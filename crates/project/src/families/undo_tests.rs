@@ -106,24 +106,24 @@ async fn publish(
     Ok(())
 }
 
-/// Every family table as ordered JSON text, and the marker without its sequence.
-async fn snapshot(pool: &PgPool) -> Result<Vec<(String, String)>> {
+/// Every family table as ordered JSON, and the marker without its sequence.
+async fn snapshot(pool: &PgPool) -> Result<Vec<(String, Value)>> {
     let mut snapshot = Vec::new();
     for name in tables::JOURNALLED
         .iter()
         .map(|table| table.name)
         .chain(tables::DERIVED)
     {
-        let rows: String = sqlx::query_scalar(&format!(
-            "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]')::text
+        let rows: Value = sqlx::query_scalar(&format!(
+            "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]')
              FROM {name} t"
         ))
         .fetch_one(pool)
         .await?;
         snapshot.push((name.to_owned(), rows));
     }
-    let marker: Option<String> = sqlx::query_scalar(
-        "SELECT (to_jsonb(m) - 'sequence')::text FROM project_family_marker m WHERE chain_id = $1",
+    let marker: Option<Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(m) - 'sequence' FROM project_family_marker m WHERE chain_id = $1",
     )
     .bind(CHAIN)
     .fetch_optional(pool)
@@ -231,13 +231,25 @@ async fn undoing_a_block_restores_every_family_row_and_the_marker_byte_for_byte(
     );
 
     assert_eq!(undo_one(&pool, 10).await?, Some(at(10)));
+    let restored_sequence = marker::read(&pool, CHAIN).await?.sequence;
+    // Undo re-publishes the original facts with a new sequence. Compare every catalogue
+    // field, including its required match to the restored family publication.
+    let mut expected = before.clone();
+    let catalogue = &mut expected
+        .iter_mut()
+        .find(|(name, _)| name == tables::HISTORY_MARKER.name)
+        .expect("catalogue marker is included")
+        .1;
+    assert_eq!(catalogue.as_array().unwrap().len(), 1);
+    assert_eq!(catalogue[0]["publication_sequence"], json!(sequence));
+    catalogue[0]["publication_sequence"] = json!(restored_sequence);
     assert_eq!(
         snapshot(&pool).await?,
-        before,
+        expected,
         "undo restores block 10's families"
     );
     assert_eq!(
-        marker::read(&pool, CHAIN).await?.sequence,
+        restored_sequence,
         sequence + 2,
         "the block and its undo each advance the sequence"
     );
@@ -253,7 +265,11 @@ async fn undoing_a_block_restores_every_family_row_and_the_marker_byte_for_byte(
     assert_eq!(undo_one(&pool, 9).await?, None);
     for (name, rows) in snapshot(&pool).await? {
         if name != "marker" {
-            assert_eq!(rows, "[]", "{name} is empty after undoing its only block");
+            assert_eq!(
+                rows,
+                json!([]),
+                "{name} is empty after undoing its only block"
+            );
         }
     }
 

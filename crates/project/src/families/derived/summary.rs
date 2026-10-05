@@ -40,10 +40,12 @@ const CHUNK: usize = 1000;
 
 /// What a summary refresh wrote: the `project_name_summary` rows written or removed, and the
 /// undo rows journalled for them.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Refreshed {
     pub(crate) rows: u64,
     pub(crate) undo_rows: u64,
+    pub(crate) names: Vec<String>,
+    pub(crate) current_relations: Vec<bigname_storage::families::records::CurrentHistoryRelation>,
 }
 
 /// Compose again, journal and write the summaries of the names block `number` touched. `after`
@@ -93,6 +95,7 @@ pub(super) async fn refresh(
         )?,
         block_timestamp_json: block.timestamp.clone(),
     };
+    let mut current_relations = Vec::new();
     let mut journal = Vec::new();
     let mut keys = Vec::new();
     let mut rows = Vec::new();
@@ -134,6 +137,7 @@ pub(super) async fn refresh(
                 ProjectError::database("failed to retire null-resolver evidence", error)
             })?;
         }
+        current_relations.extend(fresh.current_history_relations);
         let stored: BTreeMap<String, Value> = sqlx::query_as::<_, (String, Value)>(
             "/* project:families.derived.summary_rows */ SELECT summary.logical_name_id,
                     to_jsonb(summary)
@@ -167,11 +171,20 @@ pub(super) async fn refresh(
         }
     }
     if keys.is_empty() {
-        return Ok(Refreshed::default());
+        return Ok(Refreshed {
+            names,
+            current_relations,
+            ..Refreshed::default()
+        });
     }
     let undo_rows = block::insert_journal(transaction, chain_id, &block, journal).await?;
     let rows = store::replace(transaction, &NAME_SUMMARY, keys, rows).await?;
-    Ok(Refreshed { rows, undo_rows })
+    Ok(Refreshed {
+        rows,
+        undo_rows,
+        names,
+        current_relations,
+    })
 }
 
 /// The names block `$2` (at time `$3`, in seconds) of chain `$1` touched, read from its journal (each changed row's
@@ -277,7 +290,7 @@ pub(super) const WORK_LIST: &str = r#"/* project:families.derived.summary_names 
         FROM (
             SELECT touched.key ->> 1 AS value FROM touched
             WHERE touched.family IN ('project_lifecycle_key_state', 'project_wrapper_state',
-                                     'project_resource_pointer')
+                                     'project_resource_pointer', 'project_grant')
             UNION ALL
             SELECT touched.key ->> 2 FROM touched
             WHERE touched.family = 'project_lifecycle_event'

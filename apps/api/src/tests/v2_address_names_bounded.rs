@@ -258,9 +258,13 @@ async fn v2_address_names_compose_a_large_address_in_bounded_chunks() -> Result<
     let history = format!("/v1/addresses/{BULK_ADDRESS}/history?page_size=1");
     let (payload, batches) =
         with_batches(with_compose_chunk(64, bulk_payload(&database, &history))).await;
-    assert!(!payload?["data"].as_array().unwrap().is_empty());
-    assert!(batches.len() >= 10, "{batches:?}");
-    assert!(batches.iter().all(|batch| *batch <= 64), "{batches:?}");
+    let payload = payload?;
+    assert_eq!(payload["data"].as_array().unwrap().len(), 1, "{payload}");
+    assert_eq!(payload["page"]["total_count"], Value::Null, "{payload}");
+    assert_eq!(payload["page"]["has_more"], json!(true), "{payload}");
+    assert!(payload["page"]["next_cursor"].is_string(), "{payload}");
+    // History reads the published catalogue without composing the address's names.
+    assert!(batches.is_empty(), "{batches:?}");
 
     // Former owners compose every indexed name in chunks, then the page's names in full.
     let former = format!("/v1/addresses/{BULK_ADDRESS}/names?relation=former_owner&page_size=1");

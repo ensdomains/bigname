@@ -313,6 +313,25 @@ pub async fn approvals(pool: &PgPool, chain_id: &str) -> Result<Vec<ServedApprov
 /// two wall-clock audit columns are left out. Contract instance ids, which each database mints
 /// independently, are replaced by their chain and address.
 pub async fn family_rows(pool: &PgPool) -> Result<BTreeMap<String, Vec<String>>> {
+    // Rebuild and restore may reach the same publication through different generations.
+    // Verify each complete catalogue stamp before comparing content without that sequence.
+    let invalid_catalogue: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM project_history_catalogue_marker catalogue
+             FULL JOIN project_family_marker family USING (chain_id)
+             WHERE (catalogue.chain_id IS NOT NULL OR family.current_block_number IS NOT NULL)
+               AND ((catalogue.block_number, catalogue.block_hash,
+                     catalogue.publication_sequence, catalogue.input_content_hash)
+                    IS DISTINCT FROM (family.current_block_number, family.current_block_hash,
+                                      family.sequence, family.input_content_hash)
+                    OR catalogue.catalogue_version IS DISTINCT FROM 1))",
+    )
+    .fetch_one(pool)
+    .await?;
+    ensure!(
+        !invalid_catalogue,
+        "catalogue stamp does not match family publication"
+    );
     let tables: Vec<String> = sqlx::query_scalar(
         "SELECT tablename::text FROM pg_tables
          WHERE schemaname = 'bigname_phase'
@@ -338,6 +357,11 @@ pub async fn family_rows(pool: &PgPool) -> Result<BTreeMap<String, Vec<String>>>
         let mut rows = rows
             .into_iter()
             .map(|mut row| {
+                if table == "project_history_catalogue_marker" {
+                    row.as_object_mut()
+                        .expect("family row object")
+                        .remove("publication_sequence");
+                }
                 super::perturb::normalize_contract_instance_ids(&mut row, &instances);
                 serde_json::to_string(&row)
             })

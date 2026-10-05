@@ -556,6 +556,48 @@ indexes on `normalized_events`, installed by the normalized-events baseline and
 | `normalized_events_record_id_write_idx` | `push_record_link_arm` in `history/attribution/sql.rs`: a selected record's `RecordChanged` writes by chain, resolver and record id |
 | `normalized_events_record_id_link_idx` | the `links` CTE of `push_record_link_ctes` in `history/attribution/sql.rs`: the `ResolverRecordLinked` rows on a pointer's chain and resolver at its node or the zero node |
 
+The Project [address-history catalogue](glossary.md#address-history-catalogue) adds no event
+payload copies. Its chain-owned
+`project_address_history_anchor` rows pack independent current and historical address/name
+or address/resource relations; current name rows retain their selected resource after
+Project validates the cited relation position. `project_history_source` holds shared source bounds and conservative
+event-kind/record-key summaries. `project_history_source_edge` records resource-to-resolver
+source reachability and pointer/link provenance. Project journals these facts and writes
+`project_history_catalogue_marker` in the same transaction as its family publication.
+The reader requires the catalogue version, content hash, publication sequence and block/hash
+to match the captured family publication. Missing or incomplete catalogue state is stale.
+An ordinary publication between API admission and the read snapshot retains the original
+bound through the authoritative history reader in that same transaction.
+
+The catalogue migration replaces four existing normalized-event index definitions, preserving
+their equality prefixes and readable-row predicates. On populated databases it adopts
+validated [concurrent prebuilds](../ops/address-history-catalogue-indexes/README.md) by name;
+it refuses missing candidates before dropping any old index. Their order suffix is the full public
+history comparator, so a bounded source prefix needs no complete source-history sort:
+
+| Index | Additional statement served |
+| --- | --- |
+| `normalized_events_name_history_idx` | `history/address_walk/catalogue_source.rs`: direct events for one logical name |
+| `normalized_events_resource_history_idx` | the same reader: direct events for one resource |
+| `normalized_events_project_node_history_idx` | the same reader and `project:history.source_envelopes`: chain/node record events |
+| `normalized_events_record_id_write_idx` | the same reader and `project:history.source_envelopes`: chain/resolver/record-ID writes |
+
+The new suffix keeps block, chain where not fixed, block hash, transaction, log and event
+identity order, including null placement. Existing Project and Interpret consumers retain
+their leading name/resource/node/record-ID probes. The replaced indexes are not kept as
+duplicates. Catalogue masks and 256-block ranges only reject impossible candidates; exact
+relation, duplicate and record attribution checks still decide returned events and counts.
+
+Conservative catalogue work discovery also visits noncanonical events: a retired or no longer
+readable fact can still identify a key whose old membership needs removal. Two complementary
+indexes, `normalized_events_history_discovery_name_idx` and
+`normalized_events_history_discovery_resource_idx`, contain only named/resource events outside
+canonical, safe and finalized states, keyed by chain, name/resource and block. Discovery keeps
+the two state branches keyed before applying its publication/NULL bound, avoiding repeated
+reads of unrelated unpositioned manifest history. This reads all retained history of each
+touched key, including future events rejected by that bound; repeated early rebuild ranges
+can revisit a deep key's future suffix. The indexes add no canonical entries or stored facts.
+
 Address history (`crates/storage/src/history/filters.rs`) adds one read-only index on
 `normalized_events` for its registry root role branch, installed by the normalized-events
 baseline and `20261005120000_normalized_events_address_root_permission_idx.sql` and changing no
@@ -625,10 +667,14 @@ inside) also lie at or below the read's published block, so a grant Interpret ha
 the publication a read is bound to does not turn that publication's older rows, count, or cursor
 anchors into registration history.
 
-Address history (`GET /v1/addresses/{address}/history`) runs three statements in
-`crates/storage/src/history/`. The anchor lookup (`address_matches.rs`) finds the names and
-resources the address holds now, through the family address-name reader, and held in the past from three kinds
-of activated, canonical events. A current relation row counts only when the event Project cites
+Address history (`GET /v1/addresses/{address}/history`) keeps one read-only repeatable-read
+transaction in `crates/storage/src/history/address_walk/`. Address-indexed SQL joins enumerate
+narrow event keys and the name/resource evidence that can admit each event. A non-holdable
+PostgreSQL cursor returns at most 256 such rows per batch. Only those names requiring current
+membership are composed, using the base address composer without topology or record inventory;
+compact membership and attribution caches each retain at most 1,024 answers. Historical
+membership reuses `address_matches.rs`: it finds names and resources held in the past from
+three kinds of activated, canonical events. A current relation row counts only when the event Project cites
 for it (`provenance.chain_id` and `chain_positions.block_number`) lies at or below the read's
 published block of that chain, so a relation acquired after that block cannot admit the
 resource's older events; a row without a cited block does not count under a bound. The name's
@@ -657,15 +703,32 @@ is the address, each compared lowercased. One partial expression index per kind 
 by the lowercased value: `normalized_events_address_registrant_match_idx`,
 `normalized_events_address_token_holder_match_idx`, and
 `normalized_events_address_registry_owner_match_idx`. Their expressions and predicates must stay
-identical to the query text. The capped count and the page then read the rows of those names and
-resources plus the resolver record writes attributed to the resources (`attribution.rs`,
-described below). That filter is an OR of `logical_name_id`, `resource_id`, and
-`normalized_event_id` conditions. The attributed event ids do not depend on the row, so the read
-loads them once, inside the page's repeatable-read transaction, and binds them as an array
-(`= ANY($ids)`); PostgreSQL then answers each branch from
-`normalized_events_name_history_idx`, `normalized_events_resource_history_idx`, and the primary
-key and combines the results. Written as `IN (SELECT ...)`, the branch cannot be an index
-condition inside the OR, and the planner reads every canonical row to keep the few that match.
+identical to the query text. Each candidate arm probes the name, resource, node, resolver/record
+key, or selected link through the corresponding index. A lateral planning boundary keeps event
+probes keyed by that address's evidence even at large cardinalities. The database may sort and
+spill all address-specific candidates before returning the first batch; this bounds API memory,
+not the amount of address-specific SQL work.
+
+The same batched validator determines page membership and counts. Record attribution accepts
+only requested `(resource_id, normalized_event_id)` pairs, materializes those event IDs once,
+and retains all pointer/link boundary evidence needed to evaluate them correctly. It never loads
+the resource's complete attributed-event set for this route. An event reached through several
+names, resources, or attribution paths counts once. Fallback handoff copies choose the least
+eligible event identity across the complete peer group, independently of the public cursor or
+batch boundary. The API retains at most `page_size + 1` accepted IDs, one scalar count, and the
+final page's payloads. The public address-history route skips counting by default and returns
+`total_count: null`; `include=total_count` walks the complete collection for an exact total.
+The storage reader also supports capped counting: for a cap of 10,000, it stops after 10,001
+eligible events and returns a null total above the cap. This storage mode is not the public
+address-history default. Page and requested count walks share the transaction and compact
+caches. Name display enrichment loads base names and verified label preimages on that same snapshot.
+The cursor closes on success and the transaction releases it on error or cancellation. There
+is no full-address application-side anchor, payload, or attribution collection. A single name
+can still require many retained facts during composition; the fixed name batch does not impose
+a new bound on that name's lifecycle evidence.
+
+The legacy full-selector reader remains in use for unpaged/diagnostic storage calls and
+`GET /v1/events?address=...`; this bounded route does not change those contracts.
 The three indexes cover only activated rows in readable canonicality states, so an anchor read
 that drops either condition cannot use them and falls back to a broad scan, such as
 `normalized_events_projection_idx` without the address as a key: a read with `canonical_only=false` (possible only through the
@@ -679,8 +742,8 @@ whose before or after state assigns `resource_control` to the address and
 state-derived registry-only `SurfaceBound` owner evidence. This intentionally
 includes former-controller audit history after revocation or replacement; it does
 not assert current ownership. The bounded product path keeps the current-relation
-and publication checks above. No parallel current-state cache is introduced.
-`GET /v1/names/{name}/history` with `scope=both` uses the same filter. The registration-scoped
+and publication checks above; its compact caches exist only within one request snapshot.
+`GET /v1/names/{name}/history` with `scope=both` keeps its existing selector filter. The registration-scoped
 read keeps a correlated `IN` because its attribution check refers to the row. These are access
 paths only: no stored row, response, or [interpreter content
 hash](glossary.md#interpreter-content-hash) input changes. Existing installations receive the
@@ -2364,7 +2427,7 @@ The 17 kept indexes and the statements that read them:
 | `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |
 | `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows |
 
-The other 38 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
+The other 40 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
 these: `normalized_events_registry_token_idx`,
 `normalized_events_v1_subregistry_after_node_scope_idx`,
 `normalized_events_v1_subregistry_after_child_scope_idx`,
@@ -2375,6 +2438,7 @@ these: `normalized_events_registry_token_idx`,
 `normalized_events_ens_v1_record_node_resolver_idx`,
 `normalized_events_basenames_record_node_resolver_idx`,
 `normalized_events_record_id_write_idx`, `normalized_events_record_id_link_idx`,
+`normalized_events_history_discovery_name_idx`, `normalized_events_history_discovery_resource_idx`,
 `normalized_events_resolver_alias_history_idx`,
 `normalized_events_resolver_upgrade_history_idx`,
 `normalized_events_registry_origin_idx`,

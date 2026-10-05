@@ -864,13 +864,19 @@ async fn hydration_work_upgrade_reset_is_atomic_idempotent_and_rebuilds_pending_
         .skip(1)
         .step_by(2)
         .collect();
-    // The ENSv2 registry entry tables came later, with
-    // 20261005140000_project_ens_v2_registry_entries.sql.
+    // The ENSv2 registry entry and history catalogue tables came later, with
+    // 20261005140000_project_ens_v2_registry_entries.sql and
+    // 20261005170000_project_address_history_catalogue.sql.
     let expected: std::collections::BTreeSet<_> = families::family_tables()
         .filter(|table| {
             !matches!(
                 *table,
-                "project_ens_v2_entry_owner" | "project_ens_v2_registry_parent"
+                "project_ens_v2_entry_owner"
+                    | "project_ens_v2_registry_parent"
+                    | "project_address_history_anchor"
+                    | "project_history_source"
+                    | "project_history_source_edge"
+                    | "project_history_catalogue_marker"
             )
         })
         .chain([
@@ -882,7 +888,7 @@ async fn hydration_work_upgrade_reset_is_atomic_idempotent_and_rebuilds_pending_
         .collect();
     assert_eq!(
         reset_tables, expected,
-        "the first installation resets every owned table"
+        "the first installation resets every family owned when the migration was published"
     );
     let (fixture, rpc) = fixture().await?;
     text(&fixture, 1, None).await?;

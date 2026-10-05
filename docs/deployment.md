@@ -215,6 +215,28 @@ table exists. It opens the same `409 stale` window until the rebuild finishes,
 and, as above, a family run in flight when it applies fails once and the next
 run rebuilds.
 
+`20261005170000_project_address_history_catalogue.sql` installs the compact Project
+address-history tables, replaces four source-event indexes with the full public history
+order, and adds two complementary noncanonical name/resource indexes for conservative work
+discovery. On a populated database, first follow the
+[concurrent prebuild and adoption runbook](../ops/address-history-catalogue-indexes/README.md).
+It retains the four old indexes while building their replacements under temporary names,
+and builds the two new indexes concurrently. The migration validates all six before any
+old-index drop and adopts the replacements by a short transactional rename; missing or
+invalid prebuilt candidates fail before old-index loss. Empty databases can build directly.
+Record the preceding migration versions before prebuilding, and budget the temporary index,
+WAL and sort-file space described in the runbook. Installing it alone publishes no catalogue. This producer changes the interpreter
+content hash: use matching runner/API binaries and complete the full-history Interpret redo
+and the Project redo it installs before serving with the new binary. Existing interpreted
+inputs are replayed through the normal lifecycle; no request backfill, manual marker edit or
+extra Ingest fetch is part of this change. The per-chain completeness stamp must match the
+family marker's content hash, version, sequence and block/hash; absent or mismatched state
+remains stale. When another release change already requires replay, one replay under the final
+combined binary covers both changes. A replay under an earlier hash does not cover this one.
+After applying this schema-migration, grant an existing API role SELECT on all four
+[address-history catalogue](glossary.md#address-history-catalogue) tables using the
+[upgrade grants below](#address-history-catalogue-role-upgrade) before starting the new API.
+
 `20260929160000_remove_served_projections.sql` drops the tables the API and
 Project used before the [owned key families](glossary.md#owned-key-family)
 became the only serving path: `name_current`, `children_current`,
@@ -1178,6 +1200,10 @@ GRANT SELECT ON TABLE
     bigname_phase.project_address_name_fold,
     bigname_phase.project_address_controller_candidate,
     bigname_phase.project_address_name_index,
+    bigname_phase.project_address_history_anchor,
+    bigname_phase.project_history_source,
+    bigname_phase.project_history_source_edge,
+    bigname_phase.project_history_catalogue_marker,
     bigname_phase.project_address_record_node_index,
     bigname_phase.project_address_record_id_index,
     bigname_phase.project_name_history,
@@ -1186,6 +1212,22 @@ TO bigname_api;
 GRANT EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state_read_only(
     text, bigint, text, jsonb, jsonb, uuid, text, text
 ) TO bigname_api;
+```
+
+<a id="address-history-catalogue-role-upgrade"></a>
+For an existing API role, after applying
+`20261005170000_project_address_history_catalogue.sql`, the schema owner must apply these
+additional SELECT grants before serving the new API binary. On a serving standby, wait for
+the schema-migration and grants applied on the primary to replay there. The API startup check
+refuses to start if any of these relations is absent or unreadable.
+
+```sql
+GRANT SELECT ON TABLE
+    bigname_phase.project_address_history_anchor,
+    bigname_phase.project_history_source,
+    bigname_phase.project_history_source_edge,
+    bigname_phase.project_history_catalogue_marker
+TO bigname_api;
 ```
 
 For an existing deployment, apply
@@ -2379,6 +2421,15 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_record_id_link_idx
 ANALYZE bigname_phase.normalized_events;
 ```
 
+These statements are the historical definition required by that target version. The later
+`20261005170000_project_address_history_catalogue.sql` replaces the write index with the full
+history order. Apply migrations in order; do not prebuild the later definition before this
+historical migration has been recorded. The current walk-index installer uses the later
+catalogue definition and belongs after that upgrade. The dedicated
+[catalogue prebuild](../ops/address-history-catalogue-indexes/README.md) instead builds
+replacement candidates after this historical version is recorded and before the catalogue
+migration; its temporary names preserve the historical indexes until adoption.
+
 Then apply the schema-migrations with `--target-version 20261003120000` and the same
 `lock_timeout`, `statement_timeout` and retry procedure; it finds both indexes and skips the
 build. `CREATE INDEX IF NOT EXISTS` matches the name only, so the schema-migration then checks
@@ -2758,8 +2809,8 @@ runner behavior, so it needs no redo and no historical ingest fetch. Deploying i
 nothing until an operator runs the scripts.
 
 The scripts are an optional step for a from-zero walk or a full-history Interpret redo:
-`drop.sql` drops the 35 `normalized_events` indexes Interpret does not read, so Interpret
-maintains 17 indexes on the table instead of 52, and `install.sql` rebuilds them concurrently with their
+`drop.sql` drops the 37 `normalized_events` indexes Interpret does not read, so Interpret
+maintains 17 indexes on the table instead of 54, and `install.sql` rebuilds them concurrently with their
 reviewed definitions and analyzes the table before Project runs. `drop.sql` refuses while any
 chain on the database may be served. Rebuilding takes a pass over the table per index; on a
 large database, schedule it before Project starts, as the

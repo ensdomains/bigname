@@ -72,6 +72,10 @@ fn reset_tables() -> Vec<String> {
                     | "project_ens_v2_registry_parent"
                     | "project_text_hydration_work"
                     | "project_reverse_hydration_work"
+                    | "project_address_history_anchor"
+                    | "project_history_source"
+                    | "project_history_source_edge"
+                    | "project_history_catalogue_marker"
             )
         })
         .map(str::to_owned)
@@ -93,9 +97,19 @@ fn the_reset_literal_names_every_family_table() {
     );
 }
 
-/// The selector migration resets today's whole family inventory and the control tables.
+/// The selector migration resets the inventory that preceded the catalogue migration.
+/// Keep the published migration immutable; the catalogue tables are added afterward.
 fn selector_reset_tables() -> Vec<String> {
     families::family_tables()
+        .filter(|table| {
+            !matches!(
+                *table,
+                "project_address_history_anchor"
+                    | "project_history_source"
+                    | "project_history_source_edge"
+                    | "project_history_catalogue_marker"
+            )
+        })
         .map(str::to_owned)
         .chain(CONTROL_TABLES.map(str::to_owned))
         .collect()

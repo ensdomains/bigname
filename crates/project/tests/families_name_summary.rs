@@ -471,6 +471,12 @@ async fn composing_one_summary_reads_only_that_names_zero_owner_candidates() -> 
             .await?;
     }
     publish(&fixture, 5).await?;
+    // The wider history index needs fixture statistics for the planner to choose the
+    // selective name lookup; otherwise this tiny new table can favour the chain index.
+    // Keep ANALYZE outside the measured transaction, which still enforces the same bound.
+    sqlx::query("ANALYZE normalized_events")
+        .execute(&fixture.pool)
+        .await?;
     let publication =
         bigname_storage::families::name::load_family_publication(&fixture.pool, CHAIN)
             .await?
@@ -677,7 +683,7 @@ async fn a_name_with_no_composed_row_keeps_its_clock_boundary() -> Result<()> {
     fixture.cleanup().await
 }
 
-// Undo of a block whose only summary change is a clock boundary (no other family writes)
+// Undo of a block whose only data change is a clock boundary (plus publication stamps)
 // restores the summary exactly, and a replay writes the rebuild's rows. Undo of a block that
 // changes nothing at all rewrites no summary.
 #[tokio::test]
@@ -705,7 +711,12 @@ async fn undo_restores_a_clock_only_summary_and_rewrites_nothing_for_an_empty_bl
     .fetch_all(&fixture.pool)
     .await?;
     ensure!(
-        journalled == ["marker", "project_name_summary"],
+        journalled
+            == [
+                "marker",
+                "project_history_catalogue_marker",
+                "project_name_summary"
+            ],
         "block 8 journalled {journalled:?}"
     );
     let undone = families::undo_to(&fixture.pool, CHAIN, 7).await?;

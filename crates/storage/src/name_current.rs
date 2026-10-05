@@ -73,6 +73,30 @@ pub async fn load_name_current_by_logical_name_ids(
     crate::families::name::load_family_names_by_logical_name_ids(db, logical_name_ids).await
 }
 
+/// Current served names with the same composition, visibility and preimage rules as exact-name rows,
+/// without record inventory or resolution-topology enrichment that display names do not use.
+pub async fn load_current_normalized_names(
+    db: impl Into<crate::ReadDb<'_>>,
+    logical_name_ids: &[String],
+) -> Result<BTreeMap<String, String>> {
+    if logical_name_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let mut snapshot = db.into().snapshot().await?;
+    let mut rows = crate::families::name::load_composed_base(
+        &mut snapshot,
+        logical_name_ids,
+        crate::families::name::CoverageShape::Plain,
+    )
+    .await?;
+    crate::rendered_name::enrich(&mut snapshot, &mut rows).await?;
+    snapshot.close().await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, row)| (id, row.normalized_name))
+        .collect())
+}
+
 /// Load the canonical representative current name for each resource (registration).
 ///
 /// `name_current.resource_id` is 1:many; this picks one representative per resource using the

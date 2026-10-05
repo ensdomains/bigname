@@ -12,12 +12,11 @@ use super::address_names::relation_set_to_storage;
 use super::history_keyset::RequestCursor;
 use super::support::{ensure_public_namespace, parse_evm_address};
 use super::{
-    CursorPayload, Envelope, Event, HISTORY_TOTAL_COUNT_CAP, HistoryScope, Page,
-    QueryParamAllowlist, QueryParams, RelationSet, StrictQueryParams, V2Error, V2Result,
-    api_error_to_v2, build_event, decode, encode, history_include, history_page_options,
-    history_sort_token, history_storage_order, history_storage_scope, history_total_count,
-    insert_history_filter_keys, map_history_page_error, resolve_history_block_window,
-    validate_latest_collection_selectors,
+    CursorPayload, Envelope, Event, HistoryScope, Page, QueryParamAllowlist, QueryParams,
+    RelationSet, StrictQueryParams, V2Error, V2Result, api_error_to_v2, build_event, decode,
+    encode, history_include, history_page_options, history_sort_token, history_storage_order,
+    history_storage_scope, insert_history_filter_keys, map_history_page_error,
+    resolve_history_block_window, validate_latest_collection_selectors,
 };
 
 const ADDRESS_FILTER_KEY: &str = "address";
@@ -94,8 +93,8 @@ pub(crate) async fn get_address_history(
         order: history_storage_order(params.order),
         params: Some(&params),
     };
-    let (snapshot, request_cursor) =
-        super::collection_snapshot::CollectionSnapshot::capture_history(
+    let (mut snapshot, request_cursor) =
+        super::collection_snapshot::CollectionSnapshot::capture_address_history(
             &state,
             Some(&namespace),
             || {
@@ -108,39 +107,41 @@ pub(crate) async fn get_address_history(
         )
         .await?;
     let storage_cursor = match request_cursor {
-        Some(cursor) => Some(super::history_keyset::resolve(&state, cursor).await?),
+        Some(cursor) => {
+            Some(super::history_keyset::resolve_on(snapshot.conn().await?.into(), cursor).await?)
+        }
         None => None,
     };
+    let block_bounds = snapshot.block_bounds();
     let block_window = Some(super::history::bound_history_block_window(
-        resolve_history_block_window(&state.pool, &params).await?,
-        &snapshot.block_bounds(),
+        resolve_history_block_window(snapshot.conn().await?, &params).await?,
+        &block_bounds,
     ));
     let mut options = history_page_options(&params, block_window);
     options.publication_block_bounds = Some(snapshot.block_bounds());
+    options.catalogue_publication = Some(snapshot.history_catalogue_publication());
 
-    let storage_page = bigname_storage::load_address_history_page_for_relations(
-        &state.pool,
+    let storage_page = bigname_storage::load_address_history_page_for_relations_on(
+        snapshot.conn().await?,
         &normalized_address,
         Some(&namespace),
         storage_relations,
         storage_scope,
-        true,
         storage_cursor.as_ref(),
         params.page_size,
         if params.include.iter().any(|v| v == "total_count") {
             HistorySummaryMode::Count
         } else {
-            HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP)
+            HistorySummaryMode::None
         },
         &options,
-        true,
     )
     .await
     .map_err(|error| map_history_page_error(error, "failed to load address history"))?;
 
     #[cfg(test)]
-    bigname_storage::history_anchor_read_test_hooks::run(
-        &state.pool,
+    bigname_storage::history_anchor_read_test_hooks::run_on(
+        snapshot.conn().await?,
         bigname_storage::history_anchor_read_test_hooks::HistoryReadHookPoint::AfterPage,
     )
     .await
@@ -151,19 +152,10 @@ pub(crate) async fn get_address_history(
         .as_ref()
         .map(|cursor| encode(&address_history_cursor_payload(cursor, &cursor_binding)));
     let has_more = next_cursor.is_some();
-    let total_count = if params.include.iter().any(|v| v == "total_count") {
-        storage_page.summary.as_ref().map(|s| s.total_count)
-    } else {
-        history_total_count(storage_page.summary.as_ref())
-    };
-    let context = super::history_context::load_history_row_context(
-        &state.pool,
-        &storage_page.rows,
-        include,
-        &snapshot.block_bounds(),
-        storage_page.interpret_redo_fence.as_ref(),
-    )
-    .await?;
+    let total_count = storage_page
+        .summary
+        .as_ref()
+        .map(|summary| summary.total_count);
     let logical_name_ids = storage_page
         .rows
         .iter()
@@ -171,8 +163,8 @@ pub(crate) async fn get_address_history(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let names = bigname_storage::load_name_current_by_logical_name_ids(
-        &state.pool,
+    let names = bigname_storage::load_current_normalized_names(
+        snapshot.conn().await?,
         &logical_name_ids,
     )
     .await
@@ -183,6 +175,16 @@ pub(crate) async fn get_address_history(
             V2Error::internal_error("failed to load address history")
         },
     ))?;
+    // Release before the documented post-page context reads acquire their own connection.
+    let meta = snapshot.finish(&state).await?;
+    let context = super::history_context::load_history_row_context(
+        &state.pool,
+        &storage_page.rows,
+        include,
+        &block_bounds,
+        storage_page.interpret_redo_fence.as_ref(),
+    )
+    .await?;
     if let Some(fence) = storage_page.interpret_redo_fence.as_ref() {
         bigname_storage::revalidate_interpret_redo_fence(&state.pool, fence)
             .await
@@ -196,7 +198,7 @@ pub(crate) async fn get_address_history(
                 .logical_name_id
                 .as_ref()
                 .and_then(|logical_name_id| names.get(logical_name_id))
-                .map(|row| row.normalized_name.as_str());
+                .map(String::as_str);
             build_event(row, name, include, &context)
         })
         .collect();
@@ -209,7 +211,7 @@ pub(crate) async fn get_address_history(
             total_count,
             has_more,
         }),
-        meta: snapshot.finish_history(&state).await?,
+        meta,
     }))
 }
 

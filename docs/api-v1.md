@@ -753,7 +753,9 @@ Rules:
   use the address-name GET collection for an exact single-relation count.
   Address-name ownership collections return the exact count of their filtered,
   deduplicated entries before the cursor.
-  Anchored history collections (name history, address history, and
+  Address history returns `total_count=null` by default; `include=total_count`
+  requests an exact total over the same filters and published snapshot as its
+  page. Other anchored history collections (name history and
   `/v1/events` with a `name`, `registration_id`, `address`, or `resolver`
   anchor) populate
   it with a capped count over the page's exact filters: exact up to 10,000
@@ -1676,16 +1678,16 @@ and returns the rows after that position; the row the cursor came from need not
 still exist. A later page can therefore include rows published after the first
 page, a row can move or disappear after an Interpret redo, and `total_count`
 can change between pages. `meta.as_of` is the publication captured when the page was admitted: the
-page's rows are bounded at it, but some inputs are read from current state
-rather than from that publication (the resolver classification that decides
-whether a pointer attributes writes, and the address relation kinds listed
-under [history collection filters](api-v1-routes.md#history-collection-filters)),
-so not every field of a page belongs to that one publication. Publication
+page's rows are bounded at it. Address history pins its page selection as
+specified below. Other history routes may read some inputs from current state
+rather than from that publication, including the resolver classification that
+decides whether a pointer attributes writes. Optional per-row context also
+retains separate fenced reads, so not every response field is pinned. Publication
 changes do not expire a position cursor, and a publication that lands while a
 page is being read does not refuse that page either. That page is still capped at the publication
-it reports, so no row above it can appear; but when the new publication
-rewrites rows at or below it, for example after a reorg, the page can mix rows
-from before and after that rewrite. Because `event_identity`
+it reports, so no row above it can appear. Outside address history's pinned
+page selection, a new publication that rewrites rows at or below that bound,
+for example after a reorg, can mix rows from before and after that rewrite. Because `event_identity`
 is only the final tiebreaker, a re-derivation that changes the identities of
 events sharing one log position can skip or repeat a row at that position,
 which the same walk rule covers. A history cursor returns `400 invalid_input`
@@ -1700,6 +1702,19 @@ names a row that no longer exists. The first two are temporary: retry the same
 request with the same cursor. Only the third requires restarting without the
 cursor, and it happens once. A parameter that pins a history walk to
 one block may be added later; it is not part of this contract.
+
+Address history captures each page's publication and reads its address membership,
+resolver attribution, event page, and display names on the same read-only
+`REPEATABLE READ` database transaction. A healthy publication or Project
+republication after that transaction is pinned does not force a slower read or
+change the page's reported `meta.as_of`. Missing or reset publication state
+visible when the transaction is pinned is refused; changes committed afterward
+cannot erase the valid publication already being read. The namespace's manifest
+authority is revalidated when that transaction ends, and the Interpret redo
+checks still run before returning the response. Optional per-row context retains
+its separately fenced post-page reads. This makes the address page's selection
+coherent without freezing a multi-page history walk: each continuation captures
+the publication available for that new request.
 
 The `/v1/events`, name-history, and address-history collections use a
 collection-wide `redo_in_progress` check. An active Interpret redo on any chain

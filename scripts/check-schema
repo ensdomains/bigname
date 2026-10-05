@@ -529,9 +529,9 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=434
+expected_refusal_assertions=441
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=70
+expected_predecessor_shape_proof_count=71
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -670,9 +670,9 @@ check_served_projection_removal() {
             emit_phase_migration "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" baseline-first
             if [ "$suffix" = removal ]; then
                 emit_phase_migration "$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql" preceding-shape
-            else
-                emit_phase_migration "$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql" baseline-first
             fi
+            # The fresh baseline has the catalogue's ordered replacement. Do not replay
+            # the checksum-stable historical definition over that later schema shape.
             emit_phase_migration "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" baseline-first
             # Absent from the pre-7c fixture, present in the baseline.
             if [ "$suffix" = removal ]; then
@@ -712,6 +712,11 @@ check_served_projection_removal() {
                 emit_phase_migration "$ROOT/migrations/20261005160000_project_families_drop_expiry_walk_indexes.sql" preceding-shape
             fi
             emit_phase_migration "$ROOT/migrations/20261005160000_project_families_drop_expiry_walk_indexes.sql" baseline-first
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261005170000_project_address_history_catalogue.sql" preceding-shape
+            else
+                emit_phase_migration "$ROOT/migrations/20261005170000_project_address_history_catalogue.sql" baseline-first
+            fi
             # Hydration's scheduling columns: added to the pre-7c shape, already in the baseline.
             if [ "$suffix" = removal ]; then
                 emit_phase_migration "$ROOT/migrations/20261005180000_project_hydration_schedule.sql" preceding-shape
@@ -858,6 +863,7 @@ for migration_file in \
     "$ROOT/migrations/20261005140000_project_ens_v2_registry_entries.sql" \
     "$ROOT/migrations/20261005150000_project_name_summary_expiry_selector.sql" \
     "$ROOT/migrations/20261005160000_project_families_drop_expiry_walk_indexes.sql" \
+    "$ROOT/migrations/20261005170000_project_address_history_catalogue.sql" \
     "$ROOT/migrations/20261005180000_project_hydration_schedule.sql" \
     "$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql"
 do
@@ -2512,7 +2518,9 @@ attribution_index_names=(
     normalized_events_record_id_write_idx
     normalized_events_record_id_link_idx
 )
-check_lookahead_index_migration "$attribution_index_migration" absent-from-fixture 2 3 \
+# This immutable migration is exercised at its historical stage. The catalogue
+# migration replaces its write index after these definition/refusal probes.
+check_lookahead_index_migration "$attribution_index_migration" absent-from-fixture 2 2 \
     "${attribution_index_names[@]}"
 # The live prebuild in ops/v1-lookahead-indexes/install.sql builds all eight
 # indexes in one file. For each in turn it must build the baseline definition, refuse
@@ -3087,6 +3095,17 @@ assert_index_install_hint address-match-index-on-another-table-hint \
     printf '%s\n' "DROP INDEX $address_match_first_index;"
     render_phase_migration "$address_match_install"
 } | run_psql >/dev/null
+# Advance the historical fixture only after its old attribution definition has been
+# validated. The walk installer and remaining structural checks need today's indexes.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    render_phase_migration "$ROOT/ops/address-history-catalogue-indexes/install.sql"
+    emit_phase_migration "$ROOT/migrations/20261005170000_project_address_history_catalogue.sql" preceding-shape
+    emit_phase_migration "$ROOT/migrations/20261005170000_project_address_history_catalogue.sql" baseline-first
+} | run_psql
+# This migration must adopt validated concurrent candidates without rebuilding
+# them and refuse an incomplete set before attempting any old-index drop.
+source "$ROOT/scripts/tests/check-address-history-catalogue-indexes.sh"
 # ops/walk-index-set/drop.sql must refuse while a chain may be served: its Project
 # is running, has a current block or a live family marker and its Interpret is not redoing,
 # including a marker committed before Project recorded progress, and must fail after
@@ -3114,8 +3133,8 @@ JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
 WHERE pg_index.indrelid = 'normalized_events'::regclass;
 DO \$\$
 BEGIN
-    IF (SELECT count(*) FROM walk_index_baseline WHERE index_name IN ($walk_index_dropped)) <> 35 THEN
-        RAISE EXCEPTION 'drop.sql does not list 35 baseline indexes on normalized_events';
+    IF (SELECT count(*) FROM walk_index_baseline WHERE index_name IN ($walk_index_dropped)) <> 37 THEN
+        RAISE EXCEPTION 'drop.sql does not list 37 baseline indexes on normalized_events';
     END IF;
 END \$\$;
 INSERT INTO chain_phase_state (chain_id, phase_name, current_block_number, current_block_hash)
@@ -5399,6 +5418,10 @@ BEGIN
             ('name_surfaces'),
             ('normalized_events'),
             ('project_family_marker'),
+            ('project_address_history_anchor'),
+            ('project_history_source'),
+            ('project_history_source_edge'),
+            ('project_history_catalogue_marker'),
             ('project_family_undo'),
             ('project_repair_record'),
             ('project_name_state'),
@@ -5509,6 +5532,10 @@ BEGIN
             ('name_surfaces'),
             ('normalized_events'),
             ('project_family_marker'),
+            ('project_address_history_anchor'),
+            ('project_history_source'),
+            ('project_history_source_edge'),
+            ('project_history_catalogue_marker'),
             ('project_family_undo'),
             ('project_repair_record'),
             ('project_name_state'),
@@ -6063,6 +6090,26 @@ BEGIN
                 ('normalized_events_user_registry_departure_idx', 'normalized_events',
                     ARRAY['chain_id', '%lower%after_state%proxy_address%', 'block_number'],
                     ARRAY['%source_family%ens_v2_registry_l1%', '%event_kind%Upgraded%', '%canonicality_state%canonical%safe%finalized%', '%implementation%IS DISTINCT FROM%0x9bd8a88719068d09ecee662f36c0e3856708366a%']),
+                (
+                    'normalized_events_history_discovery_name_idx',
+                    'normalized_events',
+                    ARRAY['chain_id', 'logical_name_id', 'block_number'],
+                    ARRAY[
+                        '%logical_name_id IS NOT NULL%',
+                        '%resource_id IS NOT NULL%',
+                        '%canonicality_state <> ALL%canonical%safe%finalized%'
+                    ]
+                ),
+                (
+                    'normalized_events_history_discovery_resource_idx',
+                    'normalized_events',
+                    ARRAY['chain_id', 'resource_id', 'block_number'],
+                    ARRAY[
+                        '%logical_name_id IS NOT NULL%',
+                        '%resource_id IS NOT NULL%',
+                        '%canonicality_state <> ALL%canonical%safe%finalized%'
+                    ]
+                ),
                 (
                     'normalized_events_resolver_alias_history_idx',
                     'normalized_events',

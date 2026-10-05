@@ -325,14 +325,14 @@ pub(crate) fn bound_history_block_window(
 /// Map `from_timestamp`/`to_timestamp` to per-chain block ranges from readable
 /// lineage rows. `None` when no timestamp bound was requested.
 pub(crate) async fn resolve_history_block_window(
-    pool: &sqlx::PgPool,
+    db: impl Into<bigname_storage::ReadDb<'_>>,
     params: &QueryParams,
 ) -> V2Result<Option<HistoryBlockWindow>> {
     if params.from_timestamp.is_none() && params.to_timestamp.is_none() {
         return Ok(None);
     }
     let ranges = bigname_storage::resolve_chain_block_ranges(
-        pool,
+        db,
         &all_chain_slugs(),
         params.from_timestamp.as_ref().map(|bound| bound.value),
         params.to_timestamp.as_ref().map(|bound| bound.value),
@@ -354,6 +354,7 @@ pub(crate) fn history_page_options(
     let event_kinds = super::history_filters::event_kinds(params);
     HistoryPageOptions {
         publication_block_bounds: None,
+        catalogue_publication: None,
         order: history_storage_order(params.order),
         match_no_events: event_kinds.is_empty(),
         event_kinds,

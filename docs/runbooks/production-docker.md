@@ -1167,6 +1167,16 @@ in the same step.
    required column to the empty binding table, and the mandatory full-history
    Interpret and Project redos rebuild the cleared rows;
 4. if the reviewed artifact set includes a versioned schema-migration, apply it;
+   for `20261005170000_project_address_history_catalogue.sql`, first record
+   the preceding versions through `--target-version 20261005160000` using
+   their own prebuild instructions, then run and validate the dedicated
+   [catalogue index prebuild](../../ops/address-history-catalogue-indexes/README.md)
+   before applying the catalogue version. When the preceding versions were
+   already recorded, this concurrent prebuild may be completed before the
+   service stop in step 1. Its temporary candidates retain the old indexes;
+   the migration adopts them without rebuilding and refuses an incomplete or
+   invalid set on a populated table before dropping any old index. Budget the
+   temporary index/WAL space and retain both receipts as that runbook requires;
    otherwise skip this step;
 5. if an additive schema-migration created or changed a table, reapply and
    validate the verifier's `GRANT SELECT ON ALL TABLES IN SCHEMA

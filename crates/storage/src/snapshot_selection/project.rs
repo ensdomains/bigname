@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use sqlx::PgPool;
+use sqlx::PgConnection;
 
 use super::chain_position::ChainPositions;
 use super::error::{SnapshotSelectionError, SnapshotSelectionResult};
@@ -33,14 +33,14 @@ pub(super) struct ProjectPublication {
 
 /// The current live family marker for this binary's interpreter generation.
 pub(super) async fn load_current_project_publication(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     chain_id: &str,
 ) -> SnapshotSelectionResult<Option<ProjectPublication>> {
     let sql = { CURRENT_FAMILY_MARKER_PUBLICATION };
     let row: Option<(i64, String)> = sqlx::query_as(sql)
         .bind(chain_id)
         .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *connection)
         .await
         .map_err(|error| {
             SnapshotSelectionError::internal(format!(
@@ -171,7 +171,7 @@ const SERVED_FAMILY_MARKER_GENERATION: &str = concat!(
 /// positions are not bounded by the publication here; the per-row projection-target checks
 /// keep rows ahead of the selected position out of the read.
 pub(super) async fn validate_current_project_publications(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     chain_positions: &ChainPositions,
     lag_tolerance_blocks: i64,
 ) -> SnapshotSelectionResult<()> {
@@ -186,7 +186,7 @@ pub(super) async fn validate_current_project_publications(
             "SELECT latest_block_number FROM bigname_phase.chain_heads WHERE chain_id = $1",
         )
         .bind(chain_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *connection)
         .await
         .map_err(|error| {
             SnapshotSelectionError::internal(format!(
@@ -196,7 +196,7 @@ pub(super) async fn validate_current_project_publications(
         let Some(latest_block_number) = latest_block_number else {
             return Err(SnapshotSelectionError::stale(unpublished_message(chain_id)));
         };
-        let publication = load_current_project_publication(pool, chain_id)
+        let publication = load_current_project_publication(&mut *connection, chain_id)
             .await?
             .ok_or_else(|| SnapshotSelectionError::stale(unpublished_message(chain_id)))?;
         if !(0..=lag_tolerance_blocks).contains(&(latest_block_number - publication.block_number)) {

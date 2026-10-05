@@ -64,6 +64,14 @@ tables! {
         ["chain_id", "logical_name_id", "event_identity"];
     NAME_HISTORY = "project_name_history" ["chain_id", "logical_name_id"];
     NAME_SUMMARY = "project_name_summary" ["chain_id", "logical_name_id"];
+    HISTORY_ANCHOR = "project_address_history_anchor"
+        ["chain_id", "address", "anchor_kind", "anchor_id"];
+    HISTORY_SOURCE = "project_history_source"
+        ["chain_id", "source_kind", "source_key", "resolver_address"];
+    HISTORY_EDGE = "project_history_source_edge"
+        ["chain_id", "resource_id", "source_kind", "source_key", "source_resolver",
+         "pointer_event_identity", "link_event_identity"];
+    HISTORY_MARKER = "project_history_catalogue_marker" ["chain_id"];
 }
 
 /// The derived index tables, cleared with the chain and rebuilt from their base rows.

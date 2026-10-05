@@ -461,10 +461,34 @@ async fn compare_with_rebuild(
 }
 
 async fn families(pool: &PgPool) -> Result<Vec<(String, String)>> {
+    // Rebuild and restore may reach the same publication through different generations.
+    // Verify each complete catalogue stamp before comparing content without that sequence.
+    let invalid_catalogue: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM project_history_catalogue_marker catalogue
+             FULL JOIN project_family_marker family USING (chain_id)
+             WHERE (catalogue.chain_id IS NOT NULL OR family.current_block_number IS NOT NULL)
+               AND ((catalogue.block_number, catalogue.block_hash,
+                     catalogue.publication_sequence, catalogue.input_content_hash)
+                    IS DISTINCT FROM (family.current_block_number, family.current_block_hash,
+                                      family.sequence, family.input_content_hash)
+                    OR catalogue.catalogue_version IS DISTINCT FROM 1))",
+    )
+    .fetch_one(pool)
+    .await?;
+    ensure!(
+        !invalid_catalogue,
+        "catalogue stamp does not match family publication"
+    );
     let mut tables = Vec::new();
     for table in bigname_project::families::family_tables() {
+        let row = if table == "project_history_catalogue_marker" {
+            "to_jsonb(t) - 'publication_sequence'"
+        } else {
+            "to_jsonb(t)"
+        };
         let rows: String = sqlx::query_scalar(&format!(
-            "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]')::text
+            "SELECT coalesce(jsonb_agg({row} ORDER BY ({row})::text), '[]')::text
              FROM {table} t"
         ))
         .fetch_one(pool)

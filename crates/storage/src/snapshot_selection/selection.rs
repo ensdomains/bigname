@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 use sqlx::types::time::OffsetDateTime;
-use sqlx::{PgPool, Row, postgres::PgRow};
+use sqlx::{PgConnection, Row, postgres::PgRow};
 
 use super::chain_position::{
     ChainPosition, ChainPositions, SnapshotPositionRequirement, SnapshotSelectionScope,
@@ -12,7 +12,7 @@ use super::error::{SnapshotSelectionError, SnapshotSelectionResult};
 use super::project::{
     PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS, validate_current_project_publications,
 };
-use crate::lineage::{CanonicalityState, load_chain_lineage_block};
+use crate::lineage::{CanonicalityState, load_chain_lineage_block_internal};
 use crate::time::format_timestamp;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -73,8 +73,9 @@ pub enum SnapshotProjectionRead<T> {
     NotFound,
 }
 
-pub async fn resolve_exact_name_snapshot_selection(
-    pool: &PgPool,
+/// Resolve and validate a selection on the caller's existing read transaction.
+pub async fn resolve_exact_name_snapshot_selection_on(
+    conn: &mut PgConnection,
     scope: &SnapshotSelectionScope,
     input: &SnapshotSelectorInput,
 ) -> SnapshotSelectionResult<SelectedSnapshot> {
@@ -87,23 +88,23 @@ pub async fn resolve_exact_name_snapshot_selection(
     let chain_positions = match (&input.at, &input.chain_positions) {
         (_, Some(chain_positions)) => {
             chain_positions.validate_scope(scope)?;
-            validate_supplied_positions(pool, chain_positions, input.consistency).await?;
+            validate_supplied_positions(&mut *conn, chain_positions, input.consistency).await?;
             chain_positions.clone()
         }
         (Some(SnapshotAt::ResolvedPositions(chain_positions)), None) => {
             chain_positions.validate_scope(scope)?;
-            validate_supplied_positions(pool, chain_positions, input.consistency).await?;
+            validate_supplied_positions(&mut *conn, chain_positions, input.consistency).await?;
             chain_positions.clone()
         }
         (Some(SnapshotAt::Timestamp(timestamp)), None) => {
-            resolve_positions_at_timestamp(pool, scope, *timestamp, input.consistency).await?
+            resolve_positions_at_timestamp(&mut *conn, scope, *timestamp, input.consistency).await?
         }
-        (None, None) => resolve_latest_positions(pool, scope, input).await?,
+        (None, None) => resolve_latest_positions(&mut *conn, scope, input).await?,
     };
 
     validate_cross_chain_positions(scope, &chain_positions)?;
     validate_current_project_publications(
-        pool,
+        &mut *conn,
         &chain_positions,
         input.publication_lag_tolerance_blocks,
     )
@@ -136,25 +137,26 @@ pub fn ensure_projection_chain_positions_match(
 }
 
 async fn validate_supplied_positions(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     chain_positions: &ChainPositions,
     consistency: SnapshotConsistency,
 ) -> SnapshotSelectionResult<()> {
     for position in chain_positions.as_map().values() {
-        let block = load_chain_lineage_block(pool, &position.chain_id, &position.block_hash)
-            .await
-            .map_err(|error| {
-                SnapshotSelectionError::internal(format!(
-                    "failed to load lineage for supplied snapshot position {} {}: {error}",
-                    position.chain_id, position.block_hash
-                ))
-            })?
-            .ok_or_else(|| {
-                SnapshotSelectionError::conflict(format!(
-                    "snapshot position {} {} is not present in stored lineage",
-                    position.chain_id, position.block_hash
-                ))
-            })?;
+        let block =
+            load_chain_lineage_block_internal(&mut *conn, &position.chain_id, &position.block_hash)
+                .await
+                .map_err(|error| {
+                    SnapshotSelectionError::internal(format!(
+                        "failed to load lineage for supplied snapshot position {} {}: {error}",
+                        position.chain_id, position.block_hash
+                    ))
+                })?
+                .ok_or_else(|| {
+                    SnapshotSelectionError::conflict(format!(
+                        "snapshot position {} {} is not present in stored lineage",
+                        position.chain_id, position.block_hash
+                    ))
+                })?;
 
         if block.block_number != position.block_number {
             return Err(SnapshotSelectionError::conflict(format!(
@@ -185,7 +187,7 @@ async fn validate_supplied_positions(
 }
 
 async fn resolve_latest_positions(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     scope: &SnapshotSelectionScope,
     input: &SnapshotSelectorInput,
 ) -> SnapshotSelectionResult<ChainPositions> {
@@ -201,7 +203,7 @@ async fn resolve_latest_positions(
             },
         )?;
         let authoritative_position =
-            load_phase_head_position(pool, authoritative_requirement, input).await?;
+            load_phase_head_position(&mut *conn, authoritative_requirement, input).await?;
         let upper_bound = authoritative_position.timestamp;
         positions.insert(authoritative_position.slot.clone(), authoritative_position);
 
@@ -209,9 +211,13 @@ async fn resolve_latest_positions(
             if requirement.slot == authoritative_slot {
                 continue;
             }
-            let position =
-                load_lineage_position_at_or_before(pool, requirement, upper_bound, consistency)
-                    .await?;
+            let position = load_lineage_position_at_or_before(
+                &mut *conn,
+                requirement,
+                upper_bound,
+                consistency,
+            )
+            .await?;
             positions.insert(position.slot.clone(), position);
         }
 
@@ -219,7 +225,7 @@ async fn resolve_latest_positions(
     }
 
     for requirement in scope.required_positions() {
-        let position = load_phase_head_position(pool, requirement, input).await?;
+        let position = load_phase_head_position(&mut *conn, requirement, input).await?;
         positions.insert(position.slot.clone(), position);
     }
 
@@ -227,7 +233,7 @@ async fn resolve_latest_positions(
 }
 
 async fn resolve_positions_at_timestamp(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     scope: &SnapshotSelectionScope,
     timestamp: OffsetDateTime,
     consistency: SnapshotConsistency,
@@ -243,7 +249,7 @@ async fn resolve_positions_at_timestamp(
             },
         )?;
         let authoritative_position = load_lineage_position_at_or_before(
-            pool,
+            &mut *conn,
             authoritative_requirement,
             timestamp,
             consistency,
@@ -256,9 +262,13 @@ async fn resolve_positions_at_timestamp(
             if requirement.slot == authoritative_slot {
                 continue;
             }
-            let position =
-                load_lineage_position_at_or_before(pool, requirement, upper_bound, consistency)
-                    .await?;
+            let position = load_lineage_position_at_or_before(
+                &mut *conn,
+                requirement,
+                upper_bound,
+                consistency,
+            )
+            .await?;
             positions.insert(position.slot.clone(), position);
         }
 
@@ -267,7 +277,8 @@ async fn resolve_positions_at_timestamp(
 
     for requirement in scope.required_positions() {
         let position =
-            load_lineage_position_at_or_before(pool, requirement, timestamp, consistency).await?;
+            load_lineage_position_at_or_before(&mut *conn, requirement, timestamp, consistency)
+                .await?;
         positions.insert(position.slot.clone(), position);
     }
 
@@ -275,7 +286,7 @@ async fn resolve_positions_at_timestamp(
 }
 
 async fn load_phase_head_position(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     requirement: &SnapshotPositionRequirement,
     input: &SnapshotSelectorInput,
 ) -> SnapshotSelectionResult<ChainPosition> {
@@ -301,7 +312,7 @@ async fn load_phase_head_position(
     )
     .bind(&requirement.chain_id)
     .bind(consistency.as_str())
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(|error| {
         SnapshotSelectionError::internal(format!(
@@ -375,13 +386,14 @@ async fn load_phase_head_position(
     // few blocks behind is still one consistent, canonical snapshot, served (as `as_of`) at its
     // own position when behind the requested one. A publication ahead of the head or further
     // behind than the tolerance ([`PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS`] by default) is stale.
-    let publication = super::project::load_current_project_publication(pool, &requirement.chain_id)
-        .await?
-        .ok_or_else(|| {
-            SnapshotSelectionError::stale(super::project::unpublished_message(
-                &requirement.chain_id,
-            ))
-        })?;
+    let publication =
+        super::project::load_current_project_publication(&mut *conn, &requirement.chain_id)
+            .await?
+            .ok_or_else(|| {
+                SnapshotSelectionError::stale(super::project::unpublished_message(
+                    &requirement.chain_id,
+                ))
+            })?;
     let (block_hash, block_number) = if publication.block_number == latest_block_number
         && publication.block_hash == latest_block_hash
     {
@@ -404,7 +416,7 @@ async fn load_phase_head_position(
         }
     };
 
-    let block = load_chain_lineage_block(pool, &requirement.chain_id, &block_hash)
+    let block = load_chain_lineage_block_internal(&mut *conn, &requirement.chain_id, &block_hash)
         .await
         .map_err(|error| {
             SnapshotSelectionError::internal(format!(
@@ -442,23 +454,8 @@ async fn load_phase_head_position(
     })
 }
 
-pub async fn snapshot_chain_has_head(
-    pool: &PgPool,
-    chain_id: &str,
-) -> SnapshotSelectionResult<bool> {
-    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM chain_heads WHERE chain_id = $1)")
-        .bind(chain_id)
-        .fetch_one(pool)
-        .await
-        .map_err(|error| {
-            SnapshotSelectionError::internal(format!(
-                "failed to check current schema-v2 head for chain {chain_id}: {error}"
-            ))
-        })
-}
-
 async fn load_lineage_position_at_or_before(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     requirement: &SnapshotPositionRequirement,
     upper_bound: OffsetDateTime,
     consistency: SnapshotConsistency,
@@ -493,7 +490,7 @@ async fn load_lineage_position_at_or_before(
     .bind(&requirement.chain_id)
     .bind(upper_bound)
     .bind(consistency.as_str())
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(|error| {
         SnapshotSelectionError::internal(format!(

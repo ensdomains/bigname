@@ -1,3 +1,7 @@
+#[path = "namespace_admission.rs"]
+mod admission;
+pub(crate) use admission::prepare_public_namespace_admission;
+
 #[path = "collection_publication.rs"]
 mod collections;
 pub(crate) use collections::revalidate_collection_manifests;
@@ -192,9 +196,26 @@ async fn load_request_scope_snapshot(
     pool: &PgPool,
     scope: &SnapshotSelectionScope,
 ) -> ApiResult<Option<PublicNamespaceReadToken>> {
+    let mut connection = pool
+        .acquire()
+        .await
+        .map_err(|_| ApiError::internal_error("failed to acquire public namespace snapshot"))?;
+    load_request_scope_snapshot_on(&mut connection, scope).await
+}
+
+async fn load_request_scope_snapshot_on(
+    connection: &mut sqlx::PgConnection,
+    scope: &SnapshotSelectionScope,
+) -> ApiResult<Option<PublicNamespaceReadToken>> {
     let input = crate::v2::snapshots::selector_input(None, None, SnapshotConsistency::Head)
         .map_err(snapshot_selection_api_error)?;
-    let selected = match resolve_exact_name_snapshot_selection(pool, scope, &input).await {
+    let selected = match bigname_storage::resolve_exact_name_snapshot_selection_on(
+        &mut *connection,
+        scope,
+        &input,
+    )
+    .await
+    {
         Ok(selected) => selected,
         Err(error)
             if matches!(
@@ -206,12 +227,15 @@ async fn load_request_scope_snapshot(
         }
         Err(error) => return Err(snapshot_selection_api_error(error)),
     };
-    Ok(load_public_namespace_project_generations(pool, &selected)
-        .await?
-        .map(|project_generations| PublicNamespaceReadToken {
-            selected,
-            project_generations,
-        }))
+    Ok(
+        load_selected_project_generations_on(&mut *connection, &selected, true)
+            .await
+            .map_err(|_| ApiError::internal_error("failed to validate public namespace data"))?
+            .map(|project_generations| PublicNamespaceReadToken {
+                selected,
+                project_generations,
+            }),
+    )
 }
 
 pub(crate) async fn revalidate_public_namespace_set(
@@ -364,15 +388,6 @@ async fn load_public_namespace_manifest_tokens(
         }
     }
     Ok(tokens)
-}
-
-async fn load_public_namespace_project_generations(
-    pool: &PgPool,
-    selected: &SelectedSnapshot,
-) -> ApiResult<Option<BTreeMap<String, String>>> {
-    load_selected_project_generations_for_read(pool, selected, true)
-        .await
-        .map_err(|_| ApiError::internal_error("failed to validate public namespace data"))
 }
 
 pub(crate) async fn load_selected_project_generations_for_read(

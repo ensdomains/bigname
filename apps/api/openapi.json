@@ -170,7 +170,7 @@
             "name": "include",
             "in": "query",
             "required": false,
-            "description": "Comma-separated expansion names; unlisted values are invalid.",
+            "description": "Comma-separated expansion names; unlisted values are invalid. total_count requests an exact total; page.total_count is null when omitted.",
             "schema": {
               "type": "array",
               "items": {

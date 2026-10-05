@@ -56,6 +56,7 @@ use crate::address_names::{push_expires_at_timestamp_expr, push_registered_at_ti
 pub struct NameSummaryPublication {
     pub rows: BTreeMap<String, Value>,
     pub null_resolver_names: Vec<String>,
+    pub current_history_relations: Vec<crate::families::records::CurrentHistoryRelation>,
 }
 
 pub async fn compose_name_summaries(
@@ -94,6 +95,15 @@ pub async fn compose_name_summary_publication(
         &surfaces,
         CoverageShape::Plain,
         false,
+    )
+    .await?;
+    let current_history_relations = crate::families::records::publication_relations(
+        conn,
+        publication,
+        &composed
+            .values()
+            .filter_map(|name| name.row.as_ref())
+            .collect::<Vec<_>>(),
     )
     .await?;
     let null_resolver_names = if matches!(
@@ -185,6 +195,7 @@ pub async fn compose_name_summary_publication(
     Ok(NameSummaryPublication {
         rows: rows.into_iter().collect(),
         null_resolver_names,
+        current_history_relations,
     })
 }
 

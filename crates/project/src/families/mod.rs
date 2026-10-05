@@ -10,6 +10,7 @@ mod decode;
 mod derived;
 mod driver;
 mod ens_v2_registry;
+mod history_catalogue;
 mod hydrate;
 mod identity;
 mod input;

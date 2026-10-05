@@ -4,7 +4,7 @@
 //! one resumes through its anchor row, which must still be one of the rows the filter reads.
 
 use anyhow::{Context, Result};
-use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder};
+use sqlx::{PgConnection, Postgres, QueryBuilder};
 
 use super::{
     EventHistoryReadFilter, HistoryCursor, HistoryEvent, HistoryOrder, HistoryPosition,
@@ -226,17 +226,10 @@ pub(super) fn history_cursor_from_row(row: &HistoryEvent) -> HistoryCursor {
 /// history page, in one snapshot: during a redo it fails with `InterpretRedoInProgress` instead of
 /// reporting an anchor the redo may have removed.
 pub async fn load_history_anchor_position(
-    pool: &PgPool,
+    db: impl Into<crate::ReadDb<'_>>,
     event_identity: &str,
 ) -> Result<Option<HistoryPosition>> {
-    let mut transaction = pool
-        .begin()
-        .await
-        .context("failed to begin a history cursor anchor read")?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        .execute(&mut *transaction)
-        .await
-        .context("failed to configure a history cursor anchor read")?;
+    let mut transaction = db.into().snapshot().await?;
     super::redo::ensure_interpret_not_redo(&mut transaction).await?;
     let row = sqlx::query(
         "SELECT block_number, chain_id, block_hash, transaction_index, log_index
@@ -248,7 +241,7 @@ pub async fn load_history_anchor_position(
     .await
     .context("failed to load a history cursor anchor")?;
     transaction
-        .commit()
+        .close()
         .await
         .context("failed to commit a history cursor anchor read")?;
     row.map(|row| {
@@ -271,18 +264,11 @@ pub async fn load_history_anchor_position(
 /// neither exists. It reads under the same Interpret redo check as
 /// [`load_history_anchor_position`].
 pub async fn load_history_transaction_index(
-    pool: &PgPool,
+    db: impl Into<crate::ReadDb<'_>>,
     event_identity: &str,
     position: &HistoryPosition,
 ) -> Result<Option<i64>> {
-    let mut transaction = pool
-        .begin()
-        .await
-        .context("failed to begin a history cursor transaction read")?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        .execute(&mut *transaction)
-        .await
-        .context("failed to configure a history cursor transaction read")?;
+    let mut transaction = db.into().snapshot().await?;
     super::redo::ensure_interpret_not_redo(&mut transaction).await?;
     // The second arm reads one block's rows through `normalized_events_block_idx`.
     let index = sqlx::query_scalar::<_, i64>(
@@ -308,7 +294,7 @@ pub async fn load_history_transaction_index(
     .await
     .context("failed to load a history cursor transaction index")?;
     transaction
-        .commit()
+        .close()
         .await
         .context("failed to commit a history cursor transaction read")?;
     Ok(index)

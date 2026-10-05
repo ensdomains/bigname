@@ -17,6 +17,8 @@ mod evm_primitives;
 mod expiry;
 pub mod families;
 mod history;
+pub use history::catalogue_contract as history_catalogue_contract;
+pub use history::{HistoricalHistoryRelation, historical_history_relations};
 mod identity;
 mod identity_facade;
 mod label_preimages;
@@ -74,23 +76,27 @@ pub use evm_primitives::{
     ens_namehash_label_bytes, logical_name_id_for_name, normalize_evm_address, normalize_evm_b256,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub use history::history_anchor_read_test_hooks;
+pub use history::{
+    AddressHistoryWorkingSet, history_anchor_read_test_hooks, with_address_history_working_set,
+};
 pub use history::{
     ChainBlockRange, EventHistoryAddressFilter, EventHistoryFilter, EventHistoryResolverFilter,
-    HistoryBlockWindow, HistoryChainPositionSample, HistoryCursor, HistoryEvent, HistoryOrder,
-    HistoryPage, HistoryPageOptions, HistoryScope, HistorySubject, HistorySummary,
-    HistorySummaryMode, InterpretRedoFence, InterpretRedoInProgress, InvalidHistoryCursor,
-    NameHistoryPage, NameHistoryRow, capture_interpret_redo_fence, count_contract_events,
-    load_address_history, load_address_history_for_relations, load_address_history_page,
-    load_address_history_page_for_relations, load_bounded_record_attribution,
-    load_bounded_registration_resource_ids, load_candidate_logical_name_ids_for_registration_id,
-    load_event_history, load_event_history_page, load_event_history_page_with_redo_policy,
-    load_history_events_by_ids, load_history_payment_values, load_history_token_ids,
-    load_name_history, load_name_history_head, load_name_history_page,
-    load_name_history_page_with_child_registrations, load_recorded_primary_names,
-    load_registrar_grant_resource_ids_by_logical_name_id, load_resource_history,
-    load_resource_history_page, load_wrapped_registrar_resource_ids_by_logical_name_id,
-    resolve_chain_block_ranges, revalidate_interpret_redo_fence,
+    HistoryBlockWindow, HistoryCataloguePublication, HistoryCataloguePublicationFence,
+    HistoryChainPositionSample, HistoryCursor, HistoryEvent, HistoryOrder, HistoryPage,
+    HistoryPageOptions, HistoryScope, HistorySubject, HistorySummary, HistorySummaryMode,
+    InterpretRedoFence, InterpretRedoInProgress, InvalidHistoryCursor, NameHistoryPage,
+    NameHistoryRow, capture_interpret_redo_fence, count_contract_events, load_address_history,
+    load_address_history_for_relations, load_address_history_page,
+    load_address_history_page_for_relations, load_address_history_page_for_relations_on,
+    load_bounded_record_attribution, load_bounded_registration_resource_ids,
+    load_candidate_logical_name_ids_for_registration_id, load_event_history,
+    load_event_history_page, load_event_history_page_with_redo_policy, load_history_events_by_ids,
+    load_history_payment_values, load_history_token_ids, load_name_history, load_name_history_head,
+    load_name_history_page, load_name_history_page_with_child_registrations,
+    load_recorded_primary_names, load_registrar_grant_resource_ids_by_logical_name_id,
+    load_resource_history, load_resource_history_page,
+    load_wrapped_registrar_resource_ids_by_logical_name_id, resolve_chain_block_ranges,
+    revalidate_interpret_redo_fence,
 };
 pub use history::{HistoryPosition, load_history_anchor_position, load_history_transaction_index};
 pub use history::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
@@ -126,12 +132,12 @@ pub use name_current::{
     NameCurrentAddressFilter, NameCurrentAddressRelationFilter, NameCurrentExpiringFilter,
     NameCurrentExpiryWindow, NameCurrentListCursor, NameCurrentListCursorValue,
     NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage, NameCurrentListRow,
-    NameCurrentListSort, NameCurrentRow, load_current_names_by_resource_ids, load_name_current,
-    load_name_current_by_logical_name_ids, load_name_current_for_snapshot,
-    load_name_migration_transition_timestamps, name_current_authority_arm,
-    name_current_is_ownerless_registry, name_current_list_cursor_from_row,
-    name_current_public_authority, name_current_registry_generation,
-    name_current_registry_handoff_block_number,
+    NameCurrentListSort, NameCurrentRow, load_current_names_by_resource_ids,
+    load_current_normalized_names, load_name_current, load_name_current_by_logical_name_ids,
+    load_name_current_for_snapshot, load_name_migration_transition_timestamps,
+    name_current_authority_arm, name_current_is_ownerless_registry,
+    name_current_list_cursor_from_row, name_current_public_authority,
+    name_current_registry_generation, name_current_registry_handoff_block_number,
 };
 pub use normalized_events::*;
 pub use permissions::{
@@ -194,7 +200,8 @@ pub use snapshot_selection::{
     SnapshotSelectionError, SnapshotSelectionErrorKind, SnapshotSelectionResult,
     SnapshotSelectionScope, SnapshotSelectorInput, ensure_projection_chain_positions_match,
     load_served_project_generation, parse_rfc3339_utc_timestamp,
-    resolve_exact_name_snapshot_selection, snapshot_chain_has_head,
+    resolve_exact_name_snapshot_selection, resolve_exact_name_snapshot_selection_on,
+    snapshot_chain_has_head,
 };
 
 /// Checked-in migrations retained for migration validation and test database construction.

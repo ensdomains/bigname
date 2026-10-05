@@ -16,7 +16,7 @@ exceed the API's statement timeout (`BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`) until
 and list normalized events by block hash, which `normalized_events_block_idx` serves.
 
 The [walk index set](../../docs/glossary.md#walk-index-set) is the 17 indexes Interpret keeps.
-`drop.sql` drops the other 38 before a from-zero walk or a full-history Interpret redo, and
+`drop.sql` drops the other 40 before a from-zero walk or a full-history Interpret redo, and
 `install.sql` rebuilds them, with their reviewed definitions, before Project runs.
 [`docs/storage.md`](../../docs/storage.md#walk-index-set) lists both sets and the rule that
 splits them. Indexes are access paths: dropping or rebuilding them changes no stored row, no
@@ -43,7 +43,7 @@ the other's.
 The script checks this before the drops and again after them, and takes no phase lock, so
 nothing stops an Interpret redo completing while the drops run. Run it as the walk or redo
 starts, with Interpret's whole range still ahead. The one-hour timeout bounds each drop, not
-the script, so there is no fixed limit on the whole sequence; allow for all 38 drops before
+the script, so there is no fixed limit on the whole sequence; allow for all 40 drops before
 Interpret can complete. The second check sees only the state when it runs: if a chain meets
 the condition then, for example because its Project started during the drops and is still
 running, it fails after the receipt, naming the chains, and `psql` exits non-zero; run

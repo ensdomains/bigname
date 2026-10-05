@@ -68,6 +68,19 @@ it returns `409 stale` rather than a misleading partial total. Registry and
 resolver collections use the same publication fence in addition to their
 documented selected-chain position.
 
+Address history captures each page's publication and reads its address membership,
+resolver attribution, event page, and display names on the same read-only
+`REPEATABLE READ` database transaction. A healthy publication or Project
+republication after that transaction is pinned does not force a slower read or
+change the page's reported `meta.as_of`. Missing or reset publication state
+visible when the transaction is pinned is refused; changes committed afterward
+cannot erase the valid publication already being read. The namespace's manifest
+authority is revalidated when that transaction ends, and the Interpret redo
+checks still run before returning the response. Optional per-row context retains
+its separately fenced post-page reads. This makes the address page's selection
+coherent without freezing a multi-page history walk: each continuation captures
+the publication available for that new request.
+
 The history collections, `/v1/events`, name history (with or without
 `include=child_registrations`), and address history, are
 [history walks](glossary.md#history-walk), not snapshots.
@@ -84,16 +97,17 @@ after that position, whether or not the row the cursor came from still exists.
 A later page can therefore include rows published after the first page, a row
 can move or disappear after an Interpret redo, and `total_count` can change
 between pages. `meta.as_of` is the publication captured when the page was
-admitted. The page's rows are bounded at it, but the inputs listed under
-[history collection filters](#history-collection-filters) as read from current
-state (the resolver classification, and the address relation kinds in the
-known limitation) are not pinned to it, so not every field of a page belongs
-to that one publication. Publication changes do not expire a position cursor,
+admitted. The page's rows are bounded at it. Address history pins its page
+selection as specified above. Other history routes may read resolver
+classification from current state rather than that publication, and optional
+per-row context retains separate fenced reads, so not every response field
+belongs to that one publication. Publication changes do not expire a position cursor,
 and a publication that lands while a page is being read does not refuse that
 page either. The page is still capped at the
-publication it reports, so no row above it can appear; but when the new
-publication rewrites rows at or below it, for example after a reorg, the page
-can mix rows from before and after that rewrite. Because
+publication it reports, so no row above it can appear. Outside address
+history's pinned page selection, a new publication that rewrites rows at or
+below that bound, for example after a reorg, can mix rows from before and after
+that rewrite. Because
 `event_identity` is only the final tiebreaker, a re-derivation that changes the
 identities of events sharing one log position can skip or repeat a row at that
 position; that is the same walk rule, not an error. A history cursor returns
@@ -2042,7 +2056,9 @@ A recognized namespace with no available publication returns retryable `409 stal
   neither attributes an older write nor closes an earlier pointer's window.
   Bindings and ownership before `from_timestamp` remain valid anchors; the
   timestamp window filters event rows.
-- Two inputs are read from current state. An address's relations are read from
+- Two inputs use current-state semantics. Address history reads them on the
+  same publication as the page; this does not turn a current relation into
+  an event-time relation. An address's relations are read from
   the current relation rows, and a row is admitted when the event Project
   cites for it lies at or below the published block. A `role_holder` row is
   read from the address's current registry-scope grant on the name's selected
@@ -2147,8 +2163,15 @@ A recognized namespace with no available publication returns retryable `409 stal
   binds [`include=child_registrations`](#direct-child-registrations-includechild_registrations),
   which changes which rows the collection holds; the payload flags
   `include=data` and `include=raw` are not bound.
-- `page.total_count` is populated for anchored history reads: name history and
-  address history always, and `/v1/events` when `name`, `registration_id`,
+- Address history returns `page.total_count=null` by default, including empty
+  results. `include=total_count` requests an exact, uncapped total over the same
+  filtered collection and published snapshot as the page. The flag does not
+  bind cursors, so clients may request a count on one page and omit it on the
+  next; each opt-in request counts again at its current published position. An
+  exact empty result is zero. Exact counting may scan the entire matching
+  history and cost substantially more than a page.
+- `page.total_count` is populated by default for other anchored history reads:
+  name history, and `/v1/events` when `name`, `registration_id`,
   `address`, or `resolver` bounds the read. The count runs inside the same repeatable-read
   transaction as the page over exactly the page's filters (scope, type set,
   block and timestamp windows, product visibility, and duplicate suppression),
@@ -4175,7 +4198,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `order` | query | enum SortOrder | no | `desc` | Ascending or descending result order. |
 | `from_timestamp` | query | string | no | none | Inclusive timestamp lower bound, decimal Unix seconds or RFC 3339; retains input precision. |
 | `to_timestamp` | query | string | no | none | Inclusive timestamp upper bound, decimal Unix seconds or RFC 3339; must not precede from_timestamp. |
-| `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. |
+| `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count requests an exact total; page.total_count is null when omitted. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
 | `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
@@ -4266,8 +4289,15 @@ introduces it rebuilds Project from full history before serving the option; see
   product-visible events. The cursor is bound to the address, namespace,
   relation set, scope, direction, `type` set, and timestamp window. A
   nonterminal page contains `page_size` rows; only the terminal page may be
-  shorter. `page.total_count` follows the shared anchored-count contract:
-  capped by default, exact and uncapped with `include=total_count`.
+  shorter. `page.total_count` is `null` by default, including empty results.
+  `include=total_count` requests an exact, uncapped total without changing the
+  page rows, cursor or `has_more`.
+  Address candidates remain in SQL; the reader validates fixed-size event and
+  anchor batches, including resolver-record attribution, and retains only the
+  requested page and one lookahead row. Optional counting uses the same matching
+  rules without retaining the matched history; an exact count can scan the
+  entire matching history and cost substantially more than a page.
+  Neither mode truncates the collection or changes its cursor order.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Address, namespace, and
   cursor-binding validation precede the first `redo_in_progress` check, so
