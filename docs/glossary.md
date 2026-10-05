@@ -434,10 +434,14 @@ names alike, whether the name is registry-, registrar-, or NameWrapper-held.
 the adapter-owned derivation path for declaration-backed Ethereum approval
 events whose manifests deliberately leave `normalized_events` empty. In the
 current scope it emits `AccountPermissionChanged` for admitted ENSv1 and
-Basenames registry `ApprovalForAll` logs and for NameWrapper `ApprovalForAll`
-logs, and a resource-scoped `PermissionChanged` for the NameWrapper per-token
+Basenames registry `ApprovalForAll` logs, for NameWrapper `ApprovalForAll`
+logs and for ENSv2 registry and root registry `ApprovalForAll` logs, and a
+resource-scoped `PermissionChanged` for the NameWrapper per-token
 `Approval`; declared registrar and resolver approvals still decode without
-normalized output.
+normalized output. An ENSv2 registry approval carries
+`authority_kind = ens_v2_registry` and no effective power: the operator's
+powers are the token owner's on each token
+([ENSv2 registry operator approvals](manifests.md#ensv2-registry-operator-approvals)).
 
 ## Direct child registration
 
@@ -2574,7 +2578,7 @@ Project's publication of current state directly from the
 changed keys, undo journal and marker together. Rebuilds can group older work
 blocks into bounded ranges; reads remain unavailable until the marker is live.
 
-The families carry labels F1 to F15, used in the difference lists, the table
+The families carry labels F1 to F16, used in the difference lists, the table
 comments and the reducers' module headers; F10, the retired resolver alias
 tables, is unused. Each label names these tables and
 the reducer under `crates/project/src/families/` that writes them:
@@ -2597,6 +2601,7 @@ the reducer under `crates/project/src/families/` that writes them:
 | F13, address-to-name association | `project_address_name_fold`, `project_address_controller_candidate`, `project_address_name_index` | `addresses.rs`, with the index derived in `derived.rs` |
 | F14, address-to-record association | `project_address_record_node_index`, `project_address_record_id_index` | `derived.rs` |
 | F15, name summary | `project_name_summary` | `derived/summary.rs` |
+| F16, ENSv2 registry entries | `project_ens_v2_entry_owner`, `project_ens_v2_registry_parent` | `ens_v2_registry.rs` |
 
 ## Family marker
 

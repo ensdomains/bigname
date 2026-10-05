@@ -773,8 +773,9 @@ The composed permission set is resource-anchored and preserves subject, scope,
 effective powers, provenance, and chain positions. The companion resource
 summary distinguishes authoritative empty enumeration from unsupported or
 partial permission support. Current non-wrapper summaries are partial because
-registrar token and account approvals, resolver operators and delegates, and
-ENSv2 registry operators are not indexed. NameWrapper summaries are partial for
+registrar token and account approvals and resolver operators and delegates are
+not indexed, and ENSv2 registry operators are folded
+([ENSv2 registry entries](#ensv2-registry-entries)) but not yet served. NameWrapper summaries are partial for
 a narrower reason described below: holders, operators, and per-token delegates
 are rows, while parent control of a non-emancipated wrapped subname and resolver
 operators/delegates are not. For a grant on an ENSv2 record-ID resolver, whose
@@ -796,7 +797,10 @@ events from the [`standard_approval`
 derivation](glossary.md#standard-approval-derivation) by chain, authority kind, authority contract,
 owner, subject, and relation. It retains both active and revoked latest states;
 `approved=true` carries `registry_control` for a registry and `wrapper_control`
-for a NameWrapper, while `approved=false` carries no effective powers. Project
+for a NameWrapper, while `approved=false` carries no effective powers. An ENSv2
+registry approval (`authority_kind=ens_v2_registry`) carries no effective power
+in either state, because the operator's powers are the token owner's on each
+token; `approved` alone carries the fact, and no reader joins these rows yet. Project
 retains account approvals once per account key; readers join registry and
 NameWrapper operators as described below. Name composition carries the latest
 [registry-owner binding](glossary.md#registry-owner-binding) onto the resource
@@ -1642,7 +1646,7 @@ owned family: name identity and binding candidates,
 registration and lease state, wrapper state, registry ownership, resolver
 classification, the registry-node and resource resolver pointers, node and
 record-id records with resolver links, grants and account approvals,
-child edges, reverse tuples and claims, and the address associations. Each row
+ENSv2 registry entries, child edges, reverse tuples and claims, and the address associations. Each row
 belongs to one key and holds what the latest events of that key left, clears
 included: a zero pointer, record id `0` or a revoked grant
 stays a row. A row goes only when nothing remains for its key. Each grant also
@@ -1770,6 +1774,67 @@ a surface's visibility or a lineage readability flip, are covered because a
 recompute only happens with a code change that rotates the interpreter
 fingerprint, which rebuilds the families. A reorg goes through undo, which
 restores the summaries from the journal.
+
+### ENSv2 registry entries
+
+F16 keeps what an ENSv2 registry's own logs last said about each of its
+entries, so a later reader can turn an operator approval into the tokens it
+covers. An approved operator gets the roles the current token owner holds on a
+token's own resource, and the registry keeps the owner per entry, not per name.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L638-L640 @ ens_v2_sepolia_20261001@07e55a05)
+No reader uses these tables yet, and the permission summaries stay partial.
+
+`project_ens_v2_entry_owner` has one row per `(chain_id, registry,
+entry_key)`. The entry key is the registry's storage slot for a label: the
+token id, resource or labelhash with its low 32 bits, the version, cleared.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/utils/LibLabel.sol:L7-L16 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L677-L693 @ ens_v2_sepolia_20261001@07e55a05)
+The row carries the current `token_id`, the current `upstream_resource` and
+its `resource_id`, the entry's own `expiry`, a `status` and the `owner`, with
+`owner_position` and `resource_position` naming the logs that last set them.
+The reducer reads only the events a registry log produced itself:
+
+| Registry log | Effect on the row |
+| --- | --- |
+| `LabelRegistered` | `status=registered`, `owner` the registrant, `expiry` set, resource cleared until `TokenResource` |
+| `LabelReserved` | `status=reserved`, no owner, `expiry` set, resource cleared |
+| `TokenResource` | `upstream_resource`, `resource_id` and `resource_position` set |
+| `TransferSingle`, `TransferBatch` between two accounts | `status=registered`, `owner` the recipient |
+| `TokenRegenerated` | `token_id` the new id; owner and resource kept |
+| `ExpiryUpdated` | `expiry` set |
+| `LabelUnregistered` | `status=unregistered`, no owner, `expiry` the block time |
+
+A mint or burn is not a transfer: the adapter writes no token-control transfer
+for a zero endpoint, so the burn and mint around `TokenRegenerated` keep the
+owner. `unregister` burns the token and sets the entry's expiry to the block
+time. (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L238 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L517-L546 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L578-L588 @ ens_v2_sepolia_20261001@07e55a05)
+The registry burns nothing when an entry's expiry passes, so the row keeps its
+owner past `expiry`; a reader applies `expiry` at the block it serves. The
+registration, release and expiry events the adapter restates when a name's
+path changes or expires are not registry logs and write nothing here, so the
+row follows the contract and not the name: an entry under a released ancestor
+keeps its row. An entry first seen through a log that names no owner has
+`status=unknown`; a transfer seen before its registration still names the
+owner. A table constraint keeps `owner` null unless `status=registered`.
+
+`project_ens_v2_registry_parent` has one row per `(chain_id, registry)`: the
+`parent` registry and `raw_label_hex` the registry last announced with
+`ParentUpdated`, and `parent_entry_key`, the entry that label has in the
+parent, which is the entry `findOwner` reads. A WrapperRegistry gives its root
+roles to that entry's owner.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L311-L314 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05)
+A cleared parent stays a row with null `parent`. The table does not say which
+registries are WrapperRegistry instances; that needs implementation evidence
+this family does not keep.
+
+Both tables are journalled and undone like every family. Schema-migration
+`20261005140000_project_ens_v2_registry_entries.sql` adds them to an existing
+phase schema; they start empty, and the content-hash rotation that ships with
+them rebuilds the families.
 
 ### Publication and resumption
 
