@@ -2698,9 +2698,10 @@ introduces it rebuilds Project from full history before serving the option; see
 <!-- openapi:parameters GET /v1/permissions -->
 | Parameter | In | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- | --- |
-| `name` | query | string | no | none | Name anchor. At least one of name, registration_id or address is required. |
+| `name` | query | string | no | none | Name anchor. At least one of name, registration_id, address or registry is required. |
 | `registration_id` | query | string | no | none | Opaque public registration handle. |
 | `address` | query | string | no | none | EVM address in hexadecimal form. |
+| `registry` | query | string | no | none | ENSv2 registry as `<chain_id>:<address>` with a supported numeric chain ID; selects the grants on its root resource. Cannot be combined with name or registration_id. |
 | `namespace` | query | string | no | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
 | `include` | query | array of enum `lineage` | no | none | Comma-separated expansion names; unlisted values are invalid. |
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
@@ -2721,12 +2722,15 @@ introduces it rebuilds Project from full history before serving the option; see
 
 - Method/path: `GET /v1/permissions`
 - Tier: product read.
-- Purpose: flat permission rows by name, registration, or address, including
-  registrations that are no longer a name's current one. An `address` anchor
-  answers “what resources does account X operate?” for both direct and
-  effective account-wide grants.
-- Request parameters: at least one of `name`, `registration_id`, or `address`;
-  filters are combinable intersections. A `name` resolves its current
+- Purpose: flat permission rows by name, registration, address, or ENSv2
+  registry, including registrations that are no longer a name's current one. An
+  `address` anchor answers “what resources does account X operate?” for both
+  direct and effective account-wide grants. A `registry` anchor answers “who
+  holds roles on registry R itself?”: the current holders of the registry's
+  [root resource](glossary.md#registry-root-resource).
+- Request parameters: at least one of `name`, `registration_id`, `address`, or
+  `registry`; filters are combinable intersections, except that `registry`
+  cannot be combined with `name` or `registration_id` (`400 invalid_input`). A `name` resolves its current
   `registration_id`; an explicit `registration_id` must match it when both are
   supplied, and `address` then restricts the permission subject. An explicit or
   name-implied `namespace` filters registrations before pagination; an
@@ -2752,6 +2756,24 @@ introduces it rebuilds Project from full history before serving the option; see
   unnamed or superseded registration does not need a current name binding. A
   registration outside the namespace returns an empty page without its resource
   restrictions or permission support metadata.
+  `registry=<chain_id>:<address>` takes a supported numeric chain ID and a
+  case-insensitive address; an empty value is treated as omitted, and any other
+  shape returns `400 invalid_input`. It
+  selects the root resource of the registry contract instance that holds the
+  address at the served publication's block (`meta.as_of`), derived the same way
+  the interpreter derives it, and returns
+  that resource's current holders, so a revoked holder is absent. With `address`
+  it returns that account's root row or an empty page. The row answers whether
+  the account holds a listed root grant; an empty page under the partial marker
+  below does not prove the account has no root authority. An address no active contract
+  instance holds at that block (including one admitted after it), a registry
+  instance retired by then, or a registry with no current root holders returns
+  `200` with empty `data`; the empty page does not prove the
+  registry exists, which the [registry overview](#get-v1registrieschain_idaddress)
+  answers. `namespace` filters the root's rows by the same membership rule as a
+  `registration_id` read (ENSv2 root grants are in the `ens` namespace), but an
+  empty page keeps the registry's completeness classification below. Root rows are also returned by `address` reads and
+  by `registration_id=<root resource>`, the `registration_id` the rows carry.
 - Response shape: `data` is an array of permission rows
   `{address, grant_relation?, grant_scope, powers, registration_id, record_resource?, name?,
   authority_context, wrapper_state?, wrapper_fuses?}`.
@@ -2818,8 +2840,9 @@ introduces it rebuilds Project from full history before serving the option; see
   `resolver_root_fallback`, and `registry_root_fallback`. Diagnostics-only
   storage keys such as event provenance, upstream/root resources,
   contract-instance ids, changed powers, and manifest versions are omitted.
-  `grant_scope` is `{kind, detail}`. Detail is `{}` for `root`, `registry`,
-  and `registration`;
+  `grant_scope` is `{kind, detail}`. Detail is `{}` for `registry` and
+  `registration`; `{registry: {chain_id, address}}` for `root`, naming the ENSv2
+  registry whose root resource the grant is on;
   `{resolver: {chain_id, address}}` for `resolver` with numeric `chain_id`;
   `{chain_id, manager}` for `record_manager`; and
   `{chain_id, authority_kind, authority_contract, owner}` for the
@@ -2861,6 +2884,28 @@ introduces it rebuilds Project from full history before serving the option; see
   }
   ```
 
+  A registry root holder is:
+
+  ```json
+  {
+    "address": "0xholder",
+    "grant_scope": {
+      "kind": "root",
+      "detail": {"registry": {"chain_id": 11155111, "address": "0xregistry"}}
+    },
+    "powers": ["registrar", "admin_registrar"],
+    "registration_id": "<root resource id>",
+    "authority_context": "resource_audit"
+  }
+  ```
+
+  A root row's `powers` are the holder's declared root role bits, never empty;
+  `name`, `grant_relation`, `record_resource` and the wrapper fields are absent,
+  `authority_context` is always `resource_audit`, and `registration_id` is the
+  root resource's id rather than a name registration. The root `detail` is an
+  additive change: root rows served on `address` and `registration_id` reads
+  before it carried `detail: {}` and now carry the same `registry` object.
+
 - Pagination behavior: standard collection pagination with fixed sort
   `address_registration_scope_asc` and keyset
   `(subject, resource_id, scope)`. Direct and account
@@ -2869,7 +2914,9 @@ introduces it rebuilds Project from full history before serving the option; see
   opaque cursor binds the exact normalized collection anchor: normalized
   `address`, the node a `name` names when supplied (so equivalent
   [name inputs](api-v1.md#name-inputs) share a cursor), and an explicitly requested public
-  `registration_id`. It also binds the namespace when explicit or implied by a
+  `registration_id` or normalized `registry` (`<chain_id>:<lowercase address>`,
+  so spellings that differ only in address case share a cursor). It also binds
+  the namespace when explicit or implied by a
   name (and namespace absence for an address-only request, matching its
   all-namespace result set), `include=lineage`, the fixed sort and the last
   keyset tuple. A name-only request follows its current registration; a replacement
@@ -2883,7 +2930,9 @@ introduces it rebuilds Project from full history before serving the option; see
   cryptographically signed. A name-anchored cursor is rejected for a different
   name or a registration-only request, even when both names resolve to the same
   registration. Crossing from direct to operator rows neither duplicates nor
-  omits a row.
+  omits a row. A `registry` read has one resource, so its rows are in holder
+  address order, bytewise on the lowercase hex; a `registry` cursor is rejected
+  for a different registry or for a request without that `registry`.
 - Snapshot behavior: a `name` filter's current registration anchor is resolved
   first; the permission rows and the permission summaries are then read on one
   database snapshot of the captured publication, disclosed in `meta.as_of`,
@@ -2894,7 +2943,7 @@ introduces it rebuilds Project from full history before serving the option; see
   does not affect the page. Historical permission enumeration is not supported.
 - Status semantics: no matching permission rows returns `200` with empty
   `data`, including when a `name` filter has no registration anchor in the
-  current state. Unsupported filter combinations return `422 unsupported`;
+  current state. Unsupported filter combinations return `400 invalid_input`;
   pairing `name` with a `registration_id` that is not that name's selected
   current registration is not one of them. It is a supported query that selects
   nothing, so it returns `200` with empty `data`; its reason is the explicitly
@@ -2960,6 +3009,28 @@ introduces it rebuilds Project from full history before serving the option; see
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L51-L59 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L174-L184 @ ens_v2@a971bd64)
+  A `registry` read is classified by the registry, not by a registration
+  summary. For a registry whose current address an active manifest declares
+  (the root and ETH registries, whose code is pinned) the root holders are
+  listed in full, so the three
+  fields are omitted: every write to an ENSv2 role bitmap emits
+  `EACRolesChanged`, and the registry adds a name owner's roles to that owner's
+  approved operators only for a name's token resource, never for the root
+  resource.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L277-L284 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L311-L318 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+  A registry that discovery admitted, or one only an inactive or retired
+  declaration covers, reports `["ens_v2_registry_operators"]`.
+  bigname does not read a discovered contract's code, and anyone can initialize
+  a `WrapperRegistry` (a [migration registry](glossary.md#migration-registry-wrapperregistry)
+  is one): it grants its root roles to a parent registry, and gives exactly
+  those roles to the parent name's current owner and to that owner's operators
+  on the parent registry, who are not rows. A `UserRegistry` is upgradeable, so
+  its code can change too.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L125-L145 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/UserRegistry.sol:L25-L28 @ ens_v2_sepolia_20261001@07e55a05)
   Independently proven full support omits all three fields. Missing or
   unrecognized summary metadata returns `meta.completeness=partial` with
   `unsupported_reason=permission_support_unknown`, no list, and takes
@@ -4632,6 +4703,9 @@ For a registrar lease first identified by a later readable observation, registra
   (upstream: .refs/zigens/src/api/resolvers/admin.zig:L1150 @ zigens@77d106e9)
   (upstream: .refs/zigens/src/storage/roles.zig:L171 @ zigens@77d106e9)
   (upstream: .refs/zigens/src/storage/roles.zig:L505 @ zigens@77d106e9)
+  The current holders of the registry's own roles, those on its
+  [root resource](glossary.md#registry-root-resource), are listed by
+  [`GET /v1/permissions?registry=<chain_id>:<address>`](#get-v1permissions).
   `referenced_by` is a nested `{data, page}` collection of every name whose
   current subregistry pointer targets this contract, each `{name,
   display_name, namespace, namehash}`, sorted by display name. It usually

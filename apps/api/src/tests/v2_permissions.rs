@@ -9,7 +9,7 @@ async fn v2_get_permissions_requires_at_least_one_filter() -> Result<()> {
     assert_eq!(payload["error"]["code"], json!("invalid_input"));
     assert_eq!(
         payload["error"]["message"],
-        json!("at least one of name, registration_id, or address is required")
+        json!("at least one of name, registration_id, address, or registry is required")
     );
 
     database.cleanup().await?;
@@ -2489,3 +2489,6 @@ mod registry_token_handoff;
 
 #[path = "v2_registry_released_audit.rs"]
 mod registry_released_audit;
+
+#[path = "v2_permissions_registry_root.rs"]
+mod registry_root;
