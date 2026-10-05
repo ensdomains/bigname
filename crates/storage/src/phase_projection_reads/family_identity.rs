@@ -88,7 +88,7 @@ pub(crate) async fn load_on(
     for (id, row) in names {
         let normalized = super::names::normalize_phase_name(&id, &row.normalized_name)?;
         let labelhash = super::names::phase_labelhash(&normalized);
-        let labelhash_count = i32::try_from(normalized.normalized_labels.len()).ok();
+        let labelhash_count = i32::try_from(normalized.labels.len()).ok();
         row.provenance["chain_id"]
             .as_str()
             .context("composed name has no chain")?;

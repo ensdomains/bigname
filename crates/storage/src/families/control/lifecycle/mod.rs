@@ -110,19 +110,27 @@ pub enum NamePlace {
     Other,
 }
 
+/// keccak256 of the label `eth`.
+pub const ETH_LABELHASH: &str =
+    "0x4f5b812789fc606be1b3b16908db13fc7a9adf7ca72641f84d75b47069d3d7f0";
+/// keccak256 of the label `base`.
+pub const BASE_LABELHASH: &str =
+    "0xf1f3eb40f5bc1ad1344716ced8b8a0431d840b5783aea1fd01786bc26f35ac0f";
+
 impl NamePlace {
-    /// The place of a surface's name from its namespace, raw name and label hashes (in name
-    /// order).
-    pub fn of(namespace: &str, raw_name: &str, labelhashes: &[String]) -> Self {
-        let labels: Vec<&str> = raw_name.split('.').collect();
-        match (namespace, labels.as_slice()) {
-            ("ens", [_, "eth"]) => Self::EthSecondLevel,
-            ("ens", [.., _, "eth"]) if labelhashes.len() == labels.len() => {
-                let second_level = &labelhashes[labelhashes.len() - 2..];
-                expiry::logical_name_of_labelhashes(namespace, second_level)
+    /// The place of a surface's name from its namespace and label hashes (in name order). It
+    /// reads no label text, so a surface that stores no raw bytes is placed like any other.
+    pub fn of(namespace: &str, labelhashes: &[String]) -> Self {
+        let is = |labelhash: &String, known: &str| labelhash.eq_ignore_ascii_case(known);
+        match (namespace, labelhashes) {
+            ("ens", [_, tld]) if is(tld, ETH_LABELHASH) => Self::EthSecondLevel,
+            ("ens", [.., second_level, tld]) if is(tld, ETH_LABELHASH) => {
+                expiry::logical_name_of_labelhashes(namespace, &[second_level.clone(), tld.clone()])
                     .map_or(Self::Other, Self::BelowEthSecondLevel)
             }
-            ("basenames", [_, "base", "eth"]) => Self::BasenamesSecondLevel,
+            ("basenames", [_, base, tld]) if is(base, BASE_LABELHASH) && is(tld, ETH_LABELHASH) => {
+                Self::BasenamesSecondLevel
+            }
             _ => Self::Other,
         }
     }
@@ -260,3 +268,6 @@ pub fn has_live_ens_v2_entry(facts: &NameFacts) -> anyhow::Result<bool> {
 pub(crate) fn staged_as_own(facts: &NameFacts, event: &rows::LifecycleEvent) -> bool {
     served::authority_of(facts).staged_name(event) == admission::StagedName::Ours
 }
+
+#[cfg(test)]
+mod place_tests;

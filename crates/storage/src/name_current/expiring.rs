@@ -161,7 +161,7 @@ mod tests {
     use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 
     use super::*;
-    use crate::families::control::lifecycle::NamePlace;
+    use crate::families::{control::lifecycle::NamePlace, name::rendered::label_hash};
 
     async fn one_below(pool: &sqlx::PgPool, names: &[&str], parent: &str) -> Result<Vec<String>> {
         let mut query = QueryBuilder::<Postgres>::new("SELECT name FROM unnest(");
@@ -203,7 +203,15 @@ mod tests {
         ] {
             let mut expected = names
                 .iter()
-                .filter(|name| NamePlace::of(namespace, name, &[]) == place)
+                .filter(|name| {
+                    let labelhashes = name
+                        .split('.')
+                        .map(|label| {
+                            format!("0x{}", alloy_primitives::hex::encode(label_hash(label)))
+                        })
+                        .collect::<Vec<_>>();
+                    NamePlace::of(namespace, &labelhashes) == place
+                })
                 .map(|name| (*name).to_owned())
                 .collect::<Vec<_>>();
             expected.sort();

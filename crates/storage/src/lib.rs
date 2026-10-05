@@ -38,6 +38,8 @@ pub mod sql_row;
 mod time;
 mod unix_seconds;
 pub use expiry::contract_expiry_reason;
+/// How a name surface that stores no raw bytes is named when it is read.
+pub use families::name::rendered as rendered_name;
 pub use unix_seconds::UnixSeconds;
 
 pub use address_names::{

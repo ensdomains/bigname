@@ -28,6 +28,7 @@ pub(crate) const COMPOSITION_FILES: &[&str] = &[
     "crates/storage/src/families/name/compose.rs",
     "crates/storage/src/families/name/heads.rs",
     "crates/storage/src/families/name/loaders.rs",
+    "crates/storage/src/families/name/rendered.rs",
     "crates/storage/src/families/name/resolvability.rs",
     "crates/storage/src/families/name/selection.rs",
     "crates/storage/src/families/name/serving.rs",
