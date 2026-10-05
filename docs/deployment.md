@@ -3192,3 +3192,14 @@ required Ingest repair first. An earlier release-wide repair boundary already
 covers this start. See the [measured watch-plan change](manifests.md).
 Metadata and retained origins do not replace ordinary registry
 announcement admission or introduce pre-initialization approval capture.
+
+### Wrapper expiry in the bounded names listing
+
+The integrated expiry-selector reader attaches the stored wrapper expiry before
+serving scalar or multi-window `/v1/names` pages. It uses the existing batched
+reader on the page's snapshot, without loading resolution topology or expanding
+the `page_size + 1` composition bound. This preserves the `ens_v1.wrapper_expires_at`
+contract for backed, lapsed and unwrapped entries. The correction changes reader
+sources only and does not rotate the interpreter content hash itself, add a
+schema-migration or require an additional redo. It ships within the release's
+existing hash rotation and schema-migration sequence described above.
