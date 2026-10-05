@@ -33,6 +33,8 @@ mod declared;
 mod ens_v1;
 #[path = "name_record/inventory.rs"]
 mod inventory;
+#[path = "name_record/tokens.rs"]
+pub(crate) mod tokens;
 #[path = "name_record/values.rs"]
 mod values;
 #[path = "name_record/verified.rs"]
@@ -169,8 +171,11 @@ pub(crate) async fn get_name_record(
         SnapshotReadResource::Name,
     )
     .await?;
+    let mut reads = bigname_storage::begin_read_snapshot(&state.pool)
+        .await
+        .map_err(|_| V2Error::internal_error("failed to open name read snapshot"))?;
     let row = load_name_current_for_selected_snapshot(
-        &state.pool,
+        &mut *reads,
         &namespace,
         &normalized.normalized_name,
         &selected_snapshot,
@@ -188,6 +193,25 @@ pub(crate) async fn get_name_record(
             SnapshotReadResource::Name,
         )
     })?;
+
+    let token_registration = verified::unsupported_name_record(&row)?
+        .is_none()
+        .then(|| {
+            tokens::token_registration(
+                Authority::from_provenance(&row.provenance),
+                Some(name_registration_fields(Some(&row), &row.namespace).registration_status),
+                registration_id(&row.declared_summary, row.resource_id).as_deref(),
+            )
+        })
+        .flatten();
+    let token_id = tokens::load(&mut *reads, token_registration, &selected_snapshot)
+        .await?
+        .into_values()
+        .next();
+    reads
+        .commit()
+        .await
+        .map_err(|_| V2Error::internal_error("failed to close name read snapshot"))?;
 
     let record_inventory = if row_has_current_registration(&row) {
         load_name_record_inventory(&state.pool, &row, &selected_snapshot)
@@ -211,6 +235,9 @@ pub(crate) async fn get_name_record(
         route_source,
     )
     .await?;
+    if record.authority == Some(Authority::EnsV2) {
+        record.token_id = token_id;
+    }
     if let Some(groups) = record.records.as_mut() {
         let source = record_inventory
             .as_ref()
