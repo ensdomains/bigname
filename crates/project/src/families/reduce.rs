@@ -130,6 +130,7 @@ pub(crate) async fn apply(
     super::ens_v2_registry::apply(transaction, context, events, rows).await?;
     super::topology::apply(transaction, context, events, rows).await?;
     super::reverse::apply(transaction, context, events, rows).await?;
+    super::hydrate::reset_schedule(transaction, context, rows).await?;
     super::addresses::apply(transaction, context, events, rows).await?;
     super::lifecycle::apply(transaction, context, events, rows).await?;
     super::universal_resolver::apply(transaction, context, events, rows).await?;

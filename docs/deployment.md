@@ -790,6 +790,23 @@ repair. The one-shot `phase-runner redo` does not need the entry: its Project
 undo and replay read no hydration RPC, and the supervised runner refreshes the
 values the replay leaves empty.
 
+Hydration reads run only on a head block, the highest readable block Project
+holds, never while it catches up, replays or rebuilds
+([follow-only hydration](projections.md#follow-only-hydration)). The endpoint
+must therefore answer `eth_call` by block hash at the newest ingested blocks;
+it needs no deep historical state for hydration. The runner gives each
+hydration request a 5-second connect and 10-second total timeout, and Project
+limits the time one block waits for its reads to 30 seconds. An endpoint that fails does not stop
+publication. When it does not serve the block, no stored value changes. When
+it answers some calls and fails others, a call that fails inside an answered
+aggregate clears its own overlay, and a batch that fails as a whole removes no
+reverse name and no text value that was still served: the only overlay it can
+clear is a text overlay that no longer matched its selector and so was already
+not served. See [follow-only hydration](projections.md#follow-only-hydration)
+for the outcomes and
+[Project family work](runbooks/pipeline-monitoring.md#project-family-work) for
+the counters and log lines.
+
 The retained ENS chain set is the union of chains in ENS [name
 surfaces](glossary.md#surface-name-surface) and active ENS manifests. Later
 `run` and `redo` synchronization allows an empty retained set only when the
@@ -2989,6 +3006,79 @@ After the schema-migrations and until the family rebuild publishes, the listing 
 `409 stale`, as every fenced route does. An API from before this build still answers the
 listing after the indexes are dropped, by scanning the two tables, so it is slower there and
 nowhere else; replace it rather than leave it running.
+
+### Hydration only at the head
+
+The build that makes [hydration](glossary.md#hydration) run only on the head
+block changes `crates/project/src`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. It carries one schema-migration,
+`20261005180000_project_hydration_schedule.sql`, and no manifest change,
+watch-plan change or environment variable; no API response shape changes.
+
+The schema-migration adds hydration's scheduling columns: `attempt_limit` and
+`attempt_failures` on `project_reverse_tuple`, `hydration_limit` and
+`hydration_failures` on `project_node_record_value`, and a copy of each
+failure count on the two hydration work indexes. They are nullable and added
+without a default, so no row is rewritten and no family is reset; on an empty
+schema-migration database it is a no-op and `phase-runner init-schema`
+installs the same columns. It takes the family marker table in `EXCLUSIVE`
+mode until it commits. Apply it with the runner stopped and before the new
+binary starts: hydration selection now reads these columns directly and fails
+if they are absent. The generic family writer also cannot persist scheduling
+fields missing from the schema. A previous binary on the new schema leaves
+the columns null, which reads as no limit.
+
+Behavior changes on `ethereum-mainnet`, the only hydrated chain
+([follow-only hydration](projections.md#follow-only-hydration)):
+
+- Project no longer calls the hydration endpoint for blocks it applies while
+  catching up. Before this build every such block read up to 250 text
+  selectors and up to 250 reverse tuples of the rolling refresh, plus the
+  tuples it changed, at its own block hash; against an endpoint without that
+  block's state each read failed, cleared the reverse name it was refreshing
+  and recorded a failed attempt on the text selector.
+- An RPC batch that fails as a whole no longer clears hydrated reverse names.
+  A served primary name can therefore be the last one successfully observed
+  rather than absent while the endpoint fails. Against an endpoint that does
+  not serve the block nothing is written at all. Against one that answers
+  other calls at the block, the failed batch is split, within a call and time
+  limit per block, and what is still unread records only where to resume. A
+  call that fails inside an answered aggregate still clears its value.
+- Old waiting work receives 63 of the 250 text selection slots and a rounded-up
+  quarter of each kind's call budget, before new arrivals can use that time.
+  Unused shares stay available. A failed child response waits 7,200 blocks
+  before retry; fresh selector evidence clears obsolete scheduling state.
+  Outer failures keep the separate non-observation and split policy above.
+- Seven hydration metrics and two `warn` log lines are new
+  ([Project family work](runbooks/pipeline-monitoring.md#project-family-work)).
+  The hydration HTTP client now has a 5-second connect and 10-second total
+  timeout.
+
+Adoption and restart plan for an existing deployment, following the
+[planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary):
+
+1. Stop the supervised phase runner. Do not run a binary of the previous hash
+   against the database again once the next step has started, and do not
+   alternate the two: a rebuild left part-way by one hash is not resumed by the
+   other.
+2. Apply the release's schema-migrations, `20261005180000` among them.
+3. Under the new binary, run the full-history Interpret redo and then the
+   Project redo it installs, to completion, as for any rotation. A bounded
+   range cannot adopt a new hash. Neither redo needs
+   `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS`: replay and rebuild make no
+   hydration call.
+4. Start the supervised phase runner with the hydration URL configured, and
+   the matching API once the family publication is live.
+
+The rebuild starts every hydrated value from the event-derived baseline: text
+overlays are empty and event-silent reverse names are absent, including on the
+block the rebuild ends on, which is not hydrated. Values return as new blocks
+arrive after the restart, 250 text selectors per head block at most, with the
+reverse tuples in rotation beside them. How long that takes depends on the
+head blocks that arrive and on the endpoint, so it is not a fixed time; watch
+`phase_runner_project_hydration_selectors_total`. A release that rotates the
+hash for another change discharges this rotation with the same redo pair.
 
 ### WrapperRegistry permission reader upgrade
 

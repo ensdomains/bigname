@@ -34,6 +34,8 @@ mod universal_resolver;
 mod wrapper;
 
 pub use driver::redo_extent;
+pub use hydrate::batch::HydrationTimeLimits;
+pub use hydrate::outcome::{HydrationKindOutcome, HydrationOutcome};
 pub use input::{InputToken, Revision, input_token};
 pub use position::emission_ordinal;
 
@@ -187,8 +189,11 @@ pub enum FamilyMode {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FamilyOptions {
-    /// RPC configuration for mainnet follow-block hydration. Replay and rebuild never call it.
+    /// RPC configuration for mainnet hydration. Only a follow block that is the highest readable
+    /// block calls it (`hydrate`); a catch-up, replayed or rebuilt block never does.
     pub hydration_rpc_urls: Option<bigname_lookup::ChainRpcUrls>,
+    /// How long a head block's hydration may wait on RPC.
+    pub hydration_time_limits: HydrationTimeLimits,
     /// The interpreter content hash the marker records for every block.
     pub input_content_hash: String,
     /// Blocks of undo rows kept below the marker at least.
@@ -212,6 +217,7 @@ impl FamilyOptions {
     pub fn new(input_content_hash: impl Into<String>) -> Self {
         Self {
             hydration_rpc_urls: None,
+            hydration_time_limits: HydrationTimeLimits::default(),
             input_content_hash: input_content_hash.into(),
             retained_undo_depth: RETAINED_UNDO_DEPTH,
             max_blocks_per_run: MAX_BLOCKS_PER_RUN,
@@ -234,6 +240,11 @@ impl FamilyOptions {
 
     pub fn with_hydration(mut self, rpc_urls: bigname_lookup::ChainRpcUrls) -> Self {
         self.hydration_rpc_urls = Some(rpc_urls);
+        self
+    }
+
+    pub fn with_hydration_time_limits(mut self, limits: HydrationTimeLimits) -> Self {
+        self.hydration_time_limits = limits;
         self
     }
 
@@ -289,6 +300,8 @@ pub struct FamilyOutcome {
     pub statistics_refreshes: u64,
     /// Elapsed milliseconds of the whole run.
     pub elapsed_ms: u64,
+    /// What hydration did: its RPC calls, a failed block's included, and the rows it committed.
+    pub hydration: HydrationOutcome,
 }
 
 impl FamilyOutcome {
@@ -328,6 +341,8 @@ impl FamilyOutcome {
     fn add(&mut self, stats: block::BlockStats) {
         self.undo_rows += stats.undo_rows;
         self.duplicate_anomalies += stats.duplicate_anomalies;
+        self.hydration
+            .committed(stats.hydration.0, stats.hydration.1);
         for (table, rows) in stats.rows {
             *self.rows.entry(table).or_default() += rows;
         }
@@ -403,6 +418,7 @@ pub async fn run(
         budget_exhausted = outcome.budget_exhausted,
         revision_adopted = outcome.revision_adopted,
         duplicate_anomalies = outcome.duplicate_anomalies,
+        hydration = ?outcome.hydration,
         error = error.as_ref().map(tracing::field::display),
         "Project families applied"
     );

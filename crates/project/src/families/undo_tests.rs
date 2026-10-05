@@ -90,6 +90,7 @@ async fn publish(
         revision: &NO_INTERPRET,
         role: block::Role::Follow,
         manifests: &crate::families::manifests::History::default(),
+        head: None,
     };
     let mut opened = block::open(pool, CHAIN, number, &plan).await?;
     let mut rows = RowSet::default();

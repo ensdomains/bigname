@@ -92,6 +92,7 @@ pub async fn redo_extent(
             target,
             options,
             budget: Budget { left: 0 },
+            head: None,
         };
         let base = run
             .undo_limit(&family, (from - 1).min(target.number))

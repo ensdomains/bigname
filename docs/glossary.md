@@ -1613,7 +1613,12 @@ anchored to an exact block hash rather than a block number or
 a projection-owned repair pass that fills current-state values
 by making hash-pinned RPC calls (for example legacy reverse-resolver names or
 missing text values). Hydration writes only projection rows: no normalized
-events, verified output, reusable outcomes, or execution traces. Verified
+events, verified output, reusable outcomes, or execution traces. Only the
+head block hydrates: an ordinary follow block that is the highest readable
+block bigname holds, never a block applied while catching up, replayed or
+rebuilt ([follow-only hydration](projections.md#follow-only-hydration)). A
+hydrated value is the last one successfully observed, with the block it was
+observed at. Verified
 lookup always reads the newly selected projection state and executes for that
 request.
 
@@ -2030,7 +2035,7 @@ Family rows and their undo journal retain the block-derived state and, where
 applicable, hash-pinned hydration observations. Replay and rebuild make no
 provider calls; undo can restore an earlier retained overlay, while a reset
 rebuild starts from event-derived inputs and refreshes eligible values on later
-follow blocks. Operational timestamps and hydration attempt counters are not
+head blocks. Operational timestamps and hydration attempt counters are not
 protocol facts or API history. The [projection rules](projections.md#rules)
 govern serving fields, storage-only keys and retained evidence. Project is the
 only projection writer.

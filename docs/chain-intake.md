@@ -733,9 +733,12 @@ The candidate set is current-only:
 Results are overlays on the event-derived family rows, journalled with them: a
 reverse-name result on the reverse tuple and its baseline, a text result in
 `project_node_record_value.hydrated_value` with the block hash and selectors.
-The event-derived columns stay unchanged. A failed call or whole Multicall/RPC
-batch removes the affected overlays and the block still publishes; a later
-follow block retries. If a previously hydrated reverse tuple no longer selects
+The event-derived columns stay unchanged. Only the head block hydrates. A call
+that fails inside an answered Multicall3 aggregate removes its own overlay. A
+batch that fails as a whole removes no reverse name and no text value that
+was still served; the only overlay it can clear is a text overlay that no
+longer matched its selector and so was already not served. Either way the block still
+publishes and a later head block retries. If a previously hydrated reverse tuple no longer selects
 a configured legacy resolver, the reader exposes its baseline without another
 call. No hydration value is written to raw facts, identity rows, or normalized
 events. [Follow-only hydration](projections.md#follow-only-hydration) has the
