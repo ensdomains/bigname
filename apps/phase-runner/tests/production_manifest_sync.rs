@@ -1117,7 +1117,7 @@ fn without_approval_for_all(manifest: String) -> String {
 
 #[tokio::test]
 async fn ens_v2_registry_approval_widening_redoes_ingest_from_the_event_start() -> Result<()> {
-    const EVENT_START: i64 = 11_708_986;
+    const EVENT_START: i64 = 10_893_181;
     let checked_in = checked_in_sepolia_root();
     let baseline_root = copy_profile_with_ens_v2_registries(&checked_in, without_approval_for_all)?;
     let unbounded_root = copy_profile_with_ens_v2_registries(&checked_in, |manifest| {

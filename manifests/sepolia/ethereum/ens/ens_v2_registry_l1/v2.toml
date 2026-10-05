@@ -145,10 +145,11 @@ normalized_events = ["SurfaceUnbound", "RegistrationReleased", "Upgraded"]
 # AccountPermissionChanged. It is an ordinary family-wide event, so discovered user and
 # migration-created registries are watched as well as the declared ETHRegistry.
 # start_block bounds the family-wide watch entry of the compiled watch plan, and so the Ingest
-# redo that adding this event requires: it is the first block of the superseded 2026-09-15
-# deployment, which precedes every registry of the current set (docs/manifests.md, "Watch-plan
-# expansion").
-# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ENSV1Resolver.json:L757 @ ens_v2_sepolia_20260916@366de741)
+# redo that adding this event requires. It is a bigname coverage decision, not a deployment
+# fact: 10893181 is the earliest block at which a registry admitted under this manifest starts
+# on the retained Sepolia database, where discovery admits registries created before this
+# deployment's own contracts (docs/manifests.md, "Watch-plan expansion", says how to
+# re-derive it).
 # (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ETHRegistry.json:L362 @ ens_v2_sepolia_20261001@07e55a05)
 # (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UserRegistryImpl.json:L425 @ ens_v2_sepolia_20261001@07e55a05)
 # (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/WrapperRegistryImpl.json:L520 @ ens_v2_sepolia_20261001@07e55a05)
@@ -157,4 +158,4 @@ name = "ApprovalForAll"
 fragment = "event ApprovalForAll(address indexed account, address indexed operator, bool approved)"
 emitter_roles = ["registry"]
 normalized_events = []
-start_block = 11708986
+start_block = 10893181

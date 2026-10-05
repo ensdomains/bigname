@@ -142,7 +142,7 @@ fn checked_in_approvals_compile_only_for_declared_roles_and_intervals() -> Resul
     Ok(())
 }
 
-const ENS_V2_APPROVAL_START: u64 = 11_708_986;
+const ENS_V2_APPROVAL_START: u64 = 10_893_181;
 
 fn approval_for_all_topic0() -> String {
     format!(
