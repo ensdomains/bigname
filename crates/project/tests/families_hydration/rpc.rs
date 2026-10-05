@@ -41,6 +41,9 @@ struct Faults {
     /// Once this many hydration aggregates were answered, the endpoint refuses every request
     /// with an error that says it does not have the block.
     block_lost_after: Option<usize>,
+    /// A hydration aggregate of at least this many calls is rejected after the first delay; a
+    /// smaller one answers after the second. The one-call probe answers at once.
+    rejected_from: Option<(usize, std::time::Duration, std::time::Duration)>,
 }
 
 pub struct Rpc {
@@ -133,6 +136,16 @@ impl Rpc {
             .unwrap()
             .slow
             .push((plain_hex(hex), delay));
+    }
+    #[allow(dead_code)]
+    pub fn reject_from(
+        &self,
+        calls: usize,
+        rejected_after: std::time::Duration,
+        answered_after: std::time::Duration,
+    ) {
+        self.responses.faults.lock().unwrap().rejected_from =
+            Some((calls, rejected_after, answered_after));
     }
     #[allow(dead_code)]
     pub fn lose_block_after(&self, aggregates: usize) {
@@ -245,6 +258,15 @@ async fn respond(State(state): State<Responses>, Json(request): Json<Value>) -> 
         .max();
     if let Some(delay) = slowest {
         tokio::time::sleep(delay).await;
+    }
+    if let Some((size, rejected_after, answered_after)) = faults.rejected_from
+        && !probe
+    {
+        if calls.len() >= size {
+            tokio::time::sleep(rejected_after).await;
+            return error(&request, "fixture aggregate too large");
+        }
+        tokio::time::sleep(answered_after).await;
     }
     let holds = |call: &String, patterns: &[String]| patterns.iter().any(|hex| call.contains(hex));
     if faults.limit.is_some_and(|limit| calls.len() > limit) {

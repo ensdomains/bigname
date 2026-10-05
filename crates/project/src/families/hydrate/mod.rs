@@ -1,4 +1,5 @@
-//! Hydration at the head: Project's RPC read of values ENSv1 events do not carry. A block
+//! Hydration at the head: Project's RPC read of the selectors `reverse.sql` and `text.sql`
+//! select (`docs/projections.md`, follow-only hydration). A block
 //! hydrates only when it is published as an ordinary follow block and is the highest readable
 //! block the run captured when it started, by number and hash (`Plan::head`). A block applied
 //! while catching up, a block a run stops on because its budget is spent, a replayed or rebuilt

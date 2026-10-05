@@ -25,9 +25,11 @@
 //!
 //! Every call and the whole pass are bounded by [`HydrationTimeLimits`]; the kind read first has
 //! half of the pass's time while the other has selectors waiting. A failed aggregate is split
-//! only while its kind has time for both halves and for every half already waiting, each at the
-//! longest any call of this pass has taken. A call the kind's time cuts short, and everything
-//! of that kind after it, is [`Read::Unobserved`].
+//! only while its kind has a whole call's time for the first half, and time for both halves and
+//! for every half already waiting, each at the longest any aggregate of this pass has taken (the
+//! probe is not counted). Otherwise it is deferred with its reduced limit, so a failure that
+//! completed is recorded before a later call can be cut. A call the kind's time cuts short, and
+//! everything of that kind after it, is [`Read::Unobserved`].
 use std::time::{Duration, Instant};
 
 use bigname_lookup::{
@@ -46,7 +48,8 @@ pub(super) const BATCH_LIMIT: usize = 250;
 /// How long hydration may wait on RPC. This bounds the time spent waiting for RPC answers, not
 /// the publication: selecting the block's selectors before the reads and publishing after them
 /// take their own time. Reads that do not fit are not observed and the block is published
-/// without them.
+/// without them. Keep `block` at least twice `call`: a kind whose share of the block is shorter
+/// than one call can have its first aggregate cut every time.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HydrationTimeLimits {
     /// The longest one RPC call may take before it counts as failed.
@@ -192,7 +195,8 @@ pub(super) struct Session<'a> {
     /// The time since the start at which the kind being read stops, and whether it has.
     until: Duration,
     stopped: bool,
-    /// The longest a call of this pass took, a call that ran into its limit included.
+    /// The longest an aggregate of this pass took, one that ran into the call limit included.
+    /// The probe is not counted.
     slowest: Duration,
 }
 
@@ -287,7 +291,7 @@ impl<'a> Session<'a> {
                     let waiting = pending.iter().filter(|group| group.half).count();
                     if self.serves != Some(true) || self.stopped {
                         settle(&mut reads, &members, || Read::Unobserved);
-                    } else if size > 1 && calls > 0 && self.has_time_for(waiting + 2) {
+                    } else if size > 1 && calls > 0 && self.can_split(waiting) {
                         let (left, right) = members.split_at(size / 2);
                         for members in [right, left] {
                             pending.push(Group {
@@ -444,12 +448,18 @@ impl<'a> Session<'a> {
         }
     }
 
-    /// Whether the pass has time for `calls` more calls as slow as its slowest so far.
-    fn has_time_for(&self, calls: usize) -> bool {
+    /// Whether a failed aggregate may be replaced by its halves while `waiting` halves are
+    /// already scheduled. The first half must have a whole call's time, so it ends as its own
+    /// answer or failure and the failure just completed is never lost to a cut; and both halves
+    /// and those waiting must fit at the slowest aggregate of the pass so far.
+    fn can_split(&self, waiting: usize) -> bool {
+        let calls = waiting + 2;
         let left = self.until.saturating_sub(self.started.elapsed());
-        left >= self
-            .slowest
-            .saturating_mul(u32::try_from(calls).unwrap_or(u32::MAX))
+        left >= self.limits.call
+            && left
+                >= self
+                    .slowest
+                    .saturating_mul(u32::try_from(calls).unwrap_or(u32::MAX))
     }
 
     /// The time the next call may take, or `None` when the pass has spent its budget.

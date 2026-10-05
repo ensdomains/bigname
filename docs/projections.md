@@ -132,7 +132,10 @@ What follows depends on what Project knows about the endpoint at that block:
 - Nothing has been answered at the block yet. Project sends one one-call
   aggregate at the same block hash. If that fails too, the block is treated as
   not served, as above. This probe is sent only then; once any aggregate of
-  the block has been answered it is not sent again.
+  the block has been answered it is not sent again. Two cases say nothing
+  about the endpoint and count as running out of time instead: no time is
+  left to send the probe, or the probe is cut by the block's time before its
+  own 10 seconds are up.
 - The endpoint has answered an aggregate or the probe at the block. Project
   then treats the failure as coming from what the aggregate holds (its size,
   its execution cost, or one selector) and splits the aggregate in halves.
@@ -141,9 +144,11 @@ What follows depends on what Project knows about the endpoint at that block:
 
 Splitting is bounded twice. One kind sends at most one aggregate per 250
 selectors plus 16 per block. Each call is limited to 10 seconds and one
-block's reads, both kinds together, to 30 seconds, and a failed aggregate is
-split only while there is time for both halves and for every half already
-waiting, each taken at the longest any call of this block has needed. When an
+block's reads, both kinds together, to 30 seconds. A failed aggregate is
+split only while its kind has a full 10 seconds for the first half, and time
+for both halves and for every half already waiting, each taken at the longest
+any aggregate of this block has needed (the probe is not counted). A failure
+that has completed is therefore recorded before a later call can be cut. When an
 aggregate cannot be split, its selectors are deferred with half its size as
 their limit; halves that were never sent are deferred with their own size. A
 selector alone in a failed aggregate is deferred with a limit of one. The next
@@ -1696,8 +1701,12 @@ with its row, and new or changed selectors use event-derived claims until a late
 head block refreshes them. Rebuild ranges retain their existing behavior.
 
 Each hydrating block selects every eligible tuple the block changed and at
-most 250 additional eligible tuples. Both are sent together in address order,
-so a changed tuple is not necessarily read before the rolling ones, and the
+most 250 additional eligible tuples. Both are grouped into aggregates
+together: tuples without a size limit fill aggregates in address order, the
+limited ones are packed by limit, and the aggregates go out in the order of
+their earliest tuple by address. A changed tuple is therefore not necessarily
+read before the rolling ones, a later tuple can be sent before an earlier
+limited one, and the
 call and time limits of [follow-only hydration](#follow-only-hydration) decide
 how many of them the block reads.
 Rolling selection orders never-attempted tuples

@@ -1201,3 +1201,151 @@ async fn slow_reverse_reads_leave_time_for_the_text_selectors_of_the_same_block(
     );
     fixture.cleanup().await
 }
+
+#[tokio::test]
+async fn fast_rejections_followed_by_a_slow_half_still_record_where_to_resume() -> Result<()> {
+    use std::time::Duration;
+    let (fixture, rpc) = fixture().await?;
+    for index in 1..=16 {
+        reverse::seed(&fixture, 1, index).await?;
+        keyed_text(&fixture, 1, 40 + index, &format!("key{index:02}")).await?;
+    }
+    for block in 1..=8 {
+        rpc.answer(block, Some("value"));
+    }
+    // The endpoint rejects an aggregate of four or more calls after 400 ms and takes 1.9 s, most
+    // of a call's time, to answer a smaller one; the probe answers at once. Reverse has three
+    // of the block's six seconds: after the aggregates of 16, 8 and 4 are rejected it has less
+    // than one call's time left, so a half sent then would be cut and nothing recorded.
+    rpc.reject_from(4, Duration::from_millis(400), Duration::from_millis(1900));
+    let limits = bigname_project::families::HydrationTimeLimits {
+        call: Duration::from_secs(2),
+        block: Duration::from_secs(6),
+    };
+    let options = reverse::options(&rpc).with_hydration_time_limits(limits);
+    let observed = |table: &'static str, column: &'static str| {
+        let pool = fixture.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(&format!(
+                "SELECT count(*) FROM {table} WHERE {column} IS NOT NULL"
+            ))
+            .fetch_one(&pool)
+            .await
+        }
+    };
+
+    // The first head observes no reverse name, but every rejected aggregate leaves its tuples
+    // a smaller size: the aggregate of 4 is not split, and no call is cut.
+    rpc::head(&fixture.pool, 1).await?;
+    let (outcome, error) = reverse::apply(&fixture, &marker(1), FamilyMode::Normal, &options).await;
+    assert!(error.is_none(), "{error:?}");
+    let first = outcome.hydration.reverse;
+    assert_eq!(
+        (first.answered, first.deferred, first.not_observed),
+        (0, 16, 0),
+        "{first:?}"
+    );
+    assert_eq!((first.rpc_calls, first.schedule_writes), (5, 16));
+    let limits: Vec<Option<i32>> =
+        sqlx::query_scalar("SELECT attempt_limit FROM project_reverse_tuple ORDER BY address")
+            .fetch_all(&fixture.pool)
+            .await?;
+    assert_eq!(limits, [vec![Some(2); 8], vec![Some(4); 8]].concat());
+    // Text had more time: its first small half had a whole call and was answered.
+    assert_eq!(outcome.hydration.text.answered, 2);
+    assert_eq!(
+        observed("project_node_record_value", "hydrated_value").await?,
+        2
+    );
+
+    // The second head, against the same endpoint, starts from those sizes and observes names.
+    rpc::head(&fixture.pool, 2).await?;
+    let (outcome, error) = reverse::apply(&fixture, &marker(2), FamilyMode::Normal, &options).await;
+    assert!(error.is_none(), "{error:?}");
+    assert_eq!(outcome.hydration.reverse.answered, 2);
+    assert_eq!(observed("project_reverse_tuple", "hydrated_name").await?, 2);
+    let text_second = outcome.hydration.text;
+    assert!(
+        text_second.answered + text_second.deferred > 0,
+        "text is read or records where to resume: {text_second:?}"
+    );
+
+    // With small aggregates answered quickly and large ones still rejected, the following heads
+    // read everything left, for both kinds.
+    rpc.clear_faults();
+    rpc.reject_from(4, Duration::from_millis(100), Duration::from_millis(10));
+    let mut heads = 2;
+    while observed("project_reverse_tuple", "hydrated_name").await? < 16
+        || observed("project_node_record_value", "hydrated_value").await? < 16
+    {
+        heads += 1;
+        assert!(heads <= 8, "selectors were never observed");
+        rpc::head(&fixture.pool, heads).await?;
+        let (_, error) =
+            reverse::apply(&fixture, &marker(heads), FamilyMode::Normal, &options).await;
+        assert!(error.is_none(), "{error:?}");
+    }
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn undo_restores_a_deferred_text_selector_and_its_work_entry() -> Result<()> {
+    let (fixture, rpc) = fixture().await?;
+    keyed_text(&fixture, 1, 2, "badkey").await?;
+    keyed_text(&fixture, 1, 3, "goodkey").await?;
+    // The endpoint does not serve block 1: both selectors stay unread and untouched.
+    run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
+    let rows = fixture.rows("project_node_record_value").await?;
+    let work = fixture.rows("project_text_hydration_work").await?;
+
+    // At block 2 the aggregate holding `badkey` fails: it is deferred with scheduling state.
+    rpc.answer(2, Some("value"));
+    rpc.poison(&alloy_primitives::hex::encode("badkey"));
+    let outcome = run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(
+        (
+            outcome.hydration.text.answered,
+            outcome.hydration.text.deferred
+        ),
+        (1, 1)
+    );
+    let deferred: (Option<i64>, Option<i32>, Option<i32>) = sqlx::query_as(
+        "SELECT hydrated_at_block, hydration_limit, hydration_failures
+         FROM project_node_record_value WHERE selector_key = 'badkey'",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(deferred, (Some(2), Some(1), Some(1)));
+    let failures: Vec<Option<i32>> =
+        sqlx::query_scalar("SELECT hydration_failures FROM project_text_hydration_work")
+            .fetch_all(&fixture.pool)
+            .await?;
+    assert_eq!(failures, vec![Some(1)], "the work index follows the row");
+
+    // Block 2 is replaced: the undo restores both rows and both work entries exactly.
+    sqlx::query(
+        "UPDATE chain_lineage SET canonicality_state = 'orphaned'
+         WHERE chain_id = $1 AND block_number = 2",
+    )
+    .bind(CHAIN)
+    .execute(&fixture.pool)
+    .await?;
+    let replacement = reverse::fork_block(&fixture, 2, &hash(1)).await?;
+    let calls = (rpc.calls(), rpc.probes());
+    let options = reverse::options(&rpc).with_max_blocks_per_run(1);
+    let (outcome, error) =
+        reverse::apply(&fixture, &replacement, FamilyMode::Normal, &options).await;
+    assert!(error.is_none(), "{error:?}");
+    assert_eq!((outcome.undone_blocks, outcome.blocks), (1, 0));
+    assert_eq!(fixture.rows("project_node_record_value").await?, rows);
+    assert_eq!(fixture.rows("project_text_hydration_work").await?, work);
+    // The replay makes no call and leaves them so.
+    let (outcome, error) =
+        reverse::apply(&fixture, &replacement, FamilyMode::Normal, &options).await;
+    assert!(error.is_none(), "{error:?}");
+    assert_eq!(outcome.marker, Some(replacement));
+    assert_eq!((rpc.calls(), rpc.probes()), calls);
+    assert_eq!(fixture.rows("project_node_record_value").await?, rows);
+    assert_eq!(fixture.rows("project_text_hydration_work").await?, work);
+    fixture.cleanup().await
+}

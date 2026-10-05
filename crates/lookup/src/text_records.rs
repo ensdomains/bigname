@@ -105,6 +105,8 @@ pub async fn execute_ens_text_record_multicall(
         Ok(Value::String(value)) => value,
         Ok(other) => bail!("ENS text record Multicall3 eth_call returned non-string JSON {other}"),
         // The typed error stays in the chain: `rpc_error_reports_block_unavailable` reads it.
+        // `{:#}` prints the provider's message after this context; plain `{}` prints the context
+        // alone.
         Err(error) => {
             return Err(
                 anyhow::Error::new(error).context("ENS text record Multicall3 eth_call failed")
