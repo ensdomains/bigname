@@ -1358,20 +1358,6 @@ and exactly one complete ENSv2 successor for the same name and transaction.
 The name may enter the transaction bound to its lease or, after a registrar
 transfer without `reclaim`, to the registry-only resource the lease goes on
 under; the registrar state is the lease either way.
-The retained authority and lease may also exist before a readable ENSv1 name
-or binding was materialized. A previously false `surface_known` flag does not
-disqualify that same complete transaction proof: an earlier ENSv2 reservation
-may already supply the name's preimage. Reconciliation still requires the
-retained selected authority, matching live registrar lease, and every raw
-cleanup and successor condition above. It removes temporary ENSv1 openings
-even when there is no older binding to close; the writer's strict cleanup
-check remains unchanged.
-Within that complete proof, an unnamed incoming or cleanup registrar token
-transfer is attributed to the proven name and keeps its original event identity,
-resource, lineage, raw provenance, prior holder and full payload. Its retained
-state key is refreshed to that name so the later cleanup remains the latest
-transfer after restore. Older unnamed lifecycle rows are not rewritten, and
-incomplete or ordinary transactions gain no attribution from this rule.
 The successor proof ends at its initial mint/resource-link/role-grant sequence;
 subsequent same-transaction token transfers and role changes remain ordinary.
 (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRegistry.json:L2347 @ ens_v2@a971bd64)
@@ -1877,6 +1863,12 @@ they describe one registration: the original grant and the snapshot share a `res
 `registered_at` is the original grant's block time either way.
 
 For this disclosure rule, launch-bounded transfers to the manifest-declared Graveyard and admitted cleanup observations carry `registrar_surface_retired` in their existing event payload. The bounded retained evidence records that retirement separately from the ENSv1 current-registry fallback marker. It prevents a later preimage from reopening that lease and does not replace migration correlation or relax exact cleanup evidence. A subsequent independently proven new numeric grant has a new lease identity.
+Numeric registrar renewal and controller name enrichment use the same retirement
+veto before creating a new ENSv1 binding. They retain the actual renewal, expiry,
+name, resource, lineage, holder and bounded retirement evidence. Retirement does
+not close an existing ordinary binding, delete the retained lease, or prove
+that an ENSv1→ENSv2 migration completed; incomplete migration evidence remains
+subject to the same exact correlation requirements.
 
 Only active manifests participate in raw-log selection and watch authority.
 Interpret separately retains metadata for stored deprecated manifest versions

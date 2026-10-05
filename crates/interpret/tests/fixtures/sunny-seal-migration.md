@@ -35,3 +35,9 @@ renewal and following controller renewal; the unwrapped token emits no wrapper
 log. Its header, transaction and logs are test data, not part of this capture. The
 renewal must retain the Graveyard holder and leave current ENSv2 authority
 unchanged after a fresh Engine restore and Project publication.
+
+A separate generated boundary case advances past the old lease's expiry and
+grace period and uses an authorized BaseRegistrar `registerOnly` burn, mint
+and numeric grant. It verifies the new lease gets its own binding and a later
+ordinary renewal preserves that binding. None of those generated future
+transactions or timestamps are claimed as observed Sepolia activity.

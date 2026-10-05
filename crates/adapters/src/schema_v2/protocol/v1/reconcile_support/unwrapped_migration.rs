@@ -63,20 +63,6 @@ pub(in crate::schema_v2::protocol) fn reconcile(
             {
                 return false;
             }
-            // A retained numeric lease may still be unnamed at the incoming transfer. The
-            // complete proof identifies these two real transfers with the migrated name before
-            // they are first stored; older unnamed lifecycle rows remain unchanged.
-            if event.source_family == "ens_v1_registrar_l1"
-                && event.event_kind == "TokenControlTransferred"
-                && event.resource_id == Some(proof.resource_id)
-                && event.logical_name_id.is_none()
-                && event
-                    .log_index
-                    .is_some_and(|log| log == proof.first_log || log == proof.cleanup_log)
-            {
-                event.logical_name_id = Some(proof.logical_name_id.clone());
-                refresh_interpreter_state_key(event);
-            }
             if event.event_kind == "PermissionChanged" {
                 // Keep actual registrar-token transfers and predecessor revocations for audit.
                 // Grants derived from a temporary registry authority are not durable permissions.

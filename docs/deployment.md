@@ -3193,20 +3193,18 @@ covers this start. See the [measured watch-plan change](manifests.md).
 Metadata and retained origins do not replace ordinary registry
 announcement admission or introduce pre-initialization approval capture.
 
-### Unwrapped migration without a prior readable ENSv1 binding
+### Renewal of a retired ENSv1 registrar lease
 
-The complete-transaction reconciliation described in
-[storage](storage.md#ensv1ensv2-correlation-visibility) now accepts a retained ENSv1 lease
-whose readable name and binding were not previously materialized. It changes
-`crates/adapters/src`, rotating the
-[interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
-It needs no schema-migration, manifest change or historical ingest fetch.
-Deploy matching runner and API binaries, complete the full-history Interpret
-redo and the Project redo it installs, then resume serving under the new hash.
-One redo pair under the final combined release covers this correction and
-other changes in that release; replay under an earlier hash does not. Retain
-raw facts and use the [planned migration and fingerprint
+The renewal adapter now applies the existing same-lease retirement rule before
+creating a new ENSv1 binding from later name readability. Actual renewal and
+expiry observations remain available. This changes `crates/adapters/src` and
+rotates the [interpreter content hash](glossary.md#interpreter-content-hash) for
+every chain, without changing the schema, manifests or watch coverage. Deploy
+matching runner and API binaries and finish the full-history Interpret redo
+and the Project redo it installs before serving the new generation, following
+the [planned migration and fingerprint
 boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary).
-For a deployment stopped by this migration, verify that Interpret and Project
-advance beyond the previously failing transaction and publish its current
-ENSv2 registration with no active ENSv1 predecessor.
+One redo pair under the final combined release covers this correction and
+other changes in that release; an earlier hash does not. Preserve raw facts
+and verify that a migrated name continues to serve its current ENSv2
+registration after a later ENSv1 renewal, with no reopened ENSv1 predecessor.

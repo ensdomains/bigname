@@ -217,9 +217,8 @@ fn prove(
         "resource:registry-only:{}:{node}",
         boundary.chain_id
     ));
-    // The retained authority is either its lease or, after a registrar transfer without
-    // `reclaim`, the registry-only resource the lease goes on under. A known lease does not
-    // require a previously readable name or a materialized binding. The controller
+    // The name enters the transaction bound either to its lease or, after a registrar transfer
+    // without `reclaim`, to the registry-only resource the lease goes on under. The controller
     // reclaims the registry record from whoever it names before parking the token, so the token
     // is the predecessor either way and the registrar state is the lease.
     // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
@@ -229,7 +228,8 @@ fn prove(
     let registry_only_bound = predecessor.resource_id == registry_resource_id
         && predecessor.authority_source_family == "ens_v1_registry_l1"
         && predecessor.token_lineage_id.is_none();
-    if !(lease_bound || registry_only_bound)
+    if !predecessor.surface_known
+        || !(lease_bound || registry_only_bound)
         || registrar.expiry? <= incoming.raw.block_timestamp.unix_timestamp()
     {
         return None;

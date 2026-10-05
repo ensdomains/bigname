@@ -73,7 +73,14 @@ fn event(
     });
     let resource_id = binding_target.map(|state| state.resource_id);
     let token_lineage_id = binding_target.and_then(|state| state.token_lineage_id);
-    let bind = binding_target.is_some_and(|state| !state.surface_known);
+    let bind = binding_target.is_some_and(|target| {
+        !target.surface_known
+            && !state.registrar_surface_is_retired(
+                &selected.source.namespace,
+                &namehash,
+                target.resource_id,
+            )
+    });
     // This event names a surface its authority did not have. A resolver set
     // while the name was unknown was linked to the resource alone; it is
     // replayed onto the surface now, as a registrar event does for a

@@ -50,44 +50,67 @@ async fn sunny_seal_recorded_migration_commits_without_a_cleanup_binding() -> Te
 }
 
 #[tokio::test]
-async fn sunny_seal_warm_cold_and_redo_preserve_the_same_current_authority() -> TestResult {
-    let fixture: Value = serde_json::from_str(include_str!(
+async fn sunny_seal_warm_cold_combined_and_redo_preserve_the_same_current_authority() -> TestResult
+{
+    let recorded: Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/sunny-seal-migration.json"
     ))?;
     let mut snapshots = Vec::new();
-    for warm in [false, true] {
+    for mode in ["cold", "continuing", "combined"] {
         let database = database("interpret_sunny_seal_restore").await?;
         let pool = database.pool();
-        seed_recorded_state(pool, &fixture).await?;
+        seed_recorded_state(pool, &recorded).await?;
+        let fixture = seed_generated_renewal(pool, &recorded).await?;
         let older = older_history(pool).await?;
-        if warm {
-            let engine = Engine::new(pool.clone())
-                .with_blocks_per_batch(std::num::NonZeroU32::new(1).unwrap());
-            let mut request = BatchRequest {
-                chain_id: CHAIN.to_owned(),
-                from_block: INCIDENT_BLOCK - 1,
-                to_block: INCIDENT_BLOCK,
-                resume_current: None,
-                mode: RunMode::Normal,
-            };
-            let first = engine.run_batch(request.clone()).await?;
-            assert_eq!(first.current.number, INCIDENT_BLOCK - 1);
-            assert!(!first.complete);
-            request.resume_current = Some(first.current);
-            let last = engine.run_batch(request).await?;
-            assert_eq!(last.current.number, INCIDENT_BLOCK);
-            assert!(last.complete);
-        } else {
-            run_block(&Engine::new(pool.clone()), &fixture, INCIDENT_BLOCK).await?;
+        match mode {
+            "continuing" => {
+                let engine = Engine::new(pool.clone())
+                    .with_blocks_per_batch(std::num::NonZeroU32::new(1).unwrap());
+                let mut request = BatchRequest {
+                    chain_id: CHAIN.to_owned(),
+                    from_block: INCIDENT_BLOCK - 1,
+                    to_block: INCIDENT_BLOCK + 1,
+                    resume_current: None,
+                    mode: RunMode::Normal,
+                };
+                for block in INCIDENT_BLOCK - 1..=INCIDENT_BLOCK + 1 {
+                    let outcome = engine.run_batch(request.clone()).await?;
+                    assert_eq!(outcome.current.number, block);
+                    assert_eq!(outcome.complete, block == INCIDENT_BLOCK + 1);
+                    request.resume_current = Some(outcome.current);
+                    if block == INCIDENT_BLOCK {
+                        assert_committed(pool, &fixture, INCIDENT_BLOCK).await?;
+                    }
+                }
+            }
+            "combined" => {
+                let outcome = Engine::new(pool.clone())
+                    .run_batch(BatchRequest {
+                        chain_id: CHAIN.to_owned(),
+                        from_block: INCIDENT_BLOCK,
+                        to_block: INCIDENT_BLOCK + 1,
+                        resume_current: None,
+                        mode: RunMode::Normal,
+                    })
+                    .await?;
+                assert_eq!(outcome.current.number, INCIDENT_BLOCK + 1);
+                assert!(outcome.complete);
+            }
+            _ => {
+                run_block(&Engine::new(pool.clone()), &fixture, INCIDENT_BLOCK).await?;
+                assert_committed(pool, &fixture, INCIDENT_BLOCK).await?;
+                run_block(&Engine::new(pool.clone()), &fixture, INCIDENT_BLOCK + 1).await?;
+            }
         }
         assert_eq!(older_history(pool).await?, older);
-        assert_committed(pool, &fixture, INCIDENT_BLOCK).await?;
+        assert_committed(pool, &fixture, INCIDENT_BLOCK + 1).await?;
+        assert_renewed(pool, INCIDENT_BLOCK + 1, 1_810_091_605).await?;
         let before_redo = migration_snapshot(pool).await?;
         Engine::new(pool.clone())
             .run_batch(BatchRequest {
                 chain_id: CHAIN.to_owned(),
                 from_block: INCIDENT_BLOCK,
-                to_block: INCIDENT_BLOCK,
+                to_block: INCIDENT_BLOCK + 1,
                 resume_current: None,
                 mode: RunMode::Redo,
             })
@@ -95,39 +118,177 @@ async fn sunny_seal_warm_cold_and_redo_preserve_the_same_current_authority() -> 
         let after_redo = migration_snapshot(pool).await?;
         assert!(
             after_redo == before_redo,
-            "{}",
+            "{mode}: {}",
             equivalence::first_json_difference(&before_redo, &after_redo, "$")
         );
         assert_eq!(older_history(pool).await?, older);
-        assert_committed(pool, &fixture, INCIDENT_BLOCK).await?;
-        let later_fixture = seed_generated_renewal(pool, &fixture).await?;
-        run_block(
-            &Engine::new(pool.clone()),
-            &later_fixture,
-            INCIDENT_BLOCK + 1,
-        )
-        .await?;
-        assert_eq!(older_history(pool).await?, older);
-        assert_committed(pool, &later_fixture, INCIDENT_BLOCK + 1).await?;
-        let renewed: (Uuid, Value) = sqlx::query_as(
-            "SELECT resource_id,after_state FROM normalized_events
-             WHERE block_number=$1 AND event_kind='RegistrationRenewed'
-               AND source_family='ens_v1_registrar_l1' AND log_index=0",
-        )
-        .bind(INCIDENT_BLOCK + 1)
-        .fetch_one(pool)
-        .await?;
-        assert_eq!(renewed.0.to_string(), LEASE);
-        assert_eq!(renewed.1["registrant"], GRAVEYARD);
-        assert_eq!(renewed.1["expiry"], 1_810_091_605_i64);
-        snapshots.push(migration_snapshot(pool).await?);
+        assert_committed(pool, &fixture, INCIDENT_BLOCK + 1).await?;
+        assert_renewed(pool, INCIDENT_BLOCK + 1, 1_810_091_605).await?;
+        snapshots.push(before_redo);
         database.cleanup().await?;
     }
-    assert!(
-        snapshots[0] == snapshots[1],
-        "cold and retained-session output: {}",
-        equivalence::first_json_difference(&snapshots[0], &snapshots[1], "$")
+    for other in &snapshots[1..] {
+        assert!(
+            snapshots[0] == *other,
+            "cold, retained-session and combined output: {}",
+            equivalence::first_json_difference(&snapshots[0], other, "$")
+        );
+    }
+    Ok(())
+}
+
+async fn assert_renewed(pool: &PgPool, block: i64, expiry: i64) -> TestResult {
+    let renewed: (Uuid, Value) = sqlx::query_as(
+        "SELECT resource_id,after_state FROM normalized_events
+         WHERE block_number=$1 AND event_kind='RegistrationRenewed'
+           AND source_family='ens_v1_registrar_l1' AND log_index=0",
+    )
+    .bind(block)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(renewed.0.to_string(), LEASE);
+    assert_eq!(renewed.1["registrant"], GRAVEYARD);
+    assert_eq!(renewed.1["expiry"], expiry);
+    assert_eq!(
+        renewed.1["registrar_surface_evidence"]["retirement"]["state"]["registrar_surface_retired"],
+        true,
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn sunny_seal_new_numeric_grant_and_its_renewal_keep_the_new_lease_binding() -> TestResult {
+    sol! {
+        function registerOnly(uint256 id, address owner, uint256 duration);
+        event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires);
+    }
+    let recorded: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/sunny-seal-migration.json"
+    ))?;
+    let database = database("interpret_sunny_seal_new_lease").await?;
+    let pool = database.pool();
+    seed_recorded_state(pool, &recorded).await?;
+    run_block(&Engine::new(pool.clone()), &recorded, INCIDENT_BLOCK).await?;
+    assert_committed(pool, &recorded, INCIDENT_BLOCK).await?;
+
+    // Construct a new authorized numeric registerOnly after the old lease and grace period.
+    // The ERC721 burn/mint precede NameRegistered; the registry record stays independent.
+    // This is generated boundary coverage, not a captured transaction.
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L168 @ ens_v1@91c966f)
+    let later = INCIDENT_BLOCK + 1;
+    let timestamp = 1_810_091_604_i64 + 90 * 24 * 60 * 60 + 1;
+    let expiry = timestamp + 3600;
+    let token = U256::from_be_bytes(keccak256(b"sunny-seal").0);
+    let owner: Address = "0x0000000000000000000000000000000000000052".parse()?;
+    let mut fixture = recorded.clone();
+    let previous = fixture["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["block_number"] == INCIDENT_BLOCK)
+        .unwrap();
+    let block = serde_json::json!({
+        "chain_id":CHAIN, "block_number":later, "block_hash":block_hash(later),
+        "parent_hash":previous["block_hash"], "canonicality_state":"canonical",
+        "block_timestamp":time::OffsetDateTime::from_unix_timestamp(timestamp)?
+            .format(&time::format_description::well_known::Rfc3339)?,
+    });
+    sqlx::query(
+        "INSERT INTO chain_lineage
+         (chain_id,block_hash,parent_hash,block_number,block_timestamp,canonicality_state)
+         SELECT chain_id,block_hash,parent_hash,block_number,block_timestamp,canonicality_state
+         FROM jsonb_populate_record(NULL::chain_lineage,$1)",
+    )
+    .bind(&block)
+    .execute(pool)
+    .await?;
+    fixture["blocks"].as_array_mut().unwrap().push(block);
+    insert_transaction(pool, later, BASE_REGISTRAR).await?;
+    sqlx::query("UPDATE raw_transactions SET input=$1 WHERE transaction_hash=$2")
+        .bind(
+            registerOnlyCall {
+                id: token,
+                owner,
+                duration: U256::from(3600),
+            }
+            .abi_encode(),
+        )
+        .bind(transaction_hash(later))
+        .execute(pool)
+        .await?;
+    for (index, from, to) in [
+        (0, GRAVEYARD.parse()?, Address::ZERO),
+        (1, Address::ZERO, owner),
+    ] {
+        insert_log(
+            pool,
+            later,
+            index,
+            BASE_REGISTRAR,
+            base_registrar::Transfer {
+                from,
+                to,
+                tokenId: token,
+            }
+            .encode_log_data(),
+        )
+        .await?;
+    }
+    insert_log(
+        pool,
+        later,
+        2,
+        BASE_REGISTRAR,
+        NameRegistered {
+            id: token,
+            owner,
+            expires: U256::from(expiry),
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    run_block(&Engine::new(pool.clone()), &fixture, later).await?;
+    let grant: (Uuid, Value) = sqlx::query_as(
+        "SELECT resource_id,after_state FROM normalized_events WHERE block_number=$1
+         AND event_kind='RegistrationGranted' AND source_family='ens_v1_registrar_l1'",
+    )
+    .bind(later)
+    .fetch_one(pool)
+    .await?;
+    assert_ne!(grant.0.to_string(), LEASE);
+    assert_eq!(grant.1["registrant"], format!("{owner:#x}"));
+    let original_binding: Uuid = sqlx::query_scalar(
+        "SELECT surface_binding_id FROM surface_bindings WHERE resource_id=$1
+         AND authority_arm='ens_v1' AND active_to IS NULL",
+    )
+    .bind(grant.0)
+    .fetch_one(pool)
+    .await?;
+    let fixture = seed_renewal_at(
+        pool,
+        &fixture,
+        later + 1,
+        timestamp + 12,
+        (expiry + 1) as u64,
+    )
+    .await?;
+    run_block(&Engine::new(pool.clone()), &fixture, later + 1).await?;
+    let bindings: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT surface_binding_id FROM surface_bindings WHERE resource_id=$1
+         AND authority_arm='ens_v1' AND active_to IS NULL",
+    )
+    .bind(grant.0)
+    .fetch_all(pool)
+    .await?;
+    assert_eq!(bindings, vec![original_binding]);
+    let renewed: (Uuid, Value) = sqlx::query_as(
+        "SELECT resource_id,after_state FROM normalized_events WHERE block_number=$1
+         AND event_kind='RegistrationRenewed' AND source_family='ens_v1_registrar_l1' AND log_index=0",
+    ).bind(later + 1).fetch_one(pool).await?;
+    assert_eq!(renewed.0, grant.0);
+    assert_eq!(renewed.1["expiry"], expiry + 1);
+    assert_eq!(renewed.1["registrant"], format!("{owner:#x}"));
+    database.cleanup().await?;
     Ok(())
 }
 
@@ -140,7 +301,7 @@ async fn sunny_seal_incomplete_and_ordinary_transfers_gain_no_migration_attribut
     let database = database("interpret_sunny_seal_incomplete").await?;
     let pool = database.pool();
     seed_recorded_state(pool, &fixture).await?;
-    let complete = prepare_recorded(pool, None).await?;
+    let complete = prepare_recorded(pool, None, true).await?;
     let incoming = transfer(&complete, 86);
     assert_eq!(incoming.logical_name_id.as_deref(), Some(LOGICAL));
     let cleanup = transfer(&complete, 90);
@@ -182,16 +343,20 @@ async fn sunny_seal_incomplete_and_ordinary_transfers_gain_no_migration_attribut
     // resource link and initial roles separately. The final case is the ordinary incoming
     // transfer with no later migration evidence. All are counterfactual evidence subsets.
     for missing in [87, 88, 89, 90, 91, 92, 93, 94, -1] {
-        let output = prepare_recorded(pool, Some(missing)).await?;
+        let output = prepare_recorded(pool, Some(missing), true).await?;
         let ordinary = transfer(&output, 86);
-        assert_eq!(ordinary.logical_name_id, None, "incomplete proof {missing}");
+        let control = prepare_recorded(pool, Some(missing), false).await?;
+        assert_eq!(
+            ordinary,
+            transfer(&control, 86),
+            "incomplete proof {missing} must preserve ordinary registrar output"
+        );
         assert_eq!(ordinary.event_identity, incoming.event_identity);
         assert_eq!(ordinary.resource_id, incoming.resource_id);
         assert_eq!(ordinary.before_state, incoming.before_state);
         assert_eq!(ordinary.after_state, incoming.after_state);
         let mut raw = ordinary.raw_fact_ref.clone();
         let mut named_raw = incoming.raw_fact_ref.clone();
-        assert_ne!(raw[INTERPRETER_STATE_KEY], named_raw[INTERPRETER_STATE_KEY]);
         raw.as_object_mut().unwrap().remove(INTERPRETER_STATE_KEY);
         named_raw
             .as_object_mut()
@@ -224,6 +389,7 @@ fn transfer(
 async fn prepare_recorded(
     pool: &PgPool,
     missing_log: Option<i64>,
+    migration_enabled: bool,
 ) -> TestResult<bigname_adapters::schema_v2::BatchOutput> {
     let mut loaded = load::batch_input(
         pool,
@@ -243,6 +409,16 @@ async fn prepare_recorded(
                 raw.log_index != log
             }
         });
+    }
+    if !migration_enabled {
+        loaded
+            .input
+            .manifests
+            .retain(|source| source.source_family != "ens_v2_migration_l1");
+        loaded
+            .input
+            .admissions
+            .retain(|admission| admission.source_manifest_id != Some(1811));
     }
     let prepared = prepare_schema_v2_batch_incremental(
         loaded.input,
@@ -292,7 +468,19 @@ async fn assert_committed(pool: &PgPool, fixture: &Value, project_block: i64) ->
     .bind(LOGICAL)
     .fetch_one(pool)
     .await?;
-    assert_eq!(counts, (0, 1));
+    assert_eq!(counts, (0, 1), "Project target {project_block}");
+    let successor: Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM surface_bindings WHERE chain_id=$1 AND logical_name_id=$2
+         AND authority_arm='ens_v2' AND active_to IS NULL",
+    )
+    .bind(CHAIN)
+    .bind(LOGICAL)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        successor.to_string(),
+        "d130a2d8-3b46-5df7-9f7b-f7ce4a288679"
+    );
     let boundaries: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events WHERE chain_id = $1 AND logical_name_id = $2
            AND event_kind = 'MigrationApplied' AND consumer_visibility = 'activated'",
@@ -396,6 +584,23 @@ async fn assert_committed(pool: &PgPool, fixture: &Value, project_block: i64) ->
 }
 
 async fn seed_generated_renewal(pool: &PgPool, recorded: &Value) -> TestResult<Value> {
+    seed_renewal_at(
+        pool,
+        recorded,
+        INCIDENT_BLOCK + 1,
+        1_791_213_972,
+        1_810_091_605,
+    )
+    .await
+}
+
+async fn seed_renewal_at(
+    pool: &PgPool,
+    recorded: &Value,
+    later: i64,
+    timestamp: i64,
+    expiry: u64,
+) -> TestResult<Value> {
     sol! { event NameRenewed(uint256 indexed id, uint256 expires); }
     mod controller {
         use alloy_sol_types::sol;
@@ -410,17 +615,17 @@ async fn seed_generated_renewal(pool: &PgPool, recorded: &Value) -> TestResult<V
         .as_array()
         .unwrap()
         .iter()
-        .find(|row| row["block_number"] == INCIDENT_BLOCK)
+        .find(|row| row["block_number"] == later - 1)
         .unwrap()
         .clone();
-    let later = INCIDENT_BLOCK + 1;
     // This follow-up is generated, not part of the recorded transaction. BaseRegistrar renew
     // extends the current lease without transferring its owner, including a Graveyard holder.
     // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L168 @ ens_v1@91c966f)
     let block = serde_json::json!({
         "chain_id": CHAIN, "block_number": later, "block_hash": block_hash(later),
         "parent_hash": previous["block_hash"], "canonicality_state": "canonical",
-        "block_timestamp": "2026-10-05T15:26:12Z",
+        "block_timestamp": time::OffsetDateTime::from_unix_timestamp(timestamp)?
+            .format(&time::format_description::well_known::Rfc3339)?,
     });
     sqlx::query(
         "INSERT INTO chain_lineage
@@ -438,18 +643,20 @@ async fn seed_generated_renewal(pool: &PgPool, recorded: &Value) -> TestResult<V
     // (upstream: .refs/basenames/lib/ens-contracts/contracts/ethregistrar/ETHRegistrarController.sol:L210-L226 @ basenames@1809bbc)
     // (upstream: .refs/basenames/lib/ens-contracts/contracts/wrapper/NameWrapper.sol:L351-L384 @ basenames@1809bbc)
     insert_transaction(pool, later, CONTROLLER).await?;
-    sqlx::query("UPDATE raw_transactions SET input=$1,value=$2::text::numeric WHERE transaction_hash=$3")
-        .bind(
-            controller::renewCall {
-                name: "sunny-seal".to_owned(),
-                duration: U256::from(1),
-            }
-            .abi_encode(),
-        )
-        .bind("1000000000000000000")
-        .bind(transaction_hash(later))
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE raw_transactions SET input=$1,value=$2::text::numeric WHERE transaction_hash=$3",
+    )
+    .bind(
+        controller::renewCall {
+            name: "sunny-seal".to_owned(),
+            duration: U256::from(1),
+        }
+        .abi_encode(),
+    )
+    .bind("1000000000000000000")
+    .bind(transaction_hash(later))
+    .execute(pool)
+    .await?;
     insert_log(
         pool,
         later,
@@ -457,7 +664,7 @@ async fn seed_generated_renewal(pool: &PgPool, recorded: &Value) -> TestResult<V
         BASE_REGISTRAR,
         NameRenewed {
             id: U256::from_be_bytes(keccak256(b"sunny-seal").0),
-            expires: U256::from(1_810_091_605_u64),
+            expires: U256::from(expiry),
         }
         .encode_log_data(),
     )
@@ -471,7 +678,7 @@ async fn seed_generated_renewal(pool: &PgPool, recorded: &Value) -> TestResult<V
             name: "sunny-seal".to_owned(),
             label: keccak256(b"sunny-seal"),
             cost: U256::from(1_000_000_000_000_000_000_u64),
-            expires: U256::from(1_810_091_605_u64),
+            expires: U256::from(expiry),
         }
         .encode_log_data(),
     )
