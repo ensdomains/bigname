@@ -27,7 +27,7 @@ const AUTHORITY_INDEX: &str = "project_name_summary_authority_expiry_idx";
 /// and below `aXb.eth` and `a%b.eth`, which a `LIKE` taking the parent as a pattern would
 /// also match; one label and two labels below a bracketed labelhash parent; and a name of
 /// about 6.6 KB, longer than any index on names admits.
-async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
+pub(super) async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
     let opaque = format!("[{}].eth", "ab".repeat(32));
     raw_sql(&format!(
         "INSERT INTO chain_lineage
@@ -84,7 +84,7 @@ async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
 
 /// What the selection must return, read without its indexes or keyset: every readable,
 /// listable name of the fixture in the public order as (id, expiry, name, namehash).
-async fn listed(
+pub(super) async fn listed(
     connection: &mut PgConnection,
     descending: bool,
 ) -> Result<Vec<(String, String, String, String)>> {
