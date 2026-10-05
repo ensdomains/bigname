@@ -294,7 +294,7 @@ fn an_event_start_is_refused_where_no_family_wide_entry_compiles() -> Result<()>
 }
 
 #[test]
-fn the_mainnet_profile_declares_no_ens_v2_approval_and_no_event_start() -> Result<()> {
+fn the_mainnet_deployment_profile_declares_no_ens_v2_approval_and_no_event_start() -> Result<()> {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let repository = crate::load_repository(workspace_root.join("manifests/mainnet"))?;
     for loaded in repository.manifests() {

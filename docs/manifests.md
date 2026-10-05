@@ -643,7 +643,7 @@ It becomes an `ExpiryChanged` with no name and no resource and
 `token_state_absent = true`, changes no name state, is omitted from product
 event reads, and exists so that the
 [registry entry](projections.md#ensv2-registry-entries) row keeps the entry's
-expiry. The Mainnet profile declares no
+expiry. The Mainnet deployment profile declares no
 ENSv2 family and is unchanged.
 
 The registry declaration compiles one family-wide watch entry, which covers

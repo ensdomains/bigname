@@ -1760,7 +1760,7 @@ CREATE INDEX IF NOT EXISTS project_ens_v2_registry_parent_entry_idx
     ON project_ens_v2_registry_parent (chain_id, parent, parent_entry_key)
     WHERE parent IS NOT NULL;
 COMMENT ON TABLE project_ens_v2_registry_parent IS
-    'Project-owned ENSv2 registry parents of family F16: per registry, the parent registry and label its latest ParentUpdated named. A migration-created WrapperRegistry gives its root roles to the owner of that label''s entry in the parent, and to that owner''s operators there.';
+    'Project-owned ENSv2 registry parents of family F16: per registry, the parent registry and label its latest ParentUpdated named. An ENSv1→ENSv2 migration-created WrapperRegistry gives its root roles to the owner of that label''s entry in the parent, and to that owner''s operators there.';
 COMMENT ON COLUMN project_ens_v2_registry_parent.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_ens_v2_registry_parent.registry IS

@@ -1090,8 +1090,8 @@ async fn a_new_implementation_widens_from_its_declared_start() -> Result<()> {
     Ok(())
 }
 
-/// A copy of the checked-in Sepolia profile whose ENSv2 registry and root manifests are edited.
-fn copy_profile_with_ens_v2_registries(
+/// A copy of the checked-in Sepolia deployment profile whose ENSv2 registry and root manifests are edited.
+fn copy_deployment_profile_with_ens_v2_registries(
     source: &std::path::Path,
     edit: impl Fn(String) -> String,
 ) -> Result<std::path::PathBuf> {
@@ -1119,8 +1119,9 @@ fn without_approval_for_all(manifest: String) -> String {
 async fn ens_v2_registry_approval_widening_redoes_ingest_from_the_event_start() -> Result<()> {
     const EVENT_START: i64 = 10_893_181;
     let checked_in = checked_in_sepolia_root();
-    let baseline_root = copy_profile_with_ens_v2_registries(&checked_in, without_approval_for_all)?;
-    let unbounded_root = copy_profile_with_ens_v2_registries(&checked_in, |manifest| {
+    let baseline_root =
+        copy_deployment_profile_with_ens_v2_registries(&checked_in, without_approval_for_all)?;
+    let unbounded_root = copy_deployment_profile_with_ens_v2_registries(&checked_in, |manifest| {
         manifest.replacen(&format!("start_block = {EVENT_START}\n"), "", 1)
     })?;
     for (desired_root, expected_from) in [(&checked_in, EVENT_START), (&unbounded_root, 0)] {

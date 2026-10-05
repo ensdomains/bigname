@@ -143,7 +143,7 @@ normalized_events = ["SurfaceUnbound", "RegistrationReleased", "Upgraded"]
 # (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
 # A standard approval declaration: the list stays empty and the adapter maps the event to
 # AccountPermissionChanged. It is an ordinary family-wide event, so discovered user and
-# migration-created registries are watched as well as the declared ETHRegistry.
+# ENSv1→ENSv2 migration-created registries are watched as well as the declared ETHRegistry.
 # start_block bounds the family-wide watch entry of the compiled watch plan, and so the Ingest
 # redo that adding this event requires. It is a bigname coverage decision, not a deployment
 # fact: 10893181 is the earliest block at which a registry admitted under this manifest starts

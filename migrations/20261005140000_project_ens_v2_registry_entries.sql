@@ -154,7 +154,7 @@ CREATE INDEX IF NOT EXISTS project_ens_v2_registry_parent_entry_idx
 $ddl$;
 EXECUTE $ddl$
 COMMENT ON TABLE bigname_phase.project_ens_v2_registry_parent IS
-    'Project-owned ENSv2 registry parents of family F16: per registry, the parent registry and label its latest ParentUpdated named. A migration-created WrapperRegistry gives its root roles to the owner of that label''s entry in the parent, and to that owner''s operators there.'
+    'Project-owned ENSv2 registry parents of family F16: per registry, the parent registry and label its latest ParentUpdated named. An ENSv1→ENSv2 migration-created WrapperRegistry gives its root roles to the owner of that label''s entry in the parent, and to that owner''s operators there.'
 $ddl$;
 EXECUTE $ddl$
 COMMENT ON COLUMN bigname_phase.project_ens_v2_registry_parent.chain_id IS
