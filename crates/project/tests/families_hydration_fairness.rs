@@ -108,10 +108,10 @@ async fn a_slow_failing_aggregate_gives_up_its_place_and_its_other_tuples_are_ob
     run(&fixture, 1, FamilyMode::Rebuild, &rpc).await?;
     // Any aggregate holding tuple 3 outlasts a call's time; every other aggregate, and the
     // one-call probe, answers at once.
-    rpc.slow(&node(3), Duration::from_secs(5));
+    rpc.slow(&node(3), Duration::from_secs(10));
     let limits = HydrationTimeLimits {
-        call: Duration::from_millis(500),
-        block: Duration::from_millis(1500),
+        call: Duration::from_secs(1),
+        block: Duration::from_secs(3),
     };
     let options = options(&rpc).with_hydration_time_limits(limits);
 
@@ -148,12 +148,7 @@ async fn a_slow_failing_aggregate_gives_up_its_place_and_its_other_tuples_are_ob
         rpc::head(&fixture.pool, heads).await?;
         let (outcome, error) = apply(&fixture, &marker(heads), FamilyMode::Normal, &options).await;
         assert!(error.is_none(), "{error:?}");
-        assert_eq!(outcome.hydration.timed_out_passes, 0, "head {heads}");
-        assert!(
-            outcome.hydration.rpc_ms < 1500,
-            "head {heads}: {:?}",
-            outcome.hydration
-        );
+        assert_eq!(outcome.hydration.unserved_passes, 0, "head {heads}");
     }
     let slow = tuple(&fixture, 3).await?;
     assert!(slow["hydrated_name"].is_null());

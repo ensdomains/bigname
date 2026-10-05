@@ -341,36 +341,37 @@ async fn hydration_that_runs_out_of_time_publishes_the_block_without_the_unread_
     let (fixture, rpc) = fixture("family_hydration_time", 3).await?;
     run(&fixture, 0, FamilyMode::Normal, &rpc).await?;
     // 251 tuples change in the head block: an aggregate of 250 and one of a single tuple. The
-    // endpoint takes 300 ms an answer and the block's reads may take 400 ms, so the single
-    // tuple's call is cut off by the block's time after another aggregate was answered.
+    // endpoint answers the first at once and holds the single tuple's aggregate far longer than
+    // the two seconds the block's reads may take, so that call is cut off by the block's time
+    // after another aggregate was answered.
     for index in 1..=251 {
         seed(&fixture, 1, index).await?;
     }
     rpc.answer(1, Some("read.eth"));
-    rpc.delay(Duration::from_millis(300));
+    rpc.slow(&node(251), Duration::from_secs(20));
     rpc::head(&fixture.pool, 1).await?;
     let limits = HydrationTimeLimits {
-        call: Duration::from_secs(5),
-        block: Duration::from_millis(400),
+        call: Duration::from_secs(30),
+        block: Duration::from_secs(2),
     };
     let options = options(&rpc).with_hydration_time_limits(limits);
     let (outcome, error) = apply(&fixture, &marker(1), FamilyMode::Normal, &options).await;
     assert!(error.is_none(), "{error:?}");
     assert_eq!(outcome.marker, Some(marker(1)), "the block is published");
     let reverse = outcome.hydration.reverse;
-    // On a slow machine the first aggregate is cut instead and nothing is answered.
-    assert!(
-        reverse.answered == 250 || reverse.answered == 0,
-        "{reverse:?}"
-    );
-    assert_eq!(reverse.not_observed, 251 - reverse.answered);
+    assert_eq!(sizes(&rpc, 1), vec![250, 1]);
+    assert_eq!((reverse.answered, reverse.not_observed), (250, 1));
     assert_eq!(
         reverse.deferred, 0,
         "a call the block's time cut is no deferral"
     );
     assert_eq!(reverse.schedule_writes, 0);
-    assert_eq!(reverse.value_writes, reverse.answered);
-    assert_eq!(reverse.rpc_failures, 1, "the cut call is still counted");
+    assert_eq!(reverse.value_writes, 250);
+    assert_eq!(
+        (reverse.rpc_calls, reverse.rpc_failures),
+        (2, 1),
+        "the cut call is still counted"
+    );
     assert_eq!(
         (
             outcome.hydration.passes,
@@ -387,12 +388,15 @@ async fn hydration_that_runs_out_of_time_publishes_the_block_without_the_unread_
     );
 
     // One call that outlasts its own limit is a failed batch; the probe outlasts it too, so the
-    // endpoint counts as not serving the block and nothing is written.
+    // endpoint counts as not serving the block and nothing is written. From here every answer,
+    // the probe's included, takes two seconds.
+    rpc.clear_faults();
+    rpc.delay(Duration::from_secs(2));
     rpc.answer(2, Some("late.eth"));
     rpc::head(&fixture.pool, 2).await?;
     let limits = HydrationTimeLimits {
-        call: Duration::from_millis(100),
-        block: Duration::from_secs(5),
+        call: Duration::from_millis(200),
+        block: Duration::from_secs(30),
     };
     let options = options.with_hydration_time_limits(limits);
     let before = fixture.rows("project_reverse_tuple").await?;
@@ -416,8 +420,8 @@ async fn hydration_that_runs_out_of_time_publishes_the_block_without_the_unread_
     rpc.answer(3, Some("later.eth"));
     rpc::head(&fixture.pool, 3).await?;
     let limits = HydrationTimeLimits {
-        call: Duration::from_secs(5),
-        block: Duration::from_millis(100),
+        call: Duration::from_secs(30),
+        block: Duration::from_millis(200),
     };
     let options = options.with_hydration_time_limits(limits);
     let (outcome, error) = apply(&fixture, &marker(3), FamilyMode::Normal, &options).await;

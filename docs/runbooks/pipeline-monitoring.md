@@ -384,8 +384,8 @@ A rising `unserved` or `not_observed` count with no `observed` selectors means
 the hydration endpoint cannot answer at the blocks Project reaches: check the
 endpoint, its state retention against the head age, and the `warn` lines `a
 hydration RPC batch failed` and `the hydration endpoint does not serve this
-block`, which name the chain, block, kind, selector count and error. Stored
-values are not changed in that state. Rising `deferred` with `observed`
+block`, which name the chain, block, kind, selector count and error. No stored
+value changes for a block counted as `unserved`. Rising `deferred` with `observed`
 selectors means some aggregate cannot be answered although the endpoint
 works: the log's error says why (for example a size or gas limit). A steady
 small `deferred` rate with matching `schedule` writes is a selector that fails

@@ -797,7 +797,13 @@ must therefore answer `eth_call` by block hash at the newest ingested blocks;
 it needs no deep historical state for hydration. The runner gives each
 hydration request a 5-second connect and 10-second total timeout, and Project
 limits the time one block waits for its reads to 30 seconds. An endpoint that fails does not stop
-publication and does not change stored values; see
+publication. When it does not serve the block, no stored value changes. When
+it answers some calls and fails others, a call that fails inside an answered
+aggregate clears its own overlay, and a batch that fails as a whole removes no
+reverse name and no text value that was still served: the only overlay it can
+clear is a text overlay that no longer matched its selector and so was already
+not served. See [follow-only hydration](projections.md#follow-only-hydration)
+for the outcomes and
 [Project family work](runbooks/pipeline-monitoring.md#project-family-work) for
 the counters and log lines.
 
