@@ -12,23 +12,7 @@ use tower::ServiceExt;
 
 use super::*;
 
-struct PreparedQueryParams;
-impl QueryParamAllowlist for PreparedQueryParams {
-    const ALLOWED: &'static [&'static str] = &[
-        "namespace",
-        "expires_after",
-        "expires_before",
-        "expires_window",
-        "authority",
-        "parent",
-        "sort",
-        "order",
-        "at",
-        "finality",
-        "cursor",
-        "page_size",
-    ];
-}
+use super::test_route::WindowQueryParams as PreparedQueryParams;
 
 async fn probe(input: query::NamesQuery<PreparedQueryParams>) -> V2Result<Json<Value>> {
     let params = input.params;

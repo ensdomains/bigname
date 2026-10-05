@@ -69,7 +69,7 @@ pub(crate) struct SearchName {
     pub(crate) expires_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at_reason: Option<String>,
-    /// Zero-based input window membership; reserved until the bounded expiry union is enabled.
+    /// Zero-based request-window membership, omitted on scalar expiry requests and search.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) expires_window_index: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]

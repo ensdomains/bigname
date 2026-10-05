@@ -1,7 +1,7 @@
 //! Exact disjoint expiry windows. The route allowlist remains closed to this input until
 //! the bounded family reader can select the union before composing names (TYR-230).
 
-use bigname_storage::UnixSeconds;
+use bigname_storage::{NameCurrentExpiryWindow, UnixSeconds};
 
 use crate::v2::{V2Error, V2Result};
 
@@ -73,8 +73,16 @@ impl ExpiryWindows {
             .join(",")
     }
 
-    // Used by row rendering once the bounded-reader integration enables repeated windows.
-    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn storage_windows(&self) -> Vec<NameCurrentExpiryWindow> {
+        self.0
+            .iter()
+            .map(|window| NameCurrentExpiryWindow {
+                expires_after: Some(window.after),
+                expires_before: Some(window.before),
+            })
+            .collect()
+    }
+
     pub(super) fn index_of(&self, expiry: Option<UnixSeconds>) -> Option<u8> {
         let expiry = expiry?;
         self.0

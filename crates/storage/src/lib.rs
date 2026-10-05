@@ -122,6 +122,7 @@ pub use lineage::{CanonicalityState, ChainLineageBlock, load_chain_lineage_block
 pub use name_current::{
     DEFAULT_NAME_CURRENT_LINEAGE_JOINS, MIGRATION_AUTHORITY_TRANSITION_PROOF_KIND,
     NameCurrentAddressFilter, NameCurrentAddressRelationFilter, NameCurrentExpiringFilter,
+    NameCurrentExpiryWindow,
     NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder,
     NameCurrentListPage, NameCurrentListRow, NameCurrentListSort, NameCurrentRow,
     load_current_names_by_resource_ids, load_name_current, load_name_current_by_logical_name_ids,

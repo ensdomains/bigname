@@ -71,8 +71,10 @@ async fn set_marker_state(fixture: &Fixture, chain: &str, state: &str) -> Result
 fn expiring_from(seconds: i64) -> Result<NameCurrentExpiringFilter> {
     Ok(NameCurrentExpiringFilter {
         namespace: "ens".to_owned(),
-        expires_after: Some(OffsetDateTime::from_unix_timestamp(seconds)?.into()),
-        expires_before: None,
+        windows: vec![bigname_storage::NameCurrentExpiryWindow {
+            expires_after: Some(OffsetDateTime::from_unix_timestamp(seconds)?.into()),
+            expires_before: None,
+        }],
         authorities: None,
         parent: None,
     })
