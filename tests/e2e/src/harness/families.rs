@@ -249,6 +249,7 @@ pub async fn address_names(
             None,
             None,
             None,
+            None,
             AddressNamesCurrentSort::Name,
             AddressNamesCurrentOrder::Asc,
             cursor.as_ref(),

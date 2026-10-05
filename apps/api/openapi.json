@@ -494,6 +494,15 @@
             }
           },
           {
+            "name": "parent",
+            "in": "query",
+            "required": false,
+            "description": "A name; only names exactly one label below it, by normalized name spelling, are listed, on every relation and before grouping, paging and page.total_count. parent=eth lists every `<label>.eth` name and no deeper subname.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "q",
             "in": "query",
             "required": false,
@@ -5888,6 +5897,13 @@
           "ens_v2"
         ]
       },
+      "ResolutionProtocol": {
+        "type": "string",
+        "enum": [
+          "ens_v1",
+          "ens_v2"
+        ]
+      },
       "Source": {
         "type": "string",
         "enum": [
@@ -6385,7 +6401,7 @@
           },
           "ens_v1": {
             "$ref": "#/components/schemas/EnsV1",
-            "description": "What only ENSv1 holds about the name; present exactly while its authority is `ens_v1` or `ens_v0`.\n\nPresence condition: The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records and lookup feed records.",
+            "description": "What only ENSv1 holds about the name; present exactly while its authority is `ens_v1` or `ens_v0`.\n\nPresence condition: The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records. A lookup feed record follows the authority of the detail record for the same name.",
             "x-presence": "when ens_v1_authority"
           },
           "lapsed_registration": {
@@ -6831,7 +6847,7 @@
           },
           "ens_v1": {
             "$ref": "#/components/schemas/EnsV1",
-            "description": "What only ENSv1 holds about the name, on `profile=detail` records only; present exactly while its authority is `ens_v1` or `ens_v0`.\n\nPresence condition: The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records and lookup feed records.",
+            "description": "What only ENSv1 holds about the name, on `profile=detail` and `profile=feed` records alike; present exactly while its authority is `ens_v1` or `ens_v0`, which a feed record does not carry.\n\nPresence condition: The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records. A lookup feed record follows the authority of the detail record for the same name.",
             "x-presence": "when ens_v1_authority"
           },
           "migrated_at": {
@@ -6868,7 +6884,7 @@
           "namehash",
           "status"
         ],
-        "description": "Shared lookup feed/detail record. Detail adds supported registration and grouped resolver fields; reverse records additionally carry matching relations and primary-name information. Feed records omit manager with the other registration fields."
+        "description": "Shared lookup feed/detail record. Feed records carry identity, `chain_id`, `network`, status, `subregistry` on name results, reverse `is_primary`/`relations`, `resolution` on `resolves_to` rows, `expires_at`, `expires_at_reason`, `grace_ends_at` and `ens_v1` with the detail record's values; detail adds the other registration fields and the resolver and grouped record fields; reverse records additionally carry matching relations and primary-name information. Feed records omit owner, manager and the other registration fields."
       },
       "StatusData": {
         "type": "object",
@@ -7076,7 +7092,7 @@
           },
           "ens_v1": {
             "$ref": "#/components/schemas/EnsV1",
-            "description": "What only ENSv1 holds about the name; present exactly while the row's `authority` is `ens_v1` or `ens_v0`.\n\nPresence condition: The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records and lookup feed records.",
+            "description": "What only ENSv1 holds about the name; present exactly while the row's `authority` is `ens_v1` or `ens_v0`.\n\nPresence condition: The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records. A lookup feed record follows the authority of the detail record for the same name.",
             "x-presence": "when ens_v1_authority"
           },
           "lapsed_registration": {
@@ -7119,7 +7135,7 @@
           },
           "owner": {
             "type": "string",
-            "description": "Who holds the name (see Naming Dictionary): the token holder of a name with a token (a BaseRegistrar lease, a NameWrapper token or an ENSv2 registry token), otherwise the registry owner of its node; omitted on released names and on expired emancipated or locked wrapped names."
+            "description": "Who holds the name (see Naming Dictionary): the token holder of a name with a token (a BaseRegistrar lease, a NameWrapper token or an ENSv2 registry token), otherwise the registry owner of its node; omitted on released names, including a registry child with no name row whose registrar lease bigname has released, on expired emancipated or locked wrapped names, and on a registry child with no name row that the NameWrapper holds under a label failing ENSIP-15 normalization (see Manager)."
           },
           "manager": {
             "type": "string",
@@ -7162,7 +7178,7 @@
           },
           "ens_v1": {
             "$ref": "#/components/schemas/EnsV1",
-            "description": "What only ENSv1 holds about the name; present exactly while the row's `authority` is `ens_v1` or `ens_v0`; a child with no name row holds no lease, so its `expires_at` is null.\n\nPresence condition: The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records and lookup feed records.",
+            "description": "What only ENSv1 holds about the name; present exactly while the row's `authority` is `ens_v1` or `ens_v0`; a child with no name row holds no lease, so its `expires_at` is null.\n\nPresence condition: The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records. A lookup feed record follows the authority of the detail record for the same name.",
             "x-presence": "when ens_v1_authority"
           },
           "subregistry": {
@@ -7208,7 +7224,7 @@
           },
           "owner": {
             "type": "string",
-            "description": "Who holds the name (see Naming Dictionary): the token holder of a name with a token (a BaseRegistrar lease, a NameWrapper token or an ENSv2 registry token), otherwise the registry owner of its node; omitted on released names and on expired emancipated or locked wrapped names."
+            "description": "Who holds the name (see Naming Dictionary): the token holder of a name with a token (a BaseRegistrar lease, a NameWrapper token or an ENSv2 registry token), otherwise the registry owner of its node; omitted on released names and on expired emancipated or locked wrapped names. A registry child with no name row that the NameWrapper holds under a label failing ENSIP-15 normalization is not listed for the NameWrapper contract or for its token holder (see Manager), and one whose registrar lease bigname has released is not listed at all."
           },
           "manager": {
             "type": "string",
@@ -7251,7 +7267,7 @@
           },
           "ens_v1": {
             "$ref": "#/components/schemas/EnsV1",
-            "description": "What only ENSv1 holds about the name; present exactly while its authority is `ens_v1` or `ens_v0`.\n\nPresence condition: The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records and lookup feed records.",
+            "description": "What only ENSv1 holds about the name; present exactly while its authority is `ens_v1` or `ens_v0`.\n\nPresence condition: The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records. A lookup feed record follows the authority of the detail record for the same name.",
             "x-presence": "when ens_v1_authority"
           },
           "migrated_at": {
@@ -7916,11 +7932,36 @@
           "chain_id": {
             "type": "integer",
             "description": "Numeric EVM chain ID."
+          },
+          "resolution": {
+            "$ref": "#/components/schemas/NamespaceResolution",
+            "description": "ENS protocol generation that `.eth` resolution follows on this network; absent where the namespace has no ENS execution entrypoint on it, and while the network's projected data is not servable (lookup and collection reads answer `409 stale`)."
           }
         },
         "additionalProperties": false,
         "required": [
           "network"
+        ]
+      },
+      "NamespaceResolution": {
+        "type": "object",
+        "properties": {
+          "protocol": {
+            "$ref": "#/components/schemas/ResolutionProtocol",
+            "description": "`ens_v2` past the Universal Resolver cutover, otherwise `ens_v1`."
+          },
+          "since_block": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Block of the latest Universal Resolver `Upgraded` that set the current state; null before any upgrade is observed."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "protocol",
+          "since_block"
         ]
       },
       "PermissionRow": {
@@ -8219,7 +8260,7 @@
           },
           "owner": {
             "type": "string",
-            "description": "Who holds the name (see Naming Dictionary): the token holder of a name with a token (a BaseRegistrar lease, a NameWrapper token or an ENSv2 registry token), otherwise the registry owner of its node; omitted on released names and on expired emancipated or locked wrapped names."
+            "description": "Who holds the name (see Naming Dictionary): the token holder of a name with a token (a BaseRegistrar lease, a NameWrapper token or an ENSv2 registry token), otherwise the registry owner of its node; omitted on released names, including a registry child with no name row whose registrar lease bigname has released, on expired emancipated or locked wrapped names, and on a registry child with no name row that the NameWrapper holds under a label failing ENSIP-15 normalization (see Manager)."
           },
           "manager": {
             "type": "string",
@@ -8262,7 +8303,7 @@
           },
           "ens_v1": {
             "$ref": "#/components/schemas/EnsV1",
-            "description": "What only ENSv1 holds about the name; present exactly while the row's `authority` is `ens_v1` or `ens_v0`; a child with no name row holds no lease, so its `expires_at` is null.\n\nPresence condition: The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records and lookup feed records.",
+            "description": "What only ENSv1 holds about the name; present exactly while the row's `authority` is `ens_v1` or `ens_v0`; a child with no name row holds no lease, so its `expires_at` is null.\n\nPresence condition: The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records. A lookup feed record follows the authority of the detail record for the same name.",
             "x-presence": "when ens_v1_authority"
           },
           "subregistry": {

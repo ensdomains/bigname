@@ -17,8 +17,43 @@ fn binding(sort: AddressNamesSort) -> AddressNamesCursorBinding<'static> {
         name_match: NameMatch::Prefix,
         authority: Some(authority),
         is_migrated: None,
+        parent: None,
         sort,
         order: SortOrder::Asc,
+    }
+}
+
+#[test]
+fn address_names_cursor_binds_parent_only_when_sent() {
+    let cursor = AddressNamesCurrentSortedCursor {
+        sort_value: AddressNamesCurrentSortedCursorValue::Name("alice.eth".to_owned()),
+        logical_name_id: "ens:alice.eth".to_owned(),
+        resource_id: Uuid::from_u128(0x1234),
+    };
+    let unfiltered = binding(AddressNamesSort::Name);
+    assert!(
+        !address_names_cursor_payload(&cursor, &unfiltered)
+            .filters
+            .contains_key("parent")
+    );
+    let eth = AddressNamesCursorBinding {
+        parent: Some("eth"),
+        ..unfiltered.clone()
+    };
+    let payload = address_names_cursor_payload(&cursor, &eth);
+    assert_eq!(payload.filters["parent"], "eth");
+    assert_eq!(
+        address_names_storage_cursor(&payload, &eth).expect("cursor must decode"),
+        cursor
+    );
+    for other in [
+        unfiltered.clone(),
+        AddressNamesCursorBinding {
+            parent: Some("base.eth"),
+            ..unfiltered
+        },
+    ] {
+        assert!(address_names_storage_cursor(&payload, &other).is_err());
     }
 }
 

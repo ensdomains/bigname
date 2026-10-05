@@ -1235,6 +1235,41 @@ but do not admit their targets to Ingest or Interpret. Changing, clearing, expir
 or regenerating a name cannot create or retire the resolver's independent capture interval.
 Address-scoped interpretation begins at the `RegistryCreated()` block, including same-block recovery: direct `PermissionedRegistry` construction emits it first, while a `UserRegistry` proxy emits it during initialization. (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@a971bd64) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/UserRegistry.sol:L43 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/UserRegistry.sol:L47 @ ens_v2_sepolia_20260629@ccaeb58)
 
+A registry can point one of its own labels at itself as that label's
+subregistry. `ETHRegistrar.register` passes the registrant's chosen
+subregistry to the `ETHRegistry`, which emits it in `SubregistryUpdated`, and
+`setSubregistry` accepts any registry address
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/ETHRegistrar.sol:L151-L158 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L148-L152 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L508-L510 @ ens_v2_sepolia_20261001@07e55a05);
+the Sepolia `ETHRegistry` emitted itself this way at block 11840453, in
+transaction `0xea03502e4a0eaa4a65c2021bb5d9f77bfb531c4568805e09054454c34607454e`
+log 122, whose logs are pinned in the
+[interpreter fixture](../crates/adapters/tests/fixtures/interpreters/v2-registry-self-subregistry.json),
+and again at block 11840461, in transaction
+`0xae61dbac6716e749f0d6a2f3560adc2aaa7b7a81d3ba5288809c3737b4a3793e` log 90,
+pinned in the same fixture. Such a
+pointer, from a manifest-declared or a discovery-admitted registry alike,
+closes the label's previous `subregistry` edge and opens none. A name below
+that label walks back into the parent registry and reads the parent's own
+entries (`x.label.eth` reads `x`'s entry), so its subnames alias the parent's
+children rather than living under a registry of their own; the self-pointer
+gives the label no canonical registry and no new canonical suffix, and bigname
+models no alias subtree through it
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L76-L82 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L127-L160 @ ens_v2_sepolia_20261001@07e55a05).
+This is a [known divergence](upstream.md#known-divergences). Interpret writes
+no operator diagnostic for it; the `SubregistryChanged` normalized event is its
+record.
+
+Every other non-announcement discovery pointer at its own emitter, a
+`resolver` pointer or a `proxy_implementation` from `Upgraded`, likewise never
+stops Interpret: it closes the emitter's previous edge for that observation and
+opens none, because only registry announcements and `ResolverCreated`
+observations may produce self-edges. It has nothing to discover; Interpret
+logs a warning and, as for a `subregistry` self-pointer, writes no operator
+diagnostic, for manifest-declared and discovery-admitted emitters alike.
+
 ### Resolver creation capture
 
 The current ENSv2 resolver manifest declares `ResolverCreated()` as an all-emitter

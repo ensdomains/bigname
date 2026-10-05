@@ -20,9 +20,10 @@ pub enum Protocol {
 pub struct ResolutionState {
     /// `EnsV2` while the client-facing chain ends at an admitted UniversalResolverV2.
     pub protocol: Protocol,
-    /// The `Upgraded` block of the row that ended the walk.
+    /// The latest `Upgraded` block among the rows the walk passed: the chain has ended where it
+    /// ends now since this block.
     pub since_block: i64,
-    /// The proxy and implementation of that row.
+    /// The proxy and implementation of the row that ended the walk.
     pub proxy: String,
     pub implementation: String,
     /// The walk ended at an implementation the manifest neither admits nor declares as a proxy.
@@ -61,6 +62,7 @@ fn state(rows: &[StateRow]) -> Option<ResolutionState> {
         .iter()
         .find(|row| row.proxy.proxy_role.as_deref() == Some(CLIENT_FACING_ROLE))?;
     let mut visited = vec![at.proxy.proxy_address.as_str()];
+    let mut since_block = at.block_number;
     while at.proxy.implementation_kind == "universal_resolver_proxy" {
         let Some(next) = rows
             .iter()
@@ -72,6 +74,7 @@ fn state(rows: &[StateRow]) -> Option<ResolutionState> {
             break;
         }
         visited.push(&next.proxy.proxy_address);
+        since_block = since_block.max(next.block_number);
         at = next;
     }
     let proxies: Vec<ProxyRow> = rows.iter().map(|row| row.proxy.clone()).collect();
@@ -81,7 +84,7 @@ fn state(rows: &[StateRow]) -> Option<ResolutionState> {
         } else {
             Protocol::EnsV1
         },
-        since_block: at.block_number,
+        since_block,
         proxy: at.proxy.proxy_address.clone(),
         implementation: at.proxy.implementation.clone(),
         unadmitted: at.proxy.implementation_kind == "other",
@@ -183,6 +186,13 @@ mod tests {
         let mut retired = managed("0xv2", "admitted_universal_resolver");
         retired.proxy.proxy_role = None;
         assert_eq!(state(&[retired]), None);
+        let mut repointed = top();
+        repointed.block_number = 40;
+        assert_eq!(
+            state(&[repointed, managed("0xv2", "admitted_universal_resolver")]),
+            expect(Protocol::EnsV2, 40, "0xmanaged", "0xv2", false),
+            "a later hop on the chain dates the state, not the row the walk ends at"
+        );
         assert_eq!(
             state(&[row(
                 "0xtop",

@@ -133,7 +133,11 @@ async fn v2_ens_v1_object_serves_the_lease_and_wrapper_beside_the_ens_v2_reserva
         json!({"profile": "feed", "inputs": [{"name": "alice.eth"}]}),
     )
     .await?;
-    assert!(feed["data"][0]["record"].get("ens_v1").is_none(), "{feed:#}");
+    let feed = &feed["data"][0]["record"];
+    assert_eq!(feed["expires_at"], json!("1803965433"), "lookup feed: {feed:#}");
+    assert_eq!(feed["grace_ends_at"], json!("1806384633"), "lookup feed: {feed:#}");
+    assert_eq!(feed["ens_v1"], expected, "lookup feed: {feed:#}");
+    assert!(feed.get("authority").is_none(), "lookup feed: {feed:#}");
     let owned = v2_name_record_payload_for_database(
         &database,
         "/v1/addresses/0x00000000000000000000000000000000000000aa/names?namespace=ens",

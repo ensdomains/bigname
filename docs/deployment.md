@@ -827,6 +827,12 @@ already-pending redo rather than absorbing that work. If one of its phases
 fails, the error lists every pending phase-specific recovery command in
 dependency order, including a required Verify redo created by Ingest. The
 operator must complete those durable markers before rerunning `--phase all`.
+A completed redo restores the phase's pre-redo cursors and lifecycle, except
+that a normal phase the redo found running or paused becomes `failed` and must
+be resumed. When the restored status is `completed`,
+`chain_phase_state.finished_at` is stamped with the redo's completion time, so
+it reads as when the phase last completed; a restored `failed` status keeps its
+failure time and error.
 Verify redo checks its source
 and SELECT-only database configuration before phase initialization, locking,
 or redo-state publication.
@@ -2277,12 +2283,166 @@ environment change and no historical ingest fetch. The stored
 unwrapped `.eth` second-level names, and the address index drops its
 `registrant` rows; the Project redo rebuilds both. It also recomposes every
 released name: none keeps an owner or manager (except a surface-less released `.eth`
-child without a label preimage, which still lists its registry owner as both, TYR-196), and
+child without a label preimage, which still lists its registry owner as both, TYR-196, until
+the build of [released registrar children](#released-registrar-children)), and
 an ENSv1 lease that lapsed with
 its registry record left in place now carries `lapsed_registration`, so it lists
 under `relation=former_owner`. The API change is breaking
 for clients of `owner`, `registrant`, `relation=registrant`,
 `relation=former_registrant` and `lapsed_registration.registrant`.
+
+### Ingest redo after a killed supervisor
+
+The build that lets a required Ingest redo settle phases a killed supervisor
+left `running` (TYR-106, see
+[chain intake](chain-intake.md#implemented-phase-boundary)) edits no file
+the [interpreter content hash](glossary.md#interpreter-content-hash) covers and
+adds no schema-migration, so it needs no redo and no historical ingest fetch.
+Before it, a supervisor killed before a deploy that widens the watch plan left
+its Project or Interpret row `running`, and the
+[runbook's](runbooks/production-docker.md) one-shot Ingest redo refused with
+`cannot start phase ingest ... while phase project is running`. On an older
+build, instead of editing `chain_phase_state` by hand, start the supervisor
+once from the same image that ran the refused redo, so that its start-up
+manifest synchronization installs no new required work or authority marker.
+Its start-up recovery settles the row, and the chain then stops with the
+required Ingest error (`manifest watch plan widened over already-ingested
+blocks ...`). Compose restarts an exited supervisor and other configured chains
+run their unattended work, so once that error is logged, stop the
+`phase-runner` service with the runbook's `docker compose --env-file
+.env.server -f docker-compose.server.yml stop phase-runner` within its grace
+period, then rerun the same Ingest redo.
+
+### History record attribution indexes
+
+The build that keys history's record attribution (TYR-168, see
+[table ownership](storage.md#table-ownership)) changes `crates/storage/src/history`, the
+normalized-events baseline and one schema-migration, all outside the
+[interpreter content hash](glossary.md#interpreter-content-hash), so the hash does not rotate
+and it needs no redo, no manifest or environment change and no historical ingest fetch. It
+speeds up `GET /v1/names/{name}/history` with `scope=registration` or `scope=both` and
+`GET /v1/events?registration_id=` on every chain that holds writes with
+[storage model](glossary.md#storage-model) `resolver_record_id` or ENSv2 resolver pointers;
+today only the Sepolia manifests admit ENSv2 sources. Responses do not change.
+
+`20261003120000_normalized_events_record_id_attribution_indexes.sql` adds
+`normalized_events_record_id_write_idx` and `normalized_events_record_id_link_idx`, partial on
+`RecordChanged` and `ResolverRecordLinked` rows with storage model `resolver_record_id`. Each is
+a plain `CREATE INDEX` that scans all of `normalized_events` while holding a SHARE lock on it
+until the schema-migration commits, which blocks Interpret's writes. On a large initialized
+database, prebuild both concurrently first, outside a transaction; the phase runner and API can
+keep running while they build:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_record_id_write_idx
+    ON bigname_phase.normalized_events (
+        chain_id,
+        lower(after_state ->> 'resolver'),
+        (after_state ->> 'resolver_record_id')
+    )
+    WHERE event_kind = 'RecordChanged'
+      AND after_state ->> 'storage_model' = 'resolver_record_id'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_record_id_link_idx
+    ON bigname_phase.normalized_events (
+        chain_id,
+        lower(after_state ->> 'resolver'),
+        lower(after_state ->> 'node')
+    )
+    WHERE event_kind = 'ResolverRecordLinked'
+      AND after_state ->> 'storage_model' = 'resolver_record_id'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
+ANALYZE bigname_phase.normalized_events;
+```
+
+Then apply the schema-migrations with `--target-version 20261003120000` and the same
+`lock_timeout`, `statement_timeout` and retry procedure; it finds both indexes and skips the
+build. `CREATE INDEX IF NOT EXISTS` matches the name only, so the schema-migration then checks
+that each name is an index on `normalized_events` that is `indisvalid` and `indisready` with the
+reviewed `pg_get_indexdef`, and fails without recording itself otherwise. To recover, drop the
+named relation (an interrupted concurrent build leaves an invalid index: confirm in
+`pg_stat_progress_create_index` that no build is still running, then `DROP INDEX CONCURRENTLY`
+it), rebuild it with the statement above and apply the schema-migrations again. Without the
+prebuild, apply the schema-migration with the phase runner and redo processes stopped. API
+standbys receive the indexes through replication.
+
+### Resolution protocol on the namespace route
+
+The build that adds `resolution` to each network on
+[`GET /v1/namespaces/{namespace}`](api-v1-routes.md#get-v1namespacesnamespace)
+(TYR-184) changes only the API and `crates/storage/src/resolution_state.rs`, a
+read-only query outside the
+[interpreter content hash](glossary.md#interpreter-content-hash), so the hash
+does not rotate. It needs no schema-migration, no manifest or environment
+change, no redo and no historical ingest fetch. The field is additive. The
+phase-runner's Universal Resolver warning shares the read, so its `block` now
+names the latest `Upgraded` on the client-facing proxy's path rather than the
+block of the row the path ends at. After deploy, with the
+[Sepolia ENSv2 redeploy of 2026-10-01](#sepolia-ensv2-redeploy-of-2026-10-01)
+in place, `GET /v1/namespaces/ens` on Sepolia serves `resolution` with
+`protocol` `ens_v2` and `since_block` equal to the Sepolia
+[Universal Resolver cutover](glossary.md#universal-resolver-cutover) block,
+when the managed proxy moved to the listed UniversalResolverV2
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UniversalResolverV2.json:L2 @ ens_v2_sepolia_20261001@07e55a05).
+On Mainnet the `ens_execution` manifest declares no `Upgraded` event, so no
+proxy row exists and the network serves `{"protocol": "ens_v1", "since_block": null}`.
+
+### Parent filter on names by address
+
+The build that adds `parent` to
+[`GET /v1/addresses/{address}/names`](api-v1-routes.md#get-v1addressesaddressnames)
+changes only API and read paths. The storage files it edits,
+`crates/storage/src/address_names/{source,page,read,resolves_to_page,resolves_to_evm}.rs`,
+`crates/storage/src/name_current.rs`,
+`crates/storage/src/families/name/list.rs` (a comment only) and
+`crates/storage/src/families/records/{address_names,resolves_to_serving,former_owners}.rs`,
+are read-only queries outside the
+[interpreter content hash](glossary.md#interpreter-content-hash), so the hash
+does not rotate. It adds no schema-migration and needs no redo or historical
+ingest fetch. Cursors issued before it continue unchanged, and a cursor issued
+with `parent` must be continued with the same `parent`.
+
+### Released registrar children
+
+The build that stops serving an owner or manager for a released registry child with no name
+row (TYR-196, see [subnames](api-v1-routes.md#get-v1namesnamesubnames) and
+[names by address](api-v1-routes.md#get-v1addressesaddressnames)) changes only readers in
+`crates/storage/src/families`, the API, the projections baseline and one schema-migration, all
+outside the [interpreter content hash](glossary.md#interpreter-content-hash), so the hash does
+not rotate and it needs no redo, no manifest or environment change and no historical ingest
+fetch. Such a child's registrar lease is already projected without a name row; once it has been
+released, `GET /v1/addresses/{address}/names` stops listing an ENSv1 `.eth` child for its
+surviving registry owner (that route lists no Basenames child without a name row), and the
+parent's subnames page serves an ENSv1 or Basenames child as `released` with no `owner` or
+`manager`, omitted under `include_expired=false`.
+
+`20261003130000_project_lifecycle_event_namehash_index.sql` adds
+`project_lifecycle_event_namehash_idx` on `project_lifecycle_event (chain_id, namehash)`, which
+the child reads probe for each child with no name row. It is a plain `CREATE INDEX` that holds a
+SHARE lock on `project_lifecycle_event` until the schema-migration commits, blocking Project's
+writes and `VACUUM` and `ANALYZE` on it. On a large initialized database, prebuild it
+concurrently first, outside a transaction; the phase runner and API can keep running:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS project_lifecycle_event_namehash_idx
+    ON bigname_phase.project_lifecycle_event (chain_id, namehash);
+```
+
+Then apply the schema-migrations with `--target-version 20261003130000` and the same
+`lock_timeout`, `statement_timeout` and retry procedure; it finds the index and skips the build.
+Without the prebuild, apply it with the phase runner and redo processes stopped.
+`CREATE INDEX IF NOT EXISTS` matches the name only, so the schema-migration then checks that the
+name is an index on `project_lifecycle_event` that is `indisvalid` and `indisready` with the
+reviewed `pg_get_indexdef`, `(chain_id, namehash)` with no predicate, and fails without
+recording itself otherwise. To recover, drop the named relation (an interrupted concurrent
+build leaves an invalid index: confirm in `pg_stat_progress_create_index` that no build is still
+running, then `DROP INDEX CONCURRENTLY` it), rebuild it with the statement above and apply the
+schema-migrations again. An API started before the index exists serves the same rows, only
+slower. API standbys receive the index through replication.
 
 ### NameWrapper authority ends when the registry record leaves NameWrapper
 
@@ -2328,11 +2488,10 @@ before the matching API serves; in v0.4.0 it shares the release's one Interpret
 and Project redo pair with the other hash-rotating changes in the batch. Stamp no
 Ingest redo: it changes no manifest, watch set, start block, table or
 schema-migration, and Project reads only retained normalized events. It needs no
-environment change and no historical ingest fetch. On its own it changes no API
-response: the address-names and subnames readers still serve a surface-less
-ENSv1 registry child for its registry owner under both `owner` and `manager`,
-and the address-names reader lists no surface-less Basenames child, so the new
-Basenames index rows list nothing.
+environment change and no historical ingest fetch. It changes no API response
+until the build of
+[the lease holder of a registry child with no name surface](#lease-holder-of-a-registry-child-with-no-name-surface),
+which serves the token holder these rows add.
 
 ### ENSv2 registries read whole only when their suffix moves
 
@@ -2388,3 +2547,201 @@ schema-migration, table, index, manifest or setting, so stamp no Ingest redo. In
 one Interpret and Project redo pair with the other hash-rotating changes in the
 bundle. The whole-registry warning now counts a token once under all of its
 ids, so its token count no longer includes resource ids.
+
+### Lease holder of a registry child with no name surface
+
+The build that serves the holder of a `.eth` or Basenames lease as the `owner` of a
+registry child with no [name surface](glossary.md#surface-name-surface) (TYR-201, see
+[subnames](api-v1-routes.md#get-v1namesnamesubnames) and
+[names by address](api-v1-routes.md#get-v1addressesaddressnames)) changes only readers in
+`crates/storage/src/families`, `crates/storage/src/children` and
+`crates/storage/src/address_names`, and the API, all outside the
+[interpreter content hash](glossary.md#interpreter-content-hash), so the hash does not rotate.
+It needs no schema-migration, no redo, no manifest or environment change and no historical
+ingest fetch: it reads the address index rows of
+[the token holder of a lease with no name surface](#token-holder-of-a-lease-with-no-name-surface-in-the-address-index)
+and the registrar lease rows Project already keeps. While the registrar retains such a
+child's lease, its `owner` is the lease's holder, the recipient of its latest token
+`Transfer` or else its registrant, and its `manager` stays its registry owner: after a
+token transfer without `reclaim`
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f),
+`GET /v1/addresses/{address}/names`, which lists ENSv1 `.eth` children only, lists the child for
+the buyer under `owner` and for the seller under `manager` only, and
+`relation=owner&parent=eth&dedupe=registration` counts it for the buyer and not for the
+seller. The parent's subnames page serves the buyer as `owner` and the seller as `manager`,
+with the same rows and counts. The change is breaking for clients that relied on the seller
+counting under `owner`. A released lease, and a child the NameWrapper that named it holds,
+are still served for no one.
+
+### v0.4.0 rollout
+
+v0.4.0 carries four hash-rotating builds: the end of NameWrapper authority
+when the registry record leaves NameWrapper (TYR-147 and TYR-100), the
+token-holder index for leases with no name surface (TYR-201), the ENSv2
+suffix-walk reads (TYR-202) and
+[ENSv2 role changes filed under their token](#ensv2-role-changes-filed-under-their-token)
+(TYR-213). The last changes stored events only in two `raw_fact_ref` fields of
+ENSv2 registry and root registry `PermissionChanged` rows, which
+`/v1/diagnostics/events` shows; no product row changes. It also carries the builds from
+[Ingest redo after a killed supervisor](#ingest-redo-after-a-killed-supervisor)
+through [released registrar children](#released-registrar-children), the
+lookahead loader's read-path changes and the
+[lease holder of a registry child with no name surface](#lease-holder-of-a-registry-child-with-no-name-surface),
+and the optional [walk index set](#walk-index-set) operator scripts (TYR-209),
+none of which rotates the hash. Deploy
+it with the
+[planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary).
+From v0.3.0:
+
+- The [interpreter content hash](glossary.md#interpreter-content-hash) rotates
+  once for every chain. Run one full-history Interpret redo and the Project redo
+  it installs under the v0.4.0 binary before the API serves, and record the new
+  hash in the release record. The [walk index set](#walk-index-set) scripts are an
+  optional step of that redo: `drop.sql` once the Interpret redo has started,
+  `install.sql` before Interpret completes, as the runbook's planned boundary
+  describes.
+- Stamp no Ingest redo. No build since v0.3.0 changes a manifest, watch set or
+  start block, so manifest synchronization records no
+  [manifest-authority marker](glossary.md#manifest-authority-marker) and no
+  historical ingest fetch is needed.
+- Apply two schema-migrations in step 4,
+  `20261003120000_normalized_events_record_id_attribution_indexes.sql` and
+  `20261003130000_project_lifecycle_event_namehash_index.sql`. On a large
+  initialized database, prebuild their indexes concurrently first, as
+  [history record attribution indexes](#history-record-attribution-indexes) and
+  [released registrar children](#released-registrar-children) describe; without
+  the prebuild, the plain builds block Interpret's and Project's writes until
+  they commit. The four hash-rotating builds add no schema-migration.
+- From a build before v0.3.0, the deploy also carries v0.3.0's requirements
+  and every earlier section's since that build: their schema-migrations and
+  index prebuilds, including the
+  [retired resolver alias path](#retired-resolver-alias-path)'s refusal to drop
+  a table that still has rows; the manifest-authority markers that the
+  [Sepolia ENSv2 redeploy of 2026-10-01](#sepolia-ensv2-redeploy-of-2026-10-01),
+  [resolver implementation start blocks](#resolver-implementation-start-blocks)
+  and [default reverse names](#default-reverse-names) record; and the required
+  Ingest redos the redeploy and default reverse names stamp. Complete every
+  stamped Ingest redo first, sized from the ranges `chain_phase_state` records
+  after the first start. One full-history Interpret redo with
+  `--attest-watch-set-coverage` under the v0.4.0 binary, and the Project redo it
+  installs, then discharge every rotation and marker in between.
+
+### Walk index set
+
+The build that adds [`ops/walk-index-set`](../ops/walk-index-set/README.md) (TYR-209, see
+[walk index set](storage.md#walk-index-set)) adds two operator scripts, documentation and
+tests. It changes no file the [interpreter content hash](glossary.md#interpreter-content-hash)
+covers, so the hash does not rotate, and it adds no schema-migration, environment setting or
+runner behavior, so it needs no redo and no historical ingest fetch. Deploying it changes
+nothing until an operator runs the scripts.
+
+The scripts are an optional step for a from-zero walk or a full-history Interpret redo:
+`drop.sql` drops the 33 `normalized_events` indexes Interpret does not read, so Interpret
+maintains 16 indexes on the table instead of 49, and `install.sql` rebuilds them concurrently with their
+reviewed definitions and analyzes the table before Project runs. `drop.sql` refuses while any
+chain on the database may be served. Rebuilding takes a pass over the table per index; on a
+large database, schedule it before Project starts, as the
+[production runbook](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
+describes. Without the rebuild no row changes, but Project reads more slowly and an API read
+that needs a dropped index may exceed `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`.
+
+### Registry pointing a label at itself
+
+The build that treats a discovery pointer at its own emitter, such as a
+registry pointing one of its own labels at itself as that label's subregistry,
+as a pointer with no target (TYR-222, see
+[discovery admission](manifests.md#discovery-admission)) changes `crates/adapters/src`, so it
+rotates the [interpreter content hash](glossary.md#interpreter-content-hash)
+for every chain. Before, such a `SubregistryUpdated` from a manifest-declared
+registry stopped Interpret with
+`SubregistryUpdated produced a non-announcement self-edge of kind subregistry`.
+The 2026-10-01 Sepolia `ETHRegistry` emitted one at block 11840453 (transaction
+`0xea03502e4a0eaa4a65c2021bb5d9f77bfb531c4568805e09054454c34607454e`, log 122,
+pinned in the
+[interpreter fixture](../crates/adapters/tests/fixtures/interpreters/v2-registry-self-subregistry.json))
+and again at block 11840461 (transaction
+`0xae61dbac6716e749f0d6a2f3560adc2aaa7b7a81d3ba5288809c3737b4a3793e`, log 90,
+pinned in the same fixture), so every
+build that admits that deployment, including v0.4.0, stops Sepolia there. Now
+the pointer closes the label's previous `subregistry` edge and opens none, for
+a manifest-declared or a discovery-admitted registry alike, and Interpret
+continues. A name below that label walks back into the parent registry and
+reads the parent's own entries (`x.label.eth` reads `x`'s entry), so its
+subnames alias the parent's children rather than living under a registry of
+their own; the self-pointer gives the label no canonical registry and no new
+canonical suffix, and bigname models no alias subtree through it. A
+discovery-admitted registry's self-pointer used to add an
+operator diagnostic row in `interpret_decode_skips`; this build writes none. A
+`resolver` or `proxy_implementation` pointer at its own emitter, which also
+stopped Interpret for a manifest-declared emitter, now closes the previous edge
+and opens none in the same way, with a logged warning and no diagnostic row.
+Rows that earlier builds wrote stay, because the table is append-only and keyed
+by the content hash. Normalized events do not change: the `SubregistryChanged`
+event is written as before. It adds
+no schema-migration, table, index, manifest or setting, so stamp no Ingest
+redo.
+
+### v0.4.1 rollout
+
+v0.4.1 is v0.4.0 plus the
+[registry pointing a label at itself](#registry-pointing-a-label-at-itself)
+build. Deploy it with the
+[planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary).
+From v0.4.0:
+
+- The [interpreter content hash](glossary.md#interpreter-content-hash) rotates
+  once for every chain. Run one full-history Interpret redo and the Project redo
+  it installs under the v0.4.1 binary before the API serves, and record the new
+  hash in the release record. A bounded redo range cannot adopt a new hash. The
+  [walk index set](#walk-index-set) scripts are an optional step of that redo,
+  as in v0.4.0.
+- Stamp no Ingest redo and apply no schema-migration.
+- A Sepolia database that stopped at block 11840453 under v0.4.0 continues
+  past it under v0.4.1, after that redo.
+- From a build before v0.4.0, the deploy also carries the
+  [v0.4.0 rollout](#v040-rollout)'s requirements. The one full-history
+  Interpret redo and its Project redo under v0.4.1 discharge both rotations.
+
+### Manifest sync index
+
+The build that indexes the manifest sync's startup read (TYR-220, see
+[walk index set](storage.md#walk-index-set)) changes the normalized-events baseline, one
+schema-migration, the walk index set lists and their checks, all outside the
+[interpreter content hash](glossary.md#interpreter-content-hash), so the hash does not rotate
+and it needs no redo, no manifest or environment change and no historical ingest fetch. At every
+start the phase runner's manifest sync reads the latest `SourceManifestUpdated` event of each
+manifest. Without an index on `(source_manifest_id, event_kind)`, PostgreSQL walks the primary
+key backward from the newest event, and because those events were written near the start of the
+walk, each probe reads most of `normalized_events`. On a mainnet-size table (about 109 million
+rows) a runner start spent over an hour in that read before doing any work; with the index it
+finishes in seconds. Sepolia-size tables pay seconds without it.
+
+`20261004120000_normalized_events_manifest_idx.sql` adds `normalized_events_manifest_idx` on
+`normalized_events (source_manifest_id, event_kind, normalized_event_id DESC)`, partial on
+`source_manifest_id IS NOT NULL`, the name and definition the retired public-schema baseline
+gave it. It joins the [walk index set](glossary.md#walk-index-set), so `ops/walk-index-set/drop.sql`
+keeps it. The schema-migration is a plain `CREATE INDEX` that scans all of `normalized_events`
+while holding a SHARE lock on it until the schema-migration commits, which blocks Interpret's
+writes. On a mainnet-size database the prebuild is required: build it concurrently first,
+outside a transaction, while the phase runner and API keep running (on the mainnet table above
+the concurrent build took about four minutes and the index is about 6 GB):
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_manifest_idx
+    ON bigname_phase.normalized_events (source_manifest_id, event_kind, normalized_event_id DESC)
+    WHERE source_manifest_id IS NOT NULL;
+```
+
+Then apply the schema-migrations with `--target-version 20261004120000` and the same
+`lock_timeout`, `statement_timeout` and retry procedure; it finds the index and skips the build.
+A database that already carries this index under this name and definition, for example one
+prebuilt before this build, converges the same way. On a small database, such as a Sepolia one,
+the plain build may instead run with the phase runner and redo processes stopped.
+`CREATE INDEX IF NOT EXISTS` matches the name only, so the schema-migration then checks that the
+name is an index on `normalized_events` that is `indisvalid` and `indisready` with the reviewed
+`pg_get_indexdef`, and fails without recording itself otherwise. To recover, drop the named
+relation (an interrupted concurrent build leaves an invalid index: confirm in
+`pg_stat_progress_create_index` that no build is still running, then `DROP INDEX CONCURRENTLY`
+it), rebuild it with the statement above and apply the schema-migrations again. A runner started
+before the index exists behaves the same, only slower at start. API standbys receive the index
+through replication.

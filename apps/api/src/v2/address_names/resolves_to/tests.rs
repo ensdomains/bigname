@@ -11,6 +11,7 @@ fn binding(coin_type: &'static str) -> ResolvesToCursorBinding<'static> {
         q: None,
         name_match: NameMatch::Prefix,
         authority: None,
+        parent: None,
         sort: AddressNamesSort::Name,
         order: SortOrder::Asc,
     }
@@ -68,6 +69,7 @@ fn resolves_to_cursor_binds_relation_and_coin_type() {
             name_match: NameMatch::Prefix,
             authority: None,
             is_migrated: None,
+            parent: None,
             sort: AddressNamesSort::Name,
             order: SortOrder::Asc,
         },

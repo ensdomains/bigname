@@ -18,7 +18,7 @@ use crate::{BatchRequest, Engine, Marker, RunMode, StateLoader};
 
 type TestResult<T = ()> = anyhow::Result<T>;
 
-const CHAIN: &str = "ethereum-sepolia";
+pub(super) const CHAIN: &str = "ethereum-sepolia";
 const ENS_REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
 const BASE_REGISTRAR: &str = "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85";
 const WRAPPED_CONTROLLER: &str = "0xfed6a969aaa60e4961fcd3ebf1a2e8913ac65b72";
@@ -80,7 +80,7 @@ mod v2 {
 }
 
 /// Seconds after `START` at which each block is mined.
-const OFFSETS: [i64; 9] = [
+pub(super) const OFFSETS: [i64; 9] = [
     0,                   // 0: alice and carol registered in ENSv1; bob, dave and erin in ENSv2
     10,                  // 1: alice renewed, disclosing her label; bob's expiry and address set
     500, // 2: alice moves from ENSv1 to ENSv2; a migration registry claims alice.eth
@@ -253,7 +253,7 @@ impl Seeder<'_> {
 
 /// Gives every pooled connection the interpreter content hash, as the runner does: the
 /// migration writer records it beside each ENSv1→ENSv2 migration it correlates.
-async fn stamp_interpreter_hash(pool: &PgPool) -> TestResult {
+pub(super) async fn stamp_interpreter_hash(pool: &PgPool) -> TestResult {
     let mut connections = Vec::new();
     for _ in 0..pool.options().get_max_connections() {
         let mut connection = pool.acquire().await?;
@@ -267,7 +267,7 @@ async fn stamp_interpreter_hash(pool: &PgPool) -> TestResult {
 }
 
 /// The raw logs of the whole history, and canonical lineage for the blocks `lineage` times.
-async fn seed_history(pool: &PgPool, lineage: &[i64]) -> TestResult {
+pub(super) async fn seed_history(pool: &PgPool, lineage: &[i64]) -> TestResult {
     seed_lineage(pool, CHAIN, lineage).await?;
     let owner: Address = OWNER.parse()?;
     let controller: Address = UNLOCKED_CONTROLLER.parse()?;

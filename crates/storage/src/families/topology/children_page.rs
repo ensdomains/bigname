@@ -10,7 +10,9 @@
 //!
 //! The registration and expiry times the timestamp sorts and the fence use, the released
 //! status the fence checks and the owner the labels' owner filter reads are the child's name summary (`project_name_summary`), which the
-//! family step writes from the child's composed `declared_summary`.
+//! family step writes from the child's composed `declared_summary`; a child with no name surface
+//! is released when its node's registrar lease is ([`RELEASED_LEASE`]), and its lease's holder,
+//! when the registrar retains one, is [`TOKEN_HOLDER`].
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
@@ -26,6 +28,9 @@ use super::{
     children::{CHILD_DISPLAY_NAME, CHILD_SURFACE_FILTER, Parents, push_selected},
     name_summary::CHILD_SUMMARY_JOIN,
 };
+use child_flags::{LIFECYCLE_SHADOW, RELEASED_LEASE, TOKEN_HOLDER, WRAPPER_HELD};
+
+mod child_flags;
 
 /// One served child, the wire fields of the subnames route (docs/api-v1-routes.md, subnames).
 /// The row carries no per-row provenance, chain positions or target blocks: those are not family
@@ -48,27 +53,17 @@ pub struct FamilyChildRow {
     /// row. A shadow only another observer wrote, such as a resolver `NameChanged`, does not
     /// count ([`LIFECYCLE_SHADOW`]).
     pub lifecycle_shadow: bool,
+    /// A lifecycle shadow whose registry owner is the NameWrapper that observed it: the wrapper
+    /// holds the node for a token holder bigname does not record ([`WRAPPER_HELD`])
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f).
+    pub wrapper_held: bool,
+    /// The child has no name surface and its node's registrar lease has been released
+    /// ([`RELEASED_LEASE`]).
+    pub released_lease: bool,
+    /// The holder of the node's registrar lease when the child has no name surface and the
+    /// registrar retains one ([`TOKEN_HOLDER`]).
+    pub token_holder: Option<String>,
 }
-
-/// Whether the child's only surface is a shadow one at or below the clock that a lifecycle
-/// observer named: the NameWrapper (`ens_v1_wrapper_l1`, `NameWrapped`) or the ENSv1 registrar
-/// and its controllers (`ens_v1_registrar_l1`, `NameRegistered` and `NameRenewed`). Each shadow
-/// observation writes a `PreimageObserved` event under the observer's source family
-/// (crates/adapters/src/schema_v2/identity.rs, `materialize`), and the surface row keeps only the
-/// earliest observation's provenance, so the events, not the row, tell the observers apart. The
-/// lookup reads `normalized_events_name_history_idx`.
-const LIFECYCLE_SHADOW: &str = "COALESCE(child_surface.visibility_state = 'shadow'
-         AND child_surface.block_number <= clock.block_number
-         AND EXISTS (
-             SELECT 1 FROM bigname_phase.normalized_events observed
-             WHERE observed.logical_name_id = selected.child_logical_name_id
-               AND observed.chain_id = clock.chain_id
-               AND observed.canonicality_state IN ('canonical', 'safe', 'finalized')
-               AND observed.block_number <= clock.block_number
-               AND observed.event_kind = 'PreimageObserved'
-               AND observed.consumer_visibility = 'activated'
-               AND observed.source_family IN ('ens_v1_wrapper_l1', 'ens_v1_registrar_l1')),
-         FALSE)";
 
 /// A registry's labels: the ENSv2 children whose registration `registry` emitted, narrowed by
 /// the owner each serves when `owner` is given.
@@ -167,18 +162,7 @@ pub(crate) async fn count(
     parent_logical_name_id: &str,
     registry: Option<&str>,
 ) -> Result<u64> {
-    let mut builder = QueryBuilder::<Postgres>::new("WITH ");
-    push_children(
-        &mut builder,
-        Parents::One(parent_logical_name_id),
-        &ChildrenCurrentPageFilter::default(),
-        registry.map(|registry| RegistryLabels {
-            registry,
-            owner: None,
-        }),
-    );
-    builder.push(") SELECT count(*) FROM children");
-    let count: i64 = builder
+    let count: i64 = count_query(parent_logical_name_id, registry)
         .build_query_scalar()
         .fetch_one(&mut *conn)
         .await
@@ -194,18 +178,7 @@ pub(crate) async fn counts(
     conn: &mut PgConnection,
     parent_logical_name_ids: &[String],
 ) -> Result<BTreeMap<String, u64>> {
-    let mut builder = QueryBuilder::<Postgres>::new("WITH ");
-    push_children(
-        &mut builder,
-        Parents::Many(parent_logical_name_ids),
-        &ChildrenCurrentPageFilter::default(),
-        None,
-    );
-    builder.push(
-        ") SELECT parent_logical_name_id, count(*) FROM children
-         GROUP BY parent_logical_name_id",
-    );
-    let rows: Vec<(String, i64)> = builder
+    let rows: Vec<(String, i64)> = counts_query(parent_logical_name_ids)
         .build_query_as()
         .fetch_all(&mut *conn)
         .await
@@ -218,6 +191,41 @@ pub(crate) async fn counts(
             ))
         })
         .collect()
+}
+
+fn count_query<'a>(
+    parent_logical_name_id: &'a str,
+    registry: Option<&'a str>,
+) -> QueryBuilder<'a, Postgres> {
+    let mut builder = QueryBuilder::<Postgres>::new("WITH ");
+    push_children(
+        &mut builder,
+        Parents::One(parent_logical_name_id),
+        &ChildrenCurrentPageFilter::default(),
+        registry.map(|registry| RegistryLabels {
+            registry,
+            owner: None,
+        }),
+        None,
+    );
+    builder.push(") SELECT count(*) FROM children");
+    builder
+}
+
+fn counts_query(parent_logical_name_ids: &[String]) -> QueryBuilder<'_, Postgres> {
+    let mut builder = QueryBuilder::<Postgres>::new("WITH ");
+    push_children(
+        &mut builder,
+        Parents::Many(parent_logical_name_ids),
+        &ChildrenCurrentPageFilter::default(),
+        None,
+        None,
+    );
+    builder.push(
+        ") SELECT parent_logical_name_id, count(*) FROM children
+         GROUP BY parent_logical_name_id",
+    );
+    builder
 }
 
 /// One page and its exact total in one statement.
@@ -298,6 +306,7 @@ fn page_query<'a>(
         Parents::One(parent_logical_name_id),
         filter,
         registry,
+        None,
     );
     builder.push("), page AS (SELECT * FROM children WHERE TRUE");
     if let Some(cursor) = cursor {
@@ -316,14 +325,21 @@ fn page_query<'a>(
 
 /// The selected children CTEs and the `children` relation (left open, closed by the caller)
 /// after the read filter, the prefix, the expiry fence and, for a registry's labels, the registry
-/// and owner filters, with each child's served fields and `sort_timestamp`.
+/// and owner filters, with each child's served fields and `sort_timestamp`; `children` narrows
+/// the relation to those child nodes (`push_selected`).
 pub(super) fn push_children<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     parents: Parents<'a>,
     filter: &ChildrenCurrentPageFilter<'a>,
     registry: Option<RegistryLabels<'a>>,
+    children: Option<&'a [String]>,
 ) {
-    push_selected(builder, parents, registry.map(|labels| labels.registry));
+    push_selected(
+        builder,
+        parents,
+        registry.map(|labels| labels.registry),
+        children,
+    );
     let sort_timestamp = match filter.sort {
         ChildrenCurrentSort::Name => "NULL::NUMERIC",
         ChildrenCurrentSort::ExpiresAt => "summary.expires_at",
@@ -335,7 +351,8 @@ pub(super) fn push_children<'a>(
                    selected.namespace, {CHILD_DISPLAY_NAME} AS canonical_display_name,
                    selected.namehash, selected.labelhash, selected.owner, selected.registrant,
                    selected.registry_authority,
-                   {LIFECYCLE_SHADOW} AS lifecycle_shadow,
+                   {LIFECYCLE_SHADOW} AS lifecycle_shadow, {WRAPPER_HELD} AS wrapper_held,
+                   {RELEASED_LEASE} AS released_lease, {TOKEN_HOLDER} AS token_holder,
                    {sort_timestamp} AS sort_timestamp
             FROM selected
             JOIN parent ON parent.logical_name_id = selected.parent_logical_name_id
@@ -370,10 +387,10 @@ pub(super) fn push_children<'a>(
     }
     if !filter.include_expired {
         // A child with no name summary, no registration or no expiry is not expired.
-        builder.push(
+        builder.push(format!(
             " AND COALESCE(summary.registration_status, '') <> 'released' \
-             AND COALESCE(summary.expires_at >= ",
-        );
+             AND NOT {RELEASED_LEASE} AND COALESCE(summary.expires_at >= "
+        ));
         match filter.evaluated_at {
             Some(evaluated_at) => {
                 builder.push_bind(UnixSeconds::from(evaluated_at));
@@ -403,6 +420,9 @@ fn decode(row: &PgRow) -> Result<Option<(FamilyChildRow, Option<UnixSeconds>)>> 
             registrant: row.try_get("registrant")?,
             registry_authority: row.try_get("registry_authority")?,
             lifecycle_shadow: row.try_get("lifecycle_shadow")?,
+            wrapper_held: row.try_get("wrapper_held")?,
+            released_lease: row.try_get("released_lease")?,
+            token_holder: row.try_get("token_holder")?,
         },
         row.try_get("sort_timestamp")?,
     )))

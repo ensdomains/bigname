@@ -4,6 +4,11 @@
 
 const RC_OWNER: &str = "0x00000000000000000000000000000000000000d1";
 const RC_BUYER: &str = "0x00000000000000000000000000000000000000d2";
+/// The NameWrapper and a registrar controller, as the emitters of shadow observations.
+const RC_WRAPPER: &str = "0x00000000000000000000000000000000000000d3";
+const RC_CONTROLLER: &str = "0x00000000000000000000000000000000000000d4";
+/// A third address that takes the registry record or a later registration.
+const RC_THIRD: &str = "0x00000000000000000000000000000000000000d5";
 
 /// A registry NewOwner under `parent` for `label` to `owner` at `block`, carrying the child
 /// node's registry-only resource as the adapter does. Returns the child node.
@@ -489,13 +494,13 @@ async fn v2_registry_children_serve_the_authority_of_their_registry() -> Result<
 
 /// The shadow surface Interpret writes for `<label>.alpha.eth`, a name whose label fails
 /// normalization (crates/adapters/src/schema_v2/identity.rs, `materialize`), with the
-/// `PreimageObserved` event of the `family` observer that named it, at `block`. Returns the
-/// child's name id.
+/// `PreimageObserved` event of the `family` observer at `emitter` that named it, at `block`.
+/// Returns the child's name id.
 async fn insert_shadow_child_surface(
     database: &TestDatabase,
     child: &str,
     label: &str,
-    family: &str,
+    (family, emitter): (&str, &str),
     source_event: &str,
     block: i64,
 ) -> Result<String> {
@@ -536,32 +541,65 @@ async fn insert_shadow_child_surface(
     .bind(source_event)
     .execute(&database.pool)
     .await?;
-    bigname_storage::insert_normalized_event_fixtures(
-        &database.pool,
-        &[family_event(
-            &format!("rc-shadow-preimage-{label}"),
-            Some(&id),
-            None,
-            "PreimageObserved",
-            family,
-            block,
-            2,
-            json!({"source_event": source_event, "logical_name_id": id, "namehash": child,
-                   "visibility_state": "shadow", "deactivation_reason": "normalization_gate"}),
-        )],
-    )
-    .await?;
+    let mut observed = family_event(
+        &format!("rc-shadow-preimage-{label}"),
+        Some(&id),
+        None,
+        "PreimageObserved",
+        family,
+        block,
+        2,
+        json!({"source_event": source_event, "logical_name_id": id, "namehash": child,
+               "visibility_state": "shadow", "deactivation_reason": "normalization_gate"}),
+    );
+    observed.raw_fact_ref = json!({"kind": "raw_log", "emitting_address": emitter});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[observed]).await?;
     Ok(id)
 }
 
-/// A child NameWrapper wrapped under a label that fails normalization has only a shadow surface
+/// The served row of `node` among `rows`.
+fn served_child<'a>(rows: &'a [Value], node: &str) -> &'a Value {
+    rows.iter()
+        .find(|row| row["namehash"] == json!(node))
+        .unwrap_or_else(|| panic!("{node} is served: {rows:#?}"))
+}
+
+/// The address-names rows and `total_count` of `address` with no relation filter and under
+/// `relation=any`, `relation=owner` and `relation=manager`, each with the `relations` a row
+/// listed for both would match.
+async fn address_rows_by_relation(
+    database: &TestDatabase,
+    address: &str,
+) -> Result<Vec<(Value, Vec<Value>, Value)>> {
+    let mut by_relation = Vec::new();
+    for (relation, matched) in [
+        ("", json!(["owner", "manager"])),
+        ("&relation=any", json!(["owner", "manager"])),
+        ("&relation=owner", json!(["owner"])),
+        ("&relation=manager", json!(["manager"])),
+    ] {
+        let pages = read_family_pages(
+            database,
+            &format!("/v1/addresses/{address}/names?namespace=ens&page_size=10{relation}"),
+        )
+        .await?;
+        by_relation.push((matched, rows_of(&pages), pages[0]["total_count"].clone()));
+    }
+    Ok(by_relation)
+}
+
+/// A child the NameWrapper created with `setSubnodeOwner` under a label that fails
+/// normalization: the NameWrapper takes the node in the registry and mints the token to its
+/// holder (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f),
+/// and the wrapper adapter writes only a shadow surface for it
 /// (crates/adapters/src/schema_v2/protocol/v1/wrapper.rs, `name_wrapped`), so no name row
 /// composes and both routes serve it from its registry. Its wrapper state and any lease are
 /// projected without a composed name, so its `ens_v1` object claims no lifecycle: no `expires_at`
-/// and no wrapper fields. It omits `manager` rather than serve its registry owner, which the
-/// `manager` relation still lists it for. A child whose only shadow a resolver `NameChanged` wrote
-/// has no such state and, like a sibling no label-bearing event named, keeps `expires_at: null`
-/// and serves its registry owner as manager.
+/// and no wrapper fields. Its registry owner is the NameWrapper contract, not its owner, so the
+/// contract's address-names list it under no relation and its subname omits `owner` and
+/// `manager`; its token holder is not listed either. A child whose only shadow a resolver
+/// `NameChanged` wrote has no such state and, like a sibling no label-bearing event named, keeps
+/// `expires_at: null` and serves its registry owner as owner and manager.
 #[tokio::test]
 async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -572,14 +610,21 @@ async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<
         insert_family_label_preimage(&database.pool, label).await?;
     }
     let mut children = Vec::new();
-    for (index, label) in ["Wrapped", "Named", "plain"].into_iter().enumerate() {
+    for (index, (label, owner)) in [
+        ("Wrapped", RC_WRAPPER),
+        ("Named", RC_OWNER),
+        ("plain", RC_OWNER),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let offset = i64::try_from(index)?;
         children.push(
             insert_registry_child(
                 &database,
                 "alpha.eth",
                 label,
-                RC_OWNER,
+                owner,
                 202 + offset,
                 Uuid::from_u128(0x7f1_0011 + u128::try_from(index)?),
             )
@@ -591,7 +636,7 @@ async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<
         &database,
         wrapped,
         "Wrapped",
-        "ens_v1_wrapper_l1",
+        ("ens_v1_wrapper_l1", RC_WRAPPER),
         "NameWrapped",
         202,
     )
@@ -599,11 +644,12 @@ async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<
     // An admitted PublicResolver's `setName` takes any string for a node its caller controls
     // (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L19 @ ens_v1@91c966f),
     // so a reverse record can name the registry child under a label that fails normalization.
+    // Its emitter is the child's registry owner: only a NameWrapper observation hides a child.
     insert_shadow_child_surface(
         &database,
         named,
         "Named",
-        "ens_v1_resolver_l1",
+        ("ens_v1_resolver_l1", RC_OWNER),
         "NameChanged",
         203,
     )
@@ -654,6 +700,10 @@ async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<
     .await?;
     publish_test_families(&database, 240).await?;
 
+    for (relation, rows, total) in address_rows_by_relation(&database, RC_WRAPPER).await? {
+        assert_eq!(rows, Vec::<Value>::new(), "{relation}");
+        assert_eq!(total, json!(0), "{relation}");
+    }
     let rows = rows_of(
         &read_family_pages(
             &database,
@@ -661,29 +711,167 @@ async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<
         )
         .await?,
     );
+    assert!(
+        rows.iter().all(|row| row["namehash"] != json!(wrapped)),
+        "{rows:#?}"
+    );
     let subnames =
         rows_of(&read_family_pages(&database, "/v1/names/alpha.eth/subnames?page_size=10").await?);
-    for (node, ens_v1, manager) in [
-        (wrapped, json!({}), None),
-        (named, json!({"expires_at": null}), Some(json!(RC_OWNER))),
-        (plain, json!({"expires_at": null}), Some(json!(RC_OWNER))),
-    ] {
-        let row = rows
-            .iter()
-            .find(|row| row["namehash"] == json!(node))
-            .unwrap_or_else(|| panic!("{node} is listed: {rows:#?}"));
-        let subname = subnames
-            .iter()
-            .find(|row| row["namehash"] == json!(node))
-            .unwrap_or_else(|| panic!("{node} is a subname: {subnames:#?}"));
-        for served in [row, subname] {
+    let subname = served_child(&subnames, wrapped);
+    assert_eq!(subname["authority"], json!("ens_v1"), "{subname:#}");
+    assert_eq!(subname["ens_v1"], json!({}), "{subname:#}");
+    assert_eq!(subname.get("owner"), None, "{subname:#}");
+    assert_eq!(subname.get("manager"), None, "{subname:#}");
+    for node in [named, plain] {
+        let row = served_child(&rows, node);
+        for served in [row, served_child(&subnames, node)] {
             assert_eq!(served["authority"], json!("ens_v1"), "{served:#}");
-            assert_eq!(served["ens_v1"], ens_v1, "{served:#}");
+            assert_eq!(served["ens_v1"], json!({"expires_at": null}), "{served:#}");
             assert_eq!(served["owner"], json!(RC_OWNER), "{served:#}");
-            assert_eq!(served.get("manager"), manager.as_ref(), "{served:#}");
+            assert_eq!(served["manager"], json!(RC_OWNER), "{served:#}");
         }
         assert_eq!(row["relations"], json!(["owner", "manager"]), "{row:#}");
     }
+
+    database.cleanup().await
+}
+
+/// A child an ENSv1 registrar controller registered under a label that fails normalization: the
+/// legacy controller accepts any label of three or more characters
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L191-L193 @ ens_v1@91c966f)
+/// and the registration sets the registrant as registry owner
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f),
+/// so, until a `reclaim` or registry transfer moves the record, the registrant stays listed as
+/// owner and manager of the shadow child and its subname keeps `owner`. Only its `manager` field is withheld, as for every lifecycle shadow. The fixture puts
+/// the child under alpha.eth: which observer emitted the shadow is all that decides the listing.
+#[tokio::test]
+async fn v2_registrar_shadow_child_stays_listed_for_its_registrant() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bounded_membership_blocks(&database, 240).await?;
+    let (alpha, alpha_resource) =
+        seed_family_name(&database, "alpha.eth", 0x7f2_0000, "ens_v1").await?;
+    insert_family_label_preimage(&database.pool, b"Leased").await?;
+    let leased = insert_registry_child(
+        &database,
+        "alpha.eth",
+        "Leased",
+        RC_OWNER,
+        202,
+        Uuid::from_u128(0x7f2_0011),
+    )
+    .await?;
+    insert_shadow_child_surface(
+        &database,
+        &leased,
+        "Leased",
+        ("ens_v1_registrar_l1", RC_CONTROLLER),
+        "NameRegistered",
+        202,
+    )
+    .await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[family_event(
+            "rc-leased-alpha-grant",
+            Some(&alpha),
+            Some(alpha_resource),
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            201,
+            0,
+            json!({"authority_kind": "registrar", "registrant": RC_OWNER,
+                   "expiry": 1_900_000_000i64}),
+        )],
+    )
+    .await?;
+    publish_test_families(&database, 240).await?;
+
+    for (relation, rows, _) in address_rows_by_relation(&database, RC_OWNER).await? {
+        let row = served_child(&rows, &leased);
+        assert_eq!(row["relations"], relation, "{row:#}");
+        assert_eq!(row["owner"], json!(RC_OWNER), "{relation}: {row:#}");
+        assert_eq!(row.get("manager"), None, "{relation}: {row:#}");
+        assert_eq!(row["ens_v1"], json!({}), "{relation}: {row:#}");
+    }
+    let subnames =
+        rows_of(&read_family_pages(&database, "/v1/names/alpha.eth/subnames?page_size=10").await?);
+    let subname = served_child(&subnames, &leased);
+    assert_eq!(subname["owner"], json!(RC_OWNER), "{subname:#}");
+    assert_eq!(subname.get("manager"), None, "{subname:#}");
+
+    database.cleanup().await
+}
+
+/// A NameWrapper-held shadow child whose registry record later leaves the NameWrapper, as an
+/// unwrap returns it to the controller the holder names
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f), is
+/// listed for its new registry owner and served with that owner; the NameWrapper's earlier
+/// observation does not keep it hidden.
+#[tokio::test]
+async fn v2_wrapper_shadow_child_follows_its_registry_owner_out_of_the_wrapper() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bounded_membership_blocks(&database, 240).await?;
+    let (alpha, alpha_resource) =
+        seed_family_name(&database, "alpha.eth", 0x7f3_0000, "ens_v1").await?;
+    insert_family_label_preimage(&database.pool, b"Wrapped").await?;
+    let resource = Uuid::from_u128(0x7f3_0011);
+    let wrapped =
+        insert_registry_child(&database, "alpha.eth", "Wrapped", RC_WRAPPER, 202, resource)
+            .await?;
+    insert_shadow_child_surface(
+        &database,
+        &wrapped,
+        "Wrapped",
+        ("ens_v1_wrapper_l1", RC_WRAPPER),
+        "NameWrapped",
+        202,
+    )
+    .await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            family_event(
+                "rc-unwrapped-alpha-grant",
+                Some(&alpha),
+                Some(alpha_resource),
+                "RegistrationGranted",
+                "ens_v1_registrar_l1",
+                201,
+                0,
+                json!({"authority_kind": "registrar", "registrant": RC_OWNER,
+                       "expiry": 1_900_000_000i64}),
+            ),
+            family_event(
+                "rc-unwrapped-transfer",
+                None,
+                Some(resource),
+                "AuthorityTransferred",
+                "ens_v1_registry_l1",
+                207,
+                0,
+                json!({"source_event": "Transfer", "node": wrapped, "owner": RC_BUYER,
+                       "owner_getter": RC_BUYER, "emitter_role": "registry"}),
+            ),
+        ],
+    )
+    .await?;
+    publish_test_families(&database, 240).await?;
+
+    for (relation, rows, total) in address_rows_by_relation(&database, RC_WRAPPER).await? {
+        assert_eq!(rows, Vec::<Value>::new(), "{relation}");
+        assert_eq!(total, json!(0), "{relation}");
+    }
+    for (relation, rows, _) in address_rows_by_relation(&database, RC_BUYER).await? {
+        let row = served_child(&rows, &wrapped);
+        assert_eq!(row["relations"], relation, "{row:#}");
+        assert_eq!(row["owner"], json!(RC_BUYER), "{relation}: {row:#}");
+        assert_eq!(row.get("manager"), None, "{relation}: {row:#}");
+    }
+    let subnames =
+        rows_of(&read_family_pages(&database, "/v1/names/alpha.eth/subnames?page_size=10").await?);
+    let subname = served_child(&subnames, &wrapped);
+    assert_eq!(subname["owner"], json!(RC_BUYER), "{subname:#}");
+    assert_eq!(subname.get("manager"), None, "{subname:#}");
 
     database.cleanup().await
 }
@@ -945,5 +1133,899 @@ async fn v2_undated_subnames_sort_as_the_smallest_value_across_pages() -> Result
         let base = format!("/v1/names/alpha.eth/subnames?sort={key}");
         assert_undated_rows_are_smallest(&database, &base, key).await?;
     }
+    database.cleanup().await
+}
+
+/// The expiry of the unnamed leases below, long past at every fixture block.
+const LAPSED_EXPIRY: i64 = 1_600_000_000;
+
+/// The events of one unnamed registrar lease on `node` under `family`, as the registrar adapter
+/// emits them for a label bigname never observed: no name, the lease's resource, and the node
+/// and labelhash in the after-state
+/// (crates/adapters/src/schema_v2/protocol/v1/registrar/base.rs, `surface_known: false`).
+fn unnamed_lease_events(
+    identity: &str,
+    kinds: &[&str],
+    (family, namespace): (&str, &str),
+    (node, labelhash): (&str, &str),
+    (registrant, expiry): (&str, i64),
+    block: i64,
+    resource: Uuid,
+) -> Vec<NormalizedEvent> {
+    let source_event = if kinds.contains(&"RegistrationRenewed") {
+        "NameRenewed"
+    } else {
+        "NameRegistered"
+    };
+    kinds
+        .iter()
+        .zip(0..)
+        .map(|(kind, log)| {
+            let mut event = family_event(
+                &format!("{identity}-{kind}"),
+                None,
+                Some(resource),
+                kind,
+                family,
+                block,
+                log,
+                json!({"source_event": source_event, "namehash": node, "labelhash": labelhash,
+                       "token_id": labelhash, "registrant": registrant,
+                       "authority_owner": registrant, "expiry": expiry, "surface_known": false,
+                       "authority_kind": "registrar",
+                       "authority_key": format!("registrar:{node}")}),
+            );
+            event.namespace = namespace.to_owned();
+            event
+        })
+        .collect()
+}
+
+/// The `RegistrationReleased` Interpret synthesises at the first block past the lease's grace,
+/// unnamed because no surface was materialized, before every transaction of its block
+/// (crates/adapters/src/schema_v2.rs, `settle_block_boundary`).
+fn synthesised_release(
+    identity: &str,
+    (family, namespace): (&str, &str),
+    (node, labelhash): (&str, &str),
+    block: i64,
+    resource: Uuid,
+) -> NormalizedEvent {
+    let mut event = family_event(
+        identity,
+        None,
+        Some(resource),
+        "RegistrationReleased",
+        family,
+        block,
+        0,
+        json!({"source_event": "RegistrationReleased", "released_at": 1_700_000_000 + block,
+               "labelhash": labelhash, "namehash": node, "expiry": LAPSED_EXPIRY}),
+    );
+    event.namespace = namespace.to_owned();
+    event.log_index = None;
+    event.transaction_hash = None;
+    event
+}
+
+/// The registrar resource of [`seed_unnamed_lease_child`]'s lease.
+const LAPSED_LEASE: u128 = 0x7f3_0021;
+
+/// The expiry of a live lease, ahead of every fixture block.
+const LIVE_EXPIRY: i64 = 1_900_000_000;
+
+/// The registry-only resource of [`seed_unnamed_lease_child`]'s node.
+const UNNAMED_LEASE_NODE_RESOURCE: u128 = 0x7f3_0011;
+
+/// `eth`, and under it `numeric`, a `.eth` name whose label bigname never observed: the
+/// BaseRegistrar registers it to RC_OWNER at 202 until `expiry`, writing the unnamed lease and,
+/// through `setSubnodeOwner`, the registry NewOwner of its node
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f).
+/// Published at 220. Returns the child node and its labelhash.
+async fn seed_unnamed_lease_child(database: &TestDatabase, expiry: i64) -> Result<(String, String)> {
+    seed_bounded_membership_blocks(database, 220).await?;
+    seed_family_name(database, "eth", 0x7f3_0000, "ens_v1").await?;
+    let node = insert_registry_child(
+        database,
+        "eth",
+        "numeric",
+        RC_OWNER,
+        202,
+        Uuid::from_u128(UNNAMED_LEASE_NODE_RESOURCE),
+    )
+    .await?;
+    let labelhash = child_labelhash("numeric");
+    upsert_test_resources(
+        &database.pool,
+        &[Resource {
+            resource_id: Uuid::from_u128(LAPSED_LEASE),
+            token_lineage_id: None,
+            chain_id: FAMILY_CHAIN.to_owned(),
+            block_hash: "0xhistory202".to_owned(),
+            block_number: 202,
+            provenance: json!({"authority_kind": "registrar"}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &unnamed_lease_events(
+            "rc-lapsed-grant",
+            &["RegistrationGranted", "ExpiryChanged"],
+            ("ens_v1_registrar_l1", "ens"),
+            (&node, &labelhash),
+            (RC_OWNER, expiry),
+            202,
+            Uuid::from_u128(LAPSED_LEASE),
+        ),
+    )
+    .await?;
+    publish_test_families(database, 220).await?;
+    Ok((node, labelhash))
+}
+
+/// A BaseRegistrar `Transfer` of the unnamed lease on `node` to `to` at `block`, as the registrar
+/// adapter emits it when no surface names the node: no name, the lease's resource
+/// (crates/project/tests/families_registry_children.rs shapes the same input).
+fn unnamed_transfer(
+    identity: &str,
+    (node, labelhash): (&str, &str),
+    to: &str,
+    block: i64,
+    resource: Uuid,
+) -> NormalizedEvent {
+    let mut event = family_event(
+        identity,
+        None,
+        Some(resource),
+        "TokenControlTransferred",
+        "ens_v1_registrar_l1",
+        block,
+        0,
+        json!({"source_event": "Transfer", "namehash": node, "token_id": labelhash, "to": to}),
+    );
+    event.namespace = "ens".to_owned();
+    event
+}
+
+/// A registry `Transfer` of [`seed_unnamed_lease_child`]'s node to `owner` at `block`: a
+/// `reclaim` or the registry owner's own `setOwner`.
+fn unnamed_lease_registry_transfer(
+    identity: &str,
+    node: &str,
+    owner: &str,
+    block: i64,
+) -> NormalizedEvent {
+    family_event(
+        identity,
+        None,
+        Some(Uuid::from_u128(UNNAMED_LEASE_NODE_RESOURCE)),
+        "AuthorityTransferred",
+        "ens_v1_registry_l1",
+        block,
+        1,
+        json!({"source_event": "Transfer", "node": node, "owner": owner, "owner_getter": owner,
+               "emitter_role": "registry"}),
+    )
+}
+
+/// The served subnames of `eth`, with their `total_count`, under `query`.
+async fn eth_subnames(database: &TestDatabase, query: &str) -> Result<(Vec<Value>, Value)> {
+    let pages =
+        read_family_pages(database, &format!("/v1/names/eth/subnames?page_size=10{query}")).await?;
+    Ok((rows_of(&pages), pages[0]["total_count"].clone()))
+}
+
+/// The child's registry owner and manager on both routes: listed for `address` under `owner`
+/// and `manager`, and served as both on its parent's subnames row with `registration_status`.
+async fn assert_child_served_to(
+    database: &TestDatabase,
+    node: &str,
+    address: &str,
+    registration_status: &str,
+) -> Result<()> {
+    for (matched, rows, _) in address_rows_by_relation(database, address).await? {
+        let row = served_child(&rows, node);
+        assert_eq!(row["relations"], matched, "{row:#}");
+        assert_eq!(row["owner"], json!(address), "{row:#}");
+        assert_eq!(row["manager"], json!(address), "{row:#}");
+    }
+    let (subnames, _) = eth_subnames(database, "").await?;
+    let subname = served_child(&subnames, node);
+    assert_eq!(subname["owner"], json!(address), "{subname:#}");
+    assert_eq!(subname["manager"], json!(address), "{subname:#}");
+    assert_eq!(
+        subname["registration_status"],
+        json!(registration_status),
+        "{subname:#}"
+    );
+    Ok(())
+}
+
+/// `.eth` registrations `address` holds, by the count recipe of
+/// `GET /v1/addresses/{address}/names` (docs/api-v1-routes.md).
+async fn eth_registration_count(database: &TestDatabase, address: &str) -> Result<Value> {
+    let pages = read_family_pages(
+        database,
+        &format!(
+            "/v1/addresses/{address}/names?namespace=ens&relation=owner&parent=eth&dedupe=registration&page_size=1"
+        ),
+    )
+    .await?;
+    Ok(pages[0]["total_count"].clone())
+}
+
+/// The child is listed for `address` under `relation` alone, once, with `owner` and `manager`,
+/// under every relation filter that admits `relation`, and under no other.
+async fn assert_listed_as(
+    database: &TestDatabase,
+    node: &str,
+    address: &str,
+    relation: &str,
+    (owner, manager): (&str, &str),
+) -> Result<()> {
+    for (matched, rows, _) in address_rows_by_relation(database, address).await? {
+        let listed: Vec<&Value> = rows.iter().filter(|row| row["namehash"] == json!(node)).collect();
+        let admitted = matched
+            .as_array()
+            .is_some_and(|relations| relations.contains(&json!(relation)));
+        if !admitted {
+            assert!(listed.is_empty(), "{matched}: {rows:#?}");
+            continue;
+        }
+        assert_eq!(listed.len(), 1, "{matched}: {rows:#?}");
+        assert_eq!(listed[0]["relations"], json!([relation]), "{:#}", listed[0]);
+        assert_eq!(listed[0]["owner"], json!(owner), "{:#}", listed[0]);
+        assert_eq!(listed[0]["manager"], json!(manager), "{:#}", listed[0]);
+    }
+    Ok(())
+}
+
+/// The child is listed for `address` under no relation filter.
+async fn assert_not_listed(database: &TestDatabase, node: &str, address: &str) -> Result<()> {
+    for (matched, rows, _) in address_rows_by_relation(database, address).await? {
+        assert!(
+            rows.iter().all(|row| row["namehash"] != json!(node)),
+            "{matched}: {rows:#?}"
+        );
+    }
+    Ok(())
+}
+
+/// The `eth` subnames row of the child serves `owner`, `manager` and `registration_status`.
+async fn assert_subname_served(
+    database: &TestDatabase,
+    node: &str,
+    (owner, manager): (&str, &str),
+    registration_status: &str,
+) -> Result<()> {
+    let (subnames, _) = eth_subnames(database, "").await?;
+    let subname = served_child(&subnames, node);
+    assert_eq!(subname["owner"], json!(owner), "{subname:#}");
+    assert_eq!(subname["manager"], json!(manager), "{subname:#}");
+    assert_eq!(
+        subname["registration_status"],
+        json!(registration_status),
+        "{subname:#}"
+    );
+    Ok(())
+}
+
+/// The child's lease holder is its owner and its registry owner its manager, on both routes:
+/// listed for `holder` under `owner` only and for `registry_owner` under `manager` only.
+async fn assert_child_served_split(
+    database: &TestDatabase,
+    node: &str,
+    holder: &str,
+    registry_owner: &str,
+    registration_status: &str,
+) -> Result<()> {
+    let served = (holder, registry_owner);
+    assert_listed_as(database, node, holder, "owner", served).await?;
+    assert_listed_as(database, node, registry_owner, "manager", served).await?;
+    assert_subname_served(database, node, served, registration_status).await
+}
+
+/// A `.eth` name with no name surface keeps its registry record when its lease lapses: expiry
+/// only makes the token unavailable
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f).
+/// Once Interpret releases the lease, the registry owner is neither its owner nor its manager:
+/// address names list it for no relation, and its subname is `released` with neither field and
+/// no expiry fields, omitted under `include_expired=false`.
+#[tokio::test]
+async fn v2_released_surface_less_child_serves_no_owner_or_manager() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (node, labelhash) = seed_unnamed_lease_child(&database, LAPSED_EXPIRY).await?;
+    assert_child_served_to(&database, &node, RC_OWNER, "unregistered").await?;
+    let before = address_rows_by_relation(&database, RC_OWNER).await?;
+    let (_, subnames_before) = eth_subnames(&database, "").await?;
+
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[synthesised_release(
+            "rc-lapsed-release",
+            ("ens_v1_registrar_l1", "ens"),
+            (&node, &labelhash),
+            230,
+            Uuid::from_u128(LAPSED_LEASE),
+        )],
+    )
+    .await?;
+    publish_test_families(&database, 231).await?;
+
+    for ((relation, rows, total), (_, _, total_before)) in
+        address_rows_by_relation(&database, RC_OWNER).await?.into_iter().zip(before)
+    {
+        assert!(
+            rows.iter().all(|row| row["namehash"] != json!(node)),
+            "{relation}: {rows:#?}"
+        );
+        assert_eq!(
+            total.as_u64().map(|total| total + 1),
+            total_before.as_u64(),
+            "{relation}"
+        );
+    }
+    let (subnames, total) = eth_subnames(&database, "").await?;
+    assert_eq!(total, subnames_before, "{subnames:#?}");
+    let subname = served_child(&subnames, &node);
+    assert_eq!(subname["registration_status"], json!("released"), "{subname:#}");
+    assert_eq!(subname["authority"], json!("ens_v1"), "{subname:#}");
+    assert_eq!(subname["ens_v1"], json!({"expires_at": null}), "{subname:#}");
+    for absent in [
+        "owner",
+        "manager",
+        "expires_at",
+        "grace_ends_at",
+        "lapsed_registration",
+    ] {
+        assert_eq!(subname.get(absent), None, "{absent}: {subname:#}");
+    }
+    let (fenced, fenced_total) = eth_subnames(&database, "&include_expired=false").await?;
+    assert!(
+        fenced.iter().all(|row| row["namehash"] != json!(node)),
+        "{fenced:#?}"
+    );
+    assert_eq!(
+        fenced_total.as_u64().map(|total| total + 1),
+        total.as_u64(),
+        "{fenced:#?}"
+    );
+
+    database.cleanup().await
+}
+
+/// A registration in the block that released the lease is newer than the release, which
+/// Interpret settles before every transaction of the block; `_register` sets the new registrant
+/// as registry owner
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f),
+/// so the child is served to the new owner again and no longer to the old one.
+#[tokio::test]
+async fn v2_re_registered_surface_less_child_lists_for_its_new_owner() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (node, labelhash) = seed_unnamed_lease_child(&database, LAPSED_EXPIRY).await?;
+    let lease = Uuid::from_u128(LAPSED_LEASE);
+    let mut events = vec![synthesised_release(
+        "rc-rebought-release",
+        ("ens_v1_registrar_l1", "ens"),
+        (&node, &labelhash),
+        230,
+        lease,
+    )];
+    events.push(family_event(
+        "rc-rebought-new-owner",
+        None,
+        Some(Uuid::from_u128(0x7f3_0011)),
+        "SubregistryChanged",
+        "ens_v1_registry_l1",
+        230,
+        0,
+        json!({"source_event": "NewOwner", "node": bigname_lookup::ens_namehash_hex("eth")?,
+               "child_node": node, "labelhash": labelhash, "owner": RC_BUYER,
+               "owner_getter": RC_BUYER, "emitter_role": "registry"}),
+    ));
+    events.extend(unnamed_lease_events(
+        "rc-rebought-grant",
+        &["RegistrationGranted", "ExpiryChanged"],
+        ("ens_v1_registrar_l1", "ens"),
+        (&node, &labelhash),
+        (RC_BUYER, 1_900_000_000),
+        230,
+        lease,
+    ));
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    publish_test_families(&database, 231).await?;
+
+    assert_child_served_to(&database, &node, RC_BUYER, "unregistered").await?;
+    for (relation, rows, _) in address_rows_by_relation(&database, RC_OWNER).await? {
+        assert!(
+            rows.iter().all(|row| row["namehash"] != json!(node)),
+            "{relation}: {rows:#?}"
+        );
+    }
+
+    database.cleanup().await
+}
+
+/// `registerOnly` grants a new lease without touching the registry
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L128 @ ens_v1@91c966f),
+/// so the release no longer applies: the new registrant holds the lease and is the child's
+/// owner, and the old registry owner, who keeps the registry record, its manager. Address names
+/// list the old registry owner under `manager` only and the registrant nowhere, because no
+/// registry or transfer fact indexes the registrant for the node.
+#[tokio::test]
+async fn v2_surface_less_child_registered_without_the_registry_serves_its_registrant_as_owner()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (node, labelhash) = seed_unnamed_lease_child(&database, LAPSED_EXPIRY).await?;
+    // The successor lease is a new resource.
+    let successor = Uuid::from_u128(LAPSED_LEASE + 1);
+    upsert_test_resources(
+        &database.pool,
+        &[Resource {
+            resource_id: successor,
+            token_lineage_id: None,
+            chain_id: FAMILY_CHAIN.to_owned(),
+            block_hash: "0xhistory230".to_owned(),
+            block_number: 230,
+            provenance: json!({"authority_kind": "registrar"}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    let mut events = vec![synthesised_release(
+        "rc-register-only-release",
+        ("ens_v1_registrar_l1", "ens"),
+        (&node, &labelhash),
+        230,
+        Uuid::from_u128(LAPSED_LEASE),
+    )];
+    events.extend(unnamed_lease_events(
+        "rc-register-only-grant",
+        &["RegistrationGranted", "ExpiryChanged"],
+        ("ens_v1_registrar_l1", "ens"),
+        (&node, &labelhash),
+        (RC_BUYER, 1_900_000_000),
+        230,
+        successor,
+    ));
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    publish_test_families(&database, 231).await?;
+
+    let served = (RC_BUYER, RC_OWNER);
+    assert_subname_served(&database, &node, served, "unregistered").await?;
+    assert_listed_as(&database, &node, RC_OWNER, "manager", served).await?;
+    assert_not_listed(&database, &node, RC_BUYER).await?;
+
+    database.cleanup().await
+}
+
+/// A renewal in grace keeps the lease, so the registry owner stays the child's owner and manager.
+#[tokio::test]
+async fn v2_renewed_surface_less_child_keeps_its_owner() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (node, labelhash) = seed_unnamed_lease_child(&database, LAPSED_EXPIRY).await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &unnamed_lease_events(
+            "rc-renewed",
+            &["RegistrationRenewed", "ExpiryChanged"],
+            ("ens_v1_registrar_l1", "ens"),
+            (&node, &labelhash),
+            (RC_OWNER, 1_900_000_000),
+            230,
+            Uuid::from_u128(LAPSED_LEASE),
+        ),
+    )
+    .await?;
+    publish_test_families(&database, 231).await?;
+
+    assert_child_served_to(&database, &node, RC_OWNER, "unregistered").await?;
+
+    database.cleanup().await
+}
+
+/// A BaseRegistrar `Transfer` without `reclaim` moves the token and leaves the registry record
+/// with the seller
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f).
+/// Project indexes the buyer under the lease's `ens:<node>` id, and both routes serve the buyer,
+/// who holds the lease, as `owner` and the seller, the registry owner, as `manager`: the buyer
+/// lists the child under `owner`, the seller under `manager` only, and the `.eth` registration
+/// count moves from the seller to the buyer. The parent's subnames keep their rows and count.
+#[tokio::test]
+async fn v2_transferred_surface_less_child_lists_for_its_holder() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (node, labelhash) = seed_unnamed_lease_child(&database, LIVE_EXPIRY).await?;
+    assert_child_served_to(&database, &node, RC_OWNER, "unregistered").await?;
+    let seller_count = eth_registration_count(&database, RC_OWNER).await?;
+    let (_, subnames_total) = eth_subnames(&database, "").await?;
+
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[unnamed_transfer(
+            "rc-sold-transfer",
+            (&node, &labelhash),
+            RC_BUYER,
+            232,
+            Uuid::from_u128(LAPSED_LEASE),
+        )],
+    )
+    .await?;
+    publish_test_families(&database, 233).await?;
+
+    let indexed: Vec<String> = sqlx::query_scalar(
+        "SELECT relation FROM project_address_name_index
+         WHERE address = $1 AND logical_name_id = $2 ORDER BY relation",
+    )
+    .bind(RC_BUYER)
+    .bind(format!("ens:{node}"))
+    .fetch_all(&database.pool)
+    .await?;
+    assert_eq!(
+        indexed,
+        ["effective_controller", "token_holder"],
+        "the buyer is a registry-child candidate under the lease's node id"
+    );
+    assert_child_served_split(&database, &node, RC_BUYER, RC_OWNER, "unregistered").await?;
+    assert_eq!(eth_registration_count(&database, RC_BUYER).await?, json!(1));
+    assert_eq!(
+        eth_registration_count(&database, RC_OWNER)
+            .await?
+            .as_u64()
+            .map(|count| count + 1),
+        seller_count.as_u64()
+    );
+    assert_eq!(eth_subnames(&database, "").await?.1, subnames_total);
+
+    database.cleanup().await
+}
+
+/// `reclaim` by the buyer after the transfer moves the registry record to the buyer too
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f):
+/// the buyer is owner and manager in one row, and the seller is listed for nothing.
+#[tokio::test]
+async fn v2_reclaimed_surface_less_child_lists_once_for_its_holder() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (node, labelhash) = seed_unnamed_lease_child(&database, LIVE_EXPIRY).await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            unnamed_transfer(
+                "rc-reclaim-transfer",
+                (&node, &labelhash),
+                RC_BUYER,
+                232,
+                Uuid::from_u128(LAPSED_LEASE),
+            ),
+            unnamed_lease_registry_transfer("rc-reclaim", &node, RC_BUYER, 234),
+        ],
+    )
+    .await?;
+    publish_test_families(&database, 235).await?;
+
+    assert_child_served_to(&database, &node, RC_BUYER, "unregistered").await?;
+    for (matched, rows, _) in address_rows_by_relation(&database, RC_BUYER).await? {
+        let listed = rows.iter().filter(|row| row["namehash"] == json!(node));
+        assert_eq!(listed.count(), 1, "{matched}: {rows:#?}");
+    }
+    assert_not_listed(&database, &node, RC_OWNER).await?;
+    assert_eq!(eth_registration_count(&database, RC_BUYER).await?, json!(1));
+
+    database.cleanup().await
+}
+
+/// A registry `setOwner` moves the registry record and not the token: the registrant still
+/// holds the lease and is the owner, and the new registry owner is the manager.
+#[tokio::test]
+async fn v2_surface_less_child_given_away_in_the_registry_keeps_its_holder_as_owner() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    let (node, _) = seed_unnamed_lease_child(&database, LIVE_EXPIRY).await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[unnamed_lease_registry_transfer(
+            "rc-set-owner",
+            &node,
+            RC_THIRD,
+            232,
+        )],
+    )
+    .await?;
+    publish_test_families(&database, 233).await?;
+
+    assert_child_served_split(&database, &node, RC_OWNER, RC_THIRD, "unregistered").await?;
+
+    database.cleanup().await
+}
+
+/// After a transfer, a release and a re-registration by a third address, whose `_register`
+/// sets it as registry owner
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f),
+/// the third address is owner and manager and neither the buyer nor the seller is listed.
+#[tokio::test]
+async fn v2_re_registered_surface_less_child_drops_the_former_holder() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (node, labelhash) = seed_unnamed_lease_child(&database, LAPSED_EXPIRY).await?;
+    let lease = Uuid::from_u128(LAPSED_LEASE);
+    let mut events = vec![
+        unnamed_transfer("rc-resold-transfer", (&node, &labelhash), RC_BUYER, 225, lease),
+        synthesised_release(
+            "rc-resold-release",
+            ("ens_v1_registrar_l1", "ens"),
+            (&node, &labelhash),
+            230,
+            lease,
+        ),
+        family_event(
+            "rc-resold-new-owner",
+            None,
+            Some(Uuid::from_u128(UNNAMED_LEASE_NODE_RESOURCE)),
+            "SubregistryChanged",
+            "ens_v1_registry_l1",
+            232,
+            0,
+            json!({"source_event": "NewOwner", "node": bigname_lookup::ens_namehash_hex("eth")?,
+                   "child_node": node, "labelhash": labelhash, "owner": RC_THIRD,
+                   "owner_getter": RC_THIRD, "emitter_role": "registry"}),
+        ),
+    ];
+    events.extend(unnamed_lease_events(
+        "rc-resold-grant",
+        &["RegistrationGranted", "ExpiryChanged"],
+        ("ens_v1_registrar_l1", "ens"),
+        (&node, &labelhash),
+        (RC_THIRD, LIVE_EXPIRY),
+        232,
+        lease,
+    ));
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    publish_test_families(&database, 233).await?;
+
+    assert_child_served_to(&database, &node, RC_THIRD, "unregistered").await?;
+    assert_not_listed(&database, &node, RC_BUYER).await?;
+    assert_not_listed(&database, &node, RC_OWNER).await?;
+    assert_eq!(eth_registration_count(&database, RC_THIRD).await?, json!(1));
+
+    database.cleanup().await
+}
+
+/// A grant with the zero registrant (Interpret's grant for a bare `NameRenewed`) names no
+/// holder: the registry owner stays owner and manager.
+#[tokio::test]
+async fn v2_surface_less_child_with_a_zero_registrant_serves_its_registry_owner() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (node, labelhash) = seed_unnamed_lease_child(&database, LAPSED_EXPIRY).await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &unnamed_lease_events(
+            "rc-zero-grant",
+            &["RegistrationGranted", "ExpiryChanged"],
+            ("ens_v1_registrar_l1", "ens"),
+            (&node, &labelhash),
+            ("0x0000000000000000000000000000000000000000", LIVE_EXPIRY),
+            230,
+            Uuid::from_u128(LAPSED_LEASE),
+        ),
+    )
+    .await?;
+    publish_test_families(&database, 231).await?;
+
+    assert_child_served_to(&database, &node, RC_OWNER, "unregistered").await?;
+
+    database.cleanup().await
+}
+
+/// A released lease has no holder, whoever held it last: after a transfer and a release the
+/// child is listed for nobody, `released`, and omitted under `include_expired=false`.
+#[tokio::test]
+async fn v2_transferred_then_released_surface_less_child_serves_no_one() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (node, labelhash) = seed_unnamed_lease_child(&database, LAPSED_EXPIRY).await?;
+    let lease = Uuid::from_u128(LAPSED_LEASE);
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            unnamed_transfer("rc-lost-transfer", (&node, &labelhash), RC_BUYER, 225, lease),
+            synthesised_release(
+                "rc-lost-release",
+                ("ens_v1_registrar_l1", "ens"),
+                (&node, &labelhash),
+                230,
+                lease,
+            ),
+        ],
+    )
+    .await?;
+    publish_test_families(&database, 231).await?;
+
+    assert_not_listed(&database, &node, RC_BUYER).await?;
+    assert_not_listed(&database, &node, RC_OWNER).await?;
+    let (subnames, _) = eth_subnames(&database, "").await?;
+    let subname = served_child(&subnames, &node);
+    assert_eq!(subname["registration_status"], json!("released"), "{subname:#}");
+    assert_eq!(subname.get("owner"), None, "{subname:#}");
+    assert_eq!(subname.get("manager"), None, "{subname:#}");
+    let (fenced, _) = eth_subnames(&database, "&include_expired=false").await?;
+    assert!(
+        fenced.iter().all(|row| row["namehash"] != json!(node)),
+        "{fenced:#?}"
+    );
+
+    database.cleanup().await
+}
+
+/// Publish the Base families at `target` over blocks 200..=241 of `base-mainnet`.
+async fn publish_base_families(database: &TestDatabase, target: i64) -> Result<()> {
+    const BASE: &str = "base-mainnet";
+    let blocks = (200..=241)
+        .map(|number| {
+            raw_block(
+                BASE,
+                &format!("0xhistory{number}"),
+                (number > 200)
+                    .then(|| format!("0xhistory{}", number - 1))
+                    .as_deref(),
+                number,
+                1_700_000_000 + number,
+            )
+        })
+        .collect::<Vec<_>>();
+    upsert_phase_raw_blocks(&database.pool, &blocks).await?;
+    let hash = format!("0xhistory{target}");
+    let timestamp = OffsetDateTime::from_unix_timestamp(1_700_000_000 + target)?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({"base": {
+            "chain_id": BASE, "block_number": target, "block_hash": hash,
+            "timestamp": timestamp.format(&time::format_description::well_known::Rfc3339)?
+        }}))
+        .await?;
+    rebuild_fixture_families(&database.pool, BASE, target, &hash).await
+}
+
+/// The Basenames registrar runs the same lease and release as the ENSv1 BaseRegistrar: a name
+/// stays unavailable through its 90-day grace
+/// (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L294-L297 @ basenames@1809bbc)
+/// (upstream: .refs/basenames/src/util/Constants.sol:L15 @ basenames@1809bbc)
+/// and expiry leaves the registry record, which only a registration or a `reclaim` writes
+/// (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L414-L425 @ basenames@1809bbc)
+/// (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L265-L276 @ basenames@1809bbc)
+/// (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L327-L330 @ basenames@1809bbc)
+/// (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L458-L466 @ basenames@1809bbc)
+/// (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L173-L176 @ basenames@1809bbc).
+/// crates/adapters/src/schema_v2/protocol/v1.rs routes `basenames_base_registrar` to the same
+/// registrar adapter, so a released surface-less child of a Basenames parent loses its owner
+/// and manager on the subnames route too.
+/// `base.eth`, and under it `numeric`, a Basenames name whose label bigname never observed:
+/// registered to RC_OWNER at 202 until `expiry`, its registry NewOwner beside the unnamed lease.
+/// Published at 220. Returns the child node, its labelhash and the lease's resource.
+async fn seed_basenames_lease_child(
+    database: &TestDatabase,
+    expiry: i64,
+) -> Result<(String, String, Uuid)> {
+    const BASE: &str = "base-mainnet";
+    seed_family_name_on(database, "base.eth", 0x7f4_0000, "basenames", "basenames", BASE)
+        .await?;
+    let parent = bigname_lookup::ens_namehash_hex("base.eth")?;
+    let labelhash = child_labelhash("numeric");
+    let node = format!(
+        "{:#x}",
+        alloy_primitives::keccak256(
+            [
+                alloy_primitives::hex::decode(&parent)?,
+                alloy_primitives::hex::decode(&labelhash)?
+            ]
+            .concat()
+        )
+    );
+    let lease = Uuid::from_u128(0x7f4_0021);
+    upsert_test_resources(
+        &database.pool,
+        &[Resource {
+            resource_id: lease,
+            token_lineage_id: None,
+            chain_id: BASE.to_owned(),
+            block_hash: "0xhistory202".to_owned(),
+            block_number: 202,
+            provenance: json!({"authority_kind": "registrar"}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    let mut events = vec![family_event(
+        "rc-base-new-owner",
+        None,
+        None,
+        "SubregistryChanged",
+        "basenames_base_registry",
+        202,
+        0,
+        json!({"source_event": "NewOwner", "node": parent, "child_node": node,
+               "labelhash": labelhash, "owner": RC_OWNER}),
+    )];
+    events.extend(unnamed_lease_events(
+        "rc-base-grant",
+        &["RegistrationGranted", "ExpiryChanged"],
+        ("basenames_base_registrar", "basenames"),
+        (&node, &labelhash),
+        (RC_OWNER, expiry),
+        202,
+        lease,
+    ));
+    for event in &mut events {
+        event.namespace = "basenames".to_owned();
+        event.chain_id = Some(BASE.to_owned());
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    publish_base_families(database, 220).await?;
+    Ok((node, labelhash, lease))
+}
+
+
+#[tokio::test]
+async fn v2_released_surface_less_basenames_child_serves_no_owner_or_manager() -> Result<()> {
+    const BASE: &str = "base-mainnet";
+    let database = TestDatabase::new_migrated().await?;
+    let (node, labelhash, lease) = seed_basenames_lease_child(&database, LAPSED_EXPIRY).await?;
+    let uri = "/v1/names/base.eth/subnames?namespace=basenames&page_size=10";
+    let subnames = rows_of(&read_family_pages(&database, uri).await?);
+    let subname = served_child(&subnames, &node);
+    assert_eq!(subname["owner"], json!(RC_OWNER), "{subname:#}");
+    assert_eq!(subname["manager"], json!(RC_OWNER), "{subname:#}");
+
+    let mut release = synthesised_release(
+        "rc-base-release",
+        ("basenames_base_registrar", "basenames"),
+        (&node, &labelhash),
+        230,
+        lease,
+    );
+    release.chain_id = Some(BASE.to_owned());
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[release]).await?;
+    publish_base_families(&database, 231).await?;
+    let subnames = rows_of(&read_family_pages(&database, uri).await?);
+    let subname = served_child(&subnames, &node);
+    assert_eq!(subname["registration_status"], json!("released"), "{subname:#}");
+    assert_eq!(subname.get("owner"), None, "{subname:#}");
+    assert_eq!(subname.get("manager"), None, "{subname:#}");
+
+    database.cleanup().await
+}
+
+/// The Basenames registrar's token moves without the registry record too, until `reclaim`
+/// (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L327-L330 @ basenames@1809bbc):
+/// the subnames row serves the buyer as `owner` and the registry owner as `manager`. Address
+/// names list no Basenames registry child, which reads the ENSv1 registry's NewOwners only.
+#[tokio::test]
+async fn v2_transferred_surface_less_basenames_child_serves_its_holder() -> Result<()> {
+    const BASE: &str = "base-mainnet";
+    let database = TestDatabase::new_migrated().await?;
+    let (node, labelhash, lease) = seed_basenames_lease_child(&database, LIVE_EXPIRY).await?;
+    let mut transfer = unnamed_transfer("rc-base-transfer", (&node, &labelhash), RC_BUYER, 225, lease);
+    transfer.source_family = "basenames_base_registrar".to_owned();
+    transfer.namespace = "basenames".to_owned();
+    transfer.chain_id = Some(BASE.to_owned());
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[transfer]).await?;
+    publish_base_families(&database, 231).await?;
+
+    let uri = "/v1/names/base.eth/subnames?namespace=basenames&page_size=10";
+    let subnames = rows_of(&read_family_pages(&database, uri).await?);
+    let subname = served_child(&subnames, &node);
+    assert_eq!(subname["owner"], json!(RC_BUYER), "{subname:#}");
+    assert_eq!(subname["manager"], json!(RC_OWNER), "{subname:#}");
+    for address in [RC_BUYER, RC_OWNER] {
+        let rows = rows_of(
+            &read_family_pages(
+                &database,
+                &format!("/v1/addresses/{address}/names?namespace=basenames&page_size=10"),
+            )
+            .await?,
+        );
+        assert!(
+            rows.iter().all(|row| row["namehash"] != json!(node)),
+            "{address}: {rows:#?}"
+        );
+    }
+
     database.cleanup().await
 }

@@ -23,6 +23,17 @@ pub struct ChildrenCurrentRow {
     /// or ENSv1 registrar event observed: its lifecycle is projected without a composed name
     /// (`families::topology::FamilyChildRow::lifecycle_shadow`).
     pub lifecycle_shadow: bool,
+    /// The child is a lifecycle shadow whose registry owner is the NameWrapper that observed it,
+    /// holding the node for a token holder bigname does not record
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f)
+    /// (`families::topology::FamilyChildRow::wrapper_held`).
+    pub wrapper_held: bool,
+    /// The child has no name surface and its node's registrar lease has been released
+    /// (`families::topology::FamilyChildRow::released_lease`).
+    pub released_lease: bool,
+    /// The holder of the node's `.eth` or Basenames lease when the child has no name surface and
+    /// the registrar retains one (`families::topology::FamilyChildRow::token_holder`).
+    pub token_holder: Option<String>,
     pub provenance: Value,
     pub chain_positions: Value,
     pub canonicality_summary: Value,

@@ -271,6 +271,7 @@ fn push_declared_resolver_arm(
           ON {}
          AND record.source_family =
              resolver.declared_summary #>> '{{classification,source_family}}'
+         AND record.source_family IN ('ens_v1_resolver_l1', 'ens_v2_resolver_l1')
          AND (record.source_family <> 'ens_v2_resolver_l1'
               OR (record.namespace = pointer.pointer_namespace
                   AND record.source_manifest_id = declaration.manifest_id))
@@ -303,7 +304,11 @@ fn push_record_link_ctes(
             FROM bigname_phase.normalized_events link
             WHERE link.event_kind = 'ResolverRecordLinked'
               AND link.after_state ->> 'storage_model' = 'resolver_record_id'
-              AND lower(link.after_state ->> 'resolver') IN (SELECT resolver_address FROM pointers)",
+              AND (link.chain_id, lower(link.after_state ->> 'resolver'),
+                   lower(link.after_state ->> 'node')) IN (
+                  SELECT chain_id, resolver_address, namehash FROM pointers
+                  UNION
+                  SELECT chain_id, resolver_address, {DEFAULT_NODE} FROM pointers)",
         position("link")
     ));
     push_readable_event(builder, "link", published);

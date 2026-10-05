@@ -9,6 +9,12 @@ async fn v2_history_routes_refuse_while_interpret_redo_is_in_progress() -> Resul
         "/v1/events?name=history.eth&page_size=2".to_owned(),
         "/v1/names/history.eth/history?page_size=2".to_owned(),
         format!("/v1/addresses/{ADDRESS}/history?page_size=2"),
+        // Resolving a registration filter reads events by block hash, an index the walk index
+        // set drops for an Interpret redo (ops/walk-index-set), so it must stay behind the fence.
+        format!(
+            "/v1/permissions?registration_id={}",
+            Uuid::from_u128(0x7100)
+        ),
     ];
 
     for route in &routes {

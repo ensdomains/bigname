@@ -1,0 +1,220 @@
+{
+  "case": {
+    "id": "v2_registry_self_subregistry_sepolia_11840453_11840461",
+    "runner": "ens_v2_registry",
+    "manifests": [
+      {
+        "namespace": "ens",
+        "source_family": "ens_v2_registry_l1",
+        "chain": "ethereum-sepolia",
+        "deployment_epoch": "ens_v2_sepolia_20261001",
+        "file_path": "manifests/sepolia/ethereum/ens/ens_v2_registry_l1/v2.toml",
+        "role": "registry",
+        "address": "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4",
+        "contract_instance_id": "00000000-0000-0000-0000-000000000001"
+      }
+    ],
+    "blocks": [
+      {
+        "hash": "0xa2f65a4962bafa0c5fc93119a77f3ec9d02f10b0fd1e0227ba186678da84b363",
+        "number": 11840453,
+        "timestamp": 1791094020
+      },
+      {
+        "hash": "0x4995dcde789a37b4767197256eddc3307509ae274b1d3dd92d387460f10968c1",
+        "number": 11840461,
+        "timestamp": 1791094128
+      }
+    ],
+    "logs": [
+      {
+        "chain": "ethereum-sepolia",
+        "block_hash": "0xa2f65a4962bafa0c5fc93119a77f3ec9d02f10b0fd1e0227ba186678da84b363",
+        "block_number": 11840453,
+        "transaction_hash": "0xea03502e4a0eaa4a65c2021bb5d9f77bfb531c4568805e09054454c34607454e",
+        "transaction_index": 73,
+        "log_index": 118,
+        "emitting_address": "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4",
+        "topics": [
+          "0x2fe093918572373e9f1f0368f414dffd0043a74ae8c9fd7b0e390b26a0d20b6e",
+          "0x270a86934eb6b880bf8525961fcf17449d0a8fa821b10112c1669e3a00000000",
+          "0x270a86934eb6b880bf8525961fcf17449d0a8fa821b10112c1669e3a9608934d",
+          "0x000000000000000000000000f633e7fc17e2bbe0d0965d18ec1821dcb754a3d3"
+        ],
+        "data": "0x000000000000000000000000000000000000000000000000000000000000006000000000000000000000000081a4d25ae3f981a67ab6098aa8ea2b7b821d734e000000000000000000000000000000000000000000000000000000006ca32084000000000000000000000000000000000000000000000000000000000000000c616e612d706f727461626c650000000000000000000000000000000000000000"
+      },
+      {
+        "chain": "ethereum-sepolia",
+        "block_hash": "0xa2f65a4962bafa0c5fc93119a77f3ec9d02f10b0fd1e0227ba186678da84b363",
+        "block_number": 11840453,
+        "transaction_hash": "0xea03502e4a0eaa4a65c2021bb5d9f77bfb531c4568805e09054454c34607454e",
+        "transaction_index": 73,
+        "log_index": 119,
+        "emitting_address": "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4",
+        "topics": [
+          "0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62",
+          "0x000000000000000000000000f633e7fc17e2bbe0d0965d18ec1821dcb754a3d3",
+          "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "0x00000000000000000000000081a4d25ae3f981a67ab6098aa8ea2b7b821d734e"
+        ],
+        "data": "0x270a86934eb6b880bf8525961fcf17449d0a8fa821b10112c1669e3a000000000000000000000000000000000000000000000000000000000000000000000001"
+      },
+      {
+        "chain": "ethereum-sepolia",
+        "block_hash": "0xa2f65a4962bafa0c5fc93119a77f3ec9d02f10b0fd1e0227ba186678da84b363",
+        "block_number": 11840453,
+        "transaction_hash": "0xea03502e4a0eaa4a65c2021bb5d9f77bfb531c4568805e09054454c34607454e",
+        "transaction_index": 73,
+        "log_index": 120,
+        "emitting_address": "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4",
+        "topics": [
+          "0x35190fb7cb1f442974e3c68fa2be9cf56828d0043b1cfcfbd17b4efa85669296",
+          "0x270a86934eb6b880bf8525961fcf17449d0a8fa821b10112c1669e3a00000000",
+          "0x270a86934eb6b880bf8525961fcf17449d0a8fa821b10112c1669e3a00000000"
+        ],
+        "data": "0x"
+      },
+      {
+        "chain": "ethereum-sepolia",
+        "block_hash": "0xa2f65a4962bafa0c5fc93119a77f3ec9d02f10b0fd1e0227ba186678da84b363",
+        "block_number": 11840453,
+        "transaction_hash": "0xea03502e4a0eaa4a65c2021bb5d9f77bfb531c4568805e09054454c34607454e",
+        "transaction_index": 73,
+        "log_index": 121,
+        "emitting_address": "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4",
+        "topics": [
+          "0x0d35bf721a39b614de00ca5038e1deb0cb0c69a278645e83405a7226cf80ba3c",
+          "0x270a86934eb6b880bf8525961fcf17449d0a8fa821b10112c1669e3a00000000",
+          "0x00000000000000000000000081a4d25ae3f981a67ab6098aa8ea2b7b821d734e"
+        ],
+        "data": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000001110000000000000000000000000000001100000"
+      },
+      {
+        "chain": "ethereum-sepolia",
+        "block_hash": "0xa2f65a4962bafa0c5fc93119a77f3ec9d02f10b0fd1e0227ba186678da84b363",
+        "block_number": 11840453,
+        "transaction_hash": "0xea03502e4a0eaa4a65c2021bb5d9f77bfb531c4568805e09054454c34607454e",
+        "transaction_index": 73,
+        "log_index": 122,
+        "emitting_address": "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4",
+        "topics": [
+          "0xca9c8d517128edd416adf5719242ca6ff93ce234442d95234da53c0ae8a10540",
+          "0x270a86934eb6b880bf8525961fcf17449d0a8fa821b10112c1669e3a00000000",
+          "0x000000000000000000000000d4ebcbbdf463c9c45784603db0ddd499bc44a8b4",
+          "0x000000000000000000000000f633e7fc17e2bbe0d0965d18ec1821dcb754a3d3"
+        ],
+        "data": "0x"
+      },
+      {
+        "chain": "ethereum-sepolia",
+        "block_hash": "0xa2f65a4962bafa0c5fc93119a77f3ec9d02f10b0fd1e0227ba186678da84b363",
+        "block_number": 11840453,
+        "transaction_hash": "0xea03502e4a0eaa4a65c2021bb5d9f77bfb531c4568805e09054454c34607454e",
+        "transaction_index": 73,
+        "log_index": 123,
+        "emitting_address": "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4",
+        "topics": [
+          "0x9b6b420ff87c91604d447e507cbeedda5df2fa669a6b6534375e41fd3905a8d5",
+          "0x270a86934eb6b880bf8525961fcf17449d0a8fa821b10112c1669e3a00000000",
+          "0x000000000000000000000000dc4a563d00f5c3012b699794eb9e13a561be386f",
+          "0x000000000000000000000000f633e7fc17e2bbe0d0965d18ec1821dcb754a3d3"
+        ],
+        "data": "0x"
+      },
+      {
+        "chain": "ethereum-sepolia",
+        "block_hash": "0x4995dcde789a37b4767197256eddc3307509ae274b1d3dd92d387460f10968c1",
+        "block_number": 11840461,
+        "transaction_hash": "0xae61dbac6716e749f0d6a2f3560adc2aaa7b7a81d3ba5288809c3737b4a3793e",
+        "transaction_index": 62,
+        "log_index": 86,
+        "emitting_address": "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4",
+        "topics": [
+          "0x2fe093918572373e9f1f0368f414dffd0043a74ae8c9fd7b0e390b26a0d20b6e",
+          "0x314b109f722c50f22ae1c7cbbd36a10e5e245e4b5684992c5d8501a100000000",
+          "0x314b109f722c50f22ae1c7cbbd36a10e5e245e4b5684992c5d8501a1da56c012",
+          "0x000000000000000000000000f633e7fc17e2bbe0d0965d18ec1821dcb754a3d3"
+        ],
+        "data": "0x000000000000000000000000000000000000000000000000000000000000006000000000000000000000000081a4d25ae3f981a67ab6098aa8ea2b7b821d734e000000000000000000000000000000000000000000000000000000006ca320f0000000000000000000000000000000000000000000000000000000000000000e6272756e6f2d706f727461626c65000000000000000000000000000000000000"
+      },
+      {
+        "chain": "ethereum-sepolia",
+        "block_hash": "0x4995dcde789a37b4767197256eddc3307509ae274b1d3dd92d387460f10968c1",
+        "block_number": 11840461,
+        "transaction_hash": "0xae61dbac6716e749f0d6a2f3560adc2aaa7b7a81d3ba5288809c3737b4a3793e",
+        "transaction_index": 62,
+        "log_index": 87,
+        "emitting_address": "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4",
+        "topics": [
+          "0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62",
+          "0x000000000000000000000000f633e7fc17e2bbe0d0965d18ec1821dcb754a3d3",
+          "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "0x00000000000000000000000081a4d25ae3f981a67ab6098aa8ea2b7b821d734e"
+        ],
+        "data": "0x314b109f722c50f22ae1c7cbbd36a10e5e245e4b5684992c5d8501a1000000000000000000000000000000000000000000000000000000000000000000000001"
+      },
+      {
+        "chain": "ethereum-sepolia",
+        "block_hash": "0x4995dcde789a37b4767197256eddc3307509ae274b1d3dd92d387460f10968c1",
+        "block_number": 11840461,
+        "transaction_hash": "0xae61dbac6716e749f0d6a2f3560adc2aaa7b7a81d3ba5288809c3737b4a3793e",
+        "transaction_index": 62,
+        "log_index": 88,
+        "emitting_address": "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4",
+        "topics": [
+          "0x35190fb7cb1f442974e3c68fa2be9cf56828d0043b1cfcfbd17b4efa85669296",
+          "0x314b109f722c50f22ae1c7cbbd36a10e5e245e4b5684992c5d8501a100000000",
+          "0x314b109f722c50f22ae1c7cbbd36a10e5e245e4b5684992c5d8501a100000000"
+        ],
+        "data": "0x"
+      },
+      {
+        "chain": "ethereum-sepolia",
+        "block_hash": "0x4995dcde789a37b4767197256eddc3307509ae274b1d3dd92d387460f10968c1",
+        "block_number": 11840461,
+        "transaction_hash": "0xae61dbac6716e749f0d6a2f3560adc2aaa7b7a81d3ba5288809c3737b4a3793e",
+        "transaction_index": 62,
+        "log_index": 89,
+        "emitting_address": "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4",
+        "topics": [
+          "0x0d35bf721a39b614de00ca5038e1deb0cb0c69a278645e83405a7226cf80ba3c",
+          "0x314b109f722c50f22ae1c7cbbd36a10e5e245e4b5684992c5d8501a100000000",
+          "0x00000000000000000000000081a4d25ae3f981a67ab6098aa8ea2b7b821d734e"
+        ],
+        "data": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000001110000000000000000000000000000001100000"
+      },
+      {
+        "chain": "ethereum-sepolia",
+        "block_hash": "0x4995dcde789a37b4767197256eddc3307509ae274b1d3dd92d387460f10968c1",
+        "block_number": 11840461,
+        "transaction_hash": "0xae61dbac6716e749f0d6a2f3560adc2aaa7b7a81d3ba5288809c3737b4a3793e",
+        "transaction_index": 62,
+        "log_index": 90,
+        "emitting_address": "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4",
+        "topics": [
+          "0xca9c8d517128edd416adf5719242ca6ff93ce234442d95234da53c0ae8a10540",
+          "0x314b109f722c50f22ae1c7cbbd36a10e5e245e4b5684992c5d8501a100000000",
+          "0x000000000000000000000000d4ebcbbdf463c9c45784603db0ddd499bc44a8b4",
+          "0x000000000000000000000000f633e7fc17e2bbe0d0965d18ec1821dcb754a3d3"
+        ],
+        "data": "0x"
+      },
+      {
+        "chain": "ethereum-sepolia",
+        "block_hash": "0x4995dcde789a37b4767197256eddc3307509ae274b1d3dd92d387460f10968c1",
+        "block_number": 11840461,
+        "transaction_hash": "0xae61dbac6716e749f0d6a2f3560adc2aaa7b7a81d3ba5288809c3737b4a3793e",
+        "transaction_index": 62,
+        "log_index": 91,
+        "emitting_address": "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4",
+        "topics": [
+          "0x9b6b420ff87c91604d447e507cbeedda5df2fa669a6b6534375e41fd3905a8d5",
+          "0x314b109f722c50f22ae1c7cbbd36a10e5e245e4b5684992c5d8501a100000000",
+          "0x000000000000000000000000dc4a563d00f5c3012b699794eb9e13a561be386f",
+          "0x000000000000000000000000f633e7fc17e2bbe0d0965d18ec1821dcb754a3d3"
+        ],
+        "data": "0x"
+      }
+    ]
+  }
+}

@@ -507,6 +507,31 @@ CREATE INDEX IF NOT EXISTS normalized_events_basenames_record_node_resolver_idx
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
+-- The record-ID arm of history's record attribution (crates/storage/src/history/attribution):
+-- a selected record's writes by resolver and record id, and the record links on a pointer's
+-- resolver at its node or the zero node.
+CREATE INDEX IF NOT EXISTS normalized_events_record_id_write_idx
+    ON normalized_events (
+        chain_id,
+        lower(after_state ->> 'resolver'),
+        (after_state ->> 'resolver_record_id')
+    )
+    WHERE event_kind = 'RecordChanged'
+      AND after_state ->> 'storage_model' = 'resolver_record_id'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
+CREATE INDEX IF NOT EXISTS normalized_events_record_id_link_idx
+    ON normalized_events (
+        chain_id,
+        lower(after_state ->> 'resolver'),
+        lower(after_state ->> 'node')
+    )
+    WHERE event_kind = 'ResolverRecordLinked'
+      AND after_state ->> 'storage_model' = 'resolver_record_id'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
 CREATE INDEX IF NOT EXISTS normalized_events_resolver_alias_history_idx
     ON normalized_events (
         chain_id,
@@ -819,6 +844,13 @@ CREATE INDEX IF NOT EXISTS normalized_events_projection_idx
         block_number,
         normalized_event_id
     );
+
+-- The manifest sync's latest SourceManifestUpdated per manifest at every runner start
+-- (crates/manifests/src/schema_v2_sync_state.rs and schema_v2_event_history.rs). Keep it
+-- identical to migrations/20261004120000_normalized_events_manifest_idx.sql.
+CREATE INDEX IF NOT EXISTS normalized_events_manifest_idx
+    ON normalized_events (source_manifest_id, event_kind, normalized_event_id DESC)
+    WHERE source_manifest_id IS NOT NULL;
 
 COMMENT ON TABLE normalized_events IS
     'This table stores plain protocol events from the interpreter.';

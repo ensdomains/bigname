@@ -1,11 +1,16 @@
 //! The address-names rows of ENSv1 registry children with no name surface: a node an
 //! `ens_v1_registry_l1` NewOwner created (`setSubnodeOwner` or `setSubnodeRecord`) and no
 //! registrar, NameWrapper or other label-bearing event ever named. No name row composes for such a
-//! node, so the ordinary read (`address_names.rs`) lists nothing for it; this read lists it for
-//! its current registry owner as `token_holder` and `effective_controller` (it has no token, so
-//! its registry owner is its owner and its manager), as its parent's subnames route serves it
-//! (`families::topology::load_owned_registry_children`): the same served name, a non-name form
-//! when the label is unproven (docs/glossary.md#non-name-form), and the same owner.
+//! node, so the ordinary read (`address_names.rs`) lists nothing for it; this read lists it as
+//! its parent's subnames route serves it (`families::topology::load_owned_registry_children`):
+//! the same served name, a non-name form when the label is unproven
+//! (docs/glossary.md#non-name-form), for its owner as `token_holder` and for its manager, its
+//! current registry owner, as `effective_controller`. A `.eth` or Basenames child has a token
+//! while the registrar retains its lease, and that token moves without the registry record until
+//! `reclaim`
+//! (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f),
+//! so the lease's holder is its owner; any other child has no token, and its registry owner is
+//! both.
 //!
 //! The candidates are the address index's `effective_controller` ids with no name surface, which
 //! Project derives for such a node from its registry owner facts (crates/project/src/families/
@@ -24,9 +29,9 @@ use crate::families::{
     topology::{RegistryChildRow, load_owned_registry_children, published_surface_exists},
 };
 
-/// The composed rows of the surface-less registry children `address` owns, in `namespace` when
-/// given, in the relation-row shape of `address_names.rs` with `registry_child` set and the
-/// served owner.
+/// The composed rows of the surface-less registry children `address` owns or manages, in
+/// `namespace` when given, in the relation-row shape of `address_names.rs` with
+/// `registry_child` set and the served owner and manager.
 ///
 /// "Surface-less" is relative to the chain's Project publication: a surface Interpret wrote
 /// after it is not part of it, exactly as the ordinary compositor leaves such a surface out
@@ -75,19 +80,37 @@ pub(super) async fn compose_registry_child_rows(
     }
     let mut rows = Vec::new();
     for (chain_id, (published_block, ids)) in by_chain {
-        let children =
+        let mut children: Vec<RegistryChildRow> =
             load_owned_registry_children(conn, &chain_id, address, &ids, published_block).await?;
+        // The NameWrapper holds such a child for a token holder, its owner and manager, whom the
+        // address index does not record; the child is listed for neither
+        // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f).
+        // A released lease leaves its registry record behind: the registrar writes it only
+        // on a registration other than `registerOnly`
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L128 @ ens_v1@91c966f)
+        // or a `reclaim` by a live token's holder or an address it approved
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f),
+        // and a released name has no owner or manager, so that child is listed for neither.
+        children.retain(|child| !child.wrapper_held && !child.released_lease);
         if children.is_empty() {
             continue;
         }
         let publication = servable_publication(conn, &chain_id).await?;
         let (provenance, chain_positions, canonicality_summary) = publication_stamps(&publication);
         let last_recomputed_at = crate::time::format_timestamp(publication.block_timestamp);
-        // A child has no token, so its registry owner is both its owner and its manager.
-        rows.extend(children.iter().flat_map(|child: &RegistryChildRow| {
-            ["token_holder", "effective_controller"].map(|relation| {
+        let address = address.to_ascii_lowercase();
+        for child in &children {
+            let served_owner = child.token_holder.as_deref().unwrap_or(&child.owner);
+            let relations = [
+                (served_owner == address).then_some("token_holder"),
+                (child.owner == address).then_some("effective_controller"),
+            ];
+            rows.extend(relations.into_iter().flatten().map(|relation| {
                 json!({
-                    "address": child.owner,
+                    "address": address,
                     "logical_name_id": child.logical_name_id,
                     "relation": relation,
                     "namespace": child.namespace,
@@ -107,12 +130,13 @@ pub(super) async fn compose_registry_child_rows(
                     "manifest_version": 1,
                     "last_recomputed_at": last_recomputed_at,
                     "registry_child": true,
-                    "served_owner": child.owner,
+                    "served_owner": served_owner,
+                    "served_manager": child.owner,
                     "served_authority": child.authority,
                     "served_lifecycle_shadow": child.lifecycle_shadow,
                 })
-            })
-        }));
+            }));
+        }
     }
     Ok(rows)
 }

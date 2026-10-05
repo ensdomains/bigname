@@ -12,6 +12,7 @@ use super::{
     error::ErrorCode,
     history::HistoryRowSubject,
     name_filter::NameMatch,
+    namespaces::ResolutionProtocol,
     params::SortOrder,
     permission_support::UnlistedPermissionSurface,
     permission_values::GrantRelation,
@@ -338,6 +339,7 @@ fn every_named_openapi_enum_matches_its_complete_producer_vocabulary() {
     serde_enum!(AddressNamesDedupe: Name, Registration);
     serde_enum!(WrapperState: Wrapped, Emancipated, Locked);
     serde_enum!(Authority: EnsV0, EnsV1, EnsV2);
+    serde_enum!(ResolutionProtocol: EnsV1, EnsV2);
     serde_enum!(Relation: Owner, Manager, RoleHolder, ResolvesTo, FormerOwner);
     serde_enum!(AddressNamesSort: Name, ExpiresAt, RegisteredAt, CreatedAt);
     serde_enum!(UnlistedPermissionSurface:

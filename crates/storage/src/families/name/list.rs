@@ -384,7 +384,8 @@ async fn inexact_expiry_names(conn: &mut PgConnection, namespace: &str) -> Resul
 
 /// Keeps the walk's names that `filter` can list: with `authorities`, a name whose stored
 /// summary selects an arm that can serve one of them (the composed row decides, at the same
-/// publication); with `parent`, a name one label below it.
+/// publication); with `parent`, a name one label below it. The stored spelling is exact for
+/// `parent`: Interpret activates a surface only when every label is already normalized.
 const EXPIRY_PAIRS_PRUNE: &str = "
                      AND ($7::text[] IS NULL OR EXISTS (
                          SELECT 1 FROM bigname_phase.project_name_summary summary

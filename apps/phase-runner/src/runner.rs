@@ -69,6 +69,7 @@ pub struct PhaseRunner {
     timing: TimingConfig,
     watch_set_coverage_attestations: BTreeMap<String, String>,
     manifest_authority_audit_before_emit: Option<Arc<dyn Fn() + Send + Sync>>,
+    redo_notices_on_stderr: bool,
     before_redo_progress_write: Option<batch::BeforeRedoProgressWrite>,
     before_phase_context: Option<context::BeforePhaseContext>,
     after_required_redo_catch_up: Option<live_follow::AfterRequiredRedoCatchUp>,
@@ -106,6 +107,7 @@ impl PhaseRunner {
             timing,
             watch_set_coverage_attestations: BTreeMap::new(),
             manifest_authority_audit_before_emit: None,
+            redo_notices_on_stderr: false,
             before_redo_progress_write: None,
             before_phase_context: None,
             after_required_redo_catch_up: None,
@@ -287,12 +289,7 @@ impl PhaseRunner {
                     .stopped_before_start(stop_clock, chain, phase_name, &mode)
                     .await;
             };
-            if phase_name == PhaseName::Interpret
-                && let Some(audit) = session.manifest_authority_audit.as_ref()
-            {
-                self.before_manifest_authority_audit_emit();
-                audit.emit();
-            }
+            self.report_redo_start(&chain.chain_id, phase_name, &session);
             Some(session)
         } else {
             let started = until_cancelled(

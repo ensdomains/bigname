@@ -280,7 +280,13 @@ Family indexes serve these concrete readers:
   parents through `project_child_edge_candidate_child_idx`, by chain, namespace and child
   node, and find a registry instance's ENSv2 registrations through
   `project_child_registration_state_registry_idx`; both primary keys lead with a column
-  those lookups do not bind.
+  those lookups do not bind. The registry children an address owns read their edges through
+  the same index by their candidate nodes rather than by parent.
+- The same child reads, and the registry children an address owns, find the registrar lease
+  events of a child with no name surface through `project_lifecycle_event_namehash_idx`, by
+  chain and the child node, to tell whether its lease has been released and who holds it; the
+  primary key leads with the lease's resource, which the child does not know. Children with an
+  active named surface at the clock never probe, and the child counts read neither probe.
 - The name-ordered walks (`storage:families.name.search_candidates` and
   `storage:families.name.bound_candidates`) can read `name_surfaces_name_order_idx` in page
   order, `(raw_name, namespace, namehash, logical_name_id)` over active, readable surfaces, with
@@ -330,6 +336,15 @@ row:
 | Index | Serves |
 | --- | --- |
 | `name_surfaces_name_order_idx` | `storage:families.name.search_candidates` and `storage:families.name.bound_candidates`: readable surfaces in name order after the keyset cursor |
+
+History's record attribution (`crates/storage/src/history/attribution`) adds two read-only
+indexes on `normalized_events`, installed by the normalized-events baseline and
+`20261003120000_normalized_events_record_id_attribution_indexes.sql` and changing no row:
+
+| Index | Serves |
+| --- | --- |
+| `normalized_events_record_id_write_idx` | `push_record_link_arm` in `history/attribution/sql.rs`: a selected record's `RecordChanged` writes by chain, resolver and record id |
+| `normalized_events_record_id_link_idx` | the `links` CTE of `push_record_link_ctes` in `history/attribution/sql.rs`: the `ResolverRecordLinked` rows on a pointer's chain and resolver at its node or the zero node |
 
 When an ENSv1 BaseRegistrar manifest admits ordinary numeric registration and renewal,
 Interpret retains the registrar resource, token lineage, owner and expiry independently of
@@ -486,16 +501,26 @@ the field out. The inventory reads behind `GET /v1/names/{name}`, `GET /v1/names
 unsupported mirror row attributes nothing, so under `Load` and `Given` it carries an empty list. No response, guard or comparison reads the field, and on a resolver with
 many writes the reader costs seconds per resource. Reads without publication bounds (the unbounded storage loaders and diagnostics reads
 that pass none) evaluate every readable pointer and write. The ENSv1 and Basenames node-keyed arms
-use the node and resolver expression indexes on `normalized_events`. Two paths have no
-supporting index and read through the broad `normalized_events_projection_idx` or a block-range
-index instead: the ENSv2 declared-resolver arm (ENSv2 resolver writes) and the
-`ResolverRecordLinked` scan for record-ID link spans. Both are reached only by Sepolia deployments
-today. The mirror lookup of the ENSv1 registry pointer by addressed node uses
+use the node and resolver expression indexes on `normalized_events`. The ENSv2 declared-resolver
+arm reads its writes through `normalized_events_project_node_history_idx`, keyed by chain and
+node: its family comes from the resolver's classification at run time, so the arm also names the
+two families it admits literally, which lets the planner prove that index's partial predicate.
+The record-ID arm reads a selected record's writes through `normalized_events_record_id_write_idx`
+and the record links on the pointer's resolver, at the pointer's node or the zero node (the
+resolver's default link), through `normalized_events_record_id_link_idx`.
+Without these, the declared-resolver arm read every `RecordChanged` and `RecordVersionChanged`
+row of the chain, the record-ID arm every `RecordChanged` row and the `links` CTE every
+`ResolverRecordLinked` row, through the broad
+`normalized_events_projection_idx`. The mirror lookup of the ENSv1 registry pointer by addressed node uses
 `normalized_events_project_v1_pointer_addressed_node_idx`
 ([`ops/mirror-pointer-index`](../ops/mirror-pointer-index/README.md)). The lookup of
 the declaring manifest also reads through the projection index, on every deployment. Plan tests
 in `history/address_plan_tests.rs` check that neither statement reads `normalized_events`
-sequentially, and that the mirror lookup, run over a non-empty walk, reads registry pointers
+sequentially, that every record write and record link the attribution reads goes through one of
+the five indexes above, that the plan reads `normalized_events_project_node_history_idx`,
+`normalized_events_record_id_write_idx` and `normalized_events_record_id_link_idx`, each probe
+keyed by the pointer (its node, its resolver and record id, or its resolver and node), and that
+the mirror lookup, run over a non-empty walk, reads registry pointers
 through `normalized_events_project_v1_pointer_addressed_node_idx`.
 
 History loaders called with `canonical_only=false` also return rows of activated losing
@@ -648,7 +673,8 @@ text alone never authorizes that transition. This preserved evidence is
 diagnostic state, not permission to publish: policy-based Sepolia readiness
 requires both Ingest and Verify to remain completed.
 
-At runner startup, a `running` or `paused` Interpret, Project, or Verify row with no
+At runner startup, and before a `--phase ingest` redo begins while a required Ingest
+redo is pending, a `running` or `paused` Interpret, Project, or Verify row with no
 explicit redo is resolved only while its advisory lock remains held. A required Ingest
 redo whose `last_error` begins with `required downstream redo active:` and outlived its
 advisory-lock session is changed back to `required downstream redo:` while the next
@@ -663,7 +689,7 @@ earlier checkpoint is recorded as `failed` so ordinary phase execution can
 resume it. A saved Verify final checkpoint stays `failed` until current
 configuration and retained verification evidence pass the completed-Verify
 checks. A lock still held by another runner, or a lost lock connection during
-the state update, stops the new runner. The update and lock use one database
+the state update, stops the new runner or refuses the redo. The update and lock use one database
 connection. If the client cannot tell whether PostgreSQL committed the update
 before that connection failed, the next start reads the durable phase state
 again. An unlock or connection-close error after an acknowledged update is also
@@ -1678,7 +1704,34 @@ the batch's first block, so Interpret adds those names too; every earlier block
 boundary has already settled. Interpret then reads, in the batch's input
 snapshot, the latest readable event per interpreter state key among the events
 of those names and resources, adds the names and resources those events
-reference, and repeats until a round adds nothing. There is no round limit: each
+reference, and repeats until a round adds nothing. Each round reads only the
+names, resources and ENSv2 state keys the previous round added, and a retried
+attempt (below) only the names and keys it adds and what those link to, so
+Interpret reads each name, resource and key once per batch: in one snapshot the
+latest event of a key does not depend on which names, resources or keys asked
+for it. To find the state keys of the
+requested names and resources it reads every stored event of theirs marked
+canonical, safe or finalized, whether or not the event's block is still on the
+canonical lineage, and the restore then takes, for each key, the latest event on
+that lineage. This returns the same events as checking every scanned event,
+because every event of one interpreter state key is filed under the same name or
+resource: the key embeds the event's logical name and resource, and its state
+scope the node the event is filed under
+(`crates/adapters/src/schema_v2/state_key.rs`). An event on an orphaned block can
+therefore only name a key whose latest readable event, if there is one, is also
+among the events read. Separately, every Interpret write rechecks that no block
+was orphaned between the batch's input snapshot and the write
+(`crates/interpret/src/write.rs`). The read by
+[ENSv2 state key](glossary.md#ensv2-state-key) below still checks the lineage of
+every event it scans. A registry may emit `LabelRegistered` for one token id under
+a second label: the adapter keys the token's registration state by registry and
+token and checks the supplied label only against its own hash, never against the
+token (`crates/adapters/src/schema_v2/protocol/v2_registry.rs`,
+`crates/adapters/src/schema_v2/state_v2.rs`), and the event's state scope carries
+the token, not the label hash (`crates/adapters/src/schema_v2/protocol.rs`),
+while its ENSv2 state keys include one derived from the label hash
+(`crates/interpret/src/load/lookahead/v2_keys.sql`). So one interpreter state key
+can be reached through several ENSv2 state keys. There is no round limit: each
 continuing round adds a name, resource or ENSv2 state key from a finite set (the
 names, resources and keys the batch's logs and the chain's stored history
 reference or derive, and the registry-only resource of each of those names), so the
@@ -1771,7 +1824,7 @@ expiry falls in a batch, and `normalized_events_v2_lookahead_probe_idx`, keyed
 by chain and block, finds the latest ENSv2 registry event before it. An ENSv2
 read of an unloaded state key is retried like an unloaded name. The loader is an access path, not a semantic: it must produce the same
 normalized events, identity rows and discovery edges as the full-state loader,
-and it is covered by the same interpreter content hash. The loader choice
+and it is bound by the same interpreter content hash. The loader choice
 therefore looks past the manifests the batch interprets: the full-state loader
 restores every retained row regardless of family and lookahead reads only the
 ENSv1, ENSv2 and Basenames Base families, so `normalized_events` history of a family lookahead does not cover,
@@ -2008,6 +2061,86 @@ association. A Project redo the prior hash started and left unfinished is supers
 the new hash's Interpret redo starts, in the same transaction, and stamped again
 when that redo completes. Moving a covered semantic source without updating the covered set
 fails the build rather than silently narrowing the fingerprint.
+
+### Walk index set
+
+An operator may drop the `normalized_events` indexes Interpret does not read for the length
+of a from-zero walk or a full-history Interpret redo, and rebuild them before Project runs,
+with [`ops/walk-index-set`](../ops/walk-index-set/README.md). The indexes Interpret keeps are
+the [walk index set](glossary.md#walk-index-set). Indexes are access paths, not hash inputs:
+dropping or rebuilding one changes no stored row and leaves the primary key, the
+`event_identity` unique key and every foreign key in place, so database constraints stay
+authoritative. The rule that splits the indexes:
+
+- An index is kept when a statement Interpret runs can read it: its loaders, its writer, the
+  redo-range preparation, the flag recompute, or the manifest sync a runner start performs.
+- Every other index is a read path for Project, the API or an operator's
+  `phase-runner inspect` command. Project starts only after
+  Interpret completes, and the API refuses the routes that read them while an Interpret redo
+  is in progress (the public namespace snapshot and the composed name reads require each
+  served chain's Interpret not to be in a redo). The one exception is the event audit,
+  `GET /v1/diagnostics/events`, which stays available during a redo by design. Its record
+  attribution reads six of the dropped indexes (the ENSv1 and Basenames record node indexes,
+  the two record-ID indexes, `normalized_events_project_node_history_idx` and
+  `normalized_events_project_v1_pointer_addressed_node_idx`), so while they are dropped it
+  reads without them and, on a large database, may exceed the API's statement timeout
+  (`BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`, [production settings](production.md)) until
+  `install.sql` has run. The `phase-runner inspect` block and raw-event windows, which an
+  operator runs by hand, count and list normalized events by block hash through
+  `normalized_events_block_idx` and read more of the table while it is dropped.
+
+The 17 kept indexes and the statements that read them:
+
+| Index | Read by |
+| --- | --- |
+| `normalized_events_pkey` | the lookahead loader's final join (`load/lookahead/events.sql`), the full-state restore's payload read |
+| `normalized_events_event_identity_key` | the writer's `ON CONFLICT (event_identity)` and identity transitions |
+| `normalized_events_interpreter_state_history_idx` | prior-state value reads and the full-state restore (`load/prior.rs`) |
+| `normalized_events_resource_history_idx` | the lookahead loader's resource arm, registrar transition evidence |
+| `normalized_events_name_history_idx` | migration transition evidence by name (`write/identity/transition/registrar.rs`) and the flag recompute's raw-label fallback (`recompute.rs`), which look a name's events up by name alone |
+| `normalized_events_chain_block_number_idx`, `normalized_events_chain_block_number_desc_idx` | the redo-range clear and preparation, the full-state restore, the loader-choice family probe and the due-names block-before-batch read; either twin serves each |
+| `normalized_events_projection_idx` | the manifest sync's retained admission history (`retained_admission_manifests` in `crates/manifests/src/schema_v2_persistence.rs`), which reads every `SourceManifestUpdated` row by kind |
+| `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |
+| `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows |
+
+The other 33 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
+these: `normalized_events_v1_subregistry_after_node_scope_idx`,
+`normalized_events_v1_subregistry_after_child_scope_idx`,
+`normalized_events_v1_subregistry_before_node_scope_idx`,
+`normalized_events_v2_subregistry_pointer_scope_idx`,
+`normalized_events_v1_subregistry_before_child_scope_idx`, `normalized_events_block_idx`,
+`normalized_events_emitter_history_idx`, `normalized_events_v2_expiry_scope_idx`,
+`normalized_events_ens_v1_record_node_resolver_idx`,
+`normalized_events_basenames_record_node_resolver_idx`,
+`normalized_events_record_id_write_idx`, `normalized_events_record_id_link_idx`,
+`normalized_events_resolver_alias_history_idx`,
+`normalized_events_resolver_upgrade_history_idx`,
+`normalized_events_pointer_after_resolver_history_idx`,
+`normalized_events_pointer_before_resolver_history_idx`,
+`normalized_events_permission_after_resolver_history_idx`,
+`normalized_events_permission_before_resolver_history_idx`,
+`normalized_events_subregistry_registration_history_idx`,
+`normalized_events_project_name_node_idx`, `normalized_events_project_name_child_idx`,
+`normalized_events_project_name_after_target_idx`,
+`normalized_events_project_name_before_target_idx`,
+`normalized_events_project_primary_after_idx`, `normalized_events_project_primary_before_idx`,
+`normalized_events_project_primary_after_source_idx`,
+`normalized_events_project_primary_before_source_idx`,
+`normalized_events_address_registrant_match_idx`,
+`normalized_events_address_token_holder_match_idx`,
+`normalized_events_address_registry_owner_match_idx`,
+`normalized_events_project_node_history_idx`, `normalized_events_project_v1_pointer_node_idx`
+and `normalized_events_project_v1_pointer_addressed_node_idx`.
+
+A new index on `normalized_events` joins one list in the change that adds it: the drop list
+when Interpret does not read it, the kept set when Interpret does.
+`crates/interpret/src/load/walk_index_set_tests.rs` fails until the two lists together are
+every index the baseline defines on the table, and proves that Interpret, over ENSv1,
+Basenames and ENSv2 histories through either loader, scans `normalized_events` sequentially
+nowhere without the drop list and stores the same rows. That test shows each statement keeps
+an index path, not that the path is keyed: a name-only read falls back to a range of
+`normalized_events_chain_block_number_idx`, which is why `normalized_events_name_history_idx`
+stays although the ENSv1-only Mainnet walk never read it.
 
 ## Projection publication
 

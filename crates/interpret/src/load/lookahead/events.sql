@@ -1,5 +1,17 @@
--- Keep lineage validation parameterized by each selected event. A normal join can
--- hash all 25M+ lineage rows when per-name/resource history fanout is overestimated.
+-- Lineage is checked where a row is selected: twice per interpreter state key in `winners`, and
+-- for each restored event's timestamp. `winners` matches a key across the whole chain, so a key
+-- with no readable event on the chain returns nothing. The name and resource arms of
+-- `candidates` skip the check, so they may list a key from an event on an orphaned block. That
+-- changes no output: a state key embeds its logical name and resource, and its state scope the
+-- node the event is filed under (adapters state_key.rs), so every event of one key is filed
+-- under the same name or resource. An orphaned candidate therefore only lists a key whose
+-- readable winner, if any, is itself a candidate. If that ever breaks, probe lineage on one
+-- candidate per key before `winners`. The ENSv2 key arm keeps its check: a registry may emit
+-- LabelRegistered for one token under a second label, and the adapter keys the token's state by
+-- (registry, token) with the token in the state scope (v2_registry.rs, state_v2.rs,
+-- protocol.rs), while v2_keys.sql also files the event under its labelhash, so one key can be
+-- reached through several ENSv2 state keys. Each probe stays parameterized by its event: a
+-- normal join can hash all 25M+ lineage rows.
 -- LIMIT prevents lateral pull-up. It cannot discard a matching lineage row because
 -- (chain_id, block_hash) is the chain_lineage primary key; exact height is also checked.
 WITH candidates AS MATERIALIZED (
@@ -35,13 +47,6 @@ WITH candidates AS MATERIALIZED (
           AND event.canonicality_state IN ('canonical','safe','finalized')
         OFFSET 0)
     ) event ON TRUE
-    JOIN LATERAL (
-        SELECT 1 FROM chain_lineage lineage
-        WHERE lineage.chain_id = event.chain_id
-          AND lineage.block_number = event.block_number AND lineage.block_hash = event.block_hash
-          AND lineage.canonicality_state IN ('canonical','safe','finalized')
-        LIMIT 1
-    ) readable ON TRUE
     UNION ALL
     SELECT event.normalized_event_id,
            event.raw_fact_ref ? '{state_key}',
@@ -58,13 +63,6 @@ WITH candidates AS MATERIALIZED (
           AND event.canonicality_state IN ('canonical','safe','finalized')
         OFFSET 0
     ) event ON TRUE
-    JOIN LATERAL (
-        SELECT 1 FROM chain_lineage lineage
-        WHERE lineage.chain_id = event.chain_id
-          AND lineage.block_number = event.block_number AND lineage.block_hash = event.block_hash
-          AND lineage.canonicality_state IN ('canonical','safe','finalized')
-        LIMIT 1
-    ) readable ON TRUE
     UNION ALL
     -- ENSv2 events filed under a requested ENSv2 state key. The array must stay identical to
     -- normalized_events_v2_key_probe_idx and to `v2_event_keys` in the adapter crate.

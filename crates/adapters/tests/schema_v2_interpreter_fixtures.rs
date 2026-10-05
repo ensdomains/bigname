@@ -25,6 +25,8 @@ const DENSE_SAME_TRANSACTION: &str =
 const BINDING_FK_RELEASE: &str = include_str!("fixtures/interpreters/binding-fk-release.json");
 const V2_EXPIRY_RETIREMENT: &str = include_str!("fixtures/interpreters/v2-expiry-retirement.json");
 const V1_RECORD_CLEARS: &str = include_str!("fixtures/interpreters/v1-record-clears.json");
+const V2_REGISTRY_SELF_SUBREGISTRY: &str =
+    include_str!("fixtures/interpreters/v2-registry-self-subregistry.json");
 
 sol! {
     event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
@@ -596,6 +598,84 @@ fn v2_expiry_retirement_is_an_empty_block_restore_and_redo_stable_delta() -> Res
             .iter()
             .map(|event| &event.event_identity)
             .collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+#[test]
+fn sepolia_eth_registry_self_subregistry_opens_no_edge_because_its_subnames_loop_back_into_the_parent()
+-> Result<()> {
+    // Sepolia block 11840453, transaction 0xea03502e…, logs 118-123, and block 11840461,
+    // transaction 0xae61dbac…, logs 86-91: two ETHRegistrar registrations on the
+    // manifest-declared ETHRegistry each set the new label's subregistry to the ETHRegistry
+    // itself (logs 122 and 90), then set its resolver (logs 123 and 91).
+    #[derive(Deserialize)]
+    struct Fixture {
+        case: Case,
+    }
+    const REGISTRY: &str = "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4";
+    let fixture: Fixture = serde_json::from_str(V2_REGISTRY_SELF_SUBREGISTRY)?;
+    let expected = ExpectedCase {
+        id: fixture.case.id.clone(),
+        normalized_events: fixture
+            .case
+            .blocks
+            .iter()
+            .map(|block| serde_json::json!({"block_hash": block.hash}))
+            .collect(),
+        name_surfaces: Vec::new(),
+        surface_bindings: Vec::new(),
+        resources: Vec::new(),
+        token_lineages: Vec::new(),
+    };
+    let input = batch_input(&fixture.case, &expected, &checked_in_manifests()?)?;
+    let output = interpret_schema_v2_batch(input.clone())?;
+    let registry = fixture.case.manifests[0].contract_instance_id;
+
+    for (block, log) in [(11_840_453, 122), (11_840_461, 90)] {
+        let pointer = output
+            .normalized_events
+            .iter()
+            .find(|event| {
+                event.event_kind == "SubregistryChanged"
+                    && event.block_number == Some(block)
+                    && event.log_index == Some(log)
+            })
+            .with_context(|| format!("block {block} log {log} is still normalized"))?;
+        assert_eq!(pointer.after_state["subregistry"], REGISTRY);
+        assert!(
+            output.discovery_edge_closures.iter().any(|closure| {
+                closure.edge_kind == "subregistry"
+                    && closure.from_contract_instance_id == registry
+                    && closure.active_to_block_number == block
+                    && closure.log_index == log
+            }),
+            "the label's previous subregistry edge closes at block {block} log {log}"
+        );
+        assert!(
+            output.normalized_events.iter().any(|event| {
+                event.event_kind == "ResolverChanged"
+                    && event.block_number == Some(block)
+                    && event.log_index == Some(log + 1)
+            }),
+            "interpretation continues with block {block}'s resolver update"
+        );
+    }
+    assert!(
+        output
+            .discovery_edges
+            .iter()
+            .all(|edge| edge.edge_kind != "subregistry"),
+        "no subregistry edge opens"
+    );
+    assert!(
+        output.decode_skips.is_empty(),
+        "no diagnostic row is written"
+    );
+    assert_eq!(
+        output,
+        interpret_schema_v2_batch(input)?,
+        "replaying the blocks drifted"
     );
     Ok(())
 }

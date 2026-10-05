@@ -174,6 +174,22 @@ under [ENSv1 mirror ancestor gate](deployment.md#ensv1-mirror-ancestor-gate).
 
 ## Known divergences
 
+> **Labels whose subregistry is their own registry: alias subtree not modelled** —
+> a registry can set one of its labels' subregistry to the registry itself, for
+> example when a registrant passes the `ETHRegistry` as the subregistry to
+> `ETHRegistrar.register`. Resolution then walks a name below that label back
+> into the same registry, reading the parent's own entries, so `x.label.eth`
+> reads `x`'s entry and the subtree aliases the parent's children.
+> **Upstream**: (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/ETHRegistrar.sol:L151-L158 @ ens_v2_sepolia_20261001@07e55a05)
+> (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L63-L84 @ ens_v2_sepolia_20261001@07e55a05)
+> (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L127-L160 @ ens_v2_sepolia_20261001@07e55a05)
+> **Our rule / why**: the self-pointer gives the label no canonical registry and
+> no new canonical suffix. Interpret closes the label's previous `subregistry`
+> edge, opens none and models no alias subtree through it; the
+> `SubregistryChanged` normalized event keeps the pointer. See
+> [discovery admission](manifests.md#discovery-admission).
+> **Since**: `2026-10-04`
+
 > **Registry count comparison after full revocation of a newer resource version** —
 > the reference indexer deletes fully revoked assignment rows and determines the
 > newest observed version from remaining rows.
@@ -225,19 +241,32 @@ under [ENSv1 mirror ancestor gate](deployment.md#ensv1-mirror-ancestor-gate).
 > interpreter does not do. The delegate row is served as still granted.
 > **Since**: `2026-09-13`
 
-> **A registry write back to NameWrapper without a wrap keeps serving NameWrapper as owner** —
+> **A registry child the NameWrapper holds without a current wrap, or under a label failing normalization, is not served for its token holder** —
 > once a registry write moves a wrapped name's record away from NameWrapper, bigname ends the
-> NameWrapper authority. If the record is later written back to NameWrapper with
+> NameWrapper authority. If the record is later written back to the NameWrapper address with
 > `ENSRegistry.setOwner` or `setSubnodeOwner` and no wrap follows, the old token is live again on
 > chain, because NameWrapper counts a name as wrapped whenever it holds the registry record and
-> the token has an owner, but bigname serves the NameWrapper contract as `owner` and `manager`
-> until the next `NameWrapped`.
+> the token has an owner. A name with a [name row](glossary.md#composed-name-row) then serves the
+> NameWrapper contract as `owner` and `manager` until the next `NameWrapped`. A child with no name
+> row, which is what NameWrapper's `setSubnodeOwner` and `setSubnodeRecord` leave when they take
+> the registry record and mint the token for a label that fails ENSIP-15 normalization, omits
+> `owner` and `manager` on its parent's subnames page and is not listed for the NameWrapper
+> contract under any relation while the NameWrapper that named it holds its registry record,
+> including after such a write-back, whether or not a NameWrapper token survives for it. Neither
+> case lists the token holder.
 > **Upstream**: (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1079 @ ens_v1@91c966f)
+> (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f)
+> (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L612-L619 @ ens_v1@91c966f)
 > (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L84 @ ens_v1@91c966f)
-> **Our rule**: `docs/api-v1.md` § Manager; [projections](projections.md).
+> **Our rule**: `docs/api-v1.md` § Manager; [projections](projections.md);
+> `docs/api-v1-routes.md` (subnames and address names).
 > **Why**: the parent's `setSubnodeOwner`, or `setOwner` by the record's owner, can move the
 > record back, but reopening the old token's authority would need retained NameWrapper authority
-> state that the interpreter does not keep.
+> state that the interpreter does not keep. For a child with no name row, the address index
+> records the registry owner, the NameWrapper contract, not the token holder, so the read side
+> can only stop serving the contract; it keys on a NameWrapper having observed the child and
+> holding its registry record now, not on a current token. Listing the holder needs a projection
+> change and is deferred (TYR-148).
 > **Since**: `2026-10-03`
 
 

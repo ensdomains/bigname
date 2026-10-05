@@ -28,6 +28,7 @@ use crate::v2::{
     vocab::Authority,
 };
 
+use super::cursor::insert_parent_filter;
 use super::{AddressName, load_primary_names_by_namespace, name_registration_fields};
 
 const SORT: &str = "former_owner:expires_at";
@@ -52,6 +53,7 @@ pub(super) async fn get_address_former_owners(
     state: &AppState,
     normalized_address: &str,
     params: &QueryParams,
+    parent: Option<&str>,
 ) -> V2Result<Json<Envelope<Vec<AddressName>>>> {
     reject_unsupported(params)?;
     if let (Some(after), Some(before)) = (params.expires_after, params.expires_before)
@@ -62,25 +64,24 @@ pub(super) async fn get_address_former_owners(
         ));
     }
     let order = params.order.unwrap_or(SortOrder::Asc);
-    let list = ListCursor::new(
-        SORT,
-        BTreeMap::from([
-            (ADDRESS_FILTER_KEY.to_owned(), normalized_address.to_owned()),
-            (
-                NAMESPACE_FILTER_KEY.to_owned(),
-                params.namespace.clone().unwrap_or_default(),
-            ),
-            (
-                EXPIRES_AFTER_FILTER_KEY.to_owned(),
-                timestamp_filter(params.expires_after),
-            ),
-            (
-                EXPIRES_BEFORE_FILTER_KEY.to_owned(),
-                timestamp_filter(params.expires_before),
-            ),
-            (ORDER_FILTER_KEY.to_owned(), order.as_str().to_owned()),
-        ]),
-    );
+    let mut filters = BTreeMap::from([
+        (ADDRESS_FILTER_KEY.to_owned(), normalized_address.to_owned()),
+        (
+            NAMESPACE_FILTER_KEY.to_owned(),
+            params.namespace.clone().unwrap_or_default(),
+        ),
+        (
+            EXPIRES_AFTER_FILTER_KEY.to_owned(),
+            timestamp_filter(params.expires_after),
+        ),
+        (
+            EXPIRES_BEFORE_FILTER_KEY.to_owned(),
+            timestamp_filter(params.expires_before),
+        ),
+        (ORDER_FILTER_KEY.to_owned(), order.as_str().to_owned()),
+    ]);
+    insert_parent_filter(&mut filters, parent);
+    let list = ListCursor::new(SORT, filters);
     let storage_cursor = list
         .read(params.cursor.as_deref(), &POSITION_KEYS)?
         .map(|position| storage_cursor(&position))
@@ -92,6 +93,7 @@ pub(super) async fn get_address_former_owners(
         namespace: params.namespace.as_deref(),
         expires_after: params.expires_after,
         expires_before: params.expires_before,
+        parent,
     };
     let page = load_family_former_owner_page(
         snapshot.conn().await?,

@@ -17,6 +17,7 @@ const DEDUPE_FILTER_KEY: &str = "dedupe";
 const Q_FILTER_KEY: &str = "q";
 const AUTHORITY_FILTER_KEY: &str = "authority";
 const MATCH_FILTER_KEY: &str = "match";
+const PARENT_FILTER_KEY: &str = "parent";
 pub(crate) const ORDER_FILTER_KEY: &str = "order";
 pub(crate) const SORT_KIND_CURSOR_KEY: &str = "sort_kind";
 pub(crate) const SORT_VALUE_CURSOR_KEY: &str = "sort_value";
@@ -39,6 +40,7 @@ pub(crate) struct AddressNamesCursorBinding<'a> {
     pub(crate) name_match: NameMatch,
     pub(crate) authority: Option<&'a AuthoritySet>,
     pub(crate) is_migrated: Option<bool>,
+    pub(crate) parent: Option<&'a str>,
     pub(crate) sort: AddressNamesSort,
     pub(crate) order: SortOrder,
 }
@@ -77,6 +79,7 @@ fn cursor_filters(binding: &AddressNamesCursorBinding<'_>) -> BTreeMap<String, S
         ),
     ]);
     insert_match_filter(&mut filters, binding.q, binding.name_match);
+    insert_parent_filter(&mut filters, binding.parent);
     filters
 }
 
@@ -209,6 +212,13 @@ pub(super) fn insert_match_filter(
 ) {
     if q.is_some() && name_match == NameMatch::Contains {
         filters.insert(MATCH_FILTER_KEY.to_owned(), name_match.as_str().to_owned());
+    }
+}
+
+/// Binds `parent` only when sent, so a cursor without it keeps the shape it had before `parent`.
+pub(super) fn insert_parent_filter(filters: &mut BTreeMap<String, String>, parent: Option<&str>) {
+    if let Some(parent) = parent {
+        filters.insert(PARENT_FILTER_KEY.to_owned(), parent.to_owned());
     }
 }
 

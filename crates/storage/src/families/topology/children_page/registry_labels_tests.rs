@@ -128,6 +128,7 @@ async fn registry_labels_match_the_unnarrowed_relation_and_probe_the_indexes() -
                 registry: &eth_registry,
                 owner: None,
             }),
+            None,
         );
         count_query.push(") SELECT count(*) FROM children");
         raw_sql(&format!(

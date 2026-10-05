@@ -53,6 +53,7 @@ pub async fn load_family_address_names_page(
     q: Option<crate::NameQuery<'_>>,
     authority: Option<&[&str]>,
     is_migrated: Option<bool>,
+    parent: Option<&str>,
     sort: AddressNamesCurrentSort,
     order: AddressNamesCurrentOrder,
     cursor: Option<&AddressNamesCurrentSortedCursor>,
@@ -73,6 +74,7 @@ pub async fn load_family_address_names_page(
         RowSource::Composed {
             rows: &rows,
             names: &names,
+            parent,
         },
         address,
         namespace,

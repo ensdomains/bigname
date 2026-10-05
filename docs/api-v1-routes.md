@@ -348,7 +348,17 @@ collection route carry neither header.
   echoes the normalized relation set; `any`
   serializes as `owner,manager` and reordered sets use canonical
   dictionary order. `profile=feed` returns a documented core-field subset of
-  the same record object; it does not introduce another DTO.
+  the same record object; it does not introduce another DTO. A feed record
+  carries the identity fields, `chain_id`, `network`, `status` and its
+  reasons, `subregistry` on name results, `is_primary` and `relations` on
+  reverse rows, `resolution` on `resolves_to` rows, and the expiry fields
+  `expires_at`, `expires_at_reason` and `grace_ends_at` with the `ens_v1`
+  object, each with the value and presence it has on the `profile=detail`
+  record for the same name, which are those of name detail and
+  `GET /v1/names`. Every other registration field (`owner`, `manager`,
+  `registration_status`, `registration_id`, `token_id`, `registered_at`,
+  `created_at`, `lapsed_registration`, `authority`, `migrated_at`), the
+  resolver fields and `records` are detail-only.
   `profile=detail` records carry `authority` (`ens_v0`, `ens_v1` or `ens_v2`,
   as defined in the [naming dictionary](api-v1.md#naming-dictionary)) when the
   projection selected an ENSv1/ENSv2 arm for the name, and `migrated_at` when
@@ -358,7 +368,7 @@ collection route carry neither header.
   registry rows. `profile=detail` records whose `authority` is `ens_v1` or
   `ens_v0` also carry the `ens_v1` object (`{expires_at, wrapper_state?,
   wrapper_fuses?}`, the ENSv1 lease date and NameWrapper position) exactly as
-  name detail does; feed records carry no `expires_at` and no `ens_v1`.
+  name detail does, and so do feed records, which omit `authority` itself.
   Reverse inputs accept no
   `authority` filter yet; filter client-side or use
   `GET /v1/addresses/{address}/names?authority=`.
@@ -892,7 +902,7 @@ collection route carry neither header.
   name in any `ens_v1.wrapper_state`, except while a wrapped `.eth`
   second-level name is in its registrar grace period. It is absent then,
   wherever the address it copies is absent, and on `profile=feed` lookup records, which
-  carry no registration fields. No null placeholder is emitted. `authority` names where the chain
+  carry no registration fields beyond expiry and grace. No null placeholder is emitted. `authority` names where the chain
   reads the current registration fields from: `ens_v2` or `ens_v1`, read from
   the projection's selected [authority epoch](glossary.md#authority-epoch), or
   `ens_v0` for an ENSv1 name whose registry record is still read from the 2017
@@ -1763,11 +1773,57 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   but its `ens_v1` object carries no lifecycle fields: no `expires_at` and no
   wrapper fields. An ENSv1 or Basenames
   registry child with no current name row serves its node's current registry
-  owner, `owner(node)`: the
+  owner, `owner(node)`, as `manager`: the
   owner of its latest `NewOwner` or `Transfer`, so a transfer after the
-  `NewOwner` moves it. A child whose registry owner is the zero address, one
+  `NewOwner` moves it. A listed child's `owner` is the known holder of the `.eth` or Basenames
+  lease the registrar retains on its node, the recipient of the lease's latest
+  token `Transfer` or else its registrant, and the registry owner when no nonzero
+  holder is known (no lease, or a lease known only from a renewal): the
+  token moves without the registry record until `reclaim`
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L327-L330 @ basenames@1809bbc)
+  (a [registry-only handoff](glossary.md#registry-only-handoff)).
+  A child whose registry owner is the NameWrapper
+  contract that named it under a label failing ENSIP-15 normalization omits
+  `owner`: NameWrapper's `setSubnodeOwner` and `setSubnodeRecord` take the node
+  in the registry and give the token to a holder bigname does not record for a
+  child with no name row
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L612-L619 @ ens_v1@91c966f)
+  (see [Manager](api-v1.md#manager)). A child whose registry owner is the zero address, one
   the registry reads as zero, or one the admitted Graveyard holds has no
-  owner and is listed only while it has a serving resource. An unmasked 2017
+  owner and is listed only while it has a serving resource, even when bigname knows
+  the holder of a lease the registrar retains on its node. A `.eth` or Basenames
+  child with no current name row whose registrar lease bigname has released, past its
+  expiry and the 90-day grace
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L294-L297 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/util/Constants.sol:L15 @ basenames@1809bbc),
+  keeps its registry record: expiry never writes the registry, and the registrar writes
+  it only on a registration other than `registerOnly`
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L414-L425 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L265-L276 @ basenames@1809bbc)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L128 @ ens_v1@91c966f)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L248-L250 @ basenames@1809bbc)
+  or a `reclaim` by a live token's holder or an address it approved
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L327-L330 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L458-L466 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L173-L176 @ basenames@1809bbc);
+  it is listed as `released` with no `owner` or `manager` and no `expires_at`,
+  `grace_ends_at` or `lapsed_registration`, since its lease is projected without a name
+  row, and `include_expired=false` omits it. A later registration of the label serves
+  its registrant as `owner` and its registry owner as `manager`: `register` sets the
+  registry owner to the registrant, and `registerOnly` leaves the registry record as it was
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L128 @ ens_v1@91c966f)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L248-L250 @ basenames@1809bbc).
+  A known residual: a name migrated from ENSv1 to ENSv2 under a label that fails ENSIP-15
+  normalization is served from its ENSv1 registry record, and once its old ENSv1 lease
+  lapses it is served as `released` although its ENSv2 registration is live. An unmasked 2017
   registry owner word serves its low 20 bytes as `owner`. Registry events prove the child node and its
   labelhash but not the label, so two [non-name
   forms](glossary.md#non-name-form) are reachable here. A child whose label has
@@ -2972,6 +3028,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `expires_before` | query | string | no | none | Exclusive expiry upper bound, only with relation=former_owner. |
 | `authority` | query | array of enum Authority | no | none | Comma-separated served `authority` values; a row matches when the `authority` it serves is any listed value, including an ENSv1 registry child with no name row by its registry's value. Rows that serve no `authority` match no set. Not accepted with relation=former_owner. |
 | `is_migrated` | query | boolean | no | none | Whether the current name has a selected ENSv2 arm and a retained activated migration time; not accepted with relation=resolves_to or relation=former_owner. |
+| `parent` | query | string | no | none | A name; only names exactly one label below it, by normalized name spelling, are listed, on every relation and before grouping, paging and page.total_count. parent=eth lists every `<label>.eth` name and no deeper subname. |
 | `q` | query | string | no | none | Name search text; normalization, prefix and label-boundary rules are specified in the route prose. Not accepted with relation=former_owner. |
 | `match` | query | enum NameMatch | no | `prefix` | Prefix or substring matching for q. |
 | `sort` | query | enum AddressNamesSort | no | none | Defaults to name for authority and resolves_to listings, and expires_at for relation=former_owner. Former owners accept only explicit sort=expires_at; other explicit sort values return 400 invalid_input. Ties use the route's stable identity order. |
@@ -3000,7 +3057,7 @@ introduces it rebuilds Project from full history before serving the option; see
 - Purpose: names related to an address.
 - Request parameters: path `address`; query `namespace`, `relation`,
   `authority` (a comma-separated set of `ens_v0`, `ens_v1`, `ens_v2`),
-  `coin_type`, `q`, `match=prefix|contains`,
+  `parent`, `coin_type`, `q`, `match=prefix|contains`,
   `sort=name|expires_at|registered_at|created_at`, `order=asc|desc`,
   `dedupe=name|registration`, `include=role_summary`, `cursor`, `page_size`,
   and optional `finality=latest`. `at` and historical `finality` values are
@@ -3022,6 +3079,17 @@ introduces it rebuilds Project from full history before serving the option; see
   `authority` (Basenames rows and ownerless registry rows) match no set, including all three
   values, so `authority=ens_v0,ens_v1,ens_v2` is narrower than omitting the
   filter.
+  `parent` keeps only names exactly one label below the given name, by the
+  rule it has on [`GET /v1/names`](#get-v1names): the value is normalized as a
+  path name, and a row matches by its normalized name spelling, not by node or
+  registry topology, so `parent=eth` keeps the `.eth` second-level names and
+  no deeper subname, wrapped or not (see the
+  [naming dictionary](api-v1.md#naming-dictionary)). An ENSv1 registry child
+  with no name row matches by the name it serves, which spells an unknown
+  label as a bracketed labelhash. It applies to every relation, `resolves_to`
+  and `former_owner` included, before grouping, sorting, pagination and
+  `page.total_count`. An empty `parent`, a `parent` that is not a valid name,
+  or a repeated `parent` returns `400 invalid_input`.
   `is_migrated` concerns the ENSv1→ENSv2 migration only and is unrelated to
   `ens_v0`: an `ens_v0` name never satisfies `is_migrated=true`.
   `is_migrated=true|false` optionally selects whether the current name has the
@@ -3031,8 +3099,19 @@ introduces it rebuilds Project from full history before serving the option; see
   with the other filters and is rejected with `relation=resolves_to`.
   The ownership collection always returns an exact `page.total_count` before
   applying its cursor, with the same relations, `q` and `match` predicate,
-  `authority` set, migration predicate and deduplication as the rows. For registration counts use
-  `relation=owner&dedupe=registration`; a name count uses `dedupe=name`.
+  `authority` set, `parent`, migration predicate and deduplication as the rows.
+  `owner` also lists names with no token for their registry owner, such as
+  unwrapped subnames and registry children with no lease, so `relation=owner&dedupe=registration`
+  counts those as well. For the registrations an address holds, add
+  `parent=eth`: `GET /v1/addresses/{address}/names?relation=owner&parent=eth&dedupe=registration&page_size=1`
+  returns a `page.total_count` with one entry per `.eth` registration the
+  address holds, a wrapped `.eth` name once, and no subname;
+  `parent=base.eth&namespace=basenames` counts Basenames registrations. The count
+  covers the registrations this route lists: it misses a `.eth` name with no name
+  surface that `registerOnly` granted onto a registry record another address owns
+  (a known residual below), and it lists no Basenames registry child without a name
+  row. A name
+  count uses `dedupe=name`.
   This GET route supplies exact totals even for single relations whose
   `POST /v1/lookup` result count remains unknown.
   `q` applies prefix matching to the dictionary `name` field. The API treats
@@ -3086,9 +3165,10 @@ introduces it rebuilds Project from full history before serving the option; see
   token, while the token has a holder (an expired emancipated or locked wrapped
   name has none), or the registry owner of a name with no token, such as an
   unwrapped subname with only a registry record or a registry child with no
-  name row. A name with no token therefore lists under both `owner` and
-  `manager`, and a registry-child row carries `relations: ["owner",
-  "manager"]`. After a `.eth` lease's token is transferred without `reclaim`,
+  name row and no lease. A name with no token therefore lists under both `owner`
+  and `manager`. A `.eth` registry child with no name row has a token while the
+  registrar retains its lease, and its holder is its `owner`. After a `.eth`
+  lease's token is transferred without `reclaim`, with or without a name row,
   `owner` lists the name for the new holder and `manager` for the previous
   registry owner until the holder calls `reclaim`
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f). `manager` matches the address the row serves as `manager`, in
@@ -3139,11 +3219,11 @@ introduces it rebuilds Project from full history before serving the option; see
   positions compare numerically without calendar or safe-integer caps.
   `coin_type`,
   `authority`, `is_migrated`, `q` and nonempty `include` return `400 invalid_input` with
-  it. Only name deduplication is supported: omitted `dedupe` and `dedupe=name`
+  it; `parent` applies as on the other relations. Only name deduplication is supported: omitted `dedupe` and `dedupe=name`
   are equivalent; `dedupe=registration` returns `400 invalid_input`, including
   with a continuation cursor. Released names have no current registration resource
   by which this relation can group them. `page.total_count` is `null`. Its cursor binds the address,
-  namespace, both bounds and order, and holds the last row's position, as on
+  namespace, both bounds, `parent` when sent, and order, and holds the last row's position, as on
   `GET /v1/names`. An app looking for names still renewable in grace asks for
   `expires_after` at `now` minus the longest grace and checks `grace_ends_at`
   and the contract's own renewal rules: an explicitly unregistered ENSv2
@@ -3200,8 +3280,8 @@ introduces it rebuilds Project from full history before serving the option; see
   resource can match without a current owner or registration; the result does
   not invent authority for them. For such names, `dedupe=registration` and
   cursor identity use the serving resource as the grouping key while
-  registration fields remain absent. `namespace`, `authority`, `q`, `match`,
-  `sort`, `order`, `dedupe`,
+  registration fields remain absent. `namespace`, `authority`, `parent`, `q`,
+  `match`, `sort`, `order`, `dedupe`,
   and `include=role_summary` apply as for the authority relations.
 - Response shape: `data` is an array of record-shaped rows with `name`,
   `display_name`, `namespace`, `namehash`, `owner`, `manager`,
@@ -3313,7 +3393,9 @@ introduces it rebuilds Project from full history before serving the option; see
 - Pagination behavior: standard collection pagination. Cursors are bound to
   address, optional namespace filter, normalized relation set, the normalized
   `authority` set, `is_migrated`, `q`, `match=contains` when it narrows a
-  `q`, dedupe mode, sort, and order; a `resolves_to` cursor additionally binds
+  `q`, `parent` when sent, dedupe mode, sort, and order (a cursor issued
+  without `parent` keeps the shape it had before the filter existed, so it
+  continues unchanged); a `resolves_to` cursor additionally binds
   the coin-type selector (the canonical decimal coin type, or `evm`), so a
   single-coin cursor never resumes an `evm` read or the reverse, and a cursor
   minted for one relation set never resumes another. `resolves_to` reads
@@ -3369,12 +3451,15 @@ introduces it rebuilds Project from full history before serving the option; see
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L49-L58 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L83 @ ens_v1@91c966f).
   Such an ENSv1 registry child is listed for its current registry owner — the
-  node's `owner(node)`, read from its latest `NewOwner` or `Transfer` — as
-  `relations: ["owner", "manager"]`, exactly while its parent's
-  `GET /v1/names/{name}/subnames` lists it, and as that route serves it:
+  node's `owner(node)`, read from its latest `NewOwner` or `Transfer` — under
+  `manager`, and under `owner` for the holder of its `.eth` lease while the
+  registrar retains one, else for its registry owner too, exactly while its parent's
+  `GET /v1/names/{name}/subnames` lists it, except the NameWrapper-held and
+  released children below, and as that route serves it:
   `name` and `display_name` carry the proven, normalization-verified label
   preimage under the parent, else a [non-name form](glossary.md#non-name-form);
-  `namehash` is the child node, `owner` the registry owner, and
+  `namehash` is the child node, `owner` the lease's holder or else the registry
+  owner, `manager` the registry owner, and
   `permission_resource_id` the node's registry-only resource. The registry
   records no lease for it, so `registered_at`, `created_at`,
   `expires_at`, and `migrated_at` are absent,
@@ -3392,13 +3477,50 @@ introduces it rebuilds Project from full history before serving the option; see
   fails ENSIP-15 normalization: its lease and NameWrapper state are projected
   without a name row, so, as the subnames route serves it, its `ens_v1` object
   carries no lifecycle fields, no `expires_at` and no wrapper fields, and the
-  row omits `manager` while still listing it with `relations: ["owner",
-  "manager"]` (see [Manager](api-v1.md#manager)).
-  `relation=owner` and `relation=manager` each list it; `authority` matches
+  row omits `manager`. Such a child whose registry owner is the NameWrapper
+  contract that named it is not listed for the NameWrapper contract under any
+  relation, and its token holder is not listed for it either; once its registry
+  record leaves the NameWrapper it is listed for its new registry owner (see
+  [Manager](api-v1.md#manager)). A known residual: a child the NameWrapper once
+  named whose registry record is later handed back to the NameWrapper address
+  by a plain registry `setOwner` or `setSubnodeOwner`, with no new wrap, also
+  stays unlisted for the NameWrapper contract, whether or not a NameWrapper
+  token survives for it
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f).
+  A `.eth` child whose registrar lease bigname has released
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
+  is listed for no address under any relation, as a released name serves no owner or
+  manager, although its registry record survives the lapse: expiry never writes the
+  registry, and the registrar writes it only on a registration other than `registerOnly`
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L128 @ ens_v1@91c966f)
+  or a `reclaim` by a live token's holder or an address it approved
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f);
+  its parent's subnames page lists it as `released`. A later registration of the
+  label lists it for its registrant under `owner`, and under `manager` when
+  `register` sets the registry owner to the registrant; `registerOnly` leaves
+  the registry record as it was
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L128 @ ens_v1@91c966f),
+  so the old registry owner keeps `manager`. A known residual: after
+  `registerOnly` no registry or token transfer fact names the registrant for
+  the node, so this route lists the child for the registrant under no relation,
+  although its parent's subnames page serves the registrant as `owner`. A known residual:
+  `relation=former_owner` lists only names with a name row, so it never lists such
+  a child for the registrant whose lease lapsed.
+  Every other registry child described here is listed under `relation=owner`
+  for its `owner` and under `relation=manager` for its registry owner, one row
+  under both when they are the same address; `authority` matches
   it by that value, `is_migrated=true` omits it and `is_migrated=false` keeps it; `q` matches its
   served text; the timestamp sorts place it among the rows without that
   timestamp; `dedupe=registration` keys it by its registry-only resource. A
-  registry `Transfer` moves the row to the new owner. Once a surface names the
+  registry `Transfer` moves `manager` to the new registry owner, and `owner`
+  too when the registrar retains no lease; the lease token's `Transfer` moves
+  `owner`
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f).
+  Once a surface names the
   child, only its ordinary row is listed; the surface counts from the family
   publication that includes its block, so a surface Interpret commits after the
   served publication leaves the child listed here until Project publishes it.
@@ -4618,9 +4740,10 @@ For a registrar lease first identified by a later readable observation, registra
 - Response shape: `data` is `{namespace, capabilities, networks}`.
   `capabilities` is a product-facing object keyed by capability name; each
   value is `{completeness, unsupported_reason?, chains?}` using the common
-  completeness vocabulary. `networks` is an array of `{network, chain_id?}`
-  entries when the namespace has public chain mappings. Control-plane metadata
-  omits `meta.as_of` and `meta.as_of_token`.
+  completeness vocabulary. `networks` is an array of
+  `{network, chain_id?, resolution?}` entries when the namespace has public
+  chain mappings. Control-plane metadata omits `meta.as_of` and
+  `meta.as_of_token`.
 - `subnames` aggregates the active manifests' `declared_children` flags:
   `full` when every declaring manifest is supported, `partial` when some are,
   otherwise `unsupported` with `unsupported_reason=not_supported_for_namespace`.
@@ -4665,6 +4788,48 @@ For a registrar lease first identified by a later readable observation, registra
     "completeness": "full",
     "chains": { "11155111": { "completeness": "full" } }
   }
+  ```
+- Resolution protocol per network: `resolution` is `{protocol, since_block}`
+  and says which ENS protocol generation `.eth` resolution follows on that
+  network now. It is present on each network where the namespace has an ENS
+  execution entrypoint, an `active` or `shadow` `ens_execution` manifest for
+  that chain (ENS on Ethereum Mainnet or Sepolia), and absent elsewhere,
+  including every Basenames network, which has no ENSv1/ENSv2 split. It is
+  also absent while that network's projected data is not servable under the
+  publication fence the lookup and collection reads apply, when those reads
+  answer `409 stale`: before Project's first publication under the running
+  build, while the publication trails the head by more than the configured lag
+  tolerance, while Interpret is redoing, while a Project redo overlaps it, or
+  after a reorg orphans its block. The rest of the answer is still served.
+  `protocol` is `ens_v2` past the
+  [Universal Resolver cutover](glossary.md#universal-resolver-cutover): the
+  path from the client-facing Universal Resolver proxy, through the declared
+  proxies it points at, ends at an implementation `ens_execution` lists in
+  `universal_resolver_implementations`. It is `ens_v1` otherwise: before the
+  cutover, after an upgrade to an implementation the manifest does not list,
+  and while a proxy on that path has no `Upgraded` yet. This is the decision name reads apply to `.eth`
+  expiry, grace and resolvability ([Expiry and grace](api-v1.md#expiry-and-grace)).
+  `since_block` is the latest `Upgraded` block among the proxies on the
+  client-facing proxy's path, the block from which clients have resolved
+  through the current implementation. Upgrades of declared proxies off that
+  path do not move it; every upgrade on it does, including one from one
+  listed implementation to another, so it dates the current implementation,
+  not an unbroken run of the same `protocol`; earlier states are not reported.
+  It is `null`, with `protocol` `ens_v1`, when no `Upgraded` of the
+  client-facing proxy has been observed, as on Mainnet today. The fence check
+  and the proxy read share one snapshot of the projected proxy state name reads
+  also use, and the answer carries no `meta.as_of`. Example shape under the Sepolia
+  profile, with an illustrative block; there `since_block` is the Sepolia
+  cutover block:
+
+  ```json
+  "networks": [
+    {
+      "network": "ethereum-sepolia",
+      "chain_id": 11155111,
+      "resolution": { "protocol": "ens_v2", "since_block": 12345678 }
+    }
+  ]
   ```
 - Pagination behavior: none.
 - Status semantics: unsupported public namespaces return `404 not_found`.

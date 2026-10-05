@@ -1,7 +1,9 @@
 //! The ENSv1 registry children with no name surface that an address owns, read through the
 //! subnames relation (`children_page::push_children`), so each is the row
-//! `GET /v1/names/{parent}/subnames` serves for it: the same served name and the same owner, the
-//! child node's current registry owner. A child is one an `ens_v1_registry_l1` NewOwner created
+//! `GET /v1/names/{parent}/subnames` serves for it: the same served name, the same owner (the
+//! holder of the node's `.eth` lease when the registrar retains one, else the child node's
+//! current registry owner) and the same manager (its registry owner). A child is one an
+//! `ens_v1_registry_l1` NewOwner created
 //! (a `setSubnodeOwner` or `setSubnodeRecord`, which proves the child node and its labelhash but
 //! not its label). Its parent is the node that NewOwner names, found by the child through the
 //! retained SubregistryChanged events; the child relation then decides whether the parent lists
@@ -29,10 +31,17 @@ pub(crate) struct RegistryChildRow {
     /// The child has only a shadow surface a NameWrapper or ENSv1 registrar event observed
     /// (`FamilyChildRow::lifecycle_shadow`).
     pub lifecycle_shadow: bool,
+    /// The NameWrapper that observed the shadow is the registry owner
+    /// (`FamilyChildRow::wrapper_held`).
+    pub wrapper_held: bool,
+    /// The node's registrar lease has been released (`FamilyChildRow::released_lease`).
+    pub released_lease: bool,
+    /// The holder of the node's registrar lease (`FamilyChildRow::token_holder`).
+    pub token_holder: Option<String>,
 }
 
 /// The children among `candidates` (name ids of `chain_id` with no name surface) that a parent
-/// lists and whose served owner is `address`.
+/// lists and whose served owner or manager is `address`.
 pub(crate) async fn load_owned_registry_children(
     conn: &mut PgConnection,
     chain_id: &str,
@@ -67,30 +76,8 @@ pub(crate) async fn load_owned_registry_children(
         return Ok(Vec::new());
     }
     require_publication(conn, &parents).await?;
-    let filter = ChildrenCurrentPageFilter::default();
-    let mut builder = QueryBuilder::<Postgres>::new("WITH ");
-    push_children(&mut builder, Parents::Many(&parents), &filter, None);
-    builder.push(
-        ") SELECT children.child_logical_name_id, children.namespace,
-                  children.canonical_display_name, children.namehash, children.owner,
-                  children.registry_authority, children.lifecycle_shadow,
-                  state.owner_resource_id
-           FROM children
-           JOIN parent ON parent.logical_name_id = children.parent_logical_name_id
-           JOIN bigname_phase.project_registry_node_state state
-             ON state.chain_id = parent.chain_id AND state.namespace = children.namespace
-            AND state.node = lower(children.namehash)
-           WHERE children.child_logical_name_id = ANY(",
-    );
-    builder.push_bind(candidates);
-    builder.push(") AND children.owner = lower(");
-    builder.push_bind(address);
-    builder.push(") AND state.owner_resource_id IS NOT NULL AND NOT ");
-    push_published_surface_exists(
-        &mut builder,
-        "children.child_logical_name_id",
-        published_block,
-    );
+    let nodes = candidate_nodes(candidates);
+    let mut builder = owned_children_query(address, candidates, &nodes, &parents, published_block);
     let rows = builder
         .build()
         .fetch_all(&mut *conn)
@@ -108,12 +95,70 @@ pub(crate) async fn load_owned_registry_children(
             resource_id: row.try_get("owner_resource_id")?,
             authority: row.try_get("registry_authority")?,
             lifecycle_shadow: row.try_get("lifecycle_shadow")?,
+            wrapper_held: row.try_get("wrapper_held")?,
+            released_lease: row.try_get("released_lease")?,
+            token_holder: row.try_get("token_holder")?,
         };
         if seen.insert(child.logical_name_id.clone()) {
             children.push(child);
         }
     }
     Ok(children)
+}
+
+/// The child nodes of `<namespace>:<node>` name ids.
+fn candidate_nodes(candidates: &[String]) -> Vec<String> {
+    candidates
+        .iter()
+        .filter_map(|id| id.split_once(':').map(|(_, node)| node.to_owned()))
+        .collect()
+}
+
+/// The statement of [`load_owned_registry_children`]: the children relation of `parents`
+/// narrowed to `nodes`, the nodes of `candidates`, keeping the children whose served owner (the
+/// lease's holder, else the registry owner) or registry owner is `address`.
+pub(super) fn owned_children_query<'a>(
+    address: &'a str,
+    candidates: &'a [String],
+    nodes: &'a [String],
+    parents: &'a [String],
+    published_block: i64,
+) -> QueryBuilder<'a, Postgres> {
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "/* storage:families.topology.owned_registry_children */ WITH ",
+    );
+    push_children(
+        &mut builder,
+        Parents::Many(parents),
+        &ChildrenCurrentPageFilter::default(),
+        None,
+        Some(nodes),
+    );
+    builder.push(
+        ") SELECT children.child_logical_name_id, children.namespace,
+                  children.canonical_display_name, children.namehash, children.owner,
+                  children.registry_authority, children.lifecycle_shadow,
+                  children.wrapper_held, children.released_lease, children.token_holder,
+                  state.owner_resource_id
+           FROM children
+           JOIN parent ON parent.logical_name_id = children.parent_logical_name_id
+           JOIN bigname_phase.project_registry_node_state state
+             ON state.chain_id = parent.chain_id AND state.namespace = children.namespace
+            AND state.node = lower(children.namehash)
+           WHERE children.child_logical_name_id = ANY(",
+    );
+    builder.push_bind(candidates);
+    builder.push(") AND (COALESCE(children.token_holder, children.owner) = lower(");
+    builder.push_bind(address);
+    builder.push(") OR children.owner = lower(");
+    builder.push_bind(address);
+    builder.push(")) AND state.owner_resource_id IS NOT NULL AND NOT ");
+    push_published_surface_exists(
+        &mut builder,
+        "children.child_logical_name_id",
+        published_block,
+    );
+    builder
 }
 
 /// The published-surface test of a name id, as SQL with `$block` naming the publication block

@@ -91,7 +91,8 @@ impl TransactionIndex {
             && let Some((namehash, _)) = registry_registration_setup_namehash(selected, raw)?
         {
             // `_unwrap` writes the registry just before it emits `NameUnwrapped`, so only the
-            // last write for the node ahead of an unwrap is the NameWrapper's own.
+            // last write for the node ahead of an unwrap is the NameWrapper's own
+            // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f).
             let node = key(selected, raw, namehash);
             let writes = self.registry_setups.get(&node);
             context.wrapper_custody.unwrap_follows =
