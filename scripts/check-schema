@@ -697,15 +697,20 @@ check_served_projection_removal() {
             fi
             emit_phase_migration "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" baseline-first
             emit_phase_migration "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" baseline-first
+            # The ENSv2 registry entry tables: absent from the pre-7c shape, already in the baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261005140000_project_ens_v2_registry_entries.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261005140000_project_ens_v2_registry_entries.sql" baseline-first
             # The expiry selector columns and indexes: added to the pre-7c shape, already in the baseline.
             if [ "$suffix" = removal ]; then
                 emit_phase_migration "$ROOT/migrations/20261005150000_project_name_summary_expiry_selector.sql" preceding-shape
             fi
             emit_phase_migration "$ROOT/migrations/20261005150000_project_name_summary_expiry_selector.sql" baseline-first
             if [ "$suffix" = removal ]; then
-                emit_phase_migration "$ROOT/migrations/20261005160000_project_address_history_catalogue.sql" preceding-shape
+                emit_phase_migration "$ROOT/migrations/20261005170000_project_address_history_catalogue.sql" preceding-shape
             else
-                emit_phase_migration "$ROOT/migrations/20261005160000_project_address_history_catalogue.sql" baseline-first
+                emit_phase_migration "$ROOT/migrations/20261005170000_project_address_history_catalogue.sql" baseline-first
             fi
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
@@ -841,8 +846,9 @@ for migration_file in \
     "$ROOT/migrations/20261005090000_normalized_events_registry_token_index.sql" \
     "$ROOT/migrations/20261005120000_normalized_events_address_root_permission_idx.sql" \
     "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" \
+    "$ROOT/migrations/20261005140000_project_ens_v2_registry_entries.sql" \
     "$ROOT/migrations/20261005150000_project_name_summary_expiry_selector.sql" \
-    "$ROOT/migrations/20261005160000_project_address_history_catalogue.sql"
+    "$ROOT/migrations/20261005170000_project_address_history_catalogue.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1188,7 +1194,9 @@ for migration_file in \
     "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" \
     "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" \
     "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" \
-    "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql"
+    "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" \
+    "$ROOT/migrations/20261005140000_project_ens_v2_registry_entries.sql" \
+    "$ROOT/migrations/20261005140000_project_ens_v2_registry_entries.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
@@ -2868,8 +2876,8 @@ assert_index_install_hint address-match-index-on-another-table-hint \
 # validated. The walk installer and remaining structural checks need today's indexes.
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
-    emit_phase_migration "$ROOT/migrations/20261005160000_project_address_history_catalogue.sql" preceding-shape
-    emit_phase_migration "$ROOT/migrations/20261005160000_project_address_history_catalogue.sql" baseline-first
+    emit_phase_migration "$ROOT/migrations/20261005170000_project_address_history_catalogue.sql" preceding-shape
+    emit_phase_migration "$ROOT/migrations/20261005170000_project_address_history_catalogue.sql" baseline-first
 } | run_psql
 # ops/walk-index-set/drop.sql must refuse while a chain may be served: its Project
 # is running, has a current block or a live family marker and its Interpret is not redoing,
@@ -5212,6 +5220,8 @@ BEGIN
             ('project_grant'),
             ('project_resource_admin_aggregate'),
             ('project_account_approval'),
+            ('project_ens_v2_entry_owner'),
+            ('project_ens_v2_registry_parent'),
             ('project_name_alias'),
             ('project_resolver_alias'),
             ('project_child_edge_candidate'),
@@ -5324,6 +5334,8 @@ BEGIN
             ('project_grant'),
             ('project_resource_admin_aggregate'),
             ('project_account_approval'),
+            ('project_ens_v2_entry_owner'),
+            ('project_ens_v2_registry_parent'),
             ('project_name_alias'),
             ('project_resolver_alias'),
             ('project_child_edge_candidate'),

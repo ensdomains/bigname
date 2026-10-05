@@ -50,6 +50,8 @@ tables! {
     RESOURCE_ADMIN_AGGREGATE = "project_resource_admin_aggregate" ["chain_id", "resource_id"];
     ACCOUNT_APPROVAL = "project_account_approval"
         ["chain_id", "authority_kind", "authority_contract", "owner", "subject", "relation_kind"];
+    ENS_V2_ENTRY_OWNER = "project_ens_v2_entry_owner" ["chain_id", "registry", "entry_key"];
+    ENS_V2_REGISTRY_PARENT = "project_ens_v2_registry_parent" ["chain_id", "registry"];
     CHILD_EDGE_CANDIDATE = "project_child_edge_candidate"
         ["chain_id", "namespace", "parent_node", "child_node", "authority_arm"];
     PARENT_SUBREGISTRY = "project_parent_subregistry" ["chain_id", "logical_name_id"];

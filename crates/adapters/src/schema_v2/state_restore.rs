@@ -153,6 +153,10 @@ pub(super) fn rebuild_v2_indexes(state: &mut State) {
             state.restore_v2_subregistry_change(emitter, token, &event.after_state);
         }
         "ExpiryChanged" => {
+            // Written for an entry with no token state, which the log did not change.
+            if event.after_state.get("token_state_absent") == Some(&Value::Bool(true)) {
+                return;
+            }
             let (Some(token), Some(expiry)) =
                 (token, event.after_state.get("expiry").and_then(parse_u64))
             else {

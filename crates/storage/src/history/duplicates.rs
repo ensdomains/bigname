@@ -53,6 +53,14 @@ pub(super) fn push_fixed_product_history_duplicate_filter(
     // A named registrar snapshot describes retained state, not another on-chain action.
     // Filter before keyset pagination; diagnostics bypasses this product-only filter.
     builder.push(" AND NOT (ne.after_state @> '{\"state_derived\":true,\"registrar_surface_snapshot\":true}'::jsonb)");
+    // An ENSv2 registry `ExpiryUpdated` whose token the adapter holds no state for is kept for
+    // the registry entry row only: it has no name and no resource to describe. Product reads
+    // neither list nor count it; diagnostics bypasses this filter.
+    builder.push(
+        " AND NOT (ne.event_kind = 'ExpiryChanged' AND ne.logical_name_id IS NULL \
+           AND ne.resource_id IS NULL \
+           AND ne.after_state @> '{\"token_state_absent\":true}'::jsonb)",
+    );
     // Registry read copies retain the original control-resource representation.
     // NOT LIKE rather than strpos(...) = 0: PostgreSQL has no statistics for the strpos
     // result and estimates the equality at 0.5% of rows, so a page read looked 200 times

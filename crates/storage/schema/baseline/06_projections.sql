@@ -1638,7 +1638,7 @@ COMMENT ON TABLE project_account_approval IS
 COMMENT ON COLUMN project_account_approval.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_account_approval.authority_kind IS
-    'This value is registry or wrapper.';
+    'This value is registry (an ENSv1 or Basenames registry), wrapper (the NameWrapper) or ens_v2_registry (an ENSv2 registry).';
 COMMENT ON COLUMN project_account_approval.authority_contract IS
     'This value is the lower-cased authority contract.';
 COMMENT ON COLUMN project_account_approval.owner IS
@@ -1671,6 +1671,118 @@ COMMENT ON COLUMN project_account_approval.inheritance_path IS
     'This value is the after-state inheritance_path.';
 COMMENT ON COLUMN project_account_approval.transfer_behavior IS
     'This value is the after-state transfer_behavior.';
+
+CREATE TABLE IF NOT EXISTS project_ens_v2_entry_owner (
+    chain_id text NOT NULL,
+    registry text NOT NULL,
+    entry_key text NOT NULL,
+    registry_contract_instance_id text,
+    token_id text NOT NULL,
+    upstream_resource text,
+    resource_id uuid,
+    status text NOT NULL,
+    owner text,
+    expiry numeric,
+    owner_position jsonb,
+    resource_position jsonb,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    PRIMARY KEY (chain_id, registry, entry_key),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL)),
+    CHECK (status IN ('registered', 'reserved', 'unregistered', 'unknown')),
+    CHECK (status = 'registered' OR owner IS NULL)
+);
+CREATE INDEX IF NOT EXISTS project_ens_v2_entry_owner_owner_idx
+    ON project_ens_v2_entry_owner (chain_id, owner, registry, entry_key)
+    WHERE owner IS NOT NULL;
+CREATE INDEX IF NOT EXISTS project_ens_v2_entry_owner_resource_idx
+    ON project_ens_v2_entry_owner (chain_id, resource_id)
+    WHERE resource_id IS NOT NULL;
+COMMENT ON TABLE project_ens_v2_entry_owner IS
+    'Project-owned ENSv2 registry entries of family F16: per registry and entry (the labelhash with its 32 version bits cleared), what the registry''s own logs last said about the entry''s token. It follows the contract, not the name: an entry whose own expiry has passed keeps its owner, because the registry burns nothing at expiry, and a name whose path was released keeps its entry. Readers compare expiry with the block they serve.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.registry IS
+    'This value is the lower-cased address of the registry that emitted the logs.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.entry_key IS
+    'This value is the entry: a 32-byte token id, resource or labelhash of the label with its low 32 bits cleared, as 0x and 64 lower-case hex digits.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.registry_contract_instance_id IS
+    'This value is the registry contract instance the latest event carrying one named.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.token_id IS
+    'This value is the token id the latest registry log of the entry named; its low 32 bits are the token version. With status unregistered it is the burned token.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.upstream_resource IS
+    'This value is the resource the registry announced for the current token (TokenResource); its low 32 bits are the role version. Null from a registration or reservation until that log.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.resource_id IS
+    'This value is the bigname resource of upstream_resource; null with it.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.status IS
+    'This value is registered (a token was minted or transferred), reserved (the label is held without a token), unregistered (the token was burned by unregister) or unknown (the first log seen for the entry says nothing about its owner).';
+COMMENT ON COLUMN project_ens_v2_entry_owner.owner IS
+    'This value is the lower-cased token owner while status is registered; null otherwise. Under status unknown null means not known, not the zero address.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.expiry IS
+    'This value is the entry''s own expiry in Unix seconds: from the latest registration, reservation or renewal, or the block time of an unregister. Null when no log has stated it.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.owner_position IS
+    'This value is the position of the registration, reservation, transfer or unregister that last set status and owner.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.resource_position IS
+    'This value is the position of the TokenResource log that set the resource; null with it.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.block_number IS
+    'This value is the block number of the event that last wrote the row.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.transaction_index IS
+    'This value is the transaction index of the event that last wrote the row; null with log_index for a synthesised event.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.log_index IS
+    'This value is the log index of the event that last wrote the row; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.event_identity IS
+    'This value is the event identity of the event that last wrote the row, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.normalized_event_id IS
+    'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON INDEX project_ens_v2_entry_owner_owner_idx IS
+    'This index finds the entries an account owns, by registry, for joining an owner''s operator approvals to the tokens they reach.';
+COMMENT ON INDEX project_ens_v2_entry_owner_resource_idx IS
+    'This index finds the entry of a resource, for reading the current owner of a permission resource.';
+
+CREATE TABLE IF NOT EXISTS project_ens_v2_registry_parent (
+    chain_id text NOT NULL,
+    registry text NOT NULL,
+    parent text,
+    raw_label_hex text,
+    parent_entry_key text,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    PRIMARY KEY (chain_id, registry),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+CREATE INDEX IF NOT EXISTS project_ens_v2_registry_parent_entry_idx
+    ON project_ens_v2_registry_parent (chain_id, parent, parent_entry_key)
+    WHERE parent IS NOT NULL;
+COMMENT ON TABLE project_ens_v2_registry_parent IS
+    'Project-owned ENSv2 registry parents of family F16: per registry, the parent registry and label its latest ParentUpdated named. An ENSv1→ENSv2 migration-created WrapperRegistry gives its root roles to the owner of that label''s entry in the parent, and to that owner''s operators there.';
+COMMENT ON COLUMN project_ens_v2_registry_parent.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_ens_v2_registry_parent.registry IS
+    'This value is the lower-cased address of the registry that emitted ParentUpdated.';
+COMMENT ON COLUMN project_ens_v2_registry_parent.parent IS
+    'This value is the lower-cased parent registry; null when the registry named the zero address.';
+COMMENT ON COLUMN project_ens_v2_registry_parent.raw_label_hex IS
+    'This value is the label bytes the registry named, as lower-case hex without a prefix.';
+COMMENT ON COLUMN project_ens_v2_registry_parent.parent_entry_key IS
+    'This value is the entry of that label in the parent: the keccak-256 of the label bytes with its low 32 bits cleared, the key project_ens_v2_entry_owner uses.';
+COMMENT ON COLUMN project_ens_v2_registry_parent.block_number IS
+    'This value is the block number of the event that last wrote the row.';
+COMMENT ON COLUMN project_ens_v2_registry_parent.transaction_index IS
+    'This value is the transaction index of the event that last wrote the row; null with log_index for a synthesised event.';
+COMMENT ON COLUMN project_ens_v2_registry_parent.log_index IS
+    'This value is the log index of the event that last wrote the row; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_ens_v2_registry_parent.event_identity IS
+    'This value is the event identity of the event that last wrote the row, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_ens_v2_registry_parent.normalized_event_id IS
+    'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON INDEX project_ens_v2_registry_parent_entry_idx IS
+    'This index finds the registries that name a parent entry, for reading which registries an entry''s owner holds root roles on.';
 
 CREATE TABLE IF NOT EXISTS project_child_edge_candidate (
     chain_id text NOT NULL,

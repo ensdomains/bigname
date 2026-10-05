@@ -340,6 +340,15 @@ ABI entries use Alloy-parseable human-readable Solidity fragments, not handwritt
   empty list with a `registry_announcement` rule and may match without address admission. Other
   events without `emitter_roles` fail manifest validation.
 - `normalized_events` — optional normalized event kinds produced from the event.
+- `start_block` — optional inclusive first block of the event's family-wide
+  entry in the [compiled watch plan](glossary.md#compiled-watch-plan); block
+  zero when omitted. It is valid only where such an entry compiles: an event
+  with `emitter_roles`, in a source family whose emitters discovery admits,
+  that is not an all-emitter event. It bounds the
+  [required Ingest redo](#mandatory-historical-fetch-after-watch-plan-widening)
+  that adding the event stamps and nothing else: runtime intake and Interpret
+  keep each emitter's own active range. Like every other `start_block` it must
+  fit a signed 64-bit integer.
 - `status` — optional `unsupported` | `shadow` | `supported` marker for the ABI entry.
 - `notes` — optional reviewer-facing context.
 
@@ -362,9 +371,15 @@ ENSv1 and Basenames registry `ApprovalForAll` declarations map to
 `AccountPermissionChanged`, the NameWrapper `ApprovalForAll` declaration maps
 to the same kind, and the NameWrapper `Approval` declaration maps to a
 resource-scoped `PermissionChanged`; registrar and resolver approvals remain
-decoded with no normalized output. Standard approval events are watched
+decoded with no normalized output. The `ApprovalForAll` declarations of
+`ens_v2_registry_l1` and `ens_v2_root_l1` map to `AccountPermissionChanged`
+too, with `authority_kind = ens_v2_registry` and no stored power
+([ENSv2 registry operator approvals](#ensv2-registry-operator-approvals)).
+ENSv1, Basenames and NameWrapper standard approval events are watched
 only at explicitly declared, role-eligible
-contract addresses and their declared historical intervals; they are not added
+contract addresses and their declared historical intervals. The ENSv2 registry
+declaration is an ordinary family-wide event instead, because most registries
+are discovered rather than declared. No standard approval event is added
 to generic resolver [all-emitter watches](glossary.md#watch-plan--watched-tuple).
 The admitted Sepolia legacy registry artifact declares that exact
 `ApprovalForAll(owner, operator, approved)` event.
@@ -594,8 +609,73 @@ permission events and are not ownership evidence.
 
 ENSv2 terminal lifecycle events also close interpreter-owned state. `LabelUnregistered` is emitted before upstream expires the entry and has no paired zero-target subregistry or resolver updates, so the ENSv2 interpreter closes the current surface binding and emits terminal discovery observations at that log position. It also emits null `SubregistryChanged` and `ResolverChanged` boundaries for any attached roles so full and incremental projections retire the old topology. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L199 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L206 @ ens_v2@a971bd64) A replacement registration or reservation can bump the token version and overwrite the stored subregistry and resolver, while upstream emits follow-up target updates only for nonzero replacements; the adapter therefore closes the prior discovery targets before accepting the successor lifecycle and emits the same null role boundaries. Replacement registration lets the following `TokenResource` close the old surface at the successor start; replacement reservation has no successor resource, so it closes immediately and emits `SurfaceUnbound` as position-specific reorg-repair evidence. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L455 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L462 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L478 @ ens_v2@a971bd64)
 
-`RegistryCreated` is admitted as registry-instance history and discovery input. `URIUpdated`, the `PermissionedResolver` `DataChanged` / `NamedDataResource` pair, and ERC-1155 `ApprovalForAll` remain outside the active normalized behavior.[^v2-events-created][^v2-events-uri][^v2-pres-data] Operator approval is not treated as token ownership or an ENSv2 resource-role grant. (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L336 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L341 @ ens_v2@a971bd64) The official Sepolia profile directly admits the exact `PublicResolverV2` described below; Mainnet has no such declaration. PermissionedResolver proxy support still requires canonical implementation evidence.
+`RegistryCreated` is admitted as registry-instance history and discovery input. `URIUpdated`, the `PermissionedResolver` `DataChanged` / `NamedDataResource` pair, and a resolver's ERC-1155 `ApprovalForAll` remain outside the active normalized behavior.[^v2-events-created][^v2-events-uri][^v2-pres-data] A registry's `ApprovalForAll` is an account fact ([ENSv2 registry operator approvals](#ensv2-registry-operator-approvals)); it is not treated as token ownership or an ENSv2 resource-role grant. (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L336 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L341 @ ens_v2@a971bd64) The official Sepolia profile directly admits the exact `PublicResolverV2` described below; Mainnet has no such declaration. PermissionedResolver proxy support still requires canonical implementation evidence.
 
+#### ENSv2 registry operator approvals
+
+Every ENSv2 registry is an ERC-1155 contract that keeps its own
+owner-to-operator approvals, and an approved operator gets the roles the
+current token owner holds on a token's own resource.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/erc1155/ERC1155Singleton.sol:L73-L75 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/erc1155/ERC1155Singleton.sol:L351-L357 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+The Sepolia `ens_v2_registry_l1` and `ens_v2_root_l1` manifests declare
+`ApprovalForAll(address indexed account, address indexed operator, bool approved)`
+for the `registry` and `root_registry` roles, as the deployed registries emit it.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ETHRegistry.json:L362 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/RootRegistry.json:L362 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UserRegistryImpl.json:L425 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/WrapperRegistryImpl.json:L520 @ ens_v2_sepolia_20261001@07e55a05)
+Both are [standard approval](glossary.md#standard-approval-derivation)
+declarations with an empty `normalized_events` list. The adapter maps each log
+to one `AccountPermissionChanged` with `authority_kind = ens_v2_registry`, the
+emitting registry as the authority contract, and an empty `effective_powers`
+list in both states: the operator's powers are whatever the owner of each token
+holds on that token, so no power is stored with the approval and `approved`
+alone carries the fact. The adapter reads no registry state for it and routes
+it before the registry adapter settles pending name transitions, so adding the
+declaration moves no other normalized event. The same build also keeps one
+registry log the adapter used to drop: an `ExpiryUpdated` whose token the
+adapter holds no state for, which `renew` emits when a root renewer revives an
+entry that `unregister` left without a token
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L258 @ ens_v2_sepolia_20261001@07e55a05).
+It becomes an `ExpiryChanged` with no name and no resource and
+`token_state_absent = true`, changes no name state, is omitted from product
+event reads, and exists so that the
+[registry entry](projections.md#ensv2-registry-entries) row keeps the entry's
+expiry. The Mainnet deployment profile declares no
+ENSv2 family and is unchanged.
+
+The registry declaration compiles one family-wide watch entry, which covers
+the registries that announced themselves: the targets of
+`registry_announcement` edges, each from its `RegistryCreated` block. The
+declared ETHRegistry and the declared RootRegistry compile address entries at
+their own `start_block`; `ens_v2_root_l1` admits no discovered emitter of its
+own, so its declaration compiles no family-wide entry and carries no event
+`start_block`. A `subregistry` or `resolver` pointer is topology only and
+admits nothing by itself (see [Discovery admission](#discovery-admission)): a
+registry named by `SubregistryUpdated` is watched because it announced itself,
+and a resolver named by `ResolverUpdated` gets no registry topic from Ingest
+and no registry event selected by Interpret, although its address row carries
+the registry manifest. Resolver `ApprovalForAll` therefore stays outside both
+the watch and the interpretation.
+
+The registry declaration sets `start_block = 10893181`. That is a bigname
+coverage decision, not a deployment fact: it is the earliest block at which any
+registry admitted under the registry or root manifest starts on a database
+that has retained Sepolia's history, where `RegistryCreated` announcements
+admit registries created before the current deployment's own contracts, whose
+earliest declared start is the RootRegistry's `11820291`. On that database 1,865 registries are admitted, 1,848
+of them start below `11820291`, and each registry's first retained log is at its
+admission start, so no registry has an approval the floor would cut off. One
+value serves every emitter; there is no per-emitter origin. To re-derive it,
+take the least `active_from_block_number` over the `contract_instance_addresses`
+rows of the chain whose instance is admitted as a registry under the active
+`ens_v2_registry_l1` or `ens_v2_root_l1` manifest: a declared root or contract,
+or the target of a `registry_announcement` discovery edge, and not an instance
+reached only by a `subregistry` or `resolver` pointer. Lower the value when that
+minimum falls below it, for example after admitting an earlier deployment;
+lowering it widens the plan from the new start, and raising it stamps nothing.
 
 #### Direct PublicResolverV2 declarations on an owned local chain
 
@@ -1435,6 +1515,15 @@ omitted), clamped to its ingest start, and mints a manifest-authority
 marker, so its Interpret redo must be run as the attested full-range redo
 described below.
 
+An event's family-wide entry starts at the event's own `start_block`, or block
+zero when it has none. Adding an event with a `start_block` therefore widens
+from that block rather than from block zero, and the same start-later and
+start-earlier rules apply to it as to an implementation entry. The Sepolia
+`ens_v2_registry_l1` `ApprovalForAll` declaration is the one such event: its
+first synchronization stamps the required Ingest redo from block `10893181`,
+clamped to the chain's first ingest cursor
+([ENSv2 registry operator approvals](#ensv2-registry-operator-approvals)).
+
 For each newly widened direct-address watch, synchronization checks the
 continuous union of [persisted Ingest
 coverage](glossary.md#persisted-ingest-coverage) for the same chain, source
@@ -1901,6 +1990,15 @@ Watch-plan expansion starts from active manifest roots by `contract_instance_id`
   it emits `Upgraded`; another emitter can log one earlier, which is why
   Interpret applies the start.
   (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Utils.sol:L69-L86 @ basenames@1809bbc)
+- An `[[abi.events]]` entry's `start_block` is the start of that event's
+  family-wide compiled entry, block zero when omitted. It bounds the compiled
+  plan, and so a required Ingest redo; runtime intake still watches each
+  discovered emitter over its own active range, so an emitter admitted after
+  the start is fetched from its admission and one admitted before it is not
+  refetched below the start. The value is the earliest admitted emitter's
+  start for the family, re-derived as
+  [ENSv2 registry operator approvals](#ensv2-registry-operator-approvals)
+  describes.
 - Legacy watch rows may denormalize address and code-hash state, but their durable explanation path is `manifest root → discovery edge(s) → contract_instance_id`; schema-v2 resolver classification does not read that denormalization.
 - Address-only watch state is rebuildable from manifests, instance attributes, and active discovery edges.
 

@@ -10,6 +10,7 @@ use crate::{
 
 pub(super) fn compile_watch_scope(manifest: &SourceManifest) -> Result<Vec<CompiledWatchEntry>> {
     let mut family_topics = BTreeSet::new();
+    let mut family_starts = BTreeMap::<String, u64>::new();
     let mut role_topics = BTreeMap::<String, BTreeSet<String>>::new();
     for event in &manifest.abi.events {
         let parsed = event.parsed_event_view().with_context(|| {
@@ -30,6 +31,7 @@ pub(super) fn compile_watch_scope(manifest: &SourceManifest) -> Result<Vec<Compi
                     .insert(topic0.clone());
             }
         } else {
+            family_starts.insert(topic0.clone(), event.start_block.unwrap_or(0));
             family_topics.insert(topic0);
         }
     }
@@ -66,7 +68,7 @@ pub(super) fn compile_watch_scope(manifest: &SourceManifest) -> Result<Vec<Compi
                     family: manifest.source_family.clone(),
                 },
                 topic0,
-                0,
+                family_starts.get(topic0).copied().unwrap_or(0),
             );
         }
     }
