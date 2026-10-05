@@ -395,17 +395,21 @@ them.
   registration only by an account whose admin roles, held on that registration
   or on the registry root, cover it; on a registration the settable roles are
   the held admin roles shifted down to their regular counterparts, so an admin
-  role cannot be re-granted once every holder has revoked it, and
-  `ROLE_CAN_TRANSFER_ADMIN`, checked only on the token owner, has no lower
-  role at all. `locked_roles` is therefore the set of those roles whose admin
-  counterpart (`can_transfer_admin` for `transfer`) no current permission row on
-  the registration or its root carries; whether the role itself is still held
-  is read from the rows. An empty list means every one of them can still change.
-  (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L418-L424 @ ens_v2@a971bd64)
-  (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L453-L455 @ ens_v2@a971bd64)
-  (upstream: .refs/ens_v2/contracts/src/access-control/libraries/EACBaseRolesLib.sol:L31-L34 @ ens_v2@a971bd64)
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L560-L572 @ ens_v2@a971bd64)
-  (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L24-L45 @ ens_v2@a971bd64)
+  role cannot be re-granted once every holder has revoked it. `transfer` has no
+  lower role: a transfer needs `ROLE_CAN_TRANSFER_ADMIN` held by the token owner
+  on the registration itself, and the same role held on the registry root does
+  not count. `locked_roles` is therefore the set of those roles whose admin
+  counterpart no current permission row on the registration or its root
+  carries, except that `transfer` is listed whenever no current row on the
+  registration itself carries `can_transfer_admin`; whether the role itself is
+  still held is read from the rows. An empty list means every one of them can
+  still change.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L428-L435 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L463-L465 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/libraries/EACBaseRolesLib.sol:L31-L34 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L536-L539 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L606-L618 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/libraries/RegistryRolesLib.sol:L24-L45 @ ens_v2_sepolia_20261001@07e55a05)
 
 ### Permission powers vocabulary
 

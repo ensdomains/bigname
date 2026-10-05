@@ -1429,6 +1429,19 @@ async fn v2_permissions_resource_bound_read_serves_registry_locked_roles() -> Re
     );
     assert_unlisted_permission_surfaces(&payload, V2_ENS_V2_REGISTRY_UNLISTED_SURFACES);
 
+    let root = bigname_storage::ens_v2_registry_root_resource_id("ethereum-mainnet", Uuid::from_u128(0xA190));
+    insert_registry_permission_roles(&database, root, true, 74, json!([])).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 83, "0xregistry83").await?;
+    let root_revoked = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={resource_id}"),
+    )
+    .await?;
+    assert_eq!(
+        root_revoked["restrictions"]["locked_roles"],
+        json!(["unregister", "renew", "set_subregistry", "set_resolver", "transfer"])
+    );
+
     insert_registry_permission_roles(&database, resource_id, false, 75, json!([])).await?;
     rebuild_fixture_families(&database.pool, "ethereum-mainnet", 83, "0xregistry83").await?;
     let unrestricted = v2_permissions_payload_for_database(
@@ -1582,17 +1595,13 @@ async fn seed_base_permission_inputs(database: &TestDatabase, with_operator: boo
 async fn seed_registry_permission_inputs(database: &TestDatabase) -> Result<Uuid> {
     seed_registry_fixture(database).await?;
     let registration = Uuid::from_u128(0xA100);
-    let root = Uuid::from_u128(0xA300);
-    let provenance = json!({"source_family":"ens_v2_registry_l1",
-        "registry_contract_instance_id":Uuid::from_u128(0xA190),
-        "upstream_resource":format!("0x{:064x}", 0)});
+    // The adapter writes raw-log provenance only, so the root is found by its computed id.
+    let root = bigname_storage::ens_v2_registry_root_resource_id("ethereum-mainnet", Uuid::from_u128(0xA190));
+    let provenance = json!({"source":"raw_log", "source_event":"EACRolesChanged", "chain_id":"ethereum-mainnet",
+        "block_hash":"0xregistry59", "block_number":59, "emitting_address":ALPHA_REGISTRY});
     sqlx::query("INSERT INTO resources (resource_id, chain_id, block_number, block_hash, provenance, canonicality_state)
         VALUES ($1, 'ethereum-mainnet', 59, '0xregistry59', $2, 'canonical')")
         .bind(root).bind(&provenance).execute(&database.pool).await?;
-    sqlx::query("UPDATE resources SET provenance = provenance || $2 WHERE resource_id = $1")
-        .bind(registration).bind(json!({"source_family":"ens_v2_registry_l1",
-            "registry_contract_instance_id":Uuid::from_u128(0xA190),
-            "upstream_resource":format!("0x{:064x}", 0x100000001_u64)})).execute(&database.pool).await?;
     insert_registry_permission_roles(database, registration, false, 70, json!(["renew"])).await?;
     insert_registry_permission_roles(database, root, true, 70,
         json!(["admin_unregister", "admin_set_subregistry", "admin_set_resolver"])).await?;
