@@ -3605,8 +3605,10 @@ introduces it rebuilds Project from full history before serving the option; see
   Omit the include, then paginate
   `GET /v1/permissions?registration_id=<permission_resource_id>` for each selected
   resource. Preserve `namespace` only if it was explicitly present on the names
-  request; do not add `name` or `address` filters. This reads the same supported
-  permission relation, including supported rows on an unsupported name anchor.
+  request; do not add `name` or `address` filters. This is the full permissions
+  read of the registration: the grants `role_summary` would have carried,
+  including supported rows on an unsupported name anchor, plus the registry
+  root holders `role_summary` leaves out.
   Existing unsupported permission families remain unsupported. Reducing the name
   page can help, but one resource can exceed the limit by itself. Each request
   binds its own publication: a publication change between the names request and

@@ -152,7 +152,8 @@ impl Logs {
 fn registry_logs() -> Logs {
     let mut logs = Logs::default();
     let (resource, token) = (versioned(0), versioned(0));
-    logs.roles(120, U256::ZERO, ROOT_HOLDER, U256::ZERO, bit(0) | bit(128))
+    // The root holder is the registrar and holds root `renew`, which lets it revive an entry.
+    logs.roles(120, U256::ZERO, ROOT_HOLDER, U256::ZERO, bit(0) | bit(16) | bit(128))
         .roles(120, U256::ZERO, ROOT_MIXED, U256::ZERO, bit(16) | bit(156))
         .roles(120, U256::ZERO, ROOT_TRANSFER_ONLY, U256::ZERO, bit(156))
         .register(121, EXPIRY)
@@ -344,7 +345,7 @@ async fn registration_read_lists_operators_and_root_holders_through_the_token_li
     let owner_powers = json!(["renew", "set_resolver", "admin_set_resolver", "can_transfer_admin"]);
     let operator_own = row(OPERATOR, "registry", None, json!(["set_subregistry"]));
     let root_rows = [
-        row(ROOT_HOLDER, "root", None, json!(["registrar", "admin_registrar"])),
+        row(ROOT_HOLDER, "root", None, json!(["registrar", "renew", "admin_registrar"])),
         row(ROOT_MIXED, "root", None, json!(["renew"])),
     ];
 
@@ -491,7 +492,11 @@ async fn operator_rows_carry_only_the_owners_token_roles() -> Result<()> {
         .approve(122, OPERATOR, BOB, true)
         .approve(122, ALICE, ALICE, true)
         // Alice gives up every role on the token and keeps the token and her root roles.
-        .roles(124, versioned(0), ALICE, owner_roles(), U256::ZERO);
+        // The revocation regenerates the token, as a grant does.
+        .roles(124, versioned(0), ALICE, owner_roles(), U256::ZERO)
+        .transfer(124, versioned(0), ALICE, ZERO)
+        .push(124, TokenRegenerated { oldTokenId: versioned(0), newTokenId: versioned(1) }.encode_log_data())
+        .transfer(124, versioned(1), ZERO, ALICE);
     let (token, _) = seed(&database, logs, false).await?;
     let uri = format!("/v1/permissions?registration_id={token}");
     let owner_powers = json!(["renew", "set_resolver", "admin_set_resolver", "can_transfer_admin"]);
@@ -514,6 +519,13 @@ async fn operator_rows_carry_only_the_owners_token_roles() -> Result<()> {
     publish(&database, 124).await?;
     let page = v2_permissions_payload_for_database(&database, &uri).await?;
     assert_eq!(rows(&page), vec![alice_root], "{page:#}");
+    // A registration whose only rows are root holders still has its restriction block: no
+    // admin of any token role is left on the token or the root.
+    assert_eq!(page["restrictions"], json!({
+        "kind": "ens_v2_registry",
+        "locked_roles": ["unregister", "renew", "set_subregistry", "set_resolver", "transfer"],
+        "registration_id": token.to_string(),
+    }), "{page:#}");
     let by_operator = v2_permissions_payload_for_database(&database,
         &format!("/v1/permissions?address={OPERATOR}")).await?;
     assert_eq!(by_operator["data"], json!([]), "{by_operator:#}");
