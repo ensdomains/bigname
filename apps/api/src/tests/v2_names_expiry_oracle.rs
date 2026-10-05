@@ -7,22 +7,26 @@ const ORACLE_OLD_REGISTRY: &str = "0x314159265dd8dbb310642f98f50c066173c1259b";
 const ORACLE_ZERO: &str = "0x0000000000000000000000000000000000000000";
 /// Every listed name shares this second unless it says otherwise.
 const ORACLE_TIE: i64 = 1_850_000_000;
-/// Names in the shared second, cycling ens_v2, ens_v0 and ens_v1.
+/// Names in the shared second, cycling the ens_v2, ens_v0 and ens_v1 shapes.
 const ORACLE_TIE_NAMES: u128 = 30;
 
+/// Synthetic event shapes, named for the row bigname composes from each.
 #[derive(Clone, Copy)]
 enum OracleShape {
-    /// An ENSv1 `.eth` registration on the current registry.
+    /// A registrar-family grant on an `ens_v1` binding: served with `authority` `ens_v1`.
     EnsV1,
-    /// An ENSv1 registration whose registry node was written only by the 2017 registry.
+    /// The same with a registry Transfer whose emitter role is `registry_old`: served with
+    /// `authority` `ens_v0`.
     EnsV0,
-    /// An ENSv2 registration.
+    /// A grant and a token transfer of the `ens_v2_registry_l1` family on an `ens_v2` binding.
     EnsV2,
-    /// A registration whose binding is gone: the composed row is unsupported.
+    /// A registrar-family grant whose binding row is deleted: the composed row is unsupported.
     Unsupported,
-    /// A 2017-registry node with no owner and no binding: the row serves no authority.
+    /// A `registry_old` Transfer to the zero owner, the binding ended and no token: the composed
+    /// row serves no authority and no registration.
     Ownerless,
-    /// A registration the registrar released after its grace period.
+    /// A registrar-family grant followed by a `RegistrationReleased` event after its binding
+    /// ended.
     Released,
 }
 
@@ -161,9 +165,10 @@ impl OracleFixture {
 
 /// The oracle fixture, published at 240:
 /// - `tie00.eth`..`tie29.eth` share [`ORACLE_TIE`], cycling ens_v2, ens_v0 and ens_v1;
-/// - `frac-a.eth` and `frac-b.eth` (ENSv2) expire a quarter and three quarters into that second;
+/// - `frac-a.eth` and `frac-b.eth` (the ens_v2 shape) expire a quarter and three quarters into
+///   that second;
 /// - `early.eth` and `late.eth` expire before and after it, `kid.late.eth` and `kid.tie00.eth`
-///   are ENSv2 subnames;
+///   are one label below listed names;
 /// - `big.eth` expires at 2^63 and `max.eth` at the largest uint64, past every bigint;
 /// - `orphan.eth` is unsupported yet keeps a finite expiry in the tie second, and
 ///   `ownerless.eth` serves no registration; neither is listed;
