@@ -305,3 +305,7 @@ mod tests;
 #[cfg(test)]
 #[path = "expiring/union_tests.rs"]
 mod union_tests;
+
+#[cfg(any(test, feature = "test-support"))]
+#[path = "expiring/measure.rs"]
+pub(crate) mod measure;

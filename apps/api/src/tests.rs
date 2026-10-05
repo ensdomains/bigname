@@ -532,3 +532,5 @@ include!("tests/v2_family_name_display.rs");
 include!("tests/family_fixture_inputs_b.rs");
 
 include!("tests/v2_unix_timestamps.rs");
+
+include!("tests/v2_names_windows_measure.rs");
