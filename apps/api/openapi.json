@@ -5713,7 +5713,7 @@
           "wrapper_parent_control"
         ],
         "x-enum-descriptions": {
-          "ens_v2_registry_operators": "accounts that a discovered ENSv2 registry's code may let act through another account's roles: for a `WrapperRegistry`, the parent name's owner and that owner's operators on the parent registry",
+          "ens_v2_registry_operators": "accounts that a discovered ENSv2 registry's code may let act through another account's roles: for a `WrapperRegistry`, the parent name's owner and that owner's operators on the parent registry (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05)",
           "registrar_approvals": "BaseRegistrar ERC-721 per-token and operator approvals",
           "resolver_approvals": "resolver operator approvals and per-name delegates",
           "wrapper_parent_control": "the parent name's control over a wrapped subname that is not emancipated"
