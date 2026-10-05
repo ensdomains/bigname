@@ -398,8 +398,10 @@ Family indexes serve these concrete readers:
 - Expiring names select from the name summary's expiry selector through
   `project_name_summary_expiry_idx` (a namespace's listable names by expiry) and
   `project_name_summary_authority_expiry_idx` (the same within one public authority), joined
-  to `name_surfaces` by its primary key for the name order within one expiry. The family step
-  maintains both indexes. Resolver-bound names use `project_named_resource_pointer_resolver_idx`
+  to `name_surfaces` by its primary key for the name order within one expiry. A name is
+  ordered, matched against `parent` and continued by its served name: its raw name, or for a
+  surface that stores no raw bytes the name built from its label hashes, the same text its
+  composed row carries. The family step maintains both indexes. Resolver-bound names use `project_named_resource_pointer_resolver_idx`
   and `project_registry_pointer_resolver_idx`.
 - Name-summary recomposition uses `project_name_summary_recompose_idx`,
   `project_binding_candidate_predecessor_idx`, `project_binding_candidate_lease_idx`,

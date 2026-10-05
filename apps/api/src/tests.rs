@@ -525,6 +525,7 @@ include!("tests/v2_address_names_parent.rs");
 include!("tests/v2_bracketed_labelhash_names.rs");
 include!("tests/v2_textless_surface.rs");
 include!("tests/v2_textless_surface_lookup.rs");
+include!("tests/v2_textless_surface_expiry.rs");
 include!("tests/v2_family_name_publication_changes.rs");
 include!("tests/v2_family_name_recompute.rs");
 include!("tests/v2_family_resolver_history.rs");
