@@ -100,6 +100,15 @@ fn textless_child_events(
 /// from 207, where its `addr:60` is set at 208. Published at 240. `ancestors_known` adds the
 /// `alpha` and `eth` preimages that the observation of alpha.eth's bytes brings.
 async fn seed_textless_fixture(database: &TestDatabase, ancestors_known: bool) -> Result<Textless> {
+    seed_textless_fixture_with(database, ancestors_known, false).await
+}
+
+/// [`seed_textless_fixture`], with the two names of [`decoded_textless_events`] when `decoded`.
+async fn seed_textless_fixture_with(
+    database: &TestDatabase,
+    ancestors_known: bool,
+    decoded: bool,
+) -> Result<Textless> {
     seed_bounded_membership_blocks(database, 240).await?;
     let (alpha, alpha_resource) =
         seed_family_name(database, "alpha.eth", 0x8a1_0000, "ens_v1").await?;
@@ -178,6 +187,9 @@ async fn seed_textless_fixture(database: &TestDatabase, ancestors_known: bool) -
         ),
         record,
     ]);
+    if decoded {
+        events.extend(decoded_textless_events(database, &alpha_node, &first_node).await?);
+    }
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
     publish_test_families(database, 240).await?;
     let first_name = format!("{}.alpha.eth", tl_bracket(&first));

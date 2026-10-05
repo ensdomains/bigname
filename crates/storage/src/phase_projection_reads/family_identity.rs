@@ -101,7 +101,9 @@ pub(crate) async fn load_on(
             row: IdentityNameCurrentRow {
                 logical_name_id: id.clone(),
                 namespace: row.namespace,
-                canonical_display_name: normalized.canonical_display_name,
+                // The composed row's display form: a surface without raw bytes serves its
+                // rendered name there, which re-normalizing would beautify.
+                canonical_display_name: row.canonical_display_name,
                 normalized_name: normalized.normalized_name,
                 namehash: row.namehash,
                 labelhash,

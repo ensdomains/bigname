@@ -30,14 +30,21 @@ pub(super) fn compact_resolver_link_item(item: &Value) -> V2Result<Value> {
         compact.insert("namespace".to_owned(), json!(namespace));
     }
     if let Some(name) = object.get("name").and_then(Value::as_str) {
-        // The name of a surface without raw bytes spells unknown labels as bracketed hashes.
-        let normalized = bigname_storage::rendered_name::parse(name)
-            .map_err(|_| V2Error::internal_error("failed to normalize resolver link name"))?;
-        compact.insert("name".to_owned(), json!(normalized.normalized_name));
-        compact.insert(
-            "display_name".to_owned(),
-            json!(normalized.canonical_display_name),
-        );
+        // A surface without raw bytes is served under its rendered name in both fields, as
+        // its name row is; a stored name gets its display form.
+        let rendered = object.get("name_is_rendered").and_then(Value::as_bool) == Some(true);
+        let (name, display_name) = if rendered {
+            (name.to_owned(), name.to_owned())
+        } else {
+            let normalized = bigname_domain::normalization::normalize_name(name)
+                .map_err(|_| V2Error::internal_error("failed to normalize resolver link name"))?;
+            (
+                normalized.normalized_name,
+                normalized.canonical_display_name,
+            )
+        };
+        compact.insert("name".to_owned(), json!(name));
+        compact.insert("display_name".to_owned(), json!(display_name));
     }
     let position = object
         .get("chain_position")

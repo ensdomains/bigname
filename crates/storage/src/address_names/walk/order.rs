@@ -92,7 +92,8 @@ pub(super) async fn walk_order(
         // A surface without raw bytes sorts by the name it is served under.
         let mut surfaces = QueryBuilder::<Postgres>::new(format!(
             "/* storage:families.records.address_name_walk_surfaces */
-             SELECT surface.logical_name_id, {name} AS raw_name",
+             SELECT surface.logical_name_id, {name} AS raw_name,
+                    surface.raw_name IS NULL AS rendered",
             name = crate::rendered_name::rendered_name_sql("surface"),
         ));
         push_servable_surfaces(&mut surfaces, ids, &inputs.publications);
@@ -104,7 +105,13 @@ pub(super) async fn walk_order(
         for row in rows {
             let id: String = row.try_get("logical_name_id")?;
             let raw: String = row.try_get("raw_name")?;
-            let Ok(normalized) = crate::rendered_name::parse(&raw) else {
+            // The key is the display name composition serves: the rendered name as it is for
+            // a surface without raw bytes, the display form of a stored name.
+            if row.try_get("rendered")? {
+                display.insert(id, raw);
+                continue;
+            }
+            let Ok(normalized) = bigname_domain::normalization::normalize_name(&raw) else {
                 // Composition refuses the name; the full read reports it.
                 return Ok(None);
             };

@@ -261,3 +261,103 @@ async fn v2_textless_node_is_named_on_its_resolver_link() -> Result<()> {
 
     database.cleanup().await
 }
+
+/// The label of the two names [`decoded_textless_events`] adds. It is normalized as it stands
+/// and its display form adds variation selectors, so a name and its beautified form sort apart.
+const TL_DECODED_LABEL: &str = "🅰🅱";
+
+/// Two more children without bytes, `🅰🅱` below alpha.eth (209) and below `first` (210), with a
+/// preimage for every label of both paths.
+async fn decoded_textless_events(
+    database: &TestDatabase,
+    alpha_node: &str,
+    first_node: &str,
+) -> Result<Vec<NormalizedEvent>> {
+    for preimage in [TL_DECODED_LABEL.as_bytes(), b"first"] {
+        insert_family_label_preimage(&database.pool, preimage).await?;
+    }
+    let hash = |label: &[u8]| format!("{:#x}", alloy_primitives::keccak256(label));
+    let label = hash(TL_DECODED_LABEL.as_bytes());
+    let alpha_path = vec![hash(b"alpha"), hash(b"eth")];
+    let first_path = [vec![hash(b"first")], alpha_path.clone()].concat();
+    let mut events = Vec::new();
+    for (index, (parent, parent_node)) in
+        [(alpha_path, alpha_node), (first_path, first_node)].into_iter().enumerate()
+    {
+        let block = 209 + index as i64;
+        let (id, resource) = seed_textless_family_name(
+            database,
+            &[vec![label.clone()], parent].concat(),
+            0x8d1_0000 + 0x10 * index as u128,
+            "ens_v1",
+            block,
+        )
+        .await?;
+        events.extend(textless_child_events(&id, resource, parent_node, &label, RC_OWNER, block));
+    }
+    Ok(events)
+}
+
+/// A capped address read walks its names by a stored key. For a surface without bytes that key
+/// is the rendered name the row and the cursor carry, also once every label is known and the
+/// name no longer shows a bracket.
+#[tokio::test]
+async fn v2_textless_names_page_alike_on_the_capped_address_walk() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_textless_fixture_with(&database, true, true).await?;
+    let decoded = [
+        format!("{TL_DECODED_LABEL}.alpha.eth"),
+        format!("{TL_DECODED_LABEL}.first.alpha.eth"),
+    ];
+
+    for order in ["asc", "desc"] {
+        for page_size in [1, 2, 50] {
+            let uri = format!(
+                "/v1/addresses/{RC_OWNER}/names?namespace=ens&sort=name&order={order}&page_size={page_size}"
+            );
+            let exact = walk_all_pages(&database, &uri).await?;
+            let (walked, paths) =
+                with_paths(with_exact_total_cap(0, walk_all_pages(&database, &uri))).await;
+            let walked = walked?;
+            assert!(paths.iter().all(|path| *path == "walk"), "{uri}: {paths:?}");
+            assert_eq!(
+                exact.iter().map(page_body).collect::<Vec<_>>(),
+                walked.iter().map(page_body).collect::<Vec<_>>(),
+                "{uri}"
+            );
+            let rows: Vec<&Value> =
+                walked.iter().flat_map(|page| page["data"].as_array().expect("rows")).collect();
+            assert_eq!(rows.len(), 8, "{uri}: {rows:#?}");
+            for name in &decoded {
+                let row = rows.iter().find(|row| row["name"] == json!(name));
+                let row = row.unwrap_or_else(|| panic!("{uri}: {name} is not listed"));
+                assert_eq!(row["display_name"], row["name"], "{uri}");
+            }
+        }
+    }
+
+    // The name row and the batch identity read serve the same two fields.
+    let inputs: Vec<Value> = decoded.iter().map(|name| json!({"name": name})).collect();
+    for profile in ["detail", "feed"] {
+        let response = v2_lookup_response_for_database_with_public_namespaces(
+            &database,
+            "/v1/lookup",
+            json!({"inputs": inputs, "profile": profile}),
+            &["ens"],
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK, "{profile}");
+        let body: Value = read_json(response).await?;
+        for (result, name) in body["data"].as_array().expect("results").iter().zip(&decoded) {
+            assert_eq!(result["record"]["name"], json!(name), "{profile}: {result:#}");
+            assert_eq!(result["record"]["display_name"], json!(name), "{profile}: {result:#}");
+        }
+    }
+    for name in &decoded {
+        let detail = tl_get(&database, &format!("/v1/names/{}", tl_path(name))).await?;
+        assert_eq!(detail["data"]["name"], json!(name));
+        assert_eq!(detail["data"]["display_name"], json!(name));
+    }
+
+    database.cleanup().await
+}
