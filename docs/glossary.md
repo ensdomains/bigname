@@ -1909,7 +1909,11 @@ the placeholder from the text. The escape form is not reserved, since a label
 really spelled like escape output produces the same string. `namehash` and
 `labelhash` stay the stable identifiers. The placeholder is accepted as a
 [name input](api-v1.md#name-inputs) for its node, which serves no name row while
-it has no name surface; the escape form is not.
+it has no name surface; the escape form is not. The placeholder label is also
+how a [rendered name](#rendered-name) spells a label it has no verified text
+for. A child whose own name surface stores no raw label bytes has a name row
+and is listed under that rendered name, so it takes the placeholder where a
+child with no surface would take the escape form.
 
 ## Normalized event
 
@@ -2093,6 +2097,22 @@ decision and readiness result per chain. A *full source re-walk* in this contrac
 means that complete Ingest, Interpret, and Project sequence; it is not an
 Interpret-only replay. Production Verify follows Project publication and gates
 readiness and traffic, not the already committed Project rows.
+
+## Rendered name
+
+the name a route serves for a [name surface](#surface-name-surface) that stores
+no raw label bytes. It is computed when the name is read, over the surface's
+whole label-hash path: each label is its text when `label_preimages` holds a
+decoded label that passed normalization, and otherwise the reserved placeholder
+label `[<64 lowercase hex digits of the labelhash>]`. The rule is the same at
+every position, the labels `eth` and `base` included. A preimage that fails
+normalization, or whose bytes do not decode as text, leaves the placeholder; a
+rendered name never takes the escape [non-name form](#non-name-form). `name`
+and `display_name` carry the same rendered name. No stored projection holds it,
+so an imported preimage changes it on the next read without a new publication.
+A surface that stores its raw bytes is served under its stored name instead.
+See [storage](storage.md#name-identity-and-raw-evidence) and
+[name inputs](api-v1.md#name-inputs).
 
 ## Reserved surface
 
@@ -2462,6 +2482,8 @@ not identity: a surface stores the raw bytes of its labels only once all of
 them are known, with the [preimage witness](#preimage-witness) that carried
 them, and stores none until then. Display names are derived when read, following the audit's
 [normalization-as-a-gate decision](internal/archive/simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity-maintainer-2026-07-30).
+A surface that stores no raw bytes is served under its
+[rendered name](#rendered-name).
 A **surface binding** is the time-ranged record of which resource backed a
 surface when. Surfaces survive re-registration; resources rotate.
 

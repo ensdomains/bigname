@@ -670,7 +670,9 @@ A candidate with no
 lists it only when the child relation below lists it under its parent and
 serves the requested address as its owner, with the child relation's name and
 the node's registry-only resource, and with no surface binding, under both
-`owner` and `manager`.
+`owner` and `manager`. A candidate whose surface stores no raw label bytes
+composes a name row like any other surface, so the read lists it once, from
+that row, and this fallback skips it.
 
 A third relation, `role_holder`, lists the holders of an ENSv2 registry role
 on a name's selected registration resource. `PermissionedRegistry` keeps
@@ -775,8 +777,11 @@ verified label preimage when one exists and its normalization verdict is true,
 and leaves the name columns null when none does — the labelhash and child node
 are proven, the label is not. Reads name such a child by the [non-name
 form](glossary.md#non-name-form)
-`[<labelhash-without-0x>].<parent-name>`, built from the parent's stored
-spelling, and returns those same stored bytes in both name fields. A preimage whose label
+`[<labelhash-without-0x>].<parent-name>`, built from the parent's served
+name, and returns those same bytes in both name fields. The parent's served
+name is its stored spelling, or its [rendered name](glossary.md#rendered-name)
+when its surface stores no raw label bytes, so the children of such a parent
+are listed and counted under it, at any depth. A preimage whose label
 bytes are not valid UTF-8, or contain a NUL, is a third state: Composition retains
 the whole child name as raw bytes with no decoded form, and reads escape-encode
 that whole string, parent portion included. A preimage whose bytes decode but
@@ -784,7 +789,10 @@ fail the verdict is a fourth state: the text is a valid string but not a name
 for the proven node — serving it would attach a spelling that re-hashes to a
 different node — and escaping it would serve the same misleading text, so
 Composition keeps the raw label bytes, withholds the decoded text and both name
-columns, and the placeholder serves. None of these shapes is a name: the
+columns, and the placeholder serves. A child whose own surface at the
+publication stores no raw label bytes has a name row, which never serves the
+escape form, so its child row serves the placeholder in the third state too
+and both routes name the child alike. None of these shapes is a name: the
 placeholder is accepted as a [name input](api-v1.md#name-inputs) for the node,
 and the escape form is not. A preimage improves readability but does not create ownership or
 exact-name authority. ENSv2 direct and linked
@@ -1550,7 +1558,9 @@ observation, whose `node` is the parent and whose `child_node` is the child, so
 it is the child's pointer, not the parent's. Pointer reduction and the history reader use this same node identity. The consulted
 nodes are the queried name's surface and each proper ancestor surface below the
 root, matched by label suffix in the same namespace; the nearest consulted node
-with a nonzero resolver is selected.
+with a nonzero resolver is selected. A suffix is matched on raw labels when the
+queried surface and the candidate both store them, and on the label hashes of
+the suffix when either stores none.
 When the selected resolver is a supported, same-namespace `ens_v1_resolver_l1`
 declaration that is not itself a mirror and the selection is the exact node,
 the mirrored resource is re-pointed at that resolver for the queried node and
@@ -1570,7 +1580,8 @@ ancestor_depth, forwarding, mirrored_resolver_address, mirrored_resource_id?,
 mirrored_pointer_event_id, mirrored_pointer_source_family}` records the walk
 (`mirrored_resource_id` only when the selected pointer event carries one):
 `mirrored_node` and `mirrored_name` are the selected registry node and its raw
-name, `ancestor_depth` is `0` for the exact node and otherwise the number of
+name (its [rendered name](glossary.md#rendered-name) when its surface stores
+no raw label bytes), `ancestor_depth` is `0` for the exact node and otherwise the number of
 leading labels the walk stripped, and `forwarding` is `direct_call` or
 `extended_resolve` per the selected resolver's declared read features. That
 mode is inferred from the declaration alone. It does not claim that a call
@@ -1881,7 +1892,9 @@ name composes a supported row whose registration carries a finite expiry, and
 `public_authority`, the public `authority` that row serves; for a listable name
 the stored expiry is the expiry the listing serves, and the listing selects its
 page's names by these fields before it composes any. Every name with a
-surface has a row. The selected arm remains available when an unreadable token
+surface has a row, including one whose surface stores no raw label bytes. The
+summary holds no name text and its composition reads no label preimage, so an
+imported preimage never changes a stored summary. The selected arm remains available when an unreadable token
 lineage withholds the composed name row: child relations still use that selection,
 while optional name fields remain absent. A list cannot compose those at read for every child of a parent, so
 the name row is composed at read except for this summary, which is

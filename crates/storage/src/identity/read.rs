@@ -5,6 +5,7 @@ use sqlx::{Executor, PgPool, Postgres, postgres::PgRow};
 use uuid::Uuid;
 
 use super::types::{NameSurface, Resource, SurfaceBinding, TokenLineage};
+use crate::families::name::rendered::rendered_name_sql;
 
 const DEFAULT_IDENTITY_LINEAGE_JOIN: &str = r#"
   JOIN bigname_phase.chain_lineage identity_lineage
@@ -75,9 +76,9 @@ pub async fn load_name_surfaces_by_logical_name_ids(
         SELECT
             identity_row.logical_name_id,
             identity_row.namespace,
-            identity_row.raw_name AS input_name,
-            identity_row.raw_name AS canonical_display_name,
-            identity_row.raw_name AS normalized_name,
+            {name} AS input_name,
+            {name} AS canonical_display_name,
+            {name} AS normalized_name,
             identity_row.dns_encoded_name,
             identity_row.namehash,
             identity_row.labelhashes,
@@ -96,6 +97,7 @@ pub async fn load_name_surfaces_by_logical_name_ids(
         "#,
         identity_lineage_join(false),
         identity_read_filter(false),
+        name = rendered_name_sql("identity_row"),
     ))
     .bind(logical_name_ids)
     .fetch_all(pool)
@@ -256,9 +258,9 @@ where
         SELECT
             identity_row.logical_name_id,
             identity_row.namespace,
-            identity_row.raw_name AS input_name,
-            identity_row.raw_name AS canonical_display_name,
-            identity_row.raw_name AS normalized_name,
+            {name} AS input_name,
+            {name} AS canonical_display_name,
+            {name} AS normalized_name,
             identity_row.dns_encoded_name,
             identity_row.namehash,
             identity_row.labelhashes,
@@ -279,6 +281,7 @@ where
         identity_lineage_join(include_noncanonical),
         identity_read_filter(include_noncanonical),
         lock_clause,
+        name = rendered_name_sql("identity_row"),
     ))
     .bind(logical_name_id)
     .fetch_optional(executor)

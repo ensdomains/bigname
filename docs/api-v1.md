@@ -41,11 +41,11 @@ step-3-gate vocabulary needed by the route schemas:
 
 | `v2` name | Meaning | Replaces (`v1`) |
 | --- | --- | --- |
-| `name` | the ENSIP-15 normalized name string, except on routes that document an explicit [non-name form](glossary.md#non-name-form) for a label bigname cannot state as a name — today only `GET /v1/names/{name}/subnames` | `normalized_name`, `logical_name_id` (derivable as `namespace:namehash`) |
-| `display_name` | display form of the name | `canonical_display_name` |
+| `name` | the ENSIP-15 normalized name string, with two exceptions. A name whose [name surface](glossary.md#surface-name-surface) stores no raw label bytes is served as its [rendered name](glossary.md#rendered-name): each label is its text when bigname holds a preimage for it that passed normalization, and otherwise `[<64 lowercase hex digits of the labelhash>]`, at any position, `eth` and `base` included. That name is served wherever the name is: name detail, lookup records, `GET /v1/names` and search rows, address names, subnames, resolver `bound_names` and links, history rows including a child registration's, and the names of a registry's subregistry pointers; cursors over those lists carry it too. No adapter writes such a surface yet. The other exception is a route that documents an explicit [non-name form](glossary.md#non-name-form) for a label bigname cannot state as a name — today only `GET /v1/names/{name}/subnames` | `normalized_name`, `logical_name_id` (derivable as `namespace:namehash`) |
+| `display_name` | display form of the name; equal to `name` for a [rendered name](glossary.md#rendered-name) | `canonical_display_name` |
 | `namespace` | public namespace slug used to resolve a name or filter a route, such as `ens` or `basenames` | `namespace` path segment/query usage (unchanged; now echoed consistently) |
 | `namehash` | ENS namehash hex string | `namehash` (unchanged) |
-| `token_id` | decimal-string token id for tokenized registrations/names; ENSv2 uses the recorded versioned ERC-1155 token at the selected publication, never its labelhash or permission resource (see [ENSv2 token identity](#ensv2-token-identity)) | `token_id` (unchanged; now defined consistently) |
+| `token_id` | decimal-string token id for tokenized registrations/names; ENSv2 uses the recorded versioned ERC-1155 token at the selected publication, never its labelhash or permission resource (see [ENSv2 token identity](#ensv2-token-identity)). Where an ENSv1 `.eth` second-level name serves a `token_id` and its registration states none, the value is the name's labelhash as a decimal string, whether its label is served as text or as a bracketed labelhash | `token_id` (unchanged; now defined consistently) |
 | `owner` | who holds the name: the token holder of a name that has a token (an ENSv1 BaseRegistrar lease, a NameWrapper token, including a wrapped subname's, or an ENSv2 registry token), otherwise the registry owner of its node (an unwrapped subname with only a registry record, a registry child with no name row and no known lease holder); a `.eth` or Basenames registry child with no name row whose lease the registrar retains has a token, and serves its holder when bigname knows a nonzero one. On a wrapped name it is the NameWrapper token holder, not the NameWrapper contract, and on an unwrapped `.eth` second-level name the BaseRegistrar token holder, not the registry controller. After an ENSv1 `.eth` token transfer without `reclaim`, `owner` is the new holder while `manager` stays the previous registry owner until the holder calls `reclaim` (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f); being or becoming that registry owner adds no history under `relation=owner`, while history an address gained by holding the token or by owning a name with no token stays there; omitted on a released name, including a `.eth` or Basenames registry child with no name row whose registrar lease bigname has released (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L294-L297 @ basenames@1809bbc) although its registry record survives: expiry never writes the registry, and the registrar writes it only on a registration other than `registerOnly` (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L414-L425 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L265-L276 @ basenames@1809bbc) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L128 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L248-L250 @ basenames@1809bbc) or a `reclaim` by a live token's holder or an address it approved (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L327-L330 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L458-L466 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L173-L176 @ basenames@1809bbc), on an expired emancipated or locked wrapped name, whose owner NameWrapper clears (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L851 @ ens_v1@91c966f), on a record the admitted Graveyard holds, even while a NameWrapper token of that cleared subname survives (see [upstream divergences](upstream.md)), and on a registry child with no name row whose registry owner is the NameWrapper contract that named it under a label failing ENSIP-15 normalization: the NameWrapper holds that node for a token holder bigname cannot name (see [Manager](#manager)) | `token_holder`, `owner`, `owner_address`, `registry_owner`, `registrant` (removed in v0.3.0; its value is now `owner`) |
 | `manager` | the account that can change the name's registry record (see [Manager](#manager)) | `effective_controller`, `manager_address` |
 | `relation` | address-to-name relation filter: one or more of the authority relations `owner` (the address is the name's `owner`), `manager` (the address is the name's `manager`), and, on address names and address history, `role_holder` (the address holds an ENSv2 registry role on the name's current registration; not the manager) (comma-separated set); `any` = all authority relations supported on that route; or, on its own, the resolver-record relation `resolves_to` (names whose current `addr:<coin_type>` record resolves to the address, coin type from `coin_type`, default `60`, or every EVM coin type with `coin_type=evm`), or, on its own and on `GET /v1/addresses/{address}/names` only, `former_owner` (released names whose ended registration the address last held; see [lapsed registration](#lapsed-registration)). `resolves_to` and `former_owner` are not part of `any` and cannot be combined with another relation. `registrant` and `former_registrant` were removed in v0.3.0 and are rejected like any unknown value | four divergent relation/role enums incl. `owned`/`managed`/`both` (partner `BOTH` = `owner,manager`); ensjs `resolvedAddress`; `registrant`; `former_registrant` |
@@ -140,7 +140,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `expires_before` | exclusive upper `expires_at` bound on `GET /v1/names` or `GET /v1/addresses/{address}/names?relation=former_owner` (Unix seconds or RFC 3339) | `expires_before` (new) |
 | `expires_window` | repeated `GET /v1/names` query parameter: 1–32 disjoint finite `after..before` windows over exact `expires_at`, lower inclusive and upper exclusive; replaces scalar expiry bounds for that request | new in v2 |
 | `expires_window_index` | zero-based index of a `GET /v1/names` row’s matching `expires_window` in original request order; present only with repeated-window requests | new in v2 |
-| `parent` (query) | `GET /v1/names` and `GET /v1/addresses/{address}/names` filter: only names exactly one label below the given name, matched on the normalized name spelling rather than on the node or registry topology, so a bracketed labelhash label matches only names stored with that bracketed spelling, except the labelhashes of `eth` and `base`, which normalization spells as text. `parent=eth` selects the `.eth` second-level names, the registrar-governed set on both sides of the [Universal Resolver cutover](glossary.md#universal-resolver-cutover): the ENSv1 BaseRegistrar leases labels one level below `eth` (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L150 @ ens_v1@91c966f) and the ENSv2 `.eth` registrar registers labels in the `eth` registry (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L151-L158 @ ens_v2_sepolia_20260916@366de741), so the set holds ENSv1 leases and ENSv2 registrations alike and excludes every subname, wrapped or not. `parent=base.eth` with `namespace=basenames` selects the Basenames second-level names | new in v2 |
+| `parent` (query) | `GET /v1/names` and `GET /v1/addresses/{address}/names` filter: only names exactly one label below the given name, matched on the served name spelling rather than on the node or registry topology, so a bracketed labelhash label matches only names served with that bracketed spelling (a [rendered name](glossary.md#rendered-name) whose label has no verified text), except the labelhashes of `eth` and `base`, which normalization of the `parent` value spells as text. `parent=eth` selects the `.eth` second-level names, the registrar-governed set on both sides of the [Universal Resolver cutover](glossary.md#universal-resolver-cutover): the ENSv1 BaseRegistrar leases labels one level below `eth` (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L150 @ ens_v1@91c966f) and the ENSv2 `.eth` registrar registers labels in the `eth` registry (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L151-L158 @ ens_v2_sepolia_20260916@366de741), so the set holds ENSv1 leases and ENSv2 registrations alike and excludes every subname, wrapped or not. `parent=base.eth` with `namespace=basenames` selects the Basenames second-level names | new in v2 |
 | `data` | envelope root payload, and the `include=data` event-row payload when nested inside an event row (see [history event payloads](api-v1-routes.md#history-event-payloads-includedata-includeraw)) | compact event payload objects |
 | `kind` | raw storage event kind on an event row, exposed only behind the explicit `include=raw` opt-in (never part of `include=data`); the one pipeline term the product tier carries, for explorer and diagnostic use | `event_kind` |
 | `contract_address` | lower-cased emitting contract of an event row, exposed only with `include=data`; `null` for state-derived rows | `emitting_address` |
@@ -1180,11 +1180,20 @@ the same snapshot selection, cursor binding, and `404 not_found` or
 row's `name` and `display_name`, so when bigname knows the label the response
 uses the label, not the brackets. Name history rows carry that name too; a
 history continuation, which does not require the row, serves the bracketed
-spelling when the node no longer has one. A node that registry events created
+spelling when the node no longer has one. A node whose
+[name surface](glossary.md#surface-name-surface) stores no raw label bytes has
+a name row and is addressed the same way: any of its labels may be spelled as
+its bracketed labelhash or as its text, since both spell the same node. The
+response serves the row's [rendered name](glossary.md#rendered-name) whichever
+spelling the request used, so a label reads as text only when bigname holds a
+preimage for it that passed normalization, and in brackets otherwise, `eth`
+and `base` included. A node that registry events created
 without a label-bearing event (an ENSv1 or Basenames registry child with no
-[name surface](glossary.md#surface-name-surface)) has no name row yet. Its
+name surface) has no name row yet. Its
 placeholder is listed on its parent's subnames page but does not address a
-row. Uppercase hex digits, a `0x` prefix, or any digit count other than 64 are
+row; that holds only while the node has no name surface. No adapter writes a
+surface without raw bytes yet, so every such registry child is in this case
+today. Uppercase hex digits, a `0x` prefix, or any digit count other than 64 are
 rejected: the name routes return `400 invalid_input`, and lookup returns an
 in-band `invalid_name`. The octal-escape non-name form is never accepted as a
 name input.
@@ -1759,7 +1768,9 @@ it runs and returns the rows that sort after that position:
   returned again or not at all: a renewal moves a name's `expires_at` in
   `GET /v1/names`, a re-registration removes a `former_owner` row, and a resolver change moves a name into or out of
   `bound_names`. Rows published after the first page can appear on later
-  pages.
+  pages. A [rendered name](glossary.md#rendered-name) can change with no new
+  publication, when a label preimage is imported, so a name-sorted walk can
+  return such a name again or skip it between pages.
 - A position after the last row returns `200` with empty `data`,
   `has_more: false`, and `next_cursor: null`.
 - A cursor that does not decode, comes from another list, carries different
@@ -2557,7 +2568,7 @@ Flat name-detail object, also used by resolver bound names. An identity-only uns
 | `ens_v1` | object EnsV1 | when ens_v1_authority | What only ENSv1 holds about the name; present exactly while its authority is `ens_v1` or `ens_v0`. |
 | `lapsed_registration` | object LapsedRegistration | optional | Last holder and release cause for a supported lapsed registration; absent for other release causes and for non-released names. |
 | `migrated_at` | string | when migration_proven | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
-| `name` | string | always | ENSIP-15 normalized name. |
+| `name` | string | always | ENSIP-15 normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash. |
 | `display_name` | string | always | Display form of the name. |
 | `namespace` | string | always | Resolved public namespace slug. |
 | `namehash` | string | always | Hexadecimal ENS namehash. |
@@ -2659,7 +2670,7 @@ Shared lookup feed/detail record. Feed records carry identity, `chain_id`, `netw
 <!-- openapi:object LookupRecord -->
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
-| `name` | string | always | ENSIP-15 normalized name. |
+| `name` | string | always | ENSIP-15 normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash. |
 | `display_name` | string | always | Display form of the name. |
 | `namespace` | string | always | Resolved public namespace slug. |
 | `namehash` | string | always | Hexadecimal ENS namehash. |
@@ -2730,7 +2741,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 <!-- openapi:object SearchName -->
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
-| `name` | string | always | ENSIP-15 normalized name. |
+| `name` | string | always | ENSIP-15 normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash. |
 | `display_name` | string | always | Display form of the name. |
 | `namespace` | string | always | Resolved public namespace slug. |
 | `namehash` | string | always | Hexadecimal ENS namehash. |
@@ -2752,7 +2763,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 <!-- openapi:object Subname -->
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
-| `name` | string | always | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
+| `name` | string | always | Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms. |
 | `display_name` | string | always | Display form of the name. |
 | `namespace` | string | always | Resolved public namespace slug. |
 | `namehash` | string | always | Hexadecimal ENS namehash. |
@@ -2775,7 +2786,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 <!-- openapi:object AddressName -->
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
-| `name` | string | always | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
+| `name` | string | always | Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms. |
 | `display_name` | string | always | Display form of the name. |
 | `namespace` | string | always | Resolved public namespace slug. |
 | `namehash` | string | always | Hexadecimal ENS namehash. |
@@ -2877,7 +2888,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | --- | --- | --- | --- |
 | `source` | enum Source | always | Answer origin. |
 | `status` | enum Status | always | Result status; the route defines which outcomes are possible. |
-| `name` | string | optional | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
+| `name` | string | optional | Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms. |
 | `raw_claim_name` | string | optional | Stored reverse claim before product normalization when it differs from the served name. |
 | `unsupported_reason` | string | when status_unsupported | Open product reason vocabulary explaining an unsupported answer. |
 | `failure_reason` | string | only when failure_status | Open product reason vocabulary explaining a failed, stale, missing or mismatched answer. |
@@ -2888,7 +2899,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
 | `status` | enum Status | always | Result status; the route defines which outcomes are possible. |
-| `name` | string | optional | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
+| `name` | string | optional | Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms. |
 | `unsupported_reason` | string | when status_unsupported | Open product reason vocabulary explaining an unsupported answer. |
 | `failure_reason` | string | only when failure_status | Open product reason vocabulary explaining a failed, stale, missing or mismatched answer. |
 
@@ -2897,7 +2908,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 <!-- openapi:object RegistryName -->
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
-| `name` | string | always | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
+| `name` | string | always | Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms. |
 | `display_name` | string | always | Display form of the name. |
 | `namespace` | string | always | Resolved public namespace slug. |
 | `namehash` | string | always | Hexadecimal ENS namehash. |
@@ -3014,7 +3025,7 @@ Extends AddressNameGrant.
 | `address` | string | always | EVM address in hexadecimal form. |
 | `registration_id` | string | always | Opaque registration lifecycle handle; permission rows use the published permission-handle mapping. |
 | `record_resource` | object RecordResource | optional | Record selector described by the grant; only current setter powers contribute. |
-| `name` | string | optional | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
+| `name` | string | optional | Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms. |
 | `authority_context` | enum AuthorityContext | always | Whether the row is current for the named registration selection or an audit by registration handle. |
 | `wrapper_state` | enum WrapperState | optional | Current [NameWrapper lifecycle](#naming-dictionary) value. |
 | `wrapper_fuses` | object WrapperFuses | optional | Typed [expiry-effective NameWrapper fuse word](glossary.md#expiry-effective-namewrapper-fuse-word). |
@@ -3037,7 +3048,7 @@ Extends AddressNameGrant.
 | --- | --- | --- | --- |
 | `id` | string | always | Opaque 64-character event identity; identical for the same event across the product history routes. |
 | `type` | enum HistoryEventType | always | Type. |
-| `name` | string | optional | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
+| `name` | string | optional | Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms. |
 | `namespace` | string | always | Resolved public namespace slug. |
 | `registration_id` | nullable string | always | Opaque registration lifecycle handle; permission rows use the published permission-handle mapping. |
 | `block_number` | nullable integer | always | EVM block number; nullable only where the table type permits an unknown block position. |
@@ -3055,7 +3066,7 @@ Extends AddressNameGrant.
 | --- | --- | --- | --- |
 | `id` | string | always | Opaque 64-character event identity; identical for the same event across the product history routes. |
 | `type` | enum HistoryEventType | always | Type. |
-| `name` | string | always | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
+| `name` | string | always | Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms. |
 | `subject` | enum HistoryRowSubject | when child_registrations_requested | Whether the history row concerns the named parent or one of its direct children. |
 | `namespace` | string | always | Resolved public namespace slug. |
 | `registration_id` | nullable string | always | Opaque registration lifecycle handle; permission rows use the published permission-handle mapping. |
@@ -3274,7 +3285,7 @@ Closed history payload fields. The event type and retained evidence determine wh
 | `namehash` | string | always | Hexadecimal ENS namehash. |
 | `default` | boolean | always | True for the empty-name node. |
 | `namespace` | string | optional | Resolved public namespace slug. |
-| `name` | string | optional | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
+| `name` | string | optional | Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms. |
 | `display_name` | string | optional | Display form of the name. |
 | `link_event` | object LinkEvent | always | Current link observation. |
 
@@ -3285,7 +3296,7 @@ Closed history payload fields. The event type and retained evidence determine wh
 | --- | --- | --- | --- |
 | `address` | string | always | EVM address in hexadecimal form. |
 | `registration_id` | string | always | Opaque registration lifecycle handle; permission rows use the published permission-handle mapping. |
-| `name` | string | optional | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
+| `name` | string | optional | Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms. |
 | `powers` | array of enum PermissionPower | always | Product permission powers; see [permission powers vocabulary](#permission-powers-vocabulary). |
 | `grant_event` | object GrantEvent | optional | Earliest canonical permission event for the holder in the row provenance. |
 | `record_resource` | object RecordResource | optional | Record selector described by the grant; only current setter powers contribute. |

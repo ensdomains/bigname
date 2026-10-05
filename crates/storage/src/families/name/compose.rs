@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use super::{
     CoverageShape, FamilyPublication, NameHistory,
+    rendered::placeholder_name,
     selection::NameSelection,
     serving::{PointerRow, ResolverScope, Serving, resolver_block},
 };
@@ -23,7 +24,8 @@ use crate::{
 pub(super) struct Surface {
     pub(super) logical_name_id: String,
     pub(super) namespace: String,
-    pub(super) raw_name: String,
+    /// The stored name; none when the surface stores no raw bytes.
+    pub(super) raw_name: Option<String>,
     pub(super) namehash: String,
     /// The label hashes in name order.
     pub(super) labelhashes: Vec<String>,
@@ -362,18 +364,38 @@ pub(super) fn compose(parts: &Parts<'_>, shape: CoverageShape) -> Result<NameCur
         ),
         _ => (None, None, None),
     };
-    let normalized = bigname_domain::normalization::normalize_name(&parts.surface.raw_name)
-        .with_context(|| {
-            format!(
-                "phase name row {} has an unreadable active raw_name",
-                parts.surface.logical_name_id
+    // A surface without raw bytes is composed under its placeholder name alone: label text from
+    // `label_preimages` is added by the serving readers, never here, so Project's summary step
+    // does not depend on operator imports.
+    let (canonical_display_name, normalized_name) = match &parts.surface.raw_name {
+        Some(raw_name) => {
+            let normalized =
+                bigname_domain::normalization::normalize_name(raw_name).with_context(|| {
+                    format!(
+                        "phase name row {} has an unreadable active raw_name",
+                        parts.surface.logical_name_id
+                    )
+                })?;
+            (
+                normalized.canonical_display_name,
+                normalized.normalized_name,
             )
-        })?;
+        }
+        None => {
+            let name = placeholder_name(&parts.surface.labelhashes).with_context(|| {
+                format!(
+                    "phase name row {} has an unreadable label-hash path",
+                    parts.surface.logical_name_id
+                )
+            })?;
+            (name.clone(), name)
+        }
+    };
     Ok(NameCurrentRow {
         logical_name_id: parts.surface.logical_name_id.clone(),
         namespace: parts.surface.namespace.clone(),
-        canonical_display_name: normalized.canonical_display_name,
-        normalized_name: normalized.normalized_name,
+        canonical_display_name,
+        normalized_name,
         namehash: parts.surface.namehash.clone(),
         surface_binding_id,
         token_lineage_id: resource_id.and(parts.token_lineage_id),

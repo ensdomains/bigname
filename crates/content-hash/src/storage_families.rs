@@ -30,6 +30,7 @@ pub(crate) const COMPOSITION_FILES: &[&str] = &[
     // The expiry listing's eligibility and public authority, which the summary stores.
     "crates/storage/src/families/name/list_keys.rs",
     "crates/storage/src/families/name/loaders.rs",
+    "crates/storage/src/families/name/rendered.rs",
     "crates/storage/src/families/name/resolvability.rs",
     "crates/storage/src/families/name/selection.rs",
     "crates/storage/src/families/name/serving.rs",

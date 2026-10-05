@@ -10,11 +10,11 @@
 //! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/libraries/LibResolution.sol:L39-L48 @ ens_v2_sepolia_20260916@366de741)
 //! (upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)
 use alloy_primitives::{B256, keccak256};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 use sqlx::{PgConnection, Row};
 
-use crate::families::position::emission_ordinal_sql;
+use crate::families::{name::rendered::rendered_name_sql, position::emission_ordinal_sql};
 
 use super::{
     facts::{ResolverClassification, load_classification_on as load_classification},
@@ -196,32 +196,43 @@ async fn nearest(
         return Ok(None);
     };
     let namespace: String = surface.try_get("namespace")?;
-    let raw_labels: Vec<String> = surface.try_get("raw_labels")?;
+    // A surface without raw bytes is walked by its label hashes alone.
+    let raw_labels: Option<Vec<String>> = surface.try_get("raw_labels")?;
     let labelhashes: Vec<String> = surface.try_get("labelhashes")?;
-    let (mut depths, mut nodes, mut labels) = (Vec::new(), Vec::new(), Vec::new());
-    for depth in 0..raw_labels.len() {
+    let (mut depths, mut nodes) = (Vec::new(), Vec::new());
+    let (mut labels, mut hashes) = (Vec::new(), Vec::new());
+    for depth in 0..raw_labels.as_ref().map_or(labelhashes.len(), Vec::len) {
         depths.push(i32::try_from(depth).unwrap_or(i32::MAX));
+        let suffix = labelhashes.get(depth..).unwrap_or_default();
         nodes.push(suffix_namehash(
-            &raw_labels[depth..],
-            labelhashes.get(depth..).unwrap_or_default(),
-        ));
-        labels.push(Value::from(raw_labels[depth..].to_vec()));
+            raw_labels.as_ref().map(|labels| &labels[depth..]),
+            suffix,
+        )?);
+        labels.push(
+            raw_labels
+                .as_ref()
+                .map(|labels| Value::from(labels[depth..].to_vec())),
+        );
+        hashes.push(lowercase_hashes(suffix));
     }
     let walk = format!(
-        "SELECT walk.ancestor_depth, registry.node, surface.raw_name, registry.resource_id::text
-                    AS resource_id,
+        "SELECT walk.ancestor_depth, registry.node, {name} AS raw_name,
+                registry.resource_id::text AS resource_id,
                 registry.resolver_address, registry.normalized_event_id, registry.source_family,
                 registry.namespace, registry.block_number
-         FROM unnest($3::int[], $4::text[], $5::jsonb[]) walk (ancestor_depth, node, labels)
+         FROM unnest($3::int[], $4::text[], $5::jsonb[], $6::jsonb[])
+              walk (ancestor_depth, node, labels, hashes)
          JOIN bigname_phase.name_surfaces surface
            ON surface.namespace = $2 AND surface.namehash = walk.node
-          AND surface.chain_id = $1 AND to_jsonb(surface.raw_labels) = walk.labels
+          AND surface.chain_id = $1 AND {same_labels}
           AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
          JOIN bigname_phase.project_registry_pointer registry
            ON registry.chain_id = $1 AND registry.namespace = surface.namespace
           AND registry.node = walk.node
-         ORDER BY walk.ancestor_depth ASC, {}",
-        latest_registry_first("registry")
+         ORDER BY walk.ancestor_depth ASC, {order}",
+        name = rendered_name_sql("surface"),
+        same_labels = SAME_LABELS,
+        order = latest_registry_first("registry")
     );
     let rows = sqlx::query(&walk)
         .bind(chain_id)
@@ -229,6 +240,7 @@ async fn nearest(
         .bind(&depths)
         .bind(&nodes)
         .bind(&labels)
+        .bind(&hashes)
         .fetch_all(&mut *conn)
         .await
         .context("failed to walk the ENSv1 registry pointers of a mirror pointer")?;
@@ -307,10 +319,29 @@ fn classify(nearest: &mut MirrorNearest, resolver: Option<&ResolverClassificatio
     };
 }
 
+/// Whether `surface` is the walked suffix `walk`: its raw labels are the queried name's, as
+/// before, when both store them; when either stores none, its label hashes are.
+pub(crate) const SAME_LABELS: &str = "(to_jsonb(surface.raw_labels) = walk.labels
+               OR ((surface.raw_labels IS NULL OR walk.labels IS NULL)
+                   AND lower(to_jsonb(surface.labelhashes)::text)::jsonb = walk.hashes))";
+
+/// A label-hash path as the lowercase JSON array [`SAME_LABELS`] compares.
+pub(crate) fn lowercase_hashes(labelhashes: &[String]) -> Value {
+    labelhashes
+        .iter()
+        .map(|labelhash| labelhash.to_ascii_lowercase())
+        .collect()
+}
+
 /// The namehash of a name suffix. The stored labelhashes are used when each is a 32-byte hash, so
-/// labels known only by their hash still resolve; otherwise the raw labels are hashed.
-fn suffix_namehash(raw_labels: &[String], labelhashes: &[String]) -> String {
-    let parsed = (labelhashes.len() == raw_labels.len())
+/// labels known only by their hash still resolve; otherwise the raw labels are hashed. A suffix
+/// with no raw labels has only its labelhashes.
+pub(crate) fn suffix_namehash(
+    raw_labels: Option<&[String]>,
+    labelhashes: &[String],
+) -> Result<String> {
+    let parsed = raw_labels
+        .is_none_or(|raw_labels| labelhashes.len() == raw_labels.len())
         .then(|| {
             labelhashes
                 .iter()
@@ -318,12 +349,14 @@ fn suffix_namehash(raw_labels: &[String], labelhashes: &[String]) -> String {
                 .collect::<Option<Vec<_>>>()
         })
         .flatten();
-    let labelhashes = parsed.unwrap_or_else(|| {
-        raw_labels
+    let labelhashes = match (parsed, raw_labels) {
+        (Some(labelhashes), _) => labelhashes,
+        (None, Some(raw_labels)) => raw_labels
             .iter()
             .map(|label| keccak256(label.as_bytes()))
-            .collect()
-    });
+            .collect(),
+        (None, None) => bail!("a surface without raw labels has a malformed labelhash"),
+    };
     let node = labelhashes
         .iter()
         .rev()
@@ -333,7 +366,7 @@ fn suffix_namehash(raw_labels: &[String], labelhashes: &[String]) -> String {
             input[32..].copy_from_slice(labelhash.as_slice());
             keccak256(input)
         });
-    format!("{node:#x}")
+    Ok(format!("{node:#x}"))
 }
 
 #[cfg(test)]

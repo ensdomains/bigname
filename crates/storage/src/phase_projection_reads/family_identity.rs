@@ -88,7 +88,7 @@ pub(crate) async fn load_on(
     for (id, row) in names {
         let normalized = super::names::normalize_phase_name(&id, &row.normalized_name)?;
         let labelhash = super::names::phase_labelhash(&normalized);
-        let labelhash_count = i32::try_from(normalized.normalized_labels.len()).ok();
+        let labelhash_count = i32::try_from(normalized.labels.len()).ok();
         row.provenance["chain_id"]
             .as_str()
             .context("composed name has no chain")?;
@@ -101,7 +101,9 @@ pub(crate) async fn load_on(
             row: IdentityNameCurrentRow {
                 logical_name_id: id.clone(),
                 namespace: row.namespace,
-                canonical_display_name: normalized.canonical_display_name,
+                // The composed row's display form: a surface without raw bytes serves its
+                // rendered name there, which re-normalizing would beautify.
+                canonical_display_name: row.canonical_display_name,
                 normalized_name: normalized.normalized_name,
                 namehash: row.namehash,
                 labelhash,

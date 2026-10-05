@@ -25,7 +25,9 @@ use serde_json::Value;
 use crate::{
     NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListOrder, NameCurrentRow,
     UnixSeconds,
-    families::name::{CoverageShape, load_composed, servable_publication},
+    families::name::{
+        CoverageShape, load_composed, rendered::rendered_name_sql, servable_publication,
+    },
     name_current::parent_like_patterns,
 };
 
@@ -118,10 +120,11 @@ pub async fn load_family_former_owner_page(
     let after = cursor.map(cursor_key).transpose()?;
     let address = filter.address.to_ascii_lowercase();
     // A served name composes from an active surface, whose stored spelling is normalized, so
-    // `parent` can match it in the index query.
+    // `parent` can match it in the index query. A surface without raw bytes is matched on its
+    // served name.
     let parent = filter.parent.map(parent_like_patterns);
     let mut snapshot = db.into().snapshot().await?;
-    let indexed: Vec<(String, String)> = sqlx::query_as(
+    let indexed: Vec<(String, String)> = sqlx::query_as(&format!(
         "/* storage:families.records.former_owner_index */
          SELECT DISTINCT indexed.chain_id, indexed.logical_name_id
          FROM bigname_phase.project_address_name_index indexed
@@ -133,9 +136,12 @@ pub async fn load_family_former_owner_page(
            AND ($3::text IS NULL OR EXISTS (
                SELECT 1 FROM bigname_phase.name_surfaces surface
                WHERE surface.logical_name_id = indexed.logical_name_id
-                 AND surface.raw_name LIKE $3 ESCAPE '\\'
-                 AND surface.raw_name NOT LIKE $4 ESCAPE '\\'))",
-    )
+                 AND ((surface.raw_name LIKE $3 ESCAPE '\\'
+                       AND surface.raw_name NOT LIKE $4 ESCAPE '\\')
+                      OR (surface.raw_name IS NULL AND {name} LIKE $3 ESCAPE '\\'
+                          AND {name} NOT LIKE $4 ESCAPE '\\'))))",
+        name = rendered_name_sql("surface")
+    ))
     .bind(&address)
     .bind(filter.namespace)
     .bind(parent.as_ref().map(|(one_below, _)| one_below.as_str()))

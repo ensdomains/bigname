@@ -38,10 +38,13 @@ pub struct Resource {
 pub struct NameSurface {
     pub logical_name_id: String,
     pub namespace: String,
+    /// The three names are the stored name, or for a surface that stores no raw bytes the name
+    /// built from its label hashes (`rendered_name`).
     pub input_name: String,
     pub canonical_display_name: String,
     pub normalized_name: String,
-    pub dns_encoded_name: Vec<u8>,
+    /// Absent when the surface stores no raw bytes.
+    pub dns_encoded_name: Option<Vec<u8>>,
     pub namehash: String,
     pub labelhashes: Vec<String>,
     pub normalizer_version: String,

@@ -1,5 +1,8 @@
 //! Lookup inputs composed on the caller's snapshot, fenced by the family publication.
-use super::{HeadRow, InventoryRow, NameRow, positions::CapturedPublication};
+use super::{
+    HeadRow, InventoryRow, NameRow, positions::CapturedPublication,
+    textless_name::dns_name_from_preimages,
+};
 use crate::{LookupError, LookupPosition, Result, error::database};
 use bigname_storage::families::{
     name::load_family_name_on,
@@ -7,6 +10,10 @@ use bigname_storage::families::{
 };
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
+
+/// A surface's stored wire name (absent when it stores no bytes) and label-hash path, with the
+/// chain and publication sequence of the resource it is read with.
+type SurfaceIdentity = (Option<Vec<u8>>, Vec<String>, String, String);
 
 fn composition(error: anyhow::Error) -> LookupError {
     if bigname_storage::families::name::is_publication_unavailable(&error) {
@@ -27,8 +34,9 @@ pub(super) async fn load_name(
         .ok_or_else(|| {
             LookupError::unsupported("verified lookup name is not readable or supported")
         })?;
-    let identity: Option<(Vec<u8>, String, String)> = sqlx::query_as(
-        "SELECT surface.dns_encoded_name, resource.chain_id, marker.sequence::text
+    let identity: Option<SurfaceIdentity> = sqlx::query_as(
+        "SELECT surface.dns_encoded_name, surface.labelhashes, resource.chain_id,
+                marker.sequence::text
          FROM name_surfaces surface JOIN resources resource ON resource.resource_id = $2
          JOIN project_family_marker marker ON marker.chain_id = resource.chain_id
          WHERE surface.logical_name_id = $1",
@@ -38,8 +46,19 @@ pub(super) async fn load_name(
     .fetch_optional(&mut **transaction)
     .await
     .map_err(database("load family lookup identity"))?;
-    let (dns_encoded_name, resource_chain_id, row_xmin) = identity
+    let (stored_dns_name, labelhashes, resource_chain_id, row_xmin) = identity
         .ok_or_else(|| LookupError::unsupported("verified lookup requires a readable resource"))?;
+    let dns_encoded_name = match stored_dns_name {
+        Some(dns_name) => dns_name,
+        // A resolver call needs the bytes of the name, and this surface stores none.
+        None => dns_name_from_preimages(transaction, &labelhashes, &row.namehash)
+            .await?
+            .ok_or_else(|| {
+                LookupError::unsupported(
+                    "verified lookup requires the verified bytes of every label of the name",
+                )
+            })?,
+    };
     Ok(NameRow {
         logical_name_id: row.logical_name_id,
         namespace: row.namespace,

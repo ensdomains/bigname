@@ -10,5 +10,7 @@ pub mod topology;
 mod id_index_plan_tests;
 #[cfg(test)]
 mod name_order_plan_tests;
+#[cfg(test)]
+pub(crate) mod textless_tests;
 
 pub(crate) use name::read_snapshot;

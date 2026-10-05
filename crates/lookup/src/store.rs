@@ -18,6 +18,7 @@ mod persistence;
 mod positions;
 mod routes;
 mod rows;
+mod textless_name;
 
 use rows::{load_head, load_inventory, load_name};
 #[cfg(test)]
