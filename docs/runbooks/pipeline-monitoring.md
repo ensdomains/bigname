@@ -329,7 +329,7 @@ a warning from replayed history by `phase_runner_redo_in_progress` and
 
 ## Project family work
 
-Four metrics describe the family runner's work. The runner reports its outcome
+Four metrics describe the family runner's work, and seven its hydration. The runner reports its outcome
 to the metrics task, including the committed prefix when a run fails.
 
 - `phase_runner_project_families_seconds{chain}` is the wall time of the newest
@@ -346,8 +346,62 @@ to the metrics task, including the committed prefix when a run fails.
   conflicting deliveries of one normalized event identity whose position or
   payload disagrees with the delivery retained in canonical order.
 
-The run gauges retain the newest outcome until the next; anomaly counters add
-all reported outcomes. Pending single-block observations are bounded to 65,536
+[Hydration](../projections.md#follow-only-hydration) runs only on a head block
+of `ethereum-mainnet`. Its RPC activity is counted when it happens, including
+for a block whose publication then fails; row writes are counted only for
+committed blocks. `kind` is `reverse` or `text`.
+
+- `phase_runner_project_hydration_passes_total{chain,result}` counts head
+  blocks whose reads were prepared, each under exactly one result: `timed_out`
+  (the block's reads spent their 30 seconds, whatever else the pass learned),
+  `unserved` (the endpoint did not serve the block) or `served` (neither, a
+  head block with nothing to read included). The three results add up to the
+  prepared passes. No increase while blocks are published means Project is
+  catching up, replaying or rebuilding, or the chain has no new block.
+- `phase_runner_project_hydration_rpc_calls_total{chain,kind}` and
+  `phase_runner_project_hydration_rpc_failures_total{chain,kind}` count
+  Multicall3 aggregates sent and those that failed as a whole. `kind="probe"`
+  is the one-call aggregate sent after a failed batch when the endpoint has
+  answered nothing at the block yet. It is evidence of whether the endpoint
+  serves the block, not proof.
+- `phase_runner_project_hydration_selectors_total{chain,kind,outcome}` counts
+  selectors by outcome: `observed`, `failed_call`, `deferred` or
+  `not_observed`. `not_observed` includes selectors a block had no call left
+  for; they keep their place for the next head.
+- `phase_runner_project_hydration_writes_total{chain,kind,write}` counts rows
+  changed in committed blocks: `value` (the row's observation changed: the
+  hydrated value, a cleared one included, or for a reverse tuple the block it
+  was observed at) or `schedule` (only its place in the queue, its aggregate
+  size limit or its failure count).
+- `phase_runner_project_hydration_rpc_seconds{chain}` is the RPC wall time of
+  the newest family run that hydrated.
+- `phase_runner_project_hydration_head_age_seconds{chain}` is the age of the
+  newest hydrated head block, by its timestamp, when its reads began. A large
+  value means Project reached the head late; an endpoint that keeps little
+  historical state then fails those reads.
+
+A rising `unserved` or `not_observed` count with no `observed` selectors means
+the hydration endpoint cannot answer at the blocks Project reaches: check the
+endpoint, its state retention against the head age, and the `warn` lines `a
+hydration RPC batch failed` and `the hydration endpoint does not serve this
+block`, which name the chain, block, kind, selector count and error. No stored
+value changes for a block counted as `unserved`. Rising `deferred` with `observed`
+selectors means some aggregate cannot be answered although the endpoint
+works: the log's error says why (for example a size or gas limit). A steady
+small `deferred` rate with matching `schedule` writes is a selector that fails
+every time and is tried again, alone, whenever its turn comes. Do not
+judge progress by pending text work alone: reverse tuples stay in rotation
+after a successful read.
+
+A failed child response waits 7,200 blocks before another hydration read unless
+fresh selector evidence resets its delay. A stable pending count during that
+wait is expected; the row's original attempt stamp must not advance on every
+head. Old eligible work has 63 reserved text slots and a rounded-up quarter of
+each kind's call budget. Outer failures remain distinct and follow the split
+or unobserved policy above.
+
+The run gauges retain the newest outcome until the next; anomaly and hydration
+counters add all reported outcomes. Pending single-block observations are bounded to 65,536
 per chain until the metrics task drains them. Cancellation can leave an
 in-flight outcome unreported even though a commit completed, so these process
 metrics do not replace the durable marker as proof of progress. There is no

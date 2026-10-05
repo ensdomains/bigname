@@ -1,49 +1,68 @@
 //! F6 text enrichment keeps the event-derived columns intact. The existing JSON overlay records
 //! the outcome and the selectors it was read for; null restores the missing-value baseline.
 //!
-//! A block reads at most [`ROLLING_LIMIT`] selectors, as the reverse refresh does: those the block
-//! changed first, then the backlog a rebuild leaves (every overlay null) in a stable rolling order,
-//! never-read selectors before the oldest attempts. A failed read keeps the null overlay but
-//! stamps `hydrated_at_block` with the attempt, so it waits behind the rest of the backlog.
+//! A hydrating block selects at most [`ROLLING_LIMIT`] selectors. A rounded-up quarter of the
+//! slots goes to the oldest stamped work; remaining slots prefer changes, then never-read work.
 //!
-//! `text.sql` decides which selectors need work and cuts the block's share, so a block never
-//! transfers the selectors that are already current. Every row it returns is work: a read stamps
-//! it current or with a newer attempt, and a cleared overlay leaves the work set, so the backlog
-//! behind the cut moves forward whenever the block's share has room for it. Changed selectors
-//! still rank first: while 250 or more change every block, the unchanged backlog waits, as it
-//! did before the cut moved into the query, and a steady stream of never-read selectors likewise
-//! delays failed retries.
+//! `hydrated_value` is the observation. `hydrated_at_block` is its block and the selector's
+//! place in the backlog; `hydration_limit` and `hydration_failures` only schedule it: the size
+//! of aggregate it may next be sent in, and how many reads in a row observed no value for it.
+//! What a read writes (`batch::Read`):
+//! - an answered call that succeeded, with a value or empty, writes the overlay and its block
+//!   and clears the limit and the failure count;
+//! - an answered call that itself failed inside the aggregate writes a null overlay, stamps
+//!   `hydrated_at_block` with the attempt, clears the limit and counts one more failure. This is
+//!   a fail-closed policy, not evidence that the record is empty: nothing is served for the
+//!   selector and it waits behind the rest of the backlog;
+//! - a deferred selector (its aggregate failed while the endpoint answered other calls at the
+//!   block) is stamped the same way and takes the limit the read left it with, so a later head
+//!   sends it in a smaller aggregate. Every selected selector is work, so its overlay, if it
+//!   has one, was already not served for the selector as it now stands, and is cleared with the
+//!   stamp;
+//! - an unobserved selector (the endpoint did not serve the block, or the pass had no time or
+//!   call left for it) is not written at all.
+//!
+//! A failed child waits 7,200 blocks before another read. A positive failure count with no
+//! aggregate-size limit identifies it; deferred outer failures keep their limit and can resume
+//! at the next head. Actual selector changes clear scheduling state in the event reducer,
+//! including on catch-up blocks. `text.sql` applies the delay before cutting either queue share,
+//! so cooling selectors cannot occupy eligible waiting work's slots.
 use std::{collections::BTreeMap, sync::LazyLock};
 
 use bigname_lookup::{
     ChainRpcUrls, EnsTextRecordMulticallBlock, EnsTextRecordMulticallRequest,
     EnsTextRecordMulticallResult, MULTICALL3_ADDRESS, execute_ens_text_record_multicall,
+    rpc_error_reports_block_unavailable,
 };
 use bigname_storage::families::position::emission_ordinal_sql;
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 
 use super::super::{
-    input::BlockHeader,
     reduce::{Context, key_of, set},
     store::{Row, RowSet, key_text},
     tables,
 };
 use super::ETHEREUM;
 use super::admission::TEXT_RESOLVERS;
+use super::batch::{Aggregate, BATCH_LIMIT, Failure, Kind, Read, Session};
+use super::outcome::Writes;
+use super::schedule;
 use crate::{ProjectError, Result};
 
-/// The most selectors one block reads, one Multicall3 batch: the reverse refresh's bound.
-pub(super) const ROLLING_LIMIT: usize = 250;
+/// The most selectors one block reads, one Multicall3 aggregate.
+pub(super) const ROLLING_LIMIT: usize = BATCH_LIMIT;
 
 pub(super) struct Candidate {
     key: Row,
     selector: Value,
     request: Option<EnsTextRecordMulticallRequest>,
+    limit: Option<usize>,
+    waiting: bool,
 }
 
 pub(super) struct Prepared {
-    work: BTreeMap<String, (Candidate, Option<EnsTextRecordMulticallResult>)>,
+    work: BTreeMap<String, (Candidate, Option<Read<EnsTextRecordMulticallResult>>)>,
 }
 
 fn changes(rows: &RowSet, table: &'static tables::TableSpec) -> Value {
@@ -68,6 +87,7 @@ fn changes(rows: &RowSet, table: &'static tables::TableSpec) -> Value {
 
 static SELECT_SQL: LazyLock<String> = LazyLock::new(|| {
     include_str!("text.sql")
+        .replace("{eligibility}", include_str!("text_eligible.sql"))
         .replace(
             "{value_emission_ordinal}",
             &emission_ordinal_sql(
@@ -132,6 +152,58 @@ async fn selected_values(
         .map_err(|e| ProjectError::database("failed to select family text hydration", e))
 }
 
+/// Clear obsolete scheduling state in the reducer transaction, including catch-up/replay.
+pub(super) async fn reset_schedule(
+    transaction: &mut Transaction<'_, Postgres>,
+    context: &Context<'_>,
+    rows: &mut RowSet,
+) -> Result<()> {
+    let targets = super::work::text_keys(
+        transaction,
+        context.chain_id,
+        &super::work::changed_images(rows),
+    )
+    .await?;
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let changed = selected_values(
+        transaction,
+        context.chain_id,
+        context.block.number,
+        rows,
+        targets,
+        true,
+    )
+    .await?;
+    let keys: Vec<_> = changed
+        .into_iter()
+        .filter(|value| {
+            value["_delta"] == true
+                && (!value["hydration_failures"].is_null() || !value["hydration_limit"].is_null())
+        })
+        .map(|value| {
+            key_of(
+                &tables::NODE_RECORD_VALUE,
+                tables::NODE_RECORD_VALUE
+                    .key
+                    .iter()
+                    .map(|column| value[*column].clone()),
+            )
+        })
+        .collect();
+    rows.load(transaction, &tables::NODE_RECORD_VALUE, keys.clone())
+        .await?;
+    for key in keys {
+        if let Some(mut row) = rows.get(&tables::NODE_RECORD_VALUE, &key).cloned() {
+            set(&mut row, "hydration_limit", Value::Null);
+            set(&mut row, "hydration_failures", Value::Null);
+            rows.put(&tables::NODE_RECORD_VALUE, row)?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn refresh(
     transaction: &mut Transaction<'_, Postgres>,
     chain: &str,
@@ -161,8 +233,7 @@ pub(super) async fn refresh(
 }
 
 /// One selected row. The query already dropped current and cleared selectors and cut the block's
-/// share: the block's own changes first, then never-read selectors, then the oldest attempts, each
-/// in key order. Preparation and publication run the same query on the same rows, so both cut the
+/// share: reserved oldest stamped work, then changes, never-read selectors and older attempts. Preparation and publication run the same query on the same rows, so both cut the
 /// same list.
 fn candidate(value: Value) -> Result<Candidate> {
     let selector = value["_selector"].clone();
@@ -194,71 +265,102 @@ fn candidate(value: Value) -> Result<Candidate> {
         ),
         selector,
         request,
+        waiting: value["_waiting"] == true,
+        limit: value
+            .as_object()
+            .and_then(|row| schedule::limit(row, "hydration_limit")),
     })
+}
+
+/// Whether any selected selector has a read to make.
+pub(super) fn waiting(candidates: &[Candidate]) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| candidate.request.is_some())
+}
+
+struct Call<'a> {
+    rpc_urls: &'a ChainRpcUrls,
+    block: EnsTextRecordMulticallBlock,
+}
+
+impl Aggregate for Call<'_> {
+    type Request = EnsTextRecordMulticallRequest;
+    type Answer = EnsTextRecordMulticallResult;
+
+    async fn send(
+        &self,
+        chunk: &[Self::Request],
+    ) -> std::result::Result<Vec<Self::Answer>, Failure> {
+        execute_ens_text_record_multicall(
+            self.rpc_urls,
+            ETHEREUM,
+            MULTICALL3_ADDRESS,
+            &self.block,
+            chunk,
+        )
+        .await
+        .map_err(|error| Failure {
+            block_unavailable: rpc_error_reports_block_unavailable(&error),
+            message: format!("{error:#}"),
+        })
+    }
 }
 
 pub(super) async fn execute(
     candidates: Vec<Candidate>,
-    rpc_urls: &ChainRpcUrls,
-    head: &BlockHeader,
+    session: &mut Session<'_>,
 ) -> Result<Prepared> {
-    let requests: Vec<_> = candidates
+    let (requests, limits): (Vec<_>, Vec<_>) = candidates
         .iter()
-        .filter_map(|candidate| candidate.request.clone())
-        .collect();
+        .filter_map(|candidate| Some((candidate.request.clone()?, candidate.limit)))
+        .unzip();
+    let rpc_urls = session.rpc_urls;
     if !requests.is_empty() && rpc_urls.url_for(ETHEREUM).is_none() {
         return Err(ProjectError::configuration(
             "family text hydration requires an RPC URL for ethereum-mainnet",
         ));
     }
-    let block = EnsTextRecordMulticallBlock {
-        block_number: head.number,
-        block_hash: head.hash.clone(),
+    let call = Call {
+        rpc_urls,
+        block: EnsTextRecordMulticallBlock {
+            block_number: session.head.number,
+            block_hash: session.head.hash.clone(),
+        },
     };
-    let mut results = Vec::with_capacity(requests.len());
-    for chunk in requests.chunks(ROLLING_LIMIT) {
-        match execute_ens_text_record_multicall(
-            rpc_urls,
-            ETHEREUM,
-            MULTICALL3_ADDRESS,
-            &block,
-            chunk,
-        )
-        .await
-        {
-            Ok(found) => results.extend(found),
-            Err(error) => {
-                results.extend(chunk.iter().map(|_| EnsTextRecordMulticallResult::Failed {
-                    message: format!("{error:#}"),
-                }))
-            }
-        }
-    }
-    if results.len() != requests.len() {
-        return Err(ProjectError::data_integrity(
-            "family text hydration outcome count differs from its candidates",
-        ));
-    }
-    Ok(prepared(candidates, results))
-}
-
-fn prepared(candidates: Vec<Candidate>, results: Vec<EnsTextRecordMulticallResult>) -> Prepared {
-    let mut results = results.into_iter();
-    Prepared {
+    let waiting: Vec<_> = candidates
+        .iter()
+        .filter(|candidate| candidate.request.is_some())
+        .map(|candidate| candidate.waiting)
+        .collect();
+    let reads = session
+        .read(Kind::Text, &requests, &limits, &waiting, &call)
+        .await;
+    session.stats.text.failed_calls += reads
+        .iter()
+        .filter(|read| {
+            matches!(
+                read,
+                Read::Answered(EnsTextRecordMulticallResult::Failed { .. })
+            )
+        })
+        .count() as u64;
+    let mut reads = reads.into_iter();
+    Ok(Prepared {
         work: candidates
             .into_iter()
             .map(|candidate| {
-                let result = candidate
+                let read = candidate
                     .request
                     .as_ref()
-                    .map(|_| results.next().expect("count checked"));
+                    .map(|_| reads.next().expect("one read per request"));
                 (
                     key_text(&tables::NODE_RECORD_VALUE, &candidate.key),
-                    (candidate, result),
+                    (candidate, read),
                 )
             })
             .collect(),
-    }
+    })
 }
 
 impl Prepared {
@@ -268,7 +370,7 @@ impl Prepared {
         context: &Context<'_>,
         rows: &mut RowSet,
         _ordinal: i64,
-    ) -> Result<()> {
+    ) -> Result<Writes> {
         let current = select(transaction, context, rows).await?;
         rows.load(
             transaction,
@@ -276,6 +378,7 @@ impl Prepared {
             current.iter().map(|candidate| candidate.key.clone()),
         )
         .await?;
+        let mut writes = Writes::default();
         for candidate in current {
             let prepared = self
                 .work
@@ -291,31 +394,53 @@ impl Prepared {
                 continue;
             };
             let mut overlay = candidate.selector.clone();
-            let result = matched.and_then(|(_, result)| result.as_ref());
-            match result {
-                Some(EnsTextRecordMulticallResult::Success { value }) => {
+            // `None` is a selector with no read to make: one no longer eligible, whose overlay
+            // is cleared, or one that changed between preparation and this transaction.
+            let read = matched.and_then(|(_, read)| read.as_ref());
+            match read {
+                Some(Read::Unobserved) => continue,
+                Some(Read::Answered(EnsTextRecordMulticallResult::Success { value })) => {
                     overlay["status"] = json!("success");
                     overlay["value"] = json!(value);
                 }
-                Some(EnsTextRecordMulticallResult::NotFound) => {
+                Some(Read::Answered(EnsTextRecordMulticallResult::NotFound)) => {
                     overlay["status"] = json!("not_found")
                 }
-                Some(EnsTextRecordMulticallResult::Failed { .. }) | None => overlay = Value::Null,
+                Some(Read::Answered(EnsTextRecordMulticallResult::Failed { .. }))
+                | Some(Read::Deferred { .. })
+                | None => overlay = Value::Null,
             }
             if !overlay.is_null() {
                 overlay["block_hash"] = json!(context.block.hash);
             }
-            // A failed read stamps its attempt with a null overlay, which nothing serves.
-            let height = if result.is_some() {
+            // A failed or deferred read stamps its attempt with a null overlay, which nothing
+            // serves.
+            let height = if read.is_some() {
                 json!(context.block.number)
             } else {
                 Value::Null
             };
+            let before = row.clone();
+            let failed = overlay.is_null() && read.is_some();
             set(&mut row, "hydrated_value", overlay);
             set(&mut row, "hydrated_at_block", height);
+            set(
+                &mut row,
+                "hydration_limit",
+                match read {
+                    Some(Read::Deferred { limit }) => json!(limit),
+                    _ => Value::Null,
+                },
+            );
+            if failed {
+                schedule::count_failure(&mut row, "hydration_failures");
+            } else {
+                set(&mut row, "hydration_failures", Value::Null);
+            }
+            writes.count(&before, &row, &["hydrated_value"]);
             rows.put(&tables::NODE_RECORD_VALUE, row)?;
         }
-        Ok(())
+        Ok(writes)
     }
 }
 
@@ -329,6 +454,6 @@ mod tests {
             .filter(|character| character.is_whitespace())
             .map(|character| format!("\\{:04X}", u32::from(character)))
             .collect();
-        assert!(include_str!("text.sql").contains(&format!("U&'{listed}'")));
+        assert!(include_str!("text_eligible.sql").contains(&format!("U&'{listed}'")));
     }
 }

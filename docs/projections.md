@@ -45,12 +45,12 @@ context before committing. The [reorg rules](#reorg-and-redo) and
 
 Every Project SQL statement starts with a
 [statement identifier](glossary.md#statement-identifier). The current family
-metrics report run duration, block-transaction duration, marker lag and
-duplicate anomalies; see the [monitoring runbook](runbooks/pipeline-monitoring.md).
+metrics report run duration, block-transaction duration, marker lag,
+duplicate anomalies and hydration; see the [monitoring runbook](runbooks/pipeline-monitoring.md).
 
 ### Follow-only hydration
 
-Configured Ethereum Mainnet follow blocks may refresh an existing ENS/60
+On Ethereum Mainnet, a configured Project run may refresh an existing ENS/60
 reverse tuple on an admitted event-silent resolver, and supported ENSv1
 `text:<key>` entries whose normalized event retained the key but not the
 value.[^ensnode-legacy-revresolver-l311][^ensnode-legacy-revresolver-l316][^ensnode-legacy-text-l356]
@@ -58,17 +58,142 @@ This [hydration](glossary.md#hydration) is a Project-owned overlay on the
 event-derived baseline. It writes no raw facts, normalized events, verified
 results, reusable execution outcomes or traces.
 
-A short preparation transaction previews the block with the normal reducers,
-including resolver pointers, classification and records, and closes before RPC.
-Calls use the exact block number and hash being published, never provider
-`latest`. The publication transaction revalidates the predecessor, input
-revision, canonical block and each result's selected identity before accepting
-it. Overlay changes are journalled with the ordinary family rows. Failed calls
-remove the overlay and the block still publishes; a later follow block retries.
-Missing required RPC configuration refuses an eligible configured follow run.
-Replay, rebuild and rebuild ranges make no hydration calls. Undo can restore a
-previous overlay; reset rebuild starts from the baseline, and later follow
-blocks repair missing values.
+Only the head block hydrates. A block hydrates when it is published as an
+ordinary follow block (applied directly after the
+[family marker](glossary.md#family-marker), outside any repair or rebuild) and
+it is the highest readable block of the stored chain lineage, by number and
+hash, as Project read it when the run started. Project reads that block
+itself: the target a caller passes says how far to publish, not which block is
+the head. The predecessor check is unchanged, so the block must still be the
+marker's child by number and parent hash. Consequently:
+
+- Blocks applied while Project catches up publish without any hydration RPC.
+  Their changed selectors wait in the work indexes and join the rolling
+  selection at the head. After the reserved share for older waiting work,
+  selectors changed by the head block take priority over that rolling work.
+  With marker 100 and head 110, blocks 101 to 109 make no call and block 110
+  hydrates.
+- A block a run stops on because its block budget is spent is not the head.
+  The continuation that reaches the head hydrates there. Budgets, repair,
+  replay and rebuild scheduling are unchanged; no run is cut short to make a
+  block the head.
+- A replayed block never hydrates, including a replacement head reached by
+  undo and replay at the head's own number. No rebuilt block hydrates, the
+  rebuild's last block and rebuild ranges included.
+- A redo that ends below the readable head, or any target below it, does not
+  hydrate.
+- A block that took the head's height after the run started is published
+  without hydration.
+- A published head is not hydrated a second time. A run interrupted before the
+  head commits reads it again; after it commits, hydration waits for the next
+  block. A stalled chain, or a head that was rebuilt or replayed, leaves
+  values unrefreshed until then.
+
+The head is the newest block bigname holds, not the provider's tip. After a
+long catch-up, a capacity wait or a slow run it can be old, and an endpoint
+that no longer keeps that block's state fails its reads; see the outcomes
+below. There is no age cutoff:
+[`phase_runner_project_hydration_head_age_seconds`](runbooks/pipeline-monitoring.md#project-family-work)
+reports the age.
+
+A short preparation transaction previews the head block with the normal
+reducers, including resolver pointers, classification and records, and closes
+before RPC. Calls use the exact block number and hash being published, never
+provider `latest`. The publication transaction revalidates the predecessor,
+input revision, canonical block and each result's selected identity before
+accepting it. Overlay changes are journalled with the ordinary family rows.
+Missing required RPC configuration refuses an eligible configured run. Undo can
+restore a previous overlay; reset rebuild starts from the baseline, and later
+head blocks fill missing values. Nothing here promises when a backlog is
+drained: that depends on new head blocks, on the endpoint answering and on how
+much other work each head block carries.
+
+Reads go out as Multicall3 aggregates of at most 250 calls. Every selected
+selector ends in exactly one of four outcomes:
+
+| Outcome | When | What is written |
+| --- | --- | --- |
+| Observed | The endpoint answered the aggregate and the selector's call returned a value or an empty answer. | The value, or the empty answer, with the block it was observed at. A successful empty answer replaces an earlier value. |
+| Failed call | The endpoint answered the aggregate and this selector's own call failed inside it, or returned data that cannot be decoded. | The overlay is cleared and the attempt recorded, so the reader serves the event-derived baseline. This is a fail-closed policy; it is not evidence that the value was cleared on chain. |
+| Deferred | The selector's aggregate failed as a whole while the endpoint answered other calls at the same block, and the block had no call or time left to split it further. | No value is observed. The selector moves behind the rest of its queue and records the largest aggregate it may next be sent in; a reverse tuple keeps its name and the block it was observed at (see [Primary names](#primary-names)). |
+| Not observed | The endpoint did not serve the block, the block's reads ran out of time, or the block had no call left for the selector's first aggregate. | Nothing. The row, its value and the block the value was observed at are left exactly as they were, and the selector keeps its place. |
+
+An aggregate that fails as a whole (a transport or JSON-RPC error, a timeout,
+or an answer of the wrong shape) is never turned into per-selector failures.
+What follows depends on what Project knows about the endpoint at that block:
+
+- The endpoint says it cannot serve the block. Project recognises this from
+  the JSON-RPC error by a fixed list bigname chose: error code -32001, or a
+  message containing one of a set of fragments about a missing block, header
+  or state. This holds at any point of a block's reads,
+  after earlier aggregates were answered too. Every selector not yet read is
+  not observed and neither kind sends another call for the block; selectors
+  already read keep their results. The test is a heuristic: an endpoint that
+  words the refusal differently is not recognised, and its failures are then
+  handled as the next two cases; a false match only stops the reads of that
+  one block.
+- Nothing has been answered at the block yet. Project sends one one-call
+  aggregate at the same block hash. If that fails too, the block is treated as
+  not served, as above. This probe is sent only then; once any aggregate of
+  the block has been answered it is not sent again. Two cases say nothing
+  about the endpoint and count as running out of time instead: no time is
+  left to send the probe, or the probe is cut by the block's time before its
+  own 10 seconds are up.
+- The endpoint has answered an aggregate or the probe at the block. Project
+  then treats the failure as coming from what the aggregate holds (its size,
+  its execution cost, or one selector) and splits the aggregate in halves.
+  This is evidence, not proof: an endpoint can answer a small call and still
+  refuse a real one, and a brief endpoint fault can fail the probe.
+
+Splitting is bounded twice. One kind sends at most one aggregate per 250
+selectors plus 16 per block. Each call is limited to 10 seconds and one
+block's reads, both kinds together, to 30 seconds. A failed aggregate is
+split only while its kind has a full 10 seconds for the first half, and time
+for both halves and for every half already waiting, each taken at the longest
+any aggregate of this block has needed (the probe is not counted). A failure
+that has completed is therefore recorded before a later call can be cut. When an
+aggregate cannot be split, its selectors are deferred with half its size as
+their limit; halves that were never sent are deferred with their own size. A
+selector alone in a failed aggregate is deferred with a limit of one. The next
+head that selects them sends them in aggregates no larger than that limit, so
+the splitting continues where it stopped instead of starting from 250 again.
+A selector that fails every time ends up alone and costs one call whenever
+its turn comes; the readable selectors that shared its aggregate are read.
+An outer singleton failure still follows this rule: it is not a failed child
+response and does not start the individual-record retry delay.
+
+For each kind, a rounded-up quarter of its call budget is reserved for old
+waiting work and sent first, before new arrivals can use its time. The budget
+is `ceil(selected requests / 250) + 16`: 250 requests allow 17 calls, of which
+5 are reserved; 269 allow 18 calls, of which 5 are reserved. Remaining calls
+prefer fresh work, then unfinished old work. If one class has no work, the
+other can use all unused calls. When old work yields after its reserved
+calls, completed failed parents are recorded as deferred before fresh work
+can exhaust the remaining time. The existing time limits still apply; this
+is a service opportunity, not a promise of an answer from an unavailable or
+slow endpoint.
+
+A selector whose own call failed inside a successfully answered aggregate
+waits 7,200 blocks from that attempt before becoming eligible again. At
+`attempt height + 7,200` it may be selected; no empty-head tick is added. A
+positive failure count with a null size limit distinguishes this outcome
+from a deferred outer failure. Successful answers, including empty answers,
+clear the failure count. Fresh text event/version/admission changes and fresh
+reverse selector evidence clear obsolete scheduling state in the ordinary
+Project reducer, even during catch-up or replay. Those resets are journalled
+and undone with the event change; they never change observation provenance.
+An unrelated text key on the same resolver does not reset another key's delay.
+
+Reverse names are read before text values. While text selectors are waiting,
+the reverse reads may use at most half of the block's 30 seconds, so slow
+reverse reads cannot take the whole block from text; text then has all the
+time that is left. A call cut short by that time says nothing about its
+aggregate: its selectors and all that remain of its kind are not observed,
+and the pass counts as timed out, never as deferred or unserved. These limits bound the time spent
+waiting for RPC answers. Selecting the block's selectors before the reads and
+publishing after them take their own time, so the limits are not a bound on
+the publication. A block whose reads all fail still publishes. Every failed
+aggregate is logged with its chain, block, kind, selector count and error.
 
 Text hydration is restricted to supported inventory entries on the four
 manifest-admitted legacy public resolvers `0x4976fb03…`, `0xDaaF96c3…`,
@@ -81,8 +206,23 @@ the pinned ENS app metadata
 The transaction checks the record event position, partition version, namehash
 and classification again. `project_node_record_value.hydrated_value` retains
 the outcome, value, block hash and selectors; `hydrated_at_block` retains the
-height. The event columns remain unchanged. Successful empty reads are
-`not_found`; failure or lost admission exposes the baseline. A canonical result
+height; `hydration_limit` and `hydration_failures` only schedule the selector
+(the largest aggregate it may next be sent in, and the reads in a row that
+observed no value). The event columns remain unchanged. Successful empty reads
+are `not_found`; a failed call or lost admission exposes the baseline. Each
+hydrating block selects at most 250 text selectors. It reserves 63 slots
+(`ceil(250 / 4)`) for the oldest stamped, eligible, unchanged work, using the
+existing work index. The remaining slots prefer changed selectors, then
+never-read selectors, then the oldest attempts. Unused reserved slots are
+available to those other selectors. Cooling failed children remain in the
+work index but are skipped before either bounded selection. The reserved scan
+checks current eligibility before taking its slots; inactive overlays remain
+available to ordinary cleanup selection. Selection is not a
+promise that all of them are read in that block: the call and time limits
+above apply. Every selected
+text selector is one whose overlay is missing or no longer matches it, so
+nothing served is lost when a failed call or a deferred selector clears the
+overlay and records the attempt. A canonical result
 survives head advancement while its selectors remain valid. Inventory readers
 reject mismatched or orphaned overlays immediately, before another write.
 Reverse claims use the bounded refresh policy under [Primary names](#primary-names).
@@ -1622,32 +1762,64 @@ falls back here while the chain would return that resolver's name; see
 upstream order, a standalone `addr.reverse` registrar, has no admitted
 deployment and is not read.
 
-Configured mainnet follow blocks prepare reverse hydration
+A configured mainnet head block prepares reverse hydration
 before opening the publication transaction. A short preparation transaction uses
 the normal pointer and reverse reducers to include the new block's candidates,
 then closes before the hash-pinned RPC calls. The publication transaction checks
 the predecessor, input revision and block hash again, reduces the events, and
 accepts an answer only for the same selected reverse node and resolver. The
 result and its baseline enter F12's owned row set and are journalled with the
-family marker, including refresh work on empty blocks. Failed calls retract the
-overlay and publish the block; a later follow block retries through the bounded
-rolling selection. Successful not-found is distinct from failure. Attempt cohorts
-use the monotonically increasing publication generation. The reader also binds
+family marker, including refresh work on empty blocks. Only the head block
+hydrates, and a read ends in one of the four outcomes of
+[follow-only hydration](#follow-only-hydration). A call that fails inside an
+answered aggregate retracts the overlay (fail closed) and the block publishes;
+a head block at least 7,200 blocks later may retry through the bounded rolling
+selection, unless fresh selector evidence first clears the delay. A batch that
+fails as a whole retracts nothing. Successful not-found is distinct from both.
+Attempt cohorts use the monotonically increasing publication generation. The reader also binds
 the overlay to its selected node/resolver and readable block hash.
 
-Replay and rebuild perform no hydration RPC. Undo restores the previous overlay
+Replay, rebuild and catch-up blocks perform no hydration RPC. Undo restores the previous overlay
 with its row, and new or changed selectors use event-derived claims until a later
-follow block refreshes them. Rebuild ranges retain their existing behavior.
+head block refreshes them. Rebuild ranges retain their existing behavior.
 
-Each follow block refreshes eligible tuples changed by the block, then at most
-250 additional eligible tuples. Rolling selection orders never-attempted tuples
+Each hydrating block selects every eligible tuple the block changed and at
+most 250 additional eligible tuples. The rolling tuples receive the reserved
+quarter of calls before changed work, ordered by their attempt cohort and
+address. Each class is grouped separately: tuples without a size limit fill
+aggregates in request order, limited ones are packed by limit, and aggregates
+are ordered by their earliest member. After the reservation, changed work
+gets the remaining calls before unfinished rolling work. The call and time
+limits of [follow-only hydration](#follow-only-hydration) decide how many of
+them the block reads. Failed children still cooling are skipped before the
+rolling selection, so they cannot hold the oldest cohort in place.
+Rolling selection orders never-attempted tuples
 first, then the least recently attempted group; within a group it uses the
 oldest successful hydration height and stable tuple identity. Attempts use the
-publication generation as a durable ordering value. A failed group advances in
-the rotation and exposes the event-derived baseline, so it does not repeatedly
-starve older waiting groups. These counters never make a failed result readable.
-A completed same-head run performs no extra hydration tick. Subsequent follow
-blocks refresh eligible tuples; replay remains provider-free.
+publication generation as a durable ordering value, `attempt_ordinal`. It only
+orders the rotation. `attempt_limit` is the largest aggregate the tuple may
+next be sent in after its aggregate failed, and `attempt_failures` counts the
+reads in a row that observed no name; both are scheduling state, journalled
+and undone with the row. `hydrated_name`, `attempt_block`, `attempt_hash` and
+`baseline` are the observation: the name, the block it was observed at and the
+selector it was observed for, always written together.
+
+A tuple whose own call failed inside an answered aggregate advances in the
+rotation with a cleared name and a 7,200-block retry delay, so the reader
+serves the event-derived baseline.
+A deferred tuple advances in the rotation too, but keeps its observation: only
+the scheduling columns change, so a tuple that cannot be read does not hold the
+oldest group's place and block the groups behind it, and its name is never
+shown as observed at a block where it was not. A tuple that was not observed
+is not written and keeps its place. These counters never make a failed result
+readable. A completed same-head run performs no extra hydration tick.
+Subsequent head blocks refresh eligible tuples; replay remains provider-free.
+
+A hydrated reverse name is therefore the last name successfully observed for
+the tuple's current reverse node and resolver, served with the block and hash
+it was observed at. It is not a confirmation of the name at the served block:
+an event-silent change made after that block appears only once a later head
+block reads it, and a failed refresh in between keeps the earlier name.
 
 The reader accepts an overlay only while its baseline reverse node and resolver
 still match the current claim and its hydration block remains readable. A
