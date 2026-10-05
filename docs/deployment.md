@@ -3106,5 +3106,9 @@ then adopts a complete set without rebuilding or changing its OIDs. Empty
 schemas build directly. The independent
 factory-origin retention and UserRegistry implementation metadata ship in the
 held content-hash rotation and require its normal full Interpret/Project
-rebuild. Metadata and retained origins do not replace ordinary registry
+rebuild. The existing compiler also adds the migration family’s two topics at
+the UserRegistry implementation address from block `11820439`; complete the
+required Ingest repair first. An earlier release-wide repair boundary already
+covers this start. See the [measured watch-plan change](manifests.md).
+Metadata and retained origins do not replace ordinary registry
 announcement admission or introduce pre-initialization approval capture.

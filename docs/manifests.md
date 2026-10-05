@@ -1039,6 +1039,12 @@ migration correlation and does not change correlated visibility. It may
 precede delayed initialization: ordinary `RegistryCreated` remains required
 to admit the proxy, and no pre-initialization approvals are added. Other
 uncorrelated migration-source observations remain omitted.
+The existing watch compiler adds two address-scoped entries for this UserRegistry
+implementation: the migration family's `ProxyDeployed` and `NameRenewed` topics,
+from `11820439`; its existing 16 entries remain unchanged. This is a watch-plan
+widening even though the declaration is implementation metadata. Complete the
+normal required Ingest repair before the full Interpret/Project rebuild. A
+release already repairing from an earlier block covers this later start.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UserRegistryImpl.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UserRegistryImpl.json:L3269 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/build-info/solc-0_8_25-b30e6dc9a03b37f6a0b89af5d02a73d3993944f7.json:L1564 @ ens_v2_sepolia_20261001@07e55a05)
