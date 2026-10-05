@@ -2764,7 +2764,9 @@ change only there.
 `20261005120000_normalized_events_address_root_permission_idx.sql` adds
 `normalized_events_address_root_permission_idx`, keyed by the lowercased subject, then the block
 and log position, and partial on activated, readable `RootPermissionChanged` rows. Address
-history needs it: without it every address history page and count scans `normalized_events`. It
+history needs it: without it every address history page and count that includes root role
+changes (`both` or `registration` scope with the `role_holder` relation) scans
+`normalized_events`. It
 joins the walk index set's drop list. The index holds one entry per retained root role change and
 none on a chain without ENSv2 sources, so its size, and the disk the build needs, follow the
 number of root role changes rather than the size of `normalized_events`; check that count first

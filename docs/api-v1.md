@@ -1617,7 +1617,7 @@ and `removed_powers` (see
 default event feed, `type=permission`, `kind=RootPermissionChanged`, a
 registry's `contract_address` history and its `counts.events`, and address
 history in `both` or `registration` scope with the `role_holder` relation gain
-them, and so do the diagnostics `type=permission` and `kind` filters; name
+them, and so does the diagnostics `type=permission` filter; name
 history does not change. Outstanding position cursors continue.
 
 A `record` row may also come from a node-keyed resolver observation that carries

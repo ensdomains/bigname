@@ -537,6 +537,18 @@ async fn v2_registry_root_role_changes_are_permission_history() -> Result<()> {
     // Diagnostics share the `type` vocabulary, so `type=permission` now selects them too.
     let diagnostics = get("/v1/diagnostics/events?namespace=ens&type=permission".to_owned()).await?;
     assert_eq!(rows(&diagnostics).len(), 3, "{diagnostics}");
+    // Diagnostics has no `kind` filter.
+    let response = app_router(AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    ))
+    .oneshot(
+        Request::builder()
+            .uri("/v1/diagnostics/events?namespace=ens&kind=RootPermissionChanged")
+            .body(Body::empty())?,
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     // Only the account's own root changes, and only where `role_holder` and the registration
     // side of the read apply.

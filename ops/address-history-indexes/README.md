@@ -26,7 +26,8 @@ states. The expressions and predicates must stay identical to the query in
 root role arm in `crates/storage/src/history/filters.rs`. Without the first
 three the lookup still returns the same rows, but reads every grant and transfer
 on the chain: about 6 seconds on the Sepolia database on 2026-09-23. Without the
-fourth, each address history page and count scans `normalized_events`.
+fourth, each address history page and count that includes registry root role
+changes scans `normalized_events`.
 
 These change access paths only: no normalized event, canonicality state, raw
 intake or [interpreter content hash](../../docs/glossary.md#interpreter-content-hash)
