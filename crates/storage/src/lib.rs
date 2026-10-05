@@ -30,6 +30,7 @@ mod projection_helpers;
 mod read_db;
 mod record_inventory;
 mod registries;
+mod registry_token_ids;
 mod resolution_state;
 mod resolution_support;
 mod resolver;
@@ -165,6 +166,7 @@ pub use registries::{
     load_registry_references_page, load_registry_root_resource, load_registry_serving_pointer,
     load_subregistry_pointers_for_names,
 };
+pub use registry_token_ids::load_ens_v2_token_ids;
 pub use resolution_state::{Protocol, ResolutionState, load_resolution_state_on};
 pub use resolution_support::{
     BASE_MAINNET_CHAIN_ID, BASENAMES_L1_RESOLVER_ADDRESS, BASENAMES_NAMESPACE, ENS_NAMESPACE,

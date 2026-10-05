@@ -229,6 +229,12 @@ pub(crate) async fn get_resolver(
             .filter_map(|record| record.ens_v1.as_mut()),
     )
     .await?;
+    super::name_record::tokens::apply_records(
+        publication.conn().await?,
+        &mut bound_name_records,
+        &selected_snapshot,
+    )
+    .await?;
     let bound_names = BoundNames {
         data: bound_name_records,
         page: Page {

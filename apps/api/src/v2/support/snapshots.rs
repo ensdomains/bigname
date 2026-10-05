@@ -459,13 +459,13 @@ impl<'a> ExactNameSnapshotSelector<'a> {
 }
 
 pub(crate) async fn load_name_current_for_selected_snapshot(
-    pool: &PgPool,
+    db: impl Into<bigname_storage::ReadDb<'_>>,
     namespace: &str,
     name: &str,
     selected_snapshot: &SelectedSnapshot,
 ) -> ApiResult<NameCurrentRow> {
     let logical_name_id = super::route_logical_name_id(namespace, name);
-    match load_name_current_for_snapshot(pool, &logical_name_id, &selected_snapshot.chain_positions)
+    match load_name_current_for_snapshot(db, &logical_name_id, &selected_snapshot.chain_positions)
         .await
         .map_err(snapshot_selection_api_error)?
     {

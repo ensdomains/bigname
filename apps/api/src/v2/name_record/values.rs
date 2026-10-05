@@ -6,7 +6,7 @@ use crate::v2::support::{
     direct_json_field, record_json_path, record_json_string_at_paths,
     record_network_from_chain_positions,
 };
-use crate::v2::vocab::{PARTIAL_SERVE_UNSUPPORTED_REASON, RegistrationStatus};
+use crate::v2::vocab::{Authority, PARTIAL_SERVE_UNSUPPORTED_REASON, RegistrationStatus};
 
 pub(in crate::v2) fn has_current_registration(status: RegistrationStatus) -> bool {
     !matches!(
@@ -134,6 +134,9 @@ pub(super) fn has_name_binding(row: &NameCurrentRow) -> bool {
 }
 
 pub(in crate::v2) fn declared_token_id(row: &NameCurrentRow) -> Option<String> {
+    if Authority::from_provenance(&row.provenance) == Some(Authority::EnsV2) {
+        return None;
+    }
     declared_token_id_from_parts(
         &row.declared_summary,
         &row.namespace,
@@ -145,6 +148,9 @@ pub(in crate::v2) fn declared_token_id(row: &NameCurrentRow) -> Option<String> {
 pub(in crate::v2) fn identity_declared_token_id(
     row: &bigname_storage::IdentityNameCurrentRow,
 ) -> Option<String> {
+    if Authority::from_provenance(&row.provenance) == Some(Authority::EnsV2) {
+        return None;
+    }
     row.resource_id?;
     let labelhash = row.labelhash.as_deref().filter(|value| {
         row.labelhash_count

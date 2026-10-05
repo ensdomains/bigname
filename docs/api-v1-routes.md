@@ -358,7 +358,9 @@ collection route carry neither header.
   `GET /v1/names`. Every other registration field (`owner`, `manager`,
   `registration_status`, `registration_id`, `token_id`, `registered_at`,
   `created_at`, `lapsed_registration`, `authority`, `migrated_at`), the
-  resolver fields and `records` are detail-only.
+  resolver fields and `records` are detail-only. ENSv2 token values follow
+  [ENSv2 token identity](api-v1.md#ensv2-token-identity): the recorded version
+  at the selected publication, with a stable `registration_id` across regeneration.
   `profile=detail` records carry `authority` (`ens_v0`, `ens_v1` or `ens_v2`,
   as defined in the [naming dictionary](api-v1.md#naming-dictionary)) when the
   projection selected an ENSv1/ENSv2 arm for the name, and `migrated_at` when
