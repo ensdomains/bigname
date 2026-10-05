@@ -42,12 +42,13 @@ pub use expiry::contract_expiry_reason;
 pub use unix_seconds::UnixSeconds;
 
 pub use address_names::{
-    AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation, AddressNamesCurrentCursor,
-    AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentPage,
-    AddressNamesCurrentProvenanceSummary, AddressNamesCurrentSort, AddressNamesCurrentSortedCursor,
-    AddressNamesCurrentSortedCursorValue, AddressNamesCurrentSortedPage,
-    AddressNamesCurrentSummary, AddressRecordCoinMatch, AddressRecordCurrentEntry,
-    AddressRecordEvmEntry, AddressRecordsCurrentEvmPage, AddressRecordsCurrentPage,
+    AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation,
+    AddressNamesCurrentCappedPage, AddressNamesCurrentCursor, AddressNamesCurrentDedupe,
+    AddressNamesCurrentOrder, AddressNamesCurrentPage, AddressNamesCurrentProvenanceSummary,
+    AddressNamesCurrentSort, AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue,
+    AddressNamesCurrentSortedPage, AddressNamesCurrentSummary, AddressNamesPageRequest,
+    AddressRecordCoinMatch, AddressRecordCurrentEntry, AddressRecordEvmEntry,
+    AddressRecordsCurrentEvmPage, AddressRecordsCurrentPage,
     DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
     ENSIP19_DEFAULT_ADDRESS_RECORD_KEY, EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT, NameQuery,
     NameQueryMatch, load_address_names_current, load_address_names_current_for_relations,
@@ -55,7 +56,7 @@ pub use address_names::{
     load_address_names_current_including_noncanonical_for_relations,
     load_address_names_current_page, load_address_names_current_page_filtered,
     load_address_names_current_page_sorted_for_relations, load_address_records_current_evm_page,
-    load_address_records_current_page,
+    load_address_records_current_page, load_family_address_names_capped_page,
 };
 pub use api_preflight::{
     ApiLookupDdlKind, ApiLookupDdlObject, load_missing_api_lookup_ddl, phase_schema_exists,

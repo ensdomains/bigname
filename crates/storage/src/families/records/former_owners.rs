@@ -29,6 +29,8 @@ use crate::{
     name_current::parent_like_patterns,
 };
 
+use super::address_names::compose_base_chunk;
+
 /// What a former-owner page selects besides its order and position.
 #[derive(Clone, Copy, Debug)]
 pub struct FormerOwnerFilter<'a> {
@@ -49,10 +51,11 @@ pub struct FormerOwnerPage {
     pub next_cursor: Option<NameCurrentListCursor>,
 }
 
-/// The composed name the address formerly held, with its served expiry.
+/// A name the address formerly held: its sort key and id. The page's rows are composed again in
+/// full once the page is known, so the candidates hold no composed row.
 struct Held {
-    row: NameCurrentRow,
-    expiry: Option<UnixSeconds>,
+    key: Key,
+    logical_name_id: String,
 }
 
 /// The sort key: expiry, then namespace, name, namehash. A missing expiry is the smallest value,
@@ -60,13 +63,20 @@ struct Held {
 type Key = (Option<UnixSeconds>, String, String, String);
 
 impl Held {
-    fn key(&self) -> Key {
-        (
-            self.expiry,
-            self.row.namespace.clone(),
-            self.row.normalized_name.clone(),
-            self.row.namehash.clone(),
-        )
+    fn of(row: &NameCurrentRow) -> Self {
+        Self {
+            key: (
+                served_expiry(row),
+                row.namespace.clone(),
+                row.normalized_name.clone(),
+                row.namehash.clone(),
+            ),
+            logical_name_id: row.logical_name_id.clone(),
+        }
+    }
+
+    fn expiry(&self) -> Option<UnixSeconds> {
+        self.key.0
     }
 }
 
@@ -141,21 +151,19 @@ pub async fn load_family_former_owner_page(
     for (chain_id, ids) in by_chain {
         // Refuses a chain whose families are not published, as the other address reads do.
         servable_publication(&mut snapshot, &chain_id).await?;
-        let composed = load_composed(&mut snapshot, &ids, CoverageShape::Plain).await?;
-        held.extend(
-            composed
-                .into_values()
-                .filter(|row| lapsed_owner(row).as_deref() == Some(address.as_str()))
-                .map(|row| Held {
-                    expiry: served_expiry(&row),
-                    row,
-                }),
-        );
+        for chunk in ids.chunks(super::seams::compose_chunk()) {
+            let composed = compose_base_chunk(&mut snapshot, chunk).await?;
+            held.extend(
+                composed
+                    .values()
+                    .filter(|row| lapsed_owner(row).as_deref() == Some(address.as_str()))
+                    .map(Held::of),
+            );
+        }
     }
-    snapshot.close().await?;
 
     let windowed = filter.expires_after.is_some() || filter.expires_before.is_some();
-    held.retain(|held| match held.expiry {
+    held.retain(|held| match held.expiry() {
         None => !windowed,
         Some(expiry) => {
             filter.expires_after.is_none_or(|after| expiry >= after)
@@ -164,7 +172,7 @@ pub async fn load_family_former_owner_page(
     });
     let descending = order == NameCurrentListOrder::Desc;
     held.sort_by(|left, right| {
-        let ordering = left.key().cmp(&right.key());
+        let ordering = left.key.cmp(&right.key);
         if descending {
             ordering.reverse()
         } else {
@@ -173,11 +181,10 @@ pub async fn load_family_former_owner_page(
     });
     if let Some(after) = &after {
         held.retain(|held| {
-            let key = held.key();
             if descending {
-                key < *after
+                held.key < *after
             } else {
-                key > *after
+                held.key > *after
             }
         });
     }
@@ -188,13 +195,25 @@ pub async fn load_family_former_owner_page(
         .then(|| held.last())
         .flatten()
         .map(|last| NameCurrentListCursor {
-            sort_value: NameCurrentListCursorValue::Timestamp(last.expiry),
-            namespace: last.row.namespace.clone(),
-            normalized_name: last.row.normalized_name.clone(),
-            namehash: last.row.namehash.clone(),
+            sort_value: NameCurrentListCursorValue::Timestamp(last.expiry()),
+            namespace: last.key.1.clone(),
+            normalized_name: last.key.2.clone(),
+            namehash: last.key.3.clone(),
         });
-    Ok(FormerOwnerPage {
-        rows: held.into_iter().map(|held| held.row).collect(),
-        next_cursor,
-    })
+    let ids: Vec<String> = held
+        .iter()
+        .map(|held| held.logical_name_id.clone())
+        .collect();
+    super::seams::note_composed_batch(ids.len());
+    let mut composed = load_composed(&mut snapshot, &ids, CoverageShape::Plain).await?;
+    snapshot.close().await?;
+    let rows = ids
+        .iter()
+        .map(|id| {
+            composed
+                .remove(id)
+                .with_context(|| format!("former-owner name {id} did not compose again"))
+        })
+        .collect::<Result<_>>()?;
+    Ok(FormerOwnerPage { rows, next_cursor })
 }

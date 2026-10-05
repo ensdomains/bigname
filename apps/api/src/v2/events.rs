@@ -249,7 +249,11 @@ pub(crate) fn build_event(
     Some(Event {
         id: super::history_event_id(row),
         event_type,
-        name: name.map(str::to_owned),
+        // A registry root role change belongs to no name, even when a nonconforming registry
+        // tied one to its root resource.
+        name: name
+            .filter(|_| row.event_kind != "RootPermissionChanged")
+            .map(str::to_owned),
         namespace: row.namespace.clone(),
         registration_id: row
             .registration_id

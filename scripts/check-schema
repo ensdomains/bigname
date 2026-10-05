@@ -529,9 +529,9 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=387
+expected_refusal_assertions=399
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=64
+expected_predecessor_shape_proof_count=65
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -680,6 +680,12 @@ check_served_projection_removal() {
             else
                 emit_phase_migration "$ROOT/migrations/20261004120000_normalized_events_manifest_idx.sql" baseline-first
             fi
+            # Absent from the pre-7c fixture, present in the baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261005120000_normalized_events_address_root_permission_idx.sql" preceding-shape
+            else
+                emit_phase_migration "$ROOT/migrations/20261005120000_normalized_events_address_root_permission_idx.sql" baseline-first
+            fi
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -811,7 +817,8 @@ for migration_file in \
     "$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql" \
     "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" \
     "$ROOT/migrations/20261004120000_normalized_events_manifest_idx.sql" \
-    "$ROOT/migrations/20261005090000_normalized_events_registry_token_index.sql"
+    "$ROOT/migrations/20261005090000_normalized_events_registry_token_index.sql" \
+    "$ROOT/migrations/20261005120000_normalized_events_address_root_permission_idx.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1164,6 +1171,9 @@ done
 emit_phase_migration "$ROOT/migrations/20261004120000_normalized_events_manifest_idx.sql" preceding-shape | run_psql
 emit_phase_migration "$ROOT/migrations/20261004120000_normalized_events_manifest_idx.sql" baseline-first | run_psql
 emit_phase_migration "$ROOT/migrations/20261005090000_normalized_events_registry_token_index.sql" preceding-shape | run_psql
+# The same fixture lacks the address root permission index.
+emit_phase_migration "$ROOT/migrations/20261005120000_normalized_events_address_root_permission_idx.sql" preceding-shape | run_psql
+emit_phase_migration "$ROOT/migrations/20261005120000_normalized_events_address_root_permission_idx.sql" baseline-first | run_psql
 report_timing baseline-first
 # Recreate the additive historical binding index from its preceding schema shape.
 # Compare the resulting catalog definition to the fresh baseline, then prove reruns.
@@ -2518,6 +2528,110 @@ DROP INDEX $manifest_index;
 $manifest_index_found;
 SQL
 done
+# The address root permission index on normalized_events. The scratch schema's
+# normalized_events comes from the pre-7c fixture, so the expected definition is taken from
+# the fresh baseline's own statement, run in a transaction that rolls back. The
+# schema-migration must rebuild exactly that definition, which must print as the reviewed
+# text, accept it on a rerun, and refuse an invalid, unready, misplaced or differently
+# defined relation under its name. A database that already carries the index under this
+# name and definition, such as one prebuilt by ops/address-history-indexes/install.sql,
+# takes the rerun path.
+root_permission_index_migration="$ROOT/migrations/20261005120000_normalized_events_address_root_permission_idx.sql"
+root_permission_index=normalized_events_address_root_permission_idx
+root_permission_index_recovery="follow the recovery steps in ops/address-history-indexes/README.md, then run the schema-migrations again"
+root_permission_index_unready="$root_permission_index exists but is not a valid and ready index on $scratch_schema.normalized_events; $root_permission_index_recovery"
+root_permission_index_predicate="WHERE ((event_kind = 'RootPermissionChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::$scratch_schema.canonicality_state, 'safe'::$scratch_schema.canonicality_state, 'finalized'::$scratch_schema.canonicality_state])))"
+root_permission_index_reviewed="CREATE INDEX $root_permission_index ON $scratch_schema.normalized_events USING btree (lower((after_state ->> 'subject'::text)), block_number DESC NULLS LAST, log_index DESC NULLS LAST, normalized_event_id DESC) $root_permission_index_predicate"
+root_permission_index_baseline_statement="$(
+    awk -v start="CREATE INDEX IF NOT EXISTS $root_permission_index" '
+        $0 == start { found = 1 }
+        found { print }
+        found && /;$/ { exit }
+    ' "$ROOT/crates/storage/schema/baseline/05_normalized_events.sql"
+)"
+if [ -z "$root_permission_index_baseline_statement" ]; then
+    printf '%s\n' "fresh baseline does not define $root_permission_index" >&2
+    exit 1
+fi
+root_permission_index_baseline_definition="$(
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' \
+            '\pset tuples_only on' \
+            '\pset format unaligned' \
+            'BEGIN;' \
+            "DROP INDEX $root_permission_index;" \
+            "$root_permission_index_baseline_statement" \
+            'SET LOCAL search_path TO pg_catalog;' \
+            "SELECT pg_get_indexdef('$scratch_schema.$root_permission_index'::regclass);" \
+            'ROLLBACK;'
+    } | run_psql
+)"
+if [ "$root_permission_index_baseline_definition" != "$root_permission_index_reviewed" ]; then
+    printf '%s\n' \
+        "fresh baseline $root_permission_index prints as: $root_permission_index_baseline_definition" \
+        "reviewed definition:                    $root_permission_index_reviewed" >&2
+    exit 1
+fi
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<SQL
+CREATE TEMP TABLE expected_root_permission_index AS
+SELECT \$expected\$$root_permission_index_baseline_definition\$expected\$::text AS definition;
+DROP INDEX $root_permission_index;
+SQL
+    emit_phase_migration "$root_permission_index_migration" preceding-shape
+    emit_phase_migration "$root_permission_index_migration" baseline-first
+    cat <<SQL
+DO \$\$
+BEGIN
+    -- The expected text was printed under search_path pg_catalog.
+    PERFORM set_config('search_path', 'pg_catalog', true);
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_temp.expected_root_permission_index expected
+        JOIN pg_index ON pg_index.indexrelid = '$scratch_schema.$root_permission_index'::regclass
+        WHERE pg_index.indrelid = '$scratch_schema.normalized_events'::regclass
+          AND pg_index.indisvalid AND pg_index.indisready
+          AND pg_get_indexdef(pg_index.indexrelid) = expected.definition
+    ) THEN
+        RAISE EXCEPTION '$(basename "$root_permission_index_migration") upgrade differs from the baseline';
+    END IF;
+END \$\$;
+DROP TABLE expected_root_permission_index;
+SQL
+} | run_psql
+for root_permission_index_flag in indisvalid indisready; do
+    assert_migration_refusal "$root_permission_index_flag-$root_permission_index" \
+        "$root_permission_index_migration" "$root_permission_index_unready" <<SQL
+UPDATE pg_index SET $root_permission_index_flag = false
+WHERE indexrelid = '$root_permission_index'::regclass;
+SQL
+done
+for root_permission_index_kind in table view; do
+    assert_migration_refusal "$root_permission_index_kind-named-$root_permission_index" \
+        "$root_permission_index_migration" \
+        "$scratch_schema.$root_permission_index is a $root_permission_index_kind, not an index, so the index was never built; remove or rename that relation, then run the schema-migrations again" <<SQL
+DROP INDEX $root_permission_index;
+CREATE $root_permission_index_kind $root_permission_index $( [ "$root_permission_index_kind" = table ] && printf '()' || printf 'AS SELECT 1 AS occupied' );
+SQL
+done
+assert_migration_refusal "other-table-$root_permission_index" \
+    "$root_permission_index_migration" "$root_permission_index_unready" <<SQL
+DROP INDEX $root_permission_index;
+CREATE INDEX $root_permission_index ON discovery_edges (chain_id);
+SQL
+for root_permission_index_found in \
+    "CREATE INDEX $root_permission_index ON $scratch_schema.normalized_events USING btree (lower((after_state ->> 'subject'::text))) $root_permission_index_predicate" \
+    "CREATE INDEX $root_permission_index ON $scratch_schema.normalized_events USING btree (lower((after_state ->> 'subject'::text)), block_number DESC NULLS LAST, log_index DESC NULLS LAST, normalized_event_id DESC)" \
+    "CREATE INDEX $root_permission_index ON $scratch_schema.normalized_events USING btree (lower((after_state ->> 'subject'::text)), block_number DESC NULLS LAST, log_index DESC NULLS LAST, normalized_event_id DESC) WHERE (event_kind = 'PermissionChanged'::text)"
+do
+    assert_migration_refusal "wrong-definition-$root_permission_index" \
+        "$root_permission_index_migration" \
+        "$root_permission_index exists but does not have the reviewed definition; found \"$root_permission_index_found\", expected \"$root_permission_index_reviewed\"; $root_permission_index_recovery" <<SQL
+DROP INDEX $root_permission_index;
+$root_permission_index_found;
+SQL
+done
 # Recreate the three address-history match indexes from their preceding schema
 # shape. Compare each resulting catalog definition to the fresh baseline, then
 # prove a rerun leaves them unchanged.
@@ -2600,12 +2714,13 @@ SQL
 assert_migration_context_count "$address_match_migration" empty-schema 1
 assert_migration_context_count "$address_match_migration" preceding-shape 1
 assert_migration_context_count "$address_match_migration" baseline-first 3
-# The live prebuild in ops/address-history-indexes/install.sql builds all three
-# indexes in one file. For each in turn it must build the baseline definition, refuse
+# The live prebuild in ops/address-history-indexes/install.sql builds all four
+# indexes in one file: the three above and the root permission index. For each in turn it must build the baseline definition, refuse
 # an invalid index, a valid index with other keys, a valid index whose JSON
 # key literals start with the schema name, and a table under the name, and
 # recover as its README says.
-for address_match_index_name in "${address_match_index_names[@]}"; do
+address_root_permission_index=normalized_events_address_root_permission_idx
+for address_match_index_name in "${address_match_index_names[@]}" "$address_root_permission_index"; do
     assert_concurrent_index_installer "address-match-$address_match_index_name" \
         "$address_match_index_name" \
         "$address_match_install" \
@@ -2617,7 +2732,7 @@ done
 # invalid and the first one absent, it must stop on the invalid one, tell the
 # operator how to drop it, and leave the first one unbuilt.
 address_match_first_index="${address_match_index_names[0]}"
-address_match_last_index="${address_match_index_names[2]}"
+address_match_last_index="$address_root_permission_index"
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     printf '%s\n' \
@@ -2686,8 +2801,8 @@ JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
 WHERE pg_index.indrelid = 'normalized_events'::regclass;
 DO \$\$
 BEGIN
-    IF (SELECT count(*) FROM walk_index_baseline WHERE index_name IN ($walk_index_dropped)) <> 34 THEN
-        RAISE EXCEPTION 'drop.sql does not list 34 baseline indexes on normalized_events';
+    IF (SELECT count(*) FROM walk_index_baseline WHERE index_name IN ($walk_index_dropped)) <> 35 THEN
+        RAISE EXCEPTION 'drop.sql does not list 35 baseline indexes on normalized_events';
     END IF;
 END \$\$;
 INSERT INTO chain_phase_state (chain_id, phase_name, current_block_number, current_block_hash)
