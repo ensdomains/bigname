@@ -2926,8 +2926,9 @@ release; when it ships with other rotating changes, one redo pair discharges the
 `project_name_summary_authority_expiry_idx` on
 `(namespace, public_authority, expires_at, logical_name_id, chain_id)`, both
 `WHERE expiry_listable AND expires_at IS NOT NULL`. The family step fills the columns from the
-same composition as the rest of the summary. No route reads them yet:
-[`GET /v1/names`](api-v1-routes.md#get-v1names) keeps its current behaviour in this build.
+same composition as the rest of the summary.
+[`GET /v1/names`](api-v1-routes.md#get-v1names) selects each page's names by them (see
+[Expiry listing reads the selector](#expiry-listing-reads-the-selector)).
 
 The composition that fills the columns lives in hashed storage sources
 (`crates/storage/src/families`), so this build rotates the
@@ -2949,3 +2950,33 @@ not fail: the new build's writer run against a schema without the columns drops 
 it has no column for and publishes summaries with no selector, so apply the schema-migration
 before the new build ever starts. API requests that read the
 name summary or lock the marker wait for the schema-migration, up to their timeouts.
+
+### Expiry listing reads the selector
+
+The build that makes [`GET /v1/names`](api-v1-routes.md#get-v1names) select its names from the
+[name summary](glossary.md#name-summary)'s expiry selector changes reader sources only
+(`crates/storage/src/families/name/list.rs`, `list/expiring.rs` and
+`crates/storage/src/name_current`), all outside the
+[interpreter content hash](glossary.md#interpreter-content-hash): it does not rotate the hash
+itself and needs no redo, manifest or environment change. It depends on the selector columns
+of [the previous entry](#expiry-selector-on-the-name-summary), so it ships in the same
+release, after that entry's schema-migration and the re-derivation it requires. The route's
+contract does not change: the same rows, order, cursors and errors. A page composes at most
+`page_size + 1` names.
+
+`20261005160000_project_families_drop_expiry_walk_indexes.sql` drops
+`project_lifecycle_event_expiry_idx`, `project_lifecycle_event_inexact_expiry_idx` and
+`project_wrapper_state_expiry_idx`, which only the previous reader's event walk read. No other
+statement, the [walk index set](../ops/walk-index-set/README.md) and no index installer under
+`ops/` names them; the `expiry_seconds` columns stay. It also rewords the comment on
+`project_name_summary.public_authority`. Each `DROP INDEX` takes a brief `ACCESS EXCLUSIVE`
+lock on `project_lifecycle_event` or `project_wrapper_state` and waits behind transactions
+that hold the table, so apply it with the selector schema-migration while the phase runner is
+stopped, with the same `lock_timeout`, `statement_timeout` and retry procedure as the other
+schema-migrations. Rollout order: stop the phase runner, apply both schema-migrations, start
+the new phase runner and the new API. The new API must not start before
+`20261005150000` has applied: its listing reads the selector columns and fails without them.
+After the schema-migrations and until the family rebuild publishes, the listing answers
+`409 stale`, as every fenced route does. An API from before this build still answers the
+listing after the indexes are dropped, by scanning the two tables, so it is slower there and
+nowhere else; replace it rather than leave it running.

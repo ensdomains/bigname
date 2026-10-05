@@ -94,22 +94,6 @@ pub(crate) fn push_public_authority_predicate(
     builder.push(")");
 }
 
-/// The selected authority arms whose rows can serve one of the public `authorities` values:
-/// `ens_v1` for `ens_v0` and `ens_v1`, `ens_v2` for `ens_v2`.
-pub(crate) fn public_authority_arms(authorities: &[impl AsRef<str>]) -> Vec<&'static str> {
-    let mut arms = authorities
-        .iter()
-        .filter_map(|authority| match authority.as_ref() {
-            "ens_v0" | "ens_v1" => Some("ens_v1"),
-            "ens_v2" => Some("ens_v2"),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    arms.sort_unstable();
-    arms.dedup();
-    arms
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;

@@ -27,7 +27,7 @@ pub use public_authority::{
     name_current_registry_generation, name_current_registry_handoff_block_number,
 };
 pub(crate) use public_authority::{
-    public_authority_arms, push_public_authority_filter_in, push_public_authority_predicate,
+    push_public_authority_filter_in, push_public_authority_predicate,
 };
 pub use row::NameCurrentRow;
 use row::decode_name_current_row;

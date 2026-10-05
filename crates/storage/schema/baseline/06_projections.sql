@@ -2277,7 +2277,7 @@ COMMENT ON COLUMN project_name_summary.owner IS
 COMMENT ON COLUMN project_name_summary.expiry_listable IS
     'This value is whether the expiry listing of GET /v1/names lists the name: it composes a row whose coverage is not unsupported and whose registration carries a finite expiry. For such a row expires_at is the expiry the listing serves and orders by.';
 COMMENT ON COLUMN project_name_summary.public_authority IS
-    'This value is the public authority the composed name row serves (ens_v0, ens_v1 or ens_v2); null when the row serves none (Basenames, an unresolved selection, an ownerless registry row) or the name composes no row. The stored selector the expiry listing''s authority filter will read; no reader uses it yet.';
+    'This value is the public authority the composed name row serves (ens_v0, ens_v1 or ens_v2); null when the row serves none (Basenames, an unresolved selection, an ownerless registry row) or the name composes no row. The authority filter of the expiry listing of GET /v1/names selects by it.';
 CREATE INDEX IF NOT EXISTS project_name_summary_recompose_idx
     ON project_name_summary (chain_id, recompose_at)
     WHERE recompose_at IS NOT NULL;
@@ -2289,17 +2289,6 @@ CREATE INDEX IF NOT EXISTS project_name_summary_expiry_idx
 CREATE INDEX IF NOT EXISTS project_name_summary_authority_expiry_idx
     ON project_name_summary (namespace, public_authority, expires_at, logical_name_id, chain_id)
     WHERE expiry_listable AND expires_at IS NOT NULL;
-
--- The composed expiring listing's candidate indexes.
-CREATE INDEX IF NOT EXISTS project_lifecycle_event_expiry_idx
-    ON project_lifecycle_event (expiry_seconds)
-    WHERE expiry_seconds IS NOT NULL;
-CREATE INDEX IF NOT EXISTS project_lifecycle_event_inexact_expiry_idx
-    ON project_lifecycle_event (chain_id)
-    WHERE expiry_seconds IS NULL AND jsonb_typeof(expiry) = 'number';
-CREATE INDEX IF NOT EXISTS project_wrapper_state_expiry_idx
-    ON project_wrapper_state (expiry_seconds)
-    WHERE expiry_seconds IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS project_grant_subject_resource_idx
     ON project_grant (subject COLLATE "C", resource_id, scope COLLATE "C");
