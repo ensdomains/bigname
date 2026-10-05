@@ -1,5 +1,5 @@
-// Manual, serialized measurement. One family-event-published 20k fixture, exact same handler
-// with the prepared extractor admitted, and actual loopback HTTP. Run this ignored test alone.
+// Manual, serialized measurement. One family-event-published 20k fixture, the public router,
+// and actual loopback HTTP. Run this ignored test alone.
 #[derive(Clone)]
 struct WindowMeasuredName { name: String, expiry: i64, authority: &'static str, namehash: String }
 
@@ -163,8 +163,10 @@ async fn v2_names_windows_measure_20k() -> Result<()> {
 
     let counters = [Arc::new(AtomicU64::new(0)),Arc::new(AtomicU64::new(0)),Arc::new(AtomicU64::new(0))];
     let counts = counters.clone();
-    let app = crate::v2::names_windows_test_router(AppState::new_with_rpc_urls(pool.clone(),
-        bigname_lookup::ChainRpcUrls::default()).with_public_namespaces_for_test(["ens","basenames"])).layer(axum::middleware::from_fn(
+    // Use production middleware without the test router's JSON-schema validation overhead.
+    let app = crate::app_router_with_bounds(AppState::new_with_rpc_urls(pool.clone(),
+        bigname_lookup::ChainRpcUrls::default()).with_public_namespaces_for_test(["ens","basenames"]),
+        pool.clone(), &ApiBoundsConfig::default()).layer(axum::middleware::from_fn(
         move |request: axum::extract::Request,next: axum::middleware::Next| {
             let counts = counts.clone();
             async move { seams::with_composed_names_counter(counts[0].clone(),

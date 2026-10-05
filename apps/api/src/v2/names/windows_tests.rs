@@ -1,5 +1,5 @@
-//! Contract preparation tests. The probe route exercises Axum extraction and cursor handling;
-//! actual family-published union paging awaits TYR-230's bounded-reader integration.
+//! Route-local extraction and cursor contract tests. Family-published paging is covered
+//! by the public-router tests in tests/v2_names_windows.rs.
 
 use axum::{
     Json, Router,
@@ -12,9 +12,7 @@ use tower::ServiceExt;
 
 use super::*;
 
-use super::test_route::WindowQueryParams as PreparedQueryParams;
-
-async fn probe(input: query::NamesQuery<PreparedQueryParams>) -> V2Result<Json<Value>> {
+async fn probe(input: NamesQuery) -> V2Result<Json<Value>> {
     let params = input.params;
     let parent = params.parent.as_deref().map(normalize_parent).transpose()?;
     let binding = NamesCursorBinding {
@@ -57,7 +55,7 @@ async fn request(app: Router, query: &str) -> (StatusCode, Value) {
     (status, serde_json::from_slice(&bytes).unwrap())
 }
 
-async fn prepared(query: &str) -> (StatusCode, Value) {
+async fn probe_request(query: &str) -> (StatusCode, Value) {
     request(Router::new().route("/v1/names", get(probe)), query).await
 }
 
@@ -77,7 +75,7 @@ async fn windows_http_preserves_order_precision_and_encoded_offsets() {
         "9007199254740993..9007199254740994",
         "-0.000000002..-0.000000001",
     ];
-    let (status, body) = prepared(&windows_query(&input)).await;
+    let (status, body) = probe_request(&windows_query(&input)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
         body["windows"],
@@ -105,7 +103,7 @@ async fn windows_http_rejects_invalid_ranges_and_combinations() {
         "999999999999999999999999999999999999999..1",
         "1..2,3..4",
     ] {
-        let (status, body) = prepared(&windows_query(&[value])).await;
+        let (status, body) = probe_request(&windows_query(&[value])).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{value}: {body}");
         assert_eq!(body["error"]["code"], "invalid_input");
     }
@@ -116,7 +114,7 @@ async fn windows_http_rejects_invalid_ranges_and_combinations() {
         ["1..2", "01.0..2.000"],
     ] {
         assert_eq!(
-            prepared(&windows_query(&values)).await.0,
+            probe_request(&windows_query(&values)).await.0,
             StatusCode::BAD_REQUEST
         );
     }
@@ -127,13 +125,18 @@ async fn windows_http_rejects_invalid_ranges_and_combinations() {
         "expires_before=3",
     ] {
         assert_eq!(
-            prepared(&format!("expires_window=1..2&{scalar}")).await.0,
+            probe_request(&format!("expires_window=1..2&{scalar}"))
+                .await
+                .0,
             StatusCode::BAD_REQUEST
         );
     }
-    for key in NamesQueryParams::ALLOWED {
+    for key in NamesQueryParams::ALLOWED
+        .iter()
+        .filter(|key| **key != WINDOW_KEY)
+    {
         let query = format!("expires_window=1..2&{key}=ens&{key}=ens");
-        let (status, body) = prepared(&query).await;
+        let (status, body) = probe_request(&query).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{key}");
         assert_eq!(
             body["error"]["message"],
@@ -142,7 +145,9 @@ async fn windows_http_rejects_invalid_ranges_and_combinations() {
     }
     for suffix in ["unknown=x", "q=a", "page_size=0", "page_size=201"] {
         assert_eq!(
-            prepared(&format!("expires_window=1..2&{suffix}")).await.0,
+            probe_request(&format!("expires_window=1..2&{suffix}"))
+                .await
+                .0,
             StatusCode::BAD_REQUEST
         );
     }
@@ -174,14 +179,16 @@ fn windows_membership_is_exact_half_open_and_in_request_order() {
 async fn windows_http_maximum_count_and_cursor_continuation() {
     let values: Vec<_> = (0..32).rev().map(|i| format!("{i}..{}", i + 1)).collect();
     let query = windows_query(&values.iter().map(String::as_str).collect::<Vec<_>>());
-    let (status, body) = prepared(&format!("{query}&page_size=1")).await;
+    let (status, body) = probe_request(&format!("{query}&page_size=1")).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let cursor = body["next_cursor"].as_str().unwrap();
-    let (status, body) = prepared(&format!("{query}&page_size=200&cursor={cursor}")).await;
+    let (status, body) = probe_request(&format!("{query}&page_size=200&cursor={cursor}")).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["page_size"], 200);
     assert_eq!(
-        prepared(&format!("{query}&expires_window=32..33")).await.0,
+        probe_request(&format!("{query}&expires_window=32..33"))
+            .await
+            .0,
         StatusCode::BAD_REQUEST
     );
 }
@@ -190,14 +197,14 @@ async fn windows_http_maximum_count_and_cursor_continuation() {
 async fn windows_cursor_binds_ordered_normalized_windows_and_other_filters() {
     let suffix = "namespace=ens&authority=ens_v1,ens_v2&parent=ETH&order=desc";
     let query = format!("expires_window=1767225600..1767312000&expires_window=0..1&{suffix}");
-    let (status, body) = prepared(&query).await;
+    let (status, body) = probe_request(&query).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let cursor = body["next_cursor"].as_str().unwrap();
     let equivalent = windows_query(&[
         "2026-01-01T01:00:00+01:00..2026-01-02T00:00:00Z",
         "00.000..1.0",
     ]);
-    assert_eq!(prepared(&format!("{equivalent}&namespace=ens&authority=ens_v2,ens_v1&parent=eth&order=desc&page_size=1&cursor={cursor}")).await.0, StatusCode::OK);
+    assert_eq!(probe_request(&format!("{equivalent}&namespace=ens&authority=ens_v2,ens_v1&parent=eth&order=desc&page_size=1&cursor={cursor}")).await.0, StatusCode::OK);
     for other in [
         query.replace(
             "1767225600..1767312000&expires_window=0..1",
@@ -211,19 +218,19 @@ async fn windows_cursor_binds_ordered_normalized_windows_and_other_filters() {
         query.replace("order=desc", "order=asc"),
     ] {
         assert_eq!(
-            prepared(&format!("{other}&cursor={cursor}")).await.0,
+            probe_request(&format!("{other}&cursor={cursor}")).await.0,
             StatusCode::BAD_REQUEST,
             "{other}"
         );
     }
-    let (_, scalar) = prepared("expires_after=0&expires_before=1").await;
-    let (_, window) = prepared("expires_window=0..1").await;
+    let (_, scalar) = probe_request("expires_after=0&expires_before=1").await;
+    let (_, window) = probe_request("expires_window=0..1").await;
     for (query, cursor) in [
         ("expires_window=0..1", &scalar["next_cursor"]),
         ("expires_after=0&expires_before=1", &window["next_cursor"]),
     ] {
         assert_eq!(
-            prepared(&format!("{query}&cursor={}", cursor.as_str().unwrap()))
+            probe_request(&format!("{query}&cursor={}", cursor.as_str().unwrap()))
                 .await
                 .0,
             StatusCode::BAD_REQUEST
@@ -249,18 +256,24 @@ fn windows_dto_field_is_omitted_until_assigned() {
 }
 
 #[tokio::test]
-async fn windows_real_route_stays_disabled_until_bounded_reader_integration() {
+async fn windows_real_route_rejects_invalid_requests_before_reading() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://localhost/unused")
         .unwrap();
     let state = crate::AppState::new_with_rpc_urls(pool, bigname_lookup::ChainRpcUrls::default());
     let app = crate::app_router(state);
-    let (status, body) = request(app, "namespace=ens&expires_window=0..1").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        body["error"]["message"],
-        "unknown query parameter: expires_window"
-    );
+    for query in [
+        "namespace=ens&expires_window=0..1&expires_after=",
+        "namespace=ens&expires_window=0..2&expires_window=1..3",
+        "namespace=ens&expires_window=0..1&page_size=201",
+        "expires_window=0..1",
+        "namespace=ens&expires_window=0..1&at=1",
+        "namespace=ens&expires_window=0..1&finality=safe",
+    ] {
+        let (status, body) = request(app.clone(), query).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
+        assert_eq!(body["error"]["code"], "invalid_input");
+    }
 }
 
 #[tokio::test]

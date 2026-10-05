@@ -97,8 +97,6 @@ pub(crate) use name_records::{
 };
 pub(crate) use name_records_inventory::{default_requested_records, validate_product_record};
 pub(crate) use names::get_names;
-#[cfg(test)]
-pub(crate) use names::names_windows_test_router;
 pub(crate) use namespaces::get_namespace;
 pub(crate) use params::{
     AtSelector, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, QueryParams, RawQueryParams, RequestSource,

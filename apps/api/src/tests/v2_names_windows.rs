@@ -1,5 +1,4 @@
-// The prepared repeated-window contract through the actual names handler and family-published
-// fixtures. Only query admission differs while the public route remains gated.
+// Repeated-window requests through the public router and family-published fixtures.
 use bigname_storage::UnixSeconds as WindowSeconds;
 
 fn names_windows_uri(windows: &[String], order: &str, page_size: u64, extra: &str) -> String {
@@ -16,7 +15,7 @@ fn names_windows_uri(windows: &[String], order: &str, page_size: u64, extra: &st
 }
 
 async fn names_windows_response(database: &TestDatabase, uri: &str) -> Result<Response> {
-    crate::v2::names_windows_test_router(database.app_state())
+    crate::app_router(database.app_state())
         .oneshot(Request::builder().uri(uri).body(Body::empty())?)
         .await
         .context("names windows request failed")
@@ -320,7 +319,7 @@ async fn v2_names_windows_share_one_snapshot_and_continue_after_publication() ->
             .context("before cursor")?
             .to_owned();
         let (_guard, control) = install_at(&database.pool, stage).await?;
-        let app = crate::v2::names_windows_test_router(database.app_state());
+        let app = crate::app_router(database.app_state());
         let request_uri = uri.clone();
         let request = tokio::spawn(async move {
             app.oneshot(

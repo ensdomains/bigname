@@ -10,11 +10,7 @@ mod query;
 mod windows;
 
 #[cfg(test)]
-mod test_route;
-#[cfg(test)]
 mod windows_tests;
-#[cfg(test)]
-pub(crate) use test_route::names_windows_test_router;
 
 use std::collections::BTreeMap;
 
@@ -65,6 +61,7 @@ impl QueryParamAllowlist for NamesQueryParams {
         "namespace",
         "expires_after",
         "expires_before",
+        "expires_window",
         "authority",
         "parent",
         "sort",
@@ -76,8 +73,7 @@ impl QueryParamAllowlist for NamesQueryParams {
     ];
 }
 
-// Keep expires_window out of NamesQueryParams until the bounded family reader is integrated.
-pub(crate) type NamesQuery = query::NamesQuery<NamesQueryParams>;
+pub(crate) use query::NamesQuery;
 
 /// Everything a names-listing cursor binds besides its keyset position.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -118,7 +114,7 @@ async fn get_names_page(
     }
     if windows.is_none() && params.expires_after.is_none() && params.expires_before.is_none() {
         return Err(V2Error::invalid_input(
-            "expires_after or expires_before is required so the listing is bounded",
+            "expires_after, expires_before or expires_window is required so the listing is bounded",
         ));
     }
     if let (Some(after), Some(before)) = (params.expires_after, params.expires_before)

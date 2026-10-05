@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, marker::PhantomData};
+use std::collections::BTreeSet;
 
 use axum::{
     extract::{FromRequestParts, Query},
@@ -7,20 +7,20 @@ use axum::{
 
 use crate::v2::{QueryParamAllowlist, QueryParams, RawQueryParams, V2Error};
 
-use super::windows::{ExpiryWindows, WINDOW_KEY};
+use super::{
+    NamesQueryParams,
+    windows::{ExpiryWindows, WINDOW_KEY},
+};
 
 /// A route-local extractor: only expiry windows may repeat, in their original input order.
-/// The allowlist separately controls whether the route exposes that parameter yet.
-pub(crate) struct NamesQuery<A> {
+pub(crate) struct NamesQuery {
     pub(super) params: QueryParams,
     pub(super) windows: Option<ExpiryWindows>,
-    marker: PhantomData<A>,
 }
 
-impl<S, A> FromRequestParts<S> for NamesQuery<A>
+impl<S> FromRequestParts<S> for NamesQuery
 where
     S: Send + Sync,
-    A: QueryParamAllowlist + Send + Sync,
 {
     type Rejection = V2Error;
 
@@ -32,7 +32,7 @@ where
         let mut windows = Vec::new();
         let mut scalar = form_urlencoded::Serializer::new(String::new());
         for (key, value) in &pairs {
-            if !A::ALLOWED.contains(&key.as_str()) {
+            if !NamesQueryParams::ALLOWED.contains(&key.as_str()) {
                 return Err(V2Error::invalid_input(format!(
                     "unknown query parameter: {key}"
                 )));
@@ -66,7 +66,6 @@ where
         Ok(Self {
             params: QueryParams::try_from(raw)?,
             windows,
-            marker: PhantomData,
         })
     }
 }

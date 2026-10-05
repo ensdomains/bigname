@@ -138,6 +138,8 @@ step-3-gate vocabulary needed by the route schemas:
 | `to_timestamp` | inclusive upper Unix-seconds or RFC 3339 bound on history collections, resolved per chain to the last readable lineage block at or before it | new in v2 |
 | `expires_after` | inclusive lower `expires_at` bound on `GET /v1/names` or `GET /v1/addresses/{address}/names?relation=former_owner` (Unix seconds or RFC 3339) | `expires_after` (new) |
 | `expires_before` | exclusive upper `expires_at` bound on `GET /v1/names` or `GET /v1/addresses/{address}/names?relation=former_owner` (Unix seconds or RFC 3339) | `expires_before` (new) |
+| `expires_window` | repeated `GET /v1/names` query parameter: 1–32 disjoint finite `after..before` windows over exact `expires_at`, lower inclusive and upper exclusive; replaces scalar expiry bounds for that request | new in v2 |
+| `expires_window_index` | zero-based index of a `GET /v1/names` row’s matching `expires_window` in original request order; present only with repeated-window requests | new in v2 |
 | `parent` (query) | `GET /v1/names` and `GET /v1/addresses/{address}/names` filter: only names exactly one label below the given name, matched on the normalized name spelling rather than on the node or registry topology, so a bracketed labelhash label matches only names stored with that bracketed spelling, except the labelhashes of `eth` and `base`, which normalization spells as text. `parent=eth` selects the `.eth` second-level names, the registrar-governed set on both sides of the [Universal Resolver cutover](glossary.md#universal-resolver-cutover): the ENSv1 BaseRegistrar leases labels one level below `eth` (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L150 @ ens_v1@91c966f) and the ENSv2 `.eth` registrar registers labels in the `eth` registry (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L151-L158 @ ens_v2_sepolia_20260916@366de741), so the set holds ENSv1 leases and ENSv2 registrations alike and excludes every subname, wrapped or not. `parent=base.eth` with `namespace=basenames` selects the Basenames second-level names | new in v2 |
 | `data` | envelope root payload, and the `include=data` event-row payload when nested inside an event row (see [history event payloads](api-v1-routes.md#history-event-payloads-includedata-includeraw)) | compact event payload objects |
 | `kind` | raw storage event kind on an event row, exposed only behind the explicit `include=raw` opt-in (never part of `include=data`); the one pipeline term the product tier carries, for explorer and diagnostic use | `event_kind` |
@@ -1094,7 +1096,8 @@ Common parameter rules:
 | `sort`, `order` | paginated routes that declare a sort set; history collections accept `order` alone over their fixed chain-position sort | route-documented field set plus `asc`/`desc` |
 | `resolver` | `/v1/events` | `<chain_id>:<address>` resolver contract; anchors the read, suppresses the `ens` namespace default, and is bound by cursors |
 | `type`, `from_timestamp`, `to_timestamp` | name history, address history, `/v1/events` | friendly event type or comma-separated set; inclusive Unix-seconds or RFC 3339 bounds resolved to lineage block ranges (see [history collection filters](api-v1-routes.md#history-collection-filters)) |
-| `expires_after`, `expires_before` | `GET /v1/names`; `GET /v1/addresses/{address}/names?relation=former_owner` | Unix-seconds or RFC 3339 window over `expires_at`; `expires_after` inclusive, `expires_before` exclusive. At least one is required on `/v1/names`; both are optional for `former_owner` |
+| `expires_after`, `expires_before` | `GET /v1/names`; `GET /v1/addresses/{address}/names?relation=former_owner` | Unix-seconds or RFC 3339 window over `expires_at`; `expires_after` inclusive, `expires_before` exclusive. At least one is required on `/v1/names` unless `expires_window` is supplied; both are optional for `former_owner` |
+| `expires_window` | `GET /v1/names` only | Repeat 1–32 finite `after..before` windows; lower inclusive, upper exclusive. Adjacent windows allowed; overlap, duplicates and mixing scalar expiry bounds are invalid. Order defines `expires_window_index` and is bound into cursors. |
 | `include_expired` | `GET /v1/names/{name}/subnames` | `true` (default) lists released and past-expiry children; `false` omits them |
 | `cursor`, `page_size` | every paginated route | opaque cursor; default 50, max 200 |
 
@@ -1810,8 +1813,8 @@ must use an exact integer representation when comparing large values.
 
 The output format changes together across all routes, with no parallel date
 fields or optional UTC output. Timestamp query inputs (`at`,
-`from_timestamp`, `to_timestamp`, `expires_after`, `expires_before`) accept
-decimal Unix seconds and RFC 3339. Decimal input is seconds, never guessed to
+`from_timestamp`, `to_timestamp`, `expires_after`, `expires_before`, and each
+`expires_window` bound) accept decimal Unix seconds and RFC 3339. Decimal input is seconds, never guessed to
 be milliseconds. RFC 3339 offsets and fractional seconds retain their input
 precision for selection and filtering. Equivalent spellings select the same
 instant and bind the same cursor filter. Clock selectors outside their
@@ -2722,7 +2725,7 @@ Shared lookup feed/detail record. Feed records carry identity, `chain_id`, `netw
 
 ### SearchName
 
-Current name summary used by search and the namespace expiry list. The expiry list may include lapsed_registration; search omits it.
+Current name summary used by search and the namespace expiry list. The expiry list may include lapsed_registration and, for repeated-window requests, expires_window_index; search omits both.
 
 <!-- openapi:object SearchName -->
 | Field | Type | Presence | Description |
@@ -2737,6 +2740,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | `registered_at` | string | optional | Start of the current registration, which renewals keep, and the ENSv1→ENSv2 migration of a name with an ENSv1 registrar lease (a `.eth` second-level name); a migrated name without one, such as a subname, starts its registration at its ENSv2 grant; decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `created_at` | string | optional | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `expires_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `expires_window_index` | integer [0, 31] | optional | Zero-based index of the matching expires_window in original request order; present on every repeated-window GET /v1/names row and omitted on scalar requests and search. Membership uses exact stored expiry before response formatting. |
 | `expires_at_reason` | enum ExpiryReason | when null_expiry | Reason for a classified null expiry; absent for finite expiry and absent registration context. |
 | `grace_ends_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `authority` | enum Authority | optional | Registry generation that owns the node, as the name's detail serves it; omitted when none is selected or for an ownerless registry row without a retained registrar binding. |

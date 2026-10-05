@@ -1,5 +1,4 @@
-//! Exact disjoint expiry windows. The route allowlist remains closed to this input until
-//! the bounded family reader can select the union before composing names (TYR-230).
+//! Exact disjoint expiry windows, retaining input order for membership and cursors.
 
 use bigname_storage::{NameCurrentExpiryWindow, UnixSeconds};
 
