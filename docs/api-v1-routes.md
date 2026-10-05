@@ -202,6 +202,17 @@ change has no continuation guarantee and may be rejected. Consumers must
 discard pre-#613 cursors and restart from the first page; fresh post-publication
 cursors continue normally.
 
+Registry root role changes (`RootPermissionChanged`) became product history
+in a reader-only change: no stored row, identity or cursor format changed.
+They are [`permission` rows](#permission-change-values) on `GET /v1/events`
+(the default feed, `type=permission`, `kind=RootPermissionChanged` and a
+registry's `contract_address` history), in a registry overview's
+`counts.events`, and in an account's address history with `scope=both` or
+`scope=registration` and the `role_holder` relation. `GET /v1/diagnostics/events`
+always listed them, and its `type=permission` filter now selects them too
+(it has no `kind` filter). Name history does not change. Outstanding position cursors continue; the newly visible rows appear
+wherever they fall after the cursor's position.
+
 If an ended resource retains a resolver pointer to the emitter, its rebuildable
 record-inventory projection may change. The event remains resource-less and
 does not restore the name's serving `resource_id`, so the released or expired name's
@@ -2358,10 +2369,27 @@ ENSv1, Basenames and NameWrapper permission rows are derived from ownership,
 registration and wrapper events that state no previous permission set, so
 they omit both lists rather than report an unobserved previous set; their
 `powers` is still the resulting set, and an empty `powers` marks a
-revocation. A NameWrapper fuse change carries `fuses` only. A role change on
-an ENSv2 registry's root resource is stored as `RootPermissionChanged`, which
-is not a `permission` row and carries none of these fields, even though its
-log states the previous roles too.
+revocation. A NameWrapper fuse change carries `fuses` only.
+
+A role change on an ENSv2 registry's root resource (`ROOT_RESOURCE`, resource
+`0`, whose roles apply to every resource of the registry) is a `permission` row with
+raw `kind` `RootPermissionChanged` and `grant_scope.kind` `root`, whose
+`detail.registry` is the registry, as on a
+[root resource](glossary.md#registry-root-resource) permission row. Its subject
+`address` is the account whose root roles changed, `powers` is that account's
+named root roles right after the change in the permission powers vocabulary
+(`[]` when none remain; role bits with no name are omitted, as on every
+permission row), and, because the log states the old bitmap, `added_powers`
+and `removed_powers` are always present; either may be `[]`. It has no `name`
+and no `registration_id`, and its `contract_address` (with `include=data`) is
+the registry. `GET /v1/events?contract_address=<registry>` lists a registry's
+root role changes, and an account's own root role changes on every registry are
+in its [address history](#get-v1addressesaddresshistory). A root role change
+is never part of a name's or registration's history, nor of an address's
+history through a name or registration it relates to, even when a registry
+ties a name to its root resource.
+(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L19-L21 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L54 @ ens_v2@a971bd64)
 
 Admitted BaseRegistrar `ControllerAdded` and `ControllerRemoved` events are
 also `permission` rows. They record registrar-wide controller authorization,
@@ -3983,6 +4011,15 @@ introduces it rebuilds Project from full history before serving the option; see
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L304 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L902 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
+  A registry root role change (a `RootPermissionChanged` [`permission`
+  row](#permission-change-values)) belongs to no name, and its resource is the
+  registry's root resource, which every holder of that registry shares, so no
+  name or registration anchor reaches it without reaching every other holder's
+  changes. The read matches those rows one by one instead: with `scope=both`
+  or `scope=registration` and a relation set that includes `role_holder` (the
+  default does), the history also lists every root role change whose subject
+  `address` is this address, on every registry, and never another holder's.
+  `scope=name`, and a relation set without `role_holder`, list none.
 - Response shape: `data` is an array of compact event rows using the shared
   friendly `type` vocabulary and the event-identity contract documented under
   [`GET /v1/events`](#get-v2events). The correlation-scoped candidate
@@ -4213,6 +4250,11 @@ For a registrar lease first identified by a later readable observation, registra
   that contract (a registry, registrar, or resolver address, compared
   case-insensitively); it combines with every other filter (including
   `resolver`, applied as AND), and the cursor binds it like the others.
+  `address` keeps the events [address
+  history](#get-v1addressesaddresshistory) lists for that address with
+  `scope=both` and every relation, including its registry root role changes,
+  so `contract_address=<registry>&address=<account>&kind=RootPermissionChanged`
+  is one account's root role history on one registry.
 - Response shape: `data` is an array of compact event rows with friendly
   `type` vocabulary. Raw upstream event kinds appear only as `kind` behind the
   explicit `include=raw` opt-in. Event-row
@@ -4651,7 +4693,9 @@ For a registrar lease first identified by a later readable observation, registra
   defaults to the `ens` namespace, which is served on one chain. For an address
   an operator also admits into another namespace on this chain, the overview
   counts those events too and the default feed does not. The count reads every
-  event of the contract rather than a projected total.
+  event of the contract rather than a projected total. It includes the
+  registry's root role changes (`RootPermissionChanged` `permission` rows),
+  which the feed has listed since they became product history.
   `counts.roles`, also present with `include=counts`, is the exact number of
   observed nonzero declared role assignments across the registry's root and
   label resources. One account on two resources counts twice; several role bits

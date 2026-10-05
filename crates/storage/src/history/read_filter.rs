@@ -48,6 +48,9 @@ pub(in crate::history) struct EventHistoryReadFilter {
     /// The resolver record writes attributed to the selectors' resources at
     /// `publication_block_bounds`, loaded by [`EventHistoryReadFilter::with_attributed_records`].
     pub(in crate::history) attributed_records: AttributedRecords,
+    /// A diagnostics read, which audits candidate rows as stored: its name and resource
+    /// selectors keep the registry root role changes a product read leaves out.
+    pub(in crate::history) diagnostics: bool,
 }
 
 impl EventHistoryReadFilter {
@@ -214,6 +217,7 @@ pub(in crate::history) async fn event_history_read_filter(
     }
 
     Ok(EventHistoryReadFilter {
+        diagnostics: include_candidates,
         selectors,
         registration_id,
         registration_id_is_public,

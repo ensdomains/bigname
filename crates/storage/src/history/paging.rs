@@ -289,7 +289,12 @@ pub(super) fn push_history_filters<'a>(
 ) {
     for selector in &filter.selectors {
         builder.push(" AND ");
-        push_selector_filter(builder, selector, &filter.attributed_records);
+        push_selector_filter(
+            builder,
+            selector,
+            &filter.attributed_records,
+            !filter.diagnostics,
+        );
     }
 
     if let Some(namespace) = filter.namespace.as_ref() {
