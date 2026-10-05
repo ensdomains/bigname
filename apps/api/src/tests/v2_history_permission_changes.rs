@@ -490,6 +490,12 @@ async fn v2_registry_root_role_changes_are_permission_history() -> Result<()> {
         Ok(payload)
     };
     let rows = |payload: &Value| payload["data"].as_array().cloned().unwrap_or_default();
+    let assert_root_data = |row: &Value| {
+        assert_eq!(row["data"]["grant_scope"]["kind"], "root", "{row}");
+        for field in ["token_id", "canonical_id"] {
+            assert!(row["data"].get(field).is_none(), "{field}: {row}");
+        }
+    };
 
     let feed = get(format!(
         "/v1/events?contract_address={registry}&include=data,raw&order=asc"
@@ -503,7 +509,7 @@ async fn v2_registry_root_role_changes_are_permission_history() -> Result<()> {
         assert_eq!(row["contract_address"], json!(registry), "{row}");
         assert!(row.get("name").is_none(), "{row}");
         assert_eq!(row["registration_id"], Value::Null, "{row}");
-        assert_eq!(row["data"]["grant_scope"]["kind"], "root", "{row}");
+        assert_root_data(row);
         // The same `registry` detail that root permission rows carry.
         assert_eq!(
             row["data"]["grant_scope"]["detail"]["registry"]["address"],
@@ -573,9 +579,14 @@ async fn v2_registry_root_role_changes_are_permission_history() -> Result<()> {
         ("scope=name", &vec![]),
     ] {
         let history = get(format!(
-            "/v1/addresses/{HOLDER}/history?order=asc&include=total_count&{query}"
+            "/v1/addresses/{HOLDER}/history?order=asc&include=data,total_count&{query}"
         ))
         .await?;
+        for row in rows(&history) {
+            assert_root_data(&row);
+            let source = feed_rows.iter().find(|source| source["id"] == row["id"]);
+            assert_eq!(source.map(|source| &source["data"]), Some(&row["data"]));
+        }
         let ids = rows(&history)
             .iter()
             .map(|row| row["id"].clone())
@@ -591,7 +602,12 @@ async fn v2_registry_root_role_changes_are_permission_history() -> Result<()> {
         format!("address={HOLDER}"),
         format!("address={HOLDER}&contract_address={registry}&kind=RootPermissionChanged"),
     ] {
-        let events = get(format!("/v1/events?order=asc&{query}")).await?;
+        let events = get(format!("/v1/events?order=asc&include=data&{query}")).await?;
+        for row in rows(&events) {
+            assert_root_data(&row);
+            let source = feed_rows.iter().find(|source| source["id"] == row["id"]);
+            assert_eq!(source.map(|source| &source["data"]), Some(&row["data"]));
+        }
         let ids = rows(&events)
             .iter()
             .map(|row| row["id"].clone())
