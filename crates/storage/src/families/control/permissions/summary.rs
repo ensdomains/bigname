@@ -7,22 +7,25 @@ use serde_json::{Value, json};
 
 use crate::families::control::{rows::WrapperRow, wrapper::restrictions};
 
-/// The token-scoped ENSv2 roles, each with the admin power that can still change it. A role is
-/// locked when neither the registration's nor its root's admins hold that power: an account can
-/// grant a regular role only while it holds the matching admin role, its roles on the registry root
-/// count on every token, and a token's settable roles are regular roles only, so no admin role can
-/// be granted on a registration after it is registered. `transfer` has no regular role:
-/// `can_transfer_admin` is itself the role that authorizes token transfers.
-/// (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L409-L425 @ ens_v2@a971bd64)
-/// (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L452-L455 @ ens_v2@a971bd64)
-/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L545-L573 @ ens_v2@a971bd64)
-/// (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L23-L45 @ ens_v2@a971bd64)
-const ROLES: [(&str, &str); 5] = [
-    ("unregister", "admin_unregister"),
-    ("renew", "admin_renew"),
-    ("set_subregistry", "admin_set_subregistry"),
-    ("set_resolver", "admin_set_resolver"),
-    ("transfer", "can_transfer_admin"),
+/// The token-scoped ENSv2 roles, each with the admin power that can still change it and whether
+/// that power counts when held on the registry root. A role is locked when no holder of its power
+/// counts: an account can grant a regular role only while it holds the matching admin role, its
+/// roles on the registry root count on every token, and a token's settable roles are regular roles
+/// only, so no admin role can be granted on a registration after it is registered. `transfer` has
+/// no regular role: `can_transfer_admin` is itself the role that authorizes token transfers, and a
+/// transfer checks only the token owner's roles on the token itself, so a root holder of it counts
+/// for nothing.
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L428-L435 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L463-L465 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L536-L539 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L606-L618 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/libraries/RegistryRolesLib.sol:L24-L45 @ ens_v2_sepolia_20261001@07e55a05)
+const ROLES: [(&str, &str, bool); 5] = [
+    ("unregister", "admin_unregister", true),
+    ("renew", "admin_renew", true),
+    ("set_subregistry", "admin_set_subregistry", true),
+    ("set_resolver", "admin_set_resolver", true),
+    ("transfer", "can_transfer_admin", false),
 ];
 
 /// The sorted distinct union of a `project_resource_admin_aggregate.admin_powers` map, whose
@@ -40,13 +43,19 @@ pub fn admin_powers(aggregate: &Value) -> Vec<String> {
         .collect()
 }
 
-/// The roles neither the resource's nor its root's admins hold.
+/// The roles whose admin power neither the resource's admins nor, where it counts, its root's
+/// admins hold.
 pub fn locked_roles(own: &[String], root: &[String]) -> Value {
+    let root_or_none = |counts: bool| if counts { root } else { &[] };
     Value::Array(
         ROLES
             .iter()
-            .filter(|(_, admin)| !own.iter().chain(root).any(|held| held == admin))
-            .map(|(role, _)| json!(role))
+            .filter(|(_, admin, root_counts)| {
+                !own.iter()
+                    .chain(root_or_none(*root_counts))
+                    .any(|held| held == admin)
+            })
+            .map(|(role, _, _)| json!(role))
             .collect(),
     )
 }
@@ -85,10 +94,17 @@ mod tests {
     #[test]
     fn locked_roles_are_the_roles_no_admin_holds() {
         let own = vec!["admin_renew".to_owned()];
-        let root = vec!["can_transfer_admin".to_owned()];
+        let root = vec![
+            "admin_set_resolver".to_owned(),
+            "can_transfer_admin".to_owned(),
+        ];
         assert_eq!(
             locked_roles(&own, &root),
-            json!(["unregister", "set_subregistry", "set_resolver"])
+            json!(["unregister", "set_subregistry", "transfer"])
+        );
+        assert_eq!(
+            locked_roles(&["can_transfer_admin".to_owned()], &[]),
+            json!(["unregister", "renew", "set_subregistry", "set_resolver"])
         );
         assert_eq!(
             admin_powers(
