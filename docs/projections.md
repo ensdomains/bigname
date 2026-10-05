@@ -1802,13 +1802,15 @@ The reducer reads only the events a registry log produced itself:
 | `TokenResource` | `upstream_resource`, `resource_id` and `resource_position` set |
 | `TransferSingle`, `TransferBatch` between two accounts | `status=registered`, `owner` the recipient |
 | `TokenRegenerated` | `token_id` the new id; owner and resource kept |
-| `ExpiryUpdated` | `expiry` set |
+| `ExpiryUpdated` | `expiry` set; an `unregistered` entry becomes `reserved` under the log's token id, with the resource cleared |
 | `LabelUnregistered` | `status=unregistered`, no owner, `expiry` the block time |
 
 A mint or burn is not a transfer: the adapter writes no token-control transfer
 for a zero endpoint, so the burn and mint around `TokenRegenerated` keep the
 owner. `unregister` burns the token and sets the entry's expiry to the block
-time. (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L238 @ ens_v2_sepolia_20261001@07e55a05)
+time; a root renewer can then revive the entry with `renew`, which leaves it
+held with no token, as a reservation is.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L243-L258 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L238 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L517-L546 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L578-L588 @ ens_v2_sepolia_20261001@07e55a05)
 The registry burns nothing when an entry's expiry passes, so the row keeps its

@@ -634,36 +634,45 @@ list in both states: the operator's powers are whatever the owner of each token
 holds on that token, so no power is stored with the approval and `approved`
 alone carries the fact. The adapter reads no registry state for it and routes
 it before the registry adapter settles pending name transitions, so adding the
-declaration moves no other normalized event. The Mainnet profile declares no
+declaration moves no other normalized event. The same build also keeps one
+registry log the adapter used to drop: an `ExpiryUpdated` for an entry with no
+token state, which `renew` emits when a root renewer revives an entry that
+`unregister` left without a token
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L258 @ ens_v2_sepolia_20261001@07e55a05).
+It becomes an `ExpiryChanged` with no name and no resource and
+`token_state_absent = true`, changes no name state, and exists so that the
+[registry entry](projections.md#ensv2-registry-entries) row keeps the entry's
+expiry. The Mainnet profile declares no
 ENSv2 family and is unchanged.
 
 The registry declaration compiles one family-wide watch entry, which covers
-the emitters discovery admits as registries: the targets of `subregistry` and
-`registry_announcement` edges. The declared ETHRegistry and the declared
-RootRegistry compile address entries at their own `start_block`;
-`ens_v2_root_l1` admits no discovered emitter of its own, so its declaration
-compiles no family-wide entry and carries no event `start_block`. A resolver a
-registry names with `ResolverUpdated` is admitted under the registry's manifest
-by a `resolver` edge, but it is not a registry: Ingest gives a resolver-edge
-target the topics of `ens_v2_resolver_l1`, not the registry family's, and
-Interpret does not select a registry event at such an emitter. Resolver
-`ApprovalForAll` therefore stays outside both the watch and the interpretation.
+the registries that announced themselves: the targets of
+`registry_announcement` edges, each from its `RegistryCreated` block. The
+declared ETHRegistry and the declared RootRegistry compile address entries at
+their own `start_block`; `ens_v2_root_l1` admits no discovered emitter of its
+own, so its declaration compiles no family-wide entry and carries no event
+`start_block`. A `subregistry` or `resolver` pointer is topology only and
+admits nothing by itself (see [Discovery admission](#discovery-admission)): a
+registry named by `SubregistryUpdated` is watched because it announced itself,
+and a resolver named by `ResolverUpdated` gets no registry topic from Ingest
+and no registry event selected by Interpret, although its address row carries
+the registry manifest. Resolver `ApprovalForAll` therefore stays outside both
+the watch and the interpretation.
 
 The registry declaration sets `start_block = 10893181`. That is a bigname
 coverage decision, not a deployment fact: it is the earliest block at which any
 registry admitted under the registry or root manifest starts on a database
-that has retained Sepolia's history, where discovery (`RegistryCreated`,
-`SubregistryUpdated` and proxy `Upgraded`) admits registries created before the
-current deployment's own contracts, whose earliest declared start is the
-RootRegistry's `11820291`. On that database 1,865 registries are admitted, 1,848
+that has retained Sepolia's history, where `RegistryCreated` announcements
+admit registries created before the current deployment's own contracts, whose
+earliest declared start is the RootRegistry's `11820291`. On that database 1,865 registries are admitted, 1,848
 of them start below `11820291`, and each registry's first retained log is at its
 admission start, so no registry has an approval the floor would cut off. One
 value serves every emitter; there is no per-emitter origin. To re-derive it,
 take the least `active_from_block_number` over the `contract_instance_addresses`
 rows of the chain whose instance is admitted as a registry under the active
 `ens_v2_registry_l1` or `ens_v2_root_l1` manifest: a declared root or contract,
-or the target of a `subregistry` or `registry_announcement` discovery edge, and
-not an instance reached only by a `resolver` edge. Lower the value when that
+or the target of a `registry_announcement` discovery edge, and not an instance
+reached only by a `subregistry` or `resolver` pointer. Lower the value when that
 minimum falls below it, for example after admitting an earlier deployment;
 lowering it widens the plan from the new start, and raising it stamps nothing.
 

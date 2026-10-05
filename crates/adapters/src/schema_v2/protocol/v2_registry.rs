@@ -102,6 +102,23 @@ fn registry(
             )?;
             let token_id = u256_word_hex(e.tokenId);
             let Some(before) = state.v2_token(&raw.emitting_address, &token_id) else {
+                // `renew` lets a root renewer revive an entry `unregister` left without a
+                // token, and names the entry's current token id. No name or resource is
+                // bound, so the log is kept as the registry's own expiry fact and moves no
+                // name state.
+                // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L258 @ ens_v2_sepolia_20261001@07e55a05)
+                ensure_declared(selected, &["ExpiryChanged"])?;
+                let mut output = single_event(
+                    "ExpiryChanged",
+                    None,
+                    None,
+                    json!({
+                        "source_event":"ExpiryUpdated", "token_id":token_id, "expiry":e.newExpiry,
+                        "sender":address_hex(e.sender), "token_state_absent":true,
+                        "registry_contract_instance_id":selected.contract_instance_id.to_string(),
+                    }),
+                );
+                initial_output.append(&mut output);
                 return Ok(initial_output);
             };
             state.set_v2_expiry(&raw.emitting_address, &token_id, e.newExpiry);

@@ -437,8 +437,15 @@ fn v2_label_collision_with_topology_does_not_resurrect_displaced_token_after_res
                 && event.raw_fact_ref["state_scope"] == expected_role_scope
         }));
     }
+    // A renewal that names the displaced token finds no token state. It is kept only as the
+    // registry's own expiry fact, with no name or resource.
     assert!(output.normalized_events.iter().all(|event| {
-        event.block_number != Some(20_000_305) || event.after_state["token_id"] != token_a_hex
+        event.block_number != Some(20_000_305)
+            || event.after_state["token_id"] != token_a_hex
+            || (event.event_kind == "ExpiryChanged"
+                && event.after_state["token_state_absent"] == true
+                && event.logical_name_id.is_none()
+                && event.resource_id.is_none())
     }));
     assert!(output.normalized_events.iter().any(|event| {
         event.block_number == Some(20_000_306)
@@ -483,10 +490,10 @@ fn v2_replacement_null_roles_do_not_restore_displaced_token() -> Result<()> {
     let displaced_token = format!("{:#066x}", versioned_token("alpha", 1));
 
     assert!(
-        restored_expiry
-            .normalized_events
-            .iter()
-            .all(|event| { event.after_state["token_id"] != displaced_token }),
+        restored_expiry.normalized_events.iter().all(|event| {
+            event.after_state["token_id"] != displaced_token
+                || event.after_state["token_state_absent"] == true
+        }),
         "replacement null roles recreated the displaced token: {:#?}",
         restored_expiry.normalized_events
     );

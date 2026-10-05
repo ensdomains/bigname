@@ -47,7 +47,8 @@ enum Fact {
     /// `unregister` burns the token and sets the entry's expiry to the block time.
     /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L238 @ ens_v2_sepolia_20261001@07e55a05)
     Unregistered,
-    /// `renew` moves the expiry and changes neither the token nor its owner.
+    /// `renew` moves the expiry and changes neither the token nor its owner. On an entry
+    /// `unregister` left without a token it revives the entry with no owner.
     /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L243-L258 @ ens_v2_sepolia_20261001@07e55a05)
     Renewed,
     Resource,
@@ -204,7 +205,18 @@ pub(super) async fn apply(
                 set(&mut row, "owner_position", event.position.to_json());
                 set(&mut row, "expiry", json!(context.block.timestamp_seconds));
             }
-            Fact::Renewed => set(&mut row, "expiry", expiry(after)),
+            Fact::Renewed => {
+                set(&mut row, "expiry", expiry(after));
+                // A root renewer revived an entry `unregister` left without a token: it is
+                // held with no owner, as a reservation is, under the token id the log names.
+                // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L243-L258 @ ens_v2_sepolia_20261001@07e55a05)
+                if row.get("status").and_then(Value::as_str) == Some("unregistered") {
+                    set(&mut row, "status", "reserved");
+                    set(&mut row, "upstream_resource", Value::Null);
+                    set(&mut row, "resource_id", Value::Null);
+                    set(&mut row, "resource_position", Value::Null);
+                }
+            }
             Fact::Resource => {
                 set(
                     &mut row,

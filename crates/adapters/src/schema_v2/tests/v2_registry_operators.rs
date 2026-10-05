@@ -369,3 +369,84 @@ fn a_restored_session_continues_past_an_approval_as_the_live_one_does() -> anyho
     assert_eq!(revoked[0].after_state["approved"], false);
     Ok(())
 }
+
+/// `renew` by a root renewer revives an entry `unregister` left without a token. The registry
+/// adapter holds no token state for it, and the log is still kept as the registry's own expiry
+/// fact, live and after a restore.
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L258 @ ens_v2_sepolia_20261001@07e55a05)
+#[test]
+fn a_renewal_of_an_unregistered_entry_is_kept_as_an_expiry_fact() -> anyhow::Result<()> {
+    let owner: Address = OWNER.parse()?;
+    let unregistered = |block| {
+        raw_at(
+            v2_registry::LabelUnregistered {
+                tokenId: versioned_token("alice", 0),
+                sender: owner,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            ETH_REGISTRY,
+        )
+    };
+    // `unregister` burned the token and advanced its version.
+    let renewed = |block, expiry| {
+        raw_at(
+            v2_registry::ExpiryUpdated {
+                tokenId: versioned_token("alice", 1),
+                newExpiry: expiry,
+                sender: owner,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            ETH_REGISTRY,
+        )
+    };
+    let mut logs = registration(1, 0, "alice", 100);
+    logs.extend([unregistered(2), renewed(3, 200)]);
+    let first_input = input(logs, 3);
+    let first_blocks = first_input.blocks.clone();
+    let (first, session) = interpret_test_batch_incremental(first_input, None)?;
+    let revival = first
+        .normalized_events
+        .iter()
+        .filter(|event| event.block_number == Some(3))
+        .collect::<Vec<_>>();
+    assert_eq!(revival.len(), 1, "{revival:#?}");
+    let revival = revival[0];
+    assert_eq!(revival.event_kind, "ExpiryChanged");
+    assert_eq!(revival.logical_name_id, None);
+    assert_eq!(revival.resource_id, None);
+    assert_eq!(
+        revival.after_state,
+        json!({
+            "source_event": "ExpiryUpdated",
+            "token_id": format!("0x{:064x}", versioned_token("alice", 1)),
+            "expiry": 200,
+            "sender": OWNER,
+            "token_state_absent": true,
+            "registry_contract_instance_id": instance(ETH_REGISTRY).to_string(),
+        })
+    );
+
+    // A second renewal and a new registration continue the same from a restore.
+    let prior = seam::fold_prior_events(Vec::new(), &first.normalized_events, &first_blocks)?;
+    let mut second_logs = vec![renewed(4, 300)];
+    second_logs.extend(registration(5, 0, "bob", 400));
+    let mut second_input = input(second_logs, 5);
+    second_input.blocks.retain(|block| block.block_number > 3);
+    let mut fresh_input = second_input.clone();
+    fresh_input.prior_events = prior;
+    let fresh = interpret_test_batch(fresh_input)?;
+    let (second, _) = interpret_test_batch_incremental(second_input, Some(session))?;
+    assert_eq!(second, fresh);
+    let again = second
+        .normalized_events
+        .iter()
+        .find(|event| event.block_number == Some(4))
+        .expect("the second renewal");
+    assert_eq!(again.before_state["expiry"], 200);
+    assert_eq!(again.after_state["expiry"], 300);
+    Ok(())
+}

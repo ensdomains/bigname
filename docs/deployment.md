@@ -2583,7 +2583,10 @@ and [ENSv2 registry entries](projections.md#ensv2-registry-entries)) changes
 Sepolia `ens_v2_registry_l1` and `ens_v2_root_l1` manifests, so it rotates the
 [interpreter content hash](glossary.md#interpreter-content-hash) for every
 chain. It changes no reader: `GET /v1/permissions` still names
-`ens_v2_registry_operators` as an unlisted surface. The Mainnet and Base
+`ens_v2_registry_operators` as an unlisted surface. Besides the approval rows,
+stored events gain one kind of row: an `ExpiryChanged` with no name, no resource
+and `token_state_absent = true` for a renewal of an entry that has no token,
+which `/v1/diagnostics/events` shows and no product row uses. The Mainnet and Base
 manifests are unchanged, so those chains get the hash rotation and its
 Interpret and Project redo pair and no Ingest redo.
 

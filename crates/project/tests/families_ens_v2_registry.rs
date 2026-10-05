@@ -740,6 +740,87 @@ async fn reservations_batch_transfers_and_parents_are_kept_per_registry() -> Res
     fixture.cleanup().await
 }
 
+/// `renew` by a root renewer revives an entry `unregister` left without a token: the entry is
+/// held with no owner under the token id the log names, whether it was registered or reserved
+/// before.
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L258 @ ens_v2_sepolia_20261001@07e55a05)
+#[tokio::test]
+async fn a_renewal_revives_an_unregistered_entry_without_an_owner() -> Result<()> {
+    let unregister = |token: U256| {
+        LabelUnregistered {
+            tokenId: token,
+            sender: address(SENDER),
+        }
+        .encode_log_data()
+    };
+    let renew = |token: U256, expiry: u64| {
+        ExpiryUpdated {
+            tokenId: token,
+            newExpiry: expiry,
+            sender: address(SENDER),
+        }
+        .encode_log_data()
+    };
+    let mut logs = Logs::default();
+    logs.register(1, ETH_REGISTRY, "alice", (0, 0), ALICE)
+        .push(
+            1,
+            ETH_REGISTRY,
+            LabelReserved {
+                tokenId: versioned("held", 0),
+                labelHash: keccak256(b"held"),
+                label: "held".to_owned(),
+                expiry: FAR,
+                sender: address(SENDER),
+            }
+            .encode_log_data(),
+        )
+        .push(2, ETH_REGISTRY, unregister(versioned("alice", 0)))
+        .push(2, ETH_REGISTRY, burn(versioned("alice", 0), ALICE))
+        // A reservation has no token to burn, so its version stays.
+        .push(2, ETH_REGISTRY, unregister(versioned("held", 0)))
+        .push(3, ETH_REGISTRY, renew(versioned("alice", 1), FAR + 1))
+        .push(3, ETH_REGISTRY, renew(versioned("held", 0), FAR + 2))
+        .register(4, ETH_REGISTRY, "alice", (1, 1), BOB);
+    let (fixture, _) = persisted("families_ens_v2_registry_revival", &logs, 4).await?;
+
+    fixture.apply(2, FamilyMode::Normal).await?;
+    let alice = entry_row(&fixture, ETH_REGISTRY, "alice").await?;
+    assert_entry(
+        &alice,
+        "unregistered",
+        None,
+        versioned("alice", 0),
+        Some(versioned("alice", 0)),
+    );
+    assert_eq!(
+        entry_row(&fixture, ETH_REGISTRY, "held").await?["status"],
+        "unregistered"
+    );
+
+    fixture.assert_undo_restores(3).await?;
+    let alice = entry_row(&fixture, ETH_REGISTRY, "alice").await?;
+    assert_entry(&alice, "reserved", None, versioned("alice", 1), None);
+    assert_eq!(alice["expiry"], json!(FAR + 1));
+    assert_eq!(alice["owner_position"]["block_number"], 2);
+    let held = entry_row(&fixture, ETH_REGISTRY, "held").await?;
+    assert_entry(&held, "reserved", None, versioned("held", 0), None);
+    assert_eq!(held["expiry"], json!(FAR + 2));
+
+    // Registering the revived entry mints at the version the renewal named.
+    fixture.assert_undo_restores(4).await?;
+    let alice = entry_row(&fixture, ETH_REGISTRY, "alice").await?;
+    assert_entry(
+        &alice,
+        "registered",
+        Some(BOB),
+        versioned("alice", 1),
+        Some(versioned("alice", 1)),
+    );
+    fixture.assert_rebuild_equal(4).await?;
+    fixture.cleanup().await
+}
+
 /// A transfer seen before the entry's registration still names the token's owner, and a log
 /// that names no owner leaves the owner unknown rather than absent.
 #[tokio::test]
