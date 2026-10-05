@@ -313,3 +313,37 @@ fn the_mainnet_deployment_profile_declares_no_ens_v2_approval_and_no_event_start
     }
     Ok(())
 }
+
+#[test]
+fn user_registry_origin_metadata_preserves_the_compiled_watch_plan() -> Result<()> {
+    let desired = sepolia_manifest("ens_v2_migration_l1")?;
+    let mut previous = desired.clone();
+    previous
+        .contracts
+        .retain(|contract| contract.role != "user_registry_implementation");
+    assert_eq!(desired.contracts.len(), previous.contracts.len() + 1);
+    let before = compile_watch_scope(&previous)?;
+    let after = compile_watch_scope(&desired)?;
+    assert_eq!(before, after);
+    let mut old_snapshot = Snapshot::default();
+    let mut new_snapshot = Snapshot::default();
+    record(&mut old_snapshot, &previous, &manifest_payload(&previous)?)?;
+    record(&mut new_snapshot, &desired, &manifest_payload(&desired)?)?;
+    assert_eq!(
+        widening_start(
+            &old_snapshot,
+            &new_snapshot,
+            "ethereum-sepolia",
+            &PersistedWatchCoverage::new(),
+            false
+        )?,
+        None
+    );
+    println!(
+        "registry_origin_watch_plan={}",
+        serde_json::json!({
+            "before": before, "after": after, "widening_start": null
+        })
+    );
+    Ok(())
+}
