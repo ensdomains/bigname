@@ -411,7 +411,7 @@ pub(crate) async fn get_address_names(
         .as_ref()
         .map(|cursor| encode(&address_names_cursor_payload(cursor, &cursor_binding)));
     let has_more = next_cursor.is_some();
-    let data = storage_page
+    let mut data = storage_page
         .entries
         .iter()
         .map(|entry| {
@@ -458,6 +458,11 @@ pub(crate) async fn get_address_names(
             Ok(row)
         })
         .collect::<V2Result<Vec<_>>>()?;
+    crate::v2::name_record::fill_wrapper_expiries(
+        snapshot.conn().await?,
+        data.iter_mut().filter_map(|row| row.ens_v1.as_mut()),
+    )
+    .await?;
     let mut meta = snapshot.finish(&state).await?;
     if let Some(resource_ids) = role_resource_ids.as_deref() {
         let permission_support =

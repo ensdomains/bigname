@@ -116,6 +116,7 @@ pub use label_preimages::{
     import_label_preimages_from_ens_names_table,
 };
 pub use lineage::{CanonicalityState, ChainLineageBlock, load_chain_lineage_block};
+pub use name_current::wrapper_expiry;
 pub use name_current::{
     DEFAULT_NAME_CURRENT_LINEAGE_JOINS, MIGRATION_AUTHORITY_TRANSITION_PROOF_KIND,
     NameCurrentAddressFilter, NameCurrentAddressRelationFilter, NameCurrentExpiringFilter,

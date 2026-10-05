@@ -311,6 +311,55 @@ fn ens_v1_wrapper_expiry_follows_the_wrapper_state_or_its_lapse() {
     assert_eq!(unknown, Some(json!({"expires_at": null})));
 }
 
+#[test]
+fn ens_v1_wrapper_expiry_left_pending_must_be_read_before_serving() {
+    let marker = |backed: bool| {
+        json!({"chain_id": "ethereum-mainnet",
+            "resource_id": "00000000-0000-0000-0000-000000002200", "backed": backed})
+    };
+    let mut backed = wrapper_summary("wrapped", 0);
+    backed["wrapper_expiry_pending"] = marker(true);
+    let object = ens_v1(Some(Authority::EnsV1), &backed)
+        .expect("pending wrapper summary")
+        .expect("ENSv1 authority serves ens_v1");
+    let (key, marked_backed) = object
+        .pending_wrapper_expiry
+        .clone()
+        .expect("the expiry is pending");
+    assert_eq!(key.chain_id, "ethereum-mainnet");
+    assert!(marked_backed);
+    assert!(object.wrapper_expires_at.is_none());
+    assert!(
+        serde_json::to_value(&object).is_err(),
+        "an unread wrapper expiry is never served as absent"
+    );
+
+    let lapsed = json!({"wrapper_masked": true, "wrapper_expiry_pending": marker(false)});
+    assert!(ens_v1(Some(Authority::EnsV1), &lapsed).is_ok());
+    for summary in [
+        // The marker disagrees with the composed state.
+        json!({"wrapper_masked": true, "wrapper_expiry_pending": marker(true)}),
+        {
+            let mut summary = wrapper_summary("wrapped", 0);
+            summary["wrapper_expiry_pending"] = marker(false);
+            summary
+        },
+        // Attached and pending at once, or pending with no wrapper at all.
+        {
+            let mut summary = backed.clone();
+            summary["wrapper_expiry_seconds"] = json!(1_000);
+            summary
+        },
+        json!({"wrapper_expiry_pending": marker(false)}),
+        json!({"wrapper_masked": true, "wrapper_expiry_pending": {"backed": false}}),
+    ] {
+        assert!(
+            ens_v1(Some(Authority::EnsV1), &summary).is_err(),
+            "{summary}"
+        );
+    }
+}
+
 fn wrapper_summary(state: &str, fuses: u32) -> serde_json::Value {
     json!({
         "wrapper_state": state,

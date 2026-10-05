@@ -1,6 +1,11 @@
 //! The `ens_v1` object of a name-shaped row: what only ENSv1 holds about a name while ENSv1
 //! decides it (`authority` `ens_v1` or `ens_v0`).
-use bigname_storage::NameCurrentRow;
+use std::collections::BTreeMap;
+
+use bigname_storage::{
+    NameCurrentRow,
+    wrapper_expiry::{self, WrapperExpiryKey},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -49,6 +54,22 @@ pub(crate) struct EnsV1 {
     pub(crate) wrapper_expires_at: Option<ExpiryTimestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) wrapper_expires_at_reason: Option<String>,
+    /// A wrapper expiry the response has yet to read ([`fill_wrapper_expiries`]); serializing an
+    /// object that still holds one fails.
+    #[serde(
+        default,
+        skip_deserializing,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "unfilled",
+        rename = "unfilled_wrapper_expiry"
+    )]
+    pub(crate) pending_wrapper_expiry: Option<PendingExpiry>,
+}
+
+fn unfilled<S: serde::Serializer>(_: &Option<PendingExpiry>, _: S) -> Result<S::Ok, S::Error> {
+    Err(serde::ser::Error::custom(
+        "ens_v1 wrapper expiry was never read",
+    ))
 }
 
 /// The `ens_v1` object of a row whose served authority is `authority`. Stored wrapper metadata
@@ -58,7 +79,8 @@ pub(crate) fn ens_v1(
     declared_summary: &Value,
 ) -> V2Result<Option<EnsV1>> {
     let wrapper = wrapper_metadata(declared_summary)?;
-    let expiry = stored_wrapper_expiry(declared_summary, wrapper.is_some())?;
+    let (expiry, pending_wrapper_expiry) =
+        stored_wrapper_expiry(declared_summary, wrapper.is_some())?;
     if !matches!(authority, Some(Authority::EnsV0 | Authority::EnsV1)) {
         return Ok(None);
     }
@@ -77,24 +99,77 @@ pub(crate) fn ens_v1(
         wrapper_fuses,
         wrapper_expires_at,
         wrapper_expires_at_reason,
+        pending_wrapper_expiry,
     }))
 }
 
-/// The stored NameWrapper expiry the read attaches (`wrapper_expiry_seconds`): required beside a
-/// wrapper state, and allowed without one only on a masked (lapsed) wrapper.
+type ServedExpiry = (ExpiryTimestamp, Option<String>);
+type PendingExpiry = (WrapperExpiryKey, bool);
+
+/// The stored NameWrapper expiry the composed read attached (`wrapper_expiry_seconds`), or the
+/// wrapper whose expiry it left for the response to read (`wrapper_expiry_pending`). One of them
+/// is required beside a wrapper state; without a state only a masked (lapsed or unknown) wrapper
+/// may carry either.
 fn stored_wrapper_expiry(
     declared_summary: &Value,
     backed: bool,
-) -> V2Result<Option<(ExpiryTimestamp, Option<String>)>> {
+) -> V2Result<(Option<ServedExpiry>, Option<PendingExpiry>)> {
     let masked = declared_summary.get("wrapper_masked") == Some(&Value::Bool(true));
-    match declared_summary.get("wrapper_expiry_seconds") {
-        None if backed => Err(inconsistent_wrapper_expiry()),
-        None => Ok(None),
-        Some(_) if !backed && !masked => Err(inconsistent_wrapper_expiry()),
-        Some(word) => wrapper_expiry(word)
-            .map(Some)
-            .ok_or_else(inconsistent_wrapper_expiry),
+    let stored = declared_summary.get(wrapper_expiry::WRAPPER_EXPIRY_KEY);
+    let pending = declared_summary.get(wrapper_expiry::WRAPPER_EXPIRY_PENDING_KEY);
+    if (stored.is_some() || pending.is_some()) && !backed && !masked {
+        return Err(inconsistent_wrapper_expiry());
     }
+    match (stored, pending) {
+        (Some(_), Some(_)) => Err(inconsistent_wrapper_expiry()),
+        (Some(word), None) => wrapper_expiry(word)
+            .map(|served| (Some(served), None))
+            .ok_or_else(inconsistent_wrapper_expiry),
+        (None, Some(marker)) => wrapper_expiry::parse_pending_marker(marker)
+            .filter(|(_, marked_backed)| *marked_backed == backed)
+            .map(|pending| (None, Some(pending)))
+            .ok_or_else(inconsistent_wrapper_expiry),
+        (None, None) if backed => Err(inconsistent_wrapper_expiry()),
+        (None, None) => Ok((None, None)),
+    }
+}
+
+/// Reads the pending wrapper expiries of `objects` and serves them: one read per chain for the
+/// whole response, on `db`, which must be the snapshot the rows were composed on where the route
+/// holds one.
+pub(crate) async fn fill_wrapper_expiries<'a>(
+    db: impl Into<bigname_storage::ReadDb<'_>>,
+    objects: impl IntoIterator<Item = &'a mut EnsV1>,
+) -> V2Result<()> {
+    let mut objects: Vec<&mut EnsV1> = objects
+        .into_iter()
+        .filter(|object| object.pending_wrapper_expiry.is_some())
+        .collect();
+    if objects.is_empty() {
+        return Ok(());
+    }
+    let wanted: BTreeMap<WrapperExpiryKey, bool> = objects
+        .iter()
+        .filter_map(|object| object.pending_wrapper_expiry.clone())
+        .collect();
+    let served = wrapper_expiry::load_wrapper_expiries(db, &wanted)
+        .await
+        .map_err(|error| {
+            tracing::error!(service = "api", error = ?error, "failed to read wrapper expiries");
+            inconsistent_wrapper_expiry()
+        })?;
+    for object in &mut objects {
+        let Some((key, _)) = object.pending_wrapper_expiry.take() else {
+            continue;
+        };
+        if let Some(word) = served.get(&key) {
+            let (timestamp, reason) =
+                wrapper_expiry(word).ok_or_else(inconsistent_wrapper_expiry)?;
+            object.wrapper_expires_at = Some(timestamp);
+            object.wrapper_expires_at_reason = reason;
+        }
+    }
+    Ok(())
 }
 
 fn inconsistent_wrapper_expiry() -> V2Error {

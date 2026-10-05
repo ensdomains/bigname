@@ -45,7 +45,9 @@ use declared::{
     chain_positions_created_at, declared_created_at, declared_expires_at, declared_grace_ends_at,
     declared_owner, declared_registered_at, declared_registration, declared_registry_owner,
 };
-pub(crate) use ens_v1::{EnsV1, ens_v1, ens_v1_of_registry_child, ens_v1_of_row};
+pub(crate) use ens_v1::{
+    EnsV1, ens_v1, ens_v1_of_registry_child, ens_v1_of_row, fill_wrapper_expiries,
+};
 use inventory::load_name_record_inventory;
 pub(super) use values::{
     chain_id_from_positions, declared_token_id, identity_declared_token_id,

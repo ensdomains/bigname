@@ -11,10 +11,10 @@ use uuid::Uuid;
 use crate::{
     NameCurrentRow,
     families::{
-        control::{rows::WrapperRow, wrapper::load_wrapper_rows},
         records::{FamilyAttribution, FamilyRecordInventory, load_family_record_inventories_on},
         topology::{load_family_wildcard_source_on, load_name_topology_on},
     },
+    name_current::wrapper_expiry::{self, WrapperExpiryKey},
 };
 
 /// Enrich every composed row with its declared topology. The record inventories the topology
@@ -49,78 +49,58 @@ pub(super) async fn enrich_all(
     Ok(())
 }
 
-/// The declared-summary key holding the NameWrapper entry's own stored expiry word.
-const WRAPPER_EXPIRY_KEY: &str = "wrapper_expiry_seconds";
-
 /// Write the stored expiry of the name's NameWrapper entry beside the composed wrapper fields:
 /// on a row that serves a wrapper state, and on a row whose emancipated or locked wrapper has
-/// passed its expiry, which composition masks (`wrapper_masked`) instead. One read per chain in
-/// each composed batch, only for the rows that carry either flag.
+/// passed its expiry, which composition masks (`wrapper_masked`) instead. Inside
+/// `defer_wrapper_expiries` each such row gets a pending marker instead, which the response
+/// resolves once for all the rows it serves.
 async fn attach_wrapper_expiries(
     conn: &mut PgConnection,
     rows: &mut BTreeMap<String, NameCurrentRow>,
 ) -> Result<()> {
-    let mut wanted: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut wanted = BTreeMap::new();
     for row in rows.values().filter(|row| wrapper_flagged(row)) {
-        wanted
-            .entry(chain_of(row)?)
-            .or_default()
-            .push(wrapper_resource(row)?.to_string());
+        wanted.insert(wrapper_key(row)?, backed(row));
     }
-    let mut wrappers: BTreeMap<(String, String), WrapperRow> = BTreeMap::new();
-    for (chain_id, resources) in wanted {
-        for wrapper in load_wrapper_rows(&mut *conn, &chain_id, &resources).await? {
-            wrappers.insert((chain_id.clone(), wrapper.resource_id.clone()), wrapper);
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    if wrapper_expiry::deferred() {
+        for row in rows.values_mut().filter(|row| wrapper_flagged(row)) {
+            let marker = wrapper_expiry::pending_marker(&wrapper_key(row)?, backed(row));
+            row.declared_summary[wrapper_expiry::WRAPPER_EXPIRY_PENDING_KEY] = marker;
         }
+        return Ok(());
     }
+    let served = wrapper_expiry::load_wrapper_expiries(&mut *conn, &wanted).await?;
     for row in rows.values_mut().filter(|row| wrapper_flagged(row)) {
-        let key = (chain_of(row)?, wrapper_resource(row)?.to_string());
-        let wrapper = wrappers.get(&key).with_context(|| {
-            format!(
-                "composed wrapper of {} has no stored row",
-                row.logical_name_id
-            )
-        })?;
-        if row.declared_summary.get("wrapper_state").is_none() && !lapsed(wrapper) {
-            continue;
+        if let Some(expiry) = served.get(&wrapper_key(row)?) {
+            row.declared_summary[wrapper_expiry::WRAPPER_EXPIRY_KEY] = expiry.clone();
         }
-        let expiry: Value = wrapper
-            .expiry_seconds
-            .as_deref()
-            .and_then(|text| serde_json::from_str(text).ok())
-            .with_context(|| {
-                format!("composed wrapper of {} has no expiry", row.logical_name_id)
-            })?;
-        row.declared_summary[WRAPPER_EXPIRY_KEY] = expiry;
     }
     Ok(())
 }
 
 fn wrapper_flagged(row: &NameCurrentRow) -> bool {
+    backed(row) || row.declared_summary.get("wrapper_masked") == Some(&Value::Bool(true))
+}
+
+fn backed(row: &NameCurrentRow) -> bool {
     row.declared_summary.get("wrapper_state").is_some()
-        || row.declared_summary.get("wrapper_masked") == Some(&Value::Bool(true))
 }
 
 /// Composition reads the wrapper of the name's binding resource, which is the row's
 /// `resource_id` whenever the row is bound.
-fn wrapper_resource(row: &NameCurrentRow) -> Result<Uuid> {
-    row.resource_id.with_context(|| {
-        format!(
-            "composed wrapper of {} has no resource",
-            row.logical_name_id
-        )
+fn wrapper_key(row: &NameCurrentRow) -> Result<WrapperExpiryKey> {
+    Ok(WrapperExpiryKey {
+        chain_id: chain_of(row)?,
+        resource_id: row.resource_id.with_context(|| {
+            format!(
+                "composed wrapper of {} has no resource",
+                row.logical_name_id
+            )
+        })?,
     })
-}
-
-/// A masked wrapper whose stored state, fuses and expiry are all known is masked only because an
-/// emancipated or locked wrapper is past its expiry (`effective_wrapper`).
-fn lapsed(wrapper: &WrapperRow) -> bool {
-    matches!(
-        wrapper.wrapper_state.as_deref(),
-        Some("emancipated" | "locked")
-    ) && wrapper.fuses.is_some()
-        && wrapper.expiry_seconds.is_some()
-        && wrapper.lifecycle_unwrapped != Some(true)
 }
 
 fn chain_of(row: &NameCurrentRow) -> Result<String> {

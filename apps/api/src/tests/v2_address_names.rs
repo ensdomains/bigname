@@ -2049,6 +2049,56 @@ async fn v2_owner_and_manager_follow_the_wrapper_state_on_every_name_row() -> Re
     Ok(())
 }
 
+/// A response reads the wrapper expiries it serves once per chain, however many composed reads
+/// built its rows: subnames composes the parent and then the page, and search walks its
+/// candidates one batch at a time here.
+#[tokio::test]
+async fn v2_wrapper_expiries_are_read_once_per_chain_per_request() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_perms_wrapped_lease(&database, WrappedLeaseShape::LinkRecorded).await?;
+    insert_family_registry_child_edge(
+        &database.pool,
+        "ens",
+        "ethereum-mainnet",
+        "perms.eth",
+        &format!("{:#x}", alloy_primitives::keccak256(b"sub")),
+        "0x00000000000000000000000000000000000000e7",
+        120,
+        "0xperms120",
+    )
+    .await?;
+    seed_wrapped_subname_inputs(&database, "sub.perms.eth", Uuid::from_u128(0x5a_0505)).await?;
+    for (uri, batch, served) in [
+        ("/v1/names/perms.eth/subnames", 200, 1),
+        ("/v1/search?q=perms&match=contains&namespace=ens", 1, 2),
+    ] {
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (status, body) =
+            bigname_storage::wrapper_expiry::seams::with_wrapper_expiry_read_counter(
+                reads.clone(),
+                bigname_storage::families::name::seams::with_batch_size(
+                    batch,
+                    read_family_response(&database, uri),
+                ),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        let with_expiry = body["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|row| row["ens_v1"]["wrapper_expires_at"].is_string())
+            .count();
+        assert_eq!(with_expiry, served, "{uri}: {body}");
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "{uri}: one read for the one chain"
+        );
+    }
+    database.cleanup().await
+}
+
 /// TYR-134: a wrapped subname serves its token holder as `manager` on name detail, lookup detail
 /// and its parent's subnames row, before and after it is emancipated, and the `manager` relation
 /// lists the subname for that holder.

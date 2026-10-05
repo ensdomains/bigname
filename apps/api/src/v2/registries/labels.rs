@@ -197,7 +197,7 @@ pub(crate) async fn get_registry_labels(
             owner,
         ))
     });
-    let data = storage_page
+    let mut data = storage_page
         .rows
         .iter()
         .map(|row| {
@@ -220,7 +220,13 @@ pub(crate) async fn get_registry_labels(
                 role_holder_count,
             })
         })
-        .collect::<V2Result<_>>()?;
+        .collect::<V2Result<Vec<_>>>()?;
+    crate::v2::name_record::fill_wrapper_expiries(
+        collection.conn().await?,
+        data.iter_mut()
+            .filter_map(|label| label.name.ens_v1.as_mut()),
+    )
+    .await?;
     Ok(Json(Envelope {
         data,
         page: Some(Page {

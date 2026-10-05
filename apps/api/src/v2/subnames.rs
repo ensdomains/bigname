@@ -257,7 +257,7 @@ pub(crate) async fn get_subnames(
         .as_ref()
         .map(|cursor| encode(&subname_cursor_payload(cursor, &binding)));
     let has_more = next_cursor.is_some();
-    let data = storage_page
+    let mut data = storage_page
         .rows
         .iter()
         .map(|row| {
@@ -270,7 +270,13 @@ pub(crate) async fn get_subnames(
             subname.subregistry = subregistries.remove(&row.child_logical_name_id);
             Ok(subname)
         })
-        .collect::<V2Result<_>>()?;
+        .collect::<V2Result<Vec<_>>>()?;
+    super::name_record::fill_wrapper_expiries(
+        snapshot.conn().await?,
+        data.iter_mut()
+            .filter_map(|subname| subname.ens_v1.as_mut()),
+    )
+    .await?;
     Ok(Json(Envelope {
         data,
         page: Some(Page {

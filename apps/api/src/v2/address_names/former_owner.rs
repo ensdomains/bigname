@@ -128,7 +128,7 @@ pub(super) async fn get_address_former_owners(
         .collect::<Vec<_>>();
     let migrated_at_by_name =
         load_migrated_at(snapshot.conn().await?, &migrated_logical_name_ids).await?;
-    let data = page
+    let mut data = page
         .rows
         .iter()
         .map(|row| {
@@ -138,7 +138,12 @@ pub(super) async fn get_address_former_owners(
                 migrated_at_by_name.get(&row.logical_name_id).cloned(),
             )
         })
-        .collect::<V2Result<_>>()?;
+        .collect::<V2Result<Vec<_>>>()?;
+    crate::v2::name_record::fill_wrapper_expiries(
+        snapshot.conn().await?,
+        data.iter_mut().filter_map(|row| row.ens_v1.as_mut()),
+    )
+    .await?;
     let next_cursor = page
         .next_cursor
         .as_ref()
