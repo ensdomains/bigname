@@ -2016,11 +2016,13 @@ observation that establishes it, a `PreimageObserved` row or a
 [label-hash-path observation](#name-identity-and-raw-evidence), staying
 orphaned when none survives. A shadow surface's `deactivated_at` follows its
 earliest surviving `PreimageObserved` row.
-Outside that orphan replacement, a name surface's `deactivated_at` moves only
-for a strictly lower incoming block, so the stored value does not depend on the
-order emissions arrive in. The one other case is enrichment: a row without raw
-bytes that first receives bytes failing the normalization gate takes the
-incoming `deactivated_at`, at whatever block those bytes arrive.
+Outside that orphan replacement, the ordinary surface upsert moves a name
+surface's `deactivated_at` only for a strictly lower incoming block, so the
+stored value does not depend on the order emissions arrive in. Its one other
+case is enrichment: a row without raw bytes that first receives bytes failing
+the normalization gate takes the incoming `deactivated_at`, at whatever block
+those bytes arrive. Witness repair, below, is a separate operation that can
+also move it.
 
 A surface's [preimage witness](glossary.md#preimage-witness) is repaired
 separately from its anchor, so raw bytes learned after the node was established
@@ -2031,9 +2033,9 @@ in the range, takes its earliest surviving canonical `PreimageObserved` event as
 witness. A canonical surface left with none loses its raw bundle and its
 normalization verdict, and stays as the identity alone, when a surviving
 label-hash-path observation still establishes it; without such an observation
-the row is left as it was. When the
-repair moves a shadow surface's witness to an event in a later block than its
-`deactivated_at`, `deactivated_at` moves to that block's timestamp.
+the row is left as it was. When the repair moves a shadow surface's witness
+and the replacement witness's block timestamp is later than the stored
+`deactivated_at`, `deactivated_at` moves to that block timestamp.
 
 The interpreter content hash covers the current interpretation inputs: the
 adapter, manifest-authority, and project sources, the manifest ABI event
