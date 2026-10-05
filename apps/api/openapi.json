@@ -8776,6 +8776,38 @@
       "HistoryEventData": {
         "type": "object",
         "properties": {
+          "token_id": {
+            "type": "string",
+            "description": "Decimal ENSv2 token at this registration, transfer or non-root registry permission row's physical event position; see [ENSv2 token identity](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#ensv2-token-identity)."
+          },
+          "canonical_id": {
+            "type": "string",
+            "description": "Decimal ENSv2 event-local identifier with its low 32 bits cleared; scoped by registry and chain, not a registration UUID."
+          },
+          "cost": {
+            "type": "string",
+            "description": "Unsigned decimal unsplit registration amount or renewal amount; native wei for ENSv1, raw payment-token units for ENSv2."
+          },
+          "base_cost": {
+            "type": "string",
+            "description": "Unsigned decimal explicitly emitted registration base amount."
+          },
+          "premium": {
+            "type": "string",
+            "description": "Unsigned decimal explicitly emitted registration premium."
+          },
+          "payment_token": {
+            "$ref": "#/components/schemas/ContractRef",
+            "description": "ERC-20 contract named by an ENSv2 payment observation; explicit zero address is preserved, without inferring a currency."
+          },
+          "referrer": {
+            "type": "string",
+            "description": "Emitted bytes32 referrer as lowercase 0x-prefixed hex, including explicit zero."
+          },
+          "operator": {
+            "type": "string",
+            "description": "Lowercase operator explicitly retained on an ERC-1155 transfer."
+          },
           "registrant": {
             "type": "string",
             "description": "Registrant the registration event named, as the on-chain event carries it."

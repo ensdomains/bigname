@@ -53,7 +53,7 @@ async fn v2_name_history_separates_granted_and_revoked_registry_roles() -> Resul
         .map(|row| row["data"].clone())
         .collect::<Vec<_>>();
     let change = |powers: Value, added: Value, removed: Value| {
-        json!({"address":ROLE_HOLDER, "grant_scope":{"kind":"registry", "detail":{}},
+        json!({"address":ROLE_HOLDER, "canonical_id":"4294967296", "grant_scope":{"kind":"registry", "detail":{}},
             "powers":powers, "added_powers":added, "removed_powers":removed})
     };
     assert_eq!(

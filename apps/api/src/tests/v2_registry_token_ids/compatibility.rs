@@ -10,12 +10,14 @@ mod legacy {
     use super::*;
     sol! {
         event NameRegistered(uint256 indexed tokenId, string label, address owner, address subregistry, address resolver, uint64 duration, address paymentToken, bytes32 referrer, uint256 base, uint256 premium);
+        event NameRenewed(uint256 indexed tokenId, string label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 referrer, uint256 base);
     }
 }
 mod current {
     use super::*;
     sol! {
         event NameRegistered(uint256 indexed tokenId, string label, address owner, address subregistry, address resolver, uint64 duration, address paymentToken, bytes32 indexed referrer, uint256 base, uint256 premium);
+        event NameRenewed(uint256 indexed tokenId, string label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 indexed referrer, uint256 amount);
     }
 }
 mod registry {
@@ -31,24 +33,37 @@ sol! {
 }
 
 async fn admit_family(database: &TestDatabase, family: &str, id: i64) -> Result<Value> {
+    admit_family_from(database, "sepolia", CHAIN, family, id).await
+}
+
+pub(super) async fn admit_family_from(
+    database: &TestDatabase,
+    profile: &str,
+    chain: &str,
+    family: &str,
+    id: i64,
+) -> Result<Value> {
     let repository = bigname_manifests::load_repository(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests/sepolia"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../manifests/{profile}")),
     )?;
     let mut source = repository
         .manifests()
         .iter()
-        .find(|m| m.manifest.source_family == family)
+        .find(|m| {
+            m.manifest.source_family == family
+                && m.manifest.rollout_status == bigname_manifests::RolloutStatus::Active
+        })
         .context("fixture source manifest")?
         .manifest
         .clone();
-    source.chain = CHAIN.into();
+    source.chain = chain.into();
     source.rollout_status = bigname_manifests::RolloutStatus::Active;
     let manifest = ManifestInput {
         manifest_id: id,
         manifest_version: source.manifest_version as i64,
         namespace: source.namespace.clone(),
         source_family: source.source_family.clone(),
-        chain_id: CHAIN.into(),
+        chain_id: chain.into(),
         deployment_label: source.deployment_epoch.clone(),
         normalizer_version: source.normalizer_version.clone(),
         payload_json: serde_json::to_string(&source)?,
@@ -62,16 +77,16 @@ async fn admit_family(database: &TestDatabase, family: &str, id: i64) -> Result<
     for (index, contract) in source.contracts.iter().enumerate() {
         let instance = Uuid::from_u128((id * 100 + index as i64) as u128);
         sqlx::query("INSERT INTO contract_instances (contract_instance_id,chain_id,contract_kind) VALUES ($1,$2,'contract')")
-            .bind(instance).bind(CHAIN).execute(&database.pool).await?;
+            .bind(instance).bind(chain).execute(&database.pool).await?;
         sqlx::query("INSERT INTO contract_instance_addresses (contract_instance_id,chain_id,address,active_from_block_number,source_manifest_id) VALUES ($1,$2,lower($3),0,$4)")
-            .bind(instance).bind(CHAIN).bind(&contract.address).bind(id).execute(&database.pool).await?;
+            .bind(instance).bind(chain).bind(&contract.address).bind(id).execute(&database.pool).await?;
         sqlx::query("INSERT INTO manifest_contract_instances (manifest_id,chain_id,declaration_kind,declaration_name,contract_instance_id,declared_address,role,proxy_kind,start_block_number) VALUES ($1,$2,'contract',$3,$4,lower($5),$3,$6,0)")
-            .bind(id).bind(CHAIN).bind(&contract.role).bind(instance).bind(&contract.address).bind(&contract.proxy_kind).execute(&database.pool).await?;
+            .bind(id).bind(chain).bind(&contract.role).bind(instance).bind(&contract.address).bind(&contract.proxy_kind).execute(&database.pool).await?;
     }
     Ok(serde_json::to_value(&source)?)
 }
 
-fn role_address(manifest: &Value, role: &str) -> Address {
+pub(super) fn role_address(manifest: &Value, role: &str) -> Address {
     manifest["contracts"]
         .as_array()
         .unwrap()
@@ -206,42 +221,76 @@ async fn registry_token_ids_follow_migration_and_decode_both_registrar_layouts()
         // Both ABI eras observe the registration, but the later registry regeneration is
         // authoritative. A registrar observation never becomes a token-selector candidate.
         let historical_topics = registrar_topics.unwrap_or(false);
-        let data = if historical_topics {
-            legacy::NameRegistered {
-                tokenId: token(0),
-                label: LABEL.into(),
-                owner: HOLDER.parse()?,
-                subregistry: Address::ZERO,
-                resolver: Address::ZERO,
-                duration: 31536000,
-                paymentToken: Address::ZERO,
-                referrer: Default::default(),
-                base: U256::ZERO,
-                premium: U256::ZERO,
-            }
-            .encode_log_data()
-        } else {
-            current::NameRegistered {
-                tokenId: token(0),
-                label: LABEL.into(),
-                owner: HOLDER.parse()?,
-                subregistry: Address::ZERO,
-                resolver: Address::ZERO,
-                duration: 31536000,
-                paymentToken: Address::ZERO,
-                referrer: Default::default(),
-                base: U256::ZERO,
-                premium: U256::ZERO,
-            }
-            .encode_log_data()
-        };
+        let data = payment_observation(historical_topics, LABEL, token(0), U256::MAX)?;
         assert_eq!(data.topics().len(), if historical_topics { 2 } else { 3 });
         let mut observation = raw(data, 120, 10);
         observation.emitting_address = format!("{:#x}", role_address(&registrar, "registrar"));
         if registrar_topics.is_some() {
             logs = super::registration(0, 0, 120);
+            let registrar_address = role_address(&registrar, "registrar");
+            logs[0] = raw(
+                LabelRegistered {
+                    tokenId: token(0),
+                    labelHash: keccak256(LABEL),
+                    label: LABEL.into(),
+                    owner: HOLDER.parse()?,
+                    expiry: 1_900_000_000,
+                    sender: registrar_address,
+                }
+                .encode_log_data(),
+                120,
+                0,
+            );
+            logs[1] = raw(
+                TransferSingle {
+                    operator: registrar_address,
+                    from: Address::ZERO,
+                    to: HOLDER.parse()?,
+                    id: token(0),
+                    value: U256::from(1),
+                }
+                .encode_log_data(),
+                120,
+                1,
+            );
             observation.log_index = 4;
             logs.push(observation);
+            logs.push(raw(
+                ExpiryUpdated {
+                    tokenId: token(1),
+                    newExpiry: 1_900_001_000,
+                    sender: registrar_address,
+                }
+                .encode_log_data(),
+                122,
+                0,
+            ));
+            let renewed = if historical_topics {
+                legacy::NameRenewed {
+                    tokenId: token(1),
+                    label: LABEL.into(),
+                    duration: 1000,
+                    newExpiry: 1_900_001_000,
+                    paymentToken: GRANTEE.parse()?,
+                    referrer: Default::default(),
+                    base: U256::ZERO,
+                }
+                .encode_log_data()
+            } else {
+                current::NameRenewed {
+                    tokenId: token(1),
+                    label: LABEL.into(),
+                    duration: 1000,
+                    newExpiry: 1_900_001_000,
+                    paymentToken: GRANTEE.parse()?,
+                    referrer: Default::default(),
+                    amount: U256::ZERO,
+                }
+                .encode_log_data()
+            };
+            let mut renewal = raw(renewed, 122, 1);
+            renewal.emitting_address = format!("{registrar_address:#x}");
+            logs.push(renewal);
         }
         logs.extend(lifecycle.into_iter().filter(|log| log.block_number == 121));
         seed_interpret(&database, &manifest, &logs).await?;
@@ -296,8 +345,81 @@ async fn registry_token_ids_follow_migration_and_decode_both_registrar_layouts()
             assert_eq!(evidence[0].0, "RegistrarNameRegistered");
             assert_eq!(evidence[0].2["token_id"], format!("{:#066x}", token(0)));
         }
+        if registrar_topics.is_some() {
+            engine
+                .run_batch(bigname_interpret::BatchRequest {
+                    chain_id: CHAIN.into(),
+                    from_block: 122,
+                    to_block: 122,
+                    resume_current: None,
+                    mode: bigname_interpret::RunMode::Normal,
+                })
+                .await?;
+            routes::publish(&database, 122).await?;
+            let retained:Value=sqlx::query_scalar("SELECT after_state FROM normalized_events WHERE event_kind='RegistrationRenewed' AND source_family='ens_v2_registrar_l1'").fetch_one(&database.pool).await?;
+            assert_eq!(
+                retained[if historical_topics { "base" } else { "amount" }],
+                "0"
+            );
+            let (_, body) = read_family_response(
+                &database,
+                &format!("/v1/events?name={NAME}&include=data,raw&from_block=122&to_block=122"),
+            )
+            .await?;
+            let rows = body["data"].as_array().context("renewal rows")?;
+            let paid = rows
+                .iter()
+                .filter(|r| r["data"].get("cost").is_some())
+                .collect::<Vec<_>>();
+            assert_eq!(paid.len(), 1, "{body:#}");
+            assert_eq!(paid[0]["kind"], "RegistrationRenewed");
+            assert_eq!(paid[0]["data"]["cost"], "0");
+            assert_eq!(
+                paid[0]["data"]["payment_token"],
+                json!({"chain_id":1,"address":GRANTEE})
+            );
+            assert_eq!(paid[0]["data"]["canonical_id"], token(0).to_string());
+        }
+        super::history::assert_registration_payment(&database, registrar_topics.is_some()).await?;
         pool.close().await;
         database.cleanup().await?;
     }
     Ok(())
+}
+
+pub(super) fn payment_observation(
+    historical: bool,
+    label: &str,
+    id: U256,
+    base: U256,
+) -> Result<alloy_primitives::LogData> {
+    Ok(if historical {
+        legacy::NameRegistered {
+            tokenId: id,
+            label: label.into(),
+            owner: HOLDER.parse()?,
+            subregistry: Address::ZERO,
+            resolver: Address::ZERO,
+            duration: 31536000,
+            paymentToken: GRANTEE.parse()?,
+            referrer: Default::default(),
+            base,
+            premium: U256::ZERO,
+        }
+        .encode_log_data()
+    } else {
+        current::NameRegistered {
+            tokenId: id,
+            label: label.into(),
+            owner: HOLDER.parse()?,
+            subregistry: Address::ZERO,
+            resolver: Address::ZERO,
+            duration: 31536000,
+            paymentToken: GRANTEE.parse()?,
+            referrer: Default::default(),
+            base,
+            premium: U256::ZERO,
+        }
+        .encode_log_data()
+    })
 }

@@ -45,6 +45,7 @@ impl HistoryAnchorReadControl {
 pub enum HistoryReadHookPoint {
     AfterAnchors,
     AfterPage,
+    AfterContext,
 }
 
 static HOOKS: OnceLock<Mutex<HashMap<(String, HistoryReadHookPoint), HistoryAnchorReadHook>>> =
