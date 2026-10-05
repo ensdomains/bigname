@@ -49,7 +49,7 @@ pub async fn resource_wrapped_a_registrar_lease(pool: &PgPool, resource_id: Uuid
 }
 
 pub async fn permission_resource_matches_namespace(
-    pool: &PgPool,
+    conn: &mut sqlx::PgConnection,
     resource_id: Uuid,
     namespace: &str,
 ) -> Result<bool> {
@@ -66,7 +66,7 @@ pub async fn permission_resource_matches_namespace(
     )
     .bind(resource_id)
     .bind(namespace)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .context("failed to check permission resource namespace")
 }
