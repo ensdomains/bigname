@@ -19,6 +19,9 @@ mod record_id_resolver;
 #[path = "tests/resolver_announcements.rs"]
 mod resolver_announcements;
 
+#[path = "tests/v2_registry_operators.rs"]
+mod v2_registry_operators;
+
 #[path = "tests/v1_pre_surface_resolver.rs"]
 mod v1_pre_surface_resolver;
 

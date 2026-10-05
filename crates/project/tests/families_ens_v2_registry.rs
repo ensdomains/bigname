@@ -354,7 +354,13 @@ async fn entry_row(fixture: &Fixture, registry: &str, label: &str) -> Result<Val
         .with_context(|| format!("no entry row for {label} in {registry}"))
 }
 
-fn assert_entry(row: &Value, status: &str, owner: Option<&str>, token: U256, resource: Option<U256>) {
+fn assert_entry(
+    row: &Value,
+    status: &str,
+    owner: Option<&str>,
+    token: U256,
+    resource: Option<U256>,
+) {
     assert_eq!(row["status"], status, "{row:#}");
     assert_eq!(row["owner"], json!(owner), "{row:#}");
     assert_eq!(row["token_id"], word(token), "{row:#}");
