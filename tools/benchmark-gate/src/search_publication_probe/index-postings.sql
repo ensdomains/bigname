@@ -1,3 +1,0 @@
-ALTER TABLE tyr228_publication_http_20261005_r1.tyr228_postings ADD PRIMARY KEY(namespace,spelling_class,token_kind,token_length,token_bytes,search_id);
-CREATE INDEX tyr228_postings_reverse_idx ON tyr228_publication_http_20261005_r1.tyr228_postings(search_id,token_kind,token_length,token_bytes);
-ANALYZE tyr228_publication_http_20261005_r1.tyr228_postings;
