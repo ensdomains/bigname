@@ -62,7 +62,7 @@ pub(super) async fn run(
     let digest = verify(&path, &metadata)?;
     let repository = bigname_manifests::load_repository(directory.join("manifests"))?;
     // Reject modified fixture declarations before schema initialization.
-    for manifest in &repository.manifests()[..] {
+    for manifest in repository.manifests() {
         let expected = metadata["manifests"]
             .as_array()
             .context("missing manifest receipts")?

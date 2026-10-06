@@ -38,7 +38,7 @@ pub(super) enum ResolverCohort {
 impl Node {
     pub(super) fn byte_observation(&self) -> ByteObservation {
         let local = self.ordinal % GROUP_SIZE;
-        if (600..650).contains(&local) && local % 5 == 0 {
+        if (600..650).contains(&local) && local.is_multiple_of(5) {
             ByteObservation::Invalid
         } else if local % 5 == 1 {
             ByteObservation::Valid
@@ -146,7 +146,7 @@ impl Recipe {
     fn push(&mut self, parent: Option<u32>, label: String) -> u32 {
         let ordinal = self.nodes.len() as u32;
         let local = ordinal % GROUP_SIZE;
-        let invalid = (600..650).contains(&local) && local % 5 == 0;
+        let invalid = (600..650).contains(&local) && local.is_multiple_of(5);
         let raw_label = if invalid {
             let mut raw = vec![0xff];
             raw.extend_from_slice(label.as_bytes());

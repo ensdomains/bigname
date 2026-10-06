@@ -153,7 +153,7 @@ async fn absent_label_import_waits_for_new_structural_surface_then_refreshes_it(
     identity_search::prepare(
         &mut creator,
         &[],
-        &[path.clone()],
+        std::slice::from_ref(&path),
         std::slice::from_ref(&id),
     )
     .await?;
@@ -285,7 +285,7 @@ async fn colliding_buckets_serialize_complete_multi_name_work_without_lock_upgra
     let mut first = db.pool().begin().await?;
     identity_search::prepare(
         &mut first,
-        &[hashes[a].clone()],
+        std::slice::from_ref(&hashes[a]),
         &[vec![hashes[b].clone()]],
         &ids,
     )
