@@ -43,6 +43,11 @@ pub(crate) use resolvers::generation_test_hooks as resolver_generation_test_hook
 mod restrictions;
 mod router;
 mod search;
+#[cfg(test)]
+pub(crate) use search::{
+    build_compact_search_name as build_compact_search_name_for_test,
+    build_search_name as build_search_name_for_test,
+};
 mod snapshots;
 mod status;
 mod strict_query;

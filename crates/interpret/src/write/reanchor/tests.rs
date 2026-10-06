@@ -411,3 +411,62 @@ async fn same_block_null_positions_repair_identity_and_plain_timestamp() -> Test
     database.cleanup().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn real_batch_redo_replaces_lost_raw_search_evidence_atomically() -> TestResult {
+    let database = database("interpret_search_witness_redo").await?;
+    for sql in [
+        include_str!("../../../../storage/schema/baseline/02_raw_facts.sql"),
+        include_str!("../../../../storage/schema/baseline/06_projections.sql"),
+        include_str!("../../../../storage/schema/baseline/07_labels.sql"),
+        include_str!("../../../../storage/schema/baseline/08_heartbeats.sql"),
+        include_str!("../../../../storage/schema/baseline/09_divergence.sql"),
+        include_str!("../../../../storage/schema/baseline/10_phase_state.sql"),
+        include_str!("../../../../storage/schema/baseline/11_manifest_authority_attestations.sql"),
+        include_str!("../../../../storage/schema/baseline/12_project_generation_failures.sql"),
+        include_str!("../../../../storage/schema/baseline/13_interpret_decode_skips.sql"),
+        include_str!("../../../../storage/schema/baseline/14_discovery_watch_admissions.sql"),
+    ] {
+        sqlx::raw_sql(sql).execute(database.pool()).await?;
+    }
+    insert_surface(database.pool(), 1, Some(3), false).await?;
+    insert_hash_path_observation(database.pool(), 1).await?;
+    insert_preimage(database.pool(), 3).await?;
+    let mut tx = database.pool().begin().await?;
+    bigname_storage::identity_search::prepare(&mut tx, &[], &[], &[NAME.to_owned()]).await?;
+    bigname_storage::identity_search::refresh(&mut tx, &[NAME.to_owned()], &[]).await?;
+    tx.commit().await?;
+    let before: (String, i16) =
+        sqlx::query_as("SELECT name,spelling_class FROM name_search_documents")
+            .fetch_one(database.pool())
+            .await?;
+    assert_eq!(before, ("child.eth".to_owned(), 0));
+    let expected = [(3, "0x03".to_owned()), (4, "0x04".to_owned())];
+    for _ in 0..2 {
+        super::super::batch(
+            database.pool(),
+            CHAIN,
+            Some((3, 4)),
+            true,
+            true,
+            0,
+            &expected,
+            &bigname_adapters::schema_v2::BatchOutput::default(),
+        )
+        .await?;
+        let after: (String, i16) =
+            sqlx::query_as("SELECT name,spelling_class FROM name_search_documents")
+                .fetch_one(database.pool())
+                .await?;
+        assert!(after.0.starts_with('['));
+        assert_eq!(after.1, 1);
+        let stale: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM name_search_postings WHERE spelling_class=0")
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(stale, 0);
+    }
+    assert_eq!(stored(database.pool()).await?.0, None);
+    database.cleanup().await?;
+    Ok(())
+}

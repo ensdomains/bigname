@@ -374,9 +374,15 @@ async fn refresh_derived(
         stats,
     )
     .await?;
+    let (rows, undo_rows) =
+        super::derived::refresh_search_cutover(transaction, chain_id, block).await?;
+    *stats.rows.entry(NAME_SUMMARY.name).or_default() += rows;
+    stats.undo_rows += undo_rows;
     Ok(())
 }
 
+/// Journal each family once. The summary-only cutover pass may revisit a summary key;
+/// preserve that key's first before-image while keeping duplicate checks for other families.
 pub(crate) async fn insert_journal(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -388,7 +394,11 @@ pub(crate) async fn insert_journal(
              chain_id, block_number, block_hash, family, key, before_image
          )
          SELECT $1, $2, $3, entry.family, entry.key, NULLIF(entry.before_image, 'null'::jsonb)
-         FROM jsonb_to_recordset($4) AS entry(family text, key text, before_image jsonb)",
+         FROM jsonb_to_recordset($4) AS entry(family text, key text, before_image jsonb)
+         WHERE entry.family <> 'project_name_summary' OR NOT EXISTS (
+             SELECT 1 FROM project_family_undo prior
+             WHERE prior.chain_id=$1 AND prior.block_number=$2
+               AND prior.family=entry.family AND prior.key=entry.key)",
     )
     .bind(chain_id)
     .bind(block.number)

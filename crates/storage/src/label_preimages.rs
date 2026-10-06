@@ -156,6 +156,11 @@ async fn insert_label_preimages(pool: &PgPool, preimages: &[RainbowPreimage]) ->
         .map(|_| provenance.clone())
         .collect::<Vec<_>>();
 
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        .execute(&mut *transaction)
+        .await?;
+    crate::identity_search::prepare(&mut transaction, &labelhashes, &[], &[]).await?;
     let inserted = sqlx::query_scalar::<_, String>(
         r#"
         INSERT INTO label_preimages (
@@ -187,10 +192,11 @@ async fn insert_label_preimages(pool: &PgPool, preimages: &[RainbowPreimage]) ->
     .bind(&source_kinds)
     .bind(&source_priorities)
     .bind(&provenances)
-    .fetch_all(pool)
+    .fetch_all(&mut *transaction)
     .await
     .context("failed to insert verified rainbow label preimages")?;
-
+    crate::identity_search::refresh(&mut transaction, &[], &inserted).await?;
+    transaction.commit().await?;
     Ok(inserted.len() as u64)
 }
 
@@ -268,3 +274,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "label_preimages/search_tests.rs"]
+mod search_tests;

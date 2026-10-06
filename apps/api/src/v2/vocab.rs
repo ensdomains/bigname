@@ -2,12 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{V2Error, V2Result};
 
-#[path = "vocab/wrapper_fuses.rs"]
-mod wrapper_fuses;
-pub(crate) use wrapper_fuses::WrapperFuses;
-#[path = "vocab/wrapper_state.rs"]
-mod wrapper_state;
-pub(crate) use wrapper_state::WrapperState;
+pub(crate) use bigname_storage::public_name_fields::{WrapperFuses, WrapperState};
 
 #[path = "vocab/authority.rs"]
 mod authority;
@@ -86,15 +81,7 @@ impl HistoryScope {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum RegistrationStatus {
-    Active,
-    Wrapped,
-    Registered,
-    Released,
-    Unregistered,
-}
+pub(crate) use bigname_storage::public_name_fields::RegistrationStatus;
 
 /// How a permission row may be read. `CurrentForName` is claimed only when a
 /// `name` filter selected the row's current registration for that name;

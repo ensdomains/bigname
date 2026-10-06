@@ -27,6 +27,8 @@ pub(crate) const COMPOSITION_FILES: &[&str] = &[
     "crates/storage/src/families/name/batch.rs",
     "crates/storage/src/families/name/compose.rs",
     "crates/storage/src/families/name/heads.rs",
+    "crates/storage/src/families/name/wrapper_fields.rs",
+    "crates/storage/src/families/search_dictionary/shape.rs",
     // The expiry listing's eligibility and public authority, which the summary stores.
     "crates/storage/src/families/name/list_keys.rs",
     "crates/storage/src/families/name/loaders.rs",
@@ -60,6 +62,10 @@ pub(crate) const COMPOSITION_FILES: &[&str] = &[
 
 /// Serving reads and module wiring the composition does not call.
 const READER_FILES: &[&str] = &[
+    "crates/storage/src/families/search_dictionary.rs",
+    "crates/storage/src/families/search_dictionary/candidates.rs",
+    "crates/storage/src/families/search_dictionary/pointer_parity.rs",
+    "crates/storage/src/families/name/basenames_context.rs",
     "crates/storage/src/families/mod.rs",
     "crates/storage/src/families/control/mod.rs",
     "crates/storage/src/families/control/permissions/candidates.rs",
@@ -75,6 +81,8 @@ const READER_FILES: &[&str] = &[
     // The composed-row listings and the API-side topology enrichment (`batch::load`).
     "crates/storage/src/families/name/bound.rs",
     "crates/storage/src/families/name/list.rs",
+    "crates/storage/src/families/name/list/search_rows.rs",
+    "crates/storage/src/families/name/list/search_test_support.rs",
     "crates/storage/src/families/name/list/expiring.rs",
     // Test-support measurement of the read-only selector; no Project caller.
     "crates/storage/src/families/name/list/expiring/measure.rs",

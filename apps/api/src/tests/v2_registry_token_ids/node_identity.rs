@@ -482,6 +482,7 @@ async fn produced_node_names_agree_across_ranges_restarts_redo_and_public_routes
         )
         .await?;
         assert!(search.to_string().contains(&name), "{search:#}");
+        assert_search_lean_pages_match(&database, &lean_filter("ens", "a"), 1).await?;
         let response = v2_lookup_response_for_database_with_public_namespaces(
             &database,
             "/v1/lookup",
@@ -675,6 +676,7 @@ async fn produced_identity_enriches_only_at_publication_and_reanchors_after_stru
     assert_eq!(after["created_at"], before["created_at"]);
     assert_eq!(after["registration_status"], "wrapped");
     assert_eq!(after["owner"], HOLDER);
+    assert_search_lean_pages_match(&database, &lean_filter("ens", "eth"), 1).await?;
     replace_branch(&database, 121, 122, 1, &logs[2..]).await?;
     redo(&database, 121, 122, 122).await?;
     let reanchored = detail(&database, &labels).await?;
@@ -703,6 +705,78 @@ mod recovery {
         event RegistryCreated();
         event RawParentUpdated(address indexed parent, bytes label, address indexed sender);
     }
+}
+
+// Root TLD observations are real candidates but their current authority is not projected.
+// Put them between two supported children so the smaller search batch must keep walking.
+#[tokio::test]
+async fn produced_search_lean_walks_an_unsupported_interval() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let manifest =
+        admit_family_from(&database, "mainnet", CHAIN, "ens_v1_registry_l1", 2281).await?;
+    let registry = role_address(&manifest, "registry");
+    let holder = HOLDER.parse()?;
+    let mut logs = vec![owner(B256::ZERO, b"eth", holder, registry, 120, 0)];
+    let mut labels = vec!["eth".to_owned(), "lean000".to_owned(), "lean999".to_owned()];
+    for index in 0..32 {
+        let label = format!("lean1{index:02}");
+        logs.push(owner(
+            B256::ZERO,
+            label.as_bytes(),
+            holder,
+            registry,
+            120,
+            index + 1,
+        ));
+        labels.push(label);
+    }
+    for (index, label) in [b"lean000", b"lean999"].iter().enumerate() {
+        logs.push(owner(
+            node(&[b"eth"]),
+            *label,
+            holder,
+            registry,
+            121,
+            index as i64,
+        ));
+    }
+    intake(&database, &logs, 121).await?;
+    run(
+        &bigname_interpret::Engine::new(database.pool.clone()),
+        120,
+        121,
+        bigname_interpret::RunMode::Normal,
+    )
+    .await?;
+    publish(&database, 121).await?;
+    for label in &labels {
+        insert_family_label_preimage(&database.pool, label.as_bytes()).await?;
+    }
+    let tld = bigname_storage::families::name::load_family_name(
+        &database.pool,
+        &format!("ens:{:#x}", node(&[b"lean100"])),
+    )
+    .await?
+    .context("the actual TLD observation must compose")?;
+    assert_eq!(tld.coverage["status"], "unsupported");
+    let filter = lean_filter("ens", "lean");
+    let rows = assert_search_lean_pages_match(&database, &filter, 1).await?;
+    assert_eq!(
+        rows.iter()
+            .map(|row| row["name"].clone())
+            .collect::<Vec<_>>(),
+        [json!("lean000.eth"), json!("lean999.eth")]
+    );
+    let pages = read_family_pages(&database, "/v1/search?q=lean&namespace=ens&page_size=1").await?;
+    assert_eq!(pages.len(), 2);
+    assert_eq!(
+        pages
+            .iter()
+            .flat_map(|page| page["data"].as_array().unwrap().iter().cloned())
+            .collect::<Vec<_>>(),
+        rows
+    );
+    database.cleanup().await
 }
 
 #[tokio::test]

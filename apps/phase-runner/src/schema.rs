@@ -29,6 +29,8 @@ const EXPECTED_TABLES: &[&str] = &[
     "migration_discovery_associations",
     "migration_event_associations",
     "name_surfaces",
+    "name_search_documents",
+    "name_search_postings",
     "normalized_events",
     "project_family_marker",
     "project_family_undo",

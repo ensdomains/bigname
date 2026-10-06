@@ -207,7 +207,8 @@ under `raw_name` and the read does not consult `label_preimages` for it. The
 composition Project's name summary step shares uses only the bracketed form
 and reads no label preimage, and the summary stores no name text, so a
 preimage import changes the served name on the next read and changes no
-stored row. The same rendered name orders such a row in name-sorted lists,
+Project summary. The same transaction updates the identity-owned search document
+and postings described below. The same rendered name orders such a row in name-sorted lists,
 names it as a parent of its children, and is what the `parent` and `q` filters
 compare.
 
@@ -225,7 +226,62 @@ only takes the current normalizer version. When it newly rejects a row's
 bytes, `deactivated_at` comes from the row's anchor, or from its preimage
 witness when that event lies after the anchor: in a later block, or at a later
 log index in the anchor's block. A rainbow-table import never fills
-the raw bundle; it writes `label_preimages` only.
+the raw bundle; it writes `label_preimages` and atomically refreshes the search
+documents of affected structural identities.
+
+### Durable search data
+
+Search splits identity spelling from public registration fields. Interpret and the
+verified preimage importer maintain one `name_search_documents` row per text-eligible
+active identity, with its exact candidate spelling, byte-length class and optional
+raw-backed display override. Structural names keep display equal to their rendered
+spelling. `name_search_postings` stores Unicode-scalar contains tokens of lengths
+one through three and anchored prefix tokens; its document foreign key removes
+obsolete postings with a document. The reverse GIN index on structural `name_surfaces.labelhashes`
+covers their complete paths so a changed verified label can find every affected name.
+These are rebuildable identity derivations, without their own publication marker.
+Documents may retain an orphaned anchor; the reader always rechecks canonical
+lineage and the current publication before serving a candidate.
+
+A writer determines its full label lock set before changing labels or surfaces:
+256 fixed advisory label buckets, exclusive for changed served labels and shared
+for other path labels, with exclusive winning when paths share a bucket. It
+locks buckets in increasing order, then every affected existing `name_surfaces`
+row in logical-name order, before changing any source row. A bucket collision
+can serialize unrelated writers; readers take none of these locks. It never
+upgrades a shared bucket or acquires a new one after a row lock. Label
+updates, affected document replacements, length-class changes and exact posting
+set replacement commit atomically. An aborted import or Interpret write exposes
+none of those changes. Reorg re-anchoring and normalizer recompute use the same
+writer; retained verified preimages are not deleted with a chain observation.
+
+Project extends its existing `project_name_summary` with `search_supported`,
+`search_fields` and `search_creation_transport_resource_id`. The supported payload
+holds the shared public registration and ENSv1 fields, including resolved wrapper
+expiry, preserving omitted fields separately from explicit JSON null. It uses
+existing summary `owner` and `public_authority`; no name text or selected
+publication timestamp is copied into the payload. Missing data for an admitted
+supported row is an integrity error. API code never populates these tables.
+
+The search reader selects the bounded token probe or complete ordered fallback,
+rechecks current identity eligibility, exact text match and supported summary
+before the final page limit, and reads fields and creation context on one snapshot.
+The probe threshold is a strategy choice, never a result limit. Declared creation
+wins; otherwise the reader uses the current admitted publication timestamp and,
+for the existing Basenames transport shape, the live batched pointer and Ethereum
+context qualifiers. An L1-only advancement therefore requires no Base-wide write.
+Readiness retains the existing Interpret fingerprint, redo and Project publication
+fences; table existence alone cannot admit a partial derivation.
+
+The search route keeps its existing global and explicit-namespace admission and disclosure.
+On a ready scope it checks the captured Project generation on the request's repeatable-read
+connection even for an empty page. A selected match without a finished summary or matching
+identity document is an integrity error; it is never silently omitted or rebuilt by the API.
+An explicit scope without a selected publication keeps the original lexical candidate walk:
+matching source publications are checked before unsupported rows are omitted. Thus a stale
+matching publication still returns stale, while a truly empty lexical page retains the existing
+unavailable metadata. Post-request scope revalidation remains in place. Search does not adopt
+the different admission policy of the other collection routes.
 
 ### Binding intervals and authority arms
 
@@ -306,6 +362,7 @@ The candidate SQL can inspect or sort more index entries than it returns, and
 masked candidates can require additional seeks; production query plans and
 latency still require production-scale qualification before activation.
 
+
 ## Table ownership
 
 | Family | Writer | Meaning |
@@ -315,6 +372,7 @@ latency still require production-scale qualification before activation.
 | `manifest_*` | manifest synchronization | Authored source declarations and admitted capability versions. |
 | `discovery_*` | Interpret | Canonical discovered edges and admission evidence. |
 | `name_surfaces`, `surface_bindings`, `resources`, `token_lineages` | Interpret | Stable identity anchors. |
+| `name_search_documents`, `name_search_postings` | Interpret and the verified label-preimage importer | Atomic current spelling and lexical indexes; rebuilt from surface and retained verified label evidence. |
 | `label_preimages` | Interpret and `phase-runner label-preimages import-ens-rainbow` | Verified labelhash-to-label observations from chain events and the proof-checked rainbow import. |
 | `ens_names` | operator rainbow load | Unverified rainbow-table candidates consumed by the import command. |
 | `normalized_events` | Interpret; manifest synchronization for `SourceManifestUpdated` only | Protocol events normalized transactionally with identity output, plus retained manifest-authority history. Manifest synchronization's rows must not be deleted or rebuilt as Interpret output: [discovery-rule widening checks](glossary.md#discovery-rule-widening-and-narrowing) reconstruct historical declaration floors from them. |

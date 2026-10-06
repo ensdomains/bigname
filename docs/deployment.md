@@ -3222,3 +3222,14 @@ other changes in that release; an earlier hash does not. Preserve raw facts
 and verify that intermediary migrations publish their current ENSv2
 registration with no active ENSv1 predecessor, including after a later ENSv1
 renewal of that retired lease.
+
+### Durable search derivation rollout
+
+The durable search schema requires a full Interpret re-derivation under the
+new compiled fingerprint followed by a Project rebuild. Install the schema
+first, keep API readiness fenced during re-derivation, and admit the candidate
+only after both phases publish complete matching state. The migration does not
+backfill a plausible search payload from old summaries or mark an empty lexical
+index ready. The shared field shaper, token writer, identity hooks and Project
+writer participate in the interpreter fingerprint; fresh build outputs must
+prove the rotation and unchanged deployment-profile hashes.

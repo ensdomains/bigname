@@ -2001,8 +2001,25 @@ changed is journalled and written like any other family row, so an undo
 restores it from the journal and composes nothing; a rebuild composes every
 surfaced name.
 
-A stored summary is therefore refreshed only when a block touches the name or
-its scheduled boundary passes, and the work list is deliberately no wider.
+The summary also stores the supported search row's public registration fields,
+shaped by the same pure functions as the API. The publication transaction attaches
+the stored wrapper expiry with the existing batched reader before serializing;
+no deferred marker can be persisted. Exact seconds, omitted expiry, explicit null
+and the reason for null survive a JSONB round trip. Search reads existing owner
+and public authority columns. Creation stores only declared evidence and an
+optional Basenames resource recipe; its publication-clock fallback remains live.
+
+A Universal Resolver proxy or declaration change additionally refreshes every
+readable ENS second-level `.eth` identity, selected by its two-label hash path.
+After the ordinary summary and address-history refresh, this rare pass walks
+1,000 names at a time and writes each chunk within the same transaction. It
+computes only summaries and accumulates no address-history relations. Overlap
+with ordinary work is a no-op when the complete summary is equal. A repeated
+write in the same block preserves the first before-image, so undo restores the
+state before publication. The marker advances only after every chunk succeeds.
+
+A stored summary is therefore refreshed when a block touches the name, its
+scheduled boundary passes, or the explicitly bounded cutover pass requires it.
 Inputs that change in place without either, such as a normalizer recompute of
 a surface's visibility or a lineage readability flip, are covered because a
 recompute only happens with a code change that rotates the interpreter

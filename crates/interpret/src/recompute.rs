@@ -1,3 +1,4 @@
+mod search;
 use std::str;
 
 use bigname_adapters::schema_v2::seam::PREIMAGE_OBSERVATION_EVENT_KIND;
@@ -8,11 +9,10 @@ use time::OffsetDateTime;
 
 use crate::{InterpretError, Result};
 
-// Mirrors bigname_storage::ENS_RAINBOW_SOURCE_KIND; interpret does not depend on storage.
 // Rainbow-imported rows carry no chain coordinates in their provenance, so the recompute
 // selection below matches them by source kind, chain-independently: one chain's pass
 // repairs every rainbow row.
-const RAINBOW_IMPORT_SOURCE_KIND: &str = "ens_rainbow_import";
+const RAINBOW_IMPORT_SOURCE_KIND: &str = bigname_storage::ENS_RAINBOW_SOURCE_KIND;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RecomputeSummary {
@@ -84,7 +84,22 @@ pub(super) async fn run(
     let mut transaction = pool.begin().await.map_err(|error| {
         InterpretError::database("failed to begin normalization-flag recompute", error)
     })?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| {
+            InterpretError::database("failed to set normalization write isolation", error)
+        })?;
     let labels = load_labels(&mut transaction, chain_id, from_block, to_block).await?;
+    let labelhashes: Vec<String> = labels.iter().map(|label| label.labelhash.clone()).collect();
+    let search_names = search::lock(
+        &mut transaction,
+        chain_id,
+        from_block,
+        to_block,
+        &labelhashes,
+    )
+    .await?;
     for label in &labels {
         let flag = normalization_flag(&label.raw_label);
         sqlx::query(
@@ -114,6 +129,9 @@ pub(super) async fn run(
             same_class_names = same_class_names.saturating_add(1);
         }
     }
+    bigname_storage::identity_search::refresh(&mut transaction, &search_names, &labelhashes)
+        .await
+        .map_err(search::failure)?;
     transaction.commit().await.map_err(|error| {
         InterpretError::database("failed to commit normalization-flag recompute", error)
     })?;
@@ -130,6 +148,7 @@ pub async fn finalize_recompute_flags(
     from_block: i64,
     to_block: i64,
 ) -> Result<RecomputeSummary> {
+    let search_names = search::lock(transaction, chain_id, from_block, to_block, &[]).await?;
     let surfaces = load_surfaces(transaction, chain_id, from_block, to_block).await?;
     let mut summary = RecomputeSummary::default();
     for surface in &surfaces {
@@ -167,6 +186,9 @@ pub async fn finalize_recompute_flags(
         }
         update_surface(transaction, surface, &desired).await?;
     }
+    bigname_storage::identity_search::refresh(transaction, &search_names, &[])
+        .await
+        .map_err(search::failure)?;
     Ok(summary)
 }
 
@@ -201,8 +223,7 @@ async fn load_labels(
                   AND event.after_state ->> 'labelhash' = preimage.labelhash
             )
             OR preimage.source_kind = '{RAINBOW_IMPORT_SOURCE_KIND}'
-         ORDER BY preimage.labelhash
-         FOR UPDATE"
+         ORDER BY preimage.labelhash"
     ))
     .bind(chain_id)
     .bind(from_block)

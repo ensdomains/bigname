@@ -21,7 +21,9 @@ url.workspace = true
 uuid.workspace = true
 
 bigname-content-hash.workspace = true
+bigname-domain.workspace = true
 bigname-interpret.workspace = true
+bigname-manifests.workspace = true
 bigname-lookup.workspace = true
 bigname-project.workspace = true
 phase-runner = { path = "../../apps/phase-runner" }
@@ -30,5 +32,4 @@ bigname-storage.workspace = true
 bigname-test-support.workspace = true
 
 [dev-dependencies]
-bigname-domain.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

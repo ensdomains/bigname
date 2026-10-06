@@ -644,3 +644,41 @@ $$;
 CREATE INDEX IF NOT EXISTS name_surfaces_project_label_hashes_idx ON name_surfaces USING gin(label_hashes(raw_labels));
 CREATE INDEX IF NOT EXISTS name_surfaces_project_suffix_hash_idx ON name_surfaces(namespace, hash_array_extended(raw_labels, 0));
 CREATE INDEX IF NOT EXISTS name_surfaces_project_node_idx ON name_surfaces(namespace, lower(namehash));
+
+-- Current spelling and lexical membership are derived atomically by Interpret and verified imports.
+CREATE TABLE IF NOT EXISTS name_search_documents (
+    search_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    logical_name_id text NOT NULL UNIQUE REFERENCES name_surfaces(logical_name_id) ON DELETE CASCADE,
+    chain_id text NOT NULL,
+    namespace text NOT NULL,
+    namehash text NOT NULL,
+    name text NOT NULL CHECK (name <> ''),
+    display_name_override text,
+    spelling_class smallint NOT NULL,
+    CONSTRAINT name_search_documents_class_check CHECK (
+        (spelling_class IN (0, 1) AND octet_length(name) <= 2000)
+        OR (spelling_class = 2 AND octet_length(name) > 2000)),
+    CONSTRAINT name_search_documents_display_check CHECK (
+        display_name_override IS NULL OR spelling_class = 0)
+);
+COMMENT ON TABLE name_search_documents IS
+    'Identity-derived current search spelling. Class 0 is raw-backed, 1 structural through 2000 bytes, 2 longer structural. Only raw-backed display may differ. Interpret and verified imports update this atomically with postings; Project owns no text.';
+CREATE INDEX IF NOT EXISTS name_search_documents_structural_order_idx
+    ON name_search_documents (name, namespace, namehash, logical_name_id)
+    WHERE spelling_class = 1;
+CREATE INDEX IF NOT EXISTS name_search_documents_class_idx
+    ON name_search_documents (namespace, spelling_class, search_id);
+CREATE TABLE IF NOT EXISTS name_search_postings (
+    namespace text NOT NULL,
+    spelling_class smallint NOT NULL CHECK (spelling_class BETWEEN 0 AND 2),
+    token_kind smallint NOT NULL CHECK (token_kind IN (1, 2)),
+    token_length smallint NOT NULL CHECK (token_length BETWEEN 1 AND 3),
+    token_bytes bytea NOT NULL CHECK (octet_length(token_bytes) BETWEEN 1 AND 12),
+    search_id bigint NOT NULL REFERENCES name_search_documents(search_id) ON DELETE CASCADE,
+    PRIMARY KEY (namespace, spelling_class, token_kind, token_length, token_bytes, search_id)
+);
+COMMENT ON TABLE name_search_postings IS
+    'Distinct Unicode-scalar contains (kind 1) and anchored-prefix (kind 2) tokens of lengths 1 through 3. The leading key supports a bounded ordered probe; search_id supports atomic exact membership replacement.';
+CREATE INDEX IF NOT EXISTS name_search_postings_document_idx ON name_search_postings (search_id);
+CREATE INDEX IF NOT EXISTS name_surfaces_search_labelhashes_idx
+    ON name_surfaces USING gin (labelhashes) WHERE raw_name IS NULL;

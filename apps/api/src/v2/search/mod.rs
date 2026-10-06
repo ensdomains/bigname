@@ -226,25 +226,35 @@ pub(crate) async fn get_search(
     if public_namespace_set.is_some() {
         public_namespace_read_test_hooks::run(&state.pool).await?;
     }
-    // The page and its wrapper expiries are read on one snapshot.
+    // Identity text, finished public fields and live creation context share one snapshot.
     let mut reads = bigname_storage::begin_read_snapshot(&state.pool)
         .await
         .map_err(|_| V2Error::internal_error("failed to load search results"))?;
+    if let Some(namespaces) = public_namespace_set.as_ref()
+        && !namespaces
+            .served_on(&mut reads)
+            .await
+            .map_err(api_error_to_v2)?
+    {
+        return Err(V2Error::conflict(
+            "search namespace position changed while the request was being read",
+        ));
+    }
+    if let Some(scope) = explicit_namespace_meta.as_ref()
+        && !scope.served_on(&mut reads).await?
+    {
+        return Err(V2Error::conflict(
+            "search namespace position changed while the request was being read",
+        ));
+    }
     let storage_page = load_search_storage_page(
         &mut reads,
         &filter,
         storage_cursor.as_ref(),
         params.page_size,
-    )
-    .await?;
-    let mut data = storage_page
-        .rows
-        .iter()
-        .map(build_search_name)
-        .collect::<V2Result<Vec<_>>>()?;
-    crate::v2::name_record::fill_wrapper_expiries(
-        &mut *reads,
-        data.iter_mut().filter_map(|name| name.ens_v1.as_mut()),
+        explicit_namespace_meta
+            .as_ref()
+            .is_none_or(|scope| scope.has_publication()),
     )
     .await?;
     // Closed before the revalidation below, which reads through the pool.
@@ -283,6 +293,11 @@ pub(crate) async fn get_search(
         .map(|cursor| search_position(cursor).map(|position| list.next(position)))
         .transpose()?;
     let has_more = next_cursor.is_some();
+    let data = storage_page
+        .rows
+        .iter()
+        .map(build_compact_search_name)
+        .collect::<V2Result<_>>()?;
     Ok(Json(Envelope {
         data,
         page: Some(Page {
@@ -294,6 +309,38 @@ pub(crate) async fn get_search(
         }),
         meta,
     }))
+}
+
+pub(crate) fn build_compact_search_name(
+    row: &bigname_storage::families::search_dictionary::SearchRow,
+) -> V2Result<SearchName> {
+    let registration = &row.fields.registration;
+    let authority = row
+        .authority
+        .as_deref()
+        .map(|value| {
+            crate::v2::vocab::Authority::from_wire(value)
+                .ok_or_else(|| V2Error::internal_error("stored search authority is invalid"))
+        })
+        .transpose()?;
+    Ok(SearchName {
+        name: row.name.clone(),
+        display_name: row.display_name.clone(),
+        namespace: row.namespace.clone(),
+        namehash: row.namehash.clone(),
+        owner: row.owner.clone(),
+        manager: registration.manager.clone(),
+        registration_status: registration.registration_status,
+        registered_at: registration.registered_at.clone(),
+        created_at: row.created_at.clone(),
+        expires_at: registration.expires_at.clone(),
+        expires_at_reason: registration.expires_at_reason.clone(),
+        grace_ends_at: registration.grace_ends_at.clone(),
+        authority,
+        ens_v1: row.fields.ens_v1.clone(),
+        lapsed_registration: None,
+        expires_window_index: None,
+    })
 }
 
 pub(crate) fn build_search_name(row: &NameCurrentListRow) -> V2Result<SearchName> {
@@ -390,14 +437,20 @@ async fn load_search_storage_page(
     filter: &NameCurrentListFilter,
     cursor: Option<&NameCurrentListCursor>,
     page_size: u64,
-) -> V2Result<bigname_storage::NameCurrentListPage> {
-    // The rows are composed from the owned key families; the candidates are the name surfaces.
-    bigname_storage::families::name::load_family_search_page(reads, filter, cursor, page_size)
-        .await
-        .map_err(crate::v2::name_rows_error(
-            crate::v2::SnapshotReadResource::Name,
-            |_| V2Error::internal_error("failed to load search results"),
-        ))
+    scope_ready: bool,
+) -> V2Result<bigname_storage::families::search_dictionary::SearchPage> {
+    bigname_storage::families::search_dictionary::load_page_for_scope(
+        reads,
+        filter,
+        cursor,
+        page_size,
+        scope_ready,
+    )
+    .await
+    .map_err(crate::v2::name_rows_error(
+        crate::v2::SnapshotReadResource::Name,
+        |_| V2Error::internal_error("failed to load search results"),
+    ))
 }
 
 fn cursor_filters(binding: &SearchCursorBinding<'_>) -> BTreeMap<String, String> {
@@ -542,3 +595,6 @@ pub(crate) mod public_namespace_read_test_hooks {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod publication_fields_tests;

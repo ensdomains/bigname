@@ -96,9 +96,7 @@ pub(super) async fn refresh(
         block_timestamp_json: block.timestamp.clone(),
     };
     let mut current_relations = Vec::new();
-    let mut journal = Vec::new();
-    let mut keys = Vec::new();
-    let mut rows = Vec::new();
+    let mut result = Refreshed::default();
     for chunk in names.chunks(CHUNK) {
         let fresh = bigname_storage::families::name::compose_name_summary_publication(
             transaction,
@@ -138,53 +136,65 @@ pub(super) async fn refresh(
             })?;
         }
         current_relations.extend(fresh.current_history_relations);
-        let stored: BTreeMap<String, Value> = sqlx::query_as::<_, (String, Value)>(
-            "/* project:families.derived.summary_rows */ SELECT summary.logical_name_id,
+        let (rows, undo_rows) =
+            replace_chunk(transaction, chain_id, &block, chunk, &fresh.rows).await?;
+        result.rows += rows;
+        result.undo_rows += undo_rows;
+    }
+    result.names = names;
+    result.current_relations = current_relations;
+    Ok(result)
+}
+
+/// Replace at most one composition chunk, retaining the first image if ordinary and cutover
+/// work name the same key in this publication.
+pub(super) async fn replace_chunk(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    block: &input::BlockHeader,
+    chunk: &[String],
+    fresh: &BTreeMap<String, Value>,
+) -> Result<(u64, u64)> {
+    let mut journal = Vec::new();
+    let mut keys = Vec::new();
+    let mut rows = Vec::new();
+    let stored: BTreeMap<String, Value> = sqlx::query_as::<_, (String, Value)>(
+        "/* project:families.derived.summary_rows */ SELECT summary.logical_name_id,
                     to_jsonb(summary)
              FROM project_name_summary summary
              WHERE summary.chain_id = $1 AND summary.logical_name_id = ANY($2)",
-        )
-        .bind(chain_id)
-        .bind(chunk)
-        .fetch_all(&mut **transaction)
-        .await
-        .map_err(|error| ProjectError::database("failed to read the name summaries", error))?
-        .into_iter()
-        .collect();
-        for name in chunk {
-            let before = stored.get(name);
-            let after = fresh.rows.get(name);
-            if before == after {
-                continue;
-            }
-            let key = json!({"chain_id": chain_id, "logical_name_id": name});
-            let Value::Object(key_object) = &key else {
-                unreachable!("a key is an object")
-            };
-            journal.push(json!({
-                "family": NAME_SUMMARY.name,
-                "key": store::key_text(&NAME_SUMMARY, key_object),
-                "before_image": before,
-            }));
-            keys.push(key);
-            rows.extend(after.cloned());
+    )
+    .bind(chain_id)
+    .bind(chunk)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to read the name summaries", error))?
+    .into_iter()
+    .collect();
+    for name in chunk {
+        let before = stored.get(name);
+        let after = fresh.get(name);
+        if before == after {
+            continue;
         }
+        let key = json!({"chain_id": chain_id, "logical_name_id": name});
+        let Value::Object(key_object) = &key else {
+            unreachable!("a key is an object")
+        };
+        journal.push(json!({
+            "family": NAME_SUMMARY.name,
+            "key": store::key_text(&NAME_SUMMARY, key_object),
+            "before_image": before,
+        }));
+        keys.push(key);
+        rows.extend(after.cloned());
     }
     if keys.is_empty() {
-        return Ok(Refreshed {
-            names,
-            current_relations,
-            ..Refreshed::default()
-        });
+        return Ok((0, 0));
     }
-    let undo_rows = block::insert_journal(transaction, chain_id, &block, journal).await?;
+    let undo_rows = block::insert_journal(transaction, chain_id, block, journal).await?;
     let rows = store::replace(transaction, &NAME_SUMMARY, keys, rows).await?;
-    Ok(Refreshed {
-        rows,
-        undo_rows,
-        names,
-        current_relations,
-    })
+    Ok((rows, undo_rows))
 }
 
 /// The names block `$2` (at time `$3`, in seconds) of chain `$1` touched, read from its journal (each changed row's

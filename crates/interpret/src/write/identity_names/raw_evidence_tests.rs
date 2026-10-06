@@ -31,6 +31,16 @@ async fn stored(database: &TestDatabase, logical_name_id: &str) -> TestResult<St
     .await?)
 }
 
+async fn lexical(database: &TestDatabase, id: &str) -> TestResult<Option<(String, i16, i64)>> {
+    Ok(sqlx::query_as(
+        "SELECT name,spelling_class,(SELECT count(*) FROM name_search_postings p
+        WHERE p.search_id=d.search_id) FROM name_search_documents d WHERE logical_name_id=$1",
+    )
+    .bind(id)
+    .fetch_optional(database.pool())
+    .await?)
+}
+
 async fn add_block(database: &TestDatabase, number: i64) -> TestResult {
     sqlx::query(
         "INSERT INTO chain_lineage (
@@ -96,6 +106,11 @@ async fn hash_path_identity_is_stored_without_raw_bytes_and_replays() -> TestRes
             "canonical".into()
         )
     );
+    let doc = lexical(&database, "ens:child")
+        .await?
+        .expect("structural search spelling");
+    assert_eq!(doc.1, 1);
+    assert!(doc.2 > 0);
     database.cleanup().await?;
     Ok(())
 }
@@ -127,6 +142,16 @@ async fn later_raw_observation_enriches_the_identity_and_keeps_its_anchor() -> T
     // A later hash-path observation of the same node leaves the raw evidence in place.
     write_one(&database, at(hash_path_only("ens:child", "child.eth"), 2)).await?;
     assert_eq!(stored(&database, "ens:child").await?, enriched);
+    let doc = lexical(&database, "ens:child")
+        .await?
+        .expect("raw search spelling");
+    assert_eq!((&*doc.0, doc.1), ("child.eth", 0));
+    assert!(doc.2 > 0);
+    let classes: Vec<i16> =
+        sqlx::query_scalar("SELECT DISTINCT spelling_class FROM name_search_postings")
+            .fetch_all(database.pool())
+            .await?;
+    assert_eq!(classes, vec![0]);
     database.cleanup().await?;
     Ok(())
 }
@@ -159,6 +184,11 @@ async fn unnormalizable_raw_observation_shadows_the_enriched_identity() -> TestR
             1
         )
     );
+    assert!(lexical(&database, "ens:child").await?.is_none());
+    let postings: i64 = sqlx::query_scalar("SELECT count(*) FROM name_search_postings")
+        .fetch_one(database.pool())
+        .await?;
+    assert_eq!(postings, 0);
     database.cleanup().await?;
     Ok(())
 }

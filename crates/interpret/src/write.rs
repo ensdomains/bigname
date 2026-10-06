@@ -7,6 +7,7 @@ mod identity_names;
 mod migration;
 mod normalized;
 mod reanchor;
+mod search;
 
 use crate::Result;
 use bigname_adapters::schema_v2::BatchOutput;
@@ -32,6 +33,16 @@ pub(crate) async fn batch(
     let mut transaction = pool.begin().await.map_err(|error| {
         crate::InterpretError::database("failed to begin interpret write transaction", error)
     })?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| {
+            crate::InterpretError::database("failed to set Interpret write isolation", error)
+        })?;
+    let search_redo_names = match redo_range {
+        Some(range) => search::prepare_redo(&mut transaction, chain_id, range, output).await?,
+        None => Vec::new(),
+    };
     revalidate_canonical_lineage(
         &mut transaction,
         chain_id,
@@ -50,6 +61,11 @@ pub(crate) async fn batch(
     migration::write(&mut transaction, output).await?;
     if let Some((from_block, to_block)) = redo_range.filter(|_| complete) {
         reanchor::stable_identities(&mut transaction, chain_id, from_block, to_block).await?;
+    }
+    if !search_redo_names.is_empty() {
+        bigname_storage::identity_search::refresh(&mut transaction, &search_redo_names, &[])
+            .await
+            .map_err(search::failure)?;
     }
     if complete {
         discovery_admission::finalize(&mut transaction, chain_id).await?;

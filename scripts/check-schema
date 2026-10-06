@@ -732,6 +732,12 @@ check_served_projection_removal() {
                 emit_phase_migration "$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql" preceding-shape
             fi
             emit_phase_migration "$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql" baseline-first
+            if [ "$suffix" = removal ]; then
+                printf 'DROP TABLE name_search_postings, name_search_documents; DROP INDEX name_surfaces_search_labelhashes_idx;\n'
+                emit_phase_migration "$ROOT/migrations/20261005210000_durable_name_search.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261005210000_durable_name_search.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261005210000_durable_name_search.sql" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -872,7 +878,8 @@ for migration_file in \
     "$ROOT/migrations/20261005170000_project_address_history_catalogue.sql" \
     "$ROOT/migrations/20261005180000_project_hydration_schedule.sql" \
     "$ROOT/migrations/20261005190000_name_surfaces_byte_shadow_path.sql" \
-    "$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql"
+    "$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql" \
+    "$ROOT/migrations/20261005210000_durable_name_search.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1392,8 +1399,8 @@ summary_selector_migration="$ROOT/migrations/20261005150000_project_name_summary
     cat <<'SQL'
 ALTER TABLE project_name_summary
     DROP COLUMN IF EXISTS expiry_listable, DROP COLUMN IF EXISTS public_authority;
-INSERT INTO project_name_summary (chain_id, logical_name_id, namespace, serving, zero_owner)
-VALUES ('apply-check', 'ens:0x01', 'ens', FALSE, FALSE);
+INSERT INTO project_name_summary (chain_id, logical_name_id, namespace, serving, zero_owner, search_supported)
+VALUES ('apply-check', 'ens:0x01', 'ens', FALSE, FALSE, FALSE);
 SQL
     emit_phase_migration "$summary_selector_migration" preceding-shape
     cat <<SQL
@@ -1428,8 +1435,8 @@ BEGIN
         END IF;
     END LOOP;
     INSERT INTO project_name_summary (chain_id, logical_name_id, namespace, serving,
-        zero_owner, expiry_listable)
-    VALUES ('apply-check', 'ens:0x01', 'ens', FALSE, FALSE, TRUE);
+        zero_owner, expiry_listable, search_supported)
+    VALUES ('apply-check', 'ens:0x01', 'ens', FALSE, FALSE, TRUE, FALSE);
 END \$\$;
 SQL
     emit_phase_migration "$summary_selector_migration" baseline-first
@@ -5433,6 +5440,8 @@ BEGIN
             ('migration_event_associations'),
             ('name_current'),
             ('name_surfaces'),
+            ('name_search_documents'),
+            ('name_search_postings'),
             ('normalized_events'),
             ('project_family_marker'),
             ('project_address_history_anchor'),
@@ -5547,6 +5556,8 @@ BEGIN
             ('migration_event_associations'),
             ('name_current'),
             ('name_surfaces'),
+            ('name_search_documents'),
+            ('name_search_postings'),
             ('normalized_events'),
             ('project_family_marker'),
             ('project_address_history_anchor'),

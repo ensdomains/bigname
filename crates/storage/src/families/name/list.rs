@@ -1,4 +1,4 @@
-//! The composed name listings: the /v1/search page and the
+//! The original composing search reader, retained for parity checks, and the
 //! expiring listing of /v1/names, served from composed name rows at family publication.
 //!
 //! Both page through a `filtered_names` CTE populated from composed rows, with shared predicates
@@ -16,6 +16,10 @@
 //! A page is read in one snapshot (`batch::read_snapshot`): the selection or walk, the
 //! composition and the page statement see the same family block.
 mod expiring;
+#[cfg(any(test, feature = "test-support"))]
+mod search_rows;
+#[cfg(any(test, feature = "test-support"))]
+pub(super) mod search_test_support;
 
 use std::collections::BTreeSet;
 

@@ -3,8 +3,7 @@ use serde_json::Value;
 
 use crate::v2::chains::slug_to_numeric;
 use crate::v2::support::{
-    direct_json_field, record_json_path, record_json_string_at_paths,
-    record_network_from_chain_positions,
+    direct_json_field, record_json_string_at_paths, record_network_from_chain_positions,
 };
 use crate::v2::vocab::{Authority, PARTIAL_SERVE_UNSUPPORTED_REASON, RegistrationStatus};
 
@@ -94,13 +93,11 @@ pub(in crate::v2) fn json_string_at_paths(value: &Value, paths: &[&[&str]]) -> O
 }
 
 pub(super) fn json_address_at_paths(value: &Value, paths: &[&[&str]]) -> Option<String> {
-    json_string_at_paths(value, paths).map(|value| value.to_ascii_lowercase())
+    bigname_storage::public_name_fields::values::json_address_at_paths(value, paths)
 }
 
 pub(super) fn json_timestamp_at_paths(value: &Value, paths: &[&[&str]]) -> Option<String> {
-    paths
-        .iter()
-        .find_map(|path| seconds_timestamp(record_json_path(value, path, direct_json_field)?))
+    bigname_storage::public_name_fields::values::json_timestamp_at_paths(value, paths)
 }
 
 pub(in crate::v2) fn string_field(value: Option<&Value>) -> Option<String> {
@@ -114,19 +111,6 @@ pub(in crate::v2) fn value_to_string(value: &Value) -> Option<String> {
         Value::Bool(value) => Some(value.to_string()),
         _ => None,
     }
-}
-
-pub(super) fn json_value_present(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::String(value) => !value.trim().is_empty(),
-        _ => true,
-    }
-}
-
-/// Public timestamps keep exact integral Unix seconds, independent of calendar range.
-pub(in crate::v2) fn seconds_timestamp(value: &Value) -> Option<String> {
-    bigname_storage::UnixSeconds::from_json(value).map(|value| value.unix_timestamp().to_string())
 }
 
 pub(super) fn has_name_binding(row: &NameCurrentRow) -> bool {
@@ -209,36 +193,4 @@ fn eth_2ld_labelhash_token_id(
     alloy_primitives::U256::from_str_radix(hex, 16)
         .ok()
         .map(|value| value.to_string())
-}
-
-#[cfg(test)]
-mod timestamp_tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn finite_seconds_are_exact_independent_of_calendar_or_json_safe_integer_range() {
-        for seconds in [
-            0,
-            1_735_689_600,
-            253_402_300_800,
-            9_007_199_254_740_993,
-            u64::MAX,
-        ] {
-            for value in [json!(seconds), json!(seconds.to_string())] {
-                assert_eq!(seconds_timestamp(&value), Some(seconds.to_string()));
-            }
-        }
-        assert_eq!(
-            seconds_timestamp(&json!("2025-01-01T00:00:00.123Z")),
-            Some("1735689600".into())
-        );
-        assert_eq!(
-            seconds_timestamp(&json!("1735689600.123")),
-            Some("1735689600".into())
-        );
-        for malformed in ["abc", "1.", ".5", "--1"] {
-            assert_eq!(seconds_timestamp(&json!(malformed)), None);
-        }
-    }
 }

@@ -2266,6 +2266,13 @@ CREATE TABLE IF NOT EXISTS project_name_summary (
     owner text,
     expiry_listable boolean NOT NULL,
     public_authority text,
+    search_supported boolean NOT NULL,
+    search_fields jsonb,
+    search_creation_transport_resource_id uuid,
+    CONSTRAINT project_name_summary_search_check CHECK (
+        (search_supported AND search_fields IS NOT NULL AND jsonb_typeof(search_fields) = 'object'
+         AND search_fields ? 'registration_status')
+        OR (NOT search_supported AND search_fields IS NULL AND search_creation_transport_resource_id IS NULL)),
     PRIMARY KEY (chain_id, logical_name_id)
 );
 COMMENT ON TABLE project_name_summary IS
@@ -2296,6 +2303,12 @@ COMMENT ON COLUMN project_name_summary.expiry_listable IS
     'This value is whether the expiry listing of GET /v1/names lists the name: it composes a row whose coverage is not unsupported and whose registration carries a finite expiry. For such a row expires_at is the expiry the listing serves and orders by.';
 COMMENT ON COLUMN project_name_summary.public_authority IS
     'This value is the public authority the composed name row serves (ens_v0, ens_v1 or ens_v2); null when the row serves none (Basenames, an unresolved selection, an ownerless registry row) or the name composes no row. The authority filter of the expiry listing of GET /v1/names selects by it.';
+COMMENT ON COLUMN project_name_summary.search_supported IS
+    'Whether the shared composition yields a supported search row. A supported ownerless or unregistered row is distinct from an absent or unsupported composition.';
+COMMENT ON COLUMN project_name_summary.search_fields IS
+    'Shared public registration and ENSv1 fields with omission/null preserved, finished wrapper expiry and declared creation only. No identity spelling, fallback clock or deferred wrapper marker.';
+COMMENT ON COLUMN project_name_summary.search_creation_transport_resource_id IS
+    'Optional selected Basenames resource whose live pointer and Ethereum context may add a creation timestamp; no stored cross-chain eligibility decision.';
 CREATE INDEX IF NOT EXISTS project_name_summary_recompose_idx
     ON project_name_summary (chain_id, recompose_at)
     WHERE recompose_at IS NOT NULL;

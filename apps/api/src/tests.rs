@@ -538,6 +538,7 @@ include!("tests/v2_record_inventory_abi.rs");
 include!("tests/v2_node_record_events.rs");
 include!("tests/v2_history_event_data.rs");
 include!("tests/v2_search.rs");
+include!("tests/v2_search_durable.rs");
 include!("tests/v2_names.rs");
 include!("tests/v2_names_filters.rs");
 include!("tests/v2_names_expiry_oracle.rs");
@@ -593,3 +594,4 @@ include!("tests/family_fixture_inputs_b.rs");
 include!("tests/v2_unix_timestamps.rs");
 
 include!("tests/v2_names_windows_measure.rs");
+include!("tests/v2_search_lean.rs");

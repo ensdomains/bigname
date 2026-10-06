@@ -474,3 +474,120 @@ async fn byte_shadow_path_constraint_rejects_partial_or_active_raw_bundles() -> 
     database.cleanup().await?;
     Ok(())
 }
+
+const DURABLE_SEARCH: &str =
+    include_str!("../../../migrations/20261005210000_durable_name_search.sql");
+const SEARCH_TABLES: &[&str] = &[
+    "name_search_documents",
+    "name_search_postings",
+    "name_surfaces",
+    "project_name_summary",
+];
+
+#[tokio::test]
+async fn search_schema_upgrade_resets_old_fields_preserves_identity_and_matches_fresh() -> Result<()>
+{
+    let fresh = database("search_schema_fresh").await?;
+    initialize_schema_v2(fresh.pool()).await?;
+    let upgraded = database("search_schema_previous").await?;
+    let mut tx = upgraded.pool().begin().await?;
+    sqlx::raw_sql("CREATE SCHEMA bigname_phase; SET LOCAL search_path TO bigname_phase,public")
+        .execute(&mut *tx)
+        .await?;
+    for (index, current) in BASELINE.iter().enumerate() {
+        let sql = match index {
+            2 => current
+                .split("-- Current spelling and lexical membership")
+                .next()
+                .unwrap()
+                .to_owned(),
+            5 => {
+                let start = current
+                    .find("    search_supported boolean NOT NULL,")
+                    .unwrap();
+                let end = current[start..]
+                    .find("    PRIMARY KEY (chain_id, logical_name_id)")
+                    .unwrap()
+                    + start;
+                let mut sql = format!("{}{}", &current[..start], &current[end..]);
+                let start = sql
+                    .find("COMMENT ON COLUMN project_name_summary.search_supported")
+                    .unwrap();
+                let end = sql[start..]
+                    .find("CREATE INDEX IF NOT EXISTS project_name_summary_recompose_idx")
+                    .unwrap()
+                    + start;
+                sql.replace_range(start..end, "");
+                sql
+            }
+            _ => (*current).to_owned(),
+        };
+        sqlx::raw_sql(&sql).execute(&mut *tx).await?;
+    }
+    sqlx::raw_sql("INSERT INTO chain_lineage(chain_id,block_hash,block_number,block_timestamp,canonicality_state)
+        VALUES ('search-upgrade','block-1',1,to_timestamp(1),'canonical');
+        INSERT INTO name_surfaces(logical_name_id,namespace,namehash,labelhashes,normalizer_version,
+            visibility_state,chain_id,block_hash,block_number,canonicality_state)
+        VALUES ('ens:upgrade','ens','upgrade',ARRAY['0x01'],'old','active','search-upgrade','block-1',1,'canonical');
+        INSERT INTO project_family_marker(chain_id,state,current_block_number,current_block_hash,input_content_hash)
+        VALUES ('search-upgrade','live',1,'block-1','old-build');
+        INSERT INTO project_name_summary(chain_id,logical_name_id,namespace,serving,zero_owner,expiry_listable)
+        VALUES ('search-upgrade','ens:upgrade','ens',false,false,false);
+        INSERT INTO label_preimages(labelhash,raw_label,decoded_label,normalizer_version,normalized_under_version,source_kind,source_priority)
+        VALUES ('0x01',convert_to('retained','UTF8'),'retained','old',true,'fixture',1)")
+        .execute(&mut *tx).await?;
+    tx.commit().await?;
+    sqlx::raw_sql(DURABLE_SEARCH)
+        .execute(upgraded.pool())
+        .await?;
+    for table in SEARCH_TABLES {
+        assert_eq!(
+            load_table_structure(upgraded.pool(), table).await?,
+            load_table_structure(fresh.pool(), table).await?,
+            "fresh and upgraded {table}"
+        );
+    }
+    let state: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+        (SELECT count(*) FROM bigname_phase.name_surfaces),
+        (SELECT count(*) FROM bigname_phase.label_preimages),
+        (SELECT count(*) FROM bigname_phase.project_family_marker),
+        (SELECT count(*) FROM bigname_phase.project_name_summary),
+        (SELECT count(*) FROM bigname_phase.name_search_documents)",
+    )
+    .fetch_one(upgraded.pool())
+    .await?;
+    assert_eq!(
+        state,
+        (1, 1, 0, 0, 0),
+        "upgrade preserves evidence and requires real writers to rebuild"
+    );
+    sqlx::query(
+        "INSERT INTO bigname_phase.project_name_summary(chain_id,logical_name_id,namespace,
+        serving,zero_owner,expiry_listable,search_supported)
+        VALUES ('search-upgrade','ens:upgrade','ens',false,false,false,false)",
+    )
+    .execute(upgraded.pool())
+    .await?;
+    sqlx::raw_sql(DURABLE_SEARCH)
+        .execute(upgraded.pool())
+        .await?;
+    let summaries: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM bigname_phase.project_name_summary")
+            .fetch_one(upgraded.pool())
+            .await?;
+    assert_eq!(
+        summaries, 1,
+        "a baseline-shaped rerun does not erase a new publication"
+    );
+    let incomplete =
+        sqlx::query("UPDATE bigname_phase.project_name_summary SET search_supported=true")
+            .execute(upgraded.pool())
+            .await;
+    assert!(
+        incomplete.is_err(),
+        "supported rows require finished fields"
+    );
+    fresh.cleanup().await?;
+    upgraded.cleanup().await
+}
