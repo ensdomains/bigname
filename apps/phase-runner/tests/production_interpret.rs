@@ -10610,11 +10610,13 @@ async fn seed_prior_owner_registration_fixture(
         PriorOwnerRegistrationFlow::LegacyTwoOwnerChanges => 2,
         PriorOwnerRegistrationFlow::ModernSingleOwnerChange => 1,
     } + i64::from(wrapped);
+    let lease_expiry = 1_000_002_u64;
+    let wrapper_grace = 90 * 24 * 60 * 60;
     let registration = NameRegistered {
         name: "alice".to_owned(),
         label: B256::from(keccak256(b"alice")),
         owner: REGISTRANT.parse()?,
-        expires: U256::from(1_000_002_u64),
+        expires: U256::from(lease_expiry),
     }
     .encode_log_data();
     let registration_topics = registration
@@ -10764,8 +10766,8 @@ async fn seed_prior_owner_registration_fixture(
             node: raw_namehash(&[b"alice", b"eth"]),
             name: b"\x05alice\x03eth\0".to_vec().into(),
             owner: REGISTRANT.parse()?,
-            fuses: 1,
-            expiry: 1_000_002,
+            fuses: 0x30001,
+            expiry: lease_expiry + wrapper_grace,
         }
         .encode_log_data();
         insert_log_at(

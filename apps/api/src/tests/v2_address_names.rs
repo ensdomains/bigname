@@ -2049,9 +2049,8 @@ async fn v2_owner_and_manager_follow_the_wrapper_state_on_every_name_row() -> Re
     Ok(())
 }
 
-/// A response reads the wrapper expiries it serves once per chain, however many composed reads
-/// built its rows: subnames composes the parent and then the page, and search walks its
-/// candidates one batch at a time here.
+/// Subnames reads wrapper expiries once per chain while composing its parent and page.
+/// Search serves the same fields from the published summary without a wrapper-state read.
 #[tokio::test]
 async fn v2_wrapper_expiries_are_read_once_per_chain_per_request() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -2068,9 +2067,9 @@ async fn v2_wrapper_expiries_are_read_once_per_chain_per_request() -> Result<()>
     )
     .await?;
     seed_wrapped_subname_inputs(&database, "sub.perms.eth", Uuid::from_u128(0x5a_0505)).await?;
-    for (uri, batch, served) in [
-        ("/v1/names/perms.eth/subnames", 200, 1),
-        ("/v1/search?q=perms&match=contains&namespace=ens", 1, 2),
+    for (uri, batch, served, expected_reads) in [
+        ("/v1/names/perms.eth/subnames", 200, 1, 1),
+        ("/v1/search?q=perms&match=contains&namespace=ens", 1, 2, 0),
     ] {
         let reads = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let (status, body) =
@@ -2092,8 +2091,8 @@ async fn v2_wrapper_expiries_are_read_once_per_chain_per_request() -> Result<()>
         assert_eq!(with_expiry, served, "{uri}: {body}");
         assert_eq!(
             reads.load(std::sync::atomic::Ordering::Relaxed),
-            1,
-            "{uri}: one read for the one chain"
+            expected_reads,
+            "{uri}: wrapper-state reads"
         );
     }
     database.cleanup().await

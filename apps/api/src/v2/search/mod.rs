@@ -230,31 +230,26 @@ pub(crate) async fn get_search(
     let mut reads = bigname_storage::begin_read_snapshot(&state.pool)
         .await
         .map_err(|_| V2Error::internal_error("failed to load search results"))?;
-    if let Some(namespaces) = public_namespace_set.as_ref()
-        && !namespaces
+    let scope_changed = if let Some(namespaces) = public_namespace_set.as_ref() {
+        !namespaces
             .served_on(&mut reads)
             .await
             .map_err(api_error_to_v2)?
-    {
-        return Err(V2Error::conflict(
-            "search namespace position changed while the request was being read",
-        ));
-    }
-    if let Some(scope) = explicit_namespace_meta.as_ref()
-        && !scope.served_on(&mut reads).await?
-    {
-        return Err(V2Error::conflict(
-            "search namespace position changed while the request was being read",
-        ));
-    }
+    } else if let Some(scope) = explicit_namespace_meta.as_ref() {
+        !scope.served_on(&mut reads).await?
+    } else {
+        false
+    };
+    // Matching rows must report an unavailable publication as stale before a scope conflict.
     let storage_page = load_search_storage_page(
         &mut reads,
         &filter,
         storage_cursor.as_ref(),
         params.page_size,
-        explicit_namespace_meta
-            .as_ref()
-            .is_none_or(|scope| scope.has_publication()),
+        !scope_changed
+            && explicit_namespace_meta
+                .as_ref()
+                .is_none_or(|scope| scope.has_publication()),
     )
     .await?;
     // Closed before the revalidation below, which reads through the pool.
@@ -286,6 +281,11 @@ pub(crate) async fn get_search(
             .await?
         }
     };
+    if scope_changed {
+        return Err(V2Error::conflict(
+            "search namespace position changed while the request was being read",
+        ));
+    }
 
     let next_cursor = storage_page
         .next_cursor

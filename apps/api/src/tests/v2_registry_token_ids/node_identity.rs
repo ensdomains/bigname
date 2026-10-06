@@ -707,27 +707,34 @@ mod recovery {
     }
 }
 
-// Root TLD observations are real candidates but their current authority is not projected.
-// Put them between two supported children so the smaller search batch must keep walking.
+// Synthetic repetitions of a known reachable old-registry unmasked-owner event shape
+// leave lexical candidates without projected authority. Put them between two supported
+// children so the smaller search batch must keep walking; these are not 32 historical logs.
 #[tokio::test]
 async fn produced_search_lean_walks_an_unsupported_interval() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let manifest =
         admit_family_from(&database, "mainnet", CHAIN, "ens_v1_registry_l1", 2281).await?;
     let registry = role_address(&manifest, "registry");
+    let old_registry = role_address(&manifest, "registry_old");
+    let unmasked_owner = alloy_primitives::hex::decode(
+        "0x6330363834636235336331363831343865616130313363333864316330663339",
+    )?;
     let holder = HOLDER.parse()?;
     let mut logs = vec![owner(B256::ZERO, b"eth", holder, registry, 120, 0)];
     let mut labels = vec!["eth".to_owned(), "lean000".to_owned(), "lean999".to_owned()];
     for index in 0..32 {
         let label = format!("lean1{index:02}");
-        logs.push(owner(
+        let mut observation = owner(
             B256::ZERO,
             label.as_bytes(),
             holder,
-            registry,
+            old_registry,
             120,
             index + 1,
-        ));
+        );
+        observation.data = unmasked_owner.clone();
+        logs.push(observation);
         labels.push(label);
     }
     for (index, label) in [b"lean000", b"lean999"].iter().enumerate() {
@@ -752,13 +759,39 @@ async fn produced_search_lean_walks_an_unsupported_interval() -> Result<()> {
     for label in &labels {
         insert_family_label_preimage(&database.pool, label.as_bytes()).await?;
     }
-    let tld = bigname_storage::families::name::load_family_name(
-        &database.pool,
-        &format!("ens:{:#x}", node(&[b"lean100"])),
-    )
-    .await?
-    .context("the actual TLD observation must compose")?;
-    assert_eq!(tld.coverage["status"], "unsupported");
+    for index in 0..32 {
+        let label = format!("lean1{index:02}");
+        let logical = format!("ens:{:#x}", node(&[label.as_bytes()]));
+        let unmasked: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM normalized_events WHERE logical_name_id=$1
+             AND event_kind='AuthorityTransferred'
+             AND after_state @> '{\"owner_word_unmasked\":true}'",
+        )
+        .bind(&logical)
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(unmasked, 1, "{label}: admitted unmasked owner observation");
+        let bindings: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM project_binding_candidate WHERE logical_name_id=$1",
+        )
+        .bind(&logical)
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(bindings, 0, "{label}: no projected binding candidate");
+        let tld = bigname_storage::families::name::load_family_name(&database.pool, &logical)
+            .await?
+            .context("the old-registry observation must compose")?;
+        assert!(tld.surface_binding_id.is_none(), "{label}: {tld:?}");
+        assert!(
+            tld.provenance["authority_selection"]["authority_arm"].is_null(),
+            "{label}: {tld:?}"
+        );
+        assert_eq!(tld.coverage["status"], "unsupported", "{label}: {tld:?}");
+        assert_eq!(
+            tld.coverage["unsupported_reason"], "current_authority_not_projected",
+            "{label}: {tld:?}"
+        );
+    }
     let filter = lean_filter("ens", "lean");
     let rows = assert_search_lean_pages_match(&database, &filter, 1).await?;
     assert_eq!(

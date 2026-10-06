@@ -12,6 +12,7 @@ const NAME: &str = "ens:0xchild";
 
 async fn database(name: &str) -> TestResult<TestDatabase> {
     let database = TestDatabase::create(TestDatabaseConfig::new(name)).await?;
+    database.create_phase_schema().await?;
     for sql in [
         include_str!("../../../../storage/schema/baseline/01_chain.sql"),
         include_str!("../../../../storage/schema/baseline/03_identity.sql"),

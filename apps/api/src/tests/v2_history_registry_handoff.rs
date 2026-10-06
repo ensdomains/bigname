@@ -166,8 +166,8 @@ async fn wrapper_first_materialization_keeps_dormant_registry_resolver_out_of_le
                 node,
                 name: b"\x07dormant\x03eth\0".to_vec().into(),
                 owner: HOLDER.parse()?,
-                fuses: 1,
-                expiry: 1_900_000_000,
+                fuses: 0x30001,
+                expiry: 1_907_776_000,
             }
             .encode_log_data(),
             123,

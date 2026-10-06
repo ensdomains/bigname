@@ -1159,6 +1159,8 @@ GRANT SELECT ON TABLE
     bigname_phase.discovery_edges,
     bigname_phase.migration_discovery_associations,
     bigname_phase.name_surfaces,
+    bigname_phase.name_search_documents,
+    bigname_phase.name_search_postings,
     bigname_phase.resources,
     bigname_phase.surface_bindings,
     bigname_phase.token_lineages,
@@ -3233,3 +3235,16 @@ backfill a plausible search payload from old summaries or mark an empty lexical
 index ready. The shared field shaper, token writer, identity hooks and Project
 writer participate in the interpreter fingerprint; fresh build outputs must
 prove the rotation and unchanged deployment-profile hashes.
+
+After applying `20261005210000_durable_name_search.sql`, grant the existing
+API role read access to the new lexical tables before starting the new API:
+
+```sql
+GRANT SELECT ON TABLE
+    bigname_phase.name_search_documents,
+    bigname_phase.name_search_postings
+TO bigname_api;
+```
+
+New API roles receive these privileges in the provisioning block above. Startup
+preflight refuses to serve when either table is unreadable.

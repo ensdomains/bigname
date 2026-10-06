@@ -122,9 +122,12 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
             WHEN 'relation' THEN CASE WHEN to_regnamespace(split_part(identity, '.', 1)) IS NULL THEN TRUE
                 WHEN NOT has_schema_privilege(current_user, to_regnamespace(split_part(identity, '.', 1)), 'USAGE') THEN TRUE
                 WHEN to_regclass(identity) IS NULL THEN TRUE ELSE NOT has_table_privilege(current_user, identity, 'SELECT') END
-            WHEN 'column' THEN NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+            WHEN 'column' THEN CASE WHEN to_regnamespace(split_part(identity, '.', 1)) IS NULL THEN TRUE
+                WHEN NOT has_schema_privilege(current_user, to_regnamespace(split_part(identity, '.', 1)), 'USAGE') THEN TRUE
+                WHEN to_regclass(split_part(identity, '.', 1) || '.' || split_part(identity, '.', 2)) IS NULL THEN TRUE
+                ELSE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
                 WHERE attrelid=to_regclass(split_part(identity, '.', 1) || '.' || split_part(identity, '.', 2))
-                  AND attname=split_part(identity, '.', 3) AND attnum>0 AND NOT attisdropped)
+                  AND attname=split_part(identity, '.', 3) AND attnum>0 AND NOT attisdropped) END
             WHEN 'function' THEN CASE WHEN to_regnamespace(split_part(identity, '.', 1)) IS NULL THEN TRUE WHEN NOT has_schema_privilege(current_user, to_regnamespace(split_part(identity, '.', 1)), 'USAGE') THEN TRUE WHEN to_regprocedure(identity) IS NULL THEN TRUE ELSE NOT has_function_privilege(current_user, identity, 'EXECUTE') END
             WHEN 'type' THEN CASE WHEN to_regnamespace(split_part(identity, '.', 1)) IS NULL THEN TRUE WHEN NOT has_schema_privilege(current_user, to_regnamespace(split_part(identity, '.', 1)), 'USAGE') THEN TRUE ELSE to_regtype(identity) IS NULL END
         END
