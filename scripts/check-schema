@@ -3152,8 +3152,8 @@ JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
 WHERE pg_index.indrelid = 'normalized_events'::regclass;
 DO \$\$
 BEGIN
-    IF (SELECT count(*) FROM walk_index_baseline WHERE index_name IN ($walk_index_dropped)) <> 41 THEN
-        RAISE EXCEPTION 'drop.sql does not list 41 baseline indexes on normalized_events';
+    IF (SELECT count(*) FROM walk_index_baseline WHERE index_name IN ($walk_index_dropped)) <> 42 THEN
+        RAISE EXCEPTION 'drop.sql does not list 42 baseline indexes on normalized_events';
     END IF;
 END \$\$;
 INSERT INTO chain_phase_state (chain_id, phase_name, current_block_number, current_block_hash)
