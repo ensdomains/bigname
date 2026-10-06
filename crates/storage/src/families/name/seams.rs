@@ -91,7 +91,7 @@ mod scoped {
         }
     }
 
-    pub(in crate::families::name) async fn after_publication() {
+    pub(crate) async fn after_publication() {
         if let Ok((reached, resume)) = PAUSE.try_with(Clone::clone) {
             reached.notify_one();
             resume.notified().await;
@@ -106,9 +106,11 @@ mod scoped {
 #[cfg(any(test, feature = "test-support"))]
 pub use super::list::load_family_expiring_page_unbounded;
 #[cfg(any(test, feature = "test-support"))]
+pub(crate) use scoped::after_publication;
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use scoped::before_snapshot;
 #[cfg(any(test, feature = "test-support"))]
-pub(super) use scoped::{after_publication, batch_size, note_composed_names, note_submitted_rows};
+pub(super) use scoped::{batch_size, note_composed_names, note_submitted_rows};
 #[cfg(any(test, feature = "test-support"))]
 pub use scoped::{
     with_batch_size, with_composed_names_counter, with_pause_after_publication,
@@ -119,7 +121,7 @@ pub use scoped::{
 pub(crate) async fn before_snapshot() {}
 
 #[cfg(not(any(test, feature = "test-support")))]
-pub(super) async fn after_publication() {}
+pub(crate) async fn after_publication() {}
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(super) fn batch_size(production: usize) -> usize {

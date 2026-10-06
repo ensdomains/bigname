@@ -1,6 +1,6 @@
 //! Split the shared inventory result into small metadata and selected keys, and assemble the
 //! same logical inventory at read. Record-key and family order is the database's collation.
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -33,14 +33,20 @@ impl LookupInventoryPublication {
         if let Some(mirror) = provenance.get_mut("mirror").and_then(Value::as_object_mut) {
             mirror.remove("mirrored_name");
         }
+        let observed_families = self
+            .records
+            .values()
+            .filter_map(|record| record.unsupported_family.as_ref())
+            .collect::<BTreeSet<_>>()
+            .len();
+        // Assembly emits each observed unsupported family first, then fixed classification
+        // gaps. Keeping only that suffix avoids copying one item per key into metadata.
         let declared_unsupported_families = row
             .unsupported_families
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|family| {
-                family["unsupported_reason"] != "record_family_not_supported_in_phase6_projection"
-            })
+            .skip(observed_families)
             .cloned()
             .collect();
         Some(LookupInventoryMetadata {
@@ -124,13 +130,4 @@ impl LookupInventoryMetadata {
             last_recomputed_at: OffsetDateTime::UNIX_EPOCH,
         })
     }
-}
-
-pub(crate) fn unsupported_families(records: &BTreeMap<String, LookupRecordEntry>) -> Vec<String> {
-    records
-        .values()
-        .filter_map(|record| record.unsupported_family.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
 }

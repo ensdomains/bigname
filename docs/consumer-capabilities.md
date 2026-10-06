@@ -568,3 +568,11 @@ Consumers must distinguish `unresolvable_reason` (proven absence) from
 `resolution_unsupported_reason` (unproved path or unprojected target), and must
 not use retained child records when either is present. Ownership and registration
 remain independently available. See [the exact reasons and wrapper limits](api-v1.md#expiry-and-grace).
+
+Batch lookup's indexed name decisions, exact owner/manager relations and selected
+record entries are published atomically by Project. Detail retains the same full
+record contract and feed omits inventory payloads. Current spelling and primary
+claims remain read-time inputs; verified provider answers remain request-scoped.
+The live family marker and current Interpret/Project input hashes gate admission,
+so installing the additive lookup schema without the required rederivation does
+not produce empty ready results. See [lookup storage](storage.md#published-lookup-state).

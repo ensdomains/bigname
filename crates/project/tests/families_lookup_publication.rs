@@ -40,6 +40,8 @@ async fn shared_lookup_publication_matches_name_selection_and_inventory() -> Res
         .await?;
     fixture.write(10, 3, "RecordChanged", "ens_v1_resolver_l1", Some(&name), Some(&resource),
         json!({"node":format!("0x{:064x}",1), "record_key":"text:arbitrary", "record_family":"text", "selector_key":"arbitrary", "value":"one", "source_event":"TextChanged"}), resolver).await?;
+    fixture.write(10, 4, "RecordChanged", "ens_v1_resolver_l1", Some(&name), Some(&resource),
+        json!({"node":format!("0x{:064x}",1), "record_key":"text:unchanged", "record_family":"text", "selector_key":"unchanged", "value":"kept", "source_event":"TextChanged"}), resolver).await?;
     fixture.apply(12, FamilyMode::Normal).await?;
     let publication = load_family_publication(&fixture.pool, CHAIN)
         .await?
@@ -99,5 +101,59 @@ async fn shared_lookup_publication_matches_name_selection_and_inventory() -> Res
             })
     );
     drop(conn);
+    let before = fixture.rows("project_lookup_record").await?;
+    ensure!(
+        before.len() == 2,
+        "Project publishes both selected keys: {before:?}"
+    );
+    let names_before = fixture.rows("project_lookup_name").await?;
+    let dependencies_before = fixture.rows("project_lookup_dependency").await?;
+    fixture.write(13, 1, "RecordChanged", "ens_v1_resolver_l1", Some(&name), Some(&resource.to_string()),
+        json!({"node":format!("0x{:064x}",1), "record_key":"text:arbitrary", "record_family":"text", "selector_key":"arbitrary", "value":"two", "source_event":"TextChanged"}), resolver).await?;
+    fixture.assert_undo_restores(13).await?;
+    assert_eq!(
+        fixture.rows("project_lookup_name").await?,
+        names_before,
+        "value-only writes must not rewrite name cores"
+    );
+    assert_eq!(
+        fixture.rows("project_lookup_dependency").await?,
+        dependencies_before,
+        "value-only writes keep selection dependencies"
+    );
+    let changed_keys: Vec<String> = sqlx::query_scalar(
+        "SELECT key::jsonb ->> 2 FROM project_family_undo
+        WHERE chain_id=$1 AND block_number=13 AND family='project_lookup_record'",
+    )
+    .bind(CHAIN)
+    .fetch_all(&fixture.pool)
+    .await?;
+    assert_eq!(
+        changed_keys,
+        ["text:arbitrary"],
+        "only the changed selected value is journalled"
+    );
+    let unchanged = |rows: Vec<serde_json::Value>| {
+        rows.into_iter()
+            .find(|row| row["record_key"] == "text:unchanged")
+            .expect("unchanged key")
+    };
+    assert_eq!(
+        unchanged(fixture.rows("project_lookup_record").await?),
+        unchanged(before)
+    );
+    fixture.apply(14, FamilyMode::Normal).await?;
+    let unrelated: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM project_family_undo
+        WHERE chain_id=$1 AND block_number=14 AND family LIKE 'project_lookup_%'",
+    )
+    .bind(CHAIN)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        unrelated, 0,
+        "unrelated publication does not rewrite lookup components"
+    );
+    fixture.assert_rebuild_equal(14).await?;
     fixture.cleanup().await
 }

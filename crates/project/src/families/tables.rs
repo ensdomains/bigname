@@ -63,6 +63,11 @@ tables! {
     ADDRESS_CONTROLLER_CANDIDATE = "project_address_controller_candidate"
         ["chain_id", "logical_name_id", "event_identity"];
     NAME_HISTORY = "project_name_history" ["chain_id", "logical_name_id"];
+    LOOKUP_NAME = "project_lookup_name" ["chain_id", "logical_name_id"];
+    LOOKUP_RELATION = "project_lookup_relation" ["chain_id", "logical_name_id", "address", "relation"];
+    LOOKUP_INVENTORY = "project_lookup_inventory" ["chain_id", "resource_id"];
+    LOOKUP_RECORD = "project_lookup_record" ["chain_id", "resource_id", "record_key"];
+    LOOKUP_DEPENDENCY = "project_lookup_dependency" ["chain_id", "resource_id", "kind", "key1", "key2", "key3"];
     NAME_SUMMARY = "project_name_summary" ["chain_id", "logical_name_id"];
     HISTORY_ANCHOR = "project_address_history_anchor"
         ["chain_id", "address", "anchor_kind", "anchor_id"];

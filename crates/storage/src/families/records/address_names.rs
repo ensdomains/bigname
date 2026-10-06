@@ -337,25 +337,6 @@ fn address_name_row(
 
 /// Address relations for composed names on the caller's snapshot, used by batch lookup. They
 /// hold no `role_holder` relations: reverse lookup does not serve it ([`RoleHolderLoad::Skip`]).
-pub(crate) async fn name_relations_on(
-    conn: &mut PgConnection,
-    composed: &BTreeMap<String, NameCurrentRow>,
-) -> Result<BTreeMap<String, Vec<crate::IdentityAddressRelationRow>>> {
-    let mut chains: BTreeMap<String, Vec<&NameCurrentRow>> = BTreeMap::new();
-    for row in composed.values() {
-        let chain = row.provenance["chain_id"]
-            .as_str()
-            .context("composed name has no chain")?;
-        chains.entry(chain.to_owned()).or_default().push(row);
-    }
-    let mut out = BTreeMap::new();
-    for (chain, names) in chains {
-        let publication = servable_publication(conn, &chain).await?;
-        out.extend(name_relations_at(conn, &publication, &names).await?);
-    }
-    Ok(out)
-}
-
 /// Exact lookup ownership/control from the supplied publication. Project calls this before
 /// the marker advances; role holders remain excluded by the same lookup relation fold.
 pub(crate) async fn name_relations_at(

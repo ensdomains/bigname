@@ -8,6 +8,8 @@ mod cost;
 mod direct;
 #[path = "migrated_subnames/missing_parent.rs"]
 mod missing_parent;
+#[path = "migrated_subnames/lookup_publication.rs"]
+mod lookup_publication;
 #[path = "migrated_subnames/nested.rs"]
 mod nested;
 #[path = "migrated_subnames/replay.rs"]

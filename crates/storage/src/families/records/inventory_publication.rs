@@ -3,7 +3,7 @@ use super::{
     FamilyPosition, LinkSelection,
     assemble::{self, Assembly, AssemblyReads, BoundaryEvent},
     facts::{ResolverClassification, load_classifications_at, probe_events},
-    inventory::{FamilyAttribution, FamilyRecordInventory},
+    inventory_types::{FamilyAttribution, FamilyRecordInventory},
     links::{link_key, load_family_link_selections_on},
     mirror::{MirrorSelection, evaluate_family_mirror_at, is_mirror_pointer},
     pointer::load_family_resource_pointers_on,

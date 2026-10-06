@@ -16,6 +16,7 @@ pub(crate) async fn load_reverse_identity_records_live(
     inputs: &[ReverseIdentityStorageInput],
     public_namespaces: &[String],
     selected: Option<&bigname_storage::SelectedSnapshot>,
+    include_inventory: bool,
 ) -> Result<Vec<ReverseIdentityGroup>> {
     load_reverse_identity_records_live_with_count_mode(
         pool,
@@ -23,6 +24,7 @@ pub(crate) async fn load_reverse_identity_records_live(
         public_namespaces,
         selected,
         ReverseCountMode::Include,
+        include_inventory,
     )
     .await
 }
@@ -32,6 +34,7 @@ pub(crate) async fn load_reverse_identity_records_page_live(
     inputs: &[ReverseIdentityStorageInput],
     public_namespaces: &[String],
     selected: Option<&bigname_storage::SelectedSnapshot>,
+    include_inventory: bool,
 ) -> Result<Vec<ReverseIdentityGroup>> {
     #[cfg(test)]
     relation_page_test_hooks::record_page_load(pool).await?;
@@ -41,6 +44,7 @@ pub(crate) async fn load_reverse_identity_records_page_live(
         public_namespaces,
         selected,
         ReverseCountMode::Omit,
+        include_inventory,
     )
     .await
 }
@@ -99,6 +103,7 @@ async fn load_reverse_identity_records_live_with_count_mode(
     public_namespaces: &[String],
     selected: Option<&bigname_storage::SelectedSnapshot>,
     count_mode: ReverseCountMode,
+    include_inventory: bool,
 ) -> Result<Vec<ReverseIdentityGroup>> {
     if inputs.is_empty() {
         return Ok(Vec::new());
@@ -122,6 +127,7 @@ async fn load_reverse_identity_records_live_with_count_mode(
         public_namespaces,
         chains.as_deref(),
         matches!(count_mode, ReverseCountMode::Include),
+        include_inventory,
     )
     .await;
 }

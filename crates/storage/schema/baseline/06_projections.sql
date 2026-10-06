@@ -2629,3 +2629,77 @@ CREATE INDEX IF NOT EXISTS project_address_history_current_resource_idx ON proje
 CREATE INDEX IF NOT EXISTS project_history_edge_source_idx ON project_history_source_edge (chain_id, source_kind, source_key, source_resolver);
 
 CREATE INDEX IF NOT EXISTS project_history_edge_resolver_node_idx ON project_history_source_edge (chain_id, pointer_resolver, node);
+
+-- Project-owned current lookup facts. NULL core/metadata is an explicitly evaluated absence.
+CREATE TABLE IF NOT EXISTS bigname_phase.project_lookup_name (
+    chain_id text NOT NULL,
+    logical_name_id text NOT NULL,
+    record_serving_resource_id uuid,
+    core jsonb,
+    supported boolean NOT NULL,
+    PRIMARY KEY (chain_id, logical_name_id),
+    CHECK (supported = (core IS NOT NULL AND core #>> '{coverage,status}' IS DISTINCT FROM 'unsupported')),
+    CHECK (core IS NULL OR jsonb_typeof(core) = 'object'),
+    CHECK (core IS NOT NULL OR record_serving_resource_id IS NULL)
+);
+CREATE INDEX IF NOT EXISTS project_lookup_name_resource_idx
+    ON bigname_phase.project_lookup_name (chain_id, record_serving_resource_id)
+    WHERE record_serving_resource_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS bigname_phase.project_lookup_relation (
+    chain_id text NOT NULL,
+    logical_name_id text NOT NULL,
+    address text NOT NULL,
+    relation text NOT NULL,
+    PRIMARY KEY (chain_id, logical_name_id, address, relation),
+    CHECK (address = lower(address) AND address <> ''),
+    CHECK (relation IN ('token_holder', 'effective_controller')),
+    FOREIGN KEY (chain_id, logical_name_id) REFERENCES bigname_phase.project_lookup_name (chain_id, logical_name_id) DEFERRABLE INITIALLY DEFERRED
+);
+CREATE INDEX IF NOT EXISTS project_lookup_relation_address_idx
+    ON bigname_phase.project_lookup_relation (address, chain_id, relation, logical_name_id);
+CREATE TABLE IF NOT EXISTS bigname_phase.project_lookup_inventory (
+    chain_id text NOT NULL,
+    resource_id uuid NOT NULL,
+    metadata jsonb,
+    PRIMARY KEY (chain_id, resource_id),
+    CHECK (metadata IS NULL OR jsonb_typeof(metadata) = 'object')
+);
+CREATE TABLE IF NOT EXISTS bigname_phase.project_lookup_record (
+    chain_id text NOT NULL,
+    resource_id uuid NOT NULL,
+    record_key text NOT NULL,
+    payload jsonb NOT NULL,
+    PRIMARY KEY (chain_id, resource_id, record_key),
+    CHECK (jsonb_typeof(payload) = 'object'),
+    FOREIGN KEY (chain_id, resource_id) REFERENCES bigname_phase.project_lookup_inventory (chain_id, resource_id) DEFERRABLE INITIALLY DEFERRED
+);
+CREATE TABLE IF NOT EXISTS bigname_phase.project_lookup_dependency (
+    chain_id text NOT NULL,
+    resource_id uuid NOT NULL,
+    kind text NOT NULL,
+    key1 text NOT NULL,
+    key2 text NOT NULL,
+    key3 text NOT NULL,
+    PRIMARY KEY (chain_id, resource_id, kind, key1, key2, key3),
+    CHECK (kind IN ('resource_pointer', 'identity', 'classification', 'registry_node',
+                   'partition', 'link', 'record_id')),
+    CHECK (key1 <> ''),
+    CHECK ((kind IN ('resource_pointer', 'identity', 'classification') AND key2 = '' AND key3 = '')
+        OR (kind IN ('registry_node', 'link', 'record_id') AND key2 <> '' AND key3 = '')
+        OR (kind = 'partition' AND key2 <> '' AND key3 <> '')),
+    FOREIGN KEY (chain_id, resource_id) REFERENCES bigname_phase.project_lookup_inventory (chain_id, resource_id) DEFERRABLE INITIALLY DEFERRED
+);
+CREATE INDEX IF NOT EXISTS project_lookup_dependency_source_idx
+    ON bigname_phase.project_lookup_dependency (chain_id, kind, key1, key2, key3, resource_id);
+DO $lookup_reference$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+        WHERE conrelid='bigname_phase.project_lookup_name'::regclass
+          AND conname='project_lookup_name_inventory_fkey') THEN
+        ALTER TABLE bigname_phase.project_lookup_name ADD CONSTRAINT project_lookup_name_inventory_fkey
+            FOREIGN KEY (chain_id, record_serving_resource_id)
+            REFERENCES bigname_phase.project_lookup_inventory (chain_id, resource_id)
+            DEFERRABLE INITIALLY DEFERRED;
+    END IF;
+END
+$lookup_reference$;

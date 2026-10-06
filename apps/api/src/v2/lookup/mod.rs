@@ -275,7 +275,8 @@ async fn render_reverse_lookup_results(
         .filter(|input| requires_relation_post_filter(input.relation.as_ref()))
     {
         let page =
-            load_exact_relation_reverse_page(state, input, served_head, public_namespaces).await?;
+            load_exact_relation_reverse_page(state, profile, input, served_head, public_namespaces)
+                .await?;
         render_reverse_input_result(profile, input, page, results)?;
     }
     Ok(())
@@ -303,6 +304,7 @@ async fn render_storage_exact_reverse_lookup_results(
         &storage_inputs,
         public_namespaces,
         selected_snapshot,
+        matches!(profile, LookupProfile::Detail),
     )
     .await
     .map_err(crate::v2::snapshots::name_rows_error(
@@ -363,6 +365,7 @@ async fn render_storage_exact_reverse_lookup_results(
 
 async fn load_exact_relation_reverse_page(
     state: &AppState,
+    profile: LookupProfile,
     input: &ParsedAddressLookup,
     served_head: Option<&head::ServedHead>,
     public_namespaces: &[String],
@@ -391,6 +394,7 @@ async fn load_exact_relation_reverse_page(
             std::slice::from_ref(&storage_input),
             public_namespaces,
             selected_snapshot,
+            matches!(profile, LookupProfile::Detail),
         )
         .await
         .map_err(crate::v2::snapshots::name_rows_error(

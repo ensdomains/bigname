@@ -5,7 +5,7 @@
 //! Every production `.rs` file under the root must be listed in exactly one of the two lists below.
 //! A listed composition file that is missing, or an unlisted `.rs` file, fails the hash, so a file
 //! cannot move into or out of the composition without a reviewed edit here. Keep the composition
-//! list closed under what `compose_name_summary_publication` reaches: a composition file that
+//! list closed under what Project's summary, membership and lookup compositors reach: a composition file that
 //! starts calling a reader file, or embeds another file (such as SQL), lists that file in
 //! COMPOSITION_FILES in the same change.
 
@@ -27,6 +27,7 @@ pub(crate) const COMPOSITION_FILES: &[&str] = &[
     "crates/storage/src/families/records/address_names.rs",
     "crates/storage/src/families/records/assemble.rs",
     "crates/storage/src/families/records/inventory_publication.rs",
+    "crates/storage/src/families/records/inventory_types.rs",
     "crates/storage/src/families/records/inventory_cutoff.rs",
     "crates/storage/src/families/records/links.rs",
     "crates/storage/src/families/records/payload.rs",
@@ -87,6 +88,11 @@ pub(crate) const COMPOSITION_FILES: &[&str] = &[
 
 /// Serving reads and module wiring the composition does not call.
 const READER_FILES: &[&str] = &[
+    "crates/storage/src/families/lookup/read.rs",
+    "crates/storage/src/families/lookup/read_inventory.rs",
+    "crates/storage/src/families/lookup/reverse.rs",
+    "crates/storage/src/families/records/primary/batch.rs",
+    "crates/storage/src/families/records/reverse/batch.rs",
     "crates/storage/src/families/search_dictionary.rs",
     "crates/storage/src/families/search_dictionary/candidates.rs",
     "crates/storage/src/families/search_dictionary/pointer_parity.rs",

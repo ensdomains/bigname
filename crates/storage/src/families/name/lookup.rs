@@ -25,7 +25,7 @@ pub async fn compose_lookup_names_at(
                     && surface.block_number <= publication.block_number
             })
             .collect();
-        let composed =
+        let mut composed =
             load_chain(conn, publication, &surfaces, CoverageShape::Plain, false).await?;
         super::wrapper_fields::attach_published_wrapper_expiries(
             conn,
@@ -71,6 +71,10 @@ fn stable_core(row: &crate::NameCurrentRow) -> LookupNameCore {
         summary.remove("history");
         summary.remove("topology");
     }
+    let mut provenance = row.provenance.clone();
+    if let Some(object) = provenance.as_object_mut() {
+        object.remove("surface_block_number");
+    }
     LookupNameCore {
         surface_binding_id: row.surface_binding_id,
         resource_id: row.resource_id,
@@ -78,7 +82,7 @@ fn stable_core(row: &crate::NameCurrentRow) -> LookupNameCore {
         record_serving_resource_id: row.record_serving_resource_id(),
         binding_kind: row.binding_kind.map(|kind| kind.as_str().to_owned()),
         declared_summary,
-        provenance: row.provenance.clone(),
+        provenance,
         coverage: row.coverage.clone(),
     }
 }

@@ -76,6 +76,11 @@ pub const FAMILY_TABLES: &[&str] = &[
     "project_address_record_id_index",
     "project_name_history",
     "project_name_summary",
+    "project_lookup_name",
+    "project_lookup_relation",
+    "project_lookup_inventory",
+    "project_lookup_record",
+    "project_lookup_dependency",
 ];
 
 pub struct Fixture {
