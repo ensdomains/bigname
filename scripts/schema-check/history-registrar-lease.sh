@@ -101,5 +101,5 @@ CREATE INDEX $lease_index ON normalized_events $lease_wrong;
 SQL
 done
 assert_migration_context_count "$lease_migration" empty-schema 1
-assert_migration_context_count "$lease_migration" preceding-shape 3
+assert_migration_context_count "$lease_migration" preceding-shape 4
 assert_migration_context_count "$lease_migration" baseline-first 4

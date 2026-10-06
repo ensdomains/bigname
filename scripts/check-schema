@@ -1242,6 +1242,10 @@ emit_phase_migration "$ROOT/migrations/20261005120000_normalized_events_address_
 emit_phase_migration "$ROOT/migrations/20261005120000_normalized_events_address_root_permission_idx.sql" baseline-first | run_psql
 emit_phase_migration "$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql" preceding-shape | run_psql
 emit_phase_migration "$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql" baseline-first | run_psql
+# The historical normalized-event fixture lacks the registrar lease index. Install
+# the current operational definition before walk-set and exact-adoption checks.
+render_phase_migration "$ROOT/ops/history-registrar-lease-index/install.sql" | run_psql
+emit_phase_migration "$ROOT/migrations/20261006080000_normalized_events_history_registrar_lease_index.sql" preceding-shape | run_psql
 # The permission-reader indexes must be prebuilt for a populated table. Preserve
 # exact baseline definitions, then prove concurrent installation, OID-preserving
 # adoption/rerun, each refusal, and full-set validation before the first build.
