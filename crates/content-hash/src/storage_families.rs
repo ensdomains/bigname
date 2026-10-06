@@ -5,7 +5,7 @@
 //! Every production `.rs` file under the root must be listed in exactly one of the two lists below.
 //! A listed composition file that is missing, or an unlisted `.rs` file, fails the hash, so a file
 //! cannot move into or out of the composition without a reviewed edit here. Keep the composition
-//! list closed under what Project's summary, membership and lookup compositors reach: a composition file that
+//! list closed under what Project's summary, path and lookup compositors reach: a composition file that
 //! starts calling a reader file, or embeds another file (such as SQL), lists that file in
 //! COMPOSITION_FILES in the same change.
 
