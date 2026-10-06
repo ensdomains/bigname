@@ -177,9 +177,9 @@ async fn load_rows(
     let mut publications: BTreeMap<String, FamilyPublication> = BTreeMap::new();
     for record in &source {
         let chain: String = record.try_get("chain_id")?;
-        if !publications.contains_key(&chain) {
-            let publication = servable_publication(conn, &chain).await?;
-            publications.insert(chain, publication);
+        if let std::collections::btree_map::Entry::Vacant(entry) = publications.entry(chain) {
+            let publication = servable_publication(conn, entry.key()).await?;
+            entry.insert(publication);
         }
     }
     let mut rows = Vec::with_capacity(source.len());
