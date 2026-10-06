@@ -526,11 +526,13 @@ async fn v2_registry_root_role_changes_are_permission_history() -> Result<()> {
         feed_rows.iter().map(change).collect::<Vec<_>>(),
         vec![
             json!({"address":HOLDER, "powers":["registrar","renew"],
-                "added_powers":["registrar","renew"], "removed_powers":[]}),
+                "added_powers":["registrar","renew"], "removed_powers":[],
+                "old_role_bitmap":"0", "new_role_bitmap":(registrar | renew).to_string()}),
             json!({"address":OTHER, "powers":["registrar"], "added_powers":["registrar"],
-                "removed_powers":[]}),
+                "removed_powers":[], "old_role_bitmap":"0", "new_role_bitmap":registrar.to_string()}),
             json!({"address":HOLDER, "powers":["renew"], "added_powers":[],
-                "removed_powers":["registrar"]}),
+                "removed_powers":["registrar"], "old_role_bitmap":(registrar | renew).to_string(),
+                "new_role_bitmap":renew.to_string()}),
         ],
         "{feed}"
     );

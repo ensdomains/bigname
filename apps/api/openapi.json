@@ -8851,6 +8851,18 @@
             "type": "string",
             "description": "Lowercase operator explicitly retained on an ERC-1155 transfer."
           },
+          "sender": {
+            "type": "string",
+            "description": "Lowercase 20-byte 0x address of the immediate caller retained by an ENSv2 registry LabelRegistered, ResolverUpdated or SubregistryUpdated log."
+          },
+          "old_role_bitmap": {
+            "type": "string",
+            "description": "Original EACRolesChanged old role bitmap as a canonical unsigned decimal uint256 string, including zero and unnamed bits."
+          },
+          "new_role_bitmap": {
+            "type": "string",
+            "description": "Original EACRolesChanged new role bitmap as a canonical unsigned decimal uint256 string, including zero and unnamed bits."
+          },
           "registrant": {
             "type": "string",
             "description": "Registrant the registration event named, as the on-chain event carries it."
