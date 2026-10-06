@@ -1167,6 +1167,11 @@ in the same step.
    required column to the empty binding table, and the mandatory full-history
    Interpret and Project redos rebuild the cleared rows;
 4. if the reviewed artifact set includes a versioned schema-migration, apply it;
+   for `20261006080000_normalized_events_history_registrar_lease_index.sql`, prebuild
+   the one [registrar lease index](../../ops/history-registrar-lease-index/README.md)
+   concurrently before applying it to a populated schema. This access-path-only
+   change requires no Interpret or Project reset and preserves current rebuild
+   progress. A valid prebuild is adopted without rebuilding it;
    for `20261005170000_project_address_history_catalogue.sql`, first record
    the preceding versions through `--target-version 20261005160000` using
    their own prebuild instructions, then run and validate the dedicated

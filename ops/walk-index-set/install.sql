@@ -30,6 +30,8 @@ DECLARE
 BEGIN
     FOR checked_index, expected_definition IN
         SELECT * FROM (VALUES
+            ('normalized_events_history_registrar_lease_idx',
+             $def$CREATE INDEX normalized_events_history_registrar_lease_idx ON bigname_phase.normalized_events USING btree (resource_id) WHERE ((source_family = 'ens_v1_registrar_l1'::text) AND (canonicality_state <> 'orphaned'::bigname_phase.canonicality_state))$def$),
             ('normalized_events_registry_token_idx',
              $def$CREATE INDEX normalized_events_registry_token_idx ON bigname_phase.normalized_events USING btree (chain_id, resource_id, block_number DESC, transaction_index DESC, log_index DESC) WHERE ((source_family = ANY (ARRAY['ens_v2_registry_l1'::text, 'ens_v2_root_l1'::text])) AND (event_kind = ANY (ARRAY['TokenResourceLinked'::text, 'TokenRegenerated'::text])) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (resource_id IS NOT NULL) AND (block_number IS NOT NULL) AND (transaction_index IS NOT NULL) AND (log_index IS NOT NULL))$def$),
             ('normalized_events_v1_subregistry_after_node_scope_idx',
@@ -627,11 +629,17 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_history_discovery_reso
           'safe'::bigname_phase.canonicality_state,
           'finalized'::bigname_phase.canonicality_state);
 
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_history_registrar_lease_idx
+    ON bigname_phase.normalized_events (resource_id)
+    WHERE source_family = 'ens_v1_registrar_l1'
+      AND canonicality_state <> 'orphaned'::bigname_phase.canonicality_state;
+
 -- Printed first so the receipt shows the flags even when the check below fails.
 SELECT indexrelid::regclass AS index_name, indisvalid, indisready,
        pg_size_pretty(pg_relation_size(indexrelid)) AS index_size
 FROM pg_index
 WHERE indexrelid IN (
+    to_regclass('bigname_phase.normalized_events_history_registrar_lease_idx'),
     to_regclass('bigname_phase.normalized_events_v1_subregistry_after_node_scope_idx'),
     to_regclass('bigname_phase.normalized_events_v1_subregistry_after_child_scope_idx'),
     to_regclass('bigname_phase.normalized_events_v1_subregistry_before_node_scope_idx'),
