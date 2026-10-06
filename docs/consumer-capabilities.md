@@ -560,3 +560,11 @@ The construction and separate token/EAC versions are defined by the pinned regis
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/utils/LibLabel.sol:L7 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L578 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L678 @ ens_v2_sepolia_20261001@07e55a05)
+
+Retained ENSv1 descendants after the [Universal Resolver cutover](glossary.md#universal-resolver-cutover)
+share the current ENSv2 resolution-path decision across name detail, batch lookup,
+indexed keyed records, primary address, `resolves_to` and resolver `bound_names`.
+Consumers must distinguish `unresolvable_reason` (proven absence) from
+`resolution_unsupported_reason` (unproved path or unprojected target), and must
+not use retained child records when either is present. Ownership and registration
+remain independently available. See [the exact reasons and wrapper limits](api-v1.md#expiry-and-grace).

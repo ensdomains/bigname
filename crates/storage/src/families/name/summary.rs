@@ -32,7 +32,7 @@
 //!   null when it serves none or the name composes no row (`list_keys.rs`);
 //! - `recompose_at`: the first second after the composition's block at which the composition
 //!   can change with no fact changing (a binding interval opening or closing, a NameWrapper
-//!   expiry or grace boundary), in Unix seconds, since a NameWrapper expiry can lie past the last
+//!   expiry or grace boundary, or an ENSv2 resolution path expiry), in Unix seconds, since a NameWrapper expiry can lie past the last
 //!   instant a timestamp holds; kept for a name that composes no row too. The writer composes
 //!   the name again at the first block whose time reaches it.
 use std::collections::BTreeMap;
@@ -78,6 +78,15 @@ pub async fn compose_name_summary_publication(
     logical_name_ids: &[String],
 ) -> Result<NameSummaryPublication> {
     compose_summaries(conn, publication, logical_name_ids, true).await
+}
+
+/// Summary clocks and resolution evidence without unrelated address-history composition.
+pub async fn compose_name_resolution_summaries(
+    conn: &mut PgConnection,
+    publication: &FamilyPublication,
+    names: &[String],
+) -> Result<NameSummaryPublication> {
+    compose_summaries(conn, publication, names, false).await
 }
 
 async fn compose_summaries(
@@ -127,11 +136,10 @@ async fn compose_summaries(
     } else {
         Vec::new()
     };
-    let null_resolver_names = if include_relations
-        && matches!(
-            publication.chain_id.as_str(),
-            "ethereum-mainnet" | "ethereum-sepolia"
-        ) {
+    let null_resolver_names = if matches!(
+        publication.chain_id.as_str(),
+        "ethereum-mainnet" | "ethereum-sepolia"
+    ) {
         composed
             .values()
             .filter_map(|composed| composed.row.as_ref())

@@ -126,6 +126,9 @@ pub(crate) struct LookupRecord {
     /// Why the name resolves to nothing through the Universal Resolver, as on name detail.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unresolvable_reason: Option<String>,
+    /// Resolution follows an ENSv2 path whose target cannot be projected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) resolution_unsupported_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subregistry: Option<RegistryRef>,
     /// Present on `profile=detail` records that may serve resolver records and have a record

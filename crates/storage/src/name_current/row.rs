@@ -30,21 +30,27 @@ pub struct NameCurrentRow {
 
 impl NameCurrentRow {
     /// The resource the name serves records through: its serving resource, else its bound
-    /// resource; none for a name that resolves to nothing through the Universal Resolver
-    /// ([`Self::unresolvable_reason`]).
+    /// resource; none when the current resolution path is absent or its retained target cannot
+    /// be proved ([`Self::unresolvable_reason`], [`Self::resolution_unsupported_reason`]).
     pub fn record_serving_resource_id(&self) -> Option<Uuid> {
-        if self.unresolvable_reason().is_some() {
+        if self.unresolvable_reason().is_some() || self.resolution_unsupported_reason().is_some() {
             return None;
         }
         self.serving_resource_id.or(self.resource_id)
     }
 
-    /// Why the name serves no resolver or records although its authority has them: after the
-    /// Universal Resolver cutover a `.eth` name ENSv1 decides without a live ENSv2 entry at its
-    /// second-level name (`families::name::resolvability`).
+    /// Why the name serves no resolver or records although its authority has them: its
+    /// post-cutover ENSv2 path has no resolver, including a missing live second-level entry.
     pub fn unresolvable_reason(&self) -> Option<&str> {
         self.declared_summary
             .get("unresolvable_reason")
+            .and_then(Value::as_str)
+    }
+
+    /// Why retained resolution data cannot be attributed to the current ENSv2 path.
+    pub fn resolution_unsupported_reason(&self) -> Option<&str> {
+        self.declared_summary
+            .get("resolution_unsupported_reason")
             .and_then(Value::as_str)
     }
 

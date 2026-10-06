@@ -358,6 +358,7 @@ async fn refresh_derived(
     after: i64,
     stats: &mut BlockStats,
 ) -> Result<()> {
+    super::resolution_paths::prepare(transaction, chain_id, block, after).await?;
     let touched = super::derived::touched(transaction, chain_id, block.number, Some(after)).await?;
     let summary = super::derived::refresh(transaction, chain_id, &touched).await?;
     if summary.rows > 0 {
@@ -374,6 +375,9 @@ async fn refresh_derived(
         stats,
     )
     .await?;
+    let (rows, undo_rows) = super::resolution_paths::refresh(transaction, chain_id, block).await?;
+    *stats.rows.entry(NAME_SUMMARY.name).or_default() += rows;
+    stats.undo_rows += undo_rows;
     let (rows, undo_rows) =
         super::derived::refresh_search_cutover(transaction, chain_id, block).await?;
     *stats.rows.entry(NAME_SUMMARY.name).or_default() += rows;

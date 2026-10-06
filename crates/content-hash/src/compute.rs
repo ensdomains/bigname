@@ -82,6 +82,9 @@ const SEMANTIC_SOURCE_FILES: &[&str] = &[
     "crates/storage/src/identity_search/tokens.rs",
     "crates/storage/src/label_preimages.rs",
     "crates/storage/src/name_current/wrapper_expiry.rs",
+    // Physical entry identities and shared record gating now decide path deadlines/evidence.
+    "crates/storage/src/identity/ids.rs",
+    "crates/storage/src/name_current/row.rs",
     "crates/storage/src/name_current/public_authority.rs",
     "crates/storage/src/public_name_fields/ens_v1.rs",
     "crates/storage/src/public_name_fields/mod.rs",

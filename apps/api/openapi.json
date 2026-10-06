@@ -6520,7 +6520,11 @@
           },
           "unresolvable_reason": {
             "type": "string",
-            "description": "Why the retained resolver cannot resolve this name; currently `no_live_ens_v2_entry`."
+            "description": "Why the retained resolver cannot resolve this name: `no_live_ens_v2_entry` or `ens_v2_path_no_resolver`."
+          },
+          "resolution_unsupported_reason": {
+            "type": "string",
+            "description": "The current ENSv2 path is unknown (`ens_v2_path_not_projected`) or reaches a different target whose indexed records cannot be attributed (`ens_v2_path_target_not_projected`)."
           },
           "subregistry": {
             "$ref": "#/components/schemas/ContractRef",
@@ -6884,7 +6888,11 @@
           },
           "unresolvable_reason": {
             "type": "string",
-            "description": "Why the retained resolver cannot resolve this name; currently `no_live_ens_v2_entry`."
+            "description": "Why the retained resolver cannot resolve this name: `no_live_ens_v2_entry` or `ens_v2_path_no_resolver`."
+          },
+          "resolution_unsupported_reason": {
+            "type": "string",
+            "description": "The current ENSv2 path is unknown (`ens_v2_path_not_projected`) or reaches a different target whose indexed records cannot be attributed (`ens_v2_path_target_not_projected`)."
           },
           "subregistry": {
             "$ref": "#/components/schemas/ContractRef",

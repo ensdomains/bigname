@@ -15,14 +15,14 @@ const FACTORY: &str = "0xda70306c98e97ece36f997a21368e53298572991";
 const EPOCH: &str = "ens_v2_sepolia_20261001";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum Model {
+pub(crate) enum Model {
     Declared,
     User,
     Wrapper,
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct SupportedRegistry {
+pub(crate) struct SupportedRegistry {
     pub root: Uuid,
     pub namespace: String,
     pub model: Model,
@@ -37,7 +37,7 @@ struct Declaration {
     after_state: Value,
 }
 
-pub(super) struct Declarations(Vec<Declaration>);
+pub(crate) struct Declarations(Vec<Declaration>);
 
 impl Declaration {
     fn active(&self, chain: &str, family: &str, namespace: &str, version: i64) -> bool {
@@ -78,7 +78,7 @@ impl Declaration {
 }
 
 impl Declarations {
-    pub(super) async fn load(
+    pub(crate) async fn load(
         conn: &mut PgConnection,
         publication: &FamilyPublication,
     ) -> Result<Self> {
@@ -108,7 +108,7 @@ impl Declarations {
             .find(|source| Some(source.source_manifest_id) == id)
     }
 
-    fn declared(
+    pub(crate) fn declared(
         &self,
         publication: &FamilyPublication,
         registry: &str,
@@ -201,7 +201,7 @@ SELECT EXISTS (
       AND event.block_number BETWEEN $3 AND $4
       AND lower(event.after_state ->> 'implementation') IS DISTINCT FROM ";
 
-pub(super) async fn load(
+pub(crate) async fn load(
     conn: &mut PgConnection,
     publication: &FamilyPublication,
     declarations: &Declarations,

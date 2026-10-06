@@ -23,10 +23,6 @@ use crate::families::control::lifecycle::{
     AuthoritySelection, NameFacts, NameInput, NamePlace, has_live_ens_v2_entry, load_name_facts_on,
 };
 
-/// Why a composed name serves no resolver or records although its authority has them
-/// (`declared_summary.unresolvable_reason`).
-pub(super) const NO_LIVE_ENS_V2_ENTRY: &str = "no_live_ens_v2_entry";
-
 /// Whether each `.eth` second-level name a batch needs has a live ENSv2 entry, read only when
 /// the chain is cut over.
 #[derive(Default)]

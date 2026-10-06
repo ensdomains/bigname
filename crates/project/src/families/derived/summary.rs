@@ -76,8 +76,7 @@ pub(super) async fn refresh(
         })?;
     // Proxy changes and later parent releases can retire direct disagreements.
     let affected =
-        super::super::universal_resolver::cutover_names(transaction, chain_id, number, &names)
-            .await?;
+        super::super::universal_resolver::cutover_names(transaction, chain_id, number).await?;
     if !affected.is_empty() {
         names.extend(affected);
         names.sort_unstable();
@@ -119,22 +118,7 @@ pub(super) async fn refresh(
                 ProjectError::transient(message)
             }
         })?;
-        if !fresh.null_resolver_names.is_empty() {
-            sqlx::query(
-                "/* project:families.derived.retire_null_resolver_divergences */
-                UPDATE resolution_divergences
-                SET cleared_at = GREATEST(statement_timestamp(), last_observed_at)
-                WHERE logical_name_id = ANY($1) AND resolver_chain_id = $2
-                  AND cleared_at IS NULL",
-            )
-            .bind(&fresh.null_resolver_names)
-            .bind(chain_id)
-            .execute(&mut **transaction)
-            .await
-            .map_err(|error| {
-                ProjectError::database("failed to retire null-resolver evidence", error)
-            })?;
-        }
+        retire_null_resolver_divergences(transaction, chain_id, &fresh.null_resolver_names).await?;
         current_relations.extend(fresh.current_history_relations);
         let (rows, undo_rows) =
             replace_chunk(transaction, chain_id, &block, chunk, &fresh.rows).await?;
@@ -146,9 +130,24 @@ pub(super) async fn refresh(
     Ok(result)
 }
 
+pub(crate) async fn retire_null_resolver_divergences(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    names: &[String],
+) -> Result<()> {
+    if !names.is_empty() {
+        sqlx::query("/* project:families.derived.retire_null_resolver_divergences */
+            UPDATE resolution_divergences SET cleared_at=GREATEST(statement_timestamp(),last_observed_at)
+            WHERE logical_name_id=ANY($1) AND resolver_chain_id=$2 AND cleared_at IS NULL")
+            .bind(names).bind(chain_id).execute(&mut **transaction).await
+            .map_err(|error| ProjectError::database("failed to retire null-resolver evidence",error))?;
+    }
+    Ok(())
+}
+
 /// Replace at most one composition chunk, retaining the first image if ordinary and cutover
 /// work name the same key in this publication.
-pub(super) async fn replace_chunk(
+pub(crate) async fn replace_chunk(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     block: &input::BlockHeader,
@@ -209,7 +208,7 @@ pub(super) async fn replace_chunk(
 /// is widened to those names.
 /// A registry event of the block that carries a resource adds every name a registry event of that
 /// resource carries, since it can move the resource's unnamed Transfers from one to another.
-pub(super) const WORK_LIST: &str = r#"/* project:families.derived.summary_names */
+pub(crate) const WORK_LIST: &str = r#"/* project:families.derived.summary_names */
     WITH journal AS (
         SELECT family, key::jsonb AS key, before_image
         FROM project_family_undo

@@ -25,7 +25,7 @@ pub(super) async fn enrich_all(
     super::wrapper_fields::attach_wrapper_expiries(conn, rows).await?;
     let mut wanted: BTreeMap<String, Vec<Uuid>> = BTreeMap::new();
     for row in rows.values() {
-        if let Some(resource) = row.serving_resource_id.or(row.resource_id) {
+        if let Some(resource) = row.record_serving_resource_id() {
             wanted.entry(chain_of(row)?).or_default().push(resource);
         }
     }
@@ -65,7 +65,7 @@ async fn enrich(
         _ => None,
     };
     let chain_id = chain_of(row)?;
-    let resource = row.serving_resource_id.or(row.resource_id);
+    let resource = row.record_serving_resource_id();
     if let Some(resource) = resource {
         let inventory = inventories.get(&(chain_id.clone(), resource));
         if row.namespace == "ens"

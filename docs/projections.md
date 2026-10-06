@@ -385,6 +385,32 @@ unregistered ownerless registry profile; the selected arm is kept, but the API
 serves no `authority` for such a row and no public `authority` filter matches
 it.
 
+After the [Universal Resolver cutover](glossary.md#universal-resolver-cutover),
+ENSv1-selected descendants below `.eth` share one publication-scoped ENSv2 path
+decision. It reads current physical entries and pointer clears, proves the exact
+registry implementation from admitted declarations or factory/announcement
+history, and walks the requested label hashes from the root. The nearest
+nonzero resolver wins before ENSIP-10 validation; a deeper non-extended resolver
+can hide an ancestor wildcard.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L22-L85 @ ens_v2_sepolia_20261001@07e55a05)
+The retained resolver survives only when the selected node-based target matches
+ordinary child pointer admission, directly or through the ENSv1 mirror. A
+proven absence sets `unresolvable_reason`; a different or unproved target sets
+`resolution_unsupported_reason`. Both withhold the record-serving resource and
+direct topology without changing ownership, registration or authority coverage.
+See the [API reasons and limits](api-v1.md#expiry-and-grace).
+
+For a recognized WrapperRegistry, retained activated `MigrationApplied` evidence
+must match the factory deployment and registry announcement before its salt can
+identify the immutable original wrapper node. Generic factory salt alone does
+not prove that node. The original child supplies fuse/owner eligibility; the
+mirror reads the full requested name after rebinding. Positive stored registry
+expiry disables fallback even after that expiry passes. Unwrap preserves the
+NameWrapper fuse data used by this rule.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/LockedWrapperReceiver.sol:L148-L164 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L312-L327 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269-L279 @ ens_v1@91c966f)
+
 `declared_summary.topology` is the lookup engine's routing input
 (`architecture.md` § `verified_queries`, `execution.md` § Resolver-record
 lookup). The snapshot reader composes it in a fixed order, selecting the first
@@ -1994,12 +2020,28 @@ API renders the integer as a decimal string (see
 [the timestamp contract](api-v1.md#timestamp-format-and-absent-expiry)).
 `recompose_at` is the first second
 at which the name's composition can change with no fact changing: a binding
-interval opening or closing, or a NameWrapper expiry or grace boundary. It is
+interval opening or closing, a NameWrapper expiry or grace boundary, or a current
+ENSv2 resolution-path entry/fallback expiry. It is
 stored in Unix seconds, since a NameWrapper expiry can lie past the last
 instant a timestamp holds, and kept for a name that composes no row. A summary that
 changed is journalled and written like any other family row, so an undo
 restores it from the journal and composes nothing; a rebuild composes every
 surfaced name.
+
+Before consuming due summary clocks, the publication captures affected resolution
+names in a transaction-local SQL work table. The set includes full label-hash
+suffix descendants at arbitrary supported depth, hash-only names and names that
+have never served a resolver. Changed physical registries expand their current
+and just-replaced mounts; original wrapper eligibility changes also expand the
+registry's current mounts. Resolver classification, pointer, entry, owner/fuse
+and cutover changes and due clocks are dependencies. Ordinary record values,
+record links and version-only pointer updates do not expand descendants. The
+writer composes at most 1,000 affected names at a time, journals the first
+summary before-image and retires active direct-divergence evidence for withheld
+resolvers. It creates no persistent path cache or new schema family. Normal
+publication and rebuild use the same decision; undo restores the journalled
+summary rows. A manifest sync has no block position: its existing phase-hash
+invalidation requires the normal full Interpret/Project redo.
 
 The summary also stores the supported search row's public registration fields,
 shaped by the same pure functions as the API. The publication transaction attaches

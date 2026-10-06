@@ -16,11 +16,7 @@ use sqlx::{PgConnection, Row};
 
 use crate::families::{name::rendered::rendered_name_sql, position::emission_ordinal_sql};
 
-use super::{
-    facts::{ResolverClassification, load_classification_on as load_classification},
-    is_cleared,
-    serving::ServingPointer,
-};
+use super::{facts::ResolverClassification, is_cleared, serving::ServingPointer};
 
 const V2_POINTER_FAMILIES: [&str; 2] = ["ens_v2_registry_l1", "ens_v2_root_l1"];
 
@@ -158,12 +154,28 @@ pub(crate) async fn evaluate_family_mirror(
     pointer: &ServingPointer,
     mirror: ResolverClassification,
 ) -> Result<MirrorSelection> {
+    evaluate_family_mirror_at(conn, chain_id, pointer, mirror, None).await
+}
+
+pub(crate) async fn evaluate_family_mirror_at(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    pointer: &ServingPointer,
+    mirror: ResolverClassification,
+    publication_block: Option<i64>,
+) -> Result<MirrorSelection> {
     let mirror_namespace_matches = mirror.declared_in(&pointer.namespace);
     let nearest = nearest(conn, chain_id, pointer).await?;
     let nearest = match nearest {
         Some(mut nearest) => {
-            let classification =
-                load_classification(conn, chain_id, &nearest.mirrored_resolver_address).await?;
+            let classification = super::facts::load_classifications_at(
+                conn,
+                chain_id,
+                std::slice::from_ref(&nearest.mirrored_resolver_address),
+                publication_block,
+            )
+            .await?
+            .remove(&nearest.mirrored_resolver_address);
             classify(&mut nearest, classification.as_ref());
             Some(nearest)
         }

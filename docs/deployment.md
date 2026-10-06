@@ -3248,3 +3248,17 @@ TO bigname_api;
 
 New API roles receive these privileges in the provisioning block above. Startup
 preflight refuses to serve when either table is unreadable.
+
+### Retained ENSv1 descendant resolution paths
+
+The shared composition now follows the current ENSv2 path before serving retained
+ENSv1 descendant records. The composition, its registry/mirror/identity helpers
+and Project's affected-name selection are interpreter fingerprint inputs. This
+rotates the compiled hash for every chain and requires a full-history Interpret
+redo followed by the Project redo it installs under matching runner/API binaries.
+Use the [planned fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
+and keep existing readiness fences intact. No schema-migration, watch-plan,
+manifest/admission or raw-intake change is introduced by this correction. Do not
+mark old rows ready under the new hash or treat a recent parent replay as a full
+re-derivation. Validate retained mirror/direct paths, disconnected descendants,
+wrapper rebinding/unwrap eligibility, and no-child-write expiry after publication.
