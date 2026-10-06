@@ -87,7 +87,7 @@ const CLASS_IDS: &str = r#"SELECT search_id FROM bigname_phase.name_search_docum
 const MERGE: &str = r#"SELECT logical_name_id,name,namespace,namehash FROM unnest($1::text[],$2::text[],$3::text[],$4::text[]) merged(logical_name_id,name,namespace,namehash)
 ORDER BY name,namespace,namehash LIMIT $5;"#;
 
-fn terms(filter: &NameCurrentListFilter) -> (bool, Vec<(i16, String)>) {
+fn terms(filter: &NameCurrentListFilter) -> Vec<(i16, String)> {
     let (mode, query) = if let Some(name) = &filter.name {
         ("exact", name.clone())
     } else if let Some(prefix) = &filter.prefix {
@@ -97,12 +97,9 @@ fn terms(filter: &NameCurrentListFilter) -> (bool, Vec<(i16, String)>) {
     } else if let Some(contains) = &filter.contains_nocase {
         ("contains", contains.to_ascii_lowercase())
     } else {
-        return (false, Vec::new());
+        return Vec::new();
     };
-    (
-        mode == "contains",
-        crate::identity_search::tokens::required(&query, mode == "prefix"),
-    )
+    crate::identity_search::tokens::required(&query, mode == "prefix")
 }
 
 pub(super) async fn load(
@@ -123,7 +120,7 @@ pub(super) async fn load(
         .await
         .context("failed to read search namespaces")?,
     };
-    let (dense_contains, necessary) = terms(filter);
+    let necessary = terms(filter);
     let mut dense = BTreeSet::new();
     let mut selected = [Vec::new(), Vec::new(), Vec::new()];
     for class in 0_i16..=2 {
@@ -159,7 +156,7 @@ pub(super) async fn load(
             }
             if let Some(ids) = complete {
                 selected[class as usize].extend(ids);
-            } else if dense_contains && class < 2 {
+            } else if class < 2 {
                 dense.insert(class);
             } else {
                 let (kind, token) = &necessary[0];
