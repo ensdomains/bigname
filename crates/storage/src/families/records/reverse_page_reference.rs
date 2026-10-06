@@ -120,5 +120,6 @@ async fn candidates_on(
         .context("failed to seek family reverse lookup candidates")
 }
 
+#[cfg(test)]
 #[path = "reverse_page_tests.rs"]
 mod tests;

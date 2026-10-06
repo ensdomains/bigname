@@ -148,10 +148,10 @@ ALTER TABLE pg_temp.project_lookup_name ADD CONSTRAINT project_lookup_name_inven
             FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
             WHERE a.attrelid=format('pg_temp.%I',checked.name)::regclass AND a.attnum>0 AND NOT a.attisdropped
             UNION ALL SELECT jsonb_build_array('constraint', conname, contype, convalidated,
-                replace(replace(pg_get_constraintdef(oid), pg_my_temp_schema()::regnamespace::text || '.', ''), 'bigname_phase.', '')) FROM pg_constraint
+                replace(replace(replace(pg_get_constraintdef(oid), pg_my_temp_schema()::regnamespace::text || '.', ''), 'pg_temp.', ''), 'bigname_phase.', '')) FROM pg_constraint
             WHERE conrelid=format('pg_temp.%I',checked.name)::regclass
             UNION ALL SELECT jsonb_build_array('index', (SELECT relname FROM pg_class WHERE oid=indexrelid),
-                replace(pg_get_indexdef(indexrelid), pg_my_temp_schema()::regnamespace::text || '.', ''),
+                replace(replace(pg_get_indexdef(indexrelid), pg_my_temp_schema()::regnamespace::text || '.', ''), 'pg_temp.', ''),
                 indisvalid, indisready) FROM pg_index
             WHERE indrelid=format('pg_temp.%I',checked.name)::regclass
         ) shape;
@@ -161,7 +161,7 @@ ALTER TABLE pg_temp.project_lookup_name ADD CONSTRAINT project_lookup_name_inven
             FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
             WHERE a.attrelid=format('bigname_phase.%I',checked.name)::regclass AND a.attnum>0 AND NOT a.attisdropped
             UNION ALL SELECT jsonb_build_array('constraint', conname, contype, convalidated,
-                replace(replace(pg_get_constraintdef(oid), pg_my_temp_schema()::regnamespace::text || '.', ''), 'bigname_phase.', '')) FROM pg_constraint
+                replace(replace(replace(pg_get_constraintdef(oid), pg_my_temp_schema()::regnamespace::text || '.', ''), 'pg_temp.', ''), 'bigname_phase.', '')) FROM pg_constraint
             WHERE conrelid=format('bigname_phase.%I',checked.name)::regclass
             UNION ALL SELECT jsonb_build_array('index', replace((SELECT relname FROM pg_class WHERE oid=indexrelid),'bigname_phase.',''),
                 replace(pg_get_indexdef(indexrelid), 'bigname_phase.', ''), indisvalid, indisready) FROM pg_index

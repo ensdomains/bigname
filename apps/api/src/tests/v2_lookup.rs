@@ -3113,7 +3113,7 @@ async fn assert_reverse_family_pages(
     let mut names = Vec::new();
     let mut first_cursor = None;
     loop {
-        let groups = load_reverse(&database.lookup_pool, &[request.clone()], namespaces, None).await?;
+        let groups = load_reverse(&database.lookup_pool, &[request.clone()], namespaces, None, true).await?;
         assert_eq!(groups.len(), 1);
         let group = &groups[0];
         assert_eq!(group.total_count, Some(expected.len() as u64));
@@ -3236,7 +3236,7 @@ async fn reverse_identity_pages_preserve_roles_namespaces_and_long_names() -> Re
             page_size: 2,
             cursor: None,
         });
-    let empty = load_reverse(&database.lookup_pool, &[], &namespaces, None).await?;
+    let empty = load_reverse(&database.lookup_pool, &[], &namespaces, None, true).await?;
     assert!(empty.is_empty());
     let missing = ReverseIdentityStorageInput {
         address: absent.to_owned(),
@@ -3263,7 +3263,7 @@ async fn reverse_identity_pages_preserve_roles_namespaces_and_long_names() -> Re
         }
         let mut batch = [0, 3, 4, 5].map(|case| cases[case][0].clone()).to_vec();
         batch.push(missing.clone());
-        let groups = load_reverse(&database.lookup_pool, &batch, &namespaces, None).await?;
+        let groups = load_reverse(&database.lookup_pool, &batch, &namespaces, None, true).await?;
         let expected_batch = [
             &expected[0][..2],
             &expected[1][2..4],

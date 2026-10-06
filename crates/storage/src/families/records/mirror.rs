@@ -150,15 +150,6 @@ pub(crate) fn is_mirror_pointer(
 /// Walk the ENSv1 registry for a mirror pointer: at most one `project_registry_pointer` probe per
 /// label of the queried name, then one classification probe for the nearest resolver. A tie at one
 /// depth follows the canonical event order, never the generated event id.
-pub(crate) async fn evaluate_family_mirror(
-    conn: &mut PgConnection,
-    chain_id: &str,
-    pointer: &ServingPointer,
-    mirror: ResolverClassification,
-) -> Result<MirrorSelection> {
-    evaluate_family_mirror_at(conn, chain_id, pointer, mirror, None).await
-}
-
 pub(crate) async fn evaluate_family_mirror_at(
     conn: &mut PgConnection,
     chain_id: &str,

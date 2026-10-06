@@ -3,15 +3,16 @@ use super::super::{derived::SUMMARY_WORK_LIST, input::BlockHeader};
 use crate::{ProjectError, Result};
 use sqlx::{Postgres, Transaction};
 
-pub(super) async fn prepare(
+pub(in crate::families) async fn prepare(
     transaction: &mut Transaction<'_, Postgres>,
     chain: &str,
     block: &BlockHeader,
     after: i64,
 ) -> Result<()> {
-    sqlx::raw_sql("/* project:families.lookup.create_work */ CREATE TEMP TABLE bigname_lookup_name_work (logical_name_id text COLLATE \"C\" PRIMARY KEY) ON COMMIT DROP;
-        CREATE TEMP TABLE bigname_lookup_inventory_work (resource_id uuid PRIMARY KEY, refresh boolean NOT NULL) ON COMMIT DROP")
-        .execute(&mut **transaction).await.map_err(|e| ProjectError::database("failed to create lookup work", e))?;
+    sqlx::query("/* project:families.lookup.create_name_work */ CREATE TEMP TABLE bigname_lookup_name_work (logical_name_id text COLLATE \"C\" PRIMARY KEY) ON COMMIT DROP")
+        .execute(&mut **transaction).await.map_err(|e| ProjectError::database("failed to create lookup name work", e))?;
+    sqlx::query("/* project:families.lookup.create_inventory_work */ CREATE TEMP TABLE bigname_lookup_inventory_work (resource_id uuid PRIMARY KEY, refresh boolean NOT NULL) ON COMMIT DROP")
+        .execute(&mut **transaction).await.map_err(|e| ProjectError::database("failed to create lookup inventory work", e))?;
     sqlx::query(&format!("/* project:families.lookup.name_work */ INSERT INTO pg_temp.bigname_lookup_name_work {SUMMARY_WORK_LIST} ON CONFLICT DO NOTHING"))
         .bind(chain).bind(block.number).bind(block.timestamp_seconds).bind(after)
         .execute(&mut **transaction).await.map_err(|e| ProjectError::database("failed to capture lookup name work", e))?;
