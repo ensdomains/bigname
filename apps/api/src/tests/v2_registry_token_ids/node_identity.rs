@@ -761,13 +761,20 @@ async fn produced_search_lean_walks_an_unsupported_interval() -> Result<()> {
     }
     for index in 0..32 {
         let label = format!("lean1{index:02}");
-        let logical = format!("ens:{:#x}", node(&[label.as_bytes()]));
+        let namehash = format!("{:#x}", node(&[label.as_bytes()]));
+        let logical = format!("ens:{namehash}");
+        // Unmasked authority has no logical identity; the sibling SubregistryChanged
+        // observation carries the structural identity for this raw NewOwner event.
         let unmasked: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM normalized_events WHERE logical_name_id=$1
+            "SELECT count(*) FROM normalized_events WHERE chain_id=$1
+             AND namespace='ens' AND source_family='ens_v1_registry_l1'
              AND event_kind='AuthorityTransferred'
-             AND after_state @> '{\"owner_word_unmasked\":true}'",
+             AND after_state->>'child_node'=$2
+             AND after_state @> '{\"source_event\":\"NewOwner\",\"emitter_role\":\"registry_old\",\"owner_word_unmasked\":true}'
+             AND logical_name_id IS NULL AND resource_id IS NULL",
         )
-        .bind(&logical)
+        .bind(CHAIN)
+        .bind(&namehash)
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(unmasked, 1, "{label}: admitted unmasked owner observation");
