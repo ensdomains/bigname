@@ -3352,6 +3352,9 @@ Closed history payload fields. The event type and retained evidence determine wh
 | `payment_token` | object ContractRef | optional | ERC-20 contract named by an ENSv2 payment observation; explicit zero address is preserved, without inferring a currency. |
 | `referrer` | string | optional | Emitted bytes32 referrer as lowercase 0x-prefixed hex, including explicit zero. |
 | `operator` | string | optional | Lowercase operator explicitly retained on an ERC-1155 transfer. |
+| `sender` | string | optional | Lowercase 20-byte 0x address of the immediate caller retained by an ENSv2 registry LabelRegistered, ResolverUpdated or SubregistryUpdated log. |
+| `old_role_bitmap` | string | optional | Original EACRolesChanged old role bitmap as a canonical unsigned decimal uint256 string, including zero and unnamed bits. |
+| `new_role_bitmap` | string | optional | Original EACRolesChanged new role bitmap as a canonical unsigned decimal uint256 string, including zero and unnamed bits. |
 | `registrant` | string | optional | Registrant the registration event named, as the on-chain event carries it. |
 | `owner` | string | optional | Owner address the event named. |
 | `expires_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
