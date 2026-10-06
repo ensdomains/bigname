@@ -1,6 +1,6 @@
 //! Prepare the label locks before redo mutates identity anchors or raw witnesses.
 use crate::{InterpretError, Result};
-use bigname_adapters::schema_v2::BatchOutput;
+use bigname_adapters::schema_v2::{BatchOutput, seam::PREIMAGE_OBSERVATION_EVENT_KIND};
 use sqlx::{Postgres, Transaction};
 
 pub(super) fn failure(error: anyhow::Error) -> InterpretError {
@@ -15,7 +15,7 @@ pub(super) async fn prepare_redo(
 ) -> Result<Vec<String>> {
     // This includes the exact repair target's superset: range anchors, range observations,
     // released witnesses, and raw evidence whose witness has lost readable lineage.
-    let mut names: Vec<String> = sqlx::query_scalar(
+    let statement = format!(
         "/* interpret:identity_search.redo_names */ SELECT logical_name_id FROM name_surfaces surface
          WHERE surface.chain_id=$1 AND (
              surface.block_number BETWEEN $2 AND $3
@@ -31,10 +31,18 @@ pub(super) async fn prepare_redo(
              OR EXISTS (SELECT 1 FROM normalized_events event
                 WHERE event.chain_id=$1 AND event.block_number BETWEEN $2 AND $3
                   AND event.logical_name_id=surface.logical_name_id
-                  AND event.event_kind='PreimageObserved'))
+                  AND event.event_kind='{PREIMAGE_OBSERVATION_EVENT_KIND}'))
          ORDER BY logical_name_id",
-    ).bind(chain_id).bind(range.0).bind(range.1).fetch_all(&mut **transaction).await
-        .map_err(|error| InterpretError::database("failed to collect redo search identities", error))?;
+    );
+    let mut names: Vec<String> = sqlx::query_scalar(&statement)
+        .bind(chain_id)
+        .bind(range.0)
+        .bind(range.1)
+        .fetch_all(&mut **transaction)
+        .await
+        .map_err(|error| {
+            InterpretError::database("failed to collect redo search identities", error)
+        })?;
     names.extend(
         output
             .name_surfaces
