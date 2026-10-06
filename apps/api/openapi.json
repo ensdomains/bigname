@@ -8081,6 +8081,10 @@
             "type": "string",
             "description": "Opaque registration lifecycle handle; permission rows use the published permission-handle mapping."
           },
+          "eac_resource": {
+            "type": "string",
+            "description": "Exact resolver EAC uint256 resource, in canonical unsigned base-10 notation (0 through 115792089237316195423570985008687907853269984665640564039457584007913129639935), with no leading zeros except `\"0\"` for root. Omitted for non-EAC or non-resolver grants; never null. Independent of descriptive `record_resource`."
+          },
           "record_resource": {
             "$ref": "#/components/schemas/RecordResource",
             "description": "Record selector described by the grant; only current setter powers contribute."
@@ -9240,6 +9244,10 @@
           "grant_event": {
             "$ref": "#/components/schemas/GrantEvent",
             "description": "Earliest canonical permission event for the holder in the row provenance."
+          },
+          "eac_resource": {
+            "type": "string",
+            "description": "Exact resolver EAC uint256 resource, in canonical unsigned base-10 notation (0 through 115792089237316195423570985008687907853269984665640564039457584007913129639935), with no leading zeros except `\"0\"` for root. Omitted for non-EAC or non-resolver grants; never null. Independent of descriptive `record_resource`."
           },
           "record_resource": {
             "$ref": "#/components/schemas/RecordResource",
