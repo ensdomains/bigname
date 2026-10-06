@@ -1687,7 +1687,10 @@ fn collect_pipeline_vocabulary_in_product_response(
     violations: &mut Vec<String>,
 ) {
     walk_product_pipeline_response(value, "$", None, &mut |path, value_key, candidate| {
-        if value_key.is_none() && is_address_name_permission_handle(route, path, candidate) {
+        if value_key.is_none()
+            && (is_address_name_permission_handle(route, path, candidate)
+                || is_permission_eac_resource(route, path, candidate))
+        {
             return;
         }
         for term in matched_pipeline_terms(candidate) {
@@ -1849,8 +1852,22 @@ fn is_address_name_permission_handle(route: &V2ConformanceRoute, path: &str, key
             })
 }
 
+// docs/api-v1.md explicitly names this EAC target on direct permission rows.
+fn is_permission_eac_resource(route: &V2ConformanceRoute, path: &str, key: &str) -> bool {
+    route.success == V2SuccessFixture::Permissions
+        && key == "eac_resource"
+        && path
+            .strip_prefix("$.data[")
+            .and_then(|path| path.strip_suffix("].eac_resource"))
+            .is_some_and(|index| {
+                !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+            })
+}
+
 fn is_dictionary_allowlisted(route: &V2ConformanceRoute, path: &str, key: &str) -> bool {
-    if is_address_name_permission_handle(route, path, key) {
+    if is_address_name_permission_handle(route, path, key)
+        || is_permission_eac_resource(route, path, key)
+    {
         return true;
     }
 
@@ -1991,6 +2008,44 @@ fn v2_permission_resource_id_exception_is_only_for_address_name_rows() {
         matched_pipeline_terms("permission_resource_id"),
         vec!["resources"]
     );
+}
+
+#[test]
+fn v2_eac_resource_exception_is_only_for_direct_permission_row_fields() {
+    let route = V2_CONFORMANCE_ROUTES
+        .iter()
+        .find(|route| route.success == V2SuccessFixture::Permissions)
+        .unwrap();
+    let allowed = json!({"data": [{"eac_resource": "0"}, {"eac_resource": "18446744073709551617"}]});
+    type Collector = fn(&V2ConformanceRoute, &Value, &mut Vec<String>);
+    for collect in [
+        collect_banned_dictionary_fields as Collector,
+        collect_pipeline_vocabulary_in_product_response as Collector,
+    ] {
+        let mut violations = Vec::new();
+        collect(route, &allowed, &mut violations);
+        assert!(violations.is_empty(), "{violations:?}");
+        for payload in [
+            json!({"data": [{"resource": "0"}]}),
+            json!({"data": [{"eac_resource_id": "0"}]}),
+            json!({"data": [{"eac_resources": ["0"]}]}),
+            json!({"data": [{"other_eac_resource": "0"}]}),
+            json!({"data": [{"nested": {"eac_resource": "0"}}]}),
+            json!({"meta": {"eac_resource": "0"}}),
+            json!({"eac_resource": "0"}),
+        ] {
+            let mut violations = Vec::new();
+            collect(route, &payload, &mut violations);
+            assert!(!violations.is_empty(), "unexpected exception for {payload}");
+        }
+        for other in V2_CONFORMANCE_ROUTES.iter().filter(|other| {
+            other.tier == V2RouteTier::Product && other.success != V2SuccessFixture::Permissions
+        }) {
+            let mut violations = Vec::new();
+            collect(other, &allowed, &mut violations);
+            assert!(!violations.is_empty(), "unexpected exception for {}", other.label);
+        }
+    }
 }
 
 #[test]
