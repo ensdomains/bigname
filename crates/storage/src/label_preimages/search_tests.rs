@@ -164,7 +164,7 @@ async fn absent_label_import_waits_for_new_structural_surface_then_refreshes_it(
     wait_for_lock(db.pool(), "identity_search.label_locks", 1).await?;
     creator.commit().await?;
     ensure!(importer.await?? == 1);
-    ensure!(spelling(&mut db.pool().acquire().await?, &id).await?.0 == "newborn");
+    ensure!(spelling(&mut *db.pool().acquire().await?, &id).await?.0 == "newborn");
     db.cleanup().await
 }
 
@@ -375,6 +375,6 @@ async fn new_surface_waiting_on_import_reads_the_committed_preimage() -> Result<
     wait_for_lock(db.pool(), "identity_search.label_locks", 1).await?;
     importing.commit().await?;
     let id = creator.await??;
-    ensure!(spelling(&mut db.pool().acquire().await?, &id).await?.0 == "arrived");
+    ensure!(spelling(&mut *db.pool().acquire().await?, &id).await?.0 == "arrived");
     db.cleanup().await
 }

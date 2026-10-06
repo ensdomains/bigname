@@ -531,7 +531,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=449
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=73
+expected_predecessor_shape_proof_count=74
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -1399,8 +1399,8 @@ summary_selector_migration="$ROOT/migrations/20261005150000_project_name_summary
     cat <<'SQL'
 ALTER TABLE project_name_summary
     DROP COLUMN IF EXISTS expiry_listable, DROP COLUMN IF EXISTS public_authority;
-INSERT INTO project_name_summary (chain_id, logical_name_id, namespace, serving, zero_owner, search_supported)
-VALUES ('apply-check', 'ens:0x01', 'ens', FALSE, FALSE, FALSE);
+INSERT INTO project_name_summary (chain_id, logical_name_id, namespace, serving, zero_owner)
+VALUES ('apply-check', 'ens:0x01', 'ens', FALSE, FALSE);
 SQL
     emit_phase_migration "$summary_selector_migration" preceding-shape
     cat <<SQL
@@ -1435,8 +1435,8 @@ BEGIN
         END IF;
     END LOOP;
     INSERT INTO project_name_summary (chain_id, logical_name_id, namespace, serving,
-        zero_owner, expiry_listable, search_supported)
-    VALUES ('apply-check', 'ens:0x01', 'ens', FALSE, FALSE, TRUE, FALSE);
+        zero_owner, expiry_listable)
+    VALUES ('apply-check', 'ens:0x01', 'ens', FALSE, FALSE, TRUE);
 END \$\$;
 SQL
     emit_phase_migration "$summary_selector_migration" baseline-first
