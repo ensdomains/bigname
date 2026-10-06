@@ -529,9 +529,9 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=449
+expected_refusal_assertions=461
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=73
+expected_predecessor_shape_proof_count=74
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -732,6 +732,11 @@ check_served_projection_removal() {
                 emit_phase_migration "$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql" preceding-shape
             fi
             emit_phase_migration "$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql" baseline-first
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261006080000_normalized_events_history_registrar_lease_index.sql" preceding-shape
+            else
+                emit_phase_migration "$ROOT/migrations/20261006080000_normalized_events_history_registrar_lease_index.sql" baseline-first
+            fi
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -872,7 +877,8 @@ for migration_file in \
     "$ROOT/migrations/20261005170000_project_address_history_catalogue.sql" \
     "$ROOT/migrations/20261005180000_project_hydration_schedule.sql" \
     "$ROOT/migrations/20261005190000_name_surfaces_byte_shadow_path.sql" \
-    "$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql"
+    "$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql" \
+    "$ROOT/migrations/20261006080000_normalized_events_history_registrar_lease_index.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -3971,6 +3977,8 @@ DROP INDEX $events_order_index;
 CREATE INDEX $events_order_index ON normalized_events ($events_order_wrong_keys);
 SQL
 done
+source "$ROOT/scripts/schema-check/history-registrar-lease.sh"
+
 # Recreate the registry token index from its preceding schema shape. Compare
 # the resulting catalog definition to the fresh baseline, then prove a rerun
 # leaves it unchanged.

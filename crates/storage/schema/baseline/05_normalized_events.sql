@@ -335,6 +335,12 @@ CREATE INDEX IF NOT EXISTS normalized_events_resource_history_idx
     WHERE resource_id IS NOT NULL
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
+-- Project historical owner membership probes registrar evidence by lease, including observed rows.
+CREATE INDEX IF NOT EXISTS normalized_events_history_registrar_lease_idx
+    ON normalized_events (resource_id)
+    WHERE source_family = 'ens_v1_registrar_l1'
+      AND canonicality_state <> 'orphaned'::canonicality_state;
+
 -- Conservative Project discovery also revisits noncanonical named resource events.
 CREATE INDEX IF NOT EXISTS normalized_events_history_discovery_name_idx
     ON normalized_events (chain_id, logical_name_id, block_number)

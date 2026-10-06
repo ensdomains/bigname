@@ -1260,3 +1260,6 @@ async fn relations_of(pool: &sqlx::PgPool, address: &str) -> Result<Vec<String>>
     relations.sort();
     Ok(relations)
 }
+
+#[path = "v2_history_registrar_lease_index.rs"]
+mod registrar_lease_index;
