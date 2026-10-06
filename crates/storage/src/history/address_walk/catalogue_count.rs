@@ -148,7 +148,7 @@ pub(super) fn push_proof_query<'a>(
         "::text[]) name(logical_name_id) CROSS JOIN LATERAL (SELECT 1 FROM normalized_events ne",
     );
     push_arm_filters(query, read, filter, None);
-    query.push(" AND ne.logical_name_id = name.logical_name_id AND ne.event_kind <> 'RootPermissionChanged' AND ne.event_identity NOT LIKE '%:ResolverChanged:registry-fallback-handoff:%' LIMIT ").push_bind(remaining);
+    query.push(" AND ").push(crate::history::direct_accounts::ANCHORED_EVENT).push(" AND ne.logical_name_id = name.logical_name_id AND ne.event_identity NOT LIKE '%:ResolverChanged:registry-fallback-handoff:%' LIMIT ").push_bind(remaining);
     query
         .push(") event LIMIT ")
         .push_bind(remaining)

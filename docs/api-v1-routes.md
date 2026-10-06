@@ -112,26 +112,20 @@ that rewrite. Because
 identities of events sharing one log position can skip or repeat a row at that
 position; that is the same walk rule, not an error. A history cursor returns
 `400 invalid_input` when it is malformed or replayed against a different query,
-before publication admission. A history cursor issued before this rule names
-its last row instead of carrying its position: its publication token is
-ignored and it resumes from that row's position. A history cursor issued while
-the history order still compared transaction hashes carries its row's
-transaction hash instead of its transaction index. It is accepted: the
-transaction index is read from its row, or, when that row is gone, from any
-other event of the same transaction in the same block, and the walk continues
-from that position; the next cursor carries the transaction index. Because
-rows of different transactions in one block used to sort by transaction hash,
-such a continuation can land on a different neighbour inside the cursor's
-block than it would have before. Three distinct `409 stale`
-outcomes remain. A requested namespace with no publication returns "not
-available; retry after indexing is ready". An Interpret redo that is active or
-ran during the read returns the redo retry. Both are temporary: retry the same
-request with the same cursor, which continues once the publication is available
-or the redo has finished. A cursor issued before this rule whose row no longer
-exists, and a cursor carrying a transaction hash whose row and its
-transaction in that block no longer exist, return the restart once, and only those require
-restarting without the cursor. A parameter that pins a history walk to
-one block may be added later; it is not part of this contract.
+before publication admission. Product-history cursors now bind a history-only
+contract revision. Cursors from before the action/pair-selection revision return
+`409 stale` with guidance to restart without the cursor once. The position decoder
+still recognizes older row-only and transaction-hash layouts within the accepted
+revision, resolving their position from retained evidence; missing evidence likewise
+requires a restart. This does not invalidate other collection cursors or rotate the
+stored-data fingerprint.
+
+Three distinct `409 stale` outcomes remain. A requested namespace with no publication
+returns "not available; retry after indexing is ready". An Interpret redo that is
+active or ran during the read returns the redo retry. Both are temporary: retry the
+same request and cursor. A pre-revision cursor or missing legacy position evidence
+returns restart guidance. A parameter that pins a history walk to one block may be
+added later; it is not part of this contract.
 
 These current-state and history collections still reject `at`,
 `finality=safe`, and `finality=finalized` with `400 invalid_input`; omitted or
@@ -1766,7 +1760,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 | Interface declarations | Outside the grammar | No public key. ENS defines an interface-ID-to-implementer lookup. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IInterfaceResolver.sol:L4-L22 @ ens_v1@91c966f) |
 | Reverse-claim name records | Served outside the grammar | No record key. The primary-name projection takes an indexed claim value from one of two event paths, chosen by the event that keys the address, coin type, and namespace tuple. (1) When the reverse-registrar adapter interprets `NameForAddrChanged` (from the Basenames L2 reverse registrar, or from the ENS `default.reverse` registrar at coin type `2147483648`), it emits the tuple's `ReverseChanged` and a `RecordChanged` row carrying `primary_claim_source`; the claim attaches to that tuple. ENSv1's standalone reverse registrar emits `NameForAddrChanged` when it stores an address's name. (upstream: .refs/ens_v1/contracts/reverseRegistrar/StandaloneReverseRegistrar.sol:L28-L30 @ ens_v1@91c966f) (2) The ENSv1 `addr.reverse` ReverseRegistrar declared by the Mainnet and canonical `sepolia` [deployment profiles](glossary.md#deployment-profile) emits no name: it emits `ReverseClaimed` with the reverse node, sets that node's registry resolver, and calls the resolver's `setName`, which emits `NameChanged`. (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L76-L84 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123-L131 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L19 @ ens_v1@91c966f) For such a tuple the projection joins the `ReverseClaimed` reverse node to the latest retained `NameChanged` or record-version reset on the node's current registry resolver, as described in [projections.md](projections.md#primary-names). A Sepolia or Mainnet `setName` through an admitted event-emitting PublicResolver therefore yields an indexed `claim_status = success` with the claimed name; a blank name or a version reset yields `not_found`. The joined `RecordChanged` row itself still carries no `primary_claim_source`. When the reverse node's resolver is [event-silent](glossary.md#event-silent) (it stores the name without emitting `NameChanged`), there is nothing to join, so the indexed answer is `not_found` unless reverse-resolver [hydration](glossary.md#hydration) is admitted for that resolver; the canonical `sepolia` profile admits none. Either way the indexed value is a declared claim only: forward verification stays on the request-scoped [verified lookup](glossary.md#verified-lookup) path. |
 | General resolver name records | Served outside the grammar | No public key. Every resolver-family `NameChanged` is retained as an unattributed normalized `RecordChanged` in the `name` family, regardless of resolver or node type; a write for an `<addr>.addr.reverse` node therefore remains unattributed. The current value written on a name's own node is served as the forward `records.name` singleton on name detail and lookup `profile=detail` ([grouped records](#grouped-name-profile-records)), with the reset and clear rules of every indexed record. When the row is associated with a materialized name, `GET /v1/names/{name}/history` exposes the change as `type=record` without its stored name value. The record routes reject the `name` family. The primary-name projection reads these rows only through the reverse-node join in the row above: a `NameChanged` for a node that no retained `ReverseClaimed` tuple names, or on a resolver that is not that node's current registry resolver, contributes nothing. ENSv1 defines `NameChanged` generically by node and name. (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L4-L11 @ ens_v1@91c966f) |
-| Resolver record versions | Outside the grammar | No public key. ENS keeps a per-node record version on the resolver and bumps it on `clearRecords`, emitting `VersionChanged`; the indexed record inventory retains that event as the boundary that invalidates older record values, but the version number itself is not served. (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L20-L22 @ ens_v1@91c966f) |
+| Resolver record versions | Outside the grammar | No public key. ENS keeps a per-node record version on the resolver and bumps it on `clearRecords`, emitting `VersionChanged`; the indexed record inventory retains that event as the boundary that invalidates older record values, but the version number is not a record key on this route; history exposes the retained exact version as `data.record_version`. (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L20-L22 @ ens_v1@91c966f) |
 | DNS record sets | Outside the grammar | No public key. ENS defines DNS record-set update/delete events and a wire-format getter. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDNSRecordResolver.sol:L4-L24 @ ens_v1@91c966f) |
 | DNS zone hashes | Outside the grammar | No public key. ENS defines a DNS zone-hash update event and getter. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDNSZoneResolver.sol:L4-L15 @ ens_v1@91c966f) |
 | Legacy content and multihash | Outside the grammar | No public key. ENS retains these getters and setters as deprecated resolver functions. (upstream: .refs/ens_v1/contracts/resolvers/Resolver.sol:L86-L93 @ ens_v1@91c966f) |
@@ -2253,12 +2247,12 @@ every id, so it is a merge key, not a durable reference to store.
 - `data`: an object derived from the stored normalized event's before/after
   state and the bounded corresponding token/payment evidence described below,
   translated into dictionary vocabulary. Absent or null source values are omitted rather than
-  serialized as `null`, so `data` may be `{}`. The exception is an expiry
+  serialized as `null`. Every expanded row carries a closed `action` subtype. The exception is an expiry
   classified from the event’s contract and registration context: it carries
   `expires_at: null` plus `expires_at_reason`. Addresses are lower-cased.
   Contract pointers use the `{chain_id, address}` shape with the row's own
   numeric `chain_id`; a zero-address pointer means "cleared" and is omitted, so
-  a `resolver` row whose `data` has no `resolver` records a clearing. Unix
+  a `resolver_changed` action whose `data` has no `resolver` records a clearing. Unix
   expiry values become decimal Unix-second strings under the same rule as
   every other route: finite values keep every digit, including beyond year
   9999 and the signed integer range. Contextual `no_expiry`, `not_set` and
@@ -2293,6 +2287,46 @@ Per friendly `type`, `data` may contain:
 | `subregistry` | `subregistry: {chain_id, address}` (absent when the link was cleared), event-local ENSv2 `canonical_id`, retained ENSv2 `sender` |
 | `migration` | `migration_path` (`unwrapped`, `unlocked_wrapped`, `locked_wrapped`, `locked_child`, or `emancipated_child`) |
 
+Every row includes `data.action` from [HistoryAction](api-v1.md#historyaction). Ordinary
+rows use `registration_granted`, `registration_renewed`, `registration_released`,
+`expiry_changed`, `token_transferred`, `authority_changed`, `resolver_changed`,
+`record_changed`, `primary_name_recorded`, `permission_changed`, `subregistry_changed`
+or `migration_applied`. These subtypes describe a row, not a count of transactions.
+There is no action query parameter; the existing type, kind and record-key filters intersect.
+
+| Retained row | Type / action and additional fields |
+| --- | --- |
+| Explicit wrap / unwrap authority epoch | `authority` / `name_wrapped` or `name_unwrapped`: owner, node, retained fuses and expiry. Literal zero owner is preserved. The derived wrap transfer row is selected only for two different proven nonzero owners; actual token transfers remain independent rows. |
+| Account-wide operator approval | `permission` / `operator_approval_changed`: owner, operator as address, approved, account grant_scope and retained powers. No token-specific powers are inferred. |
+| Reservation | `reservation` / `registration_reserved`: exact token_id, proven canonical_id, retained expiry/node. A topology restatement uses `reservation_became_reachable`, describing the triggering reachability event rather than a new reserve transaction. |
+| Resolver record link | `resolver` / `resolver_record_linked`: resolver, node, exact record_id and retained dns_encoded_name. Record ID "0" is an unlink and remains present. A link is not a record write or a resolver pointer change. |
+| Token regeneration | `token` / `token_regenerated`: exact old_token_id and new_token_id. The retained registration association remains stable. |
+| Reverse claim | `primary_name` / `reverse_claimed`: address, coin_type, reverse_node and bounded historical name evidence. A name found beside a claim never changes it into a confirmed primary-name write. Explicit name write/clear uses `primary_name_recorded`; neither action proves forward resolution. |
+| Resolver reset | `record` / `record_version_changed`: exact record_version plus node/record/resolver identity, without invented key/value writes. |
+| Registry creation | `contract` / `registry_created`: registry. |
+| Registry parent change | `contract` / `registry_parent_changed`: registry, parent, explicit parent_cleared and exact label text or bytes. |
+| Retained proxy upgrade | `contract` / `contract_upgraded`: proxy and implementation. |
+| Proven old-to-current registry handoff | Existing authority/subregistry type / `registry_handoff`: node, retained owner, from_registry and to_registry. Only the first readable current ownership event for a non-root node with earlier readable old-registry evidence receives this action, at the selected publication. Its id and physical position remain unchanged. Current-only names and missing witnesses produce no handoff; no row is manufactured from a diagnostic block number. This is distinct from the five unchanged ENSv1→ENSv2 migration paths. |
+
+Lifecycle events belong only to global/emitting-contract collections, never a held name or
+sender's address. Account approvals belong directly to the recorded owner (`relation=owner`)
+and operator (`relation=role_holder`) only with default `scope=both`; reverse events belong
+to the claimed address only with default/all relations and `scope=both`. They never fan out
+into name/registration history. `/v1/events?address=` uses the same rule. Record links retain
+existing exact pointer/link attribution; DNS text alone never supplies a name association.
+
+Fresh history walks select one `AddressChanged` representative for a proven adjacent
+`AddressChanged` then `AddrChanged` ETH write before limits and counts. The pair must share
+chain, fork, transaction, emitter, node, resource and equivalent values. Every distinct write,
+standalone log, nonadjacent log and unproved custom emitter remains separate. Diagnostics
+retain both events. The representative keeps its existing id and richer value. The supported
+source generations and empty-clear limits are documented in [upstream divergences](upstream.md#known-divergences).
+
+Cursors issued before this product-history revision return `409 stale` with restart guidance.
+Restart once without the cursor; already delivered rows cannot be normalized across the release.
+This revision applies only to name history, address history and `/v1/events`, leaving other
+collection cursors and stored-data hashes unchanged. Existing publication and redo fences apply.
+
 Example row from `GET /v1/names/alice.eth/history?include=data&type=record`:
 
 ```json
@@ -2307,6 +2341,7 @@ Example row from `GET /v1/names/alice.eth/history?include=data&type=record`:
   "log_index": 12,
   "contract_address": "0x231b0ee14048e9dccd1d247744d114a4eb5e8e63",
   "data": {
+    "action": "record_changed",
     "key": "addr:60",
     "coin_type": 60,
     "value": "0x...",
@@ -2628,7 +2663,8 @@ the controller a name's `manager` or `role_holder`.
   `transfer`, `authority`, `resolver`, `record`, `primary_name`, `permission`,
   `subregistry` (an ENSv2 registration's subregistry link set or cleared),
   `migration` (a confirmed ENSv1→ENSv2 migration; see
-  [migrations](#migrations)).
+  [migrations](#migrations)), `reservation`, `token`, and `contract`. Contract events
+  have no name membership, so a name history filtered to that type is empty.
   Raw upstream or pipeline event kinds are not emitted by this product route
   except as the `kind` field behind the explicit `include=raw` opt-in; the
   diagnostics events route remains the raw surface. Slice 1 excludes every correlation-dependent normalized

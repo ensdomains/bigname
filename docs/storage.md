@@ -695,6 +695,22 @@ row:
 | --- | --- |
 | `normalized_events_address_root_permission_idx` | the `OrRootPermissionSubject` branch of `push_selector_filter` in `history/filters.rs`: activated, readable `RootPermissionChanged` rows by lowercased subject |
 
+The API/storage history reader additionally owns three partial read indexes for direct
+account activity. They serve `history/direct_accounts.rs` in the bounded address walker,
+the catalogue bucket discovery/page probes, exact-count walks, and `/v1/events?address=`:
+
+| Index | Serves |
+| --- | --- |
+| `normalized_events_history_account_owner_idx` | Account-wide operator approvals by `lower(after_state #>> '{scope,owner}')` |
+| `normalized_events_history_account_subject_idx` | The same approvals by `lower(after_state ->> 'subject')` |
+| `normalized_events_history_reverse_address_idx` | Reverse events by `lower(after_state ->> 'address')` |
+
+All three select activated events with readable canonicality. The approval indexes additionally
+require the retained account scope and operator relation. The phase baseline and
+`20261006160000_normalized_events_history_direct_account_indexes.sql` carry the same definitions;
+populated upgrades require the [concurrent prebuild and verifier](../ops/history-direct-account-indexes/README.md).
+They change no rows, hash inputs, catalogue encoding or phase markers and require no replay.
+
 When an ENSv1 BaseRegistrar manifest admits ordinary numeric registration and renewal,
 Interpret retains the registrar resource, token lineage, owner and expiry independently of
 registrar-controller logs. Before an admitted plaintext label is known, these lifecycle rows
@@ -2530,8 +2546,9 @@ The 17 kept indexes and the statements that read them:
 | `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |
 | `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows |
 
-The other 42 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
-these: `normalized_events_history_registrar_lease_idx`, `normalized_events_registry_token_idx`,
+The other 45 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
+these: `normalized_events_history_account_owner_idx`, `normalized_events_history_account_subject_idx`, `normalized_events_history_reverse_address_idx`,
+`normalized_events_history_registrar_lease_idx`, `normalized_events_registry_token_idx`,
 `normalized_events_v1_subregistry_after_node_scope_idx`,
 `normalized_events_v1_subregistry_after_child_scope_idx`,
 `normalized_events_v1_subregistry_before_node_scope_idx`,
@@ -2711,6 +2728,22 @@ servable; a replaced publication, or one that stops being servable, before that
 check returns `409 stale`.
 
 ### History page order
+
+Product history selection is read-only. Before every page and count it suppresses only a
+proved adjacent legacy ETH-address pair's AddrChanged row, preserving the AddressChanged
+row's existing identity and richer value. Eligibility includes the same readable fork and
+publication for both mates, exact physical log adjacency, equivalent values and declared
+source-generation proof; see [source coverage](upstream.md#product-history-actions-and-legacy-eth-address-pairs).
+The same predicate removes the derived NameWrapped transfer when the retained before/after
+owners do not prove a different nonzero owner. It never edits normalized events or the Project
+catalogue. Account approvals and reverse activity use direct account probes in both bounded
+and catalogue readers; they are not expanded into name memberships. Lifecycle events never
+acquire name/registration/address membership.
+
+Page-local registry handoff context probes retained normalized ownership observations under
+the selected publication and redo fence. It returns the exact earlier-old/earliest-current
+witnesses for selected event IDs, adds no rows, and changes no ordering or count. These reader
+changes do not change table ownership, producer hash inputs or catalogue encoding.
 
 Name history, address history, and `/v1/events` pages sort normalized events by
 chain position: block number newest first with events without a block last,

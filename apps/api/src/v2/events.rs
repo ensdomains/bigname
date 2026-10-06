@@ -246,17 +246,26 @@ pub(crate) fn build_event(
 ) -> Option<Event> {
     let event_type = history_event_type(&row.event_kind)?;
 
+    let account_or_contract = matches!(
+        row.event_kind.as_str(),
+        "AccountPermissionChanged"
+            | "ReverseChanged"
+            | "RegistryCreated"
+            | "ParentChanged"
+            | "Upgraded"
+    );
     Some(Event {
         id: super::history_event_id(row),
         event_type,
         // A registry root role change belongs to no name, even when a nonconforming registry
         // tied one to its root resource.
         name: name
-            .filter(|_| row.event_kind != "RootPermissionChanged")
+            .filter(|_| row.event_kind != "RootPermissionChanged" && !account_or_contract)
             .map(str::to_owned),
         namespace: row.namespace.clone(),
         registration_id: row
             .registration_id
+            .filter(|_| !account_or_contract)
             .map(|registration_id| registration_id.to_string()),
         block_number: row.block_number,
         timestamp: row.block_timestamp.map(format_timestamp),

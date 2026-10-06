@@ -529,9 +529,9 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=461
+expected_refusal_assertions=476
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=75
+expected_predecessor_shape_proof_count=76
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -740,8 +740,10 @@ check_served_projection_removal() {
             emit_phase_migration "$ROOT/migrations/20261005210000_durable_name_search.sql" baseline-first
             if [ "$suffix" = removal ]; then
                 emit_phase_migration "$ROOT/migrations/20261006080000_normalized_events_history_registrar_lease_index.sql" preceding-shape
+                emit_phase_migration "$ROOT/migrations/20261006160000_normalized_events_history_direct_account_indexes.sql" preceding-shape
             else
                 emit_phase_migration "$ROOT/migrations/20261006080000_normalized_events_history_registrar_lease_index.sql" baseline-first
+                emit_phase_migration "$ROOT/migrations/20261006160000_normalized_events_history_direct_account_indexes.sql" baseline-first
             fi
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
@@ -885,7 +887,8 @@ for migration_file in \
     "$ROOT/migrations/20261005190000_name_surfaces_byte_shadow_path.sql" \
     "$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql" \
     "$ROOT/migrations/20261005210000_durable_name_search.sql" \
-    "$ROOT/migrations/20261006080000_normalized_events_history_registrar_lease_index.sql"
+    "$ROOT/migrations/20261006080000_normalized_events_history_registrar_lease_index.sql" \
+    "$ROOT/migrations/20261006160000_normalized_events_history_direct_account_indexes.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1253,6 +1256,8 @@ emit_phase_migration "$ROOT/migrations/20261005200000_registry_permission_histor
 # the current operational definition before walk-set and exact-adoption checks.
 render_phase_migration "$ROOT/ops/history-registrar-lease-index/install.sql" | run_psql
 emit_phase_migration "$ROOT/migrations/20261006080000_normalized_events_history_registrar_lease_index.sql" preceding-shape | run_psql
+render_phase_migration "$ROOT/ops/history-direct-account-indexes/install.sql" | run_psql
+emit_phase_migration "$ROOT/migrations/20261006160000_normalized_events_history_direct_account_indexes.sql" preceding-shape | run_psql
 # The permission-reader indexes must be prebuilt for a populated table. Preserve
 # exact baseline definitions, then prove concurrent installation, OID-preserving
 # adoption/rerun, each refusal, and full-set validation before the first build.
@@ -3163,8 +3168,8 @@ JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
 WHERE pg_index.indrelid = 'normalized_events'::regclass;
 DO \$\$
 BEGIN
-    IF (SELECT count(*) FROM walk_index_baseline WHERE index_name IN ($walk_index_dropped)) <> 42 THEN
-        RAISE EXCEPTION 'drop.sql does not list 42 baseline indexes on normalized_events';
+    IF (SELECT count(*) FROM walk_index_baseline WHERE index_name IN ($walk_index_dropped)) <> 45 THEN
+        RAISE EXCEPTION 'drop.sql does not list 45 baseline indexes on normalized_events';
     END IF;
 END \$\$;
 INSERT INTO chain_phase_state (chain_id, phase_name, current_block_number, current_block_hash)
@@ -3989,6 +3994,7 @@ CREATE INDEX $events_order_index ON normalized_events ($events_order_wrong_keys)
 SQL
 done
 source "$ROOT/scripts/schema-check/history-registrar-lease.sh"
+source "$ROOT/scripts/schema-check/history-direct-accounts.sh"
 
 # Recreate the registry token index from its preceding schema shape. Compare
 # the resulting catalog definition to the fresh baseline, then prove a rerun

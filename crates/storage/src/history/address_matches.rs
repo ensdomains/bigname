@@ -144,11 +144,21 @@ pub(super) async fn load_address_history_selector(
     let root_roles = !include_candidates
         && scope != HistoryScope::Surface
         && relations.is_none_or(|values| values.contains(&AddressNameRelation::RoleHolder));
-    Ok(if root_roles {
+    let anchors = if root_roles {
         HistorySelector::OrRootPermissionSubject {
             anchors: Box::new(anchors),
             subject: address.to_owned(),
             namespace: namespace.map(str::to_owned),
+        }
+    } else {
+        anchors
+    };
+    Ok(if !include_candidates && scope == HistoryScope::Both {
+        HistorySelector::OrAccountParticipants {
+            anchors: Box::new(anchors),
+            address: address.to_owned(),
+            namespace: namespace.map(str::to_owned),
+            relations: relations.map(<[_]>::to_vec),
         }
     } else {
         anchors

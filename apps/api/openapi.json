@@ -6016,7 +6016,10 @@
           "primary_name",
           "permission",
           "subregistry",
-          "migration"
+          "migration",
+          "reservation",
+          "token",
+          "contract"
         ]
       },
       "NameMatch": {
@@ -6093,6 +6096,36 @@
           "child"
         ]
       },
+      "HistoryAction": {
+        "type": "string",
+        "enum": [
+          "registration_granted",
+          "registration_renewed",
+          "registration_released",
+          "expiry_changed",
+          "token_transferred",
+          "authority_changed",
+          "resolver_changed",
+          "record_changed",
+          "primary_name_recorded",
+          "permission_changed",
+          "subregistry_changed",
+          "migration_applied",
+          "name_wrapped",
+          "name_unwrapped",
+          "operator_approval_changed",
+          "registration_reserved",
+          "reservation_became_reachable",
+          "resolver_record_linked",
+          "token_regenerated",
+          "registry_handoff",
+          "reverse_claimed",
+          "record_version_changed",
+          "registry_created",
+          "registry_parent_changed",
+          "contract_upgraded"
+        ]
+      },
       "HistoryEventKind": {
         "type": "string",
         "enum": [
@@ -6114,7 +6147,14 @@
           "RolesChanged",
           "EACRolesChanged",
           "SubregistryChanged",
-          "MigrationApplied"
+          "MigrationApplied",
+          "AccountPermissionChanged",
+          "RegistrationReserved",
+          "ResolverRecordLinked",
+          "TokenRegenerated",
+          "RegistryCreated",
+          "ParentChanged",
+          "Upgraded"
         ]
       },
       "Envelope": {
@@ -8819,9 +8859,13 @@
       "HistoryEventData": {
         "type": "object",
         "properties": {
+          "action": {
+            "$ref": "#/components/schemas/HistoryAction",
+            "description": "Explicit action represented by this retained row; independent of transaction intent or forward verification."
+          },
           "token_id": {
             "type": "string",
-            "description": "Decimal ENSv2 token at this registration, transfer or non-root registry permission row's physical event position; see [ENSv2 token identity](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#ensv2-token-identity)."
+            "description": "Decimal ENSv2 token at this reservation, registration, transfer or non-root registry permission row's physical event position; see [ENSv2 token identity](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#ensv2-token-identity)."
           },
           "canonical_id": {
             "type": "string",
@@ -8975,7 +9019,7 @@
           },
           "approved": {
             "type": "boolean",
-            "description": "Registrar-controller approval after the change."
+            "description": "Account-operator or registrar-controller approval after the change."
           },
           "powers": {
             "type": "array",
@@ -9008,10 +9052,72 @@
               "emancipated_child"
             ],
             "description": "Migration path retained by the event."
+          },
+          "old_token_id": {
+            "type": "string",
+            "description": "Exact unsigned decimal token ID before regeneration."
+          },
+          "new_token_id": {
+            "type": "string",
+            "description": "Exact unsigned decimal token ID after regeneration."
+          },
+          "record_version": {
+            "type": "string",
+            "description": "Exact unsigned decimal version recorded by a resolver reset."
+          },
+          "reverse_node": {
+            "type": "string",
+            "description": "Lowercase reverse node retained by the claim or name write."
+          },
+          "dns_encoded_name": {
+            "type": "string",
+            "description": "Retained DNS-encoded bytes as lowercase 0x-prefixed hex on a record link, including unlink."
+          },
+          "from_registry": {
+            "$ref": "#/components/schemas/ContractRef",
+            "description": "Earlier old registry proved for this registry handoff."
+          },
+          "to_registry": {
+            "$ref": "#/components/schemas/ContractRef",
+            "description": "Current registry of the first readable ownership event."
+          },
+          "registry": {
+            "$ref": "#/components/schemas/ContractRef",
+            "description": "Registry created or whose parent changed."
+          },
+          "parent": {
+            "$ref": "#/components/schemas/ContractRef",
+            "description": "New nonzero parent registry pointer."
+          },
+          "parent_cleared": {
+            "type": "boolean",
+            "description": "True only when a retained parent field explicitly records a clear; false for a retained nonzero parent."
+          },
+          "label": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/components/schemas/HexBytes"
+              }
+            ],
+            "description": "Exact parent label as text when representable, otherwise retained bytes."
+          },
+          "proxy": {
+            "$ref": "#/components/schemas/ContractRef",
+            "description": "Emitting proxy of a retained upgrade event."
+          },
+          "implementation": {
+            "$ref": "#/components/schemas/ContractRef",
+            "description": "Implementation named by the upgrade event."
           }
         },
         "additionalProperties": false,
-        "description": "Closed history payload fields. The event type and retained evidence determine which fields appear; an empty object is valid. See [history event payloads](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#history-event-payloads-includedata-includeraw)."
+        "required": [
+          "action"
+        ],
+        "description": "Closed history payload fields. Every expanded row has an `action`; the event type and retained evidence determine the remaining fields. See [history event payloads](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#history-event-payloads-includedata-includeraw)."
       },
       "LinkEvent": {
         "type": "object",

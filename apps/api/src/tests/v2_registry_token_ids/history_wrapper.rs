@@ -104,7 +104,14 @@ async fn v2_history_wrapper_single_and_batch_keep_only_retained_operators() -> R
             .iter()
             .filter(|r| r["kind"] == "TokenControlTransferred")
             .collect::<Vec<_>>();
-        assert_eq!(rows.len(), 3, "{body:#}");
+        assert_eq!(rows.len(), 2, "{body:#}");
+        assert!(
+            body["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["data"]["action"] == "name_wrapped")
+        );
         for row in rows {
             if row["block_number"] == 120 {
                 assert!(row["data"].get("operator").is_none());

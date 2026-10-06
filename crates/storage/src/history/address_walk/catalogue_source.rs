@@ -9,6 +9,7 @@ use super::{
 };
 use crate::history::{
     EventHistoryReadFilter, HistoryOrder, HistoryScope, catalogue_contract as contract,
+    direct_accounts::{self, ANCHORED_EVENT, DirectAccount},
     keyset::{HistoryKeyset, push_history_cursor_cte},
     paging::push_history_order_terms,
 };
@@ -268,6 +269,25 @@ fn push_root<'a>(
     query.push(") ne");
 }
 
+#[allow(clippy::too_many_arguments)]
+fn push_account<'a>(
+    query: &mut QueryBuilder<'a, Postgres>,
+    read: &'a AddressRead<'a>,
+    filter: &'a EventHistoryReadFilter,
+    keyset: Option<&HistoryKeyset<'a>>,
+    bucket: Bucket,
+    identity: Option<&'a str>,
+    limit: i64,
+    participant: DirectAccount,
+) {
+    query.push(format!("SELECT ne.*, 0::integer AS witness_kind, NULL::text AS current_chain, NULL::text AS current_name, NULL::uuid AS witness_resource FROM (SELECT {EVENT_COLUMNS} FROM normalized_events ne"));
+    push_arm_filters(query, read, filter, keyset);
+    query.push(" AND ");
+    participant.push_predicate(query, read.address, read.namespace);
+    push_probe_tail(query, filter, bucket, identity, limit);
+    query.push(") ne");
+}
+
 fn push_probe_tail<'a>(
     query: &mut QueryBuilder<'a, Postgres>,
     filter: &EventHistoryReadFilter,
@@ -315,11 +335,28 @@ fn push_prefixes<'a>(
         }
         query.push(format!("SELECT ne.*, source.witness_kind, NULL::text AS current_chain, NULL::text AS current_name, source.witness_resource FROM catalogue_sources source CROSS JOIN LATERAL (SELECT {EVENT_COLUMNS} FROM normalized_events ne"));
         push_arm_filters(query, read, filter, keyset);
-        query.push(" AND ne.event_kind <> 'RootPermissionChanged' AND ne.chain_id = source.chain_id AND ").push(predicate);
+        query
+            .push(" AND ")
+            .push(ANCHORED_EVENT)
+            .push(" AND ne.chain_id = source.chain_id AND ")
+            .push(predicate);
         push_probe_tail(query, filter, bucket, identity, limit);
         query
             .push(") ne WHERE source.source_kind = ")
             .push_bind(kind as i16);
+    }
+    for participant in direct_accounts::participants(read.scope, read.relations) {
+        query.push(" UNION ALL ");
+        push_account(
+            query,
+            read,
+            filter,
+            keyset,
+            bucket,
+            identity,
+            limit,
+            participant,
+        );
     }
     if root_enabled(read) {
         query.push(" UNION ALL ");
@@ -401,10 +438,17 @@ pub(super) fn push_seek_query<'a>(
     query.push(format!(" ORDER BY anchor.{bound} {direction} LIMIT 1) SELECT {aggregate}(bucket) FROM (SELECT bucket FROM catalogue_bound"));
     if after.is_some() {
         query.push(" UNION ALL SELECT COALESCE(block_number / 256, -1) FROM catalogue_prefixes");
-    } else if root_enabled(read) {
-        query.push(" UNION ALL SELECT COALESCE(block_number / 256, -1) FROM (");
-        push_root(query, read, filter, None, Bucket::Any, None, 1);
-        query.push(") root");
+    } else {
+        for participant in direct_accounts::participants(read.scope, read.relations) {
+            query.push(" UNION ALL SELECT COALESCE(block_number / 256, -1) FROM (");
+            push_account(query, read, filter, None, Bucket::Any, None, 1, participant);
+            query.push(") account");
+        }
+        if root_enabled(read) {
+            query.push(" UNION ALL SELECT COALESCE(block_number / 256, -1) FROM (");
+            push_root(query, read, filter, None, Bucket::Any, None, 1);
+            query.push(") root");
+        }
     }
     query.push(") buckets");
 }

@@ -2,7 +2,9 @@
 //! (docs/api-v1-routes.md, "Shared Route Rules"). A cursor holds its anchor's position in the
 //! history order (block number, chain, block hash, transaction index, log index, then the
 //! anchor's identity) and continues after it against whatever is published when the next page
-//! is read, whether or not the anchor row still exists. Two older layouts are still read. A
+//! is read, whether or not the anchor row still exists. Public cursors must carry the current
+//! history-contract revision; pre-revision cursors restart once. Within that revision the
+//! decoder still recognizes two older position layouts. A
 //! cursor that names only its anchor row resumes from that row's position and restarts once
 //! when the row is gone. A positional cursor issued while the order compared transaction hashes
 //! carries its anchor's transaction hash and no index; the index is read from the anchor row or
@@ -18,6 +20,9 @@ use crate::AppState;
 use super::collection_snapshot::restart_required;
 use super::cursor::invalid_cursor_error;
 use super::{CursorPayload, V2Result, map_history_page_error};
+
+const HISTORY_CONTRACT_KEY: &str = "history_contract";
+const HISTORY_CONTRACT_REVISION: &str = "2";
 
 const EVENT_IDENTITY_KEY: &str = "event_identity";
 const NORMALIZED_EVENT_ID_KEY: &str = "normalized_event_id";
@@ -72,8 +77,12 @@ fn last_item(cursor: &HistoryCursor) -> BTreeMap<String, String> {
 pub(crate) fn cursor_payload(
     cursor: &HistoryCursor,
     sort: &str,
-    filters: BTreeMap<String, String>,
+    mut filters: BTreeMap<String, String>,
 ) -> CursorPayload {
+    filters.insert(
+        HISTORY_CONTRACT_KEY.into(),
+        HISTORY_CONTRACT_REVISION.into(),
+    );
     CursorPayload::new(sort, filters, last_item(cursor), None)
 }
 
@@ -85,10 +94,18 @@ pub(crate) fn decode_cursor(
     sort: &str,
     filters: &BTreeMap<String, String>,
 ) -> V2Result<RequestCursor> {
-    if payload.sort != sort || &payload.filters != filters {
+    let mut actual = payload.filters.clone();
+    let revision = actual.remove(HISTORY_CONTRACT_KEY);
+    if payload.sort != sort || &actual != filters {
         return Err(invalid_cursor_error());
     }
-    decode_last_item(payload)
+    // Validate the old position before treating its recognized binding as a restart.
+    let cursor = decode_last_item(payload)?;
+    match revision.as_deref() {
+        Some(HISTORY_CONTRACT_REVISION) => Ok(cursor),
+        None => Err(restart_required()),
+        Some(_) => Err(invalid_cursor_error()),
+    }
 }
 
 /// Decode `last_item`. A cursor issued before keyset cursors holds exactly the anchor's numeric

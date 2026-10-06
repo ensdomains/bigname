@@ -8,6 +8,7 @@ use crate::history::{
     EventHistoryReadFilter, HistoryScope,
     address_evidence::push_historical_address_matches_query,
     attribution::{push_readable_event, push_readable_surface},
+    direct_accounts::{self, ANCHORED_EVENT},
     duplicates::push_fixed_product_history_duplicate_filter,
     filters::push_publication_bound,
     keyset::{
@@ -38,6 +39,8 @@ pub(super) fn direct_only_kind(kind: &str) -> bool {
                 | "ResolverRecordLinked"
                 | "RootPermissionChanged"
                 | "ResolverChanged"
+                | "AccountPermissionChanged"
+                | "ReverseChanged"
         )
 }
 
@@ -134,6 +137,16 @@ fn push_event_arms<'a>(
     keyset: Option<&HistoryKeyset<'a>>,
 ) {
     let mut arm = false;
+    for participant in direct_accounts::participants(read.scope, read.relations) {
+        if arm {
+            builder.push(" UNION ALL ");
+        }
+        builder.push(format!("SELECT {EVENT_COLUMNS}, 0 AS witness_kind, NULL::text AS current_chain, NULL::text AS current_name, NULL::uuid AS witness_resource FROM normalized_events ne"));
+        push_arm_filters(builder, read, filter, keyset);
+        builder.push(" AND ");
+        participant.push_predicate(builder, read.address, read.namespace);
+        arm = true;
+    }
     if read.scope != HistoryScope::Surface
         && read
             .relations
@@ -141,6 +154,9 @@ fn push_event_arms<'a>(
     {
         // Root roles are independent of name/resource membership and belong only to the
         // changed subject. Match the root-history index's expression exactly.
+        if arm {
+            builder.push(" UNION ALL ");
+        }
         builder.push(format!("SELECT {EVENT_COLUMNS}, 0 AS witness_kind, NULL::text AS current_chain, NULL::text AS current_name, NULL::uuid AS witness_resource FROM normalized_events ne"));
         push_arm_filters(builder, read, filter, keyset);
         builder.push(" AND ne.event_kind = 'RootPermissionChanged' AND lower(ne.after_state ->> 'subject') = ").push_bind(read.address);
@@ -234,7 +250,7 @@ fn push_probe<'a>(
 ) {
     builder.push(format!("SELECT ne.*, {witness} FROM {source} CROSS JOIN LATERAL (SELECT {EVENT_COLUMNS} FROM normalized_events ne"));
     push_arm_filters(builder, read, filter, keyset);
-    builder.push(" AND ne.event_kind <> 'RootPermissionChanged' AND ");
+    builder.push(" AND ").push(ANCHORED_EVENT).push(" AND ");
     builder.push(predicate);
     builder.push(" OFFSET 0) ne");
 }

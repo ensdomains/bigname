@@ -2346,34 +2346,35 @@ async fn v2_history_include_data_adds_friendly_payloads_and_keeps_lean_rows_othe
     assert_eq!(
         registration["data"],
         json!({
+            "action": "registration_granted",
             "registrant": "0x00000000000000000000000000000000000000aa",
             "expires_at": "1900000000",
         })
     );
     assert_eq!(
         row_at(110)["data"],
-        json!({ "expires_at": "1950000000" })
+        json!({ "action": "registration_renewed", "expires_at": "1950000000" })
     );
     assert_eq!(
         row_at(109)["data"],
-        json!({ "expires_at": "1950000000" })
+        json!({ "action": "expiry_changed", "expires_at": "1950000000" })
     );
-    assert_eq!(row_at(108)["data"], json!({}));
+    assert_eq!(row_at(108)["data"], json!({"action":"registration_released"}));
     assert_eq!(
         row_at(103)["data"],
-        json!({ "to": "0x00000000000000000000000000000000000000bb" })
+        json!({ "action":"token_transferred", "to": "0x00000000000000000000000000000000000000bb" })
     );
     assert_eq!(
         row_at(101)["data"],
-        json!({ "owner": "0x00000000000000000000000000000000000000cc" })
+        json!({ "action":"authority_changed", "owner": "0x00000000000000000000000000000000000000cc" })
     );
     assert_eq!(
         row_at(105)["data"],
-        json!({ "owner": "0x00000000000000000000000000000000000000cc" })
+        json!({ "action":"authority_changed", "owner": "0x00000000000000000000000000000000000000cc" })
     );
     assert_eq!(
         row_at(104)["data"],
-        json!({ "resolver": { "chain_id": 1, "address": RESOLVER } })
+        json!({ "action":"resolver_changed", "resolver": { "chain_id": 1, "address": RESOLVER } })
     );
     let record = row_at(106);
     assert!(record.get("kind").is_none());
@@ -2381,6 +2382,7 @@ async fn v2_history_include_data_adds_friendly_payloads_and_keeps_lean_rows_othe
     assert_eq!(
         record["data"],
         json!({
+            "action": "record_changed",
             "key": "addr:60",
             "coin_type": 60,
             "value": "0x0000000000000000000000000000000000000def",
@@ -2390,6 +2392,7 @@ async fn v2_history_include_data_adds_friendly_payloads_and_keeps_lean_rows_othe
     assert_eq!(
         row_at(107)["data"],
         json!({
+            "action": "permission_changed",
             "address": "0x00000000000000000000000000000000000000dd",
             "grant_scope": { "kind": "registration", "detail": {} },
             "powers": ["registration_control"],

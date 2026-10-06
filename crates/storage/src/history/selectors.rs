@@ -5,6 +5,12 @@ use super::HistoryScope;
 #[derive(Clone, Debug)]
 pub(super) enum HistorySelector {
     None,
+    OrAccountParticipants {
+        anchors: Box<HistorySelector>,
+        address: String,
+        namespace: Option<String>,
+        relations: Option<Vec<crate::AddressNameRelation>>,
+    },
     LogicalNames(Vec<String>),
     Resources(Vec<Uuid>),
     LogicalNamesOrResources {
@@ -44,7 +50,8 @@ impl HistorySelector {
             Self::Resources(resource_ids)
             | Self::LogicalNamesOrResources { resource_ids, .. }
             | Self::ProductRegistration { resource_ids, .. } => resource_ids,
-            Self::OrRootPermissionSubject { anchors, .. } => anchors.resource_ids(),
+            Self::OrRootPermissionSubject { anchors, .. }
+            | Self::OrAccountParticipants { anchors, .. } => anchors.resource_ids(),
             Self::LogicalNames(_) | Self::None => &[],
         }
     }

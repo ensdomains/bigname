@@ -3339,12 +3339,13 @@ Closed union of scope detail fields. Each scope uses exactly the shape listed in
 
 ### HistoryEventData
 
-Closed history payload fields. The event type and retained evidence determine which fields appear; an empty object is valid. See [history event payloads](api-v1-routes.md#history-event-payloads-includedata-includeraw).
+Closed history payload fields. Every expanded row has an `action`; the event type and retained evidence determine the remaining fields. See [history event payloads](api-v1-routes.md#history-event-payloads-includedata-includeraw).
 
 <!-- openapi:object HistoryEventData -->
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
-| `token_id` | string | optional | Decimal ENSv2 token at this registration, transfer or non-root registry permission row's physical event position; see [ENSv2 token identity](#ensv2-token-identity). |
+| `action` | enum HistoryAction | always | Explicit action represented by this retained row; independent of transaction intent or forward verification. |
+| `token_id` | string | optional | Decimal ENSv2 token at this reservation, registration, transfer or non-root registry permission row's physical event position; see [ENSv2 token identity](#ensv2-token-identity). |
 | `canonical_id` | string | optional | Decimal ENSv2 event-local identifier with its low 32 bits cleared; scoped by registry and chain, not a registration UUID. |
 | `cost` | string | optional | Unsigned decimal unsplit registration amount or renewal amount; native wei for ENSv1, raw payment-token units for ENSv2. |
 | `base_cost` | string | optional | Unsigned decimal explicitly emitted registration base amount. |
@@ -3375,11 +3376,24 @@ Closed history payload fields. The event type and retained evidence determine wh
 | `name` | string | optional | Recorded primary-name value when available. |
 | `name_status` | enum `set`, `cleared`, `unknown` | optional | Whether the primary-name event set, cleared or did not retain a name. |
 | `grant_scope` | object GrantScope | optional | Scope in which these powers apply. |
-| `approved` | boolean | optional | Registrar-controller approval after the change. |
+| `approved` | boolean | optional | Account-operator or registrar-controller approval after the change. |
 | `powers` | array of enum PermissionPower | optional | Product permission powers; see [permission powers vocabulary](#permission-powers-vocabulary). |
 | `added_powers` | array of enum PermissionPower | optional | Powers added, when the log supplies the old set. |
 | `removed_powers` | array of enum PermissionPower | optional | Powers removed, when the log supplies the old set. |
 | `migration_path` | enum `unwrapped`, `unlocked_wrapped`, `locked_wrapped`, `locked_child`, `emancipated_child` | optional | Migration path retained by the event. |
+| `old_token_id` | string | optional | Exact unsigned decimal token ID before regeneration. |
+| `new_token_id` | string | optional | Exact unsigned decimal token ID after regeneration. |
+| `record_version` | string | optional | Exact unsigned decimal version recorded by a resolver reset. |
+| `reverse_node` | string | optional | Lowercase reverse node retained by the claim or name write. |
+| `dns_encoded_name` | string | optional | Retained DNS-encoded bytes as lowercase 0x-prefixed hex on a record link, including unlink. |
+| `from_registry` | object ContractRef | optional | Earlier old registry proved for this registry handoff. |
+| `to_registry` | object ContractRef | optional | Current registry of the first readable ownership event. |
+| `registry` | object ContractRef | optional | Registry created or whose parent changed. |
+| `parent` | object ContractRef | optional | New nonzero parent registry pointer. |
+| `parent_cleared` | boolean | optional | True only when a retained parent field explicitly records a clear; false for a retained nonzero parent. |
+| `label` | one of string, object HexBytes | optional | Exact parent label as text when representable, otherwise retained bytes. |
+| `proxy` | object ContractRef | optional | Emitting proxy of a retained upgrade event. |
+| `implementation` | object ContractRef | optional | Implementation named by the upgrade event. |
 
 ### LinkEvent
 
@@ -3815,6 +3829,9 @@ vocabularies are marked at their existing canonical tables above.
 | `permission` |
 | `subregistry` |
 | `migration` |
+| `reservation` |
+| `token` |
+| `contract` |
 
 ### NameMatch
 
@@ -3900,6 +3917,37 @@ vocabularies are marked at their existing canonical tables above.
 | `name` |
 | `child` |
 
+### HistoryAction
+
+<!-- openapi:enum HistoryAction -->
+| Value |
+| --- |
+| `registration_granted` |
+| `registration_renewed` |
+| `registration_released` |
+| `expiry_changed` |
+| `token_transferred` |
+| `authority_changed` |
+| `resolver_changed` |
+| `record_changed` |
+| `primary_name_recorded` |
+| `permission_changed` |
+| `subregistry_changed` |
+| `migration_applied` |
+| `name_wrapped` |
+| `name_unwrapped` |
+| `operator_approval_changed` |
+| `registration_reserved` |
+| `reservation_became_reachable` |
+| `resolver_record_linked` |
+| `token_regenerated` |
+| `registry_handoff` |
+| `reverse_claimed` |
+| `record_version_changed` |
+| `registry_created` |
+| `registry_parent_changed` |
+| `contract_upgraded` |
+
 ### HistoryEventKind
 
 <!-- openapi:enum HistoryEventKind -->
@@ -3924,3 +3972,10 @@ vocabularies are marked at their existing canonical tables above.
 | `EACRolesChanged` |
 | `SubregistryChanged` |
 | `MigrationApplied` |
+| `AccountPermissionChanged` |
+| `RegistrationReserved` |
+| `ResolverRecordLinked` |
+| `TokenRegenerated` |
+| `RegistryCreated` |
+| `ParentChanged` |
+| `Upgraded` |

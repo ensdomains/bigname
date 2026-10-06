@@ -15,6 +15,8 @@ mod catalogue_plans;
 mod catalogue_source;
 #[cfg(test)]
 mod catalogue_tests;
+#[cfg(test)]
+mod direct_account_tests;
 mod duplicates;
 mod entry;
 pub use entry::{

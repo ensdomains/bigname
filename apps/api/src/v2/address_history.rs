@@ -316,6 +316,7 @@ mod tests {
         assert_eq!(
             payload.filters,
             BTreeMap::from([
+                ("history_contract".to_owned(), "2".to_owned()),
                 ("address".to_owned(), ADDRESS.to_owned()),
                 ("namespace".to_owned(), "ens".to_owned()),
                 ("relation".to_owned(), "manager".to_owned()),
@@ -366,6 +367,7 @@ mod tests {
         assert_eq!(
             payload.filters,
             BTreeMap::from([
+                ("history_contract".to_owned(), "2".to_owned()),
                 ("address".to_owned(), ADDRESS.to_owned()),
                 ("namespace".to_owned(), "ens".to_owned()),
                 ("relation".to_owned(), "manager".to_owned()),
