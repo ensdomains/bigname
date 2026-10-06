@@ -219,9 +219,14 @@ The old-to-current registry handoff subtype is also bigname's interpretation: fa
 use the old registry until the current registry has a record
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L29-L34 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L54 @ ens_v1@91c966f).
-The API enriches exactly the earliest readable current ownership event with an earlier readable
-old-registry witness. It creates no event from a diagnostic block number and changes no
-ENSv1→ENSv2 migration correlation or path.
+The API enriches only the first original readable direct current ownership row with an earlier
+readable old-registry witness and no earlier ownership-triggered fallback-clear witness. A row
+whose original authority fields were removed by registration or migration reconciliation keeps
+its ordinary action, even if it might have been the first physical write. Later owner rows do not
+inherit that marker. This conservative omission preserves the remaining rows, IDs, ordering,
+membership and counts; it does not promise reconstruction of an erased ownership representative.
+No event is created from a resolver clear or diagnostic block number, and no ENSv1→ENSv2
+migration correlation or path changes.
 
 > **Labels whose subregistry is their own registry: alias subtree not modelled** —
 > a registry can set one of its labels' subregistry to the registry itself, for
