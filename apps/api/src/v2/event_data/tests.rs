@@ -235,14 +235,17 @@ fn detail_exposes_lower_cased_emitter_without_the_raw_kind() {
     );
     assert_eq!(
         Value::Object(detail.data),
-        json!({ "expires_at": "1950000000" })
+        json!({ "action":"registration_renewed", "expires_at": "1950000000" })
     );
 
     let mut state_derived = row("ExpiryChanged", json!({}), json!({ "expiry": null }));
     state_derived.raw_fact_ref = json!({ "kind": "interpreter_state" });
     let detail = row_detail(&state_derived, HistoryEventType::Expiry);
     assert_eq!(detail.contract_address, None);
-    assert!(detail.data.is_empty());
+    assert_eq!(
+        Value::Object(detail.data),
+        json!({"action":"expiry_changed"})
+    );
 }
 
 #[test]
@@ -269,6 +272,7 @@ fn registration_and_pointer_types_use_dictionary_shapes() {
     assert_eq!(
         Value::Object(data),
         json!({
+            "action":"registration_granted",
             "owner": "0x00000000000000000000000000000000000000bb",
             "expires_at": "1900000000",
             "resolver": {
@@ -286,7 +290,10 @@ fn registration_and_pointer_types_use_dictionary_shapes() {
         ),
         HistoryEventType::Resolver,
     );
-    assert!(cleared.data.is_empty());
+    assert_eq!(
+        Value::Object(cleared.data),
+        json!({"action":"resolver_changed"})
+    );
 
     let mut unknown_chain = row(
         "SubregistryChanged",
@@ -294,10 +301,9 @@ fn registration_and_pointer_types_use_dictionary_shapes() {
         json!({ "subregistry": "0x0000000000000000000000000000000000000abc" }),
     );
     unknown_chain.chain_id = Some("unknown-chain".to_owned());
-    assert!(
-        row_detail(&unknown_chain, HistoryEventType::Subregistry)
-            .data
-            .is_empty()
+    assert_eq!(
+        Value::Object(row_detail(&unknown_chain, HistoryEventType::Subregistry).data),
+        json!({"action":"subregistry_changed"})
     );
 }
 
@@ -402,6 +408,7 @@ fn transfer_authority_record_primary_name_and_permission_payloads() {
     assert_eq!(
         Value::Object(transfer.data),
         json!({
+            "action":"token_transferred",
             "from": "0x00000000000000000000000000000000000000aa",
             "to": "0x00000000000000000000000000000000000000bb",
             "fuses": 65537,
@@ -419,6 +426,7 @@ fn transfer_authority_record_primary_name_and_permission_payloads() {
     assert_eq!(
         Value::Object(authority.data),
         json!({
+            "action":"authority_changed",
             "owner": "0x00000000000000000000000000000000000000cc",
             "from": "0x00000000000000000000000000000000000000aa",
         })
@@ -440,6 +448,7 @@ fn transfer_authority_record_primary_name_and_permission_payloads() {
     assert_eq!(
         Value::Object(record.data),
         json!({
+            "action":"record_changed",
             "key": "text:avatar",
             "value": "ipfs://avatar",
             "resolver": {
@@ -469,6 +478,7 @@ fn transfer_authority_record_primary_name_and_permission_payloads() {
     assert_eq!(
         Value::Object(unretained.data),
         json!({
+            "action":"record_changed",
             "key": "addr:2147483658",
             "coin_type": 2_147_483_658_u64,
             "resolver": resolver,
@@ -490,6 +500,7 @@ fn transfer_authority_record_primary_name_and_permission_payloads() {
     assert_eq!(
         Value::Object(version.data),
         json!({
+            "action":"record_version_changed",
             "resolver": resolver,
             "node": "0x00000000000000000000000000000000000000000000000000000000000000ab",
         })
@@ -509,7 +520,7 @@ fn transfer_authority_record_primary_name_and_permission_payloads() {
     );
     assert_eq!(
         Value::Object(primary.data),
-        json!({ "address": "0x00000000000000000000000000000000000000aa", "coin_type": 60 })
+        json!({ "action":"primary_name_recorded", "address": "0x00000000000000000000000000000000000000aa", "coin_type": 60 })
     );
 
     let permission = row_detail(
@@ -528,6 +539,7 @@ fn transfer_authority_record_primary_name_and_permission_payloads() {
     assert_eq!(
         Value::Object(permission.data),
         json!({
+            "action":"permission_changed",
             "address": "0x00000000000000000000000000000000000000dd",
             "powers": ["registration_control", "set_resolver"],
         })
@@ -540,7 +552,10 @@ fn transfer_authority_record_primary_name_and_permission_payloads() {
         ),
         HistoryEventType::Permission,
     );
-    assert_eq!(Value::Object(fuses.data), json!({ "fuses": 196609 }));
+    assert_eq!(
+        Value::Object(fuses.data),
+        json!({ "action":"permission_changed", "fuses": 196609 })
+    );
 }
 
 /// An ENSv2 role change states the account's old roles on the log, so the row separates what was
@@ -566,6 +581,7 @@ fn permission_rows_derive_changes_only_from_a_logged_previous_set() {
     assert_eq!(
         Value::Object(changed.data),
         json!({
+            "action":"permission_changed",
             "address": "0x00000000000000000000000000000000000000dd",
             "grant_scope": {"kind": "resolver", "detail": {"resolver": {
                 "chain_id": 1, "address": "0x00000000000000000000000000000000000000ee"}}},
@@ -587,6 +603,7 @@ fn permission_rows_derive_changes_only_from_a_logged_previous_set() {
     assert_eq!(
         Value::Object(template.data),
         json!({
+            "action":"permission_changed",
             "address": "0x00000000000000000000000000000000000000dd",
             "grant_scope": {"kind": "registration", "detail": {}},
             "powers": ["registration_control"],
@@ -621,6 +638,7 @@ fn root_role_changes_render_as_permission_rows_with_logged_changes() {
     assert_eq!(
         data,
         json!({
+            "action":"permission_changed",
             "address": "0x00000000000000000000000000000000000000dd",
             "powers": ["register_reserved", "renew"],
             "added_powers": ["register_reserved"],

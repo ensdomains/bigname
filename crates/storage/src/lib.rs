@@ -101,6 +101,7 @@ pub use history::{
     revalidate_interpret_redo_fence,
 };
 pub use history::{HistoryPosition, load_history_anchor_position, load_history_transaction_index};
+pub use history::{HistoryRegistryHandoff, load_history_registry_handoffs};
 pub use history::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
 #[cfg(any(test, feature = "test-support"))]
 pub use history::{

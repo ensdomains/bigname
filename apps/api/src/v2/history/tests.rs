@@ -44,6 +44,7 @@ fn history_cursor_payload_round_trips_storage_cursor() {
     assert_eq!(
         payload.filters,
         BTreeMap::from([
+            ("history_contract".to_owned(), "2".to_owned()),
             ("namespace".to_owned(), "ens".to_owned()),
             ("name".to_owned(), "ens:parent.eth".to_owned()),
             ("scope".to_owned(), "both".to_owned()),
@@ -74,6 +75,7 @@ fn history_cursor_binds_order_type_set_and_timestamp_window() {
     assert_eq!(
         payload.filters,
         BTreeMap::from([
+            ("history_contract".to_owned(), "2".to_owned()),
             ("namespace".to_owned(), "ens".to_owned()),
             ("name".to_owned(), "ens:parent.eth".to_owned()),
             ("scope".to_owned(), "both".to_owned()),

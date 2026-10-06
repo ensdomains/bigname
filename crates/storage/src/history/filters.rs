@@ -76,6 +76,24 @@ pub(super) fn push_selector_filter<'a>(
     product: bool,
 ) {
     match selector {
+        HistorySelector::OrAccountParticipants {
+            anchors,
+            address,
+            namespace,
+            relations,
+        } => {
+            builder.push("(");
+            push_selector_filter(builder, anchors, attributed, product);
+            for participant in super::direct_accounts::participants(
+                super::HistoryScope::Both,
+                relations.as_deref(),
+            ) {
+                builder.push(" OR (");
+                participant.push_predicate(builder, address, namespace.as_deref());
+                builder.push(")");
+            }
+            builder.push(")");
+        }
         HistorySelector::OrRootPermissionSubject {
             anchors,
             subject,
@@ -102,7 +120,10 @@ pub(super) fn push_selector_filter<'a>(
         // subject: a name or resource it carries never makes it part of that name's or
         // resource's history.
         anchors if product => {
-            builder.push("(ne.event_kind <> 'RootPermissionChanged' AND ");
+            builder
+                .push("(")
+                .push(super::direct_accounts::ANCHORED_EVENT)
+                .push(" AND ");
             push_anchor_filter(builder, anchors, attributed);
             builder.push(")");
         }
@@ -140,7 +161,9 @@ fn push_anchor_filter<'a>(
         HistorySelector::ProductRegistration { .. } => {
             builder.push("TRUE");
         }
-        HistorySelector::OrRootPermissionSubject { .. } | HistorySelector::None => {
+        HistorySelector::OrRootPermissionSubject { .. }
+        | HistorySelector::OrAccountParticipants { .. }
+        | HistorySelector::None => {
             push_selector_filter(builder, selector, attributed, false);
         }
     }

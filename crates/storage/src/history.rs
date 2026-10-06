@@ -7,6 +7,7 @@ pub use address_walk::seams::{AddressHistoryWorkingSet, with_address_history_wor
 pub use address_walk::{
     load_address_history_page_for_relations, load_address_history_page_for_relations_on,
 };
+mod address_pairs;
 mod attribution;
 mod binding_anchors;
 mod block_window;
@@ -18,6 +19,7 @@ mod contract_count;
 #[cfg(test)]
 mod contract_event_count_tests;
 mod decoders;
+mod direct_accounts;
 mod duplicates;
 mod event_page;
 #[cfg(test)]
@@ -36,6 +38,8 @@ mod query_plan;
 mod read_filter;
 mod redo;
 mod registration_identity;
+mod registry_handoffs;
+pub use registry_handoffs::{HistoryRegistryHandoff, load_history_registry_handoffs};
 mod selectors;
 mod source;
 mod summary;

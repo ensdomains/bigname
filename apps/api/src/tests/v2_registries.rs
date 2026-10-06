@@ -321,7 +321,7 @@ async fn v2_get_registry_serves_name_parent_creation_counts_and_references() -> 
     .await?;
     assert_eq!(
         counted["data"]["counts"],
-        json!({ "labels": 2, "events": 5, "roles": 0 })
+        json!({ "labels": 2, "events": 6, "roles": 0 })
     );
     assert_eq!(
         counted["data"]["referenced_by"]["page"]["total_count"],
@@ -706,12 +706,19 @@ async fn v2_get_events_filters_by_contract_address_and_binds_cursor() -> Result<
         .context("third event page")?;
     let last = registry_payload(
         &database,
-        &format!("/v1/events?contract_address={ALPHA_REGISTRY}&page_size=2&cursor={cursor}"),
+        &format!("/v1/events?contract_address={ALPHA_REGISTRY}&page_size=2&include=data,raw&cursor={cursor}"),
     )
     .await?;
-    assert_eq!(last["data"].as_array().unwrap().len(), 1);
+    assert_eq!(last["data"].as_array().unwrap().len(), 2);
     assert_eq!(last["data"][0]["type"], json!("transfer"));
     assert_eq!(last["data"][0]["block_number"], json!(62));
+    // The creation log is now a product contract event, after the existing name activity.
+    assert_eq!(last["data"][1]["type"], json!("contract"));
+    assert_eq!(last["data"][1]["kind"], json!("RegistryCreated"));
+    assert_eq!(last["data"][1]["block_number"], json!(61));
+    assert_eq!(last["data"][1]["data"]["action"], json!("registry_created"));
+    assert_eq!(last["data"][1]["data"]["registry"]["address"], json!(ALPHA_REGISTRY));
+    assert!(last["data"][1]["name"].is_null());
     assert_eq!(last["page"]["has_more"], json!(false));
 
     assert_registry_error(
@@ -738,14 +745,19 @@ async fn v2_get_events_filters_by_contract_address_and_binds_cursor() -> Result<
 
     let root = registry_payload(
         &database,
-        &format!("/v1/events?contract_address={ROOT_REGISTRY}"),
+        &format!("/v1/events?contract_address={ROOT_REGISTRY}&include=data,raw"),
     )
     .await?;
     let rows = root["data"].as_array().expect("events data");
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["type"], json!("subregistry"));
     assert_eq!(rows[0]["block_number"], json!(61));
     assert_eq!(rows[0]["name"], json!("alpha.eth"));
+    assert_eq!(rows[1]["kind"], json!("RegistryCreated"));
+    assert_eq!(rows[1]["block_number"], json!(60));
+    assert_eq!(rows[1]["data"]["action"], json!("registry_created"));
+    assert_eq!(rows[1]["data"]["registry"]["address"], json!(ROOT_REGISTRY));
+    assert!(rows[1]["name"].is_null());
 
     let mixed = registry_payload(
         &database,
@@ -1002,7 +1014,7 @@ async fn v2_get_registry_event_count_matches_the_events_feed_total() -> Result<(
         &format!("/v1/events?contract_address={ALPHA_REGISTRY}&include=total_count&page_size=1"),
     )
     .await?;
-    assert_eq!(feed["page"]["total_count"], json!(5), "{feed}");
+    assert_eq!(feed["page"]["total_count"], json!(6), "{feed}");
     assert_eq!(
         overview["data"]["counts"]["events"], feed["page"]["total_count"],
         "{overview}"
@@ -1133,7 +1145,7 @@ async fn v2_get_registry_event_count_includes_root_role_changes() -> Result<()> 
         &format!("/v1/events?contract_address={ALPHA_REGISTRY}&include=total_count&page_size=1"),
     )
     .await?;
-    assert_eq!(feed["page"]["total_count"], json!(8), "{feed}");
+    assert_eq!(feed["page"]["total_count"], json!(9), "{feed}");
     assert_eq!(
         overview["data"]["counts"]["events"], feed["page"]["total_count"],
         "{overview}"
@@ -1282,8 +1294,9 @@ async fn v2_get_registry_event_count_includes_every_namespace_the_feed_default_d
         &format!("/v1/events?contract_address={ALPHA_REGISTRY}&include=total_count&page_size=1"),
     )
     .await?;
-    assert_eq!(feed["page"]["total_count"], json!(5), "{feed}");
-    assert_eq!(overview["data"]["counts"]["events"], json!(6), "{overview}");
+    // Both counts include RegistryCreated; only the overview also counts the other namespace.
+    assert_eq!(feed["page"]["total_count"], json!(6), "{feed}");
+    assert_eq!(overview["data"]["counts"]["events"], json!(7), "{overview}");
     database.cleanup().await
 }
 

@@ -15,9 +15,16 @@ pub(crate) struct HistoryRowContext {
     primary_names: Option<BTreeMap<i64, Value>>,
     token_ids: BTreeMap<i64, String>,
     payments: BTreeMap<i64, Value>,
+    registry_handoffs: BTreeMap<i64, bigname_storage::HistoryRegistryHandoff>,
 }
 
 impl HistoryRowContext {
+    pub(crate) fn registry_handoff(
+        &self,
+        row: &StorageHistoryEvent,
+    ) -> Option<&bigname_storage::HistoryRegistryHandoff> {
+        self.registry_handoffs.get(&row.normalized_event_id)
+    }
     pub(crate) fn payment(&self, row: &StorageHistoryEvent) -> Option<&Value> {
         self.payments.get(&row.normalized_event_id)
     }
@@ -95,6 +102,10 @@ async fn read_context(
     let payments = bigname_storage::load_history_payment_values(&mut *snapshot, rows, block_bounds)
         .await
         .map_err(context_error)?;
+    let registry_handoffs =
+        bigname_storage::load_history_registry_handoffs(&mut snapshot, rows, block_bounds)
+            .await
+            .map_err(context_error)?;
     snapshot
         .commit()
         .await
@@ -103,6 +114,7 @@ async fn read_context(
         primary_names: Some(primary_names),
         token_ids,
         payments,
+        registry_handoffs,
     })
 }
 

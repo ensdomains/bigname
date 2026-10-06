@@ -2403,6 +2403,7 @@ async fn reserved_token_resource_is_not_a_public_registration_handle() -> Result
 
 #[tokio::test]
 async fn reservation_product_rows_omit_registration_identity() -> Result<()> {
+    use sha2::Digest;
     const NAME: &str = "reserved-product-history.eth";
     const SEED: &str = "ens:reserved-product-history.eth";
     let database = TestDatabase::new_migrated().await?;
@@ -2520,6 +2521,16 @@ async fn reservation_product_rows_omit_registration_identity() -> Result<()> {
             assert_eq!(row.registration_id, expected, "{row:?}");
         }
     }
+    let public_id = |identity: &str| hex::encode(sha2::Sha256::digest(identity.as_bytes()));
+    let expected_ordinary = [
+        ("reservation-product-bridge-125", 125, 1, "renewal"),
+        ("reservation-product-125", 125, 0, "resolver"),
+        ("reservation-product-124", 124, 0, "expiry"),
+        ("reservation-product-123", 123, 0, "registration"),
+        ("reservation-product-bridge-122", 122, 1, "renewal"),
+        ("reservation-product-122", 122, 0, "resolver"),
+        ("reservation-product-121", 121, 0, "expiry"),
+    ];
     for route in [
         format!("/v1/names/{NAME}/history?scope=name&page_size=20"),
         format!("/v1/names/{NAME}/history?scope=both&page_size=20"),
@@ -2528,7 +2539,21 @@ async fn reservation_product_rows_omit_registration_identity() -> Result<()> {
     ] {
         let payload = v2_history_payload_for_database(&database, &route).await?;
         let rows = payload["data"].as_array().expect("product history rows");
-        assert_eq!(rows.len(), 7, "{route}: {payload:?}");
+        assert_eq!(rows.len(), 8, "{route}: {payload:?}");
+        // Unfiltered product history now includes the reservation, without turning it into
+        // a registration or changing the seven later rows admitted by the storage probe.
+        let reserved = rows.last().expect("reservation row");
+        assert_eq!(reserved["id"], public_id("reservation-product-120"));
+        assert_eq!(reserved["block_number"], 120);
+        assert_eq!(reserved["log_index"], 0);
+        assert_eq!(reserved["type"], "reservation");
+        assert_eq!(reserved["registration_id"], Value::Null);
+        for (row, (identity, block, log, kind)) in rows[..7].iter().zip(&expected_ordinary) {
+            assert_eq!(row["id"], public_id(identity), "{route}: {row:?}");
+            assert_eq!(row["block_number"], *block, "{route}: {row:?}");
+            assert_eq!(row["log_index"], *log, "{route}: {row:?}");
+            assert_eq!(row["type"], *kind, "{route}: {row:?}");
+        }
         for row in rows {
             let number = row["block_number"].as_i64().expect("block number");
             let expected = if number < 123 {
@@ -2544,12 +2569,20 @@ async fn reservation_product_rows_omit_registration_identity() -> Result<()> {
         &format!("/v1/events?registration_id={registration}&page_size=20"),
     )
     .await?;
+    let rows = payload["data"].as_array().expect("registration history");
+    assert_eq!(rows.len(), 4);
     assert_eq!(
-        payload["data"]
-            .as_array()
-            .expect("registration history")
-            .len(),
-        4
+        rows.iter()
+            .map(|row| row["id"].as_str().expect("event id").to_owned())
+            .collect::<Vec<_>>(),
+        expected_ordinary[..4]
+            .iter()
+            .map(|(identity, _, _, _)| public_id(identity))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        rows.iter()
+            .all(|row| row["registration_id"] == json!(registration))
     );
     let diagnostics = v2_history_payload_for_database(
         &database,

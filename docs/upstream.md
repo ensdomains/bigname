@@ -174,6 +174,60 @@ under [ENSv1 mirror ancestor gate](deployment.md#ensv1-mirror-ancestor-gate).
 
 ## Known divergences
 
+### Product history actions and legacy ETH-address pairs
+
+History is a read interpretation of retained events, with a closed `data.action` and the
+scope rules in [history payloads](api-v1-routes.md#history-event-payloads-includedata-includeraw).
+The public vocabulary is bigname's contract; it is not an upstream event catalogue.
+Wrapping and unwrapping have explicit events, including a zero unwrap destination during
+replacement (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L883-L902 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f).
+We preserve the wrap action and select its derived transfer only when two different nonzero
+owners are proved. Owner-wide approvals remain one account event, without per-name fanout
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L117 @ ens_v1@91c966f).
+Reservation, record linking and token regeneration remain distinct from registration, pointer
+writes and transfer (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/interfaces/IRegistryEvents.sol:L11-L38 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/interfaces/IRecordResolver.sol:L33-L38 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/interfaces/IRegistryEvents.sol:L78-L82 @ ens_v2_sepolia_20261001@07e55a05).
+ReverseClaimed alone does not write a name; even bounded companion-name evidence retains
+the `reverse_claimed` action (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L74-L85 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123-L131 @ ens_v1@91c966f).
+
+For proven deployed resolver generations only, one ETH setter emits adjacent AddressChanged
+then AddrChanged. Public history keeps AddressChanged as the representative before paging
+and counting; raw/normalized records stay unchanged. Both overloads delegate to that setter
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L26-L31 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L65 @ ens_v1@91c966f).
+The rule requires matching physical transaction/log/fork positions, emitter, node, resource
+and values, plus exact declaration/source proof. Distinct repeated writes and unproved
+custom emitters stay separate.
+
+| Proven deployment | Pair value rule and source binding |
+| --- | --- |
+| Mainnet current PublicResolver `0xf29100983e058b709f3d539b0c765937b804ac15`; Sepolia current PublicResolver `0xe99638b40e4fff0129d56f03b55b6bbc4bbe49b5` | 20 bytes or modern empty clear. Deployment artifacts bind the current setter: (upstream: .refs/ens_v1/deployments/mainnet/PublicResolver.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/deployments/sepolia/PublicResolver.json:L2 @ ens_v1@91c966f). |
+| Mainnet `0x231b0ee14048e9dccd1d247744d114a4eb5e8e63` | Exactly 20 bytes. The historical reference also supports deployment-linked setter evidence, in addition to its approval ABI purpose: (upstream: .refs/ens_v1_mainnet_1a2ac5c/deployments/mainnet/PublicResolver.json:L2 @ ens_v1_mainnet_1a2ac5c@1a2ac5c) (upstream: .refs/ens_v1_mainnet_1a2ac5c/contracts/resolvers/profiles/AddrResolver.sol:L45-L54 @ ens_v1_mainnet_1a2ac5c@1a2ac5c). |
+| Sepolia `0x8948458626811dd0c23eb25cc74291247077cc51` and `0x8fade66b79cc9f707ab26799354482eb93a5b7dd` | Exactly 20 bytes. These historical references likewise provide deployment-linked setter proof: (upstream: .refs/ens_v1_sepolia_8209157/deployments/sepolia/PublicResolver.json:L2 @ ens_v1_sepolia_8209157@8209157) (upstream: .refs/ens_v1_sepolia_8209157/contracts/resolvers/profiles/AddrResolver.sol:L45-L54 @ ens_v1_sepolia_8209157@8209157) (upstream: .refs/ens_v1_sepolia_ac32490/deployments/sepolia/PublicResolver.json:L2 @ ens_v1_sepolia_ac32490@ac32490) (upstream: .refs/ens_v1_sepolia_ac32490/contracts/resolvers/profiles/AddrResolver.sol:L45-L54 @ ens_v1_sepolia_ac32490@ac32490). |
+| Basenames legacy L2Resolver `0xc6d566a56a1aff6508b41f6c90ff131615583bcd` | Exactly 20 bytes; this admitted legacy resolver inherits the vendored ENS profile, not the separate upgradeable empty-capable profile: (upstream: .refs/basenames/test/Fork/BaseMainnetConstants.sol:L9-L14 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L4-L5 @ basenames@1809bbc) (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/AddrResolver.sol:L45-L54 @ basenames@1809bbc) (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/AddrResolver.sol:L73-L76 @ basenames@1809bbc). |
+| Official Sepolia PublicResolverV2 `0xdc4a563d00f5c3012b699794eb9e13a561be386f` | 20 bytes or modern empty clear. Exact deployed build inputs bind the inherited setter: (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/PublicResolverV2.json:L2 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/build-info/solc-0_8_25-b30e6dc9a03b37f6a0b89af5d02a73d3993944f7.json:L852-L854 @ ens_v2_sepolia_20261001@07e55a05). |
+
+Other historical Mainnet declarations (`public_resolver_4976fb03`, `public_resolver_daaf96c3`,
+`public_resolver_226159d5`, `public_resolver_5ffc0143`, `public_resolver_1da02271`) and Sepolia
+`public_resolver_0ceec52` lack the required exact deployment-to-setter proof in this slice.
+They remain uncollapsed. Source-family or ABI matching alone never widens this coverage.
+
+The old-to-current registry handoff subtype is also bigname's interpretation: fallback reads
+use the old registry until the current registry has a record
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L29-L34 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L54 @ ens_v1@91c966f).
+The API enriches only the first original readable direct current ownership row with an earlier
+readable old-registry witness and no earlier ownership-triggered fallback-clear witness. A row
+whose original authority fields were removed by registration or migration reconciliation keeps
+its ordinary action, even if it might have been the first physical write. Later owner rows do not
+inherit that marker. This conservative omission preserves the remaining rows, IDs, ordering,
+membership and counts; it does not promise reconstruction of an erased ownership representative.
+No event is created from a resolver clear or diagnostic block number, and no ENSv1→ENSv2
+migration correlation or path changes.
+
 > **Labels whose subregistry is their own registry: alias subtree not modelled** —
 > a registry can set one of its labels' subregistry to the registry itself, for
 > example when a registrant passes the `ETHRegistry` as the subregistry to

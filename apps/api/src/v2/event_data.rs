@@ -18,6 +18,10 @@ use super::history_context::HistoryRowContext;
 use super::slug_to_numeric;
 use super::{HistoryEventType, V2Error, V2Result, permission_powers_value, permission_scope_value};
 
+mod actions;
+mod retained_actions;
+pub(crate) use actions::HistoryAction;
+
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
 /// Row expansion added by `include=data`. `contract_address` is the emitting
@@ -93,6 +97,11 @@ fn build_event_data(
     let after = &row.after_state;
     let before = &row.before_state;
     let mut data = Map::new();
+    data.insert(
+        "action".into(),
+        serde_json::to_value(HistoryAction::for_row(row, event_type, context))
+            .expect("history action serializes"),
+    );
     if let Some(token_id) = context.token_id(row) {
         data.insert("token_id".to_owned(), Value::String(token_id.to_owned()));
     }
@@ -153,7 +162,17 @@ fn build_event_data(
                 }),
             );
             insert(&mut data, "key", key.map(Value::String));
-            insert(&mut data, "value", present(after.get("value")).cloned());
+            insert(
+                &mut data,
+                "value",
+                present(after.get("value"))
+                    .or_else(|| {
+                        (after["source_event"] == "AddressChanged")
+                            .then(|| present(after.get("address_bytes_hex")))
+                            .flatten()
+                    })
+                    .cloned(),
+            );
             // Where the record lives, so a write no single name can be given for stays
             // identifiable: the resolver, and its node or its record ID.
             insert(&mut data, "resolver", record_resolver(row));
@@ -215,6 +234,8 @@ fn build_event_data(
                 contract_ref(row, after, "subregistry"),
             );
         }
+        HistoryEventType::Reservation => insert_expiry(&mut data, row),
+        HistoryEventType::Token | HistoryEventType::Contract => {}
         HistoryEventType::Migration => {
             insert(
                 &mut data,
@@ -223,6 +244,7 @@ fn build_event_data(
             );
         }
     }
+    retained_actions::append(&mut data, row, context);
     data
 }
 

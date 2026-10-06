@@ -217,7 +217,7 @@ fn build_event_derives_name_and_drops_non_product_kinds() {
     let serialized = serde_json::to_value(&detailed).expect("event must serialize");
     assert!(serialized.get("kind").is_none());
     assert_eq!(serialized["contract_address"], Value::Null);
-    assert_eq!(serialized["data"], json!({}));
+    assert_eq!(serialized["data"], json!({"action":"record_changed"}));
 
     let raw = build_event(
         &storage_event("RecordChanged", None),
@@ -243,7 +243,7 @@ fn build_event_derives_name_and_drops_non_product_kinds() {
     .expect("raw detailed product event must build");
     let serialized = serde_json::to_value(&both).expect("event must serialize");
     assert_eq!(serialized["kind"], json!("RecordChanged"));
-    assert_eq!(serialized["data"], json!({}));
+    assert_eq!(serialized["data"], json!({"action":"record_changed"}));
 
     assert!(
         build_event(
@@ -337,6 +337,7 @@ fn events_filter_builds_storage_filter_and_cursor_filters() {
             "PermissionScopeChanged".to_owned(),
             "RolesChanged".to_owned(),
             "EACRolesChanged".to_owned(),
+            "AccountPermissionChanged".to_owned(),
         ]
     );
 

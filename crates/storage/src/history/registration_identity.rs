@@ -35,7 +35,7 @@ pub(super) fn push_product_event_kind_predicate(builder: &mut QueryBuilder<'_, P
             'RegistrationGranted', 'LabelRegistered', 'RegistrationRenewed',
             'RegistrationReleased', 'ExpiryChanged', 'TokenControlTransferred',
             'AuthorityTransferred', 'AuthorityEpochChanged', 'ResolverChanged',
-            'RecordChanged', 'RecordVersionChanged', 'ReverseChanged',
+            'RecordChanged', 'RecordVersionChanged', 'ResolverRecordLinked',
             'PermissionChanged', 'PermissionScopeChanged', 'RolesChanged',
             'EACRolesChanged', 'SubregistryChanged'
         )",

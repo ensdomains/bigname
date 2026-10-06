@@ -19,10 +19,13 @@ pub(crate) enum HistoryEventType {
     /// A confirmed ENSv1→ENSv2 migration of the name: the activated `MigrationApplied` of a
     /// completed migration correlation group, never a native ENSv2 registration.
     Migration,
+    Reservation,
+    Token,
+    Contract,
 }
 
 impl HistoryEventType {
-    pub(crate) const ALL: [Self; 12] = [
+    pub(crate) const ALL: [Self; 15] = [
         Self::Registration,
         Self::Renewal,
         Self::Release,
@@ -35,6 +38,9 @@ impl HistoryEventType {
         Self::Permission,
         Self::Subregistry,
         Self::Migration,
+        Self::Reservation,
+        Self::Token,
+        Self::Contract,
     ];
 
     pub(crate) const fn as_str(self) -> &'static str {
@@ -51,6 +57,9 @@ impl HistoryEventType {
             Self::Permission => "permission",
             Self::Subregistry => "subregistry",
             Self::Migration => "migration",
+            Self::Reservation => "reservation",
+            Self::Token => "token",
+            Self::Contract => "contract",
         }
     }
 
@@ -69,7 +78,7 @@ impl HistoryEventType {
             Self::Expiry => &["ExpiryChanged"],
             Self::Transfer => &["TokenControlTransferred"],
             Self::Authority => &["AuthorityTransferred", "AuthorityEpochChanged"],
-            Self::Resolver => &["ResolverChanged"],
+            Self::Resolver => &["ResolverChanged", "ResolverRecordLinked"],
             Self::Record => &["RecordChanged", "RecordVersionChanged"],
             Self::PrimaryName => &["ReverseChanged"],
             Self::Permission => &[
@@ -78,9 +87,13 @@ impl HistoryEventType {
                 "PermissionScopeChanged",
                 "RolesChanged",
                 "EACRolesChanged",
+                "AccountPermissionChanged",
             ],
             Self::Subregistry => &["SubregistryChanged"],
             Self::Migration => &["MigrationApplied"],
+            Self::Reservation => &["RegistrationReserved"],
+            Self::Token => &["TokenRegenerated"],
+            Self::Contract => &["RegistryCreated", "ParentChanged", "Upgraded"],
         }
     }
 }

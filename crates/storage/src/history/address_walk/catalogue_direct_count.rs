@@ -58,7 +58,10 @@ fn push_arm<'a>(
 ) {
     query.push("SELECT 1 FROM bigname_phase.project_address_history_anchor anchor CROSS JOIN LATERAL (SELECT 1 FROM normalized_events ne");
     source::push_arm_filters(query, read, filter, None);
-    query.push(" AND ne.chain_id = anchor.chain_id AND ");
+    query
+        .push(" AND ")
+        .push(crate::history::direct_accounts::ANCHORED_EVENT)
+        .push(" AND ne.chain_id = anchor.chain_id AND ");
     query.push(if resource {
         "ne.resource_id = CASE WHEN anchor.anchor_kind = 1 THEN anchor.anchor_id::uuid END"
     } else {

@@ -30,6 +30,9 @@ DECLARE
 BEGIN
     FOR checked_index, expected_definition IN
         SELECT * FROM (VALUES
+            ('normalized_events_history_account_owner_idx', $def$CREATE INDEX normalized_events_history_account_owner_idx ON bigname_phase.normalized_events USING btree (lower((after_state #>> '{scope,owner}'::text[])), block_number DESC NULLS LAST, log_index DESC NULLS LAST, normalized_event_id DESC) WHERE ((event_kind = 'AccountPermissionChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND ((after_state #>> '{scope,kind}'::text[]) = 'account'::text) AND ((after_state ->> 'relation_kind'::text) = 'operator'::text))$def$),
+            ('normalized_events_history_account_subject_idx', $def$CREATE INDEX normalized_events_history_account_subject_idx ON bigname_phase.normalized_events USING btree (lower((after_state ->> 'subject'::text)), block_number DESC NULLS LAST, log_index DESC NULLS LAST, normalized_event_id DESC) WHERE ((event_kind = 'AccountPermissionChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND ((after_state #>> '{scope,kind}'::text[]) = 'account'::text) AND ((after_state ->> 'relation_kind'::text) = 'operator'::text))$def$),
+            ('normalized_events_history_reverse_address_idx', $def$CREATE INDEX normalized_events_history_reverse_address_idx ON bigname_phase.normalized_events USING btree (lower((after_state ->> 'address'::text)), block_number DESC NULLS LAST, log_index DESC NULLS LAST, normalized_event_id DESC) WHERE ((event_kind = 'ReverseChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_history_registrar_lease_idx',
              $def$CREATE INDEX normalized_events_history_registrar_lease_idx ON bigname_phase.normalized_events USING btree (resource_id) WHERE ((source_family = 'ens_v1_registrar_l1'::text) AND (canonicality_state <> 'orphaned'::bigname_phase.canonicality_state))$def$),
             ('normalized_events_registry_token_idx',
@@ -634,11 +637,42 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_history_registrar_leas
     WHERE source_family = 'ens_v1_registrar_l1'
       AND canonicality_state <> 'orphaned'::bigname_phase.canonicality_state;
 
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_history_account_owner_idx
+    ON bigname_phase.normalized_events (
+        lower(after_state #>> '{scope,owner}'), block_number DESC NULLS LAST,
+        log_index DESC NULLS LAST, normalized_event_id DESC
+    )
+    WHERE event_kind = 'AccountPermissionChanged' AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND after_state #>> '{scope,kind}' = 'account'
+      AND after_state ->> 'relation_kind' = 'operator';
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_history_account_subject_idx
+    ON bigname_phase.normalized_events (
+        lower(after_state ->> 'subject'), block_number DESC NULLS LAST,
+        log_index DESC NULLS LAST, normalized_event_id DESC
+    )
+    WHERE event_kind = 'AccountPermissionChanged' AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND after_state #>> '{scope,kind}' = 'account'
+      AND after_state ->> 'relation_kind' = 'operator';
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_history_reverse_address_idx
+    ON bigname_phase.normalized_events (
+        lower(after_state ->> 'address'), block_number DESC NULLS LAST,
+        log_index DESC NULLS LAST, normalized_event_id DESC
+    )
+    WHERE event_kind = 'ReverseChanged' AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
 -- Printed first so the receipt shows the flags even when the check below fails.
 SELECT indexrelid::regclass AS index_name, indisvalid, indisready,
        pg_size_pretty(pg_relation_size(indexrelid)) AS index_size
 FROM pg_index
 WHERE indexrelid IN (
+    to_regclass('bigname_phase.normalized_events_history_account_owner_idx'),
+    to_regclass('bigname_phase.normalized_events_history_account_subject_idx'),
+    to_regclass('bigname_phase.normalized_events_history_reverse_address_idx'),
     to_regclass('bigname_phase.normalized_events_history_registrar_lease_idx'),
     to_regclass('bigname_phase.normalized_events_v1_subregistry_after_node_scope_idx'),
     to_regclass('bigname_phase.normalized_events_v1_subregistry_after_child_scope_idx'),

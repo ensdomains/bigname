@@ -53,7 +53,7 @@ async fn v2_name_history_separates_granted_and_revoked_registry_roles() -> Resul
         .map(|row| row["data"].clone())
         .collect::<Vec<_>>();
     let change = |powers: Value, added: Value, removed: Value| {
-        json!({"address":ROLE_HOLDER, "canonical_id":"4294967296", "grant_scope":{"kind":"registry", "detail":{}},
+        json!({"action":"permission_changed", "address":ROLE_HOLDER, "canonical_id":"4294967296", "grant_scope":{"kind":"registry", "detail":{}},
             "powers":powers, "added_powers":added, "removed_powers":removed})
     };
     assert_eq!(
@@ -278,7 +278,7 @@ async fn v2_events_describe_admitted_registrar_controller_changes() -> Result<()
         assert_eq!(row["type"], "permission");
         assert_eq!(
             row["data"],
-            json!({"address":controller,
+            json!({"action":"permission_changed", "address":controller,
             "grant_scope":{"kind":"registrar_controller","detail":{"registrar":{
                 "chain_id":11155111,"address":registrar}}}, "approved":approved}),
             "{payload}"
@@ -525,12 +525,12 @@ async fn v2_registry_root_role_changes_are_permission_history() -> Result<()> {
     assert_eq!(
         feed_rows.iter().map(change).collect::<Vec<_>>(),
         vec![
-            json!({"address":HOLDER, "powers":["registrar","renew"],
+            json!({"action":"permission_changed", "address":HOLDER, "powers":["registrar","renew"],
                 "added_powers":["registrar","renew"], "removed_powers":[],
                 "old_role_bitmap":"0", "new_role_bitmap":(registrar | renew).to_string()}),
-            json!({"address":OTHER, "powers":["registrar"], "added_powers":["registrar"],
+            json!({"action":"permission_changed", "address":OTHER, "powers":["registrar"], "added_powers":["registrar"],
                 "removed_powers":[], "old_role_bitmap":"0", "new_role_bitmap":registrar.to_string()}),
-            json!({"address":HOLDER, "powers":["renew"], "added_powers":[],
+            json!({"action":"permission_changed", "address":HOLDER, "powers":["renew"], "added_powers":[],
                 "removed_powers":["registrar"], "old_role_bitmap":(registrar | renew).to_string(),
                 "new_role_bitmap":renew.to_string()}),
         ],

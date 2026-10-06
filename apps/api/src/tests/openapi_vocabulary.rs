@@ -353,7 +353,7 @@ fn every_named_openapi_enum_matches_its_complete_producer_vocabulary() {
 
     let events = variants!(HistoryEventType:
         Registration, Renewal, Release, Expiry, Transfer, Authority, Resolver,
-        Record, PrimaryName, Permission, Subregistry, Migration);
+        Record, PrimaryName, Permission, Subregistry, Migration, Reservation, Token, Contract);
     compare(&mut covered, "HistoryEventType", events.map(serialized));
     // ALL drives the production reverse lookup. Its completeness is checked
     // against the same exhaustive list before using storage_event_kinds.
@@ -374,6 +374,7 @@ fn every_named_openapi_enum_matches_its_complete_producer_vocabulary() {
     );
 
     for (name, source) in [
+        ("HistoryAction", include_str!("../v2/event_data/actions.rs")),
         ("LookupKind", include_str!("../v2/lookup/dto.rs")),
         (
             "LapsedReleaseKind",

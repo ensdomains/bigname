@@ -209,7 +209,7 @@ async fn confirmed_migration_is_a_history_event() -> Result<()> {
     assert_eq!(migrations[0]["block_number"], json!(301));
     assert_eq!(migrations[0]["transaction_hash"], json!("0xtx301"));
     assert_eq!(migrations[0]["log_index"], json!(5));
-    assert_eq!(migrations[0]["data"], json!({"migration_path": "unwrapped"}));
+    assert_eq!(migrations[0]["data"], json!({"action": "migration_applied", "migration_path": "unwrapped"}));
     assert_eq!(history["page"]["total_count"], json!(rows.len()));
     // The migration row names the ENSv2 registration its successor binding holds, the one the
     // linked grant carries, although its own event has no resource.
@@ -473,12 +473,12 @@ async fn primary_name_rows_return_the_recorded_name() -> Result<()> {
     assert_eq!(
         ens,
         [
-            json!({"address": address, "coin_type": 60, "name": "alpha.eth", "name_status": "set"}),
-            json!({"address": address, "coin_type": 60, "name": "beta.eth", "name_status": "set"}),
-            json!({"address": address, "coin_type": 60, "name_status": "cleared"}),
-            json!({"address": address, "coin_type": 60, "name_status": "unknown"}),
-            json!({"address": address, "coin_type": 60, "name_status": "unknown"}),
-            json!({"address": address, "coin_type": 60, "name_status": "unknown"}),
+            json!({"action":"reverse_claimed", "reverse_node":reverse_node, "address": address, "coin_type": 60, "name": "alpha.eth", "name_status": "set"}),
+            json!({"action":"reverse_claimed", "reverse_node":reverse_node, "address": address, "coin_type": 60, "name": "beta.eth", "name_status": "set"}),
+            json!({"action":"reverse_claimed", "reverse_node":reverse_node, "address": address, "coin_type": 60, "name_status": "cleared"}),
+            json!({"action":"reverse_claimed", "reverse_node":reverse_node, "address": address, "coin_type": 60, "name_status": "unknown"}),
+            json!({"action":"reverse_claimed", "reverse_node":reverse_node, "address": address, "coin_type": 60, "name_status": "unknown"}),
+            json!({"action":"reverse_claimed", "reverse_node":reverse_node, "address": address, "coin_type": 60, "name_status": "unknown"}),
         ],
     );
     let basenames = data(
@@ -489,12 +489,13 @@ async fn primary_name_rows_return_the_recorded_name() -> Result<()> {
         )
         .await?,
     );
+    let basenames_node: String = sqlx::query_scalar("SELECT lower(after_state ->> 'reverse_node') FROM normalized_events WHERE namespace = 'basenames' AND event_kind = 'ReverseChanged' LIMIT 1").fetch_one(&database.pool).await?;
     assert_eq!(
         basenames,
         [
-            json!({"address": address, "coin_type": 2_147_492_101_u64, "name": "bob.base.eth",
+            json!({"action":"primary_name_recorded", "reverse_node":basenames_node, "address": address, "coin_type": 2_147_492_101_u64, "name": "bob.base.eth",
                    "name_status": "set"}),
-            json!({"address": address, "coin_type": 2_147_492_101_u64, "name_status": "cleared"}),
+            json!({"action":"primary_name_recorded", "reverse_node":basenames_node, "address": address, "coin_type": 2_147_492_101_u64, "name_status": "cleared"}),
         ],
     );
     // The claim's companion record row names its reverse node, as the adapter stores it.
@@ -545,12 +546,13 @@ async fn default_reverse_rows_return_the_recorded_name() -> Result<()> {
     .map(|row| row["data"].clone())
     .collect::<Vec<_>>();
     let address = V2_ADDRESS.to_ascii_lowercase();
+    let reverse_node = bigname_lookup::ens_namehash_hex(&format!("{}.default.reverse", address.trim_start_matches("0x")))?;
     assert_eq!(
         rows,
         [
-            json!({"address": address, "coin_type": 2_147_483_648_u64, "name": "evers.eth",
+            json!({"action":"primary_name_recorded", "reverse_node":reverse_node, "address": address, "coin_type": 2_147_483_648_u64, "name": "evers.eth",
                    "name_status": "set"}),
-            json!({"address": address, "coin_type": 2_147_483_648_u64, "name_status": "cleared"}),
+            json!({"action":"primary_name_recorded", "reverse_node":reverse_node, "address": address, "coin_type": 2_147_483_648_u64, "name_status": "cleared"}),
         ],
     );
 
@@ -686,12 +688,12 @@ async fn record_events_carry_their_locator_and_no_name() -> Result<()> {
     assert!(rows.iter().all(|row| row.get("name").is_none()), "{rows:?}");
     assert_eq!(
         at(504, 0)["data"],
-        json!({"key": "text:description", "value": "record 8 at 504",
+        json!({"action":"record_changed", "key": "text:description", "value": "record 8 at 504",
                "resolver": {"chain_id": 1, "address": RECORD_RESOLVER}, "record_id": "8"})
     );
     assert_eq!(
         at(501, 0)["data"],
-        json!({"key": "text:avatar", "value": "avatar",
+        json!({"action":"record_changed", "key": "text:avatar", "value": "avatar",
                "resolver": {"chain_id": 1, "address": NODE_RESOLVER},
                "node": node("mr-freshy.eth")})
     );
@@ -699,12 +701,12 @@ async fn record_events_carry_their_locator_and_no_name() -> Result<()> {
     let resolver = json!({"chain_id": 1, "address": RECORD_RESOLVER});
     assert_eq!(
         at(507, 0)["data"],
-        json!({"key": "text:description", "value": "record 8 at 507", "resolver": resolver,
+        json!({"action":"record_changed", "key": "text:description", "value": "record 8 at 507", "resolver": resolver,
                "record_id": "8"})
     );
     assert_eq!(
         at(501, 1)["data"],
-        json!({"key": "text:avatar", "value": "avatar",
+        json!({"action":"record_changed", "key": "text:avatar", "value": "avatar",
                "resolver": {"chain_id": 1, "address": NODE_RESOLVER}, "node": unknown_node})
     );
 
@@ -738,6 +740,25 @@ async fn record_events_carry_their_locator_and_no_name() -> Result<()> {
         let (ids, total) = hkw_baseline(&database, &query).await?;
         assert_eq!(total, json!(3));
         assert_eq!(hkw_rest(&database, &query, None, Some(&total)).await?, ids);
+    }
+
+    // The same record can be selected by several names, but a link action belongs only to
+    // its exact node's existing pointer/link attribution. Reuse the established reader seam.
+    let links = event_data_payload(&database,
+        "/v1/events?kind=ResolverRecordLinked&include=data,raw&order=asc").await?;
+    assert_eq!(links["data"].as_array().unwrap().len(), 6);
+    for name in ["legal.eth", "agent-one.eth", "agent-two.eth"] {
+        let own_node = node(name);
+        let source = links["data"].as_array().unwrap().iter()
+            .find(|row| row["data"]["node"] == own_node).context("exact source link")?;
+        assert_eq!(source["data"]["action"], "resolver_record_linked");
+        assert_eq!(source["data"]["record_id"], "8");
+        for route in [format!("/v1/events?name={name}"), format!("/v1/names/{name}/history?scope=both")] {
+            let selected = event_data_payload(&database, &format!("{route}&kind=ResolverRecordLinked&include=data,raw")).await?;
+            let rows = selected["data"].as_array().unwrap();
+            assert_eq!(rows.len(), 1, "{selected}");
+            assert_eq!(rows[0]["id"], source["id"]);
+        }
     }
 
     database.cleanup().await
@@ -830,17 +851,17 @@ async fn record_rows_carry_a_name_only_when_their_node_was_linked() -> Result<()
             }
             assert_eq!(
                 rows[0]["data"],
-                json!({"key": "text:avatar", "value": "linked", "resolver": locator,
+                json!({"action":"record_changed", "key": "text:avatar", "value": "linked", "resolver": locator,
                        "node": node}),
                 "{uri}"
             );
             assert_eq!(
                 rows[1]["data"],
-                json!({"key": "text:avatar", "value": "unlinked", "resolver": locator,
+                json!({"action":"record_changed", "key": "text:avatar", "value": "unlinked", "resolver": locator,
                        "node": node}),
                 "{uri}"
             );
-            assert_eq!(rows[2]["data"], json!({"resolver": locator, "node": node}), "{uri}");
+            assert_eq!(rows[2]["data"], json!({"action":"record_version_changed", "record_version":"1", "resolver": locator, "node": node}), "{uri}");
         }
     }
 

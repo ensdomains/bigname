@@ -884,6 +884,36 @@ CREATE INDEX IF NOT EXISTS normalized_events_address_root_permission_idx
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
+-- Product address history: direct account owner/operator and claimed reverse address.
+-- Keep these predicates equal to history/direct_accounts.rs and the reviewed prebuild.
+CREATE INDEX IF NOT EXISTS normalized_events_history_account_owner_idx
+    ON normalized_events (
+        lower(after_state #>> '{scope,owner}'), block_number DESC NULLS LAST,
+        log_index DESC NULLS LAST, normalized_event_id DESC
+    )
+    WHERE event_kind = 'AccountPermissionChanged' AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND after_state #>> '{scope,kind}' = 'account'
+      AND after_state ->> 'relation_kind' = 'operator';
+
+CREATE INDEX IF NOT EXISTS normalized_events_history_account_subject_idx
+    ON normalized_events (
+        lower(after_state ->> 'subject'), block_number DESC NULLS LAST,
+        log_index DESC NULLS LAST, normalized_event_id DESC
+    )
+    WHERE event_kind = 'AccountPermissionChanged' AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND after_state #>> '{scope,kind}' = 'account'
+      AND after_state ->> 'relation_kind' = 'operator';
+
+CREATE INDEX IF NOT EXISTS normalized_events_history_reverse_address_idx
+    ON normalized_events (
+        lower(after_state ->> 'address'), block_number DESC NULLS LAST,
+        log_index DESC NULLS LAST, normalized_event_id DESC
+    )
+    WHERE event_kind = 'ReverseChanged' AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
 CREATE INDEX IF NOT EXISTS normalized_events_projection_idx
     ON normalized_events (
         event_kind,

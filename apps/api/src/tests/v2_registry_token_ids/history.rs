@@ -24,6 +24,11 @@ async fn v2_history_token_ids_keep_old_versions_and_pre_regeneration_permission_
         for row in rows {
             let block = row["block_number"].as_i64().unwrap();
             let expected = match row["kind"].as_str().unwrap() {
+                "RegistrationReserved" => match block {
+                    119 => Some(0),
+                    133 => Some(5),
+                    _ => None,
+                },
                 "RegistrationGranted" => match block {
                     120 => Some(0),
                     123 => Some(2),
