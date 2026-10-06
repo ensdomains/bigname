@@ -48,6 +48,15 @@ to the routes and selectors documented in [`api-v1-routes.md`](api-v1-routes.md)
 | Registry overview and labels | `GET /v1/registries/{chain_id}/{address}` and `/labels` | Current labels and exact declared registry assignment/per-label distinct holder counts with `include=counts`. Historical overview label totals are null; declared assignment counts do not imply complete effective-permission coverage. |
 | Pipeline diagnostics | `/v1/diagnostics/*` | Explicit diagnostic tier, separate from product reads. |
 
+Resolver roles and matching resolver permission rows expose `eac_resource` for
+identified Enhanced Access Control (EAC) grants: the exact uint256 target as a
+decimal string, including `"0"` for root. This target remains available without
+optional record descriptions; non-EAC resolver authority omits it. See the
+[permission contract](api-v1-routes.md#get-v1permissions). Consumers must still
+complete pagination and honor existing coverage metadata. Missing target
+identity is not zero, and this additive field does not make partial collections
+exhaustive or establish a caller's live transaction authority.
+
 The [record-ID resolver generation](architecture.md) supplies declared records
 and resolver permissions through the existing routes and response shapes once
 its manifest and end-to-end implementation are admitted. Record sharing, link

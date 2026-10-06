@@ -169,6 +169,14 @@ async fn collection(
     for (_, _, mut item) in rows {
         match section {
             "roles" => {
+                let source = item
+                    .as_object_mut()
+                    .and_then(|row| row.remove("grant_source"));
+                if let Some(resource) = crate::v2::permission_values::resolver_eac_resource_value(
+                    source.as_ref().unwrap_or(&Value::Null),
+                )? {
+                    item["eac_resource"] = Value::String(resource);
+                }
                 if let Some(selector) = item
                     .as_object_mut()
                     .and_then(|object| object.remove("record_resource_selector"))

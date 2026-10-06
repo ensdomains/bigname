@@ -2921,8 +2921,23 @@ introduces it rebuilds Project from full history before serving the option; see
   A `name` or `registration_id` read of an ENSv2 registration lists the same
   holders as rows of that registration, as described below.
 - Response shape: `data` is an array of permission rows
-  `{address, grant_relation?, grant_scope, powers, registration_id, record_resource?, name?,
+  `{address, grant_relation?, grant_scope, powers, registration_id, eac_resource?, record_resource?, name?,
   authority_context, wrapper_state?, wrapper_fuses?}`.
+  `eac_resource` identifies the exact Enhanced Access Control (EAC) resource of
+  a direct resolver EAC grant within its resolver chain and contract address.
+  It is an unsigned canonical decimal string over the full uint256 range;
+  `"0"` is the actual root resource. Non-EAC resolver authority and all
+  non-resolver rows omit it, never returning null or an inferred zero. An
+  identified resolver EAC grant with missing or invalid retained resource
+  evidence fails with `500 internal_error`. `registration_id` remains the
+  opaque lookup handle, and optional `record_resource` describes current
+  setters independently of numeric identity. Parse `eac_resource` with
+  arbitrary precision (for example JavaScript `BigInt`), never `Number`.
+  EAC logs carry the resource independently of their role bitmap.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L17-L27 @ ens_v2_sepolia_20261001@07e55a05)
+  Root resource zero has distinct revoke handling from non-root resources.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L53-L54 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L143-L166 @ ens_v2_sepolia_20261001@07e55a05)
   `record_resource` is present only for a grant on an ENSv2 record-ID resolver
   (see [record links](#get-v2resolverschain_idaddress)), where the granted
   resource is not a name but a setter argument — the record the holder may
@@ -4855,13 +4870,22 @@ For a registrar lease first identified by a later readable observation, registra
   }
   ```
 - `/roles` returns one `{address, registration_id, name?, powers, grant_event?,
-  record_resource?}` row
+  eac_resource?, record_resource?}` row
   for each current resolver-scoped permission row with at least one power.
   Its `registration_id` follows the same published permission-handle mapping as
   `GET /v1/permissions`, including before a readable name exists. Following that
   handle selects the same grant. Evidence above the captured publication cannot
   change the handle between pages; an unproven lease leaves the resource audit
   handle intact.
+  `eac_resource` follows the same contract as `/v1/permissions`: an exact
+  decimal string for resolver EAC grants, including root admin-only and
+  link-only grants, and omitted for derived non-EAC resolver authority. A
+  matching permission row has the same target. For example, one account may
+  have a root row with `"eac_resource": "0"` and a separate scoped row with
+  `"eac_resource": "18446744073709551617"`; neither depends on a readable
+  `record_resource`. Keep each grant separate and walk all pages before
+  treating the collection as complete. Missing numeric identity or incomplete
+  coverage must not be converted to root authority or whole-account removal.
   `record_resource` follows the `GET /v1/permissions` contract: on a record-ID
   resolver it names the record a holder's argument-scoped grant is about.
   Grouping rows by `record_resource.hash` therefore lists the records some

@@ -4,6 +4,9 @@ use serde_json::{Value, json};
 
 use super::{V2Error, V2Result, slug_to_numeric};
 
+mod eac_resource;
+pub(crate) use eac_resource::{permission_eac_resource_value, resolver_eac_resource_value};
+
 /// How an effective permission row reaches its registration when it is not a direct grant.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
