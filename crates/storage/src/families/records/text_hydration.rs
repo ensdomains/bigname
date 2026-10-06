@@ -19,10 +19,9 @@ pub(super) const COLUMNS: &str = "CASE WHEN value.record_family = 'text'
     AND value.hydrated_value ->> 'namehash' =
         CASE WHEN value.arm = 'named' THEN surface.namehash ELSE value.node END
     AND EXISTS (SELECT 1 FROM bigname_phase.chain_lineage lineage
-        JOIN bigname_phase.project_family_marker marker ON marker.chain_id = lineage.chain_id
         WHERE lineage.chain_id = value.chain_id
           AND lineage.block_number = value.hydrated_at_block
-          AND lineage.block_number <= marker.current_block_number
+          AND lineage.block_number <= $5
           AND lineage.block_hash = value.hydrated_value ->> 'block_hash'
           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
     THEN value.hydrated_value || jsonb_build_object('block_number', value.hydrated_at_block)

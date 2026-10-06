@@ -94,6 +94,11 @@ const SEMANTIC_SOURCE_FILES: &[&str] = &[
     "crates/storage/src/public_name_fields/wrapper.rs",
     "crates/storage/src/public_name_fields/wrapper_fuses.rs",
     "crates/storage/src/public_name_fields/wrapper_state.rs",
+    // Stable lookup key/field serializers reached by Project's lookup publication.
+    "crates/storage/src/record_inventory/boundary_key.rs",
+    "crates/storage/src/record_inventory/row_decode.rs",
+    "crates/storage/src/identity/types.rs",
+    "crates/storage/src/address_names/types.rs",
     // Exact expiry decoding and contract sentinel classification also decide stored summaries.
     "crates/storage/src/unix_seconds.rs",
     "crates/storage/src/expiry.rs",

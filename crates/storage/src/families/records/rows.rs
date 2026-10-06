@@ -184,6 +184,7 @@ pub(crate) async fn load_partitions(
     conn: &mut PgConnection,
     chain_id: &str,
     partitions: &[PartitionKey],
+    publication_block: i64,
 ) -> Result<PartitionRows> {
     let unique: BTreeSet<&PartitionKey> = partitions.iter().collect();
     if unique.is_empty() {
@@ -253,6 +254,7 @@ pub(crate) async fn load_partitions(
     .bind(&resolvers)
     .bind(&arms)
     .bind(&identities)
+    .bind(publication_block)
     .fetch_all(&mut *conn)
     .await
     .context("failed to load the admitted record values")?;

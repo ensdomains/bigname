@@ -258,7 +258,11 @@ impl Assembly<'_> {
 pub(crate) fn assemble(
     input: Assembly<'_>,
     reads: &AssemblyReads,
-) -> Result<(RecordInventoryCurrentRow, String)> {
+) -> Result<(
+    RecordInventoryCurrentRow,
+    String,
+    BTreeMap<String, crate::families::lookup::LookupRecordEntry>,
+)> {
     let (record_keys, families) = input.sorted_sets();
     // The link arm's contributing events: every write of the selected record id and the links.
     let contributing: Vec<_> = input
@@ -296,6 +300,7 @@ pub(crate) fn assemble(
         .map(|record| (record.record_key.as_str(), record))
         .collect();
     let (mut entries, mut selectors, mut zero_keys) = (Vec::new(), Vec::new(), Vec::new());
+    let mut components = BTreeMap::new();
     for key in &order {
         let Some(record) = by_key.get(key.as_str()) else {
             continue;
@@ -308,12 +313,26 @@ pub(crate) fn assemble(
         if zero_absent {
             zero_keys.push(json!(key));
         }
-        entries.extend(payload::entry(
+        let selected_entries: Vec<_> = payload::entry(
             &record.payload,
             record.stored_status.as_deref(),
             zero_absent,
-        ));
-        selectors.extend(payload::selector(&record.payload));
+        )
+        .into_iter()
+        .collect();
+        let selected_selectors: Vec<_> = payload::selector(&record.payload).into_iter().collect();
+        entries.extend(selected_entries.iter().cloned());
+        selectors.extend(selected_selectors.iter().cloned());
+        components.insert(
+            key.clone(),
+            crate::families::lookup::LookupRecordEntry {
+                entries: selected_entries,
+                selectors: selected_selectors,
+                normalized_event_id: record.normalized_event_id,
+                zero_address_absent: zero_absent,
+                unsupported_family: payload::unsupported_family(&record.payload),
+            },
+        );
     }
     let mut unsupported_families: Vec<Value> = reads
         .ordered(&families)
@@ -412,7 +431,7 @@ pub(crate) fn assemble(
         "block_number": latest_block,
         "block_hash": stamps.get(&latest_block).map(|stamp| stamp.block_hash.clone()),
     }));
-    row(
+    let (row, boundary_key) = row(
         pointer,
         boundary_json,
         [
@@ -425,7 +444,8 @@ pub(crate) fn assemble(
         ],
         supported,
         reason.as_deref(),
-    )
+    )?;
+    Ok((row, boundary_key, components))
 }
 
 /// A row derived through a mirror takes the mirror back as its resolver and gains
