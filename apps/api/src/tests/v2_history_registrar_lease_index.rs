@@ -15,7 +15,7 @@ async fn holdings(
     resources: &[Uuid],
 ) -> Result<Vec<Holding>> {
     let rows =
-        bigname_storage::historical_history_relations(connection, CHAIN, 132, names, resources)
+        bigname_storage::historical_history_relations(connection, CHAIN, 133, names, resources)
             .await?;
     let mut result: Vec<_> = rows
         .into_iter()
@@ -55,7 +55,7 @@ async fn executed_plan(
         .collect::<Vec<_>>()
         .join(",");
     let arguments = format!(
-        "ARRAY[{name_array}]::text[], {}, 132, ARRAY[{resource_array}]::uuid[], {}, 132,
+        "ARRAY[{name_array}]::text[], {}, 133, ARRAY[{resource_array}]::uuid[], {}, 133,
          'ens_v1_unwrapped_authority', 'ens_v2_registry_resource_surface',
          'RegistrationGranted', 'TokenControlTransferred', 'AuthorityTransferred',
          'basenames', 'ens_v2_registry_resource_surface',
@@ -102,7 +102,7 @@ fn bounded_lease_probe(plan: &Value) -> bool {
 #[tokio::test]
 async fn complete_membership_query_uses_bounded_nonorphaned_lease_probe() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_history_blocks(&database, REGISTERED..=132).await?;
+    seed_v2_history_blocks(&database, REGISTERED..=133).await?;
     // Unrelated observed registrar resources must remain in the lease predicate. Seed
     // them before the handoff's lease so the old sequential probe cannot win by finding
     // the wanted lease at the beginning of the heap. All FK identities stay on this chain.
@@ -137,13 +137,21 @@ async fn complete_membership_query_uses_bounded_nonorphaned_lease_probe() -> Res
         registration_at(131, NEW_HOLDER, 4_102_444_800, None),
         Some(session),
     )?;
-    let (handed_off, _) = interpret(132, token_moved(132), Some(session))?;
-    for (block, output) in [(130, &held), (131, &registered), (132, &handed_off)] {
+    let (handed_off, session) = interpret(132, token_moved(132), Some(session))?;
+    // A real registry Transfer after the handoff reaches its lease exclusion.
+    // The earlier tokenless owner's evidence must remain before that boundary.
+    let (registry_moved, _) = interpret(133, registry_set_owner(133, OWNER), Some(session))?;
+    for (block, output) in [
+        (130, &held),
+        (131, &registered),
+        (132, &handed_off),
+        (133, &registry_moved),
+    ] {
         persist(&database.pool, output).await?;
         project_to(&database.pool, block, None).await?;
     }
     let handoffs: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT resource_id, lease_resource_id FROM project_binding_candidate
+        "SELECT DISTINCT resource_id, lease_resource_id FROM project_binding_candidate
          WHERE registry_only AND lease_resource_id IS NOT NULL",
     )
     .fetch_all(&database.pool)
@@ -200,7 +208,7 @@ async fn complete_membership_query_uses_bounded_nonorphaned_lease_probe() -> Res
             for registry_resource in &registry_resources {
                 let owner = rows
                     .iter()
-                    .any(|r| r.0 == NEW_HOLDER && r.3 == Some(*registry_resource) && r.4 == 1);
+                    .any(|r| r.0 == OWNER && r.3 == Some(*registry_resource) && r.4 == 1);
                 assert_eq!(
                     owner,
                     matches!(*variant, "orphaned" | "missing" | "wrong-family"),
@@ -212,7 +220,7 @@ async fn complete_membership_query_uses_bounded_nonorphaned_lease_probe() -> Res
                 );
                 assert!(
                     rows.iter()
-                        .any(|r| r.0 == NEW_HOLDER && r.3 == Some(*registry_resource) && r.4 == 2),
+                        .any(|r| r.0 == OWNER && r.3 == Some(*registry_resource) && r.4 == 2),
                     "controller: {rows:?}"
                 );
             }
