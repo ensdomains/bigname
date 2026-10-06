@@ -5,6 +5,9 @@ use super::compatibility::{admit_family_from, role_address};
 use super::*;
 use alloy_primitives::B256;
 
+#[path = "node_identity/dense_prefix.rs"]
+mod dense_prefix;
+
 mod events {
     use super::*;
     sol! {
