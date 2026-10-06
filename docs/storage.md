@@ -674,6 +674,18 @@ reads of unrelated unpositioned manifest history. This reads all retained histor
 touched key, including future events rejected by that bound; repeated early rebuild ranges
 can revisit a deep key's future suffix. The indexes add no canonical entries or stored facts.
 
+Project also owns `normalized_events_history_registrar_lease_idx(resource_id)` on Interpret's
+`normalized_events`. It serves the lease-existence arm of
+`storage:history.publication_memberships` in `history/address_evidence.rs`, also used by the
+shared token-holder history matcher. Its predicate is exactly
+`source_family = 'ens_v1_registrar_l1' AND canonicality_state <> 'orphaned'`: observed rows
+count too, with no publication, event-kind or visibility restriction. The readable-event
+resource index cannot serve that broader probe. The phase baseline and
+`20261006080000_normalized_events_history_registrar_lease_index.sql` install this access path;
+populated upgrades must first use the [concurrent installer](../ops/history-registrar-lease-index/README.md).
+No facts, memberships, markers or hash inputs change, so this addition requires no Interpret
+or Project reset and an existing rebuild can continue from its recorded progress.
+
 Address history (`crates/storage/src/history/filters.rs`) adds one read-only index on
 `normalized_events` for its registry root role branch, installed by the normalized-events
 baseline and `20261005120000_normalized_events_address_root_permission_idx.sql` and changing no
@@ -2518,8 +2530,8 @@ The 17 kept indexes and the statements that read them:
 | `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |
 | `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows |
 
-The other 41 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
-these: `normalized_events_registry_token_idx`,
+The other 42 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
+these: `normalized_events_history_registrar_lease_idx`, `normalized_events_registry_token_idx`,
 `normalized_events_v1_subregistry_after_node_scope_idx`,
 `normalized_events_v1_subregistry_after_child_scope_idx`,
 `normalized_events_v1_subregistry_before_node_scope_idx`,
