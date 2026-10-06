@@ -363,6 +363,24 @@ async fn registration_history_keeps_an_earlier_successor_lease_under_a_registry_
         ],
     )
     .await?;
+    // A tiny registrar table can legitimately prefer a full resource-index scan. Give
+    // the node lookup unrelated grants so this assertion proves its selective access path
+    // while all response checks below still exclude unrelated registration histories.
+    sqlx::raw_sql(
+        "INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state)
+         SELECT md5('successor-node-noise:' || n)::uuid, 'ethereum-mainnet',
+             '0xhistory120', 120, 'canonical' FROM generate_series(1,4096) n;
+         INSERT INTO normalized_events (event_identity, namespace, resource_id, event_kind,
+             source_family, manifest_version, chain_id, block_number, block_hash,
+             derivation_kind, canonicality_state, after_state)
+         SELECT 'successor-node-noise:' || n, 'ens', md5('successor-node-noise:' || n)::uuid,
+             'RegistrationGranted', 'ens_v1_registrar_l1', 1, 'ethereum-mainnet', 120,
+             '0xhistory120', 'ens_v1_unwrapped_authority', 'canonical',
+             jsonb_build_object('namehash', '0x' || repeat(md5('successor-node-noise:' || n), 2))
+         FROM generate_series(1,4096) n;",
+    )
+    .execute(&database.pool)
+    .await?;
     publish_registration_history_fixture(&database).await?;
 
     let registration = v2_history_payload_for_database(
@@ -398,6 +416,9 @@ async fn registration_history_keeps_an_earlier_successor_lease_under_a_registry_
         "{earlier}"
     );
 
+    sqlx::raw_sql("ANALYZE normalized_events; ANALYZE name_surfaces; ANALYZE chain_lineage")
+        .execute(&database.pool)
+        .await?;
     // The grants are found through the node probe index, not by scanning normalized_events.
     let plan = bigname_storage::explain_registration_history_filter_for_test(
         &database.pool,
@@ -417,6 +438,14 @@ async fn registration_history_keeps_an_earlier_successor_lease_under_a_registry_
         grant_plan.contains("normalized_events_v1_direct_node_probe_idx"),
         "registrar grants by name must probe the node index:\n{grant_plan}"
     );
+    assert!(
+        grant_plan.lines().any(|line| line.contains("Index Cond:")
+            && line.contains("surface.chain_id")
+            && line.contains("surface.namespace")
+            && line.contains("surface.namehash")),
+        "registrar node probe must constrain both chain and exact node:\n{grant_plan}"
+    );
+    println!("registrar grants by name with 4096 unrelated grants:\n{grant_plan}");
 
     // The retained registry authority serves successive leases without receiving a new
     // binding. Registrar grants above intentionally have no logical_name_id.
@@ -1109,7 +1138,13 @@ async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Resul
     .execute(&database.pool)
     .await?;
     let wrapper_event = |identity: &str, resource: Uuid, kind: &str, block: i64| {
-        let mut event = v2_history_event(identity, Some(logical.as_str()), Some(resource), kind, block);
+        let mut event = v2_history_event(
+            identity,
+            Some(logical.as_str()),
+            Some(resource),
+            kind,
+            block,
+        );
         event.source_family = "ens_v1_wrapper_l1".to_owned();
         if kind == "SurfaceBound" {
             event.after_state = json!({
@@ -3170,13 +3205,13 @@ async fn seed_registration_history_name(
     Ok(())
 }
 
-
 /// The NameWrapper scope a NameWrapped emits beside its binding: the wrapper state and fuses.
 fn registration_history_wrapper_scope(binding: &NormalizedEvent) -> NormalizedEvent {
     let mut scope = binding.clone();
     scope.event_identity = format!("{}:scope", binding.event_identity);
     scope.event_kind = "PermissionScopeChanged".into();
-    scope.after_state = json!({"source_event": "NameWrapped", "wrapper_state": "wrapped", "fuses": 0});
+    scope.after_state =
+        json!({"source_event": "NameWrapped", "wrapper_state": "wrapped", "fuses": 0});
     scope
 }
 
