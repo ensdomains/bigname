@@ -3,11 +3,13 @@
 //! (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/LockedWrapperReceiver.sol:L148-L164 @ ens_v2_sepolia_20261001@07e55a05)
 //! (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L312-L327 @ ens_v2_sepolia_20261001@07e55a05)
 use crate::families::{
-    control::lifecycle::{AuthoritySelection, NameInput, NamePlace, load_name_facts_on},
+    control::{
+        lifecycle::{AuthoritySelection, NameInput, NamePlace, load_name_facts_on},
+        registry::OwnerEvent,
+    },
     name::FamilyPublication,
-    records::is_cleared,
 };
-use alloy_primitives::{B256, keccak256};
+use alloy_primitives::{Address, B256, keccak256};
 use anyhow::Result;
 use serde_json::Value;
 use sqlx::{PgConnection, Row};
@@ -115,6 +117,29 @@ pub(super) async fn original_node(
     Ok(Some(node.to_owned()))
 }
 
+// WrapperRegistry checks the original ENSv1 getter, independently of public owner display.
+// Select the latest owner-setting event before reading the getter: absent/unmasked evidence
+// must not fall back to an older known value, a public owner string or an ENSv2 token owner.
+// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L314-L326 @ ens_v2_sepolia_20261001@07e55a05)
+// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
+fn ens_v1_owner_getter(events: &[OwnerEvent], publication_block: i64) -> Option<Address> {
+    let event = events
+        .iter()
+        .filter(|event| {
+            event.source_family == "ens_v1_registry_l1"
+                && matches!(
+                    event.event_kind.as_str(),
+                    "AuthorityTransferred" | "SubregistryChanged"
+                )
+                && event.position.block_number <= publication_block
+        })
+        .max_by(|a, b| a.position.cmp(&b.position))?;
+    if event.owner_word_unmasked == Some(true) {
+        return None;
+    }
+    event.owner_getter.as_deref()?.parse().ok()
+}
+
 pub(super) struct Eligibility {
     pub eligible: Option<bool>,
     pub deadline: Option<i64>,
@@ -145,12 +170,7 @@ pub(super) async fn eligible(
     let owner = facts
         .registry_node
         .as_ref()
-        .and_then(|node| {
-            node.owner_events
-                .iter()
-                .max_by(|a, b| a.position.cmp(&b.position))
-        })
-        .and_then(|event| event.reported_owner());
+        .and_then(|node| ens_v1_owner_getter(&node.owner_events, publication.block_number));
     let wrappers: Vec<_> = facts
         .wrappers
         .values()
@@ -178,14 +198,108 @@ pub(super) async fn eligible(
     // getData masks fuses on expiry, but not on unwrap. The v1 registry owner is independent.
     // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L143-L153 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L855 @ ens_v1@91c966f)
-    let eligible = Some(
-        expiry >= clock
-            && wrapper.fuses.is_some_and(|fuses| fuses & 65536 != 0)
-            && !is_cleared(owner.as_deref()),
-    );
+    let eligible = if expiry >= clock && wrapper.fuses.is_some_and(|fuses| fuses & 65536 != 0) {
+        owner.map(|owner| owner != Address::ZERO)
+    } else {
+        Some(false)
+    };
     let deadline = expiry
         .checked_add(1)
         .and_then(|value| i64::try_from(value).ok())
         .filter(|value| *value > publication.timestamp_seconds());
     Ok(Eligibility { eligible, deadline })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::families::control::position::Position;
+
+    const HOLDER: &str = "0x0000000000000000000000000000000000c0ffee";
+    const GRAVEYARD: &str = "0xb58a90a39d13cce1d0e192b5da5c47640855b04d";
+    const ZERO: &str = "0x0000000000000000000000000000000000000000";
+
+    fn owner_event(block: i64, getter: Option<&str>) -> OwnerEvent {
+        OwnerEvent {
+            position: Position {
+                block_number: block,
+                transaction_index: Some(0),
+                log_index: Some(0),
+                event_identity: format!("owner:{block}"),
+            },
+            transaction_hash: None,
+            logical_name_id: None,
+            resource_id: None,
+            event_kind: "AuthorityTransferred".into(),
+            source_family: "ens_v1_registry_l1".into(),
+            authority_kind: Some("registry".into()),
+            // Public owner strings must never substitute for missing getter evidence.
+            owner: Some(HOLDER.into()),
+            registry_owner: Some(HOLDER.into()),
+            owner_word_unmasked: Some(false),
+            owner_getter: getter.map(Into::into),
+            owner_getter_reason: None,
+        }
+    }
+
+    #[test]
+    fn wrapper_getter_preserves_nonzero_graveyard_and_exact_zero() {
+        let mut graveyard = owner_event(10, Some(GRAVEYARD));
+        graveyard.owner_getter_reason = Some("graveyard".into());
+        assert_eq!(graveyard.reported_owner(), None);
+        assert_eq!(
+            ens_v1_owner_getter(&[graveyard], 10),
+            Some(GRAVEYARD.parse().unwrap())
+        );
+        for reason in ["zero", "registry_self"] {
+            let mut zero = owner_event(10, Some(ZERO));
+            zero.owner_getter_reason = Some(reason.into());
+            assert_eq!(ens_v1_owner_getter(&[zero], 10), Some(Address::ZERO));
+        }
+    }
+
+    #[test]
+    fn wrapper_getter_uses_only_published_ens_v1_ownership_events() {
+        let mut events = vec![owner_event(10, Some(HOLDER))];
+        for family in [
+            "ens_v2_registry_l1",
+            "ens_v2_root_l1",
+            "basenames_base_registry",
+        ] {
+            let mut unrelated = owner_event(11, Some(ZERO));
+            unrelated.source_family = family.into();
+            events.push(unrelated);
+        }
+        let mut wrong_kind = owner_event(11, Some(ZERO));
+        wrong_kind.event_kind = "ResolverChanged".into();
+        events.push(wrong_kind);
+        events.push(owner_event(12, Some(ZERO)));
+        assert_eq!(
+            ens_v1_owner_getter(&events, 11),
+            Some(HOLDER.parse().unwrap())
+        );
+        assert_eq!(ens_v1_owner_getter(&events, 12), Some(Address::ZERO));
+        let mut child_owner = owner_event(13, Some(GRAVEYARD));
+        child_owner.event_kind = "SubregistryChanged".into();
+        events.push(child_owner);
+        assert_eq!(
+            ens_v1_owner_getter(&events, 13),
+            Some(GRAVEYARD.parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn wrapper_getter_keeps_latest_missing_or_unmasked_evidence_unknown() {
+        for getter in [None, Some("invalid")] {
+            let events = [owner_event(10, Some(HOLDER)), owner_event(11, getter)];
+            assert_eq!(ens_v1_owner_getter(&events, 11), None);
+        }
+        let mut unmasked = owner_event(11, Some(HOLDER));
+        unmasked.owner_word_unmasked = Some(true);
+        assert_eq!(
+            ens_v1_owner_getter(&[owner_event(10, Some(HOLDER)), unmasked], 11),
+            None
+        );
+        assert_eq!(ens_v1_owner_getter(&[], 11), None);
+    }
 }

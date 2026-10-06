@@ -1,5 +1,6 @@
 //! Exact physical entry and its current pointers. Registered generations have resource identities;
 //! the initial reservation has token/resource generation zero. Clear events remain clear.
+use super::PHYSICAL_POINTER_EVENT_SQL;
 use crate::{families::name::FamilyPublication, identity::ens_v2_registry_resource_id};
 use alloy_primitives::B256;
 use anyhow::{Context, Result};
@@ -92,18 +93,32 @@ pub(super) async fn load_entry(
     // Resource-history indexes bound these probes to one physical entry. A complete registered
     // generation starts with zero pointers; nonzero constructor arguments emit watched updates.
     // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L495-L513 @ ens_v2_sepolia_20261001@07e55a05)
-    let pointer = sqlx::query("/* storage:families.name.resolution_entry_pointers */
-        SELECT (SELECT resolver_address FROM bigname_phase.project_resource_pointer
-                WHERE chain_id = $1 AND resource_id = $2) AS resolver,
-               (SELECT after_state ->> 'subregistry' FROM bigname_phase.normalized_events
-                WHERE chain_id = $1 AND resource_id = $2 AND event_kind = 'SubregistryChanged'
-                  AND source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
-                  AND consumer_visibility = 'activated'
-                  AND canonicality_state IN ('canonical','safe','finalized') AND block_number <= $3
-                ORDER BY block_number DESC, transaction_index DESC NULLS LAST,
-                         log_index DESC NULLS LAST, event_identity COLLATE \"C\" DESC LIMIT 1) AS subregistry")
-        .bind(&publication.chain_id).bind(resource).bind(publication.block_number)
-        .fetch_one(conn).await.context("failed to read a resolution path entry's pointers")?;
+    let sql = format!(
+        r#"/* storage:families.name.resolution_entry_pointers */
+        SELECT (SELECT event.after_state ->> 'resolver' FROM bigname_phase.normalized_events event
+                WHERE event.chain_id = $1 AND event.resource_id = $2 AND event.event_kind = 'ResolverChanged'
+                  AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+                  AND event.consumer_visibility = 'activated'
+                  AND event.canonicality_state IN ('canonical','safe','finalized') AND event.block_number <= $3
+                  AND {PHYSICAL_POINTER_EVENT_SQL}
+                ORDER BY event.block_number DESC, event.transaction_index DESC NULLS LAST,
+                         event.log_index DESC NULLS LAST, event.event_identity COLLATE "C" DESC LIMIT 1) AS resolver,
+               (SELECT event.after_state ->> 'subregistry' FROM bigname_phase.normalized_events event
+                WHERE event.chain_id = $1 AND event.resource_id = $2 AND event.event_kind = 'SubregistryChanged'
+                  AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+                  AND event.consumer_visibility = 'activated'
+                  AND event.canonicality_state IN ('canonical','safe','finalized') AND event.block_number <= $3
+                  AND {PHYSICAL_POINTER_EVENT_SQL}
+                ORDER BY event.block_number DESC, event.transaction_index DESC NULLS LAST,
+                         event.log_index DESC NULLS LAST, event.event_identity COLLATE "C" DESC LIMIT 1) AS subregistry"#
+    );
+    let pointer = sqlx::query(&sql)
+        .bind(&publication.chain_id)
+        .bind(resource)
+        .bind(publication.block_number)
+        .fetch_one(conn)
+        .await
+        .context("failed to read a resolution path entry's pointers")?;
     entry.resolver = pointer.try_get("resolver")?;
     entry.subregistry = pointer.try_get("subregistry")?;
     entry.known = true;

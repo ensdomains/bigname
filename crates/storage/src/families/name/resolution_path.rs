@@ -3,6 +3,8 @@
 //! ancestor wildcard. Retained records require the same resolver and requested node.
 //! (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L22-L85 @ ens_v2_sepolia_20261001@07e55a05)
 mod facts;
+mod physical;
+pub use physical::PHYSICAL_POINTER_EVENT_SQL;
 mod wrapper;
 
 use super::{FamilyPublication, compose::Surface};

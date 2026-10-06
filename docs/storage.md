@@ -2437,6 +2437,8 @@ forces a rebuild like a project change does. That part is an explicit file list
 (`COMPOSITION_FILES` in `crates/content-hash/src/storage_families.rs`): the
 summary composition, the composed name-row loader it calls, the lifecycle
 evaluation and control rows that loader reads, and the position ordinals. The
+physical-pointer predicate shared by name composition and Project's dependency
+walk is also in that composition list. The
 read-only queries beside it (search and bound-name listings, record, reverse,
 permission, children and topology readers) are listed as readers and stay
 outside, so an API-only change there needs no redo. Every production `.rs` file

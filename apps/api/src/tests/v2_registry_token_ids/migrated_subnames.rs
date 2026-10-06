@@ -449,6 +449,18 @@ async fn seed_and_run_with(
     callers: &[(i64, i64, &str)],
     clock: Option<i64>,
 ) -> Result<()> {
+    seed_and_run_with_targets(database, logs, start, end, callers, &[], clock).await
+}
+
+async fn seed_and_run_with_targets(
+    database: &TestDatabase,
+    logs: &[RawLogInput],
+    start: i64,
+    end: i64,
+    callers: &[(i64, i64, &str)],
+    targets: &[(i64, i64, &str)],
+    clock: Option<i64>,
+) -> Result<()> {
     let blocks = (BASE + start..=BASE + end)
         .map(|n| {
             raw_block(
@@ -484,11 +496,17 @@ async fn seed_and_run_with(
                 *block + BASE == log.block_number && *tx == log.transaction_index
             })
             .map_or(caller, |(_, _, caller)| *caller);
-        let target = if log.block_number == BASE + 120 && log.transaction_index == 4 {
+        let default_target = if log.block_number == BASE + 120 && log.transaction_index == 4 {
             BATCH_REGISTRAR.to_owned()
         } else {
             log.emitting_address.clone()
         };
+        let target = targets
+            .iter()
+            .find(|(block, tx, _)| {
+                *block + BASE == log.block_number && *tx == log.transaction_index
+            })
+            .map_or(default_target.as_str(), |(_, _, target)| *target);
         sqlx::query("INSERT INTO raw_transactions(chain_id,block_hash,block_number,transaction_hash,transaction_index,from_address,to_address) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING").bind(PATH_CHAIN).bind(&log.block_hash).bind(log.block_number).bind(&log.transaction_hash).bind(log.transaction_index).bind(caller).bind(target).execute(&database.pool).await?;
         sqlx::query("INSERT INTO raw_logs(chain_id,block_hash,block_number,transaction_hash,transaction_index,log_index,emitting_address,topics,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)").bind(PATH_CHAIN).bind(&log.block_hash).bind(log.block_number).bind(&log.transaction_hash).bind(log.transaction_index).bind(log.log_index).bind(&log.emitting_address).bind(&log.topics).bind(&log.data).execute(&database.pool).await?;
     }
@@ -564,8 +582,19 @@ async fn assert_consumers(
     resolver: Address,
     reason: Option<&str>,
 ) -> Result<()> {
-    let detail = path_get(database, &format!("/v1/names/{CHILD}")).await?;
-    let lookup = path_lookup(database, json!({"profile":"detail","inputs":[{"name":CHILD},{"address":HOLDER,"relation":"resolves_to"}]})).await?;
+    assert_name_consumers(database, CHILD, HOLDER, expected, resolver, reason).await
+}
+
+async fn assert_name_consumers(
+    database: &TestDatabase,
+    name: &str,
+    address: &str,
+    expected: bool,
+    resolver: Address,
+    reason: Option<&str>,
+) -> Result<()> {
+    let detail = path_get(database, &format!("/v1/names/{name}")).await?;
+    let lookup = path_lookup(database, json!({"profile":"detail","inputs":[{"name":name},{"address":address,"relation":"resolves_to"}]})).await?;
     for field in [
         "resolver",
         "records",
@@ -584,7 +613,7 @@ async fn assert_consumers(
         .as_array()
         .context("inverse lookup records")?;
     assert_eq!(
-        inverse.iter().any(|row| row["name"] == CHILD),
+        inverse.iter().any(|row| row["name"] == name),
         expected,
         "{lookup:#}"
     );
@@ -594,13 +623,13 @@ async fn assert_consumers(
             .as_array()
             .context("bound names")?
             .iter()
-            .any(|row| row["name"] == CHILD),
+            .any(|row| row["name"] == name),
         expected,
         "{bound:#}"
     );
     let records = path_get(
         database,
-        &format!("/v1/names/{CHILD}/records?source=indexed&keys=addr:60"),
+        &format!("/v1/names/{name}/records?source=indexed&keys=addr:60"),
     )
     .await?;
     let answer = &records["data"]["records"]["addr:60"];
@@ -619,11 +648,17 @@ async fn assert_consumers(
         assert_eq!(answer["unsupported_reason"], reason, "{records:#}");
     }
     if expected {
-        assert_eq!(answer["value"], HOLDER, "{records:#}");
+        assert_eq!(answer["value"], address, "{records:#}");
+        assert_eq!(detail["data"]["primary_address"], address, "{detail:#}");
+        assert_eq!(
+            detail["data"]["resolver"]["address"],
+            format!("{resolver:#x}")
+        );
     } else {
         assert!(answer["value"].is_null(), "{records:#}");
+        assert!(detail["data"]["primary_address"].is_null(), "{detail:#}");
     }
-    let logical = format!("ens:{}", bigname_lookup::ens_namehash_hex(CHILD)?);
+    let logical = format!("ens:{}", bigname_lookup::ens_namehash_hex(name)?);
     let row = bigname_storage::families::name::load_family_name(&database.pool, &logical)
         .await?
         .context("child row")?;

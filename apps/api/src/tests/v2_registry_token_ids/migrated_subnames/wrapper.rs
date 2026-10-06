@@ -1,6 +1,10 @@
 //! Actual producer ABI fixtures for the Oct 1 locked wrapper model.
 //! Initialization binds the immutable fallback node; mounting the registry elsewhere does not
 //! change it. These fixtures execute admission, interpretation, Project and public readers.
+#[path = "wrapper/getter.rs"]
+mod getter;
+#[path = "wrapper/physical.rs"]
+mod physical;
 use super::*;
 use alloy_primitives::B256;
 const V1: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
@@ -275,8 +279,7 @@ async fn wrapped_setup() -> Result<(TestDatabase, Address)> {
     Ok((database, resolver))
 }
 
-#[tokio::test]
-async fn migrated_subname_wrapper_fallback_unwrapped_and_rebound_requested_node() -> Result<()> {
+async fn unwrapped_rebound() -> Result<(TestDatabase, Address)> {
     let (database, resolver) = wrapped_setup().await?;
     let owner = HOLDER.parse()?;
     let child_owner = GRANTEE.parse()?;
@@ -424,6 +427,15 @@ async fn migrated_subname_wrapper_fallback_unwrapped_and_rebound_requested_node(
         detail["data"]["primary_address"], GRANTEE,
         "unwrapped eligibility is retained: {detail:#}"
     );
+    Ok((database, resolver))
+}
+
+#[tokio::test]
+async fn migrated_subname_wrapper_fallback_unwrapped_and_rebound_requested_node() -> Result<()> {
+    let (database, resolver) = unwrapped_rebound().await?;
+    let original: B256 = bigname_lookup::ens_namehash_hex(CHILD)?.parse()?;
+    let owner = HOLDER.parse()?;
+    let v1 = V1.parse()?;
     let clear = transaction(
         125,
         0,
@@ -446,6 +458,7 @@ async fn migrated_subname_wrapper_fallback_unwrapped_and_rebound_requested_node(
         detail["data"]["unresolvable_reason"], "ens_v2_path_no_resolver",
         "{detail:#}"
     );
+    assert_name_consumers(&database, NEW_CHILD, GRANTEE, false, resolver, None).await?;
     // The public factory accepts initializer bytes independently of the salt. A generic
     // known-wrapper deployment cannot establish its original node from these logs alone.
     // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L125-L147 @ ens_v2_sepolia_20261001@07e55a05)

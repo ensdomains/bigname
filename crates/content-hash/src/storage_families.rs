@@ -37,6 +37,7 @@ pub(crate) const COMPOSITION_FILES: &[&str] = &[
     // Current ENSv2 path decisions also schedule summary deadlines.
     "crates/storage/src/families/name/resolution_path.rs",
     "crates/storage/src/families/name/resolution_path/facts.rs",
+    "crates/storage/src/families/name/resolution_path/physical.rs",
     "crates/storage/src/families/name/resolution_path/wrapper.rs",
     "crates/storage/src/families/control/permissions/registry_support.rs",
     "crates/storage/src/families/records/facts.rs",

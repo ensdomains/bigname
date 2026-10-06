@@ -2045,6 +2045,13 @@ checks current entry expiry and pointer clears, and retains the nearest resolver
 until a deeper resolver replaces it. Ancestor resolvers must support ENSIP-10.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L22-L85 @ ens_v2_sepolia_20261001@07e55a05)
 
+A registry's canonical name can expire while another live mount still reaches
+its physical entries. That canonical retirement does not clear the physical
+resolver or subregistry; the alternate path remains usable until a real pointer
+reset, a route change, or the physical entry's own expiry stops it.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L279-L288 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L474-L513 @ ens_v2_sepolia_20261001@07e55a05)
+
 A proven path with no valid resolver reports
 `unresolvable_reason: "ens_v2_path_no_resolver"`; a missing second-level entry
 keeps `no_live_ens_v2_entry` where no other resolver is reachable. If the selected
@@ -2065,14 +2072,17 @@ walk reaches that same admitted target. Ancestor wildcard targets
 are explicit unsupported indexed targets, not borrowed ancestor records. A
 recognized migration-created WrapperRegistry can supply this mirror fallback
 when the original wrapped node's child has unexpired PARENT_CANNOT_CONTROL fuses,
-a nonzero ENSv1 registry owner and no positive stored ENSv2 entry expiry. Unwrap
-alone does not remove that fallback. Ordinary name authority and pointer admission
-still apply: an original child whose post-unwrap selection cannot project its old
+a nonzero ENSv1 registry getter and no positive stored ENSv2 entry expiry. The
+getter can be nonzero even when the public owner display is empty for Graveyard;
+registry-self ownership remains zero-equivalent. Missing getter evidence is
+unknown, not proven absence. Unwrap alone does not remove that fallback. Ordinary
+name authority and pointer admission still apply: an original child whose post-unwrap selection cannot project its old
 wrapper-bound pointer reports `ens_v2_path_target_not_projected`; this rule does
 not create new pointer inheritance. Activated migration evidence proves the
 wrapper's immutable original node, even after the registry is mounted elsewhere;
 the mirror still queries the full requested name. A generic factory salt is not
 proof of the initializer's node.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L312-L327 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/LockedWrapperReceiver.sol:L148-L164 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20261001@07e55a05)

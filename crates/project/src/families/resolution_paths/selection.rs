@@ -4,6 +4,8 @@
 //! Missing/current/former membership and divergence evidence never restrict this candidate set.
 //! SourceManifestUpdated has no block position. Supported manifest sync invalidates phase hashes
 //! and requires a complete Interpret/Project redo; it is not an incremental event-range trigger.
+use bigname_storage::families::name::PHYSICAL_POINTER_EVENT_SQL;
+
 pub(super) fn statement(normal_work: &str) -> String {
     format!(
         r#"/* project:families.resolution_paths.prepare */
@@ -124,7 +126,7 @@ pub(super) fn statement(normal_work: &str) -> String {
             WHERE event.chain_id=$1 AND event.resource_id=COALESCE(entry.resource_id,origin.resource_id)
               AND event.event_kind='SubregistryChanged' AND event.source_family IN ('ens_v2_root_l1','ens_v2_registry_l1')
               AND event.consumer_visibility='activated' AND event.canonicality_state IN ('canonical','safe','finalized')
-              AND event.block_number<=$2
+              AND event.block_number<=$2 AND {PHYSICAL_POINTER_EVENT_SQL}
             ORDER BY event.block_number DESC, event.transaction_index DESC NULLS LAST,
                      event.log_index DESC NULLS LAST, event.event_identity COLLATE "C" DESC LIMIT 1
         ) pointer

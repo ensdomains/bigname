@@ -393,6 +393,18 @@ history, and walks the requested label hashes from the root. The nearest
 nonzero resolver wins before ENSIP-10 validation; a deeper non-extended resolver
 can hide an ancestor wildcard.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L22-L85 @ ens_v2_sepolia_20261001@07e55a05)
+
+Physical pointer selection reads the latest activated, canonical pointer event
+for the exact resource generation at that publication. It excludes only synthetic
+canonical-name retirement (`RegistryPathExpired`, `interpreter_state`,
+`registry_name_binding_expired`): retiring a canonical name does not clear its
+physical entry while another live mount still reaches it. Canonical-name readers
+keep those retirement clears. Real explicit zeros and registration/reset events
+still clear physical pointers, and the entry's own expiry still stops its route.
+The Project dependency walk uses this same distinction for later deeper changes.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L279-L288 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L474-L513 @ ens_v2_sepolia_20261001@07e55a05)
+
 The retained resolver survives only when the selected node-based target matches
 ordinary child pointer admission, directly or through the ENSv1 mirror. A
 proven absence sets `unresolvable_reason`; a different or unproved target sets
@@ -406,10 +418,16 @@ identify the immutable original wrapper node. Generic factory salt alone does
 not prove that node. The original child supplies fuse/owner eligibility; the
 mirror reads the full requested name after rebinding. Positive stored registry
 expiry disables fallback even after that expiry passes. Unwrap preserves the
-NameWrapper fuse data used by this rule.
+NameWrapper fuse data used by this rule. Eligibility reads the latest ENSv1
+owner-setting event's exact retained `owner_getter`, independently of the public
+owner display. A nonzero admitted Graveyard getter remains nonzero for this test;
+literal zero and registry-self zero-equivalent getters fail it. Missing or
+unmasked getter evidence remains unknown, and ENSv2 owner events do not supply
+this ENSv1 predicate.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/LockedWrapperReceiver.sol:L148-L164 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L312-L327 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269-L279 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
 
 `declared_summary.topology` is the lookup engine's routing input
 (`architecture.md` § `verified_queries`, `execution.md` § Resolver-record
