@@ -347,7 +347,7 @@ fn dense_same_transaction_output_matches_the_slow_path_snapshot() -> Result<()> 
     for event in &mut hashed_output.normalized_events {
         event.before_state_explicit = false;
     }
-    let snapshot = format!("{hashed_output:#?}");
+    let snapshot = flat_raw_evidence_snapshot(&format!("{hashed_output:#?}"));
     let output_keccak = format!("{:#x}", keccak256(snapshot.as_bytes()));
     eprintln!(
         "dense_corpus raw_logs={} normalized_events={} registrations={} output_keccak={} elapsed_ms={:.3}",
@@ -364,6 +364,36 @@ fn dense_same_transaction_output_matches_the_slow_path_snapshot() -> Result<()> 
     );
     assert_eq!(output_keccak, case.expected_output_keccak);
     Ok(())
+}
+
+/// Renders each name surface's raw evidence as the flat `raw_name`, `raw_labels` and
+/// `dns_encoded_name` fields the pinned snapshots were taken with, leaving out the preimage
+/// witness. The pins therefore still prove that every surface keeps the same raw bundle.
+fn flat_raw_evidence_snapshot(snapshot: &str) -> String {
+    let mut flat = Vec::new();
+    let mut lines = snapshot.lines();
+    while let Some(line) = lines.next() {
+        if line.trim() != "raw: Some(" {
+            flat.push(line.to_owned());
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        let evidence_end = format!("{}}},", " ".repeat(indent + 4));
+        assert_eq!(lines.next().map(str::trim), Some("RawNameEvidence {"));
+        for evidence in lines.by_ref() {
+            if evidence == evidence_end {
+                break;
+            }
+            if !evidence
+                .trim_start()
+                .starts_with("preimage_event_identity:")
+            {
+                flat.push(evidence[8..].to_owned());
+            }
+        }
+        assert_eq!(lines.next().map(str::trim), Some("),"));
+    }
+    flat.join("\n")
 }
 
 #[test]
@@ -1603,7 +1633,7 @@ fn assert_name_surfaces(
         let expected_logical =
             canonical_logical_id(text_field(row, "logical_name_id")?, logical_ids);
         if surface.logical_name_id != expected_logical
-            || surface.raw_name != text_field(row, "input_name")?
+            || surface.raw_name() != row.get("input_name").and_then(Value::as_str)
             || surface.chain_id != text_field(row, "chain_id")?
             || surface.block_hash != text_field(row, "block_hash")?
             || surface.normalizer_version != text_field(row, "normalizer_version")?
@@ -1613,10 +1643,9 @@ fn assert_name_surfaces(
         {
             bail!("{case_id}: name-surface identity/envelope changed for {namehash}");
         }
-        let actual_dns = format!(
-            "\\x{}",
-            alloy_primitives::hex::encode(&surface.dns_encoded_name)
-        );
+        let actual_dns = surface
+            .dns_encoded_name()
+            .map(|bytes| format!("\\x{}", alloy_primitives::hex::encode(bytes)));
         let actual_labelhashes = Value::Array(
             surface
                 .labelhashes
@@ -1625,7 +1654,7 @@ fn assert_name_surfaces(
                 .map(Value::String)
                 .collect(),
         );
-        if text_field(row, "dns_encoded_name")? != actual_dns
+        if row.get("dns_encoded_name").and_then(Value::as_str) != actual_dns.as_deref()
             || row.get("labelhashes") != Some(&actual_labelhashes)
             || row.get("normalization_errors") != Some(&surface.normalization_errors)
         {
@@ -1643,9 +1672,7 @@ fn assert_resources(case_id: &str, expected: &[Value], actual: &BatchOutput) -> 
     let mut resources = BTreeMap::new();
     if !matches!(
         case_id,
-        "wrapped_name_preimage"
-            | "ens_v2_registrar_registration"
-            | "ens_v1_new_owner_without_contract_discovery"
+        "wrapped_name_preimage" | "ens_v2_registrar_registration"
     ) {
         for resource in &actual.resources {
             if case_id == "ens_unwrapped_authority" && resource.token_lineage_id.is_none() {
@@ -1706,7 +1733,6 @@ fn assert_token_lineages(case_id: &str, expected: &[Value], actual: &BatchOutput
         "wrapped_name_preimage"
             | "ens_v2_registrar_registration"
             | "ens_v2_permissions_grant_revoke"
-            | "ens_v1_new_owner_without_contract_discovery"
     ) {
         BTreeMap::new()
     } else {
@@ -2457,7 +2483,8 @@ fn dense_output_is_purely_additive_over_the_pre_retention_snapshot() -> Result<(
     // resource rows themselves (exactly the rows no surviving normalized event or surface
     // binding references), plus the bounded registrar provenance described in docs/storage.md.
     // Assert that provenance separately, then remove these additions to recover the original
-    // pre-retention hash. The full snapshot above also pins every provenance field.
+    // pre-retention hash after also verifying/removing the additive byte visibility verdict.
+    // The full snapshot above pins every provenance field and the explicit verdict.
     let fixture: DenseFixture = serde_json::from_str(DENSE_SAME_TRANSACTION)?;
     let case = dense_case(fixture)?;
     let expected_gate = ExpectedCase {
@@ -2470,6 +2497,20 @@ fn dense_output_is_purely_additive_over_the_pre_retention_snapshot() -> Result<(
     };
     let input = batch_input(&case.case, &expected_gate, &checked_in_manifests()?)?;
     let mut reduced = interpret_with_incremental_equivalence(&case.case.id, input)?;
+    // The producer now records the active/shadow verdict explicitly on byte witnesses.
+    // Verify this additive metadata before recovering the historical snapshot.
+    for event in &mut reduced.normalized_events {
+        if event.event_kind == "PreimageObserved" {
+            assert_eq!(
+                event
+                    .after_state
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("visibility_state"),
+                Some(serde_json::json!("active"))
+            );
+        }
+    }
     let mut registry_evidence = BTreeMap::new();
     let mut evidence_counts = (0, 0);
     for event in &mut reduced.normalized_events {
@@ -2552,7 +2593,7 @@ fn dense_output_is_purely_additive_over_the_pre_retention_snapshot() -> Result<(
     reduced
         .resources
         .retain(|resource| referenced.contains(&resource.resource_id));
-    let snapshot = format!("{reduced:#?}")
+    let snapshot = flat_raw_evidence_snapshot(&format!("{reduced:#?}"))
         .lines()
         .filter(|line| !line.trim().starts_with("before_state_explicit:"))
         .collect::<Vec<_>>()

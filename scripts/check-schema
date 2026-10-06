@@ -529,9 +529,9 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=399
+expected_refusal_assertions=449
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=65
+expected_predecessor_shape_proof_count=73
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -670,9 +670,9 @@ check_served_projection_removal() {
             emit_phase_migration "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" baseline-first
             if [ "$suffix" = removal ]; then
                 emit_phase_migration "$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql" preceding-shape
-            else
-                emit_phase_migration "$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql" baseline-first
             fi
+            # The fresh baseline has the catalogue's ordered replacement. Do not replay
+            # the checksum-stable historical definition over that later schema shape.
             emit_phase_migration "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" baseline-first
             # Absent from the pre-7c fixture, present in the baseline.
             if [ "$suffix" = removal ]; then
@@ -686,6 +686,52 @@ check_served_projection_removal() {
             else
                 emit_phase_migration "$ROOT/migrations/20261005120000_normalized_events_address_root_permission_idx.sql" baseline-first
             fi
+            if [ "$suffix" = removal ]; then
+                # Restore name_surfaces' exact predecessor shape before testing the upgrade.
+                printf 'ALTER TABLE name_surfaces DROP CONSTRAINT name_surfaces_raw_evidence_check, DROP COLUMN preimage_event_identity, ALTER COLUMN raw_name SET NOT NULL, ALTER COLUMN raw_labels SET NOT NULL, ALTER COLUMN dns_encoded_name SET NOT NULL, ADD CHECK (cardinality(raw_labels) = cardinality(labelhashes));\n'
+                printf "COMMENT ON TABLE name_surfaces IS 'This table stores raw names and their visibility state.';\n"
+                printf "COMMENT ON COLUMN name_surfaces.raw_name IS 'This value is the verbatim name.';\n"
+                printf "COMMENT ON COLUMN name_surfaces.raw_labels IS 'This array stores the verbatim labels.';\n"
+                printf "COMMENT ON COLUMN name_surfaces.dns_encoded_name IS 'This value is the DNS wire name.';\n"
+                emit_phase_migration "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" baseline-first
+            # Extend the preceding optional-byte constraint without rewriting any identity row.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261005190000_name_surfaces_byte_shadow_path.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261005190000_name_surfaces_byte_shadow_path.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261005190000_name_surfaces_byte_shadow_path.sql" baseline-first
+            # The ENSv2 registry entry tables: absent from the pre-7c shape, already in the baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261005140000_project_ens_v2_registry_entries.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261005140000_project_ens_v2_registry_entries.sql" baseline-first
+            # The expiry selector columns and indexes: added to the pre-7c shape, already in the baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261005150000_project_name_summary_expiry_selector.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261005150000_project_name_summary_expiry_selector.sql" baseline-first
+            # The event walk's expiry indexes: present in the pre-7c shape, absent from the baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261005160000_project_families_drop_expiry_walk_indexes.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261005160000_project_families_drop_expiry_walk_indexes.sql" baseline-first
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261005170000_project_address_history_catalogue.sql" preceding-shape
+            else
+                emit_phase_migration "$ROOT/migrations/20261005170000_project_address_history_catalogue.sql" baseline-first
+            fi
+            # Hydration's scheduling columns: added to the pre-7c shape, already in the baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261005180000_project_hydration_schedule.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261005180000_project_hydration_schedule.sql" baseline-first
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -818,7 +864,15 @@ for migration_file in \
     "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" \
     "$ROOT/migrations/20261004120000_normalized_events_manifest_idx.sql" \
     "$ROOT/migrations/20261005090000_normalized_events_registry_token_index.sql" \
-    "$ROOT/migrations/20261005120000_normalized_events_address_root_permission_idx.sql"
+    "$ROOT/migrations/20261005120000_normalized_events_address_root_permission_idx.sql" \
+    "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" \
+    "$ROOT/migrations/20261005140000_project_ens_v2_registry_entries.sql" \
+    "$ROOT/migrations/20261005150000_project_name_summary_expiry_selector.sql" \
+    "$ROOT/migrations/20261005160000_project_families_drop_expiry_walk_indexes.sql" \
+    "$ROOT/migrations/20261005170000_project_address_history_catalogue.sql" \
+    "$ROOT/migrations/20261005180000_project_hydration_schedule.sql" \
+    "$ROOT/migrations/20261005190000_name_surfaces_byte_shadow_path.sql" \
+    "$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1162,7 +1216,13 @@ for migration_file in \
     "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" \
     "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" \
     "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" \
-    "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql"
+    "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" \
+    "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" \
+    "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" \
+    "$ROOT/migrations/20261005140000_project_ens_v2_registry_entries.sql" \
+    "$ROOT/migrations/20261005140000_project_ens_v2_registry_entries.sql" \
+    "$ROOT/migrations/20261005190000_name_surfaces_byte_shadow_path.sql" \
+    "$ROOT/migrations/20261005190000_name_surfaces_byte_shadow_path.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
@@ -1174,6 +1234,278 @@ emit_phase_migration "$ROOT/migrations/20261005090000_normalized_events_registry
 # The same fixture lacks the address root permission index.
 emit_phase_migration "$ROOT/migrations/20261005120000_normalized_events_address_root_permission_idx.sql" preceding-shape | run_psql
 emit_phase_migration "$ROOT/migrations/20261005120000_normalized_events_address_root_permission_idx.sql" baseline-first | run_psql
+emit_phase_migration "$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql" preceding-shape | run_psql
+emit_phase_migration "$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql" baseline-first | run_psql
+# The permission-reader indexes must be prebuilt for a populated table. Preserve
+# exact baseline definitions, then prove concurrent installation, OID-preserving
+# adoption/rerun, each refusal, and full-set validation before the first build.
+permission_index_migration="$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql"
+permission_index_install="$ROOT/ops/registry-permission-indexes/install.sql"
+permission_indexes=(normalized_events_registry_origin_idx normalized_events_registry_announcement_idx normalized_events_wrapper_departure_idx normalized_events_user_registry_departure_idx project_grant_registry_parent_idx)
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TABLE expected_permission_indexes AS
+SELECT relation.relname, pg_get_indexdef(indexrelid) AS definition
+FROM pg_index JOIN pg_class relation ON relation.oid = indexrelid
+WHERE indexrelid IN ('normalized_events_registry_origin_idx'::regclass,
+    'normalized_events_registry_announcement_idx'::regclass,
+    'normalized_events_wrapper_departure_idx'::regclass,
+    'normalized_events_user_registry_departure_idx'::regclass,
+    'project_grant_registry_parent_idx'::regclass);
+DROP INDEX normalized_events_registry_origin_idx;
+DROP INDEX normalized_events_registry_announcement_idx;
+DROP INDEX normalized_events_wrapper_departure_idx;
+DROP INDEX normalized_events_user_registry_departure_idx;
+DROP INDEX project_grant_registry_parent_idx;
+INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+    manifest_version, chain_id, derivation_kind)
+VALUES ('permission-index-prebuild-probe', 'schema-v2-check', 'ContractDiscovered',
+    'ens_v2_migration_l1', 1, 'schema-v2-check', 'ens_v2_migration');
+INSERT INTO project_grant (chain_id,resource_id,subject,scope,block_number,event_identity,event_kind,effective_powers,revoked)
+VALUES ('schema-v2-check','12345678-1234-1234-1234-123456789012','permission-prebuild-probe','root',1,
+    'permission-grant-prebuild-probe','RootPermissionChanged','["registrar"]',false);
+SQL
+} | run_psql
+assert_migration_refusal permission-populated-missing-set "$permission_index_migration" \
+    'missing prebuilt index normalized_events_registry_origin_idx on populated normalized_events; run ops/registry-permission-indexes/install.sql before this schema-migration' </dev/null
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    render_phase_migration "$permission_index_install"
+    cat <<'SQL'
+CREATE TABLE permission_prebuilt_oids AS SELECT indexrelid
+FROM pg_index WHERE indexrelid IN ('normalized_events_registry_origin_idx'::regclass,
+    'normalized_events_registry_announcement_idx'::regclass,
+    'normalized_events_wrapper_departure_idx'::regclass,
+    'normalized_events_user_registry_departure_idx'::regclass,
+    'project_grant_registry_parent_idx'::regclass);
+SQL
+    render_phase_migration "$permission_index_install"
+    emit_phase_migration "$permission_index_migration" specialized
+    emit_quote_all_identifiers_probe "$permission_index_migration" in-transaction
+    emit_quote_all_identifiers_probe "$permission_index_install" outside-transaction
+    cat <<'SQL'
+DO $$ BEGIN
+    IF (SELECT count(*) FROM pg_index actual JOIN permission_prebuilt_oids expected
+        ON actual.indexrelid = expected.indexrelid) <> 5 THEN
+        RAISE EXCEPTION 'permission index adoption/rerun rebuilt a prebuilt index';
+    END IF;
+    IF EXISTS (SELECT 1 FROM expected_permission_indexes expected
+        LEFT JOIN pg_class relation ON relation.relname = expected.relname
+            AND relation.relnamespace = current_schema()::regnamespace
+        LEFT JOIN pg_index actual ON actual.indexrelid = relation.oid
+        WHERE pg_get_indexdef(actual.indexrelid) IS DISTINCT FROM expected.definition) THEN
+        RAISE EXCEPTION 'permission prebuilt definitions differ from baseline';
+    END IF;
+END $$;
+DROP TABLE permission_prebuilt_oids;
+SQL
+} | run_psql
+for permission_index in "${permission_indexes[@]}"; do
+    permission_relation=normalized_events
+    if [ "$permission_index" = project_grant_registry_parent_idx ]; then
+        permission_relation=project_grant
+    fi
+    permission_invalid="$scratch_schema.$permission_index is invalid or has an unexpected definition; follow ops/registry-permission-indexes/README.md before retrying"
+    # The first missing-index case above covers this name with all five absent.
+    if [ "$permission_index" != normalized_events_registry_origin_idx ]; then
+        assert_migration_refusal "permission-missing-$permission_index" "$permission_index_migration" \
+            "missing prebuilt index $permission_index on populated $permission_relation; run ops/registry-permission-indexes/install.sql before this schema-migration" <<SQL
+DROP INDEX $permission_index;
+SQL
+    fi
+    for permission_flag in indisvalid indisready indislive; do
+        assert_migration_refusal "permission-$permission_flag-$permission_index" "$permission_index_migration" \
+            "$permission_invalid" <<SQL
+UPDATE pg_index SET $permission_flag = false WHERE indexrelid = '$permission_index'::regclass;
+SQL
+    done
+    assert_migration_refusal "permission-keys-$permission_index" "$permission_index_migration" \
+        "$permission_invalid" <<SQL
+DROP INDEX $permission_index;
+CREATE INDEX $permission_index ON normalized_events (chain_id);
+SQL
+    assert_migration_refusal "permission-relation-$permission_index" "$permission_index_migration" \
+        "$permission_invalid" <<SQL
+DROP INDEX $permission_index;
+CREATE TABLE $permission_index (id bigint);
+SQL
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf "UPDATE pg_index SET indisvalid = false WHERE indexrelid = '%s'::regclass;\n" "$permission_index"
+    } | run_psql
+    assert_index_install_refusal "permission-invalid-prebuild-$permission_index" "$permission_index_install" "$permission_invalid"
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf 'DROP INDEX %s; CREATE INDEX %s ON normalized_events (chain_id);\n' "$permission_index" "$permission_index"
+    } | run_psql
+    assert_index_install_refusal "permission-wrong-prebuild-$permission_index" "$permission_index_install" "$permission_invalid"
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf 'DROP INDEX %s;\n' "$permission_index"
+        render_phase_migration "$permission_index_install"
+    } | run_psql
+ done
+# Relation-specific refusal: an empty normalized-events table does not permit a
+# transactional index build on populated Project grants. No earlier missing
+# normalized-event index may build before this later refusal is discovered.
+assert_migration_refusal permission-populated-grants-empty-events "$permission_index_migration" \
+    'missing prebuilt index project_grant_registry_parent_idx on populated project_grant; run ops/registry-permission-indexes/install.sql before this schema-migration' <<SQL
+DELETE FROM normalized_events;
+DROP INDEX normalized_events_registry_origin_idx;
+DROP INDEX normalized_events_registry_announcement_idx;
+DROP INDEX normalized_events_wrapper_departure_idx;
+DROP INDEX normalized_events_user_registry_departure_idx;
+DROP INDEX project_grant_registry_parent_idx;
+SQL
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        'DROP INDEX normalized_events_registry_origin_idx;' \
+        "UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'normalized_events_user_registry_departure_idx'::regclass;"
+} | run_psql
+assert_index_install_refusal permission-validates-set-before-building "$permission_index_install" \
+    "$scratch_schema.normalized_events_user_registry_departure_idx is invalid or has an unexpected definition; follow ops/registry-permission-indexes/README.md before retrying"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+DO $$ BEGIN
+    IF to_regclass('normalized_events_registry_origin_idx') IS NOT NULL THEN
+        RAISE EXCEPTION 'permission installer built before validating the whole set';
+    END IF;
+END $$;
+UPDATE pg_index SET indisvalid = true WHERE indexrelid = 'normalized_events_user_registry_departure_idx'::regclass;
+SQL
+    render_phase_migration "$permission_index_install"
+    emit_phase_migration "$permission_index_migration" specialized
+    printf '%s\n' "DELETE FROM normalized_events WHERE event_identity = 'permission-index-prebuild-probe';" \
+        "DELETE FROM project_grant WHERE event_identity = 'permission-grant-prebuild-probe';" \
+        'DROP TABLE expected_permission_indexes;'
+} | run_psql
+# The expiry selector on project_name_summary. From a populated summary without the two
+# columns, the schema-migration must clear the summaries, add both columns and build both
+# partial indexes with the reviewed definitions and the baseline's comments, then accept
+# that shape on a rerun without clearing anything.
+summary_selector_migration="$ROOT/migrations/20261005150000_project_name_summary_expiry_selector.sql"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+ALTER TABLE project_name_summary
+    DROP COLUMN IF EXISTS expiry_listable, DROP COLUMN IF EXISTS public_authority;
+INSERT INTO project_name_summary (chain_id, logical_name_id, namespace, serving, zero_owner)
+VALUES ('apply-check', 'ens:0x01', 'ens', FALSE, FALSE);
+SQL
+    emit_phase_migration "$summary_selector_migration" preceding-shape
+    cat <<SQL
+DO \$\$
+DECLARE
+    selector_index text;
+    selector_definition text;
+BEGIN
+    IF EXISTS (SELECT 1 FROM project_name_summary) THEN
+        RAISE EXCEPTION 'the expiry selector upgrade kept a summary written without it';
+    END IF;
+    IF (SELECT count(*) FROM pg_attribute
+        WHERE attrelid = 'project_name_summary'::regclass AND NOT attisdropped
+          AND ((attname = 'expiry_listable' AND atttypid = 'boolean'::regtype AND attnotnull)
+            OR (attname = 'public_authority' AND atttypid = 'text'::regtype AND NOT attnotnull))
+          AND col_description(attrelid, attnum) IS NOT NULL) <> 2 THEN
+        RAISE EXCEPTION 'the expiry selector upgrade left the wrong columns';
+    END IF;
+    FOR selector_index, selector_definition IN VALUES
+        ('project_name_summary_expiry_idx',
+         'CREATE INDEX project_name_summary_expiry_idx ON $scratch_schema.project_name_summary USING btree (namespace, expires_at, logical_name_id, chain_id) WHERE (expiry_listable AND (expires_at IS NOT NULL))'),
+        ('project_name_summary_authority_expiry_idx',
+         'CREATE INDEX project_name_summary_authority_expiry_idx ON $scratch_schema.project_name_summary USING btree (namespace, public_authority, expires_at, logical_name_id, chain_id) WHERE (expiry_listable AND (expires_at IS NOT NULL))')
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_index
+            WHERE indexrelid = to_regclass(selector_index) AND indisvalid AND indisready
+              AND pg_get_indexdef(indexrelid) = selector_definition
+        ) THEN
+            RAISE EXCEPTION '% differs from its reviewed definition: %', selector_index,
+                pg_get_indexdef(to_regclass(selector_index));
+        END IF;
+    END LOOP;
+    INSERT INTO project_name_summary (chain_id, logical_name_id, namespace, serving,
+        zero_owner, expiry_listable)
+    VALUES ('apply-check', 'ens:0x01', 'ens', FALSE, FALSE, TRUE);
+END \$\$;
+SQL
+    emit_phase_migration "$summary_selector_migration" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM project_name_summary) <> 1 THEN
+        RAISE EXCEPTION 'the expiry selector rerun cleared a summary that carries it';
+    END IF;
+    DELETE FROM project_name_summary;
+END $$;
+SQL
+    emit_phase_migration "$summary_selector_migration" baseline-first
+} | run_psql
+# The event walk's expiry indexes. From a schema that still has the three indexes with the
+# definitions 20260928140000 gave them, and the selector column's earlier comment, the
+# schema-migration must drop exactly those three, keep expiry_seconds on both tables and
+# every other index, set the baseline's comment (the selector schema-migration, applied
+# just above, leaves its earlier wording), and accept that shape on a rerun. A
+# relation of one of the names that is not such an index must stop it.
+expiry_walk_index_migration="$ROOT/migrations/20261005160000_project_families_drop_expiry_walk_indexes.sql"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+-- 20260928140000, applied above after the baseline, has already put the three back.
+DROP INDEX IF EXISTS project_lifecycle_event_expiry_idx,
+    project_lifecycle_event_inexact_expiry_idx, project_wrapper_state_expiry_idx;
+CREATE TEMP TABLE expected_family_indexes AS
+SELECT indexrelid::regclass::text AS index_name, pg_get_indexdef(indexrelid) AS definition
+FROM pg_index
+WHERE indrelid IN ('project_lifecycle_event'::regclass, 'project_wrapper_state'::regclass);
+CREATE INDEX project_lifecycle_event_expiry_idx
+    ON project_lifecycle_event (expiry_seconds) WHERE expiry_seconds IS NOT NULL;
+CREATE INDEX project_lifecycle_event_inexact_expiry_idx
+    ON project_lifecycle_event (chain_id)
+    WHERE expiry_seconds IS NULL AND jsonb_typeof(expiry) = 'number';
+CREATE INDEX project_wrapper_state_expiry_idx
+    ON project_wrapper_state (expiry_seconds) WHERE expiry_seconds IS NOT NULL;
+COMMENT ON COLUMN project_name_summary.public_authority IS
+    'This value is the public authority the composed name row serves (ens_v0, ens_v1 or ens_v2); null when the row serves none (Basenames, an unresolved selection, an ownerless registry row) or the name composes no row. The stored selector the expiry listing''s authority filter will read; no reader uses it yet.';
+SQL
+    emit_phase_migration "$expiry_walk_index_migration" preceding-shape
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT indexrelid::regclass::text, pg_get_indexdef(indexrelid) FROM pg_index
+        WHERE indrelid IN ('project_lifecycle_event'::regclass, 'project_wrapper_state'::regclass)
+        EXCEPT SELECT index_name, definition FROM expected_family_indexes
+    ) OR EXISTS (
+        SELECT index_name, definition FROM expected_family_indexes
+        EXCEPT SELECT indexrelid::regclass::text, pg_get_indexdef(indexrelid) FROM pg_index
+        WHERE indrelid IN ('project_lifecycle_event'::regclass, 'project_wrapper_state'::regclass)
+    ) THEN
+        RAISE EXCEPTION 'dropping the expiry walk indexes left a different index set than the baseline';
+    END IF;
+    IF (SELECT count(*) FROM pg_attribute
+        WHERE attrelid IN ('project_lifecycle_event'::regclass, 'project_wrapper_state'::regclass)
+          AND attname = 'expiry_seconds' AND NOT attisdropped) <> 2 THEN
+        RAISE EXCEPTION 'dropping the expiry walk indexes removed an expiry_seconds column';
+    END IF;
+    IF (SELECT col_description('project_name_summary'::regclass, attnum) FROM pg_attribute
+        WHERE attrelid = 'project_name_summary'::regclass AND attname = 'public_authority')
+       IS DISTINCT FROM 'This value is the public authority the composed name row serves (ens_v0, ens_v1 or ens_v2); null when the row serves none (Basenames, an unresolved selection, an ownerless registry row) or the name composes no row. The authority filter of the expiry listing of GET /v1/names selects by it.' THEN
+        RAISE EXCEPTION 'the public_authority comment differs from the baseline';
+    END IF;
+END $$;
+SQL
+    emit_phase_migration "$expiry_walk_index_migration" baseline-first
+    emit_phase_migration "$expiry_walk_index_migration" baseline-first
+} | run_psql
+assert_migration_refusal "table-named-project_wrapper_state_expiry_idx" \
+    "$expiry_walk_index_migration" \
+    "$scratch_schema.project_wrapper_state_expiry_idx is not an index on $scratch_schema.project_wrapper_state; it is not dropped" <<'SQL'
+CREATE TABLE project_wrapper_state_expiry_idx (placeholder integer);
+SQL
 report_timing baseline-first
 # Recreate the additive historical binding index from its preceding schema shape.
 # Compare the resulting catalog definition to the fresh baseline, then prove reruns.
@@ -2199,7 +2531,9 @@ attribution_index_names=(
     normalized_events_record_id_write_idx
     normalized_events_record_id_link_idx
 )
-check_lookahead_index_migration "$attribution_index_migration" absent-from-fixture 2 3 \
+# This immutable migration is exercised at its historical stage. The catalogue
+# migration replaces its write index after these definition/refusal probes.
+check_lookahead_index_migration "$attribution_index_migration" absent-from-fixture 2 2 \
     "${attribution_index_names[@]}"
 # The live prebuild in ops/v1-lookahead-indexes/install.sql builds all eight
 # indexes in one file. For each in turn it must build the baseline definition, refuse
@@ -2774,6 +3108,17 @@ assert_index_install_hint address-match-index-on-another-table-hint \
     printf '%s\n' "DROP INDEX $address_match_first_index;"
     render_phase_migration "$address_match_install"
 } | run_psql >/dev/null
+# Advance the historical fixture only after its old attribution definition has been
+# validated. The walk installer and remaining structural checks need today's indexes.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    render_phase_migration "$ROOT/ops/address-history-catalogue-indexes/install.sql"
+    emit_phase_migration "$ROOT/migrations/20261005170000_project_address_history_catalogue.sql" preceding-shape
+    emit_phase_migration "$ROOT/migrations/20261005170000_project_address_history_catalogue.sql" baseline-first
+} | run_psql
+# This migration must adopt validated concurrent candidates without rebuilding
+# them and refuse an incomplete set before attempting any old-index drop.
+source "$ROOT/scripts/tests/check-address-history-catalogue-indexes.sh"
 # ops/walk-index-set/drop.sql must refuse while a chain may be served: its Project
 # is running, has a current block or a live family marker and its Interpret is not redoing,
 # including a marker committed before Project recorded progress, and must fail after
@@ -2801,8 +3146,8 @@ JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
 WHERE pg_index.indrelid = 'normalized_events'::regclass;
 DO \$\$
 BEGIN
-    IF (SELECT count(*) FROM walk_index_baseline WHERE index_name IN ($walk_index_dropped)) <> 35 THEN
-        RAISE EXCEPTION 'drop.sql does not list 35 baseline indexes on normalized_events';
+    IF (SELECT count(*) FROM walk_index_baseline WHERE index_name IN ($walk_index_dropped)) <> 41 THEN
+        RAISE EXCEPTION 'drop.sql does not list 41 baseline indexes on normalized_events';
     END IF;
 END \$\$;
 INSERT INTO chain_phase_state (chain_id, phase_name, current_block_number, current_block_hash)
@@ -4963,6 +5308,10 @@ SQL
     do
         emit_phase_migration "$migration_file" preceding-shape
     done
+    # Reconstructing the historical column shape drops the current announcement
+    # index because its predicate depends on consumer_visibility. Restore that
+    # current reader index before checking today's definitions below.
+    render_phase_migration "$permission_index_install"
 } | run_psql
 
 # The preceding vocabulary reconstruction ends with the exact 20260902 constraint.
@@ -5086,6 +5435,10 @@ BEGIN
             ('name_surfaces'),
             ('normalized_events'),
             ('project_family_marker'),
+            ('project_address_history_anchor'),
+            ('project_history_source'),
+            ('project_history_source_edge'),
+            ('project_history_catalogue_marker'),
             ('project_family_undo'),
             ('project_repair_record'),
             ('project_name_state'),
@@ -5111,6 +5464,8 @@ BEGIN
             ('project_grant'),
             ('project_resource_admin_aggregate'),
             ('project_account_approval'),
+            ('project_ens_v2_entry_owner'),
+            ('project_ens_v2_registry_parent'),
             ('project_name_alias'),
             ('project_resolver_alias'),
             ('project_child_edge_candidate'),
@@ -5194,6 +5549,10 @@ BEGIN
             ('name_surfaces'),
             ('normalized_events'),
             ('project_family_marker'),
+            ('project_address_history_anchor'),
+            ('project_history_source'),
+            ('project_history_source_edge'),
+            ('project_history_catalogue_marker'),
             ('project_family_undo'),
             ('project_repair_record'),
             ('project_name_state'),
@@ -5219,6 +5578,8 @@ BEGIN
             ('project_grant'),
             ('project_resource_admin_aggregate'),
             ('project_account_approval'),
+            ('project_ens_v2_entry_owner'),
+            ('project_ens_v2_registry_parent'),
             ('project_name_alias'),
             ('project_resolver_alias'),
             ('project_child_edge_candidate'),
@@ -5680,6 +6041,10 @@ BEGIN
                   AND index_state.indnatts = index_state.indnkeyatts
                   AND index_state.indnkeyatts =
                       cardinality(required.key_patterns)
+                  -- Per-column pg_get_indexdef omits COLLATE; inspect the key's
+                  -- stored collation separately from its expression below.
+                  AND (required.index_name <> 'normalized_events_registry_origin_idx'
+                       OR index_state.indcollation[5] = '"C"'::regcollation)
                   AND NOT EXISTS (
                       SELECT 1
                       FROM generate_subscripts(required.key_patterns, 1)
@@ -5733,6 +6098,41 @@ BEGIN
                     'normalized_events',
                     ARRAY['chain_id', 'block_number'],
                     NULL::text[]
+                ),
+                ('project_grant_registry_parent_idx', 'project_grant',
+                    ARRAY['chain_id', 'subject', '%scope_detail%registry_address%'],
+                    ARRAY['%scope%root%']),
+                ('normalized_events_registry_origin_idx', 'normalized_events',
+                    ARRAY['chain_id', '%lower%after_state%proxy_address%', 'block_number', 'transaction_index', 'log_index', 'event_identity'],
+                    ARRAY['%source_family%ens_v2_migration_l1%', '%event_kind%ContractDiscovered%', '%canonicality_state%canonical%safe%finalized%']),
+                ('normalized_events_registry_announcement_idx', 'normalized_events',
+                    ARRAY['chain_id', '%lower%raw_fact_ref%emitting_address%', 'block_number', 'log_index', 'normalized_event_id'],
+                    ARRAY['%source_family%ens_v2_registry_l1%', '%event_kind%RegistryCreated%', '%consumer_visibility%activated%', '%canonicality_state%canonical%safe%finalized%']),
+                ('normalized_events_wrapper_departure_idx', 'normalized_events',
+                    ARRAY['chain_id', '%lower%after_state%proxy_address%', 'block_number'],
+                    ARRAY['%source_family%ens_v2_registry_l1%', '%event_kind%Upgraded%', '%canonicality_state%canonical%safe%finalized%', '%implementation%IS DISTINCT FROM%0xbe768b63e5fbbfbb0ae97e9064e0002df8001880%']),
+                ('normalized_events_user_registry_departure_idx', 'normalized_events',
+                    ARRAY['chain_id', '%lower%after_state%proxy_address%', 'block_number'],
+                    ARRAY['%source_family%ens_v2_registry_l1%', '%event_kind%Upgraded%', '%canonicality_state%canonical%safe%finalized%', '%implementation%IS DISTINCT FROM%0x9bd8a88719068d09ecee662f36c0e3856708366a%']),
+                (
+                    'normalized_events_history_discovery_name_idx',
+                    'normalized_events',
+                    ARRAY['chain_id', 'logical_name_id', 'block_number'],
+                    ARRAY[
+                        '%logical_name_id IS NOT NULL%',
+                        '%resource_id IS NOT NULL%',
+                        '%canonicality_state <> ALL%canonical%safe%finalized%'
+                    ]
+                ),
+                (
+                    'normalized_events_history_discovery_resource_idx',
+                    'normalized_events',
+                    ARRAY['chain_id', 'resource_id', 'block_number'],
+                    ARRAY[
+                        '%logical_name_id IS NOT NULL%',
+                        '%resource_id IS NOT NULL%',
+                        '%canonicality_state <> ALL%canonical%safe%finalized%'
+                    ]
                 ),
                 (
                     'normalized_events_resolver_alias_history_idx',

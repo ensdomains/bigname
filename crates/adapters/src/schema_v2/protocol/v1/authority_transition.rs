@@ -372,6 +372,7 @@ pub(super) fn append_authority_transition(
                 binding_active_from,
             );
             let mut observation = observation_state.clone();
+            observation["surface_materialization"] = json!(true);
             if let Some((owner, contract)) = registry_binding {
                 observation["owner_getter"] = json!(owner);
                 observation["registry_contract"] = json!(contract);

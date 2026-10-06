@@ -322,8 +322,7 @@ async fn deep_registry_hierarchy_lists_direct_children_only() -> Result<()> {
         .to_owned();
     assert!(a_placeholder.starts_with('[') && a_placeholder.ends_with("].parent.eth"));
 
-    // Registry interpretation retains the grandchild edge even though the
-    // unknown a-node cannot own a projected children collection.
+    // The complete hash path makes the unrevealed a-node a known parent.
     let b_events: i64 = sqlx::query_scalar(&format!(
         "SELECT count(*) FROM normalized_events \
          WHERE event_kind = 'SubregistryChanged' AND canonicality_state = 'canonical' \
@@ -334,20 +333,19 @@ async fn deep_registry_hierarchy_lists_direct_children_only() -> Result<()> {
     .await?;
     assert_eq!(
         b_events, 1,
-        "the grandchild registry edge must remain normalized below the unknown a-node"
+        "the grandchild registry edge must remain normalized below the proven a-node"
     );
 
-    // Enumeration stops at unknown surfaces. Schema-v2 materializes neither
-    // an addressable name row nor child rows below the placeholder; v1 input
-    // normalization remains API-owned and is not asserted in this lane.
-    let placeholder_name = families::name(&run.db.pool, &format!("ens:{a_node}")).await?;
-    assert!(placeholder_name.is_none(), "{placeholder_name:?}");
-    // Children are served only under known parent surfaces (docs/architecture.md § Name →
-    // children), so the b-child is served under no parent.
+    let placeholder_name = families::required_name(&run.db.pool, &format!("ens:{a_node}")).await?;
+    assert_eq!(placeholder_name.normalized_name, a_placeholder);
+    let b_children = families::children(&run.db.pool, &placeholder_name.logical_name_id).await?;
+    assert_eq!(b_children.len(), 1, "{b_children:?}");
+    assert_eq!(b_children[0].namehash, b_node);
+    assert_eq!(b_children[0].owner.as_deref(), Some(carol_owner.as_str()));
     let b_rows = families::served_child_rows(&run.db.pool, &b_node).await?;
     assert_eq!(
-        b_rows, 0,
-        "children under an unrevealed-label parent must not be served"
+        b_rows, 1,
+        "the grandchild must be served only under its direct parent"
     );
 
     run.db.cleanup().await?;

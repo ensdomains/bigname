@@ -57,7 +57,7 @@ pub(super) async fn enrich_all(
 /// Inside
 /// `defer_wrapper_expiries` each such row gets a pending marker instead, which the response
 /// resolves once for all the rows it serves.
-async fn attach_wrapper_expiries(
+pub(super) async fn attach_wrapper_expiries(
     conn: &mut PgConnection,
     rows: &mut BTreeMap<String, NameCurrentRow>,
 ) -> Result<()> {

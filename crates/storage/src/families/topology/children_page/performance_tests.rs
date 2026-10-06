@@ -170,7 +170,8 @@ async fn child_arm_selection_and_a_later_edge_under_another_parent_are_preserved
         for arm in [None, Some("ens_v1"), Some("ens_v2"), Some("unsupported")] {
             sqlx::query(
                 "INSERT INTO project_name_summary(chain_id, logical_name_id, namespace,
-                     authority_arm, serving, zero_owner) VALUES ($1, $2, 'ens', $3, false, false)
+                     authority_arm, serving, zero_owner, expiry_listable)
+                 VALUES ($1, $2, 'ens', $3, false, false, false)
                  ON CONFLICT (chain_id, logical_name_id)
                  DO UPDATE SET authority_arm = EXCLUDED.authority_arm",
             )

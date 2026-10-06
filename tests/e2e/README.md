@@ -386,12 +386,12 @@ explicitly with issue #314.
   `lifecycle_divergence::transfer_without_reclaim_keeps_registry_owner_divergent`.
 - Replay, reorg, and provider faults:
   `perturbations::rich_chain_live_reorg_converges_to_winning_branch`;
-  `perturbations::pre_surface_records_converge_fresh_incremental_and_restored`;
+  `perturbations::registry_child_records_converge_fresh_incremental_and_restored`;
   `perturbations::rich_chain_projection_and_normalized_event_replay_are_route_stable`;
   `perturbations::rich_chain_rpc_ingest_normalized_events_match_upfront_facts`;
   `perturbations::rich_chain_successive_fixture_replays_match_single_pass`;
-  `pre_surface_resolver::owned_pre_surface_resolver_records_serve_after_late_renewal_without_reselection`;
-  `pre_surface_resolver::ownerless_pre_surface_resolver_records_serve_after_late_renewal_without_reselection`;
+  `pre_surface_resolver::owned_registry_resolver_records_serve_after_late_renewal_without_reselection`;
+  `pre_surface_resolver::ownerless_registry_resolver_records_serve_after_late_renewal_without_reselection`;
   `provider_faults::an_endpoint_serving_another_chain_is_refused_before_ingest`;
   `provider_faults::silently_short_logs_are_accepted_until_explicit_refetch_matches_control`;
   `provider_faults::transient_provider_faults_and_partial_receipts_recover_to_control`.
@@ -414,9 +414,9 @@ explicitly with issue #314.
 - Resolver and reverse claims:
   `resolver_records::exact_zero_addr60_uses_stubbed_verified_transport`;
   `resolver_authorization::operator_delegate_writes_match_owner_authorship`;
-  `resolver_records::pre_surface_newowner_record_serves_after_late_surface`;
-  `resolver_records::pre_surface_record_attribution_is_node_scoped_and_never_materializes_unknown_names`;
-  `resolver_records::pre_surface_record_history_follows_current_resolver_and_version_boundary`;
+  `resolver_records::registry_child_record_survives_later_wrap`;
+  `resolver_records::record_attribution_is_node_scoped_and_never_materializes_unproven_names`;
+  `resolver_records::registry_child_record_history_follows_current_resolver_and_version_boundary`;
   `resolver_records::records_route_values_and_version_boundaries_follow_current_resolver`;
   `resolver_records::resolver_changes_follow_registry_and_zero_releases`;
   `resolver_records::shared_resolver_keeps_per_name_records_and_projection_marks_fan_in_unsupported`;

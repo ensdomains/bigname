@@ -102,7 +102,7 @@ fn registry(
             )?;
             let token_id = u256_word_hex(e.tokenId);
             let Some(before) = state.v2_token(&raw.emitting_address, &token_id) else {
-                return Ok(initial_output);
+                return expiry::tokenless(selected, initial_output, &e);
             };
             state.set_v2_expiry(&raw.emitting_address, &token_id, e.newExpiry);
             let transitions = state.refresh_dirty_v2_names(raw.block_timestamp.unix_timestamp());

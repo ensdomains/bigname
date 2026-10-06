@@ -817,27 +817,43 @@ fn label_preimages(output: &BatchOutput) -> Vec<Row> {
 }
 
 fn name_surfaces(output: &BatchOutput) -> Vec<Row> {
+    // The stored identity keeps its first anchor, while its initially absent raw bundle may
+    // be enriched by the first real byte witness. Compare both pieces across batch shapes.
+    let mut evidence = BTreeMap::new();
+    for row in &output.name_surfaces {
+        if row.raw.is_some() {
+            evidence
+                .entry((&row.chain_id, &row.logical_name_id))
+                .or_insert(row);
+        }
+    }
     output
         .name_surfaces
         .iter()
-        .map(|row| Row {
-            key: format!("{}:{}", row.chain_id, row.logical_name_id),
-            body: format!(
-                "{}:{}:{:?}:{:?}:{:?}:{}:{}:{}:{}:{:?}:{:?}:{}",
-                row.namespace,
-                row.raw_name,
-                row.raw_labels,
-                row.labelhashes,
-                row.dns_encoded_name,
-                row.namehash,
-                row.normalizer_version,
-                row.visibility_state,
-                row.normalization_errors,
-                row.deactivation_reason,
-                row.deactivated_at,
-                row.canonicality_state
-            ),
-            anchor: anchor(&row.block_hash, row.block_number, &row.provenance),
+        .map(|row| {
+            let bytes = evidence
+                .get(&(&row.chain_id, &row.logical_name_id))
+                .copied()
+                .unwrap_or(row);
+            Row {
+                key: format!("{}:{}", row.chain_id, row.logical_name_id),
+                body: format!(
+                    "{}:{:?}:{:?}:{:?}:{:?}:{}:{}:{}:{}:{:?}:{:?}:{}",
+                    row.namespace,
+                    bytes.raw_name(),
+                    bytes.raw_labels(),
+                    row.labelhashes,
+                    bytes.dns_encoded_name(),
+                    row.namehash,
+                    bytes.normalizer_version,
+                    bytes.visibility_state,
+                    bytes.normalization_errors,
+                    bytes.deactivation_reason,
+                    bytes.deactivated_at,
+                    row.canonicality_state
+                ),
+                anchor: anchor(&row.block_hash, row.block_number, &row.provenance),
+            }
         })
         .collect()
 }

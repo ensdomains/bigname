@@ -45,12 +45,12 @@ context before committing. The [reorg rules](#reorg-and-redo) and
 
 Every Project SQL statement starts with a
 [statement identifier](glossary.md#statement-identifier). The current family
-metrics report run duration, block-transaction duration, marker lag and
-duplicate anomalies; see the [monitoring runbook](runbooks/pipeline-monitoring.md).
+metrics report run duration, block-transaction duration, marker lag,
+duplicate anomalies and hydration; see the [monitoring runbook](runbooks/pipeline-monitoring.md).
 
 ### Follow-only hydration
 
-Configured Ethereum Mainnet follow blocks may refresh an existing ENS/60
+On Ethereum Mainnet, a configured Project run may refresh an existing ENS/60
 reverse tuple on an admitted event-silent resolver, and supported ENSv1
 `text:<key>` entries whose normalized event retained the key but not the
 value.[^ensnode-legacy-revresolver-l311][^ensnode-legacy-revresolver-l316][^ensnode-legacy-text-l356]
@@ -58,17 +58,142 @@ This [hydration](glossary.md#hydration) is a Project-owned overlay on the
 event-derived baseline. It writes no raw facts, normalized events, verified
 results, reusable execution outcomes or traces.
 
-A short preparation transaction previews the block with the normal reducers,
-including resolver pointers, classification and records, and closes before RPC.
-Calls use the exact block number and hash being published, never provider
-`latest`. The publication transaction revalidates the predecessor, input
-revision, canonical block and each result's selected identity before accepting
-it. Overlay changes are journalled with the ordinary family rows. Failed calls
-remove the overlay and the block still publishes; a later follow block retries.
-Missing required RPC configuration refuses an eligible configured follow run.
-Replay, rebuild and rebuild ranges make no hydration calls. Undo can restore a
-previous overlay; reset rebuild starts from the baseline, and later follow
-blocks repair missing values.
+Only the head block hydrates. A block hydrates when it is published as an
+ordinary follow block (applied directly after the
+[family marker](glossary.md#family-marker), outside any repair or rebuild) and
+it is the highest readable block of the stored chain lineage, by number and
+hash, as Project read it when the run started. Project reads that block
+itself: the target a caller passes says how far to publish, not which block is
+the head. The predecessor check is unchanged, so the block must still be the
+marker's child by number and parent hash. Consequently:
+
+- Blocks applied while Project catches up publish without any hydration RPC.
+  Their changed selectors wait in the work indexes and join the rolling
+  selection at the head. After the reserved share for older waiting work,
+  selectors changed by the head block take priority over that rolling work.
+  With marker 100 and head 110, blocks 101 to 109 make no call and block 110
+  hydrates.
+- A block a run stops on because its block budget is spent is not the head.
+  The continuation that reaches the head hydrates there. Budgets, repair,
+  replay and rebuild scheduling are unchanged; no run is cut short to make a
+  block the head.
+- A replayed block never hydrates, including a replacement head reached by
+  undo and replay at the head's own number. No rebuilt block hydrates, the
+  rebuild's last block and rebuild ranges included.
+- A redo that ends below the readable head, or any target below it, does not
+  hydrate.
+- A block that took the head's height after the run started is published
+  without hydration.
+- A published head is not hydrated a second time. A run interrupted before the
+  head commits reads it again; after it commits, hydration waits for the next
+  block. A stalled chain, or a head that was rebuilt or replayed, leaves
+  values unrefreshed until then.
+
+The head is the newest block bigname holds, not the provider's tip. After a
+long catch-up, a capacity wait or a slow run it can be old, and an endpoint
+that no longer keeps that block's state fails its reads; see the outcomes
+below. There is no age cutoff:
+[`phase_runner_project_hydration_head_age_seconds`](runbooks/pipeline-monitoring.md#project-family-work)
+reports the age.
+
+A short preparation transaction previews the head block with the normal
+reducers, including resolver pointers, classification and records, and closes
+before RPC. Calls use the exact block number and hash being published, never
+provider `latest`. The publication transaction revalidates the predecessor,
+input revision, canonical block and each result's selected identity before
+accepting it. Overlay changes are journalled with the ordinary family rows.
+Missing required RPC configuration refuses an eligible configured run. Undo can
+restore a previous overlay; reset rebuild starts from the baseline, and later
+head blocks fill missing values. Nothing here promises when a backlog is
+drained: that depends on new head blocks, on the endpoint answering and on how
+much other work each head block carries.
+
+Reads go out as Multicall3 aggregates of at most 250 calls. Every selected
+selector ends in exactly one of four outcomes:
+
+| Outcome | When | What is written |
+| --- | --- | --- |
+| Observed | The endpoint answered the aggregate and the selector's call returned a value or an empty answer. | The value, or the empty answer, with the block it was observed at. A successful empty answer replaces an earlier value. |
+| Failed call | The endpoint answered the aggregate and this selector's own call failed inside it, or returned data that cannot be decoded. | The overlay is cleared and the attempt recorded, so the reader serves the event-derived baseline. This is a fail-closed policy; it is not evidence that the value was cleared on chain. |
+| Deferred | The selector's aggregate failed as a whole while the endpoint answered other calls at the same block, and the block had no call or time left to split it further. | No value is observed. The selector moves behind the rest of its queue and records the largest aggregate it may next be sent in; a reverse tuple keeps its name and the block it was observed at (see [Primary names](#primary-names)). |
+| Not observed | The endpoint did not serve the block, the block's reads ran out of time, or the block had no call left for the selector's first aggregate. | Nothing. The row, its value and the block the value was observed at are left exactly as they were, and the selector keeps its place. |
+
+An aggregate that fails as a whole (a transport or JSON-RPC error, a timeout,
+or an answer of the wrong shape) is never turned into per-selector failures.
+What follows depends on what Project knows about the endpoint at that block:
+
+- The endpoint says it cannot serve the block. Project recognises this from
+  the JSON-RPC error by a fixed list bigname chose: error code -32001, or a
+  message containing one of a set of fragments about a missing block, header
+  or state. This holds at any point of a block's reads,
+  after earlier aggregates were answered too. Every selector not yet read is
+  not observed and neither kind sends another call for the block; selectors
+  already read keep their results. The test is a heuristic: an endpoint that
+  words the refusal differently is not recognised, and its failures are then
+  handled as the next two cases; a false match only stops the reads of that
+  one block.
+- Nothing has been answered at the block yet. Project sends one one-call
+  aggregate at the same block hash. If that fails too, the block is treated as
+  not served, as above. This probe is sent only then; once any aggregate of
+  the block has been answered it is not sent again. Two cases say nothing
+  about the endpoint and count as running out of time instead: no time is
+  left to send the probe, or the probe is cut by the block's time before its
+  own 10 seconds are up.
+- The endpoint has answered an aggregate or the probe at the block. Project
+  then treats the failure as coming from what the aggregate holds (its size,
+  its execution cost, or one selector) and splits the aggregate in halves.
+  This is evidence, not proof: an endpoint can answer a small call and still
+  refuse a real one, and a brief endpoint fault can fail the probe.
+
+Splitting is bounded twice. One kind sends at most one aggregate per 250
+selectors plus 16 per block. Each call is limited to 10 seconds and one
+block's reads, both kinds together, to 30 seconds. A failed aggregate is
+split only while its kind has a full 10 seconds for the first half, and time
+for both halves and for every half already waiting, each taken at the longest
+any aggregate of this block has needed (the probe is not counted). A failure
+that has completed is therefore recorded before a later call can be cut. When an
+aggregate cannot be split, its selectors are deferred with half its size as
+their limit; halves that were never sent are deferred with their own size. A
+selector alone in a failed aggregate is deferred with a limit of one. The next
+head that selects them sends them in aggregates no larger than that limit, so
+the splitting continues where it stopped instead of starting from 250 again.
+A selector that fails every time ends up alone and costs one call whenever
+its turn comes; the readable selectors that shared its aggregate are read.
+An outer singleton failure still follows this rule: it is not a failed child
+response and does not start the individual-record retry delay.
+
+For each kind, a rounded-up quarter of its call budget is reserved for old
+waiting work and sent first, before new arrivals can use its time. The budget
+is `ceil(selected requests / 250) + 16`: 250 requests allow 17 calls, of which
+5 are reserved; 269 allow 18 calls, of which 5 are reserved. Remaining calls
+prefer fresh work, then unfinished old work. If one class has no work, the
+other can use all unused calls. When old work yields after its reserved
+calls, completed failed parents are recorded as deferred before fresh work
+can exhaust the remaining time. The existing time limits still apply; this
+is a service opportunity, not a promise of an answer from an unavailable or
+slow endpoint.
+
+A selector whose own call failed inside a successfully answered aggregate
+waits 7,200 blocks from that attempt before becoming eligible again. At
+`attempt height + 7,200` it may be selected; no empty-head tick is added. A
+positive failure count with a null size limit distinguishes this outcome
+from a deferred outer failure. Successful answers, including empty answers,
+clear the failure count. Fresh text event/version/admission changes and fresh
+reverse selector evidence clear obsolete scheduling state in the ordinary
+Project reducer, even during catch-up or replay. Those resets are journalled
+and undone with the event change; they never change observation provenance.
+An unrelated text key on the same resolver does not reset another key's delay.
+
+Reverse names are read before text values. While text selectors are waiting,
+the reverse reads may use at most half of the block's 30 seconds, so slow
+reverse reads cannot take the whole block from text; text then has all the
+time that is left. A call cut short by that time says nothing about its
+aggregate: its selectors and all that remain of its kind are not observed,
+and the pass counts as timed out, never as deferred or unserved. These limits bound the time spent
+waiting for RPC answers. Selecting the block's selectors before the reads and
+publishing after them take their own time, so the limits are not a bound on
+the publication. A block whose reads all fail still publishes. Every failed
+aggregate is logged with its chain, block, kind, selector count and error.
 
 Text hydration is restricted to supported inventory entries on the four
 manifest-admitted legacy public resolvers `0x4976fb03…`, `0xDaaF96c3…`,
@@ -81,8 +206,23 @@ the pinned ENS app metadata
 The transaction checks the record event position, partition version, namehash
 and classification again. `project_node_record_value.hydrated_value` retains
 the outcome, value, block hash and selectors; `hydrated_at_block` retains the
-height. The event columns remain unchanged. Successful empty reads are
-`not_found`; failure or lost admission exposes the baseline. A canonical result
+height; `hydration_limit` and `hydration_failures` only schedule the selector
+(the largest aggregate it may next be sent in, and the reads in a row that
+observed no value). The event columns remain unchanged. Successful empty reads
+are `not_found`; a failed call or lost admission exposes the baseline. Each
+hydrating block selects at most 250 text selectors. It reserves 63 slots
+(`ceil(250 / 4)`) for the oldest stamped, eligible, unchanged work, using the
+existing work index. The remaining slots prefer changed selectors, then
+never-read selectors, then the oldest attempts. Unused reserved slots are
+available to those other selectors. Cooling failed children remain in the
+work index but are skipped before either bounded selection. The reserved scan
+checks current eligibility before taking its slots; inactive overlays remain
+available to ordinary cleanup selection. Selection is not a
+promise that all of them are read in that block: the call and time limits
+above apply. Every selected
+text selector is one whose overlay is missing or no longer matches it, so
+nothing served is lost when a failed call or a deferred selector clears the
+overlay and records the attempt. A canonical result
 survives head advancement while its selectors remain valid. Inventory readers
 reject mismatched or orphaned overlays immediately, before another write.
 Reverse claims use the bounded refresh policy under [Primary names](#primary-names).
@@ -562,7 +702,9 @@ A candidate with no
 lists it only when the child relation below lists it under its parent and
 serves the requested address as its owner, with the child relation's name and
 the node's registry-only resource, and with no surface binding, under both
-`owner` and `manager`.
+`owner` and `manager`. A candidate whose surface stores no raw label bytes
+composes a name row like any other surface, so the read lists it once, from
+that row, and this fallback skips it.
 
 A third relation, `role_holder`, lists the holders of an ENSv2 registry role
 on a name's selected registration resource. `PermissionedRegistry` keeps
@@ -585,9 +727,10 @@ on the same registration. A request whose explicit relation set excludes
 unfiltered reads and sets including `role_holder` retain them. This does not
 bound the request's ordinary ownership enumeration or other work. A role held on the registry root
 reaches every name in the registry, and an ENSv2 registry operator approved
-with `setApprovalForAll` is not a permission row, so neither adds names to an
-address's collection. Reverse lookup does not serve this relation.
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
+with `setApprovalForAll` holds the token owner's roles rather than a grant of
+its own, so neither adds names to an address's collection. Reverse lookup does
+not serve this relation.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
 
 Raw unbounded diagnostic address history separately includes retained
 controller and permission evidence, including former controllers, as documented
@@ -667,8 +810,11 @@ verified label preimage when one exists and its normalization verdict is true,
 and leaves the name columns null when none does — the labelhash and child node
 are proven, the label is not. Reads name such a child by the [non-name
 form](glossary.md#non-name-form)
-`[<labelhash-without-0x>].<parent-name>`, built from the parent's stored
-spelling, and returns those same stored bytes in both name fields. A preimage whose label
+`[<labelhash-without-0x>].<parent-name>`, built from the parent's served
+name, and returns those same bytes in both name fields. The parent's served
+name is its stored spelling, or its [rendered name](glossary.md#rendered-name)
+when its surface stores no raw label bytes, so the children of such a parent
+are listed and counted under it, at any depth. A preimage whose label
 bytes are not valid UTF-8, or contain a NUL, is a third state: Composition retains
 the whole child name as raw bytes with no decoded form, and reads escape-encode
 that whole string, parent portion included. A preimage whose bytes decode but
@@ -676,7 +822,10 @@ fail the verdict is a fourth state: the text is a valid string but not a name
 for the proven node — serving it would attach a spelling that re-hashes to a
 different node — and escaping it would serve the same misleading text, so
 Composition keeps the raw label bytes, withholds the decoded text and both name
-columns, and the placeholder serves. None of these shapes is a name: the
+columns, and the placeholder serves. A child whose own surface at the
+publication stores no raw label bytes has a name row, which never serves the
+escape form, so its child row serves the placeholder in the third state too
+and both routes name the child alike. None of these shapes is a name: the
 placeholder is accepted as a [name input](api-v1.md#name-inputs) for the node,
 and the escape form is not. A preimage improves readability but does not create ownership or
 exact-name authority. ENSv2 direct and linked
@@ -773,8 +922,46 @@ The composed permission set is resource-anchored and preserves subject, scope,
 effective powers, provenance, and chain positions. The companion resource
 summary distinguishes authoritative empty enumeration from unsupported or
 partial permission support. Current non-wrapper summaries are partial because
-registrar token and account approvals, resolver operators and delegates, and
-ENSv2 registry operators are not indexed. NameWrapper summaries are partial for
+registrar token and account approvals and resolver operators and delegates are
+not indexed. ENSv2 registry operators are not stored per token. The reader
+joins each approved `ens_v2_registry` approval to the
+[registry entries](#ensv2-registry-entries) its owner currently holds in that
+registry and serves the operator with the powers of the owner's own served
+grant on the entry's current resource: no root grant, no grant the owner has
+only as another owner's operator, and nothing once the publication's block
+time reaches the entry's own expiry. The owner's grant is taken as served, so
+the path-expiry drop of the direct rows applies to operators too: a child
+whose ancestor's path expired serves no rows while its own entry is still
+live in the registry.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L350-L352 @ ens_v2_sepolia_20261001@07e55a05)
+A read bound to one ENSv2 registry token resource also serves the registry's
+root grants as rows of that resource, under the same path-expiry drop. A
+root holder of `can_transfer_admin` does not pass the transfer gate, which
+checks that role only among the token owner's own roles on the token, and has
+no ERC-1155 approval from it. The holder can revoke the role from an account
+on a live token. In a `PermissionedRegistry`, or a `UserRegistry`, which
+inherits the check, while any account holds it on the root the registry is not
+emancipated, so `safeTransferFrom` of every token reverts; `unsafeTransfer`
+skips that check. A `WrapperRegistry` overrides the check to always pass.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L220-L227 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/UserRegistry.sol:L25-L31 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L454-L465 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L528-L543 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L408-L417 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L444-L451 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/libraries/RegistryRolesLib.sol:L65-L76 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L433-L438 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/erc1155/ERC1155Singleton.sol:L359-L364 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L185-L190 @ ens_v2_sepolia_20261001@07e55a05)
+An expired registration lists no root holder, although a root `renew` holder
+can still revive the entry; that holder is a row of the root resource.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L243-L258 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L643-L654 @ ens_v2_sepolia_20261001@07e55a05)
+The summary of an ENSv2 registry resource records whether an active manifest
+declares its registry, by the rule a registry root read uses; a discovered
+registry keeps the ENSv2 operator surface unlisted because its code may add
+holders these joins do not see. NameWrapper summaries are partial for
 a narrower reason described below: holders, operators, and per-token delegates
 are rows, while parent control of a non-emancipated wrapped subname and resolver
 operators/delegates are not. For a grant on an ENSv2 record-ID resolver, whose
@@ -796,7 +983,11 @@ events from the [`standard_approval`
 derivation](glossary.md#standard-approval-derivation) by chain, authority kind, authority contract,
 owner, subject, and relation. It retains both active and revoked latest states;
 `approved=true` carries `registry_control` for a registry and `wrapper_control`
-for a NameWrapper, while `approved=false` carries no effective powers. Project
+for a NameWrapper, while `approved=false` carries no effective powers. An ENSv2
+registry approval (`authority_kind=ens_v2_registry`) carries no effective power
+in either state, because the operator's powers are the token owner's on each
+token; `approved` alone carries the fact, and the permission reader joins these rows
+to the registry's entry owners as described above. Project
 retains account approvals once per account key; readers join registry and
 NameWrapper operators as described below. Name composition carries the latest
 [registry-owner binding](glossary.md#registry-owner-binding) onto the resource
@@ -1438,7 +1629,9 @@ observation, whose `node` is the parent and whose `child_node` is the child, so
 it is the child's pointer, not the parent's. Pointer reduction and the history reader use this same node identity. The consulted
 nodes are the queried name's surface and each proper ancestor surface below the
 root, matched by label suffix in the same namespace; the nearest consulted node
-with a nonzero resolver is selected.
+with a nonzero resolver is selected. A suffix is matched on raw labels when the
+queried surface and the candidate both store them, and on the label hashes of
+the suffix when either stores none.
 When the selected resolver is a supported, same-namespace `ens_v1_resolver_l1`
 declaration that is not itself a mirror and the selection is the exact node,
 the mirrored resource is re-pointed at that resolver for the queried node and
@@ -1458,7 +1651,8 @@ ancestor_depth, forwarding, mirrored_resolver_address, mirrored_resource_id?,
 mirrored_pointer_event_id, mirrored_pointer_source_family}` records the walk
 (`mirrored_resource_id` only when the selected pointer event carries one):
 `mirrored_node` and `mirrored_name` are the selected registry node and its raw
-name, `ancestor_depth` is `0` for the exact node and otherwise the number of
+name (its [rendered name](glossary.md#rendered-name) when its surface stores
+no raw label bytes), `ancestor_depth` is `0` for the exact node and otherwise the number of
 leading labels the walk stripped, and `forwarding` is `direct_call` or
 `extended_resolve` per the selected resolver's declared read features. That
 mode is inferred from the declaration alone. It does not claim that a call
@@ -1568,32 +1762,64 @@ falls back here while the chain would return that resolver's name; see
 upstream order, a standalone `addr.reverse` registrar, has no admitted
 deployment and is not read.
 
-Configured mainnet follow blocks prepare reverse hydration
+A configured mainnet head block prepares reverse hydration
 before opening the publication transaction. A short preparation transaction uses
 the normal pointer and reverse reducers to include the new block's candidates,
 then closes before the hash-pinned RPC calls. The publication transaction checks
 the predecessor, input revision and block hash again, reduces the events, and
 accepts an answer only for the same selected reverse node and resolver. The
 result and its baseline enter F12's owned row set and are journalled with the
-family marker, including refresh work on empty blocks. Failed calls retract the
-overlay and publish the block; a later follow block retries through the bounded
-rolling selection. Successful not-found is distinct from failure. Attempt cohorts
-use the monotonically increasing publication generation. The reader also binds
+family marker, including refresh work on empty blocks. Only the head block
+hydrates, and a read ends in one of the four outcomes of
+[follow-only hydration](#follow-only-hydration). A call that fails inside an
+answered aggregate retracts the overlay (fail closed) and the block publishes;
+a head block at least 7,200 blocks later may retry through the bounded rolling
+selection, unless fresh selector evidence first clears the delay. A batch that
+fails as a whole retracts nothing. Successful not-found is distinct from both.
+Attempt cohorts use the monotonically increasing publication generation. The reader also binds
 the overlay to its selected node/resolver and readable block hash.
 
-Replay and rebuild perform no hydration RPC. Undo restores the previous overlay
+Replay, rebuild and catch-up blocks perform no hydration RPC. Undo restores the previous overlay
 with its row, and new or changed selectors use event-derived claims until a later
-follow block refreshes them. Rebuild ranges retain their existing behavior.
+head block refreshes them. Rebuild ranges retain their existing behavior.
 
-Each follow block refreshes eligible tuples changed by the block, then at most
-250 additional eligible tuples. Rolling selection orders never-attempted tuples
+Each hydrating block selects every eligible tuple the block changed and at
+most 250 additional eligible tuples. The rolling tuples receive the reserved
+quarter of calls before changed work, ordered by their attempt cohort and
+address. Each class is grouped separately: tuples without a size limit fill
+aggregates in request order, limited ones are packed by limit, and aggregates
+are ordered by their earliest member. After the reservation, changed work
+gets the remaining calls before unfinished rolling work. The call and time
+limits of [follow-only hydration](#follow-only-hydration) decide how many of
+them the block reads. Failed children still cooling are skipped before the
+rolling selection, so they cannot hold the oldest cohort in place.
+Rolling selection orders never-attempted tuples
 first, then the least recently attempted group; within a group it uses the
 oldest successful hydration height and stable tuple identity. Attempts use the
-publication generation as a durable ordering value. A failed group advances in
-the rotation and exposes the event-derived baseline, so it does not repeatedly
-starve older waiting groups. These counters never make a failed result readable.
-A completed same-head run performs no extra hydration tick. Subsequent follow
-blocks refresh eligible tuples; replay remains provider-free.
+publication generation as a durable ordering value, `attempt_ordinal`. It only
+orders the rotation. `attempt_limit` is the largest aggregate the tuple may
+next be sent in after its aggregate failed, and `attempt_failures` counts the
+reads in a row that observed no name; both are scheduling state, journalled
+and undone with the row. `hydrated_name`, `attempt_block`, `attempt_hash` and
+`baseline` are the observation: the name, the block it was observed at and the
+selector it was observed for, always written together.
+
+A tuple whose own call failed inside an answered aggregate advances in the
+rotation with a cleared name and a 7,200-block retry delay, so the reader
+serves the event-derived baseline.
+A deferred tuple advances in the rotation too, but keeps its observation: only
+the scheduling columns change, so a tuple that cannot be read does not hold the
+oldest group's place and block the groups behind it, and its name is never
+shown as observed at a block where it was not. A tuple that was not observed
+is not written and keeps its place. These counters never make a failed result
+readable. A completed same-head run performs no extra hydration tick.
+Subsequent head blocks refresh eligible tuples; replay remains provider-free.
+
+A hydrated reverse name is therefore the last name successfully observed for
+the tuple's current reverse node and resolver, served with the block and hash
+it was observed at. It is not a confirmation of the name at the served block:
+an event-silent change made after that block appears only once a later head
+block reads it, and a failed refresh in between keeps the earlier name.
 
 The reader accepts an overlay only while its baseline reverse node and resolver
 still match the current claim and its hydration block remains readable. A
@@ -1647,7 +1873,7 @@ owned family: name identity and binding candidates,
 registration and lease state, wrapper state, registry ownership, resolver
 classification, the registry-node and resource resolver pointers, node and
 record-id records with resolver links, grants and account approvals,
-child edges, reverse tuples and claims, and the address associations. Each row
+ENSv2 registry entries, child edges, reverse tuples and claims, and the address associations. Each row
 belongs to one key and holds what the latest events of that key left, clears
 included: a zero pointer, record id `0` or a revoked grant
 stays a row. A row goes only when nothing remains for its key. Each grant also
@@ -1734,8 +1960,15 @@ any kind of its resource and family, read from the readable interpreted events,
 else an active surface at its node), and the owner the name row serves
 (`control.owner`, the token holder, else the registry owner, and none on a
 released name; lower-cased), which the
-registry labels' `owner` and `exclude_owner` filters read. Every name with a
-surface has a row. The selected arm remains available when an unreadable token
+registry labels' `owner` and `exclude_owner` filters read. It also holds the
+expiry selector of the names-by-expiry listing: `expiry_listable`, whether the
+name composes a supported row whose registration carries a finite expiry, and
+`public_authority`, the public `authority` that row serves; for a listable name
+the stored expiry is the expiry the listing serves, and the listing selects its
+page's names by these fields before it composes any. Every name with a
+surface has a row, including one whose surface stores no raw label bytes. The
+summary holds no name text and its composition reads no label preimage, so an
+imported preimage never changes a stored summary. The selected arm remains available when an unreadable token
 lineage withholds the composed name row: child relations still use that selection,
 while optional name fields remain absent. A list cannot compose those at read for every child of a parent, so
 the name row is composed at read except for this summary, which is
@@ -1775,6 +2008,75 @@ a surface's visibility or a lineage readability flip, are covered because a
 recompute only happens with a code change that rotates the interpreter
 fingerprint, which rebuilds the families. A reorg goes through undo, which
 restores the summaries from the journal.
+
+### ENSv2 registry entries
+
+F16 keeps what an ENSv2 registry's own logs last said about each of its
+entries, so a later reader can turn an operator approval into the tokens it
+covers. An approved operator gets the roles the current token owner holds on a
+token's own resource, and the registry keeps the owner per entry, not per name.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L638-L640 @ ens_v2_sepolia_20261001@07e55a05)
+The permission reader joins approvals to `project_ens_v2_entry_owner`
+([Permissions](#permissions)); no reader uses
+`project_ens_v2_registry_parent` yet.
+
+`project_ens_v2_entry_owner` has one row per `(chain_id, registry,
+entry_key)`. The entry key is the registry's storage slot for a label: the
+token id, resource or labelhash with its low 32 bits, the version, cleared.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/utils/LibLabel.sol:L7-L16 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L677-L693 @ ens_v2_sepolia_20261001@07e55a05)
+The row carries the current `token_id`, the current `upstream_resource` and
+its `resource_id`, the entry's own `expiry`, a `status` and the `owner`, with
+`owner_position` and `resource_position` naming the logs that last set them.
+The reducer reads only the events a registry log produced itself:
+
+| Registry log | Effect on the row |
+| --- | --- |
+| `LabelRegistered` | `status=registered`, `owner` the registrant, `expiry` set, resource cleared until `TokenResource` |
+| `LabelReserved` | `status=reserved`, no owner, `expiry` set, resource cleared |
+| `TokenResource` | `upstream_resource`, `resource_id` and `resource_position` set |
+| `TransferSingle`, `TransferBatch` between two accounts | `status=registered`, `owner` the recipient |
+| `TokenRegenerated` | `token_id` the new id; owner and resource kept |
+| `ExpiryUpdated` | `expiry` set; an `unregistered` entry becomes `reserved` under the log's token id, with the resource cleared |
+| `LabelUnregistered` | `status=unregistered`, no owner, `expiry` the block time |
+
+A mint or burn is not a transfer: the adapter writes no token-control transfer
+for a zero endpoint, so the burn and mint around `TokenRegenerated` keep the
+owner. `unregister` burns the token and sets the entry's expiry to the block
+time; a root renewer can then revive the entry with `renew`, which leaves it
+held with no token, as a reservation is.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L243-L258 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L238 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L517-L546 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L578-L588 @ ens_v2_sepolia_20261001@07e55a05)
+The registry burns nothing when an entry's expiry passes, so the row keeps its
+owner past `expiry`; a reader applies `expiry` at the block it serves. The
+registration, release and expiry events the adapter restates when a name's
+path changes or expires are not registry logs and write nothing here, so the
+row follows the contract and not the name: an entry under a released ancestor
+keeps its row. An entry first seen through a log that names no owner has
+`status=unknown`; a transfer seen before its registration still names the
+owner. A table constraint keeps `owner` null unless `status=registered`.
+
+`project_ens_v2_registry_parent` has one row per `(chain_id, registry)`: the
+`parent` registry and `raw_label_hex` the registry last announced with
+`ParentUpdated`, and `parent_entry_key`, the entry that label has in the
+parent, which is the entry `findOwner` reads. A WrapperRegistry gives its root
+roles to that entry's owner.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L311-L314 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05)
+A cleared parent stays a row with null `parent`. The table does not say which
+registries are WrapperRegistry instances; that needs implementation evidence
+this family does not keep. The permission reader joins retained declared-factory
+origins and uninterrupted known implementation history at the same publication,
+then derives the parent entry owner and that owner's parent-registry approvals
+from these F16 rows and F9. It adds no Project rows or child fanout; see
+[permission semantics](api-v1.md) and [recognition narrowing](upstream.md#wrapperregistry-permission-history).
+
+Both tables are journalled and undone like every family. Schema-migration
+`20261005140000_project_ens_v2_registry_entries.sql` adds them to an existing
+phase schema; they start empty, and the content-hash rotation that ships with
+them rebuilds the families.
 
 ### Publication and resumption
 

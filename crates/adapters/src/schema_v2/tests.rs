@@ -19,6 +19,11 @@ mod record_id_resolver;
 #[path = "tests/resolver_announcements.rs"]
 mod resolver_announcements;
 
+#[path = "tests/v2_registry_operators.rs"]
+mod v2_registry_operators;
+
+#[path = "tests/v1_node_identity.rs"]
+mod v1_node_identity;
 #[path = "tests/v1_pre_surface_resolver.rs"]
 mod v1_pre_surface_resolver;
 
@@ -2093,7 +2098,7 @@ fn wrapper_adapter_expands_the_manifest_wrapper_transition() -> anyhow::Result<(
     assert!(kinds.contains("SurfaceBound"));
     assert!(kinds.contains("AuthorityEpochChanged"));
     assert!(kinds.contains("PreimageObserved"));
-    assert_eq!(output.name_surfaces[0].raw_name, "wrapped.eth");
+    assert_eq!(output.name_surfaces[0].raw_name(), Some("wrapped.eth"));
     // No registrar lease is known for this node, so the wrap records no link; the key is
     // present and null rather than omitted.
     for kind in [
@@ -2332,7 +2337,7 @@ fn hostile_parent_update_retracts_a_bound_descendant_and_records_the_shadow_clai
     let active = output
         .name_surfaces
         .iter()
-        .find(|surface| surface.raw_name == "leaf.sub.eth")
+        .find(|surface| surface.raw_name() == Some("leaf.sub.eth"))
         .expect("the valid mutual claim first binds the descendant");
     assert!(output.binding_closures.iter().any(|closure| {
         closure.logical_name_id == active.logical_name_id && closure.block_number == 6
@@ -4046,7 +4051,10 @@ fn registrar_adapter_emits_raw_namehash_identity_and_preimages() -> anyhow::Resu
             .as_deref()
             .is_some_and(|id| id.starts_with("ens:0x"))
     );
-    assert_eq!(output.name_surfaces[0].raw_labels, ["alice", "eth"]);
+    assert_eq!(
+        output.name_surfaces[0].raw_labels().expect("raw labels"),
+        ["alice", "eth"]
+    );
     assert_eq!(output.surface_bindings.len(), 1);
     assert_eq!(
         output.surface_bindings[0].binding_kind,
@@ -12039,7 +12047,7 @@ fn ens_v2_parent_expiry_retracts_descendant_at_the_block_boundary() -> anyhow::R
     let leaf = first
         .name_surfaces
         .iter()
-        .find(|surface| surface.raw_name == "leaf.sub.eth")
+        .find(|surface| surface.raw_name() == Some("leaf.sub.eth"))
         .expect("descendant surface before parent expiry");
     assert!(
         first
@@ -12710,7 +12718,7 @@ fn reserved_child_on_a_claim_path_keeps_reservation_scope_through_topology_legs(
         output
             .name_surfaces
             .iter()
-            .any(|surface| surface.raw_name == "kid.sub.eth" && surface.block_number == 6),
+            .any(|surface| surface.raw_name() == Some("kid.sub.eth") && surface.block_number == 6),
         "the mutual claim must materialize the reserved child surface"
     );
     assert!(
@@ -13818,7 +13826,7 @@ fn renewed_then_detached_v2_name_retires_equally_after_cold_restore() -> anyhow:
         raw_at(v2_registry::SubregistryUpdated { tokenId: parent_token, subregistry: OTHER77.parse()?, sender }.encode_log_data(), 12, 0, CONTRACT),
     ];
     let (out_setup, sess1) = interpret_test_batch_incremental(input(setup, Vec::new(), Vec::new()), None)?;
-    let leaf = out_setup.name_surfaces.iter().find(|s| s.raw_name == "leaf.sub.eth").expect("leaf.sub.eth binds").logical_name_id.clone();
+    let leaf = out_setup.name_surfaces.iter().find(|s| s.raw_name() == Some("leaf.sub.eth")).expect("leaf.sub.eth binds").logical_name_id.clone();
     let (out_10, sess2) = interpret_test_batch_incremental(input(Vec::new(), Vec::new(), vec![test_block(10)]), Some(sess1))?;
     assert_eq!(out_10.normalized_events.iter().filter(|event| event.event_kind == "RegistrationReleased" && event.logical_name_id.as_deref() == Some(leaf.as_str())).count(), 1);
     let (out_11, sess3) = interpret_test_batch_incremental(input(renew, Vec::new(), Vec::new()), Some(sess2))?;
@@ -18011,7 +18019,7 @@ fn assert_empty_segment_shadow(output: &BatchOutput, namehash: &str, raw_name: &
         .find(|surface| surface.namehash == namehash)
         .expect("empty-segment shadow identity");
     assert_eq!(surface.visibility_state, "shadow");
-    assert_eq!(surface.raw_name, raw_name);
+    assert_eq!(surface.raw_name(), Some(raw_name));
     assert!(
         output
             .label_preimages
@@ -18020,7 +18028,7 @@ fn assert_empty_segment_shadow(output: &BatchOutput, namehash: &str, raw_name: &
         "empty label content must not reach label_preimages"
     );
     assert!(
-        surface.dns_encoded_name.is_empty(),
+        surface.dns_encoded_name().is_some_and(<[u8]>::is_empty),
         "an empty label segment has no valid DNS wire encoding"
     );
 }
@@ -18255,11 +18263,12 @@ fn announced_registry_gains_a_suffix_only_after_mutual_parent_agreement() -> any
         output
             .name_surfaces
             .iter()
-            .any(|surface| surface.raw_name == "leaf.sub.eth")
+            .any(|surface| surface.raw_name() == Some("leaf.sub.eth"))
     );
     assert!(output.surface_bindings.iter().any(|binding| {
         output.name_surfaces.iter().any(|surface| {
-            surface.raw_name == "leaf.sub.eth" && surface.logical_name_id == binding.logical_name_id
+            surface.raw_name() == Some("leaf.sub.eth")
+                && surface.logical_name_id == binding.logical_name_id
         })
     }));
     Ok(())
@@ -18410,7 +18419,7 @@ fn mutual_parent_changes_rebind_and_retract_existing_child_resources() -> anyhow
     let surface = output
         .name_surfaces
         .iter()
-        .find(|surface| surface.raw_name == "leaf.sub.eth")
+        .find(|surface| surface.raw_name() == Some("leaf.sub.eth"))
         .expect("mutual agreement binds the retained child resource");
     assert!(
         output

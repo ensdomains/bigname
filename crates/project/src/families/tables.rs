@@ -50,6 +50,8 @@ tables! {
     RESOURCE_ADMIN_AGGREGATE = "project_resource_admin_aggregate" ["chain_id", "resource_id"];
     ACCOUNT_APPROVAL = "project_account_approval"
         ["chain_id", "authority_kind", "authority_contract", "owner", "subject", "relation_kind"];
+    ENS_V2_ENTRY_OWNER = "project_ens_v2_entry_owner" ["chain_id", "registry", "entry_key"];
+    ENS_V2_REGISTRY_PARENT = "project_ens_v2_registry_parent" ["chain_id", "registry"];
     CHILD_EDGE_CANDIDATE = "project_child_edge_candidate"
         ["chain_id", "namespace", "parent_node", "child_node", "authority_arm"];
     PARENT_SUBREGISTRY = "project_parent_subregistry" ["chain_id", "logical_name_id"];
@@ -62,6 +64,14 @@ tables! {
         ["chain_id", "logical_name_id", "event_identity"];
     NAME_HISTORY = "project_name_history" ["chain_id", "logical_name_id"];
     NAME_SUMMARY = "project_name_summary" ["chain_id", "logical_name_id"];
+    HISTORY_ANCHOR = "project_address_history_anchor"
+        ["chain_id", "address", "anchor_kind", "anchor_id"];
+    HISTORY_SOURCE = "project_history_source"
+        ["chain_id", "source_kind", "source_key", "resolver_address"];
+    HISTORY_EDGE = "project_history_source_edge"
+        ["chain_id", "resource_id", "source_kind", "source_key", "source_resolver",
+         "pointer_event_identity", "link_event_identity"];
+    HISTORY_MARKER = "project_history_catalogue_marker" ["chain_id"];
 }
 
 /// The derived index tables, cleared with the chain and rebuilt from their base rows.

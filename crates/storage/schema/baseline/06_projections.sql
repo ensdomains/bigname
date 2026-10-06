@@ -1329,12 +1329,18 @@ CREATE TABLE IF NOT EXISTS project_node_record_value (
     sibling_address_bytes_hex text,
     raw_name jsonb,
     raw_name_bytes jsonb,
+    hydration_limit integer,
+    hydration_failures integer,
     PRIMARY KEY (chain_id, resolver_address, arm, arm_identity, record_key),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL)),
     CHECK (arm IN ('named', 'native', 'guarded'))
 );
 COMMENT ON TABLE project_node_record_value IS
     'Project-owned node record values of family F6: per partition and record key, the latest record in the canonical event order, with its coin-60 compatibility sibling.';
+COMMENT ON COLUMN project_node_record_value.hydration_limit IS
+    'This value is the largest Multicall3 aggregate hydration may next send the text selector in, left by a read whose aggregate failed as a whole; null when the last read answered the selector or none failed. Scheduling state only.';
+COMMENT ON COLUMN project_node_record_value.hydration_failures IS
+    'This value counts the hydration reads in a row that observed no value for the text selector, a failed aggregate or a failed call; null after a read that observed one. Scheduling state only; a positive count with a null aggregate limit delays a failed child retry by 7,200 blocks.';
 COMMENT ON COLUMN project_node_record_value.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_node_record_value.resolver_address IS
@@ -1537,6 +1543,12 @@ CREATE TABLE IF NOT EXISTS project_grant (
 );
 CREATE INDEX IF NOT EXISTS project_grant_subject_idx ON project_grant (subject);
 CREATE INDEX IF NOT EXISTS project_grant_scope_idx ON project_grant (chain_id, scope);
+CREATE INDEX IF NOT EXISTS project_grant_registry_parent_idx
+    ON project_grant (chain_id, subject, (scope_detail ->> 'registry_address'))
+    WHERE scope = 'root';
+COMMENT ON INDEX project_grant_registry_parent_idx IS
+    'This index finds a virtual parent root grant for one registry without joining all of the parent subject’s registry grants.';
+
 COMMENT ON TABLE project_grant IS
     'Project-owned raw grants of family F8: per resource, subject and scope, the latest PermissionChanged or RootPermissionChanged, unmasked; wrapper masks, grace and expiry retirement apply at read.';
 COMMENT ON COLUMN project_grant.chain_id IS
@@ -1638,7 +1650,7 @@ COMMENT ON TABLE project_account_approval IS
 COMMENT ON COLUMN project_account_approval.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_account_approval.authority_kind IS
-    'This value is registry or wrapper.';
+    'This value is registry (an ENSv1 or Basenames registry), wrapper (the NameWrapper) or ens_v2_registry (an ENSv2 registry).';
 COMMENT ON COLUMN project_account_approval.authority_contract IS
     'This value is the lower-cased authority contract.';
 COMMENT ON COLUMN project_account_approval.owner IS
@@ -1671,6 +1683,118 @@ COMMENT ON COLUMN project_account_approval.inheritance_path IS
     'This value is the after-state inheritance_path.';
 COMMENT ON COLUMN project_account_approval.transfer_behavior IS
     'This value is the after-state transfer_behavior.';
+
+CREATE TABLE IF NOT EXISTS project_ens_v2_entry_owner (
+    chain_id text NOT NULL,
+    registry text NOT NULL,
+    entry_key text NOT NULL,
+    registry_contract_instance_id text,
+    token_id text NOT NULL,
+    upstream_resource text,
+    resource_id uuid,
+    status text NOT NULL,
+    owner text,
+    expiry numeric,
+    owner_position jsonb,
+    resource_position jsonb,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    PRIMARY KEY (chain_id, registry, entry_key),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL)),
+    CHECK (status IN ('registered', 'reserved', 'unregistered', 'unknown')),
+    CHECK (status = 'registered' OR owner IS NULL)
+);
+CREATE INDEX IF NOT EXISTS project_ens_v2_entry_owner_owner_idx
+    ON project_ens_v2_entry_owner (chain_id, owner, registry, entry_key)
+    WHERE owner IS NOT NULL;
+CREATE INDEX IF NOT EXISTS project_ens_v2_entry_owner_resource_idx
+    ON project_ens_v2_entry_owner (chain_id, resource_id)
+    WHERE resource_id IS NOT NULL;
+COMMENT ON TABLE project_ens_v2_entry_owner IS
+    'Project-owned ENSv2 registry entries of family F16: per registry and entry (the labelhash with its 32 version bits cleared), what the registry''s own logs last said about the entry''s token. It follows the contract, not the name: an entry whose own expiry has passed keeps its owner, because the registry burns nothing at expiry, and a name whose path was released keeps its entry. Readers compare expiry with the block they serve.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.registry IS
+    'This value is the lower-cased address of the registry that emitted the logs.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.entry_key IS
+    'This value is the entry: a 32-byte token id, resource or labelhash of the label with its low 32 bits cleared, as 0x and 64 lower-case hex digits.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.registry_contract_instance_id IS
+    'This value is the registry contract instance the latest event carrying one named.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.token_id IS
+    'This value is the token id the latest registry log of the entry named; its low 32 bits are the token version. With status unregistered it is the burned token.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.upstream_resource IS
+    'This value is the resource the registry announced for the current token (TokenResource); its low 32 bits are the role version. Null from a registration or reservation until that log.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.resource_id IS
+    'This value is the bigname resource of upstream_resource; null with it.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.status IS
+    'This value is registered (a token was minted or transferred), reserved (the label is held without a token), unregistered (the token was burned by unregister) or unknown (the first log seen for the entry says nothing about its owner).';
+COMMENT ON COLUMN project_ens_v2_entry_owner.owner IS
+    'This value is the lower-cased token owner while status is registered; null otherwise. Under status unknown null means not known, not the zero address.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.expiry IS
+    'This value is the entry''s own expiry in Unix seconds: from the latest registration, reservation or renewal, or the block time of an unregister. Null when no log has stated it.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.owner_position IS
+    'This value is the position of the registration, reservation, transfer or unregister that last set status and owner.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.resource_position IS
+    'This value is the position of the TokenResource log that set the resource; null with it.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.block_number IS
+    'This value is the block number of the event that last wrote the row.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.transaction_index IS
+    'This value is the transaction index of the event that last wrote the row; null with log_index for a synthesised event.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.log_index IS
+    'This value is the log index of the event that last wrote the row; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.event_identity IS
+    'This value is the event identity of the event that last wrote the row, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_ens_v2_entry_owner.normalized_event_id IS
+    'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON INDEX project_ens_v2_entry_owner_owner_idx IS
+    'This index finds the entries an account owns, by registry, for joining an owner''s operator approvals to the tokens they reach.';
+COMMENT ON INDEX project_ens_v2_entry_owner_resource_idx IS
+    'This index finds the entry of a resource, for reading the current owner of a permission resource.';
+
+CREATE TABLE IF NOT EXISTS project_ens_v2_registry_parent (
+    chain_id text NOT NULL,
+    registry text NOT NULL,
+    parent text,
+    raw_label_hex text,
+    parent_entry_key text,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    PRIMARY KEY (chain_id, registry),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+CREATE INDEX IF NOT EXISTS project_ens_v2_registry_parent_entry_idx
+    ON project_ens_v2_registry_parent (chain_id, parent, parent_entry_key)
+    WHERE parent IS NOT NULL;
+COMMENT ON TABLE project_ens_v2_registry_parent IS
+    'Project-owned ENSv2 registry parents of family F16: per registry, the parent registry and label its latest ParentUpdated named. An ENSv1→ENSv2 migration-created WrapperRegistry gives its root roles to the owner of that label''s entry in the parent, and to that owner''s operators there.';
+COMMENT ON COLUMN project_ens_v2_registry_parent.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_ens_v2_registry_parent.registry IS
+    'This value is the lower-cased address of the registry that emitted ParentUpdated.';
+COMMENT ON COLUMN project_ens_v2_registry_parent.parent IS
+    'This value is the lower-cased parent registry; null when the registry named the zero address.';
+COMMENT ON COLUMN project_ens_v2_registry_parent.raw_label_hex IS
+    'This value is the label bytes the registry named, as lower-case hex without a prefix.';
+COMMENT ON COLUMN project_ens_v2_registry_parent.parent_entry_key IS
+    'This value is the entry of that label in the parent: the keccak-256 of the label bytes with its low 32 bits cleared, the key project_ens_v2_entry_owner uses.';
+COMMENT ON COLUMN project_ens_v2_registry_parent.block_number IS
+    'This value is the block number of the event that last wrote the row.';
+COMMENT ON COLUMN project_ens_v2_registry_parent.transaction_index IS
+    'This value is the transaction index of the event that last wrote the row; null with log_index for a synthesised event.';
+COMMENT ON COLUMN project_ens_v2_registry_parent.log_index IS
+    'This value is the log index of the event that last wrote the row; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_ens_v2_registry_parent.event_identity IS
+    'This value is the event identity of the event that last wrote the row, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_ens_v2_registry_parent.normalized_event_id IS
+    'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON INDEX project_ens_v2_registry_parent_entry_idx IS
+    'This index finds the registries that name a parent entry, for reading which registries an entry''s owner holds root roles on.';
 
 CREATE TABLE IF NOT EXISTS project_child_edge_candidate (
     chain_id text NOT NULL,
@@ -1778,11 +1902,17 @@ CREATE TABLE IF NOT EXISTS project_reverse_tuple (
     attempt_hash text,
     attempt_ordinal bigint,
     baseline jsonb,
+    attempt_limit integer,
+    attempt_failures integer,
     PRIMARY KEY (address, coin_type, namespace),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_reverse_tuple IS
     'Project-owned reverse tuples of family F12: per address, coin type and namespace, the latest ReverseChanged and the latest direct claim, with the hydration result once hydration moves into the block.';
+COMMENT ON COLUMN project_reverse_tuple.attempt_limit IS
+    'This value is the largest Multicall3 aggregate hydration may next send the tuple in, left by a read whose aggregate failed as a whole; null when the last read answered the tuple or none failed. Scheduling state only.';
+COMMENT ON COLUMN project_reverse_tuple.attempt_failures IS
+    'This value counts the hydration reads in a row that observed no name for the tuple, a failed aggregate or a failed call; null after a read that observed one. Scheduling state only; a positive count with a null aggregate limit delays a failed child retry by 7,200 blocks.';
 COMMENT ON COLUMN project_reverse_tuple.address IS
     'This value is the lower-cased address.';
 COMMENT ON COLUMN project_reverse_tuple.coin_type IS
@@ -2134,6 +2264,8 @@ CREATE TABLE IF NOT EXISTS project_name_summary (
     zero_owner boolean NOT NULL,
     recompose_at bigint,
     owner text,
+    expiry_listable boolean NOT NULL,
+    public_authority text,
     PRIMARY KEY (chain_id, logical_name_id)
 );
 COMMENT ON TABLE project_name_summary IS
@@ -2160,20 +2292,21 @@ COMMENT ON COLUMN project_name_summary.recompose_at IS
     'This value is the first second, in Unix seconds, after the block the row was composed at at which the composition can change with no fact changing: a binding interval opening or closing, or a NameWrapper expiry or grace boundary, kept whether or not the name composes a row. The family step composes the name again at the first block whose time reaches it; null when no such second exists. It is a count of seconds, not a timestamp, because a NameWrapper expiry can be any 64-bit word, past the last instant a timestamp holds.';
 COMMENT ON COLUMN project_name_summary.owner IS
     'This value is the owner the composed name row serves: declared_summary.control.owner, else control.registry_owner, lower-cased; null when the first present one is blank or the name composes no row. The registry labels'' owner and exclude_owner filters read it.';
+COMMENT ON COLUMN project_name_summary.expiry_listable IS
+    'This value is whether the expiry listing of GET /v1/names lists the name: it composes a row whose coverage is not unsupported and whose registration carries a finite expiry. For such a row expires_at is the expiry the listing serves and orders by.';
+COMMENT ON COLUMN project_name_summary.public_authority IS
+    'This value is the public authority the composed name row serves (ens_v0, ens_v1 or ens_v2); null when the row serves none (Basenames, an unresolved selection, an ownerless registry row) or the name composes no row. The authority filter of the expiry listing of GET /v1/names selects by it.';
 CREATE INDEX IF NOT EXISTS project_name_summary_recompose_idx
     ON project_name_summary (chain_id, recompose_at)
     WHERE recompose_at IS NOT NULL;
-
--- The composed expiring listing's candidate indexes.
-CREATE INDEX IF NOT EXISTS project_lifecycle_event_expiry_idx
-    ON project_lifecycle_event (expiry_seconds)
-    WHERE expiry_seconds IS NOT NULL;
-CREATE INDEX IF NOT EXISTS project_lifecycle_event_inexact_expiry_idx
-    ON project_lifecycle_event (chain_id)
-    WHERE expiry_seconds IS NULL AND jsonb_typeof(expiry) = 'number';
-CREATE INDEX IF NOT EXISTS project_wrapper_state_expiry_idx
-    ON project_wrapper_state (expiry_seconds)
-    WHERE expiry_seconds IS NOT NULL;
+-- The expiry listing's selectors: a namespace's listable names by expiry, and the same within
+-- one public authority.
+CREATE INDEX IF NOT EXISTS project_name_summary_expiry_idx
+    ON project_name_summary (namespace, expires_at, logical_name_id, chain_id)
+    WHERE expiry_listable AND expires_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS project_name_summary_authority_expiry_idx
+    ON project_name_summary (namespace, public_authority, expires_at, logical_name_id, chain_id)
+    WHERE expiry_listable AND expires_at IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS project_grant_subject_resource_idx
     ON project_grant (subject COLLATE "C", resource_id, scope COLLATE "C");
@@ -2194,10 +2327,13 @@ CREATE TABLE IF NOT EXISTS project_text_hydration_work (
     arm_identity text NOT NULL,
     record_key text NOT NULL,
     hydrated_at_block bigint,
+    hydration_failures integer,
     PRIMARY KEY (chain_id, resolver_address, arm, arm_identity, record_key)
 );
 COMMENT ON TABLE project_text_hydration_work IS
     'Project-owned derived index of text selectors needing hydration or overlay clearing. Rebuilt from affected source keys after publication and undo; contains no provider responses.';
+COMMENT ON COLUMN project_text_hydration_work.hydration_failures IS
+    'This value copies project_node_record_value.hydration_failures. The selector uses it with the source aggregate limit and attempt height to defer failed child retries.';
 CREATE INDEX IF NOT EXISTS project_text_hydration_work_order_idx
     ON project_text_hydration_work (chain_id, hydrated_at_block NULLS FIRST,
         resolver_address, arm, arm_identity, record_key);
@@ -2211,10 +2347,13 @@ CREATE TABLE IF NOT EXISTS project_reverse_hydration_work (
     attempt_ordinal bigint,
     attempt_block bigint,
     successful_at_block bigint,
+    attempt_failures integer,
     PRIMARY KEY (address, coin_type, namespace)
 );
 COMMENT ON TABLE project_reverse_hydration_work IS
     'Project-owned derived index of continuously refreshed reverse tuples and obsolete overlays to clear. Rebuilt from affected source keys after publication and undo; contains no provider responses.';
+COMMENT ON COLUMN project_reverse_hydration_work.attempt_failures IS
+    'This value copies project_reverse_tuple.attempt_failures. The selector uses it with the source aggregate limit and attempt height to defer failed child retries.';
 CREATE INDEX IF NOT EXISTS project_reverse_hydration_work_active_idx
     ON project_reverse_hydration_work (chain_id, attempt_ordinal NULLS FIRST,
         successful_at_block NULLS FIRST, address) WHERE eligible;
@@ -2228,3 +2367,252 @@ CREATE INDEX IF NOT EXISTS project_reverse_node_claim_event_idx
     ON project_reverse_node_claim (chain_id, event_identity);
 CREATE INDEX IF NOT EXISTS project_resource_pointer_hydration_node_idx
     ON project_resource_pointer (chain_id, namespace, namehash);
+
+-- Compact address-history catalogue. See docs/storage.md table ownership.
+
+CREATE TABLE IF NOT EXISTS project_address_history_anchor (
+    chain_id text NOT NULL,
+    address text NOT NULL,
+    namespace text NOT NULL,
+    anchor_kind smallint NOT NULL,
+    anchor_id text NOT NULL,
+    current_mask smallint NOT NULL DEFAULT 0,
+    historical_mask smallint NOT NULL DEFAULT 0,
+    current_resource_id uuid,
+    first_bucket bigint,
+    last_bucket bigint,
+    bucket_range int8range NOT NULL DEFAULT 'empty'::int8range,
+    event_mask bigint NOT NULL DEFAULT 0,
+    key_bloom bit(256) NOT NULL DEFAULT B'0'::bit(256),
+    PRIMARY KEY (chain_id, anchor_kind, anchor_id, address),
+    CHECK (anchor_kind IN (0, 1)),
+    CHECK (current_mask BETWEEN 0 AND 7 AND historical_mask BETWEEN 0 AND 3),
+    CHECK (anchor_kind = 0 OR current_resource_id IS NULL),
+    CHECK ((first_bucket IS NULL) = (last_bucket IS NULL)),
+    CHECK (first_bucket IS NULL OR (first_bucket >= -1 AND last_bucket >= first_bucket)),
+    CHECK (bucket_range = CASE WHEN first_bucket IS NULL THEN 'empty'::int8range
+        ELSE int8range(first_bucket, last_bucket + 1, '[)') END),
+    CHECK (event_mask >= 0)
+);
+
+COMMENT ON TABLE project_address_history_anchor IS
+    'Project-owned exact current/historical address membership by logical name or resource. Semantic and pruning fields are journalled together by their owning chain; undo restores both atomically. No event IDs or payloads are copied per address.';
+
+COMMENT ON COLUMN project_address_history_anchor.chain_id IS
+    'The owning chain of this catalogue fact.';
+
+COMMENT ON COLUMN project_address_history_anchor.address IS
+    'The lower-case related address.';
+
+COMMENT ON COLUMN project_address_history_anchor.namespace IS
+    'The namespace of the qualifying membership evidence.';
+
+COMMENT ON COLUMN project_address_history_anchor.anchor_kind IS
+    'Anchor encoding: 0 logical name, 1 resource.';
+
+COMMENT ON COLUMN project_address_history_anchor.anchor_id IS
+    'The stable logical-name ID or resource UUID text, according to anchor_kind.';
+
+COMMENT ON COLUMN project_address_history_anchor.current_mask IS
+    'Exact current relation bits: owner 1, effective controller 2, role holder 4.';
+
+COMMENT ON COLUMN project_address_history_anchor.historical_mask IS
+    'Exact historical relation bits: owner 1, effective controller 2, independent of current reasons.';
+
+COMMENT ON COLUMN project_address_history_anchor.current_resource_id IS
+    'For a logical-name row, its selected current resource; these name rows are the provenance of resource current membership.';
+
+COMMENT ON COLUMN project_address_history_anchor.first_bucket IS
+    'The earliest conservative candidate bucket, block divided by 256 or -1 for unpositioned events; null only for an empty envelope.';
+
+COMMENT ON COLUMN project_address_history_anchor.last_bucket IS
+    'The latest conservative candidate bucket; null only for an empty envelope.';
+
+COMMENT ON COLUMN project_address_history_anchor.bucket_range IS
+    'The inclusive first/last candidate buckets encoded as half-open int8range; empty when no candidate source is known.';
+
+COMMENT ON COLUMN project_address_history_anchor.event_mask IS
+    'Frozen event-kind bit union; unknown kinds are all-matching. A missing bit proves absence only.';
+
+COMMENT ON COLUMN project_address_history_anchor.key_bloom IS
+    '256-bit negative record-key summary: exact UTF-8 key MD5 bytes 0,5,10,15 select bits; resets and unknown kinds match every key.';
+
+CREATE TABLE IF NOT EXISTS project_history_source (
+    chain_id text NOT NULL,
+    source_kind smallint NOT NULL,
+    source_key text NOT NULL,
+    resolver_address text NOT NULL DEFAULT '',
+    first_bucket bigint,
+    last_bucket bigint,
+    bucket_range int8range NOT NULL DEFAULT 'empty'::int8range,
+    event_mask bigint NOT NULL DEFAULT 0,
+    key_bloom bit(256) NOT NULL DEFAULT B'0'::bit(256),
+    PRIMARY KEY (chain_id, source_kind, source_key, resolver_address),
+    CHECK (source_kind BETWEEN 0 AND 3),
+    CHECK (source_kind = 3 OR resolver_address = ''),
+    CHECK ((first_bucket IS NULL) = (last_bucket IS NULL)),
+    CHECK (first_bucket IS NULL OR (first_bucket >= -1 AND last_bucket >= first_bucket)),
+    CHECK (bucket_range = CASE WHEN first_bucket IS NULL THEN 'empty'::int8range
+        ELSE int8range(first_bucket, last_bucket + 1, '[)') END),
+    CHECK (event_mask >= 0)
+);
+
+COMMENT ON TABLE project_history_source IS
+    'Project-owned shared event-source bounds and negative filter summaries, one row per chain/name, resource, node, or resolver/record ID. Journalled by the source chain; empty sources retain a reachable key without event rows.';
+
+COMMENT ON COLUMN project_history_source.chain_id IS
+    'The owning chain of this catalogue fact.';
+
+COMMENT ON COLUMN project_history_source.source_kind IS
+    'Source encoding: 0 logical name, 1 resource, 2 node records, 3 resolver record-ID writes.';
+
+COMMENT ON COLUMN project_history_source.source_key IS
+    'Stable name ID, resource UUID text, lower-case node, or record ID according to source_kind.';
+
+COMMENT ON COLUMN project_history_source.resolver_address IS
+    'Lower-case resolver for a record-ID source, empty for other source kinds.';
+
+COMMENT ON COLUMN project_history_source.first_bucket IS
+    'The earliest conservative candidate bucket, block divided by 256 or -1 for unpositioned events; null only for an empty envelope.';
+
+COMMENT ON COLUMN project_history_source.last_bucket IS
+    'The latest conservative candidate bucket; null only for an empty envelope.';
+
+COMMENT ON COLUMN project_history_source.bucket_range IS
+    'The inclusive first/last candidate buckets encoded as half-open int8range; empty when no candidate source is known.';
+
+COMMENT ON COLUMN project_history_source.event_mask IS
+    'Frozen event-kind bit union; unknown kinds are all-matching. A missing bit proves absence only.';
+
+COMMENT ON COLUMN project_history_source.key_bloom IS
+    '256-bit negative record-key summary: exact UTF-8 key MD5 bytes 0,5,10,15 select bits; resets and unknown kinds match every key.';
+
+CREATE TABLE IF NOT EXISTS project_history_source_edge (
+    chain_id text NOT NULL,
+    resource_id uuid NOT NULL,
+    source_kind smallint NOT NULL,
+    source_key text NOT NULL,
+    source_resolver text NOT NULL DEFAULT '',
+    pointer_event_identity text NOT NULL,
+    link_event_identity text NOT NULL DEFAULT '',
+    pointer_resolver text NOT NULL,
+    node text NOT NULL,
+    pointer_block_number bigint,
+    link_block_number bigint,
+    first_bucket bigint,
+    last_bucket bigint,
+    bucket_range int8range NOT NULL DEFAULT 'empty'::int8range,
+    event_mask bigint NOT NULL DEFAULT 0,
+    key_bloom bit(256) NOT NULL DEFAULT B'0'::bit(256),
+    PRIMARY KEY (chain_id, resource_id, source_kind, source_key, source_resolver,
+        pointer_event_identity, link_event_identity),
+    CHECK (source_kind IN (2, 3)),
+    CHECK ((source_kind = 2 AND source_resolver = '' AND link_event_identity = '')
+        OR (source_kind = 3 AND source_resolver <> '' AND link_event_identity <> '')),
+    CHECK ((first_bucket IS NULL) = (last_bucket IS NULL)),
+    CHECK (first_bucket IS NULL OR (first_bucket >= -1 AND last_bucket >= first_bucket)),
+    CHECK (bucket_range = CASE WHEN first_bucket IS NULL THEN 'empty'::int8range
+        ELSE int8range(first_bucket, last_bucket + 1, '[)') END),
+    CHECK (event_mask >= 0)
+);
+
+COMMENT ON TABLE project_history_source_edge IS
+    'Project-owned conservative resolver-source reachability per resource and pointer/link evidence. Edges discover candidates; exact history attribution decides membership. No pointer-start lower bound is implied.';
+
+COMMENT ON COLUMN project_history_source_edge.chain_id IS
+    'The owning chain of this catalogue fact.';
+
+COMMENT ON COLUMN project_history_source_edge.resource_id IS
+    'The owning-chain resource whose history may reach this source.';
+
+COMMENT ON COLUMN project_history_source_edge.source_kind IS
+    'Source encoding: 0 logical name, 1 resource, 2 node records, 3 resolver record-ID writes.';
+
+COMMENT ON COLUMN project_history_source_edge.source_key IS
+    'Stable name ID, resource UUID text, lower-case node, or record ID according to source_kind.';
+
+COMMENT ON COLUMN project_history_source_edge.source_resolver IS
+    'The reached source resolver key; empty for a node source.';
+
+COMMENT ON COLUMN project_history_source_edge.pointer_event_identity IS
+    'The stable ResolverChanged identity that supplies this conservative reachability reason.';
+
+COMMENT ON COLUMN project_history_source_edge.link_event_identity IS
+    'The stable ResolverRecordLinked identity for a record-ID source, empty for a node source.';
+
+COMMENT ON COLUMN project_history_source_edge.pointer_resolver IS
+    'The pointer resolver address, also used for reverse link propagation.';
+
+COMMENT ON COLUMN project_history_source_edge.node IS
+    'The pointer surface node; both this node and zero-node links can supply record-ID sources.';
+
+COMMENT ON COLUMN project_history_source_edge.pointer_block_number IS
+    'The pointer evidence block, null when unpositioned; it never imposes a source start bound.';
+
+COMMENT ON COLUMN project_history_source_edge.link_block_number IS
+    'The link evidence block, null for an absent or unpositioned link.';
+
+COMMENT ON COLUMN project_history_source_edge.first_bucket IS
+    'The earliest conservative candidate bucket, block divided by 256 or -1 for unpositioned events; null only for an empty envelope.';
+
+COMMENT ON COLUMN project_history_source_edge.last_bucket IS
+    'The latest conservative candidate bucket; null only for an empty envelope.';
+
+COMMENT ON COLUMN project_history_source_edge.bucket_range IS
+    'The inclusive first/last candidate buckets encoded as half-open int8range; empty when no candidate source is known.';
+
+COMMENT ON COLUMN project_history_source_edge.event_mask IS
+    'Frozen event-kind bit union; unknown kinds are all-matching. A missing bit proves absence only.';
+
+COMMENT ON COLUMN project_history_source_edge.key_bloom IS
+    '256-bit negative record-key summary: exact UTF-8 key MD5 bytes 0,5,10,15 select bits; resets and unknown kinds match every key.';
+
+CREATE TABLE IF NOT EXISTS project_history_catalogue_marker (
+    chain_id text PRIMARY KEY,
+    block_number bigint NOT NULL,
+    block_hash text NOT NULL,
+    publication_sequence bigint NOT NULL,
+    input_content_hash text NOT NULL,
+    catalogue_version smallint NOT NULL,
+    CHECK (block_number >= 0 AND publication_sequence >= 0),
+    CHECK (catalogue_version = 1)
+);
+
+COMMENT ON TABLE project_history_catalogue_marker IS
+    'Project-owned completeness stamp published atomically with the family marker and catalogue. A reader requires the captured family publication and matching catalogue version, sequence, position and input hash.';
+
+COMMENT ON COLUMN project_history_catalogue_marker.chain_id IS
+    'The owning chain of this catalogue fact.';
+
+COMMENT ON COLUMN project_history_catalogue_marker.block_number IS
+    'The exact family publication block whose catalogue is complete.';
+
+COMMENT ON COLUMN project_history_catalogue_marker.block_hash IS
+    'The exact family publication block hash.';
+
+COMMENT ON COLUMN project_history_catalogue_marker.publication_sequence IS
+    'The current family sequence, including undo/replay generations at the same block.';
+
+COMMENT ON COLUMN project_history_catalogue_marker.input_content_hash IS
+    'The semantic input hash of the family publication.';
+
+COMMENT ON COLUMN project_history_catalogue_marker.catalogue_version IS
+    'The frozen catalogue layout/encoding version; currently 1.';
+
+CREATE INDEX IF NOT EXISTS project_address_history_first_idx ON project_address_history_anchor (address, namespace, first_bucket);
+
+CREATE INDEX IF NOT EXISTS project_address_history_last_idx ON project_address_history_anchor (address, namespace, last_bucket);
+
+CREATE INDEX IF NOT EXISTS project_address_history_any_first_idx ON project_address_history_anchor (address, first_bucket);
+
+CREATE INDEX IF NOT EXISTS project_address_history_any_last_idx ON project_address_history_anchor (address, last_bucket);
+
+CREATE INDEX IF NOT EXISTS project_address_history_overlap_idx ON project_address_history_anchor USING gist (address, bucket_range);
+
+CREATE INDEX IF NOT EXISTS project_address_history_historical_names_idx ON project_address_history_anchor (address, anchor_id) WHERE anchor_kind = 0 AND historical_mask <> 0;
+
+CREATE INDEX IF NOT EXISTS project_address_history_current_resource_idx ON project_address_history_anchor (chain_id, current_resource_id) WHERE current_resource_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS project_history_edge_source_idx ON project_history_source_edge (chain_id, source_kind, source_key, source_resolver);
+
+CREATE INDEX IF NOT EXISTS project_history_edge_resolver_node_idx ON project_history_source_edge (chain_id, pointer_resolver, node);

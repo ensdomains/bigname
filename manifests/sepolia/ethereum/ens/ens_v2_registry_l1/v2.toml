@@ -136,3 +136,26 @@ name = "Upgraded"
 fragment = "event Upgraded(address indexed implementation)"
 emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "Upgraded"]
+
+# Each registry keeps its own ERC-1155 owner-to-operator approvals, and an approved operator
+# gets the roles the current token owner holds on a token's own resource.
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/erc1155/ERC1155Singleton.sol:L73-L75 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+# A standard approval declaration: the list stays empty and the adapter maps the event to
+# AccountPermissionChanged. It is an ordinary family-wide event, so discovered user and
+# ENSv1→ENSv2 migration-created registries are watched as well as the declared ETHRegistry.
+# start_block bounds the family-wide watch entry of the compiled watch plan, and so the Ingest
+# redo that adding this event requires. It is a bigname coverage decision, not a deployment
+# fact: 10893181 is the earliest block at which a registry admitted under this manifest starts
+# on the retained Sepolia database, where discovery admits registries created before this
+# deployment's own contracts (docs/manifests.md, "Watch-plan expansion", says how to
+# re-derive it).
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ETHRegistry.json:L362 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UserRegistryImpl.json:L425 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/WrapperRegistryImpl.json:L520 @ ens_v2_sepolia_20261001@07e55a05)
+[[abi.events]]
+name = "ApprovalForAll"
+fragment = "event ApprovalForAll(address indexed account, address indexed operator, bool approved)"
+emitter_roles = ["registry"]
+normalized_events = []
+start_block = 10893181

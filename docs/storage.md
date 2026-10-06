@@ -130,6 +130,103 @@ surface-to-resource changes remain reconstructible through `surface_bindings`.
 Canonical display text is derived from verified preimages and normalization
 state; it is never identity.
 
+### Name identity and raw evidence
+
+A `name_surfaces` row is a node's [name surface](glossary.md#surface-name-surface).
+Its identity columns are always present: `logical_name_id`, `namehash`, and
+`labelhashes`, the complete verified label-hash path, leaf first. `block_hash`,
+`block_number` and `provenance` anchor the first canonical observation that
+established the node.
+
+The raw bytes of its labels are optional evidence, stored as one bundle:
+`raw_name`, `raw_labels` and `dns_encoded_name` are all present or all NULL.
+A row whose bytes are not all known stores NULL in all three, never an empty
+string, an empty array or the DNS encoding of the root; it is always `active`
+with no normalization errors, because unknown bytes have no normalization
+verdict. `preimage_event_identity` names the row's
+[preimage witness](glossary.md#preimage-witness), the `event_identity` of the
+earliest canonical `PreimageObserved` event of that name, and is NULL whenever
+the bundle is. It is the deterministic event identity, not the sequence-assigned
+`normalized_event_id`, and is not a foreign key, because a redo deletes and
+rewrites its range's events. The `name_surfaces_raw_evidence_check` constraint
+holds these rules.
+
+A byte-oriented shadow whose observed bytes have no PostgreSQL-safe text
+decoding stores an empty `raw_name` and empty `raw_labels`, its complete verified
+`labelhashes` path, a nonempty `preimage_event_identity`, and DNS wire bytes where
+those bytes can be encoded. Its `PreimageObserved.raw_labels_hex` remains the
+recoverable evidence even when DNS encoding is unavailable. This narrow shadow
+shape is separate from active raw-backed rows, whose raw-label and hash-path
+cardinalities must agree, and from identities whose bytes are unknown. Hashes
+are computed from the raw bytes before decoding. Legacy empty paths are repaired
+with their byte evidence by full Interpret re-derivation, never a path-only SQL
+backfill. A structural observation cannot reactivate a known byte shadow.
+
+Interpret's surface writer accepts a second observation of a stored surface
+when the namespace, namehash, label-hash path and chain match and, where both
+sides carry raw bytes, the bytes match too. An observation with raw bytes
+enriches a row that has none and takes the incoming normalization verdict; an
+observation without them leaves stored bytes, witness and verdict alone. When
+one batch observes a name's bytes more than once in a block, the writer stores
+the earliest of those events by transaction and log position as the witness,
+whichever observation it writes first. The
+identity anchor moves on its own rule, to a strictly earlier observation or
+onto an orphaned row, whichever kind of observation arrives. Anything else is
+a data-integrity error.
+
+An event establishes a surface without raw bytes by carrying
+`name_identity_observed: true` in its `after_state` and naming the surface.
+The ENSv1 registry adapter emits it on `SubregistryChanged` for admitted
+`NewOwner` observations whose complete path is proven from the root or a known
+full path; the event also retains `labelhashes`. The identity is known before
+ownership and resolver attribution for the log. That event uses a dedicated
+retained state scope, so later authority changes cannot replace its evidence.
+State restore and redo re-anchoring accept it as an identity observation, as
+they accept `PreimageObserved`. Neither a transfer, a resolver log, a query nor
+an imported preimage establishes missing ancestry. Cold and incremental restore
+retain structural and byte evidence separately: surviving invalid-byte evidence
+wins regardless of observation order, while removal of the final byte witness
+can recover a surviving identity without bytes. This evidence belongs to the
+same namespace and node across admitted source families: an ENSv2 named
+`PreimageObserved` shadow also suppresses later ENSv1 structural control claims.
+Only the explicitly witnessed node's complete path is retained as an ancestor
+anchor; no suffix ancestor is inferred from a descendant's path. This leaves
+node-local restoration independent of descendant enumeration.
+
+The readers serve a row without raw bytes. The name compositor reads every
+`active` surface whose `raw_name` is not the empty string, so it composes a
+[name row](glossary.md#composed-name-row) for a row whose `raw_name` is NULL
+as it does for one with a name, and every reader that asks whether a node has
+a name row applies the same test, so no node is served both by its name row
+and by a reader for nodes without one. The row is served under its
+[rendered name](glossary.md#rendered-name), computed at read time from
+`labelhashes` and `label_preimages`: each label is its `decoded_label` when
+that is present and `normalized_under_version` is true, else
+`[<64 lowercase hex digits of the labelhash>]`. A row with raw bytes is served
+under `raw_name` and the read does not consult `label_preimages` for it. The
+composition Project's name summary step shares uses only the bracketed form
+and reads no label preimage, and the summary stores no name text, so a
+preimage import changes the served name on the next read and changes no
+stored row. The same rendered name orders such a row in name-sorted lists,
+names it as a parent of its children, and is what the `parent` and `q` filters
+compare.
+
+Where a name sits relative to the registrars (a `.eth` second-level name, a
+name below one, or a Basenames second-level name) is read from `labelhashes`
+for every surface, not from name text. That placement selects the registrar
+grace period and resolver withholding a name is composed with, so a surface
+without raw bytes is placed as the same node with bytes would be. The mirror
+walks compare a surface with a walked label suffix by raw labels when both
+sides store them and by lower-cased label hashes when either does not.
+
+The normalization-flag recompute (`phase-runner redo --phase recompute-flags`)
+gives a row without raw bytes no verdict: it stays `active` with no errors and
+only takes the current normalizer version. When it newly rejects a row's
+bytes, `deactivated_at` comes from the row's anchor, or from its preimage
+witness when that event lies after the anchor: in a later block, or at a later
+log index in the anchor's block. A rainbow-table import never fills
+the raw bundle; it writes `label_preimages` only.
+
 ### Binding intervals and authority arms
 
 Every `surface_bindings` row stores a non-null `authority_arm` with one of the
@@ -226,7 +323,7 @@ latency still require production-scale qualification before activation.
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or [discovery edges](glossary.md#discovery-graph--discovery-edge). The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `child_registration_events` | Project | Historical membership of each name's [direct child registration](glossary.md#direct-child-registration) events, rebuildable from canonical interpreted input; name history selects rows through it and reads the events themselves from `normalized_events`. |
 | `project_family_marker`, `project_family_undo`, `project_repair_record` and [owned key family tables](glossary.md#per-block-publication) | Project | Permanent current serving state, publication generation, undo journal and repair progress. Readers compose names, records, control, permissions, resolver collections, reverse claims and address relations from one family snapshot. Child lists and counts use `project_child_edge_candidate`, `project_parent_subregistry` and `project_name_summary`; the `GET /v1/names` expiry walk reads `project_name_summary.authority_arm` to skip names an `authority` filter cannot list. An unavailable marker or overlapping redo refuses composed reads. Family data is rebuildable from canonical interpreted input; hash-pinned hydration overlays follow the documented replay policy. |
-| `project_text_hydration_work`, `project_reverse_hydration_work` | Project | Derived indexes of pending text hydration and continuously refreshed reverse tuples. Keyed like their source rows, with indexed attempt order. Publication and undo refresh affected keys transactionally; reset clears them and rebuild repopulates them. No provider payloads or separate history. |
+| `project_text_hydration_work`, `project_reverse_hydration_work` | Project | Derived indexes of pending text hydration and continuously refreshed reverse tuples. Keyed like their source rows, with indexed attempt order. The order is scheduling state only: `project_reverse_tuple.attempt_ordinal` can advance while the tuple's name and the block it was observed at (`hydrated_name`, `attempt_block`, `attempt_hash`, `baseline`) stay. The source rows also carry the largest Multicall3 aggregate a selector may next be sent in after its aggregate failed (`attempt_limit`, `hydration_limit`) and the count of reads in a row that observed nothing (`attempt_failures`, `hydration_failures`, copied into the work indexes). Selection uses a positive failure count, a null aggregate limit and the attempt height to delay an individually failed child's retry by 7,200 blocks; outer failures retain their split scheduling. Fresh selector evidence clears obsolete limits and counts. They are journalled and undone with their row. Publication and undo refresh affected keys transactionally; reset clears them and rebuild repopulates them. No provider payloads or separate history. |
 | `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner; manifest synchronization may stamp or widen required Ingest redo work recorded by the [manifest-authority marker](glossary.md#manifest-authority-marker), and Interpret may stamp discovery-owned required Ingest work in the transaction that finalizes a completed pass | Phase progress, repair work, and runtime liveness. Both coordination writers use the shared required-Ingest installer under the existing synchronization and runner phase-exclusion rules. They preserve lifecycle backup fields, clear resumable evidence for genuinely new demand, and never execute the redo. The phase runner remains the sole executor and redo authority. |
 | `resolution_divergences` | guarded non-API lookup functions; Project publication may only clear outdated direct observations | Active live/indexed resolver disagreements and retained observations retired after the exact resolver becomes null; diagnostic only. |
 
@@ -285,7 +382,9 @@ the page context's read-only snapshot and the surrounding redo fence. No normali
 updated, inserted or newly exposed as a history row.
 
 `project:families.hydrate.text.select` reads changed selector keys and the ordered share from
-`project_text_hydration_work_order_idx`. The reverse selector uses
+`project_text_hydration_work_order_idx`. Its reserved old-work scan checks eligibility through
+keyed source and dependency probes before limiting the share; inactive overlays retain their
+ordinary cleanup path. The reverse selector uses
 `project_reverse_hydration_work_active_idx` and `_stale_idx` before joining tuple state.
 `project:families.hydrate.reverse.keys` finds dependents through
 `project_reverse_tuple_node_idx`, `project_reverse_tuple_claim_idx`, and
@@ -309,12 +408,49 @@ candidates under a parent whose current subregistry is that registry, and evalua
 ENSv1 and Basenames edges only for those children, since another arm can only refuse a child
 that also has an ENSv2 candidate.
 
+The permission reader adds four read-only indexes on Interpret-owned
+`normalized_events`, installed by schema-migration
+`20261005200000_registry_permission_history_indexes.sql` and the phase baseline.
+`registry_support_origins` uses `normalized_events_registry_origin_idx` to
+seek at most two canonical factory origins by chain/proxy and semantic event
+order. `registry_support_announcements` uses
+`normalized_events_registry_announcement_idx` to seek at most two ordinary
+`RegistryCreated` facts by chain/emitter and block/log/identity order. Its literal
+family, event-kind, activated-visibility and readable-canonicality predicate
+avoids scanning unrelated registry history, including when no announcement exists.
+`registry_support_departure` uses
+`normalized_events_wrapper_departure_idx` or
+`normalized_events_user_registry_departure_idx` for a `NOT EXISTS`-equivalent
+probe of canonical upgrades away from the exact supported implementation.
+Their literal partial predicates match the production queries under generic
+plans, include malformed/null targets, and deliberately do not filter consumer
+visibility. They change no Interpret row. A same-code upgrade contributes to
+the other model's sparse index only; other upgrades contribute to both.
+The F16 reverse parent-entry index finds only registries associated with an
+ownership/approval candidate. The same schema-migration adds
+`project_grant_registry_parent_idx` on Project-owned `project_grant`: chain,
+subject and the root grant’s registry address, restricted to root grants.
+Each candidate probes its virtual parent’s grant on that one registry, avoiding
+a join against every child registry for which the parent holds root roles.
+The new candidate arms expose ordinary owner/subject equality alongside the
+public bytewise key order so existing ownership/approval indexes remain usable.
+No new projected classification or holder rows are stored. The concurrent
+prebuild validates each index against its actual relation; a populated
+`project_grant` requires its own prebuilt index even when `normalized_events`
+is empty. API startup already requires `project_grant`; its deployment grant
+list additionally requires
+`project_ens_v2_registry_parent` for this reader.
+
 Family indexes serve these concrete readers:
 
-- Expiring names use `project_lifecycle_event_expiry_idx`,
-  `project_lifecycle_event_inexact_expiry_idx` and `project_wrapper_state_expiry_idx`;
-  resolver-bound names use `project_named_resource_pointer_resolver_idx` and
-  `project_registry_pointer_resolver_idx`.
+- Expiring names select from the name summary's expiry selector through
+  `project_name_summary_expiry_idx` (a namespace's listable names by expiry) and
+  `project_name_summary_authority_expiry_idx` (the same within one public authority), joined
+  to `name_surfaces` by its primary key for the name order within one expiry. A name is
+  ordered, matched against `parent` and continued by its served name: its raw name, or for a
+  surface that stores no raw bytes the name built from its label hashes, the same text its
+  composed row carries. The family step maintains both indexes. Resolver-bound names use `project_named_resource_pointer_resolver_idx`
+  and `project_registry_pointer_resolver_idx`.
 - Name-summary recomposition uses `project_name_summary_recompose_idx`,
   `project_binding_candidate_predecessor_idx`, `project_binding_candidate_lease_idx`,
   `project_lifecycle_association_target_idx` and `project_registry_owner_event_resource_idx`;
@@ -350,7 +486,24 @@ Family indexes serve these concrete readers:
   there. A `LIKE` prefix becomes an index range only on a database whose collation PostgreSQL
   recognises as C (`C` or `POSIX`); under any other collation it filters the ordered scan. The
   reverse lookup candidates (`storage:families.records.reverse_candidates`) keep long names and
-  start from `project_address_name_index`.
+  start from `project_address_name_index`. They order and continue by name, namespace and
+  namehash under `COLLATE "C"`, on any database: the reverse page then drops the names at or
+  before its cursor by comparing the same keys as bytes, and the route builds its cursor the
+  same way, so a database collation that orders names differently from their bytes would
+  otherwise skip names between pages. Search and bound names order, filter and continue in
+  SQL alone, under the database collation throughout.
+- Each of those three walks runs its statement for the surfaces with raw bytes as the first
+  arm of a `UNION ALL`; for search and bound names that statement's text is unchanged. The second arm walks the surfaces without raw bytes: it
+  computes each one's [rendered name](glossary.md#rendered-name) before its `LIMIT`, applies
+  the same filters and keyset cursor to that name, and has no length bound. The two arms are
+  merged in served-name order. The second arm is guarded by a test that any surface without
+  raw bytes exists; the test reads no column of the statement around it, so it runs once, and
+  the arm is not executed when it is false. The test steps through the namespaces and, for
+  each, probes `name_surfaces_project_suffix_hash_idx`, whose expression
+  `hash_array_extended(raw_labels, 0)` is NULL exactly for a row without raw bytes; the arm
+  can reach its rows through the same index when the statement names the namespace. With no
+  such surface the cost is those probes. The cost of rendering before `LIMIT` with a large
+  population of such surfaces has not been measured.
 - The address-names walk (`storage:families.records.address_name_walk`) orders one address's
   candidate names, read from `project_address_name_index` by its primary key, by their sort
   key: the `name_surfaces` and `project_name_summary` primary keys, one probe per candidate,
@@ -360,6 +513,15 @@ Family indexes serve these concrete readers:
 - Permission pages use `project_grant_subject_idx`, `project_grant_scope_idx`,
   `project_account_approval_subject_idx`, `project_registry_binding_observation_resource_idx`
   and `project_registry_binding_observation_owner_idx`.
+- The [ENSv2 registry entry](projections.md#ensv2-registry-entries) tables carry the indexes
+  the registry operator read will use and no reader uses yet:
+  `project_ens_v2_entry_owner_owner_idx` `(chain_id, owner, registry, entry_key)` over rows
+  with an owner, from an approval's owner to the entries it owns in the approving registry;
+  `project_ens_v2_entry_owner_resource_idx` `(chain_id, resource_id)` over rows with a
+  resource, from a served resource to its entry; and
+  `project_ens_v2_registry_parent_entry_idx` `(chain_id, parent, parent_entry_key)` over rows
+  with a parent, from a parent entry to the registries that name it. Schema-migration
+  `20261005140000_project_ens_v2_registry_entries.sql` adds the two tables and these indexes.
 - The composed name reader's resource pointer lookup
   (`storage:families.name.resource_pointers`) can probe `project_resource_pointer_pkey` by
   resource and the partial `project_resource_pointer_root_node_idx` (ENSv2 root registry
@@ -397,6 +559,12 @@ row:
 | --- | --- |
 | `name_surfaces_name_order_idx` | `storage:families.name.search_candidates` and `storage:families.name.bound_candidates`: readable surfaces in name order after the keyset cursor |
 
+The same readers, and `storage:families.records.reverse_candidates`, also read
+`name_surfaces_project_suffix_hash_idx`, which the identity baseline and
+`20260923140000_project_name_surfaces_label_indexes.sql` install on
+`(namespace, hash_array_extended(raw_labels, 0))`. They use it to find the surfaces that
+store no raw bytes, whose indexed expression is NULL, and to learn that none exists.
+
 History's record attribution (`crates/storage/src/history/attribution`) adds two read-only
 indexes on `normalized_events`, installed by the normalized-events baseline and
 `20261003120000_normalized_events_record_id_attribution_indexes.sql` and changing no row:
@@ -405,6 +573,48 @@ indexes on `normalized_events`, installed by the normalized-events baseline and
 | --- | --- |
 | `normalized_events_record_id_write_idx` | `push_record_link_arm` in `history/attribution/sql.rs`: a selected record's `RecordChanged` writes by chain, resolver and record id |
 | `normalized_events_record_id_link_idx` | the `links` CTE of `push_record_link_ctes` in `history/attribution/sql.rs`: the `ResolverRecordLinked` rows on a pointer's chain and resolver at its node or the zero node |
+
+The Project [address-history catalogue](glossary.md#address-history-catalogue) adds no event
+payload copies. Its chain-owned
+`project_address_history_anchor` rows pack independent current and historical address/name
+or address/resource relations; current name rows retain their selected resource after
+Project validates the cited relation position. `project_history_source` holds shared source bounds and conservative
+event-kind/record-key summaries. `project_history_source_edge` records resource-to-resolver
+source reachability and pointer/link provenance. Project journals these facts and writes
+`project_history_catalogue_marker` in the same transaction as its family publication.
+The reader requires the catalogue version, content hash, publication sequence and block/hash
+to match the captured family publication. Missing or incomplete catalogue state is stale.
+An ordinary publication between API admission and the read snapshot retains the original
+bound through the authoritative history reader in that same transaction.
+
+The catalogue migration replaces four existing normalized-event index definitions, preserving
+their equality prefixes and readable-row predicates. On populated databases it adopts
+validated [concurrent prebuilds](../ops/address-history-catalogue-indexes/README.md) by name;
+it refuses missing candidates before dropping any old index. Their order suffix is the full public
+history comparator, so a bounded source prefix needs no complete source-history sort:
+
+| Index | Additional statement served |
+| --- | --- |
+| `normalized_events_name_history_idx` | `history/address_walk/catalogue_source.rs`: direct events for one logical name |
+| `normalized_events_resource_history_idx` | the same reader: direct events for one resource |
+| `normalized_events_project_node_history_idx` | the same reader and `project:history.source_envelopes`: chain/node record events |
+| `normalized_events_record_id_write_idx` | the same reader and `project:history.source_envelopes`: chain/resolver/record-ID writes |
+
+The new suffix keeps block, chain where not fixed, block hash, transaction, log and event
+identity order, including null placement. Existing Project and Interpret consumers retain
+their leading name/resource/node/record-ID probes. The replaced indexes are not kept as
+duplicates. Catalogue masks and 256-block ranges only reject impossible candidates; exact
+relation, duplicate and record attribution checks still decide returned events and counts.
+
+Conservative catalogue work discovery also visits noncanonical events: a retired or no longer
+readable fact can still identify a key whose old membership needs removal. Two complementary
+indexes, `normalized_events_history_discovery_name_idx` and
+`normalized_events_history_discovery_resource_idx`, contain only named/resource events outside
+canonical, safe and finalized states, keyed by chain, name/resource and block. Discovery keeps
+the two state branches keyed before applying its publication/NULL bound, avoiding repeated
+reads of unrelated unpositioned manifest history. This reads all retained history of each
+touched key, including future events rejected by that bound; repeated early rebuild ranges
+can revisit a deep key's future suffix. The indexes add no canonical entries or stored facts.
 
 Address history (`crates/storage/src/history/filters.rs`) adds one read-only index on
 `normalized_events` for its registry root role branch, installed by the normalized-events
@@ -418,7 +628,9 @@ row:
 When an ENSv1 BaseRegistrar manifest admits ordinary numeric registration and renewal,
 Interpret retains the registrar resource, token lineage, owner and expiry independently of
 registrar-controller logs. Before an admitted plaintext label is known, these lifecycle rows
-have no `logical_name_id`, and the numeric event creates no name surface. A previously admitted,
+have no `logical_name_id` unless a proven registry path already establishes the name
+identity or does so in the same registration transaction. The numeric event alone creates
+no name surface. A previously admitted,
 non-shadow preimage in the same namespace can make the name known before numeric registration;
 with matching current-registry ownership setup, that registration binds the registrar resource.
 A later admitted controller preimage binds the current retained ENSv1 authority, while a preimage
@@ -475,10 +687,14 @@ inside) also lie at or below the read's published block, so a grant Interpret ha
 the publication a read is bound to does not turn that publication's older rows, count, or cursor
 anchors into registration history.
 
-Address history (`GET /v1/addresses/{address}/history`) runs three statements in
-`crates/storage/src/history/`. The anchor lookup (`address_matches.rs`) finds the names and
-resources the address holds now, through the family address-name reader, and held in the past from three kinds
-of activated, canonical events. A current relation row counts only when the event Project cites
+Address history (`GET /v1/addresses/{address}/history`) keeps one read-only repeatable-read
+transaction in `crates/storage/src/history/address_walk/`. Address-indexed SQL joins enumerate
+narrow event keys and the name/resource evidence that can admit each event. A non-holdable
+PostgreSQL cursor returns at most 256 such rows per batch. Only those names requiring current
+membership are composed, using the base address composer without topology or record inventory;
+compact membership and attribution caches each retain at most 1,024 answers. Historical
+membership reuses `address_matches.rs`: it finds names and resources held in the past from
+three kinds of activated, canonical events. A current relation row counts only when the event Project cites
 for it (`provenance.chain_id` and `chain_positions.block_number`) lies at or below the read's
 published block of that chain, so a relation acquired after that block cannot admit the
 resource's older events; a row without a cited block does not count under a bound. The name's
@@ -507,15 +723,32 @@ is the address, each compared lowercased. One partial expression index per kind 
 by the lowercased value: `normalized_events_address_registrant_match_idx`,
 `normalized_events_address_token_holder_match_idx`, and
 `normalized_events_address_registry_owner_match_idx`. Their expressions and predicates must stay
-identical to the query text. The capped count and the page then read the rows of those names and
-resources plus the resolver record writes attributed to the resources (`attribution.rs`,
-described below). That filter is an OR of `logical_name_id`, `resource_id`, and
-`normalized_event_id` conditions. The attributed event ids do not depend on the row, so the read
-loads them once, inside the page's repeatable-read transaction, and binds them as an array
-(`= ANY($ids)`); PostgreSQL then answers each branch from
-`normalized_events_name_history_idx`, `normalized_events_resource_history_idx`, and the primary
-key and combines the results. Written as `IN (SELECT ...)`, the branch cannot be an index
-condition inside the OR, and the planner reads every canonical row to keep the few that match.
+identical to the query text. Each candidate arm probes the name, resource, node, resolver/record
+key, or selected link through the corresponding index. A lateral planning boundary keeps event
+probes keyed by that address's evidence even at large cardinalities. The database may sort and
+spill all address-specific candidates before returning the first batch; this bounds API memory,
+not the amount of address-specific SQL work.
+
+The same batched validator determines page membership and counts. Record attribution accepts
+only requested `(resource_id, normalized_event_id)` pairs, materializes those event IDs once,
+and retains all pointer/link boundary evidence needed to evaluate them correctly. It never loads
+the resource's complete attributed-event set for this route. An event reached through several
+names, resources, or attribution paths counts once. Fallback handoff copies choose the least
+eligible event identity across the complete peer group, independently of the public cursor or
+batch boundary. The API retains at most `page_size + 1` accepted IDs, one scalar count, and the
+final page's payloads. The public address-history route skips counting by default and returns
+`total_count: null`; `include=total_count` walks the complete collection for an exact total.
+The storage reader also supports capped counting: for a cap of 10,000, it stops after 10,001
+eligible events and returns a null total above the cap. This storage mode is not the public
+address-history default. Page and requested count walks share the transaction and compact
+caches. Name display enrichment loads base names and verified label preimages on that same snapshot.
+The cursor closes on success and the transaction releases it on error or cancellation. There
+is no full-address application-side anchor, payload, or attribution collection. A single name
+can still require many retained facts during composition; the fixed name batch does not impose
+a new bound on that name's lifecycle evidence.
+
+The legacy full-selector reader remains in use for unpaged/diagnostic storage calls and
+`GET /v1/events?address=...`; this bounded route does not change those contracts.
 The three indexes cover only activated rows in readable canonicality states, so an anchor read
 that drops either condition cannot use them and falls back to a broad scan, such as
 `normalized_events_projection_idx` without the address as a key: a read with `canonical_only=false` (possible only through the
@@ -529,8 +762,8 @@ whose before or after state assigns `resource_control` to the address and
 state-derived registry-only `SurfaceBound` owner evidence. This intentionally
 includes former-controller audit history after revocation or replacement; it does
 not assert current ownership. The bounded product path keeps the current-relation
-and publication checks above. No parallel current-state cache is introduced.
-`GET /v1/names/{name}/history` with `scope=both` uses the same filter. The registration-scoped
+and publication checks above; its compact caches exist only within one request snapshot.
+`GET /v1/names/{name}/history` with `scope=both` keeps its existing selector filter. The registration-scoped
 read keeps a correlated `IN` because its attribution check refers to the row. These are access
 paths only: no stored row, response, or [interpreter content
 hash](glossary.md#interpreter-content-hash) input changes. Existing installations receive the
@@ -1122,6 +1355,13 @@ proof requires the admitted BaseRegistrar holder-to-controller transfer,
 registry reclaim to that controller, registry transfer to Graveyard, any
 emitted resolver/TTL clears, the matching registrar transfer to Graveyard,
 and exactly one complete ENSv2 successor for the same name and transaction.
+The controller entry and selected cleanup must be the unique terminal pair
+of same-label registrar transfers, in strict log order. Earlier ordinary
+transfers remain outside the reconciliation window: their token control,
+permissions, binding changes and authority history are preserved and folded
+into the predecessor state. An approved intermediary can therefore receive
+the token before transferring it into the controller in the same transaction.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/UnlockedMigrationController.sol:L92-L120 @ ens_v2_sepolia_20261001@07e55a05)
 The name may enter the transaction bound to its lease or, after a registrar
 transfer without `reclaim`, to the registry-only resource the lease goes on
 under; the registrar state is the lease either way.
@@ -1225,6 +1465,12 @@ bump, not automatically. A false or error verdict keeps the proven bytes in the
 store but withholds the text from names, so serving falls back to the
 documented [non-name forms](glossary.md#non-name-form) — the escape-encoded raw
 bytes when the label does not decode, the labelhash placeholder when it does.
+For a name surface that stores no raw bytes the serving read applies the
+verdict itself, each time it computes the
+[rendered name](glossary.md#rendered-name): a label is text only when its
+preimage decodes and its verdict is true, and is the labelhash placeholder
+otherwise, undecodable bytes included. No Project redo is involved, so a new
+preimage or a changed verdict shows on the next read.
 
 ## Rainbow-table preimage import
 
@@ -1624,6 +1870,12 @@ they describe one registration: the original grant and the snapshot share a `res
 `registered_at` is the original grant's block time either way.
 
 For this disclosure rule, launch-bounded transfers to the manifest-declared Graveyard and admitted cleanup observations carry `registrar_surface_retired` in their existing event payload. The bounded retained evidence records that retirement separately from the ENSv1 current-registry fallback marker. It prevents a later preimage from reopening that lease and does not replace migration correlation or relax exact cleanup evidence. A subsequent independently proven new numeric grant has a new lease identity.
+Numeric registrar renewal and controller name enrichment use the same retirement
+veto before creating a new ENSv1 binding. They retain the actual renewal, expiry,
+name, resource, lineage, holder and bounded retirement evidence. Retirement does
+not close an existing ordinary binding, delete the retained lease, or prove
+that an ENSv1→ENSv2 migration completed; incomplete migration evidence remains
+subject to the same exact correlation requirements.
 
 Only active manifests participate in raw-log selection and watch authority.
 Interpret separately retains metadata for stored deprecated manifest versions
@@ -2039,10 +2291,30 @@ identity derived before it keeps its anchor even when an in-range event
 references it. An identity the replay re-observes is restored by the ordinary
 upsert at its first derivation block; only one still orphaned afterwards is
 re-anchored, and a name surface re-anchors from the earliest surviving
-observation that carries the name itself, staying orphaned when none survives.
-Outside that orphan replacement, a name surface's `deactivated_at` moves only
-for a strictly lower incoming block, so the stored value does not depend on the
-order emissions arrive in.
+observation that establishes it, a `PreimageObserved` row or a
+[label-hash-path observation](#name-identity-and-raw-evidence), staying
+orphaned when none survives. A shadow surface's `deactivated_at` follows its
+earliest surviving `PreimageObserved` row.
+Fresh writes, normalization recompute, re-anchoring and witness repair use the
+plain block timestamp of the earliest surviving relevant byte witness for
+`deactivated_at`; transaction/log position and event identity order the witnesses
+separately. No log-index microseconds are added to this public timestamp.
+
+A surface's [preimage witness](glossary.md#preimage-witness) is repaired
+separately from its anchor, so raw bytes learned after the node was established
+are handled even when the node's first observation lies before the redo range.
+Redo preparation releases every witness whose event is in the range. An ordinary
+raw-backed row clears its pointer. A byte-oriented shadow retains the pointer
+through the unpublished redo interval to preserve its nonempty-witness shape;
+a missing or noncanonical referenced event makes that witness replaceable.
+At completion each surface with a released witness, or with a preimage observation
+in the range, takes its earliest surviving canonical `PreimageObserved` event as
+witness. A canonical surface left with none loses its raw bundle and its
+normalization verdict, and stays as the identity alone, when a surviving
+label-hash-path observation still establishes it; without such an observation
+the row is left as it was. Witness identity is repaired even when a replacement
+has the same block timestamp. This change rotates the content hash and requires
+full Interpret plus Project re-derivation before publication.
 
 The interpreter content hash covers the current interpretation inputs: the
 adapter, manifest-authority, and project sources, the manifest ABI event
@@ -2182,13 +2454,13 @@ The 17 kept indexes and the statements that read them:
 | `normalized_events_event_identity_key` | the writer's `ON CONFLICT (event_identity)` and identity transitions |
 | `normalized_events_interpreter_state_history_idx` | prior-state value reads and the full-state restore (`load/prior.rs`) |
 | `normalized_events_resource_history_idx` | the lookahead loader's resource arm, registrar transition evidence |
-| `normalized_events_name_history_idx` | migration transition evidence by name (`write/identity/transition/registrar.rs`) and the flag recompute's raw-label fallback (`recompute.rs`), which look a name's events up by name alone |
+| `normalized_events_name_history_idx` | migration transition evidence by name (`write/identity/transition/registrar.rs`) the flag recompute's raw-label fallback (`recompute.rs`) and the redo's preimage-witness repair (`write/reanchor.rs`), which look a name's events up by name alone |
 | `normalized_events_chain_block_number_idx`, `normalized_events_chain_block_number_desc_idx` | the redo-range clear and preparation, the full-state restore, the loader-choice family probe and the due-names block-before-batch read; either twin serves each |
 | `normalized_events_projection_idx` | the manifest sync's retained admission history (`retained_admission_manifests` in `crates/manifests/src/schema_v2_persistence.rs`), which reads every `SourceManifestUpdated` row by kind |
 | `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |
 | `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows |
 
-The other 35 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
+The other 41 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
 these: `normalized_events_registry_token_idx`,
 `normalized_events_v1_subregistry_after_node_scope_idx`,
 `normalized_events_v1_subregistry_after_child_scope_idx`,
@@ -2199,8 +2471,13 @@ these: `normalized_events_registry_token_idx`,
 `normalized_events_ens_v1_record_node_resolver_idx`,
 `normalized_events_basenames_record_node_resolver_idx`,
 `normalized_events_record_id_write_idx`, `normalized_events_record_id_link_idx`,
+`normalized_events_history_discovery_name_idx`, `normalized_events_history_discovery_resource_idx`,
 `normalized_events_resolver_alias_history_idx`,
 `normalized_events_resolver_upgrade_history_idx`,
+`normalized_events_registry_origin_idx`,
+`normalized_events_registry_announcement_idx`,
+`normalized_events_wrapper_departure_idx`,
+`normalized_events_user_registry_departure_idx`,
 `normalized_events_pointer_after_resolver_history_idx`,
 `normalized_events_pointer_before_resolver_history_idx`,
 `normalized_events_permission_after_resolver_history_idx`,

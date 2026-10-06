@@ -485,7 +485,7 @@ async fn resolver_changes_follow_registry_and_zero_releases() -> Result<()> {
 }
 
 #[tokio::test]
-async fn pre_surface_newowner_record_serves_after_late_surface() -> Result<()> {
+async fn registry_child_record_survives_later_wrap() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let rpc = anvil.client();
     let root = repo_root();
@@ -504,19 +504,19 @@ async fn pre_surface_newowner_record_serves_after_late_surface() -> Result<()> {
         alice,
         name,
         "description",
-        "written before the surface",
+        "written before the wrap",
     )
     .await?;
-    let null_link_ready_sql = format!(
+    let named_ready_sql = format!(
         "SELECT EXISTS (SELECT 1 FROM normalized_events \
          WHERE event_kind = 'RecordChanged' \
            AND after_state->>'record_key' = 'text:description' \
            AND lower(after_state->>'node') = lower('{node}') \
-           AND logical_name_id IS NULL)"
+           AND logical_name_id = 'ens:{node}')"
     );
     let record_target = rpc.block_number().await?;
     let (db, scratch, mut replay) =
-        start_split_replay(&anvil, &deployment, record_target, &null_link_ready_sql).await?;
+        start_split_replay(&anvil, &deployment, record_target, &named_ready_sql).await?;
     materialize_and_select_wrapped_resolver(
         &anvil,
         &deployment,
@@ -542,8 +542,9 @@ async fn pre_surface_newowner_record_serves_after_late_surface() -> Result<()> {
         .fetch_one(&run.db.pool)
         .await?;
     assert_eq!(
-        linked_name, None,
-        "the interpretation-time name link must stay null"
+        linked_name,
+        Some(format!("ens:{node}")),
+        "the proven registry path must name the record before the wrap"
     );
     assert_eq!(retained_node.to_lowercase(), node);
     assert_eq!(emitting_resolver.to_lowercase(), format!("{resolver:#x}"));
@@ -551,12 +552,12 @@ async fn pre_surface_newowner_record_serves_after_late_surface() -> Result<()> {
     let exact = exact_name(&run.api, "ens", name).await?;
     assert!(
         selector_keys(&exact).contains("text:description"),
-        "late surface must recover the earlier record in inventory: {exact}"
+        "the later wrap must retain the earlier record in inventory: {exact}"
     );
     let records = compact_records(&run, name, "?texts=description&mode=declared&meta=full").await?;
     assert_eq!(
         pointer(&records, "/data/text_records/description/value"),
-        "written before the surface"
+        "written before the wrap"
     );
 
     run.db.cleanup().await?;
@@ -564,7 +565,8 @@ async fn pre_surface_newowner_record_serves_after_late_surface() -> Result<()> {
 }
 
 #[tokio::test]
-async fn pre_surface_record_history_follows_current_resolver_and_version_boundary() -> Result<()> {
+async fn registry_child_record_history_follows_current_resolver_and_version_boundary() -> Result<()>
+{
     let anvil = Anvil::spawn().await?;
     let rpc = anvil.client();
     let deployment = ens_v1::deploy_ens_v1(&rpc, &repo_root()).await?;
@@ -591,14 +593,14 @@ async fn pre_surface_record_history_follows_current_resolver_and_version_boundar
     .await?;
 
     let record_target = rpc.block_number().await?;
-    let null_ready = format!(
+    let record_ready = format!(
         "SELECT count(*) >= 4 FROM normalized_events \
-         WHERE logical_name_id IS NULL \
+         WHERE logical_name_id = 'ens:{node}' \
            AND event_kind IN ('RecordChanged', 'RecordVersionChanged') \
            AND lower(after_state->>'node') = lower('{node}')"
     );
     let (db, scratch, mut replay) =
-        start_split_replay(&anvil, &deployment, record_target, &null_ready).await?;
+        start_split_replay(&anvil, &deployment, record_target, &record_ready).await?;
     let resolver_one_target = materialize_and_select_wrapped_resolver(
         &anvil,
         &deployment,
@@ -658,18 +660,14 @@ async fn pre_surface_record_history_follows_current_resolver_and_version_boundar
 }
 
 #[tokio::test]
-async fn pre_surface_record_attribution_is_node_scoped_and_never_materializes_unknown_names()
--> Result<()> {
+async fn record_attribution_is_node_scoped_and_never_materializes_unproven_names() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let rpc = anvil.client();
-    let deployment = ens_v1::deploy_ens_v1(&rpc, &repo_root()).await?;
+    let mut deployment = ens_v1::deploy_ens_v1(&rpc, &repo_root()).await?;
     let owner = rpc.accounts().await?[1];
     let resolver = deployment.public_resolver.address;
     let (name_one, name_two, unknown_name) = ("one.scope.eth", "two.scope.eth", "orphan");
 
-    ens_v1::register_eth_name(&rpc, &deployment, "scope", owner, YEAR, resolver).await?;
-    ens_v1::create_subname(&rpc, &deployment, owner, "scope.eth", "one", owner).await?;
-    ens_v1::create_subname(&rpc, &deployment, owner, "scope.eth", "two", owner).await?;
     ens_v1::create_subname(
         &rpc,
         &deployment,
@@ -679,6 +677,12 @@ async fn pre_surface_record_attribution_is_node_scoped_and_never_materializes_un
         owner,
     )
     .await?;
+    // This node's assignment predates the indexed registry range. Its later resolver
+    // record has no admitted ancestry proof; the two subsequent children do.
+    deployment.registry.block_number = rpc.block_number().await? + 1;
+    ens_v1::register_eth_name(&rpc, &deployment, "scope", owner, YEAR, resolver).await?;
+    ens_v1::create_subname(&rpc, &deployment, owner, "scope.eth", "one", owner).await?;
+    ens_v1::create_subname(&rpc, &deployment, owner, "scope.eth", "two", owner).await?;
     ens_v1::set_text_record(&rpc, resolver, owner, name_one, "description", "one-only").await?;
     ens_v1::set_text_record(&rpc, resolver, owner, name_two, "description", "two-only").await?;
     ens_v1::set_text_record(
@@ -694,15 +698,28 @@ async fn pre_surface_record_attribution_is_node_scoped_and_never_materializes_un
     let record_target = rpc.block_number().await?;
     let nodes =
         [name_one, name_two, unknown_name].map(|name| format!("{:#x}", ens_v1::namehash(name)));
-    let null_ready = format!(
+    let record_ready = format!(
         "SELECT count(*) = 3 FROM normalized_events \
-         WHERE logical_name_id IS NULL AND event_kind = 'RecordChanged' \
+         WHERE event_kind = 'RecordChanged' \
            AND after_state->>'record_key' = 'text:description' \
            AND lower(after_state->>'node') IN (lower('{}'), lower('{}'), lower('{}'))",
         nodes[0], nodes[1], nodes[2]
     );
     let (db, scratch, mut replay) =
-        start_split_replay(&anvil, &deployment, record_target, &null_ready).await?;
+        start_split_replay(&anvil, &deployment, record_target, &record_ready).await?;
+    let name_links: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT lower(after_state->>'node'), logical_name_id FROM normalized_events \
+         WHERE event_kind = 'RecordChanged' AND after_state->>'record_key' = 'text:description'",
+    )
+    .fetch_all(&db.pool)
+    .await?;
+    for (index, node) in nodes.iter().enumerate() {
+        let expected = (index < 2).then(|| format!("ens:{node}"));
+        assert!(
+            name_links.contains(&(node.clone(), expected)),
+            "{name_links:?}"
+        );
+    }
     let one_pointer = materialize_and_select_wrapped_resolver(
         &anvil,
         &deployment,

@@ -5,8 +5,6 @@
 use serde_json::Value;
 use sqlx::{Postgres, QueryBuilder};
 
-use super::name_current_authority_arm;
-
 /// The [registry generation](../../../../docs/glossary.md#registry-generation) Project recorded
 /// for a name on the `ens_v1` arm: `old` while only the 2017 registry holds an ownership record
 /// for its node, `current` after. The deployed registry answers from the 2017 registry while it
@@ -44,15 +42,7 @@ pub fn name_current_is_ownerless_registry(provenance: &Value) -> bool {
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L157 @ ens_v1@91c966f).
 /// `None` for Basenames, an unresolved selection, or an ownerless registry row.
 pub fn name_current_public_authority(provenance: &Value) -> Option<&'static str> {
-    if name_current_is_ownerless_registry(provenance) {
-        return None;
-    }
-    match name_current_authority_arm(provenance)? {
-        "ens_v1" if name_current_registry_generation(provenance) == Some("old") => Some("ens_v0"),
-        "ens_v1" => Some("ens_v1"),
-        "ens_v2" => Some("ens_v2"),
-        _ => None,
-    }
+    crate::families::name::public_authority(provenance)
 }
 
 /// Keeps rows whose exact-name row in `names` serves one of the public `authorities` values, as
@@ -102,22 +92,6 @@ pub(crate) fn push_public_authority_predicate(
             .collect::<Vec<_>>(),
     );
     builder.push(")");
-}
-
-/// The selected authority arms whose rows can serve one of the public `authorities` values:
-/// `ens_v1` for `ens_v0` and `ens_v1`, `ens_v2` for `ens_v2`.
-pub(crate) fn public_authority_arms(authorities: &[impl AsRef<str>]) -> Vec<&'static str> {
-    let mut arms = authorities
-        .iter()
-        .filter_map(|authority| match authority.as_ref() {
-            "ens_v0" | "ens_v1" => Some("ens_v1"),
-            "ens_v2" => Some("ens_v2"),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    arms.sort_unstable();
-    arms.dedup();
-    arms
 }
 
 #[cfg(test)]

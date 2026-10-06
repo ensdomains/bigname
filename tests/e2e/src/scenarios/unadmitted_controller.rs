@@ -9,10 +9,9 @@ const YEAR: u64 = 365 * 24 * 60 * 60;
 /// An owner-added controller registers directly on the registrar
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L79 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L110 @ ens_v1@91c966f).
-/// The registrar-level uint256 events are outside every active manifest ABI,
-/// so the pipeline sees only the registry-side normalized event. With no
-/// routeable `.eth` parent surface, no child projection, lease facts, or
-/// exact-name surface materializes.
+/// This Mainnet profile does not admit the registrar-level uint256 lifecycle,
+/// so only registry facts derive. The proven registry path names the child and
+/// its control binding, while the unadmitted registration creates no lease facts.
 #[tokio::test]
 async fn unadmitted_controller_registration_derives_registry_side_only() -> Result<()> {
     let anvil = Anvil::spawn().await?;
@@ -64,8 +63,8 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
     );
 
     // Nothing lease-bearing derives. Schema-v2 expands the registry-side
-    // child edge into its authority and permission facets, but all three
-    // remain registry-family facts.
+    // child edge into its named authority, binding and permission facets;
+    // every derived event remains a registry-family fact.
     let mut derived_kinds: Vec<(String, String)> = sqlx::query_as(
         "SELECT event_kind, source_family FROM normalized_events \
          WHERE transaction_hash = $1 AND canonicality_state = 'canonical'",
@@ -78,6 +77,10 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
         derived_kinds,
         vec![
             (
+                "AuthorityEpochChanged".to_owned(),
+                "ens_v1_registry_l1".to_owned(),
+            ),
+            (
                 "AuthorityTransferred".to_owned(),
                 "ens_v1_registry_l1".to_owned(),
             ),
@@ -89,6 +92,7 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
                 "SubregistryChanged".to_owned(),
                 "ens_v1_registry_l1".to_owned(),
             ),
+            ("SurfaceBound".to_owned(), "ens_v1_registry_l1".to_owned(),),
         ],
         "unadmitted-controller registration must derive only registry-side facets"
     );
@@ -107,22 +111,26 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
     .await?;
     assert_eq!(lease_events, 0, "no lease facts may derive for shadow.eth");
 
-    // Children are served under a routeable parent surface. The harness has no
-    // `.eth` parent surface, so the registry fact remains normalized evidence
-    // rather than becoming a served child.
+    // The root-proven eth path makes this registry child addressable without
+    // attributing the unadmitted registrar's lease or token lineage to it.
     let child_rows = families::served_child_rows(&run.db.pool, &shadow_node).await?;
     assert_eq!(
-        child_rows, 0,
-        "unadmitted registration must not invent a child without a parent surface"
+        child_rows, 1,
+        "the admitted registry child must be served under the proven parent"
     );
     let surfaces: i64 =
         sqlx::query_scalar("SELECT count(*) FROM name_surfaces WHERE logical_name_id = $1")
             .bind("ens:0x71912a92f1d7b9f48a8ccc1e1a7bcc3ed43e88c682cb276692e6618bb96437ae")
             .fetch_one(&run.db.pool)
             .await?;
-    assert_eq!(surfaces, 0, "no exact-name surface may be minted");
-    let (status, body) = run.api.get_json("/v1/names/ens/shadow.eth").await?;
-    assert_eq!(status, 404, "shadow.eth must stay unknown: {body}");
+    assert_eq!(surfaces, 1, "the registry path proves the name surface");
+    let row = families::required_name(&run.db.pool, &format!("ens:{shadow_node}")).await?;
+    assert_eq!(row.token_lineage_id, None);
+    assert_eq!(row.declared_summary["registration"]["expiry"], Value::Null);
+    assert_eq!(
+        row.declared_summary["registration"]["authority_kind"],
+        "registry_only"
+    );
 
     let registrant_names: Value = {
         let (status, body) = run
@@ -139,10 +147,13 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    assert!(
-        entries.is_empty(),
-        "an unadmitted-controller lease must not appear as a registration: {entries:?}"
+    assert_eq!(
+        entries.len(),
+        1,
+        "the direct registry owner holds the named child: {entries:?}"
     );
+    assert_eq!(entries[0]["namehash"], shadow_node);
+    assert_eq!(entries[0]["token_lineage_id"], Value::Null);
 
     run.db.cleanup().await?;
     Ok(())

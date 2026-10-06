@@ -1,6 +1,6 @@
 use std::str;
 
-use bigname_adapters::schema_v2::seam::{LOG_INDEX_KEY, PREIMAGE_OBSERVATION_EVENT_KIND};
+use bigname_adapters::schema_v2::seam::PREIMAGE_OBSERVATION_EVENT_KIND;
 use bigname_domain::normalization::{ENS_NORMALIZER_VERSION, normalized_label_verdict};
 use serde_json::{Value, json};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
@@ -45,8 +45,8 @@ struct LabelRow {
 #[derive(Debug, FromRow)]
 struct SurfaceRow {
     logical_name_id: String,
-    raw_labels: Vec<String>,
-    dns_encoded_name: Vec<u8>,
+    raw_labels: Option<Vec<String>>,
+    dns_encoded_name: Option<Vec<u8>>,
     normalizer_version: String,
     visibility_state: String,
     normalization_errors: Value,
@@ -54,8 +54,11 @@ struct SurfaceRow {
     deactivated_at: Option<OffsetDateTime>,
     block_number: i64,
     block_timestamp: OffsetDateTime,
-    provenance: Value,
+    preimage_event_identity: Option<String>,
     fallback_raw_labels_hex: Option<Value>,
+    fallback_block_timestamp: Option<OffsetDateTime>,
+    witness_event_identity: Option<String>,
+    witness_block_timestamp: Option<OffsetDateTime>,
 }
 
 #[derive(Debug)]
@@ -223,15 +226,18 @@ async fn load_surfaces(
                 surface.visibility_state, surface.normalization_errors,
                 surface.deactivation_reason, surface.deactivated_at,
                 surface.block_number, lineage.block_timestamp,
-                surface.provenance,
-                fallback.after_state -> 'raw_labels_hex' AS fallback_raw_labels_hex
+                surface.preimage_event_identity,
+                fallback.after_state -> 'raw_labels_hex' AS fallback_raw_labels_hex,
+                fallback.block_timestamp AS fallback_block_timestamp,
+                witness.event_identity AS witness_event_identity,
+                witness.block_timestamp AS witness_block_timestamp
          FROM name_surfaces surface
          JOIN chain_lineage lineage
            ON lineage.chain_id = surface.chain_id
           AND lineage.block_hash = surface.block_hash
           AND lineage.block_number = surface.block_number
          LEFT JOIN LATERAL (
-             SELECT event.after_state
+             SELECT event.after_state, event_lineage.block_timestamp
              FROM normalized_events event
              JOIN chain_lineage event_lineage
                ON event_lineage.chain_id = event.chain_id
@@ -240,15 +246,30 @@ async fn load_surfaces(
              WHERE event.chain_id = surface.chain_id
                AND event.logical_name_id = surface.logical_name_id
                AND event.after_state ? 'raw_labels_hex'
-               AND event.block_number <= surface.block_number
                AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
                AND event_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-             ORDER BY event.block_number DESC NULLS LAST,
-                      event.transaction_index DESC NULLS LAST,
-                      event.log_index DESC NULLS LAST,
-                      event.normalized_event_id DESC
+             ORDER BY event.block_number,
+                      event.transaction_index NULLS FIRST,
+                      event.log_index NULLS FIRST,
+                      event.event_identity
              LIMIT 1
          ) fallback ON true
+         LEFT JOIN LATERAL (
+             SELECT witness.event_identity, witness_lineage.block_timestamp
+             FROM normalized_events witness
+             JOIN chain_lineage witness_lineage
+               ON witness_lineage.chain_id = witness.chain_id
+              AND witness_lineage.block_hash = witness.block_hash
+              AND witness_lineage.block_number = witness.block_number
+             WHERE witness.chain_id = surface.chain_id
+               AND witness.logical_name_id = surface.logical_name_id
+               AND witness.event_kind = $4
+               AND witness.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND witness_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+             ORDER BY witness.block_number, witness.transaction_index NULLS FIRST,
+                      witness.log_index NULLS FIRST, witness.event_identity
+             LIMIT 1
+         ) witness ON true
          WHERE surface.chain_id = $1
            AND surface.block_number BETWEEN $2 AND $3
            AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
@@ -259,6 +280,7 @@ async fn load_surfaces(
     .bind(chain_id)
     .bind(from_block)
     .bind(to_block)
+    .bind(PREIMAGE_OBSERVATION_EVENT_KIND)
     .fetch_all(&mut **transaction)
     .await
     .map_err(|error| {
@@ -277,13 +299,15 @@ async fn update_surface(
              visibility_state = $3,
              normalization_errors = $4,
              deactivation_reason = $5,
-             deactivated_at = $6
+             deactivated_at = $6,
+             preimage_event_identity = $12
          WHERE logical_name_id = $1
            AND normalizer_version = $7
            AND visibility_state = $8
            AND normalization_errors = $9
            AND deactivation_reason IS NOT DISTINCT FROM $10
-           AND deactivated_at IS NOT DISTINCT FROM $11",
+           AND deactivated_at IS NOT DISTINCT FROM $11
+           AND preimage_event_identity IS NOT DISTINCT FROM $13",
     )
     .bind(&surface.logical_name_id)
     .bind(ENS_NORMALIZER_VERSION)
@@ -296,6 +320,15 @@ async fn update_surface(
     .bind(&surface.normalization_errors)
     .bind(&surface.deactivation_reason)
     .bind(surface.deactivated_at)
+    .bind(if surface.raw_labels.is_some() {
+        surface
+            .witness_event_identity
+            .as_ref()
+            .or(surface.preimage_event_identity.as_ref())
+    } else {
+        None
+    })
+    .bind(&surface.preimage_event_identity)
     .execute(&mut **transaction)
     .await
     .map_err(|error| {
@@ -311,6 +344,15 @@ async fn update_surface(
 }
 
 fn surface_normalization(surface: &SurfaceRow) -> Result<SurfaceNormalization> {
+    // Unknown bytes have no normalization verdict; the identity stays visible.
+    if surface.raw_labels.is_none() {
+        return Ok(SurfaceNormalization {
+            visibility_state: "active",
+            normalization_errors: Value::Array(Vec::new()),
+            deactivation_reason: None,
+            deactivated_at: None,
+        });
+    }
     let raw_labels = raw_surface_labels(surface)?;
     let byte_oriented = surface.fallback_raw_labels_hex.is_some();
     let errors = raw_labels
@@ -338,13 +380,12 @@ fn surface_normalization(surface: &SurfaceRow) -> Result<SurfaceNormalization> {
     let deactivated_at = if active {
         None
     } else {
-        surface.deactivated_at.or_else(|| {
-            let log_index = surface_log_index(&surface.provenance);
-            Some(bigname_adapters::schema_v2::seam::event_time(
-                surface.block_timestamp,
-                log_index,
-            ))
-        })
+        Some(
+            surface
+                .witness_block_timestamp
+                .or(surface.fallback_block_timestamp)
+                .unwrap_or(surface.block_timestamp),
+        )
     };
     Ok(SurfaceNormalization {
         visibility_state: if active { "active" } else { "shadow" },
@@ -354,23 +395,22 @@ fn surface_normalization(surface: &SurfaceRow) -> Result<SurfaceNormalization> {
     })
 }
 
-fn surface_log_index(provenance: &Value) -> i64 {
-    provenance
-        .get(LOG_INDEX_KEY)
-        .and_then(Value::as_i64)
-        .unwrap_or(-1)
-}
-
 fn raw_surface_labels(surface: &SurfaceRow) -> Result<Vec<Vec<u8>>> {
-    if !surface.raw_labels.is_empty() {
-        return Ok(surface
-            .raw_labels
+    if let Some(raw_labels) = surface
+        .raw_labels
+        .as_ref()
+        .filter(|labels| !labels.is_empty())
+    {
+        return Ok(raw_labels
             .iter()
             .map(|label| label.as_bytes().to_vec())
             .collect());
     }
-    if !surface.dns_encoded_name.is_empty()
-        && let Ok(labels) = decode_dns_labels(&surface.dns_encoded_name)
+    if let Some(dns_encoded_name) = surface
+        .dns_encoded_name
+        .as_ref()
+        .filter(|name| !name.is_empty())
+        && let Ok(labels) = decode_dns_labels(dns_encoded_name)
     {
         return Ok(labels);
     }

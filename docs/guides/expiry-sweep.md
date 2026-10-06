@@ -7,7 +7,7 @@ rule of its own: every behaviour below is stated in the API contract, and each
 section links the rule it relies on. Where this guide and the contract differ,
 the contract wins.
 
-A sweep is one pass over one expiry window, page by page:
+A sweep is one pass over an expiry window or a set of disjoint windows, page by page:
 
 ```text
 GET /v1/names?namespace=ens&parent=eth&expires_after=1793491200&expires_before=1793577600&page_size=200
@@ -22,13 +22,14 @@ that block in `meta.as_of`.
 
 ## 1. Windows
 
-- `namespace` is required, and so is at least one of `expires_after` and
-  `expires_before`. Both bounds accept decimal Unix seconds or RFC 3339.
+- `namespace` is required. Supply at least one of `expires_after` and
+  `expires_before`, or use repeated `expires_window` as below. Bounds accept
+  exact decimal Unix seconds or RFC 3339, with up to nanosecond precision.
 - `expires_after` is inclusive and `expires_before` is exclusive, so
   consecutive windows `[t0, t1)`, `[t1, t2)` tile without overlap or gap.
   `expires_after` must be earlier than `expires_before`.
 - Rows are sorted by `expires_at`, ascending by default (`order=desc` reverses
-  it); ties are broken by namespace, name and namehash.
+  the expiry order); namespace, name and namehash ties always sort ascending.
 - `expires_at` is a decimal string of Unix seconds and can exceed the
   floating-point safe-integer range. Parse it as an exact integer before
   comparing ([timestamp format](../api-v1.md#timestamp-format-and-absent-expiry)).
@@ -48,6 +49,25 @@ that block in `meta.as_of`.
   whose current authority is unsupported, is not listed either.
 - An empty window is `200` with empty `data`, `has_more: false` and
   `next_cursor: null`. `page.total_count` is always `null`.
+
+For several reminder bands in one request, repeat the parameter:
+
+```http
+GET /v1/names?namespace=ens&parent=eth&expires_window=1793491200..1793577600&expires_window=1794096000..1794182400&page_size=200
+```
+
+Each `after..before` window needs two finite bounds with `after < before`.
+Supply 1–32 disjoint windows; adjacent windows are allowed. Overlap, duplicate
+windows, missing bounds, and combining them with `expires_after` or
+`expires_before` (even blank) return `400 invalid_input`. Encode literal `+`
+timezone offsets as `%2B`. Every result carries `expires_window_index`: `0`
+for the first window above, `1` for the second. It is absent on scalar-window
+requests. Membership uses exact stored expiry before response formatting.
+
+The union is sorted globally by expiry, regardless of input window order.
+The page still has at most 200 rows, one `next_cursor`, one snapshot and no
+count; it does not return a separate page for each band. Continue until
+`has_more: false`, keeping every window in its original order.
 
 The rules are in the request, coverage and status bullets of
 [`GET /v1/names`](../api-v1-routes.md#get-v1names).
@@ -200,13 +220,18 @@ later block is not on that page.
 
 ## 5. Pagination and retries
 
-- `next_cursor` is opaque. It binds the namespace, both bounds, the order and
+- `next_cursor` is opaque. It binds the namespace, scalar bounds or the full
+  ordered normalized window list, the expiry order and
   the `authority` and `parent` filters when sent, and holds the position of the last row
   returned (its `expires_at`, namespace, name and namehash). It holds no
   publication. Send the next request with the same parameters plus `cursor`; a
   cursor sent with a different namespace, bound, order or filter returns
   `400 invalid_input`
   ([current-state list cursors](../api-v1.md#current-state-list-cursors)).
+  Reordering, adding, removing or changing a window invalidates the cursor;
+  equivalent timestamp spellings remain valid. A scalar-window cursor cannot
+  be used with `expires_window`, or vice versa. You may change `page_size`
+  between requests, within 1–200.
 - A continuation reads whatever is published when it runs and returns the rows
   after the cursor's position. Pages of one walk can therefore read different
   publications, and each page reports its own `meta.as_of`. A name renewed

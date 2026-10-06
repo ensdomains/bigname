@@ -170,7 +170,7 @@
             "name": "include",
             "in": "query",
             "required": false,
-            "description": "Comma-separated expansion names; unlisted values are invalid.",
+            "description": "Comma-separated expansion names; unlisted values are invalid. total_count requests an exact total; page.total_count is null when omitted.",
             "schema": {
               "type": "array",
               "items": {
@@ -1566,6 +1566,22 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "expires_window",
+            "in": "query",
+            "required": false,
+            "description": "Repeat for 1–32 disjoint finite half-open windows, each `after..before` in decimal Unix seconds or RFC 3339. Adjacent windows are allowed; overlap, duplicates, missing bounds, and combination with either scalar expiry parameter are invalid. Input order defines each row’s expires_window_index.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "maxItems": 32
+            },
+            "style": "form",
+            "explode": true
           },
           {
             "name": "authority",
@@ -5697,7 +5713,7 @@
           "wrapper_parent_control"
         ],
         "x-enum-descriptions": {
-          "ens_v2_registry_operators": "operators that the name's owner approved on the ENSv2 registry with `setApprovalForAll`",
+          "ens_v2_registry_operators": "accounts that a discovered ENSv2 registry's code may let act through another account's roles: for a `WrapperRegistry`, the parent name's owner and that owner's operators on the parent registry (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05)",
           "registrar_approvals": "BaseRegistrar ERC-721 per-token and operator approvals",
           "resolver_approvals": "resolver operator approvals and per-name delegates",
           "wrapper_parent_control": "the parent name's control over a wrapped subname that is not emancipated"
@@ -6049,7 +6065,8 @@
       "GrantRelation": {
         "type": "string",
         "enum": [
-          "operator"
+          "operator",
+          "holder"
         ]
       },
       "NetworkHeadStatus": {
@@ -6443,7 +6460,7 @@
           },
           "name": {
             "type": "string",
-            "description": "ENSIP-15 normalized name."
+            "description": "ENSIP-15 normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash."
           },
           "display_name": {
             "type": "string",
@@ -6756,7 +6773,7 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "ENSIP-15 normalized name."
+            "description": "ENSIP-15 normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash."
           },
           "display_name": {
             "type": "string",
@@ -7061,7 +7078,7 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "ENSIP-15 normalized name."
+            "description": "ENSIP-15 normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash."
           },
           "display_name": {
             "type": "string",
@@ -7102,6 +7119,12 @@
             ],
             "description": "Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
           },
+          "expires_window_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 31,
+            "description": "Zero-based index of the matching expires_window in original request order; present on every repeated-window GET /v1/names row and omitted on scalar requests and search. Membership uses exact stored expiry before response formatting."
+          },
           "expires_at_reason": {
             "$ref": "#/components/schemas/ExpiryReason",
             "description": "Reason for a classified null expiry; absent for finite expiry and absent registration context.\n\nPresence condition: The object contains expires_at with JSON null. Absent expires_at and finite strings do not satisfy this condition.",
@@ -7136,14 +7159,14 @@
           "namehash",
           "registration_status"
         ],
-        "description": "Current name summary used by search and the namespace expiry list. The expiry list may include lapsed_registration; search omits it."
+        "description": "Current name summary used by search and the namespace expiry list. The expiry list may include lapsed_registration and, for repeated-window requests, expires_window_index; search omits both."
       },
       "Subname": {
         "type": "object",
         "properties": {
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "display_name": {
             "type": "string",
@@ -7232,7 +7255,7 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "display_name": {
             "type": "string",
@@ -7392,7 +7415,7 @@
         "properties": {
           "grant_relation": {
             "$ref": "#/components/schemas/GrantRelation",
-            "description": "`operator` for an effective account approval; direct grants omit it."
+            "description": "`operator` for an effective account approval or `holder` for a derived WrapperRegistry parent owner; direct grants omit it."
           },
           "grant_scope": {
             "$ref": "#/components/schemas/GrantScope",
@@ -7602,7 +7625,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "raw_claim_name": {
             "type": "string",
@@ -7634,7 +7657,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "unsupported_reason": {
             "type": "string",
@@ -7657,7 +7680,7 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "display_name": {
             "type": "string",
@@ -7997,7 +8020,7 @@
         "properties": {
           "grant_relation": {
             "$ref": "#/components/schemas/GrantRelation",
-            "description": "`operator` for an effective account approval; direct grants omit it."
+            "description": "`operator` for an effective account approval or `holder` for a derived WrapperRegistry parent owner; direct grants omit it."
           },
           "grant_scope": {
             "$ref": "#/components/schemas/GrantScope",
@@ -8024,7 +8047,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "authority_context": {
             "$ref": "#/components/schemas/AuthorityContext",
@@ -8100,7 +8123,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "namespace": {
             "type": "string",
@@ -8185,7 +8208,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "subject": {
             "$ref": "#/components/schemas/HistoryRowSubject",
@@ -8268,7 +8291,7 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "display_name": {
             "type": "string",
@@ -8520,7 +8543,8 @@
             "enum": [
               "registry",
               "registrar",
-              "wrapper"
+              "wrapper",
+              "ens_v2_registry"
             ],
             "description": "Account approval authority kind."
           },
@@ -9054,7 +9078,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "display_name": {
             "type": "string",
@@ -9086,7 +9110,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "powers": {
             "type": "array",

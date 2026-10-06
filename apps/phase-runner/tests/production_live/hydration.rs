@@ -103,24 +103,36 @@ async fn event_silent_reverse_hydration_bounds_the_rolling_refresh_batch() -> Re
     db.cleanup().await
 }
 
+/// `poison` names a tuple whose presence fails any aggregate that holds it (zero: none). The
+/// endpoint answers every other aggregate, so Project splits the failed page: every other tuple
+/// is read, and the poisoned one keeps its (empty) state and only moves back in the rotation.
 async fn rolling_progress(poison: i64, cross_head: bool) -> Result<()> {
     let db = setup("live_family_reverse_fairness", 5).await?;
     seed_page(db.pool()).await?;
     let rpc = SelectiveFailureHydrationRpc::spawn(poison, 251).await?;
+    // The page of 250; then, with a poisoned tuple, the probe, the halves that hold the tuple
+    // down to the tuple alone, and the other half of each split.
+    let page: &[usize] = if poison == 0 {
+        &[250]
+    } else {
+        &[250, 1, 125, 62, 31, 15, 7, 3, 1, 2, 4, 8, 16, 31, 63, 125]
+    };
+    let counts = |rpc: &SelectiveFailureHydrationRpc| {
+        rpc.batches
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|batch| batch.call_count)
+            .collect::<Vec<_>>()
+    };
     follow(db.pool(), &rpc.endpoint, 1, 2).await?;
     // A completed head is not another hydration tick. Later Follow blocks advance the cohort.
     project(db.pool(), Some(urls(&rpc.endpoint)?), 1, 2, false).await?;
-    assert_eq!(rpc.batches.lock().unwrap().len(), 1);
+    assert_eq!(counts(&rpc), page);
     follow(db.pool(), &rpc.endpoint, 1, 3).await?;
     let batches = rpc.batches.lock().unwrap().clone();
-    assert_eq!(
-        batches
-            .iter()
-            .map(|batch| batch.call_count)
-            .collect::<Vec<_>>(),
-        vec![250, 1]
-    );
-    assert!(batches[1].contains_last_row);
+    assert_eq!(counts(&rpc), [page, &[1]].concat());
+    assert!(batches.last().expect("a batch").contains_last_row);
     let last = "0x00000000000000000000000000000000000000fb";
     assert_primary(
         db.pool(),
@@ -130,42 +142,47 @@ async fn rolling_progress(poison: i64, cross_head: bool) -> Result<()> {
         Some(&block_hash(1, 3)),
     )
     .await?;
-    let attempts:Vec<(String,i64,String,i64,bool)>=sqlx::query_as("SELECT address,attempt_block,attempt_hash,attempt_ordinal,hydrated_name IS NOT NULL FROM project_reverse_tuple WHERE address IN ($1,$2) ORDER BY address")
+    type Attempt = (String, Option<i64>, Option<String>, i64, bool);
+    let attempts:Vec<Attempt>=sqlx::query_as("SELECT address,attempt_block,attempt_hash,attempt_ordinal,hydrated_name IS NOT NULL FROM project_reverse_tuple WHERE address IN ($1,$2) ORDER BY address")
         .bind("0x0000000000000000000000000000000000000001").bind(last).fetch_all(db.pool()).await?;
     assert_eq!(attempts.len(), 2);
-    assert_eq!(attempts[0].1, 2);
-    assert_eq!(attempts[1].1, 3);
-    assert_eq!(attempts[0].2, block_hash(1, 2));
-    assert_eq!(attempts[1].2, block_hash(1, 3));
+    assert_eq!(attempts[1].1, Some(3));
+    assert_eq!(attempts[1].2, Some(block_hash(1, 3)));
     assert!(attempts[0].3 < attempts[1].3);
-    assert_eq!(attempts[0].4, poison == 0);
     assert!(attempts[1].4);
-    if poison != 0 {
+    if poison == 0 {
+        assert_eq!(attempts[0].1, Some(2));
+        assert_eq!(attempts[0].2, Some(block_hash(1, 2)));
+        assert!(attempts[0].4);
+    } else {
+        // Nothing was observed for the poisoned tuple, so it records no attempt block.
+        assert_eq!((attempts[0].1, attempts[0].2.as_deref()), (None, None));
+        assert!(!attempts[0].4);
         assert_primary(db.pool(), &attempts[0].0, "not_found", None, None).await?;
+        let read: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM project_reverse_tuple WHERE hydrated_name = 'new.eth'",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(read, 250, "every other tuple of the page was read");
     }
     if cross_head {
         follow(db.pool(), &rpc.endpoint, 1, 4).await?;
         follow(db.pool(), &rpc.endpoint, 1, 5).await?;
-        assert_eq!(
-            rpc.batches
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|batch| batch.call_count)
-                .collect::<Vec<_>>(),
-            vec![250, 1, 250, 1]
-        );
+        // The next time round the poisoned tuple goes alone, as the split left it: its call,
+        // the probe that follows the block's first failure, then the rest of the page in one.
+        assert_eq!(counts(&rpc), [page, &[1], &[1, 1, 249], &[1]].concat());
     }
     rpc.server.abort();
     db.cleanup().await
 }
 
 #[tokio::test]
-async fn failed_reverse_hydration_page_keeps_its_place_across_heads() -> Result<()> {
+async fn unreadable_reverse_tuple_does_not_hold_its_page_across_heads() -> Result<()> {
     rolling_progress(1, true).await
 }
 #[tokio::test]
-async fn failed_reverse_hydration_page_does_not_starve_the_next_rolling_row() -> Result<()> {
+async fn unreadable_reverse_tuple_does_not_starve_the_next_rolling_row() -> Result<()> {
     rolling_progress(1, false).await
 }
 #[tokio::test]
@@ -347,10 +364,22 @@ async fn project_redo_runs_without_a_hydration_url() -> Result<()> {
     db.cleanup().await
 }
 
-async fn reverse_failure(failure: &str, shortened: bool) -> Result<()> {
-    let db = setup("live_family_reverse_failure", 3).await?;
+/// What a reverse read that goes wrong at block 2 leaves served.
+enum ReverseFailure {
+    /// The resolver call fails inside an answered aggregate: the name is cleared (fail closed).
+    FailedCall,
+    /// Every aggregate at the block fails: nothing is observed and the name stays.
+    FailedBatch,
+    /// The endpoint answers a two-call aggregate with one result. The aggregate fails as a
+    /// whole; the endpoint does answer single calls, so each tuple is read on its own.
+    Shortened,
+}
+
+async fn reverse_failure(failure: ReverseFailure) -> Result<()> {
+    let db = setup("live_family_reverse_failure", 4).await?;
     seed_reverse(db.pool(), ADDRESS).await?;
     let second = "0x00000000000000000000000000000000000000a2";
+    let shortened = matches!(failure, ReverseFailure::Shortened);
     if shortened {
         seed_reverse(db.pool(), second).await?;
     }
@@ -359,10 +388,16 @@ async fn reverse_failure(failure: &str, shortened: bool) -> Result<()> {
     } else {
         "alice.eth".into()
     };
+    let at_two = match failure {
+        ReverseFailure::FailedCall => FAILED_MULTICALL,
+        ReverseFailure::FailedBatch => FAILED_MULTICALL_BATCH,
+        ReverseFailure::Shortened => "only-one.eth",
+    };
     let rpc = HydrationRpc::spawn(BTreeMap::from([
         (block_hash(1, 1), first),
-        (block_hash(1, 2), failure.into()),
+        (block_hash(1, 2), at_two.into()),
         (block_hash(1, 3), "recovered.eth".into()),
+        (block_hash(1, 4), "recovered.eth".into()),
     ]))
     .await?;
     follow(db.pool(), &rpc.endpoint, 1, 1).await?;
@@ -375,17 +410,51 @@ async fn reverse_failure(failure: &str, shortened: bool) -> Result<()> {
     )
     .await?;
     follow(db.pool(), &rpc.endpoint, 1, 2).await?;
-    assert_primary(db.pool(), ADDRESS, "not_found", None, None).await?;
-    if shortened {
-        assert_primary(db.pool(), second, "not_found", None, None).await?;
-    } else {
+    match failure {
+        ReverseFailure::FailedCall => {
+            assert_primary(db.pool(), ADDRESS, "not_found", None, None).await?
+        }
+        // The last observed name is served with the block it was observed at.
+        ReverseFailure::FailedBatch => {
+            assert_primary(
+                db.pool(),
+                ADDRESS,
+                "success",
+                Some("alice.eth"),
+                Some(&block_hash(1, 1)),
+            )
+            .await?
+        }
+        ReverseFailure::Shortened => {
+            for address in [ADDRESS, second] {
+                assert_primary(
+                    db.pool(),
+                    address,
+                    "success",
+                    Some("only-one.eth"),
+                    Some(&block_hash(1, 2)),
+                )
+                .await?;
+            }
+        }
+    }
+    if !shortened {
         follow(db.pool(), &rpc.endpoint, 1, 3).await?;
+        let recovered_at = if matches!(failure, ReverseFailure::FailedCall) {
+            assert_primary(db.pool(), ADDRESS, "not_found", None, None).await?;
+            assert_eq!(rpc.calls.lock().unwrap().len(), 2, "failed children wait");
+            event(db.pool(), 4, "ReverseChanged", "ens_v1_reverse_l1", json!({"source_event":"ReverseClaimed","address":ADDRESS,"coin_type":"60","namespace":"ens","reverse_node":reverse_node(ADDRESS)}), None, None).await?;
+            follow(db.pool(), &rpc.endpoint, 1, 4).await?;
+            4
+        } else {
+            3
+        };
         assert_primary(
             db.pool(),
             ADDRESS,
             "success",
             Some("recovered.eth"),
-            Some(&block_hash(1, 3)),
+            Some(&block_hash(1, recovered_at)),
         )
         .await?;
     }
@@ -394,15 +463,15 @@ async fn reverse_failure(failure: &str, shortened: bool) -> Result<()> {
 }
 #[tokio::test]
 async fn failed_reverse_hydration_retracts_the_previous_head_value() -> Result<()> {
-    reverse_failure(FAILED_MULTICALL, false).await
+    reverse_failure(ReverseFailure::FailedCall).await
 }
 #[tokio::test]
-async fn reverse_hydration_rpc_failure_retracts_the_previous_head_value() -> Result<()> {
-    reverse_failure(FAILED_MULTICALL_BATCH, false).await
+async fn reverse_hydration_rpc_failure_keeps_the_previous_head_value() -> Result<()> {
+    reverse_failure(ReverseFailure::FailedBatch).await
 }
 #[tokio::test]
-async fn shortened_reverse_multicall_retracts_every_candidate_baseline() -> Result<()> {
-    reverse_failure("only-one.eth", true).await
+async fn shortened_reverse_multicall_is_read_again_one_call_at_a_time() -> Result<()> {
+    reverse_failure(ReverseFailure::Shortened).await
 }
 
 #[tokio::test]
@@ -485,13 +554,17 @@ async fn text_hydration_rejects_unknown_resolvers_and_restores_ineligible_values
     db.cleanup().await
 }
 
+/// Block 2 writes the text record again and its read fails, as a failed call or as a failed
+/// batch. Either way nothing is served for the new write: a failed call clears the overlay, and
+/// a failed batch leaves the overlay read for the replaced write, which the reader rejects.
 async fn text_failure(failure: &str) -> Result<()> {
-    let db = setup("live_family_text_failure", 3).await?;
+    let db = setup("live_family_text_failure", 4).await?;
     let resource = seed_text(db.pool()).await?;
     let rpc = HydrationRpc::spawn(BTreeMap::from([
         (block_hash(1, 1), "https://one.test".into()),
         (block_hash(1, 2), failure.into()),
         (block_hash(1, 3), "https://recovered.test".into()),
+        (block_hash(1, 4), "https://recovered.test".into()),
     ]))
     .await?;
     follow(db.pool(), &rpc.endpoint, 1, 1).await?;
@@ -506,6 +579,12 @@ async fn text_failure(failure: &str) -> Result<()> {
     assert!(entry.get("value").is_none());
     assert!(entry.get("canonical_head_multicall_hydration").is_none());
     follow(db.pool(), &rpc.endpoint, 1, 3).await?;
+    if failure == FAILED_MULTICALL {
+        assert_eq!(text_entry(db.pool(), resource).await?, entry);
+        assert_eq!(rpc.calls.lock().unwrap().len(), 2, "failed children wait");
+        text_change(db.pool(), 4).await?;
+        follow(db.pool(), &rpc.endpoint, 1, 4).await?;
+    }
     assert_eq!(
         text_entry(db.pool(), resource).await?["value"],
         "https://recovered.test"
@@ -518,6 +597,6 @@ async fn failed_text_hydration_retracts_the_previous_head_value() -> Result<()> 
     text_failure(FAILED_MULTICALL).await
 }
 #[tokio::test]
-async fn text_hydration_rpc_failure_retracts_the_previous_head_value() -> Result<()> {
+async fn text_hydration_rpc_failure_serves_no_value_for_the_new_write() -> Result<()> {
     text_failure(FAILED_MULTICALL_BATCH).await
 }

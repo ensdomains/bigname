@@ -33,6 +33,8 @@ const FAMILY_TABLES: &[&str] = &[
     "project_grant",
     "project_resource_admin_aggregate",
     "project_account_approval",
+    "project_ens_v2_entry_owner",
+    "project_ens_v2_registry_parent",
     "project_child_edge_candidate",
     "project_parent_subregistry",
     "project_reverse_tuple",
@@ -41,6 +43,10 @@ const FAMILY_TABLES: &[&str] = &[
     "project_claim_normalization",
     "project_address_name_fold",
     "project_address_controller_candidate",
+    "project_address_history_anchor",
+    "project_history_source",
+    "project_history_source_edge",
+    "project_history_catalogue_marker",
     "project_address_name_index",
     "project_address_record_node_index",
     "project_address_record_id_index",
@@ -240,4 +246,231 @@ async fn load_table_structure(pool: &sqlx::PgPool, table: &str) -> Result<Vec<St
     .bind(table)
     .fetch_all(pool)
     .await?)
+}
+
+const OPTIONAL_RAW_EVIDENCE: &str =
+    include_str!("../../../migrations/20261005130000_name_surfaces_optional_raw_evidence.sql");
+
+/// `name_surfaces` without column positions: the test rebuilds the predecessor shape by
+/// dropping the new column, which a database that never had it does not do.
+async fn name_surfaces_structure(pool: &sqlx::PgPool) -> Result<Vec<String>> {
+    let mut structure = load_table_structure(pool, "name_surfaces")
+        .await?
+        .into_iter()
+        .map(|object| match object.strip_prefix("column:") {
+            Some(column) => format!(
+                "column:{}",
+                column.split_once(':').map_or(column, |(_, rest)| rest)
+            ),
+            None => object,
+        })
+        .collect::<Vec<_>>();
+    structure.sort();
+    Ok(structure)
+}
+
+/// A populated phase schema from before raw label bytes became optional gains the baseline's
+/// `name_surfaces`, keeps every row's raw labels, and names each row's preimage witness.
+#[tokio::test]
+async fn optional_raw_evidence_upgrade_matches_the_baseline_on_a_populated_schema() -> Result<()> {
+    let installed = database("name_surfaces_schema_installed").await?;
+    initialize_schema_v2(installed.pool()).await?;
+
+    let upgraded = database("name_surfaces_schema_upgraded").await?;
+    install_baseline(&upgraded, false).await?;
+    sqlx::raw_sql(
+        "BEGIN;
+         SET LOCAL search_path TO bigname_phase, public;
+         ALTER TABLE name_surfaces
+             DROP CONSTRAINT name_surfaces_raw_evidence_check,
+             DROP COLUMN preimage_event_identity,
+             ALTER COLUMN raw_name SET NOT NULL,
+             ALTER COLUMN raw_labels SET NOT NULL,
+             ALTER COLUMN dns_encoded_name SET NOT NULL,
+             ADD CHECK (cardinality(raw_labels) = cardinality(labelhashes));
+         INSERT INTO chain_lineage
+             (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         VALUES ('upgrade', '0x01', 1, to_timestamp(1), 'canonical'),
+                ('upgrade', '0x02', 2, to_timestamp(2), 'canonical'),
+                ('upgrade', '0x0f', 2, to_timestamp(2), 'orphaned');
+         INSERT INTO name_surfaces
+             (logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash,
+              labelhashes, normalizer_version, visibility_state, deactivation_reason,
+              deactivated_at, chain_id, block_hash, block_number, canonicality_state)
+         VALUES ('ens:0xnamed', 'ens', 'named.eth', ARRAY['named', 'eth'], '\\x05', '0xnamed',
+                 ARRAY['0xa', '0xeth'], 'test', 'active', NULL, NULL, 'upgrade', '0x01', 1,
+                 'canonical'),
+                ('ens:0xbytes', 'ens', '', '{}', '', '0xbytes', '{}', 'test', 'shadow',
+                 'normalization_gate', to_timestamp(2), 'upgrade', '0x02', 2, 'canonical'),
+                ('ens:0xgone', 'ens', 'gone.eth', ARRAY['gone', 'eth'], '\\x04', '0xgone',
+                 ARRAY['0xb', '0xeth'], 'test', 'active', NULL, NULL, 'upgrade', '0x0f', 2,
+                 'orphaned');
+         INSERT INTO normalized_events
+             (event_identity, namespace, logical_name_id, event_kind, source_family,
+              manifest_version, chain_id, block_number, block_hash, transaction_hash,
+              transaction_index, log_index, derivation_kind, canonicality_state)
+         VALUES ('named-later', 'ens', 'ens:0xnamed', 'PreimageObserved', 'ens_v1_registrar_l1',
+                 1, 'upgrade', 2, '0x02', '0xtx2', 0, 0, 'raw_log_preimage_observation',
+                 'canonical'),
+                ('named-first', 'ens', 'ens:0xnamed', 'PreimageObserved', 'ens_v1_registrar_l1',
+                 1, 'upgrade', 1, '0x01', '0xtx1', 0, 4, 'raw_log_preimage_observation',
+                 'canonical'),
+                ('named-other', 'ens', 'ens:0xnamed', 'RegistrationGranted',
+                 'ens_v1_registrar_l1', 1, 'upgrade', 1, '0x01', '0xtx1', 0, 1,
+                 'ens_v1_unwrapped_authority', 'canonical'),
+                ('bytes-first', 'ens', 'ens:0xbytes', 'PreimageObserved', 'ens_v1_wrapper_l1',
+                 1, 'upgrade', 2, '0x02', '0xtx2', 0, 2, 'raw_log_preimage_observation',
+                 'canonical'),
+                ('gone-orphaned', 'ens', 'ens:0xgone', 'PreimageObserved', 'ens_v1_wrapper_l1',
+                 1, 'upgrade', 2, '0x0f', '0xtx3', 0, 0, 'raw_log_preimage_observation',
+                 'orphaned');
+         COMMIT;",
+    )
+    .execute(upgraded.pool())
+    .await?;
+    assert_ne!(
+        name_surfaces_structure(upgraded.pool()).await?,
+        name_surfaces_structure(installed.pool()).await?,
+        "the fixture restores the predecessor shape"
+    );
+
+    for _ in 0..2 {
+        sqlx::raw_sql(OPTIONAL_RAW_EVIDENCE)
+            .execute(upgraded.pool())
+            .await?;
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/20261005190000_name_surfaces_byte_shadow_path.sql"
+        ))
+        .execute(upgraded.pool())
+        .await?;
+        assert_eq!(
+            name_surfaces_structure(upgraded.pool()).await?,
+            name_surfaces_structure(installed.pool()).await?,
+            "the schema-migration and the baseline define one identical name_surfaces"
+        );
+        let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT logical_name_id, raw_name, preimage_event_identity
+             FROM bigname_phase.name_surfaces ORDER BY logical_name_id",
+        )
+        .fetch_all(upgraded.pool())
+        .await?;
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "ens:0xbytes".to_owned(),
+                    Some(String::new()),
+                    Some("bytes-first".to_owned())
+                ),
+                ("ens:0xgone".to_owned(), Some("gone.eth".to_owned()), None),
+                (
+                    "ens:0xnamed".to_owned(),
+                    Some("named.eth".to_owned()),
+                    Some("named-first".to_owned())
+                ),
+            ]
+        );
+    }
+
+    for pool in [installed.pool(), upgraded.pool()] {
+        sqlx::raw_sql(
+            "INSERT INTO bigname_phase.chain_lineage
+                 (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+             VALUES ('upgrade', '0x03', 3, to_timestamp(3), 'canonical');
+             INSERT INTO bigname_phase.name_surfaces
+                 (logical_name_id, namespace, namehash, labelhashes, normalizer_version,
+                  visibility_state, chain_id, block_hash, block_number, canonicality_state)
+             VALUES ('ens:0xchild', 'ens', '0xchild', ARRAY['0xc', '0xa', '0xeth'], 'test',
+                     'active', 'upgrade', '0x03', 3, 'canonical')",
+        )
+        .execute(pool)
+        .await?;
+    }
+
+    installed.cleanup().await?;
+    upgraded.cleanup().await
+}
+
+/// The extra representation is confined to byte-oriented shadows; unknown bytes and active
+/// raw-backed names retain their independent complete shapes.
+#[tokio::test]
+async fn byte_shadow_path_constraint_rejects_partial_or_active_raw_bundles() -> Result<()> {
+    let database = database("byte_shadow_constraint").await?;
+    initialize_schema_v2(database.pool()).await?;
+    sqlx::query("INSERT INTO bigname_phase.chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ('constraint','block',1,to_timestamp(1),'canonical')")
+        .execute(database.pool()).await?;
+    for (raw, labels, dns, witness, visibility, accepted) in [
+        (
+            Some(""),
+            Some(Vec::<String>::new()),
+            Some(Vec::<u8>::new()),
+            Some("witness"),
+            "shadow",
+            true,
+        ),
+        (
+            Some(""),
+            Some(Vec::new()),
+            Some(Vec::new()),
+            None,
+            "shadow",
+            false,
+        ),
+        (
+            Some(""),
+            Some(Vec::new()),
+            Some(Vec::new()),
+            Some("  "),
+            "shadow",
+            false,
+        ),
+        (
+            Some(""),
+            Some(Vec::new()),
+            Some(Vec::new()),
+            Some("witness"),
+            "active",
+            false,
+        ),
+        (
+            Some("invented"),
+            Some(Vec::new()),
+            Some(Vec::new()),
+            Some("witness"),
+            "shadow",
+            false,
+        ),
+        (
+            Some(""),
+            None,
+            Some(Vec::new()),
+            Some("witness"),
+            "shadow",
+            false,
+        ),
+        (None, None, None, None, "active", true),
+        (None, None, None, Some("witness"), "active", false),
+        (None, None, None, None, "shadow", false),
+    ] {
+        let mut transaction = database.pool().begin().await?;
+        let result = sqlx::query("INSERT INTO bigname_phase.name_surfaces (logical_name_id,namespace,namehash,labelhashes,raw_name,raw_labels,dns_encoded_name,preimage_event_identity,normalizer_version,visibility_state,deactivation_reason,deactivated_at,chain_id,block_hash,block_number,canonicality_state) VALUES ('ens:node','ens','node',ARRAY['child','eth'],$1,$2,$3,$4,'test',$5,CASE WHEN $5='shadow' THEN 'normalization_gate' END,CASE WHEN $5='shadow' THEN to_timestamp(1) END,'constraint','block',1,'canonical')")
+            .bind(raw).bind(labels).bind(dns).bind(witness).bind(visibility).execute(&mut *transaction).await;
+        assert_eq!(
+            result.is_ok(),
+            accepted,
+            "raw={raw:?} witness={witness:?} visibility={visibility}: {result:?}"
+        );
+        if !accepted {
+            assert_eq!(
+                result
+                    .unwrap_err()
+                    .as_database_error()
+                    .and_then(|error| error.constraint()),
+                Some("name_surfaces_raw_evidence_check")
+            );
+        }
+        transaction.rollback().await?;
+    }
+    database.cleanup().await?;
+    Ok(())
 }

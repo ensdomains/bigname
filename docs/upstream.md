@@ -509,7 +509,7 @@ to the applicable entries below.
 > **Why**: keep declared Basenames primary-name values aligned with the ENSv1 Base L2 primary-name path while preserving the Basenames Base registry/registrar/resolver families as the declared exact-name, address-name, children, and record authority.
 > **Since**: `2026-06-04`
 
-> **Permission enumeration with partially indexed approval paths** — the manifest-scoped ENSv1 and Basenames registry `ApprovalForAll` logs from admitted Solidity registries are normalized into [account permission state](glossary.md#account-permission-state), and Project records their applicability through current registry ownership. The API synthesizes effective registry-operator rows from that account state and current binding, with request-relative partial reasons. NameWrapper `ApprovalForAll` logs are normalized into account permission state and fanned out per wrapped name, and NameWrapper `Approval` logs become per-token delegate rows; registrar token/operator and resolver operator/delegate approval logs remain retained [raw facts](glossary.md#raw-fact) without permission output, and the uncaptured Mainnet LLL registry and ENSv2 registry operator approvals also remain outside this slice. Permission summaries retain `operator_approval_surfaces_not_ingested` and remain request-relative partial rather than full or authoritative. NameWrapper resources are partial under `wrapper_parent_and_resolver_delegation_not_projected` because parent control of a wrapped subname is not enumerated as rows.
+> **Permission enumeration with partially indexed approval paths** — the manifest-scoped ENSv1 and Basenames registry `ApprovalForAll` logs from admitted Solidity registries are normalized into [account permission state](glossary.md#account-permission-state), and Project records their applicability through current registry ownership. The API synthesizes effective registry-operator rows from that account state and current binding, with request-relative partial reasons. NameWrapper `ApprovalForAll` logs are normalized into account permission state and fanned out per wrapped name, and NameWrapper `Approval` logs become per-token delegate rows; registrar token/operator and resolver operator/delegate approval logs remain retained [raw facts](glossary.md#raw-fact) without permission output, and the uncaptured Mainnet LLL registry approvals also remain outside this slice. ENSv2 registry `ApprovalForAll` logs are normalized into account permission state with no stored power, and Project keeps each registry entry's current token owner beside them; the API joins the two and serves each operator with the token owner's own token roles while the entry has not expired. `ens_v2_registry_operators` stays an unlisted surface for a registration or root of a registry no active manifest declares (one discovery admitted, or one only an inactive or retired declaration covers), whose code bigname does not read, and on every address-only read, which may reach such a registry. Permission summaries retain `operator_approval_surfaces_not_ingested` and remain request-relative partial rather than full or authoritative. NameWrapper resources are partial under `wrapper_parent_and_resolver_delegation_not_projected` because parent control of a wrapped subname is not enumerated as rows.
 > **Upstream**: ENSv1 registry ownership checks include approved operators and `setApprovalForAll` persists that authority `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L20 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)`. BaseRegistrar accepts both per-token approvees and owner-wide operators for `reclaim` `(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)`. PublicResolver accepts owner-wide operators and node delegates `(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L114-L129 @ ens_v1@91c966f)`. Basenames has equivalent registry operator and resolver operator/delegate paths, while its registrar delegates authorization to ERC-721 approval checks `(upstream: .refs/basenames/src/L2/Registry.sol:L46-L52 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/Registry.sol:L148-L158 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L319-L329 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L448-L465 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/L2Resolver.sol:L141-L166 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/L2Resolver.sol:L180-L198 @ basenames@1809bbc)`. ENSv2's ERC-1155 base exposes owner-wide approval and `PermissionedRegistry` inherits approved-owner roles for non-root resources `(upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L70-L84 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)`. NameWrapper separately exposes token approval and owner/operator mutation paths `(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L124-L135 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L210-L221 @ ens_v1@91c966f)`.
 > **Our rule**: `docs/projections.md` § Permissions and `docs/storage.md` § Projection publication.
 > **Why**: account state represents future and current registry-owned names without per-name fan-out. Remaining approval paths keep the served permission contract partial.
@@ -678,3 +678,36 @@ Per-entry format:
 Use `$upstream-evidence` or `evidence_reader` when a change adds or relies on ENSv1, ENSv2, Basenames, admitted app-metadata, reference-indexer, or execution-client behavior claims. The check produces a claim-to-citation ledger and flags any divergence that belongs in this file.
 
 Pin drift checks are deliberate, not scheduled automation. Run them when manifests, ADRs, or load-bearing citations change. Stale pins are not urgent by default — material upstream behavior change is the trigger, not calendar time.
+
+### WrapperRegistry permission history
+
+The permission reader supports the exact 2026-10-01 Sepolia WrapperRegistry
+implementation `0xbe768b63e5fbbfbb0ae97e9064e0002df8001880`, and the exact
+UserRegistry implementation `0x9bd8a88719068d09ecee662f36c0e3856708366a`
+as a parent. Recognition requires an authenticated declared-factory origin,
+ordinary canonical `RegistryCreated` admission linked to the current address
+instance, and no canonical departure from that implementation through the
+served Project publication. Namespace, chain, source manifest, factory and
+implementation declaration intervals must agree. Duplicate/conflicting
+origins establish no support. The creation block is included because the
+initial `Upgraded` precedes initialization and the factory's final log.
+Delayed initialization can follow the factory origin. Canonical adverse
+upgrades count regardless of consumer visibility; orphaned evidence does not.
+Same-code upgrades preserve support; a later return after a different-code
+upgrade does not establish compatible storage history. An undo removing the
+departure restores the previous proof.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/build-info/solc-0_8_25-b30e6dc9a03b37f6a0b89af5d02a73d3993944f7.json:L1561 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/build-info/solc-0_8_25-b30e6dc9a03b37f6a0b89af5d02a73d3993944f7.json:L1564 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/build-info/solc-0_8_25-b30e6dc9a03b37f6a0b89af5d02a73d3993944f7.json:L1171 @ ens_v2_sepolia_20261001@07e55a05)
+
+This intentionally narrows upstream's mutable upgrade allowlist: admission
+of a target by that allowlist does not prove compatible permission behavior.
+The parent may instead be one of the pinned nonproxy root/ETH declarations,
+within its actual admitted declaration interval. A proven Wrapper parent
+needs no recursive ancestor classification to read its entries and approvals.
+The reader uses the latest parent and raw label, never the initializer's stale
+parent. Unknown histories keep ordinary direct rows and conservative coverage.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L297-L305 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/utils/PermissionedAddressSet.sol:L51-L61 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L311-L314 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/erc1155/ERC1155Singleton.sol:L70-L75 @ ens_v2_sepolia_20261001@07e55a05)

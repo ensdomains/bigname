@@ -176,6 +176,7 @@ impl Run<'_> {
                 revision,
                 role: block::Role::Rebuild { attempt, completes },
                 manifests: &manifests,
+                head: None,
             };
             let eligible = blocks[index..].iter().take_while(|n| ranged(n)).count();
             if eligible > 0 {
@@ -187,9 +188,16 @@ impl Run<'_> {
                 size = applied.saturating_mul(2).min(cap);
                 continue;
             }
-            let (next, stats) = block::apply(self.pool, self.chain_id, number, &plan, self.options)
-                .await
-                .map_err(|error| at_block(number, error))?;
+            let (next, stats) = block::apply(
+                self.pool,
+                self.chain_id,
+                number,
+                &plan,
+                self.options,
+                &mut outcome.hydration,
+            )
+            .await
+            .map_err(|error| at_block(number, error))?;
             outcome.record(stats);
             family = next;
             index += 1;

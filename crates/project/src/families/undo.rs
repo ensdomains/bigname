@@ -102,6 +102,7 @@ pub(crate) async fn undo_block(
     derived::refresh(&mut transaction, chain_id, &touched).await?;
 
     let restored = FamilyMarker::from_journal_image(&prior, locked.sequence + 1);
+    super::history_catalogue::restored(&mut transaction, chain_id, &restored).await?;
     marker::advance(&mut transaction, chain_id, &restored).await?;
     sqlx::query(
         "/* project:families.undo.forget */ DELETE FROM project_family_undo

@@ -4254,7 +4254,7 @@
         {
           "event_identity": "ens_v1_subregistry_changed:1:0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7:0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8:0:0x0000000000000000000000000000000000002aaa",
           "namespace": "ens",
-          "logical_name_id": null,
+          "logical_name_id": "ens:0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f",
           "resource_id": null,
           "event_kind": "SubregistryChanged",
           "source_family": "ens_v1_registry_l1",
@@ -4286,13 +4286,18 @@
             "owner": "0x0000000000000000000000000000000000002a22",
             "parent_node": "0x0000000000000000000000000000000000000000000000000000000000000000",
             "source_event": "NewOwner",
-            "tombstone": false
+            "tombstone": false,
+            "name_identity_observed": true,
+            "labelhashes": [
+              "0xef5b8fe8789ed448b54018e6e47371bfa696902c135a273e35ad0d4cf6df057e"
+            ],
+            "surface_known": true
           }
         },
         {
           "event_identity": "ens_v1_unwrapped_authority:1:ethereum-mainnet:0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7:0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8:0:AuthorityTransferred:1",
           "namespace": "ens",
-          "logical_name_id": null,
+          "logical_name_id": "ens:0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f",
           "resource_id": "35df7b28-6768-57de-bdc9-d104d336f4ec",
           "event_kind": "AuthorityTransferred",
           "source_family": "ens_v1_registry_l1",
@@ -4328,7 +4333,7 @@
         {
           "event_identity": "ens_v1_unwrapped_authority:1:ethereum-mainnet:0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7:0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8:0:PermissionChanged:resource-grant:0x0000000000000000000000000000000000002a22:2",
           "namespace": "ens",
-          "logical_name_id": null,
+          "logical_name_id": "ens:0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f",
           "resource_id": "35df7b28-6768-57de-bdc9-d104d336f4ec",
           "event_kind": "PermissionChanged",
           "source_family": "ens_v1_registry_l1",
@@ -4379,11 +4384,121 @@
             "subject": "0x0000000000000000000000000000000000002a22",
             "transfer_behavior": "replace_on_authority_change"
           }
+        },
+        {
+          "event_identity": "ens_v1_unwrapped_authority:1:ethereum-mainnet:0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7:0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8:0:SurfaceBound:NewOwner:35df7b28-6768-57de-bdc9-d104d336f4ec:2",
+          "namespace": "ens",
+          "logical_name_id": "ens:0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f",
+          "resource_id": "35df7b28-6768-57de-bdc9-d104d336f4ec",
+          "event_kind": "SurfaceBound",
+          "source_family": "ens_v1_registry_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 180,
+          "block_hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
+          "transaction_hash": "0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "block_hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
+            "block_number": 180,
+            "chain_id": "ethereum-mainnet",
+            "kind": "raw_log",
+            "log_index": 0,
+            "transaction_hash": "0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": {},
+          "after_state": {
+            "authority_key": "registry-only:ethereum-mainnet:0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f",
+            "authority_kind": "registry_only",
+            "owner": "0x0000000000000000000000000000000000002a22",
+            "owner_getter": "0x0000000000000000000000000000000000002a22",
+            "active_from": 1700000180,
+            "binding_kind": "declared_registry_path",
+            "registry_contract": "0x0000000000000000000000000000000000002aaa"
+          }
+        },
+        {
+          "event_identity": "ens_v1_unwrapped_authority:1:ethereum-mainnet:0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7:0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8:0:AuthorityEpochChanged:NewOwner:ens:0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f:3",
+          "namespace": "ens",
+          "logical_name_id": "ens:0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f",
+          "resource_id": "35df7b28-6768-57de-bdc9-d104d336f4ec",
+          "event_kind": "AuthorityEpochChanged",
+          "source_family": "ens_v1_registry_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 180,
+          "block_hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
+          "transaction_hash": "0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "block_hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
+            "block_number": 180,
+            "chain_id": "ethereum-mainnet",
+            "kind": "raw_log",
+            "log_index": 0,
+            "transaction_hash": "0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": {
+            "authority_key": null,
+            "authority_kind": null
+          },
+          "after_state": {
+            "authority_key": "registry-only:ethereum-mainnet:0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f",
+            "authority_kind": "registry_only",
+            "owner": "0x0000000000000000000000000000000000002a22",
+            "owner_getter": "0x0000000000000000000000000000000000002a22"
+          }
         }
       ],
-      "name_surfaces": [],
-      "surface_bindings": [],
-      "resources": [],
+      "name_surfaces": [
+        {
+          "chain_id": "ethereum-mainnet",
+          "block_hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
+          "block_number": 180,
+          "canonicality_state": "Canonical",
+          "logical_name_id": "ens:0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f",
+          "namespace": "ens",
+          "input_name": null,
+          "dns_encoded_name": null,
+          "namehash": "0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f",
+          "labelhashes": [
+            "0xef5b8fe8789ed448b54018e6e47371bfa696902c135a273e35ad0d4cf6df057e"
+          ],
+          "normalizer_version": "ensip15@ens-normalize-0.1.1",
+          "normalization_errors": [],
+          "visibility_state": "active"
+        }
+      ],
+      "surface_bindings": [
+        {
+          "chain_id": "ethereum-mainnet",
+          "block_hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
+          "block_number": 180,
+          "canonicality_state": "Canonical",
+          "logical_name_id": "ens:0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f",
+          "resource_id": "35df7b28-6768-57de-bdc9-d104d336f4ec",
+          "binding_kind": "declared_registry_path",
+          "active_from": "2023-11-14T22:16:20+00:00"
+        }
+      ],
+      "resources": [
+        {
+          "chain_id": "ethereum-mainnet",
+          "block_hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
+          "block_number": 180,
+          "canonicality_state": "Canonical",
+          "resource_id": "35df7b28-6768-57de-bdc9-d104d336f4ec",
+          "token_lineage_id": null
+        }
+      ],
       "token_lineages": []
     },
     {

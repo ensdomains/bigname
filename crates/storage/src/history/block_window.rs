@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use sqlx::{PgPool, types::time::OffsetDateTime};
+use sqlx::{PgConnection, types::time::OffsetDateTime};
 
 use super::ChainBlockRange;
 
@@ -12,25 +12,30 @@ use super::ChainBlockRange;
 /// excluded by the resulting window. Block timestamps are monotonic per chain,
 /// so each bound is one ordered index probe.
 pub async fn resolve_chain_block_ranges(
-    pool: &PgPool,
+    db: impl Into<crate::ReadDb<'_>>,
     chain_ids: &[&str],
     from: Option<OffsetDateTime>,
     to: Option<OffsetDateTime>,
 ) -> Result<Vec<ChainBlockRange>> {
+    let mut connection = db.into().acquire().await?;
     let mut ranges = Vec::with_capacity(chain_ids.len());
     for chain_id in chain_ids {
         let from_block = match from {
-            Some(from) => match first_readable_block_at_or_after(pool, chain_id, from).await? {
-                Some(block_number) => Some(block_number),
-                None => continue,
-            },
+            Some(from) => {
+                match first_readable_block_at_or_after(&mut connection, chain_id, from).await? {
+                    Some(block_number) => Some(block_number),
+                    None => continue,
+                }
+            }
             None => None,
         };
         let to_block = match to {
-            Some(to) => match last_readable_block_at_or_before(pool, chain_id, to).await? {
-                Some(block_number) => Some(block_number),
-                None => continue,
-            },
+            Some(to) => {
+                match last_readable_block_at_or_before(&mut connection, chain_id, to).await? {
+                    Some(block_number) => Some(block_number),
+                    None => continue,
+                }
+            }
             None => None,
         };
         if matches!((from_block, to_block), (Some(from), Some(to)) if from > to) {
@@ -46,7 +51,7 @@ pub async fn resolve_chain_block_ranges(
 }
 
 async fn first_readable_block_at_or_after(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     chain_id: &str,
     at: OffsetDateTime,
 ) -> Result<Option<i64>> {
@@ -70,13 +75,13 @@ async fn first_readable_block_at_or_after(
     )
     .bind(chain_id)
     .bind(parameter)
-    .fetch_optional(pool)
+    .fetch_optional(connection)
     .await
     .with_context(|| format!("failed to resolve the first block at or after {at} on {chain_id}"))
 }
 
 async fn last_readable_block_at_or_before(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     chain_id: &str,
     at: OffsetDateTime,
 ) -> Result<Option<i64>> {
@@ -100,7 +105,7 @@ async fn last_readable_block_at_or_before(
     )
     .bind(chain_id)
     .bind(parameter)
-    .fetch_optional(pool)
+    .fetch_optional(connection)
     .await
     .with_context(|| format!("failed to resolve the last block at or before {at} on {chain_id}"))
 }

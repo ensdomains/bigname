@@ -12,6 +12,7 @@ use super::{
 mod activation;
 mod child;
 mod registry;
+mod registry_origin;
 mod renewals;
 mod support;
 mod unwrapped_reconcile;
@@ -209,11 +210,7 @@ pub(super) fn correlate(
             log_index,
         ))
     });
-    // Logs from the ENSv1→ENSv2 migration source that do not match an admitted shape are omitted;
-    // unrelated factory logs stay out.
-    output.normalized_events.retain(|event| {
-        event.source_family != MIGRATION_FAMILY || event.consumer_visibility == CANDIDATE
-    });
+    registry_origin::retain(catalog, &mut output.normalized_events);
     insert_boundaries(output, boundaries);
     activate_complete_groups(output);
     sort_and_deduplicate(output);

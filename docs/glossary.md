@@ -434,10 +434,14 @@ names alike, whether the name is registry-, registrar-, or NameWrapper-held.
 the adapter-owned derivation path for declaration-backed Ethereum approval
 events whose manifests deliberately leave `normalized_events` empty. In the
 current scope it emits `AccountPermissionChanged` for admitted ENSv1 and
-Basenames registry `ApprovalForAll` logs and for NameWrapper `ApprovalForAll`
-logs, and a resource-scoped `PermissionChanged` for the NameWrapper per-token
+Basenames registry `ApprovalForAll` logs, for NameWrapper `ApprovalForAll`
+logs and for ENSv2 registry and root registry `ApprovalForAll` logs, and a
+resource-scoped `PermissionChanged` for the NameWrapper per-token
 `Approval`; declared registrar and resolver approvals still decode without
-normalized output.
+normalized output. An ENSv2 registry approval carries
+`authority_kind = ens_v2_registry` and no effective power: the operator's
+powers are the token owner's on each token
+([ENSv2 registry operator approvals](manifests.md#ensv2-registry-operator-approvals)).
 
 ## Direct child registration
 
@@ -714,7 +718,8 @@ role check on every name in that registry.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L467 @ ens_v2_sepolia_20261001@07e55a05)
 bigname stores its role changes as `RootPermissionChanged` events and serves
 its current holders as permission rows with `grant_scope.kind` `root`, through
-`GET /v1/permissions?registry=<chain_id>:<address>`. Its `resource_id` is
+`GET /v1/permissions?registry=<chain_id>:<address>`, and lists them on a
+permissions read of one registration of that registry. Its `resource_id` is
 derived from the registry's contract instance, so it changes when the address
 moves to a new contract instance.
 
@@ -1497,6 +1502,18 @@ not materialize a resource, token lineage, authority transition, or surface
 binding. This preserves a post-ENSv1→ENSv2 migration ENSv1 arm without treating it as
 current authority.
 
+<a id="address-history-catalogue"></a>
+## Address-history catalogue
+
+Project-owned facts that let address-history requests find relevant event sources without
+loading an address's complete history. The catalogue records address/name and address/resource
+relations, shared source bounds, and resource-to-resolver reachability; it stores no event
+payload copies. Its event-kind summaries, record-key summaries and block ranges reject only
+impossible candidates. Exact relation, attribution and duplicate checks still determine the
+returned events and any requested count. Project publishes the catalogue in the same transaction
+and generation as its other families, and the reader checks that publication before using it.
+See [storage](storage.md#table-ownership) for the tables and their ownership.
+
 <a id="history-walk"></a>
 ## History walk
 
@@ -1608,7 +1625,12 @@ anchored to an exact block hash rather than a block number or
 a projection-owned repair pass that fills current-state values
 by making hash-pinned RPC calls (for example legacy reverse-resolver names or
 missing text values). Hydration writes only projection rows: no normalized
-events, verified output, reusable outcomes, or execution traces. Verified
+events, verified output, reusable outcomes, or execution traces. Only the
+head block hydrates: an ordinary follow block that is the highest readable
+block bigname holds, never a block applied while catching up, replayed or
+rebuilt ([follow-only hydration](projections.md#follow-only-hydration)). A
+hydrated value is the last one successfully observed, with the block it was
+observed at. Verified
 lookup always reads the newly selected projection state and executes for that
 request.
 
@@ -1645,8 +1667,13 @@ a permission scope whose authority starts from an account-wide approval rather
 than a grant persisted for one resource. The public `grant_scope.kind` is
 `account`; its detail contains `chain_id`, `authority_kind`,
 `authority_contract`, and `owner`. Applicability to a resource is evaluated at
-read time through that resource's current
-[registry-owner binding](#registry-owner-binding).
+read time: for an ENSv1 or Basenames registry approval (`authority_kind`
+`registry`) through that resource's current
+[registry-owner binding](#registry-owner-binding), and for an ENSv2 registry
+approval (`authority_kind` `ens_v2_registry`) through the registry entry whose
+current token owner is `owner`, while that entry has not expired. An ENSv2
+row's powers are that owner's roles on the token's own resource.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
 
 <a id="grant-relation"></a>
 ## Grant relation
@@ -1661,6 +1688,12 @@ classified relation and omit the field. (upstream:
 ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L150-L157 @
 basenames@1809bbc) (upstream: .refs/basenames/src/L2/Registry.sol:L202-L207 @
 basenames@1809bbc)
+
+For supported WrapperRegistry histories, `holder` identifies the current owner
+of the registry's parent entry, whose bitmap is derived from the parent
+registry's stored grant on the WrapperRegistry root. The owner's approvals on
+that parent registry produce `operator` rows. See [permission semantics](api-v1.md).
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05)
 
 ## Registry-owner binding
 
@@ -1900,7 +1933,11 @@ the placeholder from the text. The escape form is not reserved, since a label
 really spelled like escape output produces the same string. `namehash` and
 `labelhash` stay the stable identifiers. The placeholder is accepted as a
 [name input](api-v1.md#name-inputs) for its node, which serves no name row while
-it has no name surface; the escape form is not.
+it has no name surface; the escape form is not. The placeholder label is also
+how a [rendered name](#rendered-name) spells a label it has no verified text
+for. A child whose own name surface stores no raw label bytes has a name row
+and is listed under that rendered name, so it takes the placeholder where a
+child with no surface would take the escape form.
 
 ## Normalized event
 
@@ -1982,6 +2019,17 @@ may serve as a name — see [non-name form](#non-name-form) for what serves when
 it may not. A preimage improves display only; it never
 creates ownership, resolver, record, or primary-name truth.
 
+## Preimage witness
+
+the `PreimageObserved` event a [name surface](#surface-name-surface) names in
+`preimage_event_identity` as the source of its raw label bytes: the earliest
+canonical preimage observation of that name. It is kept apart from the surface's
+own first-observation block, because a node can be established by its label-hash
+path before any event states its bytes. A reorg or redo that removes the witness
+moves it to the next surviving preimage observation, or removes the raw bytes
+when none survives and a label-hash-path observation still establishes the
+surface. See [storage](storage.md#name-identity-and-raw-evidence).
+
 ## Pre-surface
 
 a name whose registry events were observed before any plaintext [name
@@ -1999,7 +2047,7 @@ Family rows and their undo journal retain the block-derived state and, where
 applicable, hash-pinned hydration observations. Replay and rebuild make no
 provider calls; undo can restore an earlier retained overlay, while a reset
 rebuild starts from event-derived inputs and refreshes eligible values on later
-follow blocks. Operational timestamps and hydration attempt counters are not
+head blocks. Operational timestamps and hydration attempt counters are not
 protocol facts or API history. The [projection rules](projections.md#rules)
 govern serving fields, storage-only keys and retained evidence. Project is the
 only projection writer.
@@ -2073,6 +2121,22 @@ decision and readiness result per chain. A *full source re-walk* in this contrac
 means that complete Ingest, Interpret, and Project sequence; it is not an
 Interpret-only replay. Production Verify follows Project publication and gates
 readiness and traffic, not the already committed Project rows.
+
+## Rendered name
+
+the name a route serves for a [name surface](#surface-name-surface) that stores
+no raw label bytes. It is computed when the name is read, over the surface's
+whole label-hash path: each label is its text when `label_preimages` holds a
+decoded label that passed normalization, and otherwise the reserved placeholder
+label `[<64 lowercase hex digits of the labelhash>]`. The rule is the same at
+every position, the labels `eth` and `base` included. A preimage that fails
+normalization, or whose bytes do not decode as text, leaves the placeholder; a
+rendered name never takes the escape [non-name form](#non-name-form). `name`
+and `display_name` carry the same rendered name. No stored projection holds it,
+so an imported preimage changes it on the next read without a new publication.
+A surface that stores its raw bytes is served under its stored name instead.
+See [storage](storage.md#name-identity-and-raw-evidence) and
+[name inputs](api-v1.md#name-inputs).
 
 ## Reserved surface
 
@@ -2436,9 +2500,14 @@ statistics.
 
 an on-chain name identity
 (`logical_name_id = namespace:namehash`), distinct from whatever authority
-currently backs it. Raw labels and their normalization flags are observations,
-not identity; display names are derived when read, following the audit's
+currently backs it. The identity is the node and the label-hash path that
+proves it. Raw labels and their normalization flags are observations,
+not identity: a surface stores the raw bytes of its labels only once all of
+them are known, with the [preimage witness](#preimage-witness) that carried
+them, and stores none until then. Display names are derived when read, following the audit's
 [normalization-as-a-gate decision](internal/archive/simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity-maintainer-2026-07-30).
+A surface that stores no raw bytes is served under its
+[rendered name](#rendered-name).
 A **surface binding** is the time-ranged record of which resource backed a
 surface when. Surfaces survive re-registration; resources rotate.
 
@@ -2594,7 +2663,7 @@ Project's publication of current state directly from the
 changed keys, undo journal and marker together. Rebuilds can group older work
 blocks into bounded ranges; reads remain unavailable until the marker is live.
 
-The families carry labels F1 to F15, used in the difference lists, the table
+The families carry labels F1 to F16, used in the difference lists, the table
 comments and the reducers' module headers; F10, the retired resolver alias
 tables, is unused. Each label names these tables and
 the reducer under `crates/project/src/families/` that writes them:
@@ -2617,6 +2686,7 @@ the reducer under `crates/project/src/families/` that writes them:
 | F13, address-to-name association | `project_address_name_fold`, `project_address_controller_candidate`, `project_address_name_index` | `addresses.rs`, with the index derived in `derived.rs` |
 | F14, address-to-record association | `project_address_record_node_index`, `project_address_record_id_index` | `derived.rs` |
 | F15, name summary | `project_name_summary` | `derived/summary.rs` |
+| F16, ENSv2 registry entries | `project_ens_v2_entry_owner`, `project_ens_v2_registry_parent` | `ens_v2_registry.rs` |
 
 ## Family marker
 
@@ -2664,8 +2734,14 @@ child counts and the registry labels filter, sort and count by inside one
 statement, which a list cannot compose at read for every child: the selected
 authority arm, whether the name has a serving resource, its registration
 status, expiry and registration times, the owner it serves, and whether the
-latest registry Transfer attributed to it names the zero owner. Each but the
-last is the value
+latest registry Transfer attributed to it names the zero owner. It also stores
+the expiry selector of [`GET /v1/names`](api-v1-routes.md#get-v1names): whether
+the name's row is listed by expiry (`expiry_listable`: the name composes a row,
+its coverage is not unsupported and its registration carries a finite expiry)
+and the public `authority` the row serves (`public_authority`: `ens_v0`,
+`ens_v1`, `ens_v2`, or none). That listing selects each page's names by
+these two fields and the stored expiry, then composes only the selected names. Each but the zero-owner flag
+is the value
 the [composed name row](#composed-name-row) carries, from the same selection
 code; the zero-owner flag attributes a Transfer by the name it carries, else the
 latest named registry event of any kind of its resource, else an active surface

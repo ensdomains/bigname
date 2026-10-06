@@ -174,8 +174,8 @@ async fn alice_search_row(database: &TestDatabase) -> Result<Value> {
         .with_context(|| format!("no alice.eth search row: {search:#}"))
 }
 
-/// The `ens_v1` object of alice.eth on name detail, lookup detail and feed, `/v1/names` and
-/// search.
+/// The `ens_v1` object of alice.eth on name detail, lookup detail and feed, scalar and
+/// multi-window `/v1/names` listings, and search.
 async fn alice_ens_v1_objects(database: &TestDatabase) -> Result<Vec<(&'static str, Value)>> {
     let detail = v2_name_record_payload_for_database(database, "/v1/names/alice.eth").await?;
     let lookup = |profile: &'static str| {
@@ -195,11 +195,25 @@ async fn alice_ens_v1_objects(database: &TestDatabase) -> Result<Vec<(&'static s
         .find(|row| row["name"] == json!("alice.eth"))
         .cloned()
         .with_context(|| format!("no alice.eth listing row: {listed:#}"))?;
+    let windowed = v2_name_record_payload_for_database(
+        database,
+        "/v1/names?namespace=ens&expires_window=1..2&expires_window=1803965432..1803965434",
+    )
+    .await?;
+    let windowed = windowed["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|row| row["name"] == json!("alice.eth"))
+        .cloned()
+        .with_context(|| format!("no alice.eth multi-window listing row: {windowed:#}"))?;
+    assert_eq!(windowed["expires_window_index"], json!(1));
     Ok(vec![
         ("name detail", detail["data"]["ens_v1"].clone()),
         ("lookup detail", lookup_detail["data"][0]["record"]["ens_v1"].clone()),
         ("lookup feed", feed["data"][0]["record"]["ens_v1"].clone()),
         ("names listing", listed["ens_v1"].clone()),
+        ("multi-window names listing", windowed["ens_v1"].clone()),
         ("search", alice_search_row(database).await?["ens_v1"].clone()),
     ])
 }

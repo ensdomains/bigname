@@ -171,9 +171,10 @@ fn openapi_query_names_equal_every_route_specific_extractor() {
             for parameter in parameters {
                 if parameter["in"] == "query" && parameter["schema"]["type"] == "array" {
                     assert_eq!(parameter["style"], "form", "{path} {parameter}");
+                    let repeated = path == "/v1/names" && parameter["name"] == "expires_window";
                     assert_eq!(
-                        parameter["explode"], false,
-                        "comma-separated query {path} {parameter}"
+                        parameter["explode"], repeated,
+                        "query array serialization {path} {parameter}"
                     );
                 }
             }

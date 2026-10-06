@@ -312,10 +312,12 @@ CREATE INDEX IF NOT EXISTS migration_candidate_discovery_effects_position_idx
 CREATE INDEX IF NOT EXISTS normalized_events_name_history_idx
     ON normalized_events (
         logical_name_id,
-        block_number DESC,
-        transaction_index DESC,
-        log_index DESC,
-        normalized_event_id DESC
+        block_number DESC NULLS LAST,
+        chain_id ASC NULLS LAST,
+        block_hash DESC NULLS LAST,
+        transaction_index DESC NULLS LAST,
+        log_index DESC NULLS LAST,
+        event_identity DESC
     )
     WHERE logical_name_id IS NOT NULL
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
@@ -323,13 +325,32 @@ CREATE INDEX IF NOT EXISTS normalized_events_name_history_idx
 CREATE INDEX IF NOT EXISTS normalized_events_resource_history_idx
     ON normalized_events (
         resource_id,
-        block_number DESC,
-        transaction_index DESC,
-        log_index DESC,
-        normalized_event_id DESC
+        block_number DESC NULLS LAST,
+        chain_id ASC NULLS LAST,
+        block_hash DESC NULLS LAST,
+        transaction_index DESC NULLS LAST,
+        log_index DESC NULLS LAST,
+        event_identity DESC
     )
     WHERE resource_id IS NOT NULL
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
+-- Conservative Project discovery also revisits noncanonical named resource events.
+CREATE INDEX IF NOT EXISTS normalized_events_history_discovery_name_idx
+    ON normalized_events (chain_id, logical_name_id, block_number)
+    WHERE logical_name_id IS NOT NULL AND resource_id IS NOT NULL
+      AND canonicality_state NOT IN (
+          'canonical'::canonicality_state,
+          'safe'::canonicality_state,
+          'finalized'::canonicality_state);
+
+CREATE INDEX IF NOT EXISTS normalized_events_history_discovery_resource_idx
+    ON normalized_events (chain_id, resource_id, block_number)
+    WHERE logical_name_id IS NOT NULL AND resource_id IS NOT NULL
+      AND canonicality_state NOT IN (
+          'canonical'::canonicality_state,
+          'safe'::canonicality_state,
+          'finalized'::canonicality_state);
 
 CREATE INDEX IF NOT EXISTS normalized_events_v1_subregistry_after_node_scope_idx
     ON normalized_events (
@@ -514,7 +535,12 @@ CREATE INDEX IF NOT EXISTS normalized_events_record_id_write_idx
     ON normalized_events (
         chain_id,
         lower(after_state ->> 'resolver'),
-        (after_state ->> 'resolver_record_id')
+        (after_state ->> 'resolver_record_id'),
+        block_number DESC NULLS LAST,
+        block_hash DESC NULLS LAST,
+        transaction_index DESC NULLS LAST,
+        log_index DESC NULLS LAST,
+        event_identity DESC
     )
     WHERE event_kind = 'RecordChanged'
       AND after_state ->> 'storage_model' = 'resolver_record_id'
@@ -990,7 +1016,14 @@ $$;
 
 -- Keyed incremental Project history retrieval.
 CREATE INDEX IF NOT EXISTS normalized_events_project_node_history_idx
-    ON normalized_events (chain_id, lower(after_state ->> 'node'), block_number)
+    ON normalized_events (
+        chain_id, lower(after_state ->> 'node'),
+        block_number DESC NULLS LAST,
+        block_hash DESC NULLS LAST,
+        transaction_index DESC NULLS LAST,
+        log_index DESC NULLS LAST,
+        event_identity DESC
+    )
     WHERE logical_name_id IS NULL
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized')
@@ -1034,3 +1067,38 @@ WHERE source_family IN ('ens_v2_registry_l1', 'ens_v2_root_l1')
   AND canonicality_state IN ('canonical', 'safe', 'finalized')
   AND resource_id IS NOT NULL AND block_number IS NOT NULL
   AND transaction_index IS NOT NULL AND log_index IS NOT NULL;
+
+
+-- Read-only permission recognition; owned by the API reader.
+CREATE INDEX IF NOT EXISTS normalized_events_registry_origin_idx
+    ON normalized_events (chain_id, lower(after_state ->> 'proxy_address'),
+        block_number, transaction_index, log_index, event_identity COLLATE "C")
+    WHERE source_family = 'ens_v2_migration_l1' AND event_kind = 'ContractDiscovered'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+COMMENT ON INDEX normalized_events_registry_origin_idx IS
+    'This index seeks at most two canonical factory origins for one registry address at the served publication.';
+
+CREATE INDEX IF NOT EXISTS normalized_events_registry_announcement_idx
+ON normalized_events
+    (chain_id, lower(raw_fact_ref ->> 'emitting_address'), block_number, log_index, normalized_event_id)
+WHERE source_family = 'ens_v2_registry_l1' AND event_kind = 'RegistryCreated'
+  AND consumer_visibility = 'activated'
+  AND canonicality_state IN ('canonical', 'safe', 'finalized');
+COMMENT ON INDEX normalized_events_registry_announcement_idx IS
+    'This index seeks at most two activated canonical registry announcements for one address at the served publication.';
+
+CREATE INDEX IF NOT EXISTS normalized_events_wrapper_departure_idx
+    ON normalized_events (chain_id, lower(after_state ->> 'proxy_address'), block_number)
+    WHERE source_family = 'ens_v2_registry_l1' AND event_kind = 'Upgraded'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND lower(after_state ->> 'implementation') IS DISTINCT FROM '0xbe768b63e5fbbfbb0ae97e9064e0002df8001880';
+COMMENT ON INDEX normalized_events_wrapper_departure_idx IS
+    'This sparse index checks for a canonical departure from the supported WrapperRegistry implementation without visiting benign same-code upgrades.';
+
+CREATE INDEX IF NOT EXISTS normalized_events_user_registry_departure_idx
+    ON normalized_events (chain_id, lower(after_state ->> 'proxy_address'), block_number)
+    WHERE source_family = 'ens_v2_registry_l1' AND event_kind = 'Upgraded'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND lower(after_state ->> 'implementation') IS DISTINCT FROM '0x9bd8a88719068d09ecee662f36c0e3856708366a';
+COMMENT ON INDEX normalized_events_user_registry_departure_idx IS
+    'This sparse index checks for a canonical departure from the supported UserRegistry implementation without visiting benign same-code upgrades.';

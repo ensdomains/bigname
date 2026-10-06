@@ -13,12 +13,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use alloy_primitives::{B256, keccak256};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::{PgConnection, Postgres, QueryBuilder, Row};
 
-use crate::families::topology::resolver_classification_relation;
+use crate::families::{
+    records::{SAME_LABELS, lowercase_hashes, suffix_namehash},
+    topology::resolver_classification_relation,
+};
 use uuid::Uuid;
 
 use super::sql::{
@@ -30,7 +32,8 @@ struct MirrorPointer {
     resource_id: Uuid,
     chain_id: String,
     namespace: String,
-    raw_labels: Vec<String>,
+    /// Absent on a surface that stores no raw bytes, which is walked by its label hashes.
+    raw_labels: Option<Vec<String>>,
     labelhashes: Vec<String>,
     namehash: String,
     followable: bool,
@@ -43,12 +46,23 @@ pub(super) async fn load_mirror_attribution(
     connection: &mut PgConnection,
     resource_ids: &[Uuid],
     published: Option<&BTreeMap<String, i64>>,
+    requested: Option<&super::RequestedPairs>,
 ) -> Result<BTreeMap<Uuid, Option<BTreeSet<i64>>>> {
     let mirrors = load_mirror_pointers(connection, resource_ids, published).await?;
+    let _pointers_live = requested
+        .map(|_| super::super::address_walk::seams::Live::new("mirror_pointers", mirrors.len()));
     let mut attribution = mirrors
         .iter()
         .map(|mirror| (mirror.resource_id, None))
         .collect::<BTreeMap<_, _>>();
+    let _resource_live = requested.map(|_| {
+        super::super::address_walk::seams::Live::new(
+            "mirror_substitution_resources",
+            attribution.len(),
+        )
+    });
+    let mut pairs_live = requested
+        .map(|_| super::super::address_walk::seams::Live::new("mirror_substitution_pairs", 0));
     let followable = mirrors
         .into_iter()
         .filter(|mirror| mirror.followable)
@@ -57,15 +71,23 @@ pub(super) async fn load_mirror_attribution(
         return Ok(attribution);
     }
 
-    let walk = MirrorWalk::new(&followable);
+    let walk = MirrorWalk::new(&followable)?;
+    let _suffixes_live = requested.map(|_| {
+        super::super::address_walk::seams::Live::new("mirror_suffixes", walk.resource_ids.len())
+    });
     let mut builder = QueryBuilder::<Postgres>::new("");
-    push_mirror_writes(&mut builder, &walk, published);
-    for row in builder
+    push_mirror_writes(&mut builder, &walk, published, requested);
+    let rows = builder
         .build()
         .fetch_all(&mut *connection)
         .await
-        .context("failed to load mirrored resolver record writes")?
-    {
+        .context("failed to load mirrored resolver record writes")?;
+    let _rows_live = requested
+        .map(|_| super::super::address_walk::seams::Live::new("mirror_sql_rows", rows.len()));
+    if requested.is_some() {
+        super::super::address_walk::seams::count("mirror_rows_returned", rows.len());
+    }
+    for row in rows {
         let resource_id: Uuid = row.try_get("resource_id")?;
         let writes = attribution
             .entry(resource_id)
@@ -73,6 +95,15 @@ pub(super) async fn load_mirror_attribution(
             .get_or_insert_with(BTreeSet::new);
         if let Some(event_id) = row.try_get::<Option<i64>, _>("normalized_event_id")? {
             writes.insert(event_id);
+        }
+        if let Some(live) = pairs_live.as_mut() {
+            live.set(
+                attribution
+                    .values()
+                    .filter_map(Option::as_ref)
+                    .map(BTreeSet::len)
+                    .sum(),
+            );
         }
     }
     Ok(attribution)
@@ -145,59 +176,34 @@ struct MirrorWalk {
     namespaces: Vec<String>,
     depths: Vec<i32>,
     nodes: Vec<String>,
-    labels: Vec<Value>,
+    labels: Vec<Option<Value>>,
+    hashes: Vec<Value>,
     queried_nodes: Vec<String>,
 }
 
 impl MirrorWalk {
-    fn new(mirrors: &[MirrorPointer]) -> Self {
+    fn new(mirrors: &[MirrorPointer]) -> Result<Self> {
         let mut walk = Self::default();
         for mirror in mirrors {
-            for depth in 0..mirror.raw_labels.len() {
+            let raw_labels = mirror.raw_labels.as_ref();
+            for depth in 0..raw_labels.map_or(mirror.labelhashes.len(), Vec::len) {
+                let suffix = mirror.labelhashes.get(depth..).unwrap_or_default();
                 walk.resource_ids.push(mirror.resource_id);
                 walk.chain_ids.push(mirror.chain_id.clone());
                 walk.namespaces.push(mirror.namespace.clone());
                 walk.depths.push(i32::try_from(depth).unwrap_or(i32::MAX));
                 walk.nodes.push(suffix_namehash(
-                    &mirror.raw_labels[depth..],
-                    mirror.labelhashes.get(depth..).unwrap_or_default(),
-                ));
+                    raw_labels.map(|labels| &labels[depth..]),
+                    suffix,
+                )?);
                 walk.labels
-                    .push(Value::from(mirror.raw_labels[depth..].to_vec()));
+                    .push(raw_labels.map(|labels| Value::from(labels[depth..].to_vec())));
+                walk.hashes.push(lowercase_hashes(suffix));
                 walk.queried_nodes.push(mirror.namehash.clone());
             }
         }
-        walk
+        Ok(walk)
     }
-}
-
-/// The namehash of a name suffix. The stored labelhashes are used when each is a 32-byte hash, so
-/// labels known only by their hash still resolve; otherwise the raw labels are hashed.
-fn suffix_namehash(raw_labels: &[String], labelhashes: &[String]) -> String {
-    let parsed = (labelhashes.len() == raw_labels.len())
-        .then(|| {
-            labelhashes
-                .iter()
-                .map(|labelhash| labelhash.parse::<B256>().ok())
-                .collect::<Option<Vec<_>>>()
-        })
-        .flatten();
-    let labelhashes = parsed.unwrap_or_else(|| {
-        raw_labels
-            .iter()
-            .map(|label| keccak256(label.as_bytes()))
-            .collect()
-    });
-    let node = labelhashes
-        .iter()
-        .rev()
-        .fold(B256::ZERO, |parent, labelhash| {
-            let mut input = [0_u8; 64];
-            input[..32].copy_from_slice(parent.as_slice());
-            input[32..].copy_from_slice(labelhash.as_slice());
-            keccak256(input)
-        });
-    format!("{node:#x}")
 }
 
 #[cfg(test)]
@@ -206,7 +212,7 @@ pub(super) fn push_empty_mirror_writes_for_test(
     published: Option<&BTreeMap<String, i64>>,
 ) {
     let walk: &'static MirrorWalk = Box::leak(Box::default());
-    push_mirror_writes(builder, walk, published);
+    push_mirror_writes(builder, walk, published, None);
 }
 
 /// The mirror substitution statement over one consulted node, the queried name itself, for plan
@@ -225,10 +231,11 @@ pub(super) fn push_exact_node_mirror_writes_for_test(
         namespaces: vec!["ens".to_owned()],
         depths: vec![0],
         nodes: vec![node.to_owned()],
-        labels: vec![Value::from(raw_labels.to_vec())],
+        labels: vec![Some(Value::from(raw_labels.to_vec()))],
+        hashes: vec![Value::Array(Vec::new())],
         queried_nodes: vec![node.to_owned()],
     }));
-    push_mirror_writes(builder, walk, published);
+    push_mirror_writes(builder, walk, published, None);
 }
 
 /// `SELECT resource_id, normalized_event_id`: one row with a null id for every followed mirror,
@@ -237,7 +244,13 @@ fn push_mirror_writes<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     walk: &'a MirrorWalk,
     published: Option<&BTreeMap<String, i64>>,
+    requested: Option<&super::RequestedPairs>,
 ) {
+    let record_source = if requested.is_some() {
+        "requested_history_records"
+    } else {
+        "bigname_phase.normalized_events"
+    };
     builder.push("WITH walk AS (SELECT * FROM unnest(");
     builder.push_bind(&walk.resource_ids);
     builder.push("::uuid[], ");
@@ -251,12 +264,18 @@ fn push_mirror_writes<'a>(
     builder.push("::text[], ");
     builder.push_bind(&walk.labels);
     builder.push("::jsonb[], ");
+    builder.push_bind(&walk.hashes);
+    builder.push("::jsonb[], ");
     builder.push_bind(&walk.queried_nodes);
     builder.push(
         "::text[]) AS walk(resource_id, chain_id, namespace, ancestor_depth, node, labels,
-                           queried_node)
-        ),
-        candidates AS (
+                           hashes, queried_node))",
+    );
+    if let Some(requested) = requested {
+        requested.push_event_cte(builder);
+    }
+    builder.push(
+        ", candidates AS (
             SELECT walk.resource_id, walk.chain_id, walk.ancestor_depth, walk.queried_node,
                    registry.mirrored_pointer_namespace, registry.mirrored_resolver_address,
                    registry.mirrored_pointer_position
@@ -265,8 +284,9 @@ fn push_mirror_writes<'a>(
               ON surface.namespace = walk.namespace
              AND surface.namehash = walk.node
              AND surface.chain_id = walk.chain_id
-             AND to_jsonb(surface.raw_labels) = walk.labels",
+             AND ",
     );
+    builder.push(SAME_LABELS);
     push_readable_surface(builder, "surface", published);
     // The ENSv1 registry's resolver for the node at the bound: its latest registry-side pointer,
     // clears included, so a cleared node falls through to its ancestors.
@@ -346,7 +366,7 @@ fn push_mirror_writes<'a>(
         UNION ALL
         SELECT followed.resource_id, record.normalized_event_id
         FROM followed
-        JOIN bigname_phase.normalized_events record
+        JOIN __requested_record_source__ record
           ON record.chain_id = followed.chain_id
          AND record.logical_name_id IS NULL
          AND record.source_family = 'ens_v1_resolver_l1'
@@ -356,7 +376,19 @@ fn push_mirror_writes<'a>(
                  NULLIF(record.after_state ->> 'resolver', ''),
                  NULLIF(record.raw_fact_ref ->> 'emitting_address', '')
              )) = followed.mirrored_resolver_address
-        WHERE TRUE",
+        WHERE TRUE"
+            .replace("__requested_record_source__", record_source),
     );
     push_readable_event(builder, "record", published);
+    if let Some(requested) = requested {
+        requested.push_filter(
+            builder,
+            "followed.resource_id",
+            "record.normalized_event_id",
+        );
+    }
 }
+
+#[cfg(test)]
+#[path = "mirror_tests.rs"]
+mod tests;

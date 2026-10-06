@@ -9,6 +9,7 @@ use super::{V2Error, V2Result, slug_to_numeric};
 #[serde(rename_all = "snake_case")]
 pub(crate) enum GrantRelation {
     Operator,
+    Holder,
 }
 
 pub(crate) fn permission_grant_relation(
@@ -16,6 +17,7 @@ pub(crate) fn permission_grant_relation(
 ) -> Option<GrantRelation> {
     relation.map(|relation| match relation {
         PermissionGrantRelation::Operator => GrantRelation::Operator,
+        PermissionGrantRelation::Holder => GrantRelation::Holder,
     })
 }
 

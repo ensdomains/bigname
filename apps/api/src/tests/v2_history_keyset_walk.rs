@@ -161,7 +161,7 @@ async fn v2_history_walks_equal_their_unpaged_collection() -> Result<()> {
                 assert_eq!(tied, expected.map(hkw_id).to_vec(), "{base}: identity tiebreaker");
             }
 
-            // A fixed dataset: the walk is the collection, with the capped and the exact count.
+            // A fixed dataset: the walk is the collection under both default and exact-count modes.
             let exact = if base.contains("include=child_registrations") {
                 base.replace("include=child_registrations", "include=child_registrations,total_count")
             } else {
@@ -170,7 +170,12 @@ async fn v2_history_walks_equal_their_unpaged_collection() -> Result<()> {
             for counted in [base.clone(), exact] {
                 let (baseline, total_count) = hkw_baseline(&database, &counted).await?;
                 assert!(baseline.len() >= 4, "{counted}: {baseline:?}");
-                assert_eq!(total_count, json!(baseline.len()), "{counted}");
+                let expected_total = if counted.starts_with("/v1/addresses/") && counted == base {
+                    Value::Null
+                } else {
+                    json!(baseline.len())
+                };
+                assert_eq!(total_count, expected_total, "{counted}");
                 let walked = hkw_rest(&database, &counted, None, Some(&total_count)).await?;
                 assert_eq!(walked, baseline, "{counted}");
             }

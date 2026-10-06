@@ -348,6 +348,10 @@ impl State {
         key: &str,
         authority: &mut V1NameState,
     ) -> bool {
+        if self.v1_shadow_surfaces.contains(&authority.logical_name_id) {
+            authority.surface_known = false;
+            return false;
+        }
         if self.known_surfaces.contains(&authority.logical_name_id) {
             authority.surface_known = true;
             if let Some(registrar) = self.v1_registrars.get_mut(key)
@@ -383,6 +387,7 @@ impl State {
     pub(in crate::schema_v2) fn observe_v1_surface(&mut self, namespace: &str, namehash: &str) {
         self.v1_materialized_surfaces
             .insert(v1_key(namespace, namehash));
+        self.remember_v1_shadow(format!("{namespace}:{namehash}"));
     }
 
     pub(in crate::schema_v2) fn observe_v1_active_surface(
@@ -394,6 +399,9 @@ impl State {
         let logical_name_id = format!("{namespace}:{namehash}");
         self.v1_materialized_surfaces.insert(key.clone());
         self.remember_known_surface(logical_name_id.clone());
+        if self.v1_surface_is_shadow(namespace, namehash) {
+            return;
+        }
         if let Some(anchor) = self.v1_registry_read_anchors.get_mut(&key) {
             anchor.logical_name_id = logical_name_id;
             anchor.surface_known = true;
@@ -410,6 +418,9 @@ impl State {
         let key = v1_key(namespace, namehash);
         self.v1_materialized_surfaces.insert(key.clone());
         self.remember_known_surface(logical_name_id.to_owned());
+        if self.v1_surface_is_shadow(namespace, namehash) {
+            return Ok(V1SurfaceMaterialization::AlreadyMaterialized);
+        }
 
         if let Some(previous) = self.v1_names.get(&key).cloned()
             && previous.token_lineage_id.is_none()
@@ -498,7 +509,9 @@ impl State {
     ) -> anyhow::Result<V1SurfaceMaterialization> {
         let materialization =
             self.materialize_v1_active_surface(namespace, namehash, logical_name_id, labelhash)?;
-        if materialization == V1SurfaceMaterialization::AlreadyMaterialized {
+        if materialization == V1SurfaceMaterialization::AlreadyMaterialized
+            && !self.v1_surface_is_shadow(namespace, namehash)
+        {
             self.sync_registry_surface_from_registrar(
                 namespace,
                 namehash,
@@ -536,6 +549,9 @@ impl State {
 
     pub(in crate::schema_v2) fn bind_v1_active_surface(&mut self, namespace: &str, namehash: &str) {
         self.observe_v1_active_surface(namespace, namehash);
+        if self.v1_surface_is_shadow(namespace, namehash) {
+            return;
+        }
         let key = v1_key(namespace, namehash);
         let logical_name_id = format!("{namespace}:{namehash}");
         let Some(resource_id) = self.v1_names.get(&key).map(|state| state.resource_id) else {
@@ -563,8 +579,10 @@ impl State {
         namespace: &str,
         namehash: &str,
     ) -> bool {
-        self.known_surfaces
-            .contains(&super::registrar::v1_surface_key(namespace, namehash))
+        !self.v1_surface_is_shadow(namespace, namehash)
+            && self
+                .known_surfaces
+                .contains(&super::registrar::v1_surface_key(namespace, namehash))
     }
 
     pub(in crate::schema_v2) fn v1_surface_materialized(

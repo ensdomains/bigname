@@ -5,7 +5,7 @@ mod support;
 use anyhow::Result;
 use bigname_project::families::{self, FamilyMode};
 use bigname_storage::{AddressNameRelation, HistoryPageOptions, HistoryScope, HistorySummaryMode};
-use serde_json::json;
+use serde_json::{Value, json};
 use support::{CHAIN, Event, Fixture, uuid};
 
 const OWNER: &str = "0x00000000000000000000000000000000000000a1";
@@ -60,6 +60,7 @@ async fn controller_history_uses_its_actual_event_and_undo_restores_the_previous
         )
         .await?;
     fixture.apply(2, FamilyMode::Normal).await?;
+    let catalogue_before = catalogue_facts(&fixture).await?;
     let event_id = fixture
         .event(
             Event::new(
@@ -76,6 +77,28 @@ async fn controller_history_uses_its_actual_event_and_undo_restores_the_previous
         )
         .await?;
     fixture.apply(3, FamilyMode::Normal).await?;
+    let catalogue_after = catalogue_facts(&fixture).await?;
+    assert_ne!(
+        catalogue_after, catalogue_before,
+        "the later controller must change catalogue membership"
+    );
+    let anchor_before_images: Vec<Value> = sqlx::query_scalar(
+        "SELECT before_image FROM project_family_undo WHERE chain_id=$1 AND block_number=3
+         AND family='project_address_history_anchor' AND before_image IS NOT NULL",
+    )
+    .bind(CHAIN)
+    .fetch_all(&fixture.pool)
+    .await?;
+    assert!(
+        !anchor_before_images.is_empty(),
+        "existing owner envelope changes in this block"
+    );
+    for image in anchor_before_images {
+        assert!(
+            catalogue_before[0].as_array().unwrap().contains(&image),
+            "journal must retain the full pre-block row, not an intermediate envelope: {image}"
+        );
+    }
     let rows =
         bigname_storage::load_address_names_current(&fixture.pool, CONTROLLER, Some("ens"), None)
             .await?;
@@ -93,16 +116,54 @@ async fn controller_history_uses_its_actual_event_and_undo_restores_the_previous
         "{visible:?}"
     );
     families::undo_to(&fixture.pool, CHAIN, 2).await?;
+    assert_eq!(
+        catalogue_facts(&fixture).await?,
+        catalogue_before,
+        "actual undo must restore masks, provenance, sources, edges and envelope bytes"
+    );
+    assert_catalogue_stamp(&fixture, 2).await?;
     assert!(
         bigname_storage::load_address_names_current(&fixture.pool, CONTROLLER, None, None)
             .await?
             .is_empty()
     );
     fixture.apply(3, FamilyMode::Normal).await?;
+    assert_eq!(catalogue_facts(&fixture).await?, catalogue_after);
+    assert_catalogue_stamp(&fixture, 3).await?;
     assert_eq!(history(&fixture, 3).await?, visible);
     fixture.assert_rebuild_equal(3).await?;
+    assert_catalogue_stamp(&fixture, 3).await?;
     assert_eq!(history(&fixture, 3).await?, visible);
     fixture.cleanup().await
+}
+
+async fn catalogue_facts(fixture: &Fixture) -> Result<Vec<Value>> {
+    let mut result = Vec::new();
+    for table in [
+        "project_address_history_anchor",
+        "project_history_source",
+        "project_history_source_edge",
+    ] {
+        result.push(sqlx::query_scalar(&format!(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(row) ORDER BY to_jsonb(row)::text),'[]'::jsonb) FROM {table} row",
+        )).fetch_one(&fixture.pool).await?);
+    }
+    Ok(result)
+}
+async fn assert_catalogue_stamp(fixture: &Fixture, block: i64) -> Result<()> {
+    let matches:bool=sqlx::query_scalar(
+        "SELECT catalogue.block_number=$2 AND catalogue.block_number=family.current_block_number
+           AND catalogue.block_hash=family.current_block_hash
+           AND catalogue.publication_sequence=family.sequence
+           AND catalogue.input_content_hash=family.input_content_hash AND catalogue.catalogue_version=1
+         FROM project_history_catalogue_marker catalogue JOIN project_family_marker family USING(chain_id)
+         WHERE catalogue.chain_id=$1",
+    ).bind(CHAIN).bind(block).fetch_one(&fixture.pool).await?;
+    assert!(
+        matches,
+        "catalogue and family publications must be the same generation"
+    );
+    Ok(())
 }
 
 async fn diagnostic_history(fixture: &Fixture) -> Result<Vec<String>> {
@@ -169,6 +230,7 @@ async fn raw_controller_audit_survives_revocation_and_family_reset() -> Result<(
         .await?;
     fixture.apply(3, FamilyMode::Normal).await?;
     assert!(!history(&fixture, 3).await?.is_empty());
+    let granted_catalogue = catalogue_facts(&fixture).await?;
     fixture
         .event(
             Event::new(
@@ -187,6 +249,20 @@ async fn raw_controller_audit_survives_revocation_and_family_reset() -> Result<(
         )
         .await?;
     fixture.apply(4, FamilyMode::Normal).await?;
+    let revoked_catalogue = catalogue_facts(&fixture).await?;
+    assert_ne!(granted_catalogue, revoked_catalogue);
+    let controller_current: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM project_address_history_anchor WHERE chain_id=$1
+         AND address=$2 AND current_mask<>0",
+    )
+    .bind(CHAIN)
+    .bind(CONTROLLER)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        controller_current, 0,
+        "revocation removes every current address membership"
+    );
     assert!(
         history(&fixture, 4).await?.is_empty(),
         "product history retains current-controller admission"
@@ -204,6 +280,16 @@ async fn raw_controller_audit_survives_revocation_and_family_reset() -> Result<(
         retained.contains(&"RegistrationGranted:1:0".to_owned()),
         "{retained:?}"
     );
+
+    families::undo_to(&fixture.pool, CHAIN, 3).await?;
+    assert_eq!(catalogue_facts(&fixture).await?, granted_catalogue);
+    assert_catalogue_stamp(&fixture, 3).await?;
+    fixture.apply(4, FamilyMode::Normal).await?;
+    assert_eq!(catalogue_facts(&fixture).await?, revoked_catalogue);
+    assert_catalogue_stamp(&fixture, 4).await?;
+    fixture.assert_rebuild_equal(4).await?;
+    assert_eq!(catalogue_facts(&fixture).await?, revoked_catalogue);
+    assert_catalogue_stamp(&fixture, 4).await?;
 
     let mut options = bigname_project::families::FamilyOptions::new(support::CONTENT_HASH);
     options.max_blocks_per_run = 0;

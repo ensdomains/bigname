@@ -201,7 +201,8 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
         "SELECT count(*) FROM normalized_events \
          WHERE event_kind = 'RecordChanged' \
          AND source_family = 'ens_v1_resolver_l1' \
-         AND logical_name_id IS NULL AND resource_id IS NULL \
+         AND logical_name_id = 'ens:' || lower(after_state->>'node') \
+         AND resource_id IS NOT NULL \
          AND after_state->>'raw_name' = 'burst.eth' \
          AND NOT (after_state ? 'primary_claim_source') \
          AND transaction_hash = $1 AND canonicality_state = 'canonical'",

@@ -25,7 +25,19 @@ WITH latest_links AS (
 ), named_nodes AS (
     -- Only an active surface is a name to show; a shadow surface is withheld from readers,
     -- and the default node's surface is the root name, not a name.
-    SELECT link.node, surface.logical_name_id, surface.raw_name, surface.namespace
+    -- A surface without raw bytes is named from its label-hash path: each label its verified
+    -- text, else its bracketed hash (bigname_storage::rendered_name).
+    SELECT link.node, surface.logical_name_id, surface.namespace,
+        COALESCE(surface.raw_name, (
+            SELECT string_agg(
+                       CASE WHEN preimage.decoded_label IS NOT NULL
+                                 AND preimage.normalized_under_version
+                            THEN preimage.decoded_label
+                            ELSE '[' || substring(lower(path.labelhash) FROM 3) || ']' END,
+                       '.' ORDER BY path.position)
+            FROM unnest(surface.labelhashes) WITH ORDINALITY AS path(labelhash, position)
+            LEFT JOIN bigname_phase.label_preimages preimage
+              ON preimage.labelhash = lower(path.labelhash))) AS raw_name
     FROM (SELECT DISTINCT node FROM latest_links
           WHERE node <> '0x0000000000000000000000000000000000000000000000000000000000000000') link
     JOIN bigname_phase.name_surfaces surface

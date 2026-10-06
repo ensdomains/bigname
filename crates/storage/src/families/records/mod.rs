@@ -9,6 +9,8 @@
 //! event identity as bytes, with a synthesised event's missing positions first; see
 //! `FamilyPosition`), never by the generated event id.
 mod address_names;
+mod address_publication;
+mod address_relation_inputs;
 mod address_relations;
 mod address_roles;
 mod assemble;
@@ -38,6 +40,8 @@ pub(crate) use address_names::{
     AddressComposer, ComposedName, address_name_candidates, compose_candidate_rows, includes_roles,
 };
 pub(crate) use address_names::{compose_address_name_rows, name_relations_on};
+pub use address_publication::CurrentHistoryRelation;
+pub(crate) use address_publication::publication_relations;
 pub use facts::{
     ResolverClassification as FamilyResolverClassification,
     load_classification as load_family_resolver_classification,
@@ -55,6 +59,7 @@ pub use links::{
     DEFAULT_RECORD_NODE, FamilyLink, FamilyWildcardSource, LinkSelection,
     load_family_link_selection, load_family_wildcard_source,
 };
+pub(crate) use mirror::{SAME_LABELS, lowercase_hashes, suffix_namehash};
 pub use pointer::{FamilyResourcePointer, load_family_resource_pointer};
 pub use primary::{load_family_primary_name_snapshot, load_family_primary_name_snapshots};
 pub(crate) use registry_children::{load_registry_children, registry_child_rows};

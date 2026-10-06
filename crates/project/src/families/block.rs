@@ -48,6 +48,9 @@ pub(crate) struct Plan<'a> {
     pub(crate) role: Role,
     /// The manifest updates the run read once; the block takes its active set from them.
     pub(crate) manifests: &'a manifests::History,
+    /// The highest readable block when the run started, on a follow block of a run that may
+    /// hydrate. The block hydrates only when it is that block, by number and hash.
+    pub(crate) head: Option<&'a Marker>,
 }
 
 /// What one block wrote.
@@ -58,6 +61,8 @@ pub(crate) struct BlockStats {
     pub(crate) elapsed_ms: u64,
     /// Deliveries of one event identity that disagreed and were dropped.
     pub(crate) duplicate_anomalies: u64,
+    /// Hydration row writes the block committed, reverse then text.
+    pub(crate) hydration: (hydrate::outcome::Writes, hydrate::outcome::Writes),
 }
 
 /// A block whose input revision differs from the one it must apply under. The loop stops and
@@ -85,9 +90,10 @@ pub(crate) async fn apply(
     number: i64,
     plan: &Plan<'_>,
     options: &FamilyOptions,
+    hydration: &mut hydrate::outcome::HydrationOutcome,
 ) -> Result<(FamilyMarker, BlockStats)> {
     let started = Instant::now();
-    let prepared = hydrate::prepare(pool, chain_id, number, plan, options).await?;
+    let prepared = hydrate::prepare(pool, chain_id, number, plan, options, hydration).await?;
     let mut opened = open(pool, chain_id, number, plan).await?;
     if let Some(prepared) = &prepared {
         prepared.require_block(&opened.block)?;
@@ -115,17 +121,21 @@ pub(crate) async fn apply(
         prefetched: None,
     };
     reduce::apply(&mut opened.transaction, &context, &events, &mut rows).await?;
-    if let Some(prepared) = prepared {
-        prepared
-            .apply(
-                &mut opened.transaction,
-                &context,
-                &mut rows,
-                plan.sequence + 1,
-            )
-            .await?;
-    }
+    let hydrated = match prepared {
+        Some(prepared) => {
+            prepared
+                .apply(
+                    &mut opened.transaction,
+                    &context,
+                    &mut rows,
+                    plan.sequence + 1,
+                )
+                .await?
+        }
+        None => Default::default(),
+    };
     let (next, mut stats) = publish(opened, chain_id, &rows, plan, options).await?;
+    stats.hydration = hydrated;
     stats.duplicate_anomalies = duplicate_anomalies;
     stats.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     Ok((next, stats))
@@ -252,6 +262,7 @@ pub(crate) async fn publish(
         admission_manifests: Some(manifests.key),
         bootstrap: plan.bootstrap,
     };
+    super::history_catalogue::stamp(&mut transaction, chain_id, &block, &next, &mut stats).await?;
     marker::advance(&mut transaction, chain_id, &next).await?;
     let floor = retention_floor(
         &mut transaction,
@@ -353,6 +364,16 @@ async fn refresh_derived(
         stats.rows.insert(NAME_SUMMARY.name, summary.rows);
     }
     stats.undo_rows += summary.undo_rows;
+    super::history_catalogue::refresh(
+        transaction,
+        chain_id,
+        block,
+        after,
+        &summary.names,
+        &summary.current_relations,
+        stats,
+    )
+    .await?;
     Ok(())
 }
 

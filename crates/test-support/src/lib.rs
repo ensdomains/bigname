@@ -53,6 +53,7 @@ pub const fn test_database_harness_hint() -> &'static str {
 #[derive(Clone, Debug)]
 pub struct TestDatabaseConfig {
     name_prefix: String,
+    icu_locale: Option<String>,
     admin_database: Option<String>,
     admin_max_connections: u32,
     pool_max_connections: u32,
@@ -65,6 +66,7 @@ impl TestDatabaseConfig {
     pub fn new(name_prefix: impl Into<String>) -> Self {
         Self {
             name_prefix: name_prefix.into(),
+            icu_locale: None,
             admin_database: Some("postgres".to_owned()),
             admin_max_connections: 1,
             pool_max_connections: 5,
@@ -72,6 +74,14 @@ impl TestDatabaseConfig {
             admin_connect_context: "failed to connect admin pool for tests".to_owned(),
             pool_connect_context: "failed to connect test pool".to_owned(),
         }
+    }
+
+    /// Build the database with this ICU locale as its default collation instead of the
+    /// server's, for tests of ordering on a database whose collation is not bytewise. Only
+    /// [`TestDatabase::create_from_template`] applies it; give such a template its own key.
+    pub fn icu_locale(mut self, locale: impl Into<String>) -> Self {
+        self.icu_locale = Some(locale.into());
+        self
     }
 
     pub fn admin_database(mut self, database: impl Into<String>) -> Self {
@@ -141,8 +151,15 @@ impl TestDatabase {
         let base_options = PgConnectOptions::from_str(&database_url_from_env())
             .context(config.parse_context.clone())?;
         let admin_pool = connect_admin_pool(&config, &base_options).await?;
-        let template =
-            ensure_template(&admin_pool, &base_options, template_key, fingerprint, build).await;
+        let template = ensure_template(
+            &admin_pool,
+            &base_options,
+            template_key,
+            fingerprint,
+            config.icu_locale.as_deref(),
+            build,
+        )
+        .await;
         admin_pool.close().await;
         Self::create_copy(config, Some(&template?)).await
     }
@@ -275,6 +292,7 @@ async fn ensure_template<F, Fut>(
     base_options: &PgConnectOptions,
     key: &str,
     fingerprint: &[&[u8]],
+    icu_locale: Option<&str>,
     build: F,
 ) -> Result<String>
 where
@@ -292,7 +310,7 @@ where
         .bind(&template)
         .execute(&mut *connection)
         .await?;
-    let built = build_template(&mut connection, base_options, &template, build).await;
+    let built = build_template(&mut connection, base_options, &template, icu_locale, build).await;
     sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
         .bind(&template)
         .execute(&mut *connection)
@@ -304,6 +322,7 @@ async fn build_template<F, Fut>(
     connection: &mut PgConnection,
     base_options: &PgConnectOptions,
     template: &str,
+    icu_locale: Option<&str>,
     build: F,
 ) -> Result<()>
 where
@@ -314,10 +333,19 @@ where
         return Ok(());
     }
     let scratch = unique_database_name(TEMPLATE_SCRATCH_PREFIX)?;
-    sqlx::query(&format!("CREATE DATABASE {}", quote_identifier(&scratch)))
-        .execute(&mut *connection)
-        .await
-        .with_context(|| format!("failed to create template scratch database {scratch}"))?;
+    let locale = icu_locale.map_or_else(String::new, |locale| {
+        format!(
+            " TEMPLATE template0 LOCALE_PROVIDER icu ICU_LOCALE '{}'",
+            locale.replace('\'', "''")
+        )
+    });
+    sqlx::query(&format!(
+        "CREATE DATABASE {}{locale}",
+        quote_identifier(&scratch)
+    ))
+    .execute(&mut *connection)
+    .await
+    .with_context(|| format!("failed to create template scratch database {scratch}"))?;
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .connect_with(base_options.clone().database(&scratch))

@@ -71,6 +71,10 @@ const SEMANTIC_SOURCE_FILES: &[&str] = &[
     // code serves reads only.
     "crates/storage/src/address_names/query.rs",
     "crates/storage/src/address_names/query/timestamps.rs",
+    // The same historical membership/canonicality predicates now decide catalogue rows.
+    "crates/storage/src/history/address_evidence.rs",
+    "crates/storage/src/history/catalogue_contract.rs",
+    "crates/storage/src/history/source.rs",
     // Exact expiry decoding and contract sentinel classification also decide stored summaries.
     "crates/storage/src/unix_seconds.rs",
     "crates/storage/src/expiry.rs",

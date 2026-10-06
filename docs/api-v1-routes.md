@@ -68,6 +68,19 @@ it returns `409 stale` rather than a misleading partial total. Registry and
 resolver collections use the same publication fence in addition to their
 documented selected-chain position.
 
+Address history captures each page's publication and reads its address membership,
+resolver attribution, event page, and display names on the same read-only
+`REPEATABLE READ` database transaction. A healthy publication or Project
+republication after that transaction is pinned does not force a slower read or
+change the page's reported `meta.as_of`. Missing or reset publication state
+visible when the transaction is pinned is refused; changes committed afterward
+cannot erase the valid publication already being read. The namespace's manifest
+authority is revalidated when that transaction ends, and the Interpret redo
+checks still run before returning the response. Optional per-row context retains
+its separately fenced post-page reads. This makes the address page's selection
+coherent without freezing a multi-page history walk: each continuation captures
+the publication available for that new request.
+
 The history collections, `/v1/events`, name history (with or without
 `include=child_registrations`), and address history, are
 [history walks](glossary.md#history-walk), not snapshots.
@@ -84,16 +97,17 @@ after that position, whether or not the row the cursor came from still exists.
 A later page can therefore include rows published after the first page, a row
 can move or disappear after an Interpret redo, and `total_count` can change
 between pages. `meta.as_of` is the publication captured when the page was
-admitted. The page's rows are bounded at it, but the inputs listed under
-[history collection filters](#history-collection-filters) as read from current
-state (the resolver classification, and the address relation kinds in the
-known limitation) are not pinned to it, so not every field of a page belongs
-to that one publication. Publication changes do not expire a position cursor,
+admitted. The page's rows are bounded at it. Address history pins its page
+selection as specified above. Other history routes may read resolver
+classification from current state rather than that publication, and optional
+per-row context retains separate fenced reads, so not every response field
+belongs to that one publication. Publication changes do not expire a position cursor,
 and a publication that lands while a page is being read does not refuse that
 page either. The page is still capped at the
-publication it reports, so no row above it can appear; but when the new
-publication rewrites rows at or below it, for example after a reorg, the page
-can mix rows from before and after that rewrite. Because
+publication it reports, so no row above it can appear. Outside address
+history's pinned page selection, a new publication that rewrites rows at or
+below that bound, for example after a reorg, can mix rows from before and after
+that rewrite. Because
 `event_identity` is only the final tiebreaker, a re-derivation that changes the
 identities of events sharing one log position can skip or repeat a row at that
 position; that is the same walk rule, not an error. A history cursor returns
@@ -635,6 +649,7 @@ collection route carry neither header.
 | `namespace` | query | string | yes | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
 | `expires_after` | query | string | no | none | Inclusive finite-expiry lower bound, as decimal Unix seconds or RFC 3339. Classified null expiry never matches. |
 | `expires_before` | query | string | no | none | Exclusive finite-expiry upper bound, as decimal Unix seconds or RFC 3339; must be later than expires_after when both are supplied. |
+| `expires_window` | query | repeated array [1, 32] of string | no | none | Repeat for 1–32 disjoint finite half-open windows, each `after..before` in decimal Unix seconds or RFC 3339. Adjacent windows are allowed; overlap, duplicates, missing bounds, and combination with either scalar expiry parameter are invalid. Input order defines each row’s expires_window_index. |
 | `authority` | query | array of enum Authority | no | none | Comma-separated served `authority` values; a row matches when the `authority` it serves is any listed value. Rows that serve no `authority` match no set. |
 | `parent` | query | string | no | none | A name; only names exactly one label below it, by normalized name spelling, are listed. parent=eth lists every `<label>.eth` name and no deeper subname. |
 | `sort` | query | enum `expires_at` | no | `expires_at` | Row sort key; ties use the route's stable identity order. |
@@ -669,13 +684,14 @@ collection route carry neither header.
   [Running an expiry sweep](guides/expiry-sweep.md) shows how a notification
   service applies the rules below.
 - Request parameters: query `namespace` (required), `expires_after`,
-  `expires_before`, `authority`, `parent`, `sort=expires_at`,
+  `expires_before`, repeated `expires_window`, `authority`, `parent`, `sort=expires_at`,
   `order=asc|desc`, `cursor`, `page_size`, and optional `finality=latest`. `at` and historical `finality`
   values are rejected by the shared latest-state collection rule.
   `namespace` is required: the listing is one namespace's index scan, and a
   missing namespace returns `400 invalid_input`; an unsupported one returns
-  `404 not_found`. At least one of `expires_after` and `expires_before` is
-  required so the request can never be an unbounded scan; both accept decimal
+  `404 not_found`. Supply at least one of `expires_after` and `expires_before`,
+  or use repeated `expires_window`, so the request can never be an unbounded
+  scan. Scalar bounds accept decimal
   Unix seconds or RFC 3339 timestamps, including offsets and fractional
   seconds. `expires_after` is inclusive and `expires_before` exclusive, so
   consecutive windows tile without overlap or gap; `expires_after` must be
@@ -684,6 +700,18 @@ collection route carry neither header.
   bound, or an equal or inverted pair returns `400 invalid_input`. Finite
   expiry bounds are exact numeric seconds, including beyond year 9999; public
   whole-second formatting does not round an RFC 3339 filter boundary.
+  Alternatively, repeat `expires_window=after..before` for 1–32 finite,
+  disjoint windows. Each bound uses the same exact timestamp parser as the
+  scalar bounds, with at most nanosecond precision. Both bounds are required
+  and `after < before`; the lower bound is inclusive and the upper exclusive.
+  Whitespace around bounds is ignored. Encode a literal `+` in an RFC 3339
+  offset as `%2B`. Adjacent windows are allowed; overlap, duplicates after
+  normalization, more than 32 windows, blank or malformed windows, and a
+  mixture with either scalar expiry parameter (even a blank one) return
+  `400 invalid_input`. Each row belongs to exactly one input window and
+  carries its zero-based `expires_window_index` in the original request order.
+  Input order does not affect result ordering. This parameter is supported
+  only on `GET /v1/names`; every other parameter remains single-valued.
   `authority` keeps only rows whose served `authority` is a listed value, with
   the grammar of
   [`GET /v1/addresses/{address}/names`](#get-v1addressesaddressnames): an
@@ -693,11 +721,12 @@ collection route carry neither header.
   `authority=ens_v0,ens_v1` matches both. Rows that serve no `authority`
   (Basenames rows and ownerless registry rows) match no set.
   `parent` keeps only names exactly one label below the given name, compared
-  by normalized name spelling after the ENSIP-15 normalization name routes
+  by served name spelling after the ENSIP-15 normalization name routes
   apply to a path name, not by node or registry topology: a bracketed labelhash
-  label matches only names stored with that bracketed spelling, never a name
-  that spells the label as text, except the labelhashes of `eth` and `base`,
-  which that normalization spells as text. `parent=eth` selects the `.eth`
+  label matches only names served with that bracketed spelling (a
+  [rendered name](glossary.md#rendered-name) whose label has no verified
+  text), never a name that spells the label as text, except the labelhashes of
+  `eth` and `base`, which that normalization spells as text. `parent=eth` selects the `.eth`
   second-level names before and after the
   [Universal Resolver cutover](glossary.md#universal-resolver-cutover), ENSv1
   BaseRegistrar leases
@@ -709,7 +738,8 @@ collection route carry neither header.
   `parent=base.eth` with `namespace=basenames` selects the Basenames
   second-level names. Both filters apply before paging. A value that names no
   authority (`authority=,`), an unknown authority, an empty `parent`, a
-  `parent` that is not a valid name, or a repeated parameter returns
+  `parent` that is not a valid name, or a repeated parameter other than
+  `expires_window` returns
   `400 invalid_input`.
 - Response shape: `data` is an array of the same record-shaped rows
   `GET /v1/search` serves: `name`, `display_name`, `namespace`, `namehash`,
@@ -717,8 +747,11 @@ collection route carry neither header.
   `created_at`,
   `expires_at`, `grace_ends_at`, `authority` as `GET /v1/names/{name}` serves
   it, and the `ens_v1` object while that `authority` is `ens_v1` or `ens_v0` (see
-  [the naming dictionary](api-v1.md#naming-dictionary)). Every row has an
-  `expires_at` inside the window. `expires_at` is the served expiry of
+  [the naming dictionary](api-v1.md#naming-dictionary)). Every row's exact
+  stored expiry falls in a requested window. With repeated windows, every row
+  also carries `expires_window_index` (0–31); scalar requests and search omit
+  that field. Membership uses the exact stored expiry, before public
+  whole-second formatting. `expires_at` is the served expiry of
   [Expiry and grace](api-v1.md#expiry-and-grace): from the Universal Resolver
   cutover a `.eth` name with a live ENSv2 entry is listed by that entry's
   expiry, before it by its ENSv1 lease's. A name
@@ -729,19 +762,23 @@ collection route carry neither header.
   registrar leases, ENSv2 registrations, and wrapped subnames; `parent=eth`
   narrows it to the `.eth` second-level names. The public
   `expires_at` is a decimal string; the index and comparisons use exact numeric
-  seconds, never floating point or lexicographic string order. It finds them by
-  walking the retained lifecycle events
-  and NameWrapper states by expiry through `project_lifecycle_event_expiry_idx`,
-  `project_lifecycle_event_inexact_expiry_idx` and
-  `project_wrapper_state_expiry_idx`. These indexes were introduced by
-  `20260928140000_project_families_expiry_indexes.sql`; their current expiry
-  keys use exact numeric storage. With `authority` set the indexed walk
-  composes only names whose stored [name summary](glossary.md#name-summary)
-  selects an arm that can serve a listed value (`ens_v1` for `ens_v0` and
-  `ens_v1`, `ens_v2` for `ens_v2`), and with `parent` set only names one label
-  below it. Names whose retained expiry is a JSON number that is not an
-  integral second, which the walk cannot place, are composed without that
-  pruning. Either way the composed row decides each row. A row with no finite registration expiry is outside this
+  seconds, never floating point or lexicographic string order. It selects a
+  page's names from the stored [name summary](glossary.md#name-summary), which
+  holds each name's exact listing selector: whether the name is listed, its
+  expiry and the public `authority` its row serves. One statement applies the
+  expiry bounds, `authority`, `parent` and the cursor and takes the first
+  `page_size + 1` names in the listing's order, through
+  `project_name_summary_expiry_idx` or
+  `project_name_summary_authority_expiry_idx`; only those names are composed.
+  For repeated windows, that statement selects at most `page_size + 1` keys
+  per window and takes the first `page_size + 1` across their ordered union,
+  then composes those names once under the page's shared snapshot.
+  A page therefore composes at most `page_size + 1` names however many names
+  the namespace holds or the filters leave out, though a sparse `parent` or a
+  second that many names share still reads many index entries. The selector
+  is written with each publication from the same composition the page runs;
+  a selected name whose composed row does not match is a failure
+  (`500 internal_error`), not a shorter page. A row with no finite registration expiry is outside this
   listing. Finite values after year 9999, above `2^53 - 1` or above `i64::MAX`
   remain eligible and keep every digit through filtering, sorting and paging.
   A negative or malformed stored expiry is not a no-expiry sentinel.
@@ -775,9 +812,13 @@ collection route carry neither header.
   that wants the names a given address last held asks
   `GET /v1/addresses/{address}/names?relation=former_owner`.
 - Pagination behavior: standard collection pagination by `expires_at` in the
-  requested order, ties broken by namespace, name, and namehash. Cursors are
-  bound to namespace, both bounds, `authority`, `parent`, and order, and hold
-  the last row's position;
+  requested expiry order; namespace, name and namehash tie breakers remain
+  ascending in either direction. Cursors bind namespace, scalar bounds or the
+  complete ordered normalized window list, `authority`, `parent`, and order,
+  and hold the last row's position. Reordering, adding, removing or changing a
+  window invalidates the cursor; equivalent timestamp spellings are accepted.
+  Scalar and repeated-window cursors are not interchangeable, even for one
+  equivalent window. `page_size` may change within its 1–200 limit;
   see [current-state list cursors](api-v1.md#current-state-list-cursors).
   `page.total_count` is `null`.
 - Snapshot behavior: each page is read on one database snapshot of the
@@ -1001,7 +1042,9 @@ collection route carry neither header.
   registration and no classified serving path, for example a released name, a
   reservation, or an unbound `current_authority_not_projected` row) requests
   no key, dispatches no call, and returns `status=unsupported` with
-  `verified_records_not_supported`. An inventory-derived set above 200 keys
+  `verified_records_not_supported`. So does a name whose surface stores no raw
+  label bytes unless every label has verified bytes (see the refusal reasons
+  under [`GET /v1/names/{name}/records`](#get-v1namesnamerecords)). An inventory-derived set above 200 keys
   also dispatches no call: the request fails with `422 unsupported`. An
   eligible name is not in that group just because it has no exact resolver:
   an ENS name whose exact resolver is null executes the same key set through
@@ -1382,7 +1425,8 @@ its value map:
   exact-name detail route: `verified_records_not_supported` when the projected
   row carries no topology the engine admits (a bound name without a record
   inventory row, a null-resolver row outside the discovery shape below, an
-  out-of-class shape, or no admitted execution entrypoint), and
+  out-of-class shape, or no admitted execution entrypoint) or when the name's
+  surface stores no raw label bytes and bigname cannot supply them, and
   `exact_name_authority_not_verifiable` when the row's selected
   [authority arm](glossary.md#authority-epoch) is outside the
   `verified_authority_arms` the selected `ens_execution` manifest declares
@@ -1391,6 +1435,17 @@ its value map:
   admitted on the official `sepolia` profile). A name served as
   `authority=ens_v0` is on the stored `ens_v1` arm and is admitted wherever
   `ens_v1` is. Neither refusal dispatches a provider call.
+  A name whose surface stores no raw label bytes is verified only when every
+  label of its label-hash path has a preimage that passed normalization, each
+  1 to 255 bytes long, and those label bytes hash to the name's node; the
+  lookup then builds the DNS wire name from them. Otherwise it is refused with
+  `verified_records_not_supported` before any provider call, and the
+  exact-name detail route still serves its indexed registration and identity
+  fields. A bracketed labelhash cannot stand in for the missing bytes on the
+  ENSv1 path, because the library the ENSv1 Universal Resolver's registry walk
+  uses hashes the literal bytes of each label of the wire name
+  (upstream: .refs/ens_v1/contracts/utils/NameCoder.sol:L126-L137 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L32 @ ens_v1@91c966f).
   Bound ENS names of either arm with a non-null exact resolver carry a
   projected direct topology (`execution.md` § Resolver-record lookup), so an
   admitted arm executes the direct route and compares against the indexed
@@ -1891,6 +1946,14 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   bigname cannot name is absent from the page instead. The placeholder label
   is a [name input](api-v1.md#name-inputs) for its node. That node has no name
   row while it has no name surface, so name routes answer it `404 not_found`.
+  A child whose own name surface stores no raw label bytes has a name row. It
+  is listed once, as that row serves it, under its
+  [rendered name](glossary.md#rendered-name), and name routes answer that
+  spelling with the row. Its row never takes the escape form: a label whose
+  preimage is not valid text reads as the placeholder. A parent whose surface
+  stores no raw label bytes lists and counts its children under its own
+  rendered name, at any depth. Admitted ENSv1 `NewOwner` events create these
+  surfaces when the complete labelhash path is proven back to the root.
   The escape form is never a name input. Resolver records are not included here;
   use `GET /v1/names/{name}` for `resolver` and grouped `records`, or `GET /v1/names/{name}/records` for per-key record
   answers.
@@ -2021,7 +2084,9 @@ A recognized namespace with no available publication returns retryable `409 stal
   neither attributes an older write nor closes an earlier pointer's window.
   Bindings and ownership before `from_timestamp` remain valid anchors; the
   timestamp window filters event rows.
-- Two inputs are read from current state. An address's relations are read from
+- Two inputs use current-state semantics. Address history reads them on the
+  same publication as the page; this does not turn a current relation into
+  an event-time relation. An address's relations are read from
   the current relation rows, and a row is admitted when the event Project
   cites for it lies at or below the published block. A `role_holder` row is
   read from the address's current registry-scope grant on the name's selected
@@ -2126,8 +2191,15 @@ A recognized namespace with no available publication returns retryable `409 stal
   binds [`include=child_registrations`](#direct-child-registrations-includechild_registrations),
   which changes which rows the collection holds; the payload flags
   `include=data` and `include=raw` are not bound.
-- `page.total_count` is populated for anchored history reads: name history and
-  address history always, and `/v1/events` when `name`, `registration_id`,
+- Address history returns `page.total_count=null` by default, including empty
+  results. `include=total_count` requests an exact, uncapped total over the same
+  filtered collection and published snapshot as the page. The flag does not
+  bind cursors, so clients may request a count on one page and omit it on the
+  next; each opt-in request counts again at its current published position. An
+  exact empty result is zero. Exact counting may scan the entire matching
+  history and cost substantially more than a page.
+- `page.total_count` is populated by default for other anchored history reads:
+  name history, and `/v1/events` when `name`, `registration_id`,
   `address`, or `resolver` bounds the read. The count runs inside the same repeatable-read
   transaction as the page over exactly the page's filters (scope, type set,
   block and timestamp windows, product visibility, and duplicate suppression),
@@ -2846,6 +2918,8 @@ introduces it rebuilds Project from full history before serving the option; see
   `registration_id` read (ENSv2 root grants are in the `ens` namespace), but an
   empty page keeps the registry's completeness classification below. Root rows are also returned by `address` reads and
   by `registration_id=<root resource>`, the `registration_id` the rows carry.
+  A `name` or `registration_id` read of an ENSv2 registration lists the same
+  holders as rows of that registration, as described below.
 - Response shape: `data` is an array of permission rows
   `{address, grant_relation?, grant_scope, powers, registration_id, record_resource?, name?,
   authority_context, wrapper_state?, wrapper_fuses?}`.
@@ -2919,9 +2993,11 @@ introduces it rebuilds Project from full history before serving the option; see
   `{chain_id, manager}` for `record_manager`; and
   `{chain_id, authority_kind, authority_contract, owner}` for the
   [`account` permission scope](glossary.md#account-permission-scope). Effective
-  account rows carry `grant_relation=operator` and
-  `powers=["registry_control"]`; direct rows omit `grant_relation` and are
-  otherwise byte-for-byte compatible. For example, a direct row remains:
+  account rows carry `grant_relation=operator`. An ENSv1 or Basenames registry
+  operator has `powers=["registry_control"]`; an ENSv2 registry operator has
+  the powers of the token owner's own row on that registration. Direct rows
+  omit `grant_relation` and are otherwise byte-for-byte compatible. For
+  example, a direct row remains:
 
   ```json
   {
@@ -2956,7 +3032,42 @@ introduces it rebuilds Project from full history before serving the option; see
   }
   ```
 
-  A registry root holder is:
+  An ENSv2 registry operator is an account the registration's current token
+  owner approved on the registry with `setApprovalForAll`. Its `powers` are
+  the owner's `registry` row on the same registration, admin roles included,
+  and none of the owner's root roles. The row is absent once the token moves to
+  an owner who did not approve the account, once the approval is revoked, and
+  from the first publication whose block time reaches the entry's own expiry;
+  a renewal brings it back. An account that also holds a role of its own has
+  both rows. Like the direct rows, operator rows follow the name's
+  registration: once the name's path is released, because the entry or an
+  ancestor of the name expired, the registration serves no rows, although the
+  registry contract still honours roles on an entry whose own expiry has not
+  passed.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L350-L352 @ ens_v2_sepolia_20261001@07e55a05)
+
+  ```json
+  {
+    "address": "0xoperator",
+    "grant_relation": "operator",
+    "grant_scope": {
+      "kind": "account",
+      "detail": {
+        "chain_id": 11155111,
+        "authority_kind": "ens_v2_registry",
+        "authority_contract": "0xregistry",
+        "owner": "0xtoken-owner"
+      }
+    },
+    "powers": ["set_resolver", "admin_set_resolver", "can_transfer_admin"],
+    "registration_id": "018f...",
+    "name": "example.eth",
+    "authority_context": "current_for_name"
+  }
+  ```
+
+  A direct registry root holder is:
 
   ```json
   {
@@ -2971,12 +3082,58 @@ introduces it rebuilds Project from full history before serving the option; see
   }
   ```
 
-  A root row's `powers` are the holder's declared root role bits, never empty;
-  `name`, `grant_relation`, `record_resource` and the wrapper fields are absent,
-  `authority_context` is always `resource_audit`, and `registration_id` is the
-  root resource's id rather than a name registration. The root `detail` is an
-  additive change: root rows served on `address` and `registration_id` reads
-  before it carried `detail: {}` and now carry the same `registry` object.
+  On a `registry` read, an `address` read and a read of the root resource by
+  `registration_id`, a root row's `powers` are the holder's declared root role
+  bits, never empty. This direct row omits `name`, `grant_relation`,
+  `record_resource` and wrapper fields. `authority_context` is `resource_audit`,
+  and `registration_id` is the root resource's id rather than a name
+  registration. The root `detail` is an additive change: root rows served on
+  `address` and `registration_id` reads before it carried `detail: {}` and now
+  carry the same `registry` object.
+
+  A supported WrapperRegistry's derived parent owner carries
+  `grant_relation=holder` and root scope. That owner's approvals on the parent
+  registry carry `grant_relation=operator` and account scope naming the parent
+  registry and owner. Qualification replaces the subject's own stored root
+  bitmap before pagination, even with an empty replacement. Registry and
+  address filters share this composition; see [permission semantics](api-v1.md).
+
+  A read bound to one ENSv2 registration by `name` or `registration_id` lists
+  the registry's root holders too, because a role held on the root passes the
+  same check on every token of the registry. There a root row belongs to the
+  registration: `registration_id`, `name` and `authority_context` are the
+  values the registration's other rows carry, `grant_scope` is the same `root`
+  object, and `powers` are the holder's root powers. `can_transfer_admin`
+  held on the root has three effects. It does not pass the transfer gate,
+  which checks that role only among the token owner's own roles on the token,
+  and it gives no ERC-1155 approval to move a token. It lets the holder revoke
+  that role from an account on a live name. And in a `PermissionedRegistry`, or a
+  `UserRegistry`, which inherits the check, while any account holds it on
+  the root the registry is not emancipated, so `safeTransferFrom` of every
+  name of the registry reverts; `unsafeTransfer` skips that check. A
+  `WrapperRegistry` overrides the check to always pass, so this third effect
+  does not apply there.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L220-L227 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/UserRegistry.sol:L25-L31 @ ens_v2_sepolia_20261001@07e55a05)
+  With `address` the read returns that account's
+  rows on the registration, its root row included. An `address` read without
+  `name` or `registration_id` lists a root holder once, on the root resource,
+  and does not repeat it for each name of the registry. A registration whose
+  rows are dropped because its name's path was released, by its own expiry or
+  an ancestor's, lists no root holders. A holder of root `renew` can still
+  revive an expired entry; such holders are rows of the `registry` read.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L454-L465 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L528-L543 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L270-L277 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L408-L417 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L444-L451 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/libraries/EACBaseRolesLib.sol:L30-L34 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/libraries/RegistryRolesLib.sol:L65-L76 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L433-L438 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/erc1155/ERC1155Singleton.sol:L359-L364 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L185-L190 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L243-L258 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L643-L654 @ ens_v2_sepolia_20261001@07e55a05)
 
 - Pagination behavior: standard collection pagination with fixed sort
   `address_registration_scope_asc` and keyset
@@ -3002,7 +3159,8 @@ introduces it rebuilds Project from full history before serving the option; see
   cryptographically signed. A name-anchored cursor is rejected for a different
   name or a registration-only request, even when both names resolve to the same
   registration. Crossing from direct to operator rows neither duplicates nor
-  omits a row. A `registry` read has one resource, so its rows are in holder
+  omits a row. A root holder listed on an ENSv2 registration has the scope key
+  `root` under that registration's id. A `registry` read has one resource, so its rows are in holder
   address order, bytewise on the lowercase hex; a `registry` cursor is rejected
   for a different registry or for a request without that `registry`.
 - Snapshot behavior: a `name` filter's current registration anchor is resolved
@@ -3073,12 +3231,19 @@ introduces it rebuilds Project from full history before serving the option; see
   approvals are not enumerated; the NameWrapper `Ownable` owner is a
   deployment-wide administrator, not a per-registration permission.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L565-L589 @ ens_v1@91c966f)
-  An ENSv2 registry registration reports
-  `["ens_v2_registry_operators","resolver_approvals"]`: its direct role holders
-  are rows, while operators the owner approved on the ENSv2 registry and
-  `PublicResolverV2` operators and delegates are not. It has no BaseRegistrar
-  token, so it never reports `registrar_approvals`.
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
+  A registration of an ENSv2 registry whose current address an active
+  manifest declares reports `["resolver_approvals"]`: its direct role holders,
+  the operators its owner approved on the registry and the registry's root
+  holders are rows, while `PublicResolverV2` operators and delegates are not.
+  A registration of a registry that discovery admitted, or one only an
+  inactive or retired declaration covers, serves the same rows and reports
+  `["ens_v2_registry_operators","resolver_approvals"]`, for the reason given
+  for a discovered registry's root below: the accounts a `WrapperRegistry`
+  lets act with its parent's roles act on every token of the registry. The
+  supported factory/history cases produce rows as specified in
+  [permission semantics](api-v1.md); this coverage label remains conservative. An ENSv2 registration has no BaseRegistrar token, so it never
+  reports `registrar_approvals`.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
   (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L51-L59 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L174-L184 @ ens_v2@a971bd64)
   A `registry` read is classified by the registry, not by a registration
@@ -3098,7 +3263,8 @@ introduces it rebuilds Project from full history before serving the option; see
   a `WrapperRegistry` (a [migration registry](glossary.md#migration-registry-wrapperregistry)
   is one): it grants its root roles to a parent registry, and gives exactly
   those roles to the parent name's current owner and to that owner's operators
-  on the parent registry, who are not rows. A `UserRegistry` is upgradeable, so
+  on the parent registry. Supported factory/history cases produce those rows
+  as specified in [permission semantics](api-v1.md). A `UserRegistry` is upgradeable, so
   its code can change too.
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L125-L145 @ ens_v2_sepolia_20261001@07e55a05)
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05)
@@ -3115,9 +3281,13 @@ introduces it rebuilds Project from full history before serving the option; see
   but neither the page nor a role summary is an authoritative permission
   enumeration while the partial marker is present. Registrar ERC-721 approvals,
   resolver approvals/delegates, and parent control of non-emancipated wrapped
-  subnames remain absent. ENSv2 registry operators also remain absent, and an
-  ENSv2 registration names that gap as `ens_v2_registry_operators`.
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64) A `name` filter
+  subnames remain absent. ENSv2 registry operators are served as rows. A
+  registration of a manifest-declared ENSv2 registry reports only
+  `resolver_approvals`; a registration of a discovered registry serves the
+  same operator rows and also reports `ens_v2_registry_operators`, because its
+  code may let further accounts act that the rows do not list.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05) A `name` filter
   resolves only the selected current registration: a migrated name returns its
   ENSv2 permission rows, while an explicit `registration_id` can still select a
   retained historical ENSv1 registration for audit. An ENSv2 reservation does
@@ -3379,7 +3549,8 @@ introduces it rebuilds Project from full history before serving the option; see
   (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47-L48 @ ens_v2@a971bd64)
   Holding a role does not make the address the `manager`, and it combines with the other
   relations: an owner that also holds a role matches both. Roles held on the
-  registry root and ENSv2 registry operators add no `role_holder` rows (see
+  registry root and roles an ENSv2 registry operator has through a token owner
+  add no `role_holder` rows (see
   [address collections](projections.md#address-and-child-collections)), so a
   page that omits a name does not prove the address holds no permission on
   it. `dedupe=name` groups by name surface and is the
@@ -3558,8 +3729,12 @@ introduces it rebuilds Project from full history before serving the option; see
   explicit gaps. `grant_scope` uses the same shape documented for
   `GET /v1/permissions`. Direct grants omit `grant_relation`; effective
   registry-operator grants carry `grant_relation=operator`, the account scope,
-  and `powers=["registry_control"]`. Operator grants expand roles for resources
+  and `powers=["registry_control"]` for an ENSv1 or Basenames registry or the
+  token owner's powers for an ENSv2 registry. Operator grants expand roles for resources
   already on the page but never add or remove address-name membership rows.
+  The registry root holders a permissions read of one ENSv2 registration lists
+  are not repeated in `role_summary`: they are the same for every name of a
+  registry. Read them once with `GET /v1/permissions?registry=`.
   The include supports at most 1,000 grant rows across all returned summaries,
   counting each grant again when multiple names share a resource. This is a
   total nested expansion budget, not a per-name or per-subject limit. Overflows
@@ -3567,8 +3742,10 @@ introduces it rebuilds Project from full history before serving the option; see
   Omit the include, then paginate
   `GET /v1/permissions?registration_id=<permission_resource_id>` for each selected
   resource. Preserve `namespace` only if it was explicitly present on the names
-  request; do not add `name` or `address` filters. This reads the same supported
-  permission relation, including supported rows on an unsupported name anchor.
+  request; do not add `name` or `address` filters. This is the full permissions
+  read of the registration: the grants `role_summary` would have carried,
+  including supported rows on an unsupported name anchor, plus the registry
+  root holders `role_summary` leaves out.
   Existing unsupported permission families remain unsupported. Reducing the name
   page can help, but one resource can exceed the limit by itself. Each request
   binds its own publication: a publication change between the names request and
@@ -3630,12 +3807,15 @@ introduces it rebuilds Project from full history before serving the option; see
   row is served `status=ok` and `registration_status=unregistered`.
   A name bigname has never materialized as a
   [name surface](glossary.md#surface-name-surface) has no current name row.
-  On the ENSv1 arm a surface comes from a
-  label-bearing registrar or NameWrapper event; a node known only from registry
-  owner events — a subname written with `setSubnodeOwner` or
-  `setSubnodeRecord`, which emit the labelhash and not the label, and never
-  wrapped — has a registry-only resource but no surface, whether or not a
-  label preimage for it exists
+  On the ENSv1 arm an admitted `NewOwner` creates a surface without raw label
+  bytes when its complete labelhash path is known from the root or a fully
+  proven ancestor. Such a child uses the ordinary name row and is `registered`
+  while it has active registry control, a current nonzero owner and a binding;
+  a child without a registrar lease omits the corresponding dates. A
+  label-bearing registrar or NameWrapper event can also establish the surface.
+  An isolated owner event whose ancestry is unproven, or known invalid bytes,
+  still leaves only the registry resource; a label preimage import alone does
+  not establish a surface
   ([ADR 0002](adrs/0002-surface-resource-identity.md), ENSv1 authority-anchor
   rules)
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L49-L58 @ ens_v1@91c966f)
@@ -3710,8 +3890,8 @@ introduces it rebuilds Project from full history before serving the option; see
   too when the registrar retains no lease; the lease token's `Transfer` moves
   `owner`
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f).
-  Once a surface names the
-  child, only its ordinary row is listed; the surface counts from the family
+  Once the child has a name surface, with or without raw label bytes, only its
+  ordinary row is listed; the surface counts from the family
   publication that includes its block, so a surface Interpret commits after the
   served publication leaves the child listed here until Project publishes it.
   A label preimage can arrive without a new publication and rename such a row,
@@ -4049,7 +4229,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `order` | query | enum SortOrder | no | `desc` | Ascending or descending result order. |
 | `from_timestamp` | query | string | no | none | Inclusive timestamp lower bound, decimal Unix seconds or RFC 3339; retains input precision. |
 | `to_timestamp` | query | string | no | none | Inclusive timestamp upper bound, decimal Unix seconds or RFC 3339; must not precede from_timestamp. |
-| `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. |
+| `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count requests an exact total; page.total_count is null when omitted. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
 | `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
@@ -4140,8 +4320,15 @@ introduces it rebuilds Project from full history before serving the option; see
   product-visible events. The cursor is bound to the address, namespace,
   relation set, scope, direction, `type` set, and timestamp window. A
   nonterminal page contains `page_size` rows; only the terminal page may be
-  shorter. `page.total_count` follows the shared anchored-count contract:
-  capped by default, exact and uncapped with `include=total_count`.
+  shorter. `page.total_count` is `null` by default, including empty results.
+  `include=total_count` requests an exact, uncapped total without changing the
+  page rows, cursor or `has_more`.
+  Address candidates remain in SQL; the reader validates fixed-size event and
+  anchor batches, including resolver-record attribution, and retains only the
+  requested page and one lookahead row. Optional counting uses the same matching
+  rules without retaining the matched history; an exact count can scan the
+  entire matching history and cost substantially more than a page.
+  Neither mode truncates the collection or changes its cursor order.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Address, namespace, and
   cursor-binding validation precede the first `redo_in_progress` check, so
@@ -4242,7 +4429,13 @@ introduces it rebuilds Project from full history before serving the option; see
   required; a missing or empty `q` returns `400 invalid_input`. The API treats
   `q` as an ENSIP-15 name fragment, normalizes it, and then applies the selected
   `match=prefix|contains` byte comparison directly to stored names. Invalid
-  normalization returns `400 invalid_input`. A single trailing dot remains
+  normalization returns `400 invalid_input`. A name whose surface stores no
+  raw label bytes is compared by its
+  [rendered name](glossary.md#rendered-name) and is not subject to the
+  2000-byte bound. The normalizer rejects `[` and `]`, so `q` cannot spell a
+  bracketed labelhash label: such a name is found through its labels that have
+  verified text, and a `match=contains` fragment of hex digits also matches
+  those digits inside a bracketed label. A single trailing dot remains
   preserved as a label boundary after the preceding nonempty name is normalized,
   matching the address-names `q` behavior documented above. With
   `match=contains`, one leading dot is also accepted when it is followed by a
@@ -4300,7 +4493,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
 | 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
 
-For a registrar lease first identified by a later readable observation, registration time remains the original numeric grant time. Compact product history omits only snapshots with both `state_derived=true` and `registrar_surface_snapshot=true`, before pagination and cursor validation. Diagnostics retains the marked snapshot at its later readable trigger; original resource-only history and all unmarked events remain unchanged. See [storage semantics](storage.md).
+For a registrar lease first identified by a later readable observation, registration time remains the original numeric grant time. Compact product history omits only snapshots with both `state_derived=true` and `registrar_surface_snapshot=true`, before pagination and cursor validation. It also omits, before pagination and counting, an ENSv2 registry `ExpiryChanged` that has no name and no resource and carries `token_state_absent=true`: a registry `ExpiryUpdated` for a token with no interpreted state, kept only for the registry entry projection. Unanchored and `contract_address` reads neither list it nor include it in `total_count`; diagnostics retains it. Diagnostics retains the marked snapshot at its later readable trigger; original resource-only history and all unmarked events remain unchanged. See [storage semantics](storage.md).
 
 - Method/path: `GET /v1/events`
 - Tier: product read.

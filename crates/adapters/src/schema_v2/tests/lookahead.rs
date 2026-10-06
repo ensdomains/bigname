@@ -64,7 +64,11 @@ fn complete(
             after_state: prior
                 .iter()
                 .rev()
-                .find(|e| e.retained_state_key == request.state_key)
+                .find(|e| {
+                    // A retained event is filed under its interpreter state key behind a
+                    // `state:` prefix (`seam::retained_prior_state_key`).
+                    e.retained_state_key.strip_prefix("state:") == Some(request.state_key.as_str())
+                })
                 .map_or_else(|| json!({}), |e| e.after_state.clone()),
         })
         .collect();

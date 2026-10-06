@@ -250,9 +250,9 @@ CREATE INDEX IF NOT EXISTS resources_chain_block_number_idx
 CREATE TABLE IF NOT EXISTS name_surfaces (
     logical_name_id text PRIMARY KEY,
     namespace text NOT NULL,
-    raw_name text NOT NULL,
-    raw_labels text[] NOT NULL,
-    dns_encoded_name bytea NOT NULL,
+    raw_name text,
+    raw_labels text[],
+    dns_encoded_name bytea,
     namehash text NOT NULL,
     labelhashes text[] NOT NULL,
     normalizer_version text NOT NULL,
@@ -267,6 +267,7 @@ CREATE TABLE IF NOT EXISTS name_surfaces (
     canonicality_state canonicality_state NOT NULL DEFAULT 'observed',
     observed_at timestamptz NOT NULL DEFAULT now(),
     inserted_at timestamptz NOT NULL DEFAULT now(),
+    preimage_event_identity text,
     UNIQUE (chain_id, logical_name_id),
     FOREIGN KEY (chain_id, block_hash, block_number)
         REFERENCES chain_lineage (chain_id, block_hash, block_number),
@@ -274,7 +275,36 @@ CREATE TABLE IF NOT EXISTS name_surfaces (
     CHECK (btrim(namehash) <> ''),
     CONSTRAINT name_surfaces_logical_identity_check
         CHECK (logical_name_id = namespace || ':' || namehash),
-    CHECK (cardinality(raw_labels) = cardinality(labelhashes)),
+    -- The raw bytes of every label are known together or not at all. A row without them
+    -- still names its node through the complete label-hash path, and unknown bytes are
+    -- never a normalization failure.
+    CONSTRAINT name_surfaces_raw_evidence_check CHECK (
+        (
+            raw_name IS NULL
+            AND raw_labels IS NULL
+            AND dns_encoded_name IS NULL
+            AND preimage_event_identity IS NULL
+            AND cardinality(labelhashes) > 0
+            AND visibility_state = 'active'
+        )
+        OR (
+            raw_name IS NOT NULL
+            AND raw_labels IS NOT NULL
+            AND dns_encoded_name IS NOT NULL
+            AND (
+                cardinality(raw_labels) = cardinality(labelhashes)
+                OR (
+                    visibility_state = 'shadow'
+                    AND raw_name = ''
+                    AND cardinality(raw_labels) = 0
+                    AND cardinality(labelhashes) > 0
+                    AND preimage_event_identity IS NOT NULL
+                    AND btrim(preimage_event_identity) <> ''
+                )
+            )
+            AND (preimage_event_identity IS NULL OR btrim(preimage_event_identity) <> '')
+        )
+    ),
     CHECK (btrim(normalizer_version) <> ''),
     CHECK (visibility_state IN ('active', 'shadow')),
     CHECK (jsonb_typeof(normalization_errors) = 'array'),
@@ -522,17 +552,17 @@ COMMENT ON COLUMN resources.inserted_at IS
     'This time records row creation.';
 
 COMMENT ON TABLE name_surfaces IS
-    'This table stores raw names and their visibility state.';
+    'This table stores name identities, their raw names when known, and their visibility state.';
 COMMENT ON COLUMN name_surfaces.logical_name_id IS
     'This value is the namespace and name hash joined by a colon.';
 COMMENT ON COLUMN name_surfaces.namespace IS
     'This value identifies the name system.';
 COMMENT ON COLUMN name_surfaces.raw_name IS
-    'This value is the verbatim name.';
+    'This value is the verbatim name, or NULL while the bytes of a label are unknown.';
 COMMENT ON COLUMN name_surfaces.raw_labels IS
-    'This array stores the verbatim labels.';
+    'This array stores the verbatim labels, or NULL while the bytes of a label are unknown.';
 COMMENT ON COLUMN name_surfaces.dns_encoded_name IS
-    'This value is the DNS wire name.';
+    'This value is the DNS wire name, or NULL while the bytes of a label are unknown.';
 COMMENT ON COLUMN name_surfaces.namehash IS
     'This value is the name hash.';
 COMMENT ON COLUMN name_surfaces.labelhashes IS
@@ -561,6 +591,8 @@ COMMENT ON COLUMN name_surfaces.observed_at IS
     'This time records the stored observation.';
 COMMENT ON COLUMN name_surfaces.inserted_at IS
     'This time records row creation.';
+COMMENT ON COLUMN name_surfaces.preimage_event_identity IS
+    'This value is the event identity of the earliest canonical preimage observation of the name.';
 
 COMMENT ON INDEX name_surfaces_visibility_idx IS
     'This bounded index filters surfaces by namespace and visibility using the name hash. Verbatim names are unbounded chain input and are sorted after filtering when needed.';

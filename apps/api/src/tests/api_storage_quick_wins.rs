@@ -181,6 +181,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
         "relation: bigname_phase.normalized_events",
         "relation: bigname_phase.project_account_approval",
         "relation: bigname_phase.project_address_controller_candidate",
+        "relation: bigname_phase.project_address_history_anchor",
         "relation: bigname_phase.project_address_name_fold",
         "relation: bigname_phase.project_address_name_index",
         "relation: bigname_phase.project_address_record_id_index",
@@ -189,9 +190,14 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
         "relation: bigname_phase.project_child_edge_candidate",
         "relation: bigname_phase.project_child_registration_state",
         "relation: bigname_phase.project_claim_normalization",
+        "relation: bigname_phase.project_ens_v2_entry_owner",
+        "relation: bigname_phase.project_ens_v2_registry_parent",
         "relation: bigname_phase.project_family_marker",
         "relation: bigname_phase.project_family_undo",
         "relation: bigname_phase.project_grant",
+        "relation: bigname_phase.project_history_catalogue_marker",
+        "relation: bigname_phase.project_history_source",
+        "relation: bigname_phase.project_history_source_edge",
         "relation: bigname_phase.project_lifecycle_association",
         "relation: bigname_phase.project_lifecycle_event",
         "relation: bigname_phase.project_lifecycle_key_state",
@@ -226,7 +232,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
     .map(str::to_owned));
 
     assert_eq!(actual, expected);
-    assert_eq!(actual.len(), 58);
+    assert_eq!(actual.len(), 64);
     database.cleanup().await
 }
 

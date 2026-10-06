@@ -7,7 +7,7 @@ use crate::harness::{anvil::Anvil, ens_v1, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
 const TEXT_KEY: &str = "description";
-const TEXT_VALUE: &str = "selected before the surface";
+const TEXT_VALUE: &str = "selected before the renewal";
 
 async fn exercise(ownerless: bool) -> Result<()> {
     let anvil = Anvil::spawn().await?;
@@ -39,7 +39,7 @@ async fn exercise(ownerless: bool) -> Result<()> {
         "SELECT EXISTS (SELECT 1 FROM normalized_events \
          WHERE logical_name_id = '{logical_name_id}' \
            AND event_kind = 'ResolverChanged' \
-           AND after_state->>'state_derived' = 'true' \
+           AND after_state->>'source_event' = 'NewResolver' \
            AND after_state->>'resolver' = '{resolver:#x}')"
     );
     let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
@@ -156,13 +156,13 @@ async fn exercise(ownerless: bool) -> Result<()> {
 }
 
 #[tokio::test]
-async fn owned_pre_surface_resolver_records_serve_after_late_renewal_without_reselection()
--> Result<()> {
+async fn owned_registry_resolver_records_serve_after_late_renewal_without_reselection() -> Result<()>
+{
     exercise(false).await
 }
 
 #[tokio::test]
-async fn ownerless_pre_surface_resolver_records_serve_after_late_renewal_without_reselection()
+async fn ownerless_registry_resolver_records_serve_after_late_renewal_without_reselection()
 -> Result<()> {
     exercise(true).await
 }

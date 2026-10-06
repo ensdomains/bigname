@@ -65,10 +65,18 @@ async fn apply(pool: &PgPool, number: i64, predecessor: Option<&Marker>) -> crat
         revision: &NO_INTERPRET,
         role: block::Role::Follow,
         manifests: &crate::families::manifests::History::default(),
+        head: None,
     };
-    block::apply(pool, CHAIN, number, &plan, &FamilyOptions::new("guard"))
-        .await
-        .map(|_| ())
+    block::apply(
+        pool,
+        CHAIN,
+        number,
+        &plan,
+        &FamilyOptions::new("guard"),
+        &mut Default::default(),
+    )
+    .await
+    .map(|_| ())
 }
 
 #[tokio::test]
@@ -152,10 +160,18 @@ async fn apply_as(
         revision: &NO_INTERPRET,
         role,
         manifests: &crate::families::manifests::History::default(),
+        head: None,
     };
-    block::apply(pool, CHAIN, number, &plan, &FamilyOptions::new("guard"))
-        .await
-        .map(|_| ())
+    block::apply(
+        pool,
+        CHAIN,
+        number,
+        &plan,
+        &FamilyOptions::new("guard"),
+        &mut Default::default(),
+    )
+    .await
+    .map(|_| ())
 }
 
 // Every block is fenced on the marker generation it planned from and on the repair record its

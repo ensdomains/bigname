@@ -258,13 +258,22 @@ pub struct LabelPreimage {
     pub provenance: Value,
 }
 
+/// The raw bytes of every label of a name, with the preimage observation that carried them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RawNameEvidence {
+    pub raw_name: String,
+    pub raw_labels: Vec<String>,
+    pub dns_encoded_name: Vec<u8>,
+    pub preimage_event_identity: String,
+}
+
+/// A node's name identity. `raw` is absent while the bytes of some label are unknown; the
+/// identity is then named only by its label-hash path.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NameSurface {
     pub logical_name_id: String,
     pub namespace: String,
-    pub raw_name: String,
-    pub raw_labels: Vec<String>,
-    pub dns_encoded_name: Vec<u8>,
+    pub raw: Option<RawNameEvidence>,
     pub namehash: String,
     pub labelhashes: Vec<String>,
     pub normalizer_version: String,
@@ -277,6 +286,26 @@ pub struct NameSurface {
     pub block_number: i64,
     pub provenance: Value,
     pub canonicality_state: String,
+}
+
+impl NameSurface {
+    pub fn raw_name(&self) -> Option<&str> {
+        self.raw.as_ref().map(|raw| raw.raw_name.as_str())
+    }
+
+    pub fn raw_labels(&self) -> Option<&[String]> {
+        self.raw.as_ref().map(|raw| raw.raw_labels.as_slice())
+    }
+
+    pub fn dns_encoded_name(&self) -> Option<&[u8]> {
+        self.raw.as_ref().map(|raw| raw.dns_encoded_name.as_slice())
+    }
+
+    pub fn preimage_event_identity(&self) -> Option<&str> {
+        self.raw
+            .as_ref()
+            .map(|raw| raw.preimage_event_identity.as_str())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

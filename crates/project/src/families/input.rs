@@ -4,7 +4,7 @@
 use serde_json::{Map, Value, json};
 use sqlx::{Postgres, Transaction};
 
-use crate::{ProjectError, Result};
+use crate::{Marker, ProjectError, Result};
 
 pub(crate) use super::position::Position;
 
@@ -381,6 +381,21 @@ pub(crate) async fn readable_hash(
     .fetch_optional(pool)
     .await
     .map_err(|error| ProjectError::database("failed to read a readable family block hash", error))
+}
+
+/// The highest readable block of the chain's stored lineage, by number and hash.
+pub(crate) async fn readable_head(pool: &sqlx::PgPool, chain_id: &str) -> Result<Option<Marker>> {
+    let head: Option<(i64, String)> = sqlx::query_as(
+        "/* project:families.input.readable_head */ SELECT block_number, block_hash
+         FROM chain_lineage
+         WHERE chain_id = $1 AND canonicality_state IN ('canonical', 'safe', 'finalized')
+         ORDER BY block_number DESC LIMIT 1",
+    )
+    .bind(chain_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| ProjectError::database("failed to read the readable family head", error))?;
+    Ok(head.map(|(number, hash)| Marker { number, hash }))
 }
 
 /// The input revision: the Interpret row's content hash and redo attempt

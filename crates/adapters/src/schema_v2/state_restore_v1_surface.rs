@@ -1,6 +1,8 @@
 use uuid::Uuid;
 
-use crate::schema_v2::{common::hash_hex, model::PriorEventInput, state::State};
+use crate::schema_v2::{
+    common::hash_hex, model::PriorEventInput, seam::NAME_IDENTITY_OBSERVED_KEY, state::State,
+};
 
 fn materialize_or_sync_retained_registry(
     state: &mut State,
@@ -19,7 +21,30 @@ fn materialize_or_sync_retained_registry(
     }
 }
 
+/// Whether the event establishes the name identity it names without raw label bytes.
+pub(in crate::schema_v2) fn observes_name_identity(event: &PriorEventInput) -> bool {
+    event.logical_name_id.is_some()
+        && event
+            .after_state
+            .get(NAME_IDENTITY_OBSERVED_KEY)
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+}
+
 pub(in crate::schema_v2) fn restore_preimage(state: &mut State, event: &PriorEventInput) {
+    if let Err(error) = state.restore_v1_path(event) {
+        state.record_restore_error(error);
+        return;
+    }
+    if observes_name_identity(event)
+        && let Some(namehash) = event
+            .logical_name_id
+            .as_deref()
+            .and_then(|logical_name_id| logical_name_id.strip_prefix(event.namespace.as_str()))
+            .and_then(|rest| rest.strip_prefix(':'))
+    {
+        state.observe_v1_active_surface(&event.namespace, namehash);
+    }
     if event.event_kind != "PreimageObserved" || event.logical_name_id.is_none() {
         return;
     }

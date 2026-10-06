@@ -241,6 +241,85 @@ async fn the_family_undo_and_rebuild_keep_every_summary_row() -> Result<()> {
     fixture.cleanup().await
 }
 
+// The expiry selector of four ENSv1 registrations that differ only in what the listing reads:
+// one on the current registry, one whose node only the 2017 registry holds, one whose binding
+// is gone (unsupported, though its expiry is still finite) and one the registrar released.
+#[tokio::test]
+async fn the_expiry_selector_splits_authorities_and_drops_only_unsupported_rows() -> Result<()> {
+    let fixture = Fixture::new("families_name_summary_selector", 12).await?;
+    let released_expiry = u64::try_from(block_time(10))? - 90 * 86_400 - 1;
+    registered(&fixture, 1, 1, 2_000_000_000).await?;
+    registered(&fixture, 2, 3, 2_000_000_000).await?;
+    registered(&fixture, 3, 5, 2_000_000_000).await?;
+    registered(&fixture, 4, 7, released_expiry).await?;
+    fixture
+        .write(
+            4,
+            7,
+            "AuthorityTransferred",
+            V1_REGISTRY,
+            Some(&name(2)),
+            Some(&uuid(0x1002)),
+            json!({"source_event": "Transfer", "node": format!("0x{:064x}", 2), "owner": OWNER,
+                   "owner_getter": OWNER, "emitter_role": "registry_old"}),
+            REGISTRY,
+        )
+        .await?;
+    sqlx::query("DELETE FROM surface_bindings WHERE surface_binding_id = $1::uuid")
+        .bind(uuid(103))
+        .execute(&fixture.pool)
+        .await?;
+    fixture
+        .event(
+            Event::new("released:4", 10, 0, "RegistrationReleased", V1_REGISTRAR)
+                .name(&name(4))
+                .resource(&uuid(0x1004))
+                .synthesised()
+                .before(json!({"registrant": OWNER}))
+                .after(
+                    json!({"expiry": released_expiry, "released_at": block_time(10),
+                              "source_event": "RegistrationReleased"}),
+                )
+                .raw(json!({"kind": "raw_block", "emitting_address": REGISTRAR})),
+        )
+        .await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp($2) WHERE surface_binding_id = $1::uuid",
+    )
+    .bind(uuid(104))
+    .bind(block_time(10) as f64)
+    .execute(&fixture.pool)
+    .await?;
+    publish(&fixture, 11).await?;
+
+    let selected = |n: u64, expiry: u64, authority: &str| {
+        (name(n), expiry.to_string(), Some(authority.to_owned()))
+    };
+    let expected = [
+        selected(1, 2_000_000_000, "ens_v1"),
+        selected(2, 2_000_000_000, "ens_v0"),
+        selected(4, released_expiry, "ens_v1"),
+    ];
+    ensure!(
+        fixture.assert_expiry_selector().await? == expected,
+        "{:?}",
+        fixture.assert_expiry_selector().await?
+    );
+    let (unsupported, _) = summary(&fixture, &name(3)).await?.expect("summary");
+    ensure!(
+        unsupported["expiry_listable"] == json!(false)
+            && unsupported["expires_at"] == json!(2_000_000_000u64),
+        "an unsupported name keeps its expiry and is not listable: {unsupported}"
+    );
+    let (released, _) = summary(&fixture, &name(4)).await?.expect("summary");
+    ensure!(released["registration_status"] == "released", "{released}");
+
+    fixture.assert_undo_restores(11).await?;
+    fixture.assert_rebuild_equal(11).await?;
+    ensure!(fixture.assert_expiry_selector().await? == expected);
+    fixture.cleanup().await
+}
+
 /// Block times in the fixture: `1800000000 + 12 * block` seconds.
 fn block_time(block: i64) -> i64 {
     1_800_000_000 + 12 * block
@@ -392,6 +471,12 @@ async fn composing_one_summary_reads_only_that_names_zero_owner_candidates() -> 
             .await?;
     }
     publish(&fixture, 5).await?;
+    // The wider history index needs fixture statistics for the planner to choose the
+    // selective name lookup; otherwise this tiny new table can favour the chain index.
+    // Keep ANALYZE outside the measured transaction, which still enforces the same bound.
+    sqlx::query("ANALYZE normalized_events")
+        .execute(&fixture.pool)
+        .await?;
     let publication =
         bigname_storage::families::name::load_family_publication(&fixture.pool, CHAIN)
             .await?
@@ -598,7 +683,7 @@ async fn a_name_with_no_composed_row_keeps_its_clock_boundary() -> Result<()> {
     fixture.cleanup().await
 }
 
-// Undo of a block whose only summary change is a clock boundary (no other family writes)
+// Undo of a block whose only data change is a clock boundary (plus publication stamps)
 // restores the summary exactly, and a replay writes the rebuild's rows. Undo of a block that
 // changes nothing at all rewrites no summary.
 #[tokio::test]
@@ -626,7 +711,12 @@ async fn undo_restores_a_clock_only_summary_and_rewrites_nothing_for_an_empty_bl
     .fetch_all(&fixture.pool)
     .await?;
     ensure!(
-        journalled == ["marker", "project_name_summary"],
+        journalled
+            == [
+                "marker",
+                "project_history_catalogue_marker",
+                "project_name_summary"
+            ],
         "block 8 journalled {journalled:?}"
     );
     let undone = families::undo_to(&fixture.pool, CHAIN, 7).await?;

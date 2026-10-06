@@ -270,17 +270,25 @@ fn name_renewed(
             Some(json!({"expiry":existing.as_ref().and_then(|state| state.expiry)}));
     }
     let active = state.v1_name(&selected.source.namespace, &namehash);
-    super::super::registry::append_authority_transition(
-        &mut output,
-        super::super::authority_arm(&selected.source.namespace),
-        previous_active.as_ref(),
-        active.as_ref(),
-        state.v1_registry_binding(&selected.source.namespace, &namehash),
-        raw,
-        &after,
-        state.v1_resolver_for_activation(&selected.source.namespace, &namehash, active.as_ref()),
-        None,
-    );
+    // A renewal remains a real lease observation, but cannot disclose a retired lease as
+    // a new ENSv1 binding. The same veto applies to external readable-name observations.
+    if !state.registrar_surface_is_retired(&selected.source.namespace, &namehash, resource_id) {
+        super::super::registry::append_authority_transition(
+            &mut output,
+            super::super::authority_arm(&selected.source.namespace),
+            previous_active.as_ref(),
+            active.as_ref(),
+            state.v1_registry_binding(&selected.source.namespace, &namehash),
+            raw,
+            &after,
+            state.v1_resolver_for_activation(
+                &selected.source.namespace,
+                &namehash,
+                active.as_ref(),
+            ),
+            None,
+        );
+    }
     if !surface_known {
         output
             .events

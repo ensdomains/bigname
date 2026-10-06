@@ -19,7 +19,6 @@ pub(crate) use page::{
 };
 pub(crate) use query::{push_expires_at_timestamp_expr, push_registered_at_timestamp_expr};
 pub(crate) use read::load_address_names_current_at_bound;
-#[cfg(test)]
 pub(crate) use read::push_address_names_current_query;
 pub use read::{
     load_address_names_current, load_address_names_current_for_relations,

@@ -3,8 +3,9 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result};
 use sqlx::{Postgres, QueryBuilder, Row, postgres::PgRow};
 
-use crate::projection_helpers::{
-    checked_page_limit_i64, checked_page_size_usize, split_keyset_page,
+use crate::{
+    families::name::rendered::rendered_name_sql,
+    projection_helpers::{checked_page_limit_i64, checked_page_size_usize, split_keyset_page},
 };
 
 use super::types::{
@@ -39,12 +40,19 @@ fn lineage_readable(alias: &str) -> String {
     format!(" AND ({alias}.block_hash IS NULL OR rb.canonicality_state IN {READABLE_STATES}) ")
 }
 
-const POINTER_SELECT: &str = r#"
-    SELECT pointer.logical_name_id, surface.namespace, surface.raw_name AS display_name,
+/// `display_name` is the surface's served name: its stored name, or the name built from its
+/// label hashes when it stores no raw bytes.
+fn pointer_select() -> String {
+    format!(
+        r#"
+    SELECT pointer.logical_name_id, surface.namespace, {name} AS display_name,
            surface.namehash, pointer.chain_id, pointer.subregistry, pointer.registry,
            pointer.block_number, pointer.block_hash, pointer.transaction_hash,
            pointer.block_timestamp
-"#;
+"#,
+        name = rendered_name_sql("surface")
+    )
+}
 
 /// Loads one known registry contract with its first-observation evidence. A registry is known
 /// when it announced itself with `RegistryCreated`, was ever the target of an ENSv2
@@ -233,13 +241,14 @@ pub async fn load_subregistry_pointers_for_names(
                      ne.transaction_index DESC NULLS LAST, ne.log_index DESC NULLS LAST,
                      ne.event_identity DESC
         )
-        {POINTER_SELECT}
+        {pointer_select}
         FROM pointer
         JOIN bigname_phase.name_surfaces surface
           ON surface.logical_name_id = pointer.logical_name_id
         "#,
         pointer_predicates = pointer_event_predicates("ne"),
         lineage_readable = lineage_readable("ne"),
+        pointer_select = pointer_select(),
     ))
     .bind(logical_name_ids)
     .bind(as_of_block)
@@ -429,7 +438,7 @@ fn current_pointers_to_registry<'a>(
         "#,
     );
     builder.push(", matched AS (");
-    builder.push(POINTER_SELECT);
+    builder.push(pointer_select());
     builder.push(
         r#", pointer.transaction_index, pointer.log_index, pointer.event_identity
         FROM pointer

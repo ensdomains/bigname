@@ -344,7 +344,7 @@ fn every_named_openapi_enum_matches_its_complete_producer_vocabulary() {
     serde_enum!(AddressNamesSort: Name, ExpiresAt, RegisteredAt, CreatedAt);
     serde_enum!(UnlistedPermissionSurface:
         EnsV2RegistryOperators, RegistrarApprovals, ResolverApprovals, WrapperParentControl);
-    serde_enum!(GrantRelation: Operator);
+    serde_enum!(GrantRelation: Operator, Holder);
     serde_enum!(ResolverReadFeature: Ensip19DefaultAddress, Ensip10ExtendedResolver);
     serde_enum!(HistoryRowSubject: Name, Child);
     string_enum!(NameMatch: Prefix, Contains);

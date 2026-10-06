@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use anyhow::Result;
 use sqlx::{PgConnection, types::Uuid};
 
@@ -13,6 +15,27 @@ pub struct RegistryRootResource {
     pub manifest_declared: bool,
 }
 
+/// Whether the address interval `holder` is live and admitted by an active manifest's declaration
+/// of its instance as an ENSv2 root or registry contract.
+const DECLARED: &str = "holder.deactivated_at IS NULL
+                AND holder.provenance ->> 'source' = 'manifest_declaration'
+                AND EXISTS (
+                    SELECT 1
+                    FROM bigname_phase.manifest_contract_instances declaration
+                    JOIN bigname_phase.manifest_versions manifest
+                      ON manifest.manifest_id = declaration.manifest_id
+                     AND manifest.chain_id = declaration.chain_id
+                    WHERE declaration.chain_id = holder.chain_id
+                      AND declaration.manifest_id = COALESCE(
+                          holder.source_manifest_id,
+                          (holder.provenance ->> 'manifest_id')::bigint)
+                      AND declaration.contract_instance_id = holder.contract_instance_id
+                      AND lower(declaration.declared_address) = lower(holder.address)
+                      AND declaration.role IN ('root_registry', 'registry')
+                      AND manifest.rollout_status = 'active'
+                      AND manifest.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+                )";
+
 /// The root resource of the registry at `address` as of the publication's `block`, derived from
 /// the contract instance holding the address at that block exactly as the schema-v2 adapter
 /// derives it. An instance admitted after the publication, or dropped as if it never existed,
@@ -26,7 +49,7 @@ pub async fn load_registry_root_resource(
     address: &str,
     block: i64,
 ) -> Result<Option<RegistryRootResource>> {
-    let row: Option<(Uuid, bool)> = sqlx::query_as(
+    let row: Option<(Uuid, bool)> = sqlx::query_as(&format!(
         "WITH holder AS (
              SELECT address.chain_id, address.contract_instance_id, address.address,
                     address.active_from_block_number, address.deactivated_at,
@@ -47,28 +70,11 @@ pub async fn load_registry_root_resource(
                AND (address.active_from_block_number IS NULL OR address.active_from_block_number <= $3)
          )
          SELECT holder.contract_instance_id,
-                holder.deactivated_at IS NULL
-                AND holder.provenance ->> 'source' = 'manifest_declaration'
-                AND EXISTS (
-                    SELECT 1
-                    FROM bigname_phase.manifest_contract_instances declaration
-                    JOIN bigname_phase.manifest_versions manifest
-                      ON manifest.manifest_id = declaration.manifest_id
-                     AND manifest.chain_id = declaration.chain_id
-                    WHERE declaration.chain_id = holder.chain_id
-                      AND declaration.manifest_id = COALESCE(
-                          holder.source_manifest_id,
-                          (holder.provenance ->> 'manifest_id')::bigint)
-                      AND declaration.contract_instance_id = holder.contract_instance_id
-                      AND lower(declaration.declared_address) = lower(holder.address)
-                      AND declaration.role IN ('root_registry', 'registry')
-                      AND manifest.rollout_status = 'active'
-                      AND manifest.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
-                )
+                {DECLARED}
          FROM holder
          ORDER BY holder.active_from_block_number DESC NULLS LAST, holder.contract_instance_id
-         LIMIT 1",
-    )
+         LIMIT 1"
+    ))
     .bind(chain_id)
     .bind(address)
     .bind(block)
@@ -80,4 +86,32 @@ pub async fn load_registry_root_resource(
             manifest_declared,
         }),
     )
+}
+
+/// The instances of `instances` that an active manifest declares as an ENSv2 root or registry
+/// contract at an address they hold at `block`, by the rule of
+/// [`RegistryRootResource::manifest_declared`].
+pub async fn load_manifest_declared_registry_instances(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    instances: &[Uuid],
+    block: i64,
+) -> Result<BTreeSet<Uuid>> {
+    if instances.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let declared: Vec<Uuid> = sqlx::query_scalar(&format!(
+        "SELECT DISTINCT holder.contract_instance_id
+         FROM bigname_phase.contract_instance_addresses holder
+         WHERE holder.chain_id = $1 AND holder.contract_instance_id = ANY($2::uuid[])
+           AND (holder.active_from_block_number IS NULL OR holder.active_from_block_number <= $3)
+           AND (holder.active_to_block_number IS NULL OR holder.active_to_block_number >= $3)
+           AND {DECLARED}"
+    ))
+    .bind(chain_id)
+    .bind(instances)
+    .bind(block)
+    .fetch_all(conn)
+    .await?;
+    Ok(declared.into_iter().collect())
 }

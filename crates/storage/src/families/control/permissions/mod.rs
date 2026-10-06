@@ -1,12 +1,15 @@
 //! Effective permissions from F8 grants, F9 account approvals and registry binding state.
 //! `page.rs` serves bounded permission pages and resource summaries at family publication.
 mod candidates;
+mod ens_v2;
 mod facts;
 mod grants;
 mod operators;
 pub mod page;
+mod registry_support;
 mod restrictions;
 mod summary;
+mod wrapper_registry;
 
 use std::collections::{BTreeMap, BTreeSet};
 

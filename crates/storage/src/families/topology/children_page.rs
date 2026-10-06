@@ -11,8 +11,8 @@
 //! The registration and expiry times the timestamp sorts and the fence use, the released
 //! status the fence checks and the owner the labels' owner filter reads are the child's name summary (`project_name_summary`), which the
 //! family step writes from the child's composed `declared_summary`; a child with no name surface
-//! is released when its node's registrar lease is ([`RELEASED_LEASE`]), and its lease's holder,
-//! when the registrar retains one, is [`TOKEN_HOLDER`].
+//! is released when its node's registrar lease is ([`released_lease`]), and its lease's holder,
+//! when the registrar retains one, is [`token_holder`].
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
@@ -28,7 +28,7 @@ use super::{
     children::{CHILD_DISPLAY_NAME, CHILD_SURFACE_FILTER, Parents, push_selected},
     name_summary::CHILD_SUMMARY_JOIN,
 };
-use child_flags::{LIFECYCLE_SHADOW, RELEASED_LEASE, TOKEN_HOLDER, WRAPPER_HELD};
+use child_flags::{LIFECYCLE_SHADOW, WRAPPER_HELD, released_lease, token_holder};
 
 mod child_flags;
 
@@ -58,10 +58,10 @@ pub struct FamilyChildRow {
     /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f).
     pub wrapper_held: bool,
     /// The child has no name surface and its node's registrar lease has been released
-    /// ([`RELEASED_LEASE`]).
+    /// ([`released_lease`]).
     pub released_lease: bool,
     /// The holder of the node's registrar lease when the child has no name surface and the
-    /// registrar retains one ([`TOKEN_HOLDER`]).
+    /// registrar retains one ([`token_holder`]).
     pub token_holder: Option<String>,
 }
 
@@ -352,7 +352,7 @@ pub(super) fn push_children<'a>(
                    selected.namehash, selected.labelhash, selected.owner, selected.registrant,
                    selected.registry_authority,
                    {LIFECYCLE_SHADOW} AS lifecycle_shadow, {WRAPPER_HELD} AS wrapper_held,
-                   {RELEASED_LEASE} AS released_lease, {TOKEN_HOLDER} AS token_holder,
+                   {released_lease} AS released_lease, {token_holder} AS token_holder,
                    {sort_timestamp} AS sort_timestamp
             FROM selected
             JOIN parent ON parent.logical_name_id = selected.parent_logical_name_id
@@ -360,7 +360,9 @@ pub(super) fn push_children<'a>(
             LEFT JOIN bigname_phase.name_surfaces child_surface
               ON child_surface.logical_name_id = selected.child_logical_name_id
             {CHILD_SUMMARY_JOIN}
-            WHERE selected.pair_rank = 1{CHILD_SURFACE_FILTER}"
+            WHERE selected.pair_rank = 1{CHILD_SURFACE_FILTER}",
+        released_lease = released_lease(),
+        token_holder = token_holder(),
     ));
     if let Some(labels) = registry {
         builder.push(" AND selected.registry_address = ");
@@ -389,7 +391,8 @@ pub(super) fn push_children<'a>(
         // A child with no name summary, no registration or no expiry is not expired.
         builder.push(format!(
             " AND COALESCE(summary.registration_status, '') <> 'released' \
-             AND NOT {RELEASED_LEASE} AND COALESCE(summary.expires_at >= "
+             AND NOT {released_lease} AND COALESCE(summary.expires_at >= ",
+            released_lease = released_lease(),
         ));
         match filter.evaluated_at {
             Some(evaluated_at) => {

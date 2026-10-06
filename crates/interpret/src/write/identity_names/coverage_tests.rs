@@ -1,16 +1,18 @@
-use bigname_adapters::schema_v2::{BatchOutput, LabelPreimage, NameSurface};
+use bigname_adapters::schema_v2::{BatchOutput, LabelPreimage, NameSurface, RawNameEvidence};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::json;
 
 use super::*;
 
-type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+pub(super) type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-async fn database(name: &str) -> TestResult<TestDatabase> {
+pub(super) async fn database(name: &str) -> TestResult<TestDatabase> {
     let database = TestDatabase::create(TestDatabaseConfig::new(name)).await?;
     for sql in [
         include_str!("../../../../storage/schema/baseline/01_chain.sql"),
         include_str!("../../../../storage/schema/baseline/03_identity.sql"),
+        include_str!("../../../../storage/schema/baseline/04_manifests.sql"),
+        include_str!("../../../../storage/schema/baseline/05_normalized_events.sql"),
         include_str!("../../../../storage/schema/baseline/07_labels.sql"),
     ] {
         sqlx::raw_sql(sql).execute(database.pool()).await?;
@@ -25,7 +27,7 @@ async fn database(name: &str) -> TestResult<TestDatabase> {
     Ok(database)
 }
 
-async fn write_output(database: &TestDatabase, output: &BatchOutput) -> TestResult {
+pub(super) async fn write_output(database: &TestDatabase, output: &BatchOutput) -> TestResult {
     let mut transaction = database.pool().begin().await?;
     write(&mut transaction, output).await?;
     transaction.commit().await?;
@@ -51,16 +53,19 @@ fn observed_preimage(
     }
 }
 
-fn surface(logical_name_id: &str, raw_name: &str) -> NameSurface {
+pub(super) fn surface(logical_name_id: &str, raw_name: &str) -> NameSurface {
     let namehash = logical_name_id
         .strip_prefix("ens:")
         .expect("test logical IDs use the ENS namespace");
     NameSurface {
         logical_name_id: logical_name_id.to_owned(),
         namespace: "ens".to_owned(),
-        raw_name: raw_name.to_owned(),
-        raw_labels: vec![raw_name.to_owned()],
-        dns_encoded_name: raw_name.as_bytes().to_vec(),
+        raw: Some(RawNameEvidence {
+            raw_name: raw_name.to_owned(),
+            raw_labels: vec![raw_name.to_owned()],
+            dns_encoded_name: raw_name.as_bytes().to_vec(),
+            preimage_event_identity: format!("preimage:{raw_name}"),
+        }),
         namehash: namehash.to_owned(),
         labelhashes: vec![format!("label:{raw_name}")],
         normalizer_version: "test".to_owned(),

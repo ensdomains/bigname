@@ -315,8 +315,10 @@ impl IdentityReferences {
 /// The guard compares against the row already in the table, not against the batch, so this holds
 /// over any set of rows the writer would apply in sequence — one batch, or a whole split replay
 /// concatenated. Comparing against the first emission is right because the guarded columns are
-/// frozen at insert: `name_surfaces`, `label_preimages`, and `normalized_events` never rewrite one,
-/// and the two that can — `token_lineages` rewriting its anchor, `surface_bindings` rewriting
+/// frozen at insert, except a name's optional raw bundle which may enrich an earlier hash-only
+/// identity. Check that bundle independently against its first actual byte observation.
+/// `label_preimages` and `normalized_events` never rewrite a guarded field. The two that can —
+/// `token_lineages` rewriting its anchor, `surface_bindings` rewriting
 /// `active_from` — only do so when the stored row is orphaned, which cannot occur here (below).
 /// `deactivated_at` is deliberately not compared: it is absent from the writer's guard, which is
 /// the divergence tracked by issue #336.
@@ -348,23 +350,30 @@ pub fn assert_upsert_guards_agree(context: &str, output: &BatchOutput) -> Result
         }
     };
     for row in &output.name_surfaces {
+        let key = format!("{}:{}", row.chain_id, row.logical_name_id);
         check(
             "name_surfaces",
-            format!("{}:{}", row.chain_id, row.logical_name_id),
-            format!(
-                "{}:{}:{:?}:{:?}:{:?}:{}:{}:{}:{}:{:?}",
-                row.namespace,
-                row.raw_name,
-                row.raw_labels,
-                row.labelhashes,
-                row.dns_encoded_name,
-                row.namehash,
-                row.normalizer_version,
-                row.visibility_state,
-                row.normalization_errors,
-                row.deactivation_reason
-            ),
+            key.clone(),
+            format!("{}:{}:{:?}", row.namespace, row.namehash, row.labelhashes),
         );
+        // A missing bundle cannot erase or conflict with known bytes. Once bytes are present,
+        // the ordinary canonical upsert still requires exact byte/normalization agreement.
+        if row.raw.is_some() {
+            check(
+                "name_surfaces_raw_evidence",
+                key,
+                format!(
+                    "{:?}:{:?}:{:?}:{}:{}:{}:{:?}",
+                    row.raw_name(),
+                    row.raw_labels(),
+                    row.dns_encoded_name(),
+                    row.normalizer_version,
+                    row.visibility_state,
+                    row.normalization_errors,
+                    row.deactivation_reason
+                ),
+            );
+        }
     }
     for row in &output.label_preimages {
         check(

@@ -14,7 +14,7 @@ SET statement_timeout = '1h';
 -- progress or holds a live publication, which it commits before it records progress, and
 -- its Interpret is not redoing. The check runs before and after the drops and takes no phase
 -- lock, so run the script as the walk or redo starts. The one-hour timeout bounds each drop,
--- not the script, so allow for all 35 before Interpret can complete.
+-- not the script, so allow for all 40 before Interpret can complete.
 CREATE OR REPLACE FUNCTION pg_temp.walk_index_served_chains() RETURNS text
 LANGUAGE sql STABLE AS $$
     SELECT string_agg(projected.chain_id, ', ' ORDER BY projected.chain_id)
@@ -52,10 +52,16 @@ LANGUAGE sql IMMUTABLE AS $$
         'normalized_events_v2_expiry_scope_idx',
         'normalized_events_ens_v1_record_node_resolver_idx',
         'normalized_events_basenames_record_node_resolver_idx',
+        'normalized_events_history_discovery_name_idx',
+        'normalized_events_history_discovery_resource_idx',
         'normalized_events_record_id_write_idx',
         'normalized_events_record_id_link_idx',
         'normalized_events_resolver_alias_history_idx',
         'normalized_events_resolver_upgrade_history_idx',
+        'normalized_events_registry_origin_idx',
+        'normalized_events_registry_announcement_idx',
+        'normalized_events_wrapper_departure_idx',
+        'normalized_events_user_registry_departure_idx',
         'normalized_events_pointer_after_resolver_history_idx',
         'normalized_events_pointer_before_resolver_history_idx',
         'normalized_events_permission_after_resolver_history_idx',
@@ -126,10 +132,16 @@ DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_emitter_histor
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_v2_expiry_scope_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_ens_v1_record_node_resolver_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_basenames_record_node_resolver_idx;
+DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_history_discovery_name_idx;
+DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_history_discovery_resource_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_record_id_write_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_record_id_link_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_resolver_alias_history_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_resolver_upgrade_history_idx;
+DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_registry_origin_idx;
+DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_registry_announcement_idx;
+DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_wrapper_departure_idx;
+DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_user_registry_departure_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_pointer_after_resolver_history_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_pointer_before_resolver_history_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_permission_after_resolver_history_idx;

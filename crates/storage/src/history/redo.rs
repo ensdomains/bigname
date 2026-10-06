@@ -35,13 +35,21 @@ pub async fn capture_interpret_redo_fence(pool: &PgPool) -> Result<InterpretRedo
         .execute(&mut *transaction)
         .await
         .context("failed to configure Interpret redo fence transaction")?;
-    ensure_interpret_not_redo(&mut transaction).await?;
-    let fence = InterpretRedoFence(load_interpret_redo_generations(&mut transaction).await?);
+    let fence = capture_interpret_redo_fence_on(&mut transaction).await?;
     transaction
         .commit()
         .await
         .context("failed to commit Interpret redo fence transaction")?;
     Ok(fence)
+}
+
+pub(super) async fn capture_interpret_redo_fence_on(
+    connection: &mut PgConnection,
+) -> Result<InterpretRedoFence> {
+    ensure_interpret_not_redo(connection).await?;
+    Ok(InterpretRedoFence(
+        load_interpret_redo_generations(connection).await?,
+    ))
 }
 
 pub(super) async fn capture_fence_if(

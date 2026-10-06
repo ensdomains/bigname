@@ -1,12 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use alloy_primitives::hex;
-use anyhow::bail;
+use anyhow::{bail, ensure};
 use bigname_domain::normalization::ENS_NORMALIZER_VERSION;
 use serde_json::{Value, json};
 
 mod boundary;
+mod node;
 pub(super) use boundary::materialize_v2_boundary;
+pub(super) use node::NodeIdentityDraft;
 
 use super::{
     catalog::Selected,
@@ -15,8 +17,8 @@ use super::{
         stable_uuid,
     },
     model::{
-        BatchOutput, BindingClosure, LabelPreimage, NameSurface, RawLogInput, Resource,
-        SurfaceBinding, TokenLineage,
+        BatchOutput, BindingClosure, LabelPreimage, NameSurface, RawLogInput, RawNameEvidence,
+        Resource, SurfaceBinding, TokenLineage,
     },
     normalized::preimage_event,
     protocol::Interpreted,
@@ -240,6 +242,14 @@ pub(super) fn materialize(
             canonicality_state: raw.canonicality_state.clone(),
         });
     }
+    node::materialize(
+        selected,
+        raw,
+        &interpreted.node_identities,
+        &raw_provenance,
+        state,
+        output,
+    )?;
     let mut represented = BTreeSet::<Vec<u8>>::new();
     for name in &interpreted.names {
         let logical_name_id = format!("{}:{}", selected.source.namespace, name.namehash);
@@ -265,18 +275,47 @@ pub(super) fn materialize(
                 name.bind,
             );
         }
+        if !active && !v1_surface {
+            state.observe_v1_surface(&selected.source.namespace, &name.namehash);
+        }
         let labelhashes = name
             .labels
             .iter()
             .map(|label| hash_hex(label.as_bytes()))
             .collect::<Vec<_>>();
+        if !labelhashes.is_empty() {
+            state.remember_v1_path(&selected.source.namespace, &name.namehash, &labelhashes)?;
+        }
         represented.extend(name.labels.iter().map(|label| label.as_bytes().to_vec()));
+        let mut after_state = json!({
+            "source_event": selected.event.name,
+            "raw_name": name.labels.join("."),
+            "raw_labels": name.labels,
+            "namehash": name.namehash,
+            "visibility_state": if active { "active" } else { "shadow" },
+        });
+        if let (Some(after), Some(metadata)) =
+            (after_state.as_object_mut(), name.preimage_metadata.as_ref())
+            && let Some(metadata) = metadata.as_object()
+        {
+            after.extend(metadata.clone());
+        }
+        let preimage = preimage_event(
+            selected,
+            raw,
+            Some(logical_name_id.clone()),
+            &name.namehash,
+            after_state,
+        );
         output.name_surfaces.push(NameSurface {
             logical_name_id: logical_name_id.clone(),
             namespace: selected.source.namespace.clone(),
-            raw_name: name.labels.join("."),
-            raw_labels: name.labels.clone(),
-            dns_encoded_name: dns_encode(&name.labels)?,
+            raw: Some(RawNameEvidence {
+                raw_name: name.labels.join("."),
+                raw_labels: name.labels.clone(),
+                dns_encoded_name: dns_encode(&name.labels)?,
+                preimage_event_identity: preimage.event_identity.clone(),
+            }),
             namehash: name.namehash.clone(),
             labelhashes,
             normalizer_version: ENS_NORMALIZER_VERSION.to_owned(),
@@ -341,32 +380,16 @@ pub(super) fn materialize(
                 });
             }
         }
-        let mut after_state = json!({
-            "source_event": selected.event.name,
-            "raw_name": name.labels.join("."),
-            "raw_labels": name.labels,
-            "namehash": name.namehash,
-        });
-        if let (Some(after), Some(metadata)) =
-            (after_state.as_object_mut(), name.preimage_metadata.as_ref())
-            && let Some(metadata) = metadata.as_object()
-        {
-            after.extend(metadata.clone());
-        }
-        output.normalized_events.push(preimage_event(
-            selected,
-            raw,
-            Some(logical_name_id),
-            &name.namehash,
-            after_state,
-        ));
+        output.normalized_events.push(preimage);
     }
     for name in &interpreted.shadow_names {
+        ensure!(
+            super::common::namehash_raw(name.raw_labels.iter().map(Vec::as_slice)) == name.namehash,
+            "shadow raw-label path does not hash to its observed node"
+        );
         represented.extend(name.raw_labels.iter().cloned());
         let logical_name_id = format!("{}:{}", selected.source.namespace, name.namehash);
-        if v1_surface {
-            state.observe_v1_surface(&selected.source.namespace, &name.namehash);
-        }
+        state.observe_v1_surface(&selected.source.namespace, &name.namehash);
         let decoded_labels = name
             .raw_labels
             .iter()
@@ -374,15 +397,18 @@ pub(super) fn materialize(
             .collect::<Option<Vec<_>>>();
         let postgres_text_labels =
             decoded_labels.filter(|labels| labels.iter().all(|label| !label.contains('\0')));
-        let (raw_name, raw_labels, labelhashes) = postgres_text_labels
+        let labelhashes = name
+            .raw_labels
+            .iter()
+            .map(|label| hash_hex(label))
+            .collect::<Vec<_>>();
+        if !labelhashes.is_empty() {
+            state.remember_v1_path(&selected.source.namespace, &name.namehash, &labelhashes)?;
+        }
+        let (raw_name, raw_labels) = postgres_text_labels
             .map(|labels| {
                 let raw_name = labels.join(".");
-                let labelhashes = name
-                    .raw_labels
-                    .iter()
-                    .map(|label| hash_hex(label))
-                    .collect();
-                (raw_name, labels, labelhashes)
+                (raw_name, labels)
             })
             .unwrap_or_default();
         let normalization_errors = name
@@ -400,26 +426,7 @@ pub(super) fn materialize(
                 })
             })
             .collect::<Vec<_>>();
-        output.name_surfaces.push(NameSurface {
-            logical_name_id: logical_name_id.clone(),
-            namespace: selected.source.namespace.clone(),
-            raw_name,
-            raw_labels,
-            dns_encoded_name: dns_encode_raw(&name.raw_labels).unwrap_or_default(),
-            namehash: name.namehash.clone(),
-            labelhashes,
-            normalizer_version: ENS_NORMALIZER_VERSION.to_owned(),
-            visibility_state: "shadow".to_owned(),
-            normalization_errors: Value::Array(normalization_errors),
-            deactivation_reason: Some("normalization_gate".to_owned()),
-            deactivated_at: Some(raw.block_timestamp),
-            chain_id: raw.chain_id.clone(),
-            block_hash: raw.block_hash.clone(),
-            block_number: raw.block_number,
-            provenance: raw_provenance.clone(),
-            canonicality_state: raw.canonicality_state.clone(),
-        });
-        output.normalized_events.push(preimage_event(
+        let preimage = preimage_event(
             selected,
             raw,
             Some(logical_name_id.clone()),
@@ -433,7 +440,30 @@ pub(super) fn materialize(
                 "raw_labels_hex": name.raw_labels.iter().map(hex::encode).collect::<Vec<_>>(),
                 "decoded_labels": name.raw_labels.iter().map(|label| decoded_label(label)).collect::<Vec<_>>(),
             }),
-        ));
+        );
+        output.name_surfaces.push(NameSurface {
+            logical_name_id: logical_name_id.clone(),
+            namespace: selected.source.namespace.clone(),
+            raw: Some(RawNameEvidence {
+                raw_name,
+                raw_labels,
+                dns_encoded_name: dns_encode_raw(&name.raw_labels).unwrap_or_default(),
+                preimage_event_identity: preimage.event_identity.clone(),
+            }),
+            namehash: name.namehash.clone(),
+            labelhashes,
+            normalizer_version: ENS_NORMALIZER_VERSION.to_owned(),
+            visibility_state: "shadow".to_owned(),
+            normalization_errors: Value::Array(normalization_errors),
+            deactivation_reason: Some("normalization_gate".to_owned()),
+            deactivated_at: Some(raw.block_timestamp),
+            chain_id: raw.chain_id.clone(),
+            block_hash: raw.block_hash.clone(),
+            block_number: raw.block_number,
+            provenance: raw_provenance.clone(),
+            canonicality_state: raw.canonicality_state.clone(),
+        });
+        output.normalized_events.push(preimage);
     }
     for label in &interpreted.labels {
         if label.skips_automatic_preimage(represented.contains(&label.raw_label)) {
@@ -477,128 +507,4 @@ fn dns_encode_raw(labels: &[Vec<u8>]) -> Option<Vec<u8>> {
 }
 
 #[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-
-    fn preimage(labelhash: &str, raw_label: &[u8], priority: i32, ordinal: i64) -> LabelPreimage {
-        LabelPreimage {
-            labelhash: labelhash.to_owned(),
-            raw_label: raw_label.to_vec(),
-            decoded_label: Some(String::from_utf8(raw_label.to_vec()).expect("UTF-8")),
-            normalizer_version: "test-normalizer".to_owned(),
-            normalized_under_version: true,
-            normalization_error: None,
-            source_kind: "LabelReserved_label".to_owned(),
-            source_priority: priority,
-            provenance: json!({"ordinal":ordinal}),
-        }
-    }
-
-    fn other_preimage(hash: &str, label: &[u8], priority: i32, ordinal: i64) -> LabelPreimage {
-        LabelPreimage {
-            source_kind: "Resolver_name".to_owned(),
-            ..preimage(hash, label, priority, ordinal)
-        }
-    }
-
-    fn sequential_winners(observations: &[LabelPreimage]) -> BTreeMap<String, LabelPreimage> {
-        let mut winners = BTreeMap::<String, LabelPreimage>::new();
-        for candidate in observations {
-            if winners
-                .get(&candidate.labelhash)
-                .is_none_or(|winner| candidate.source_priority >= winner.source_priority)
-            {
-                winners.insert(candidate.labelhash.clone(), candidate.clone());
-            }
-        }
-        winners
-    }
-
-    #[test]
-    fn reserved_label_preimage_compaction_preserves_writer_winner_and_position()
-    -> anyhow::Result<()> {
-        let mut output = BatchOutput {
-            label_preimages: vec![
-                preimage("hash-a", b"a", 100, 1),
-                preimage("hash-b", b"b", 100, 2),
-                preimage("hash-a", b"a", 90, 3),
-                preimage("hash-a", b"a", 200, 4),
-                preimage("hash-a", b"a", 200, 5),
-            ],
-            ..BatchOutput::default()
-        };
-
-        compact_reserved_label_preimages(&mut output)?;
-
-        assert_eq!(output.label_preimages.len(), 2);
-        assert_eq!(output.label_preimages[0].labelhash, "hash-b");
-        assert_eq!(output.label_preimages[1].labelhash, "hash-a");
-        assert_eq!(output.label_preimages[1].source_priority, 200);
-        assert_eq!(output.label_preimages[1].provenance, json!({"ordinal":5}));
-        Ok(())
-    }
-
-    #[test]
-    fn label_preimage_compaction_rejects_inconsistent_same_hash_observations() {
-        let mut output = BatchOutput {
-            label_preimages: vec![
-                preimage("hash-a", b"a", 100, 1),
-                preimage("hash-a", b"different", 200, 2),
-            ],
-            ..BatchOutput::default()
-        };
-
-        let error =
-            compact_reserved_label_preimages(&mut output).expect_err("conflict must be rejected");
-        assert!(
-            error
-                .to_string()
-                .contains("inconsistent preimage observations"),
-            "unexpected error: {error:#}"
-        );
-    }
-
-    #[test]
-    fn interleaved_compaction_matches_writer() -> anyhow::Result<()> {
-        let original = vec![
-            preimage("hash-a", b"a", 100, 1),
-            other_preimage("hash-a", b"a", 100, 2),
-            preimage("hash-a", b"a", 100, 3),
-            other_preimage("hash-a", b"a", 90, 4),
-            preimage("hash-a", b"a", 200, 5),
-            other_preimage("hash-a", b"a", 200, 6),
-            preimage("hash-a", b"a", 200, 7),
-            preimage("hash-b", b"b", 300, 8),
-            other_preimage("hash-b", b"b", 300, 9),
-            preimage("hash-b", b"b", 200, 10),
-        ];
-        let expected_winners = sequential_winners(&original);
-        let expected_other_rows = original
-            .iter()
-            .filter(|observation| observation.source_kind != "LabelReserved_label")
-            .count();
-        let mut output = BatchOutput {
-            label_preimages: original,
-            ..BatchOutput::default()
-        };
-
-        compact_reserved_label_preimages(&mut output)?;
-
-        assert_eq!(
-            sequential_winners(&output.label_preimages),
-            expected_winners
-        );
-        assert_eq!(
-            output
-                .label_preimages
-                .iter()
-                .filter(|observation| observation.source_kind != "LabelReserved_label")
-                .count(),
-            expected_other_rows,
-            "compaction must retain every non-reservation submission"
-        );
-        Ok(())
-    }
-}
+mod tests;

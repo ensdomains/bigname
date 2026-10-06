@@ -1,13 +1,15 @@
 //! F6 through the actual Follow preparation, pinned RPC, publication, reader and undo paths.
 //! The admitted legacy resolver is the existing text hydration allowlist's first address.
 //! (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L71 @ ens_app_v3@7175858)
+#[path = "families_hydration/reverse.rs"]
+mod reverse;
 #[path = "families_hydration/rpc.rs"]
 mod rpc;
 #[path = "families_support/mod.rs"]
 mod support;
 
 use anyhow::Result;
-use bigname_project::families::{self, FamilyMode, FamilyOptions};
+use bigname_project::families::{self, FamilyMode, FamilyOptions, FamilyOutcome};
 use serde_json::{Value, json};
 use support::{CONTENT_HASH, Event, Fixture, hash, marker};
 
@@ -16,9 +18,17 @@ const RESOLVER: &str = "0x4976fb03c32e5b8cfe2b6ccb31c09ba78ebaba41";
 const NODE: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 const RESOURCE: &str = "00000000-0000-0000-0000-000000000001";
 
-async fn run(fixture: &Fixture, block: i64, mode: FamilyMode, rpc: &rpc::Rpc) -> Result<()> {
-    let token = families::input_token(&fixture.pool, CHAIN).await?;
-    let outcome = families::apply(
+/// One family run to `block` with hydration configured, whatever the readable head is.
+async fn apply(
+    fixture: &Fixture,
+    block: i64,
+    mode: FamilyMode,
+    rpc: &rpc::Rpc,
+) -> (FamilyOutcome, Option<bigname_project::ProjectError>) {
+    let token = families::input_token(&fixture.pool, CHAIN)
+        .await
+        .expect("input token");
+    families::run(
         &fixture.pool,
         CHAIN,
         &marker(block),
@@ -26,9 +36,23 @@ async fn run(fixture: &Fixture, block: i64, mode: FamilyMode, rpc: &rpc::Rpc) ->
         &token,
         &FamilyOptions::new(CONTENT_HASH).with_hydration(rpc.urls()),
     )
-    .await?;
+    .await
+}
+
+/// Make `block` the highest readable block, then run the families to it.
+async fn run(
+    fixture: &Fixture,
+    block: i64,
+    mode: FamilyMode,
+    rpc: &rpc::Rpc,
+) -> Result<FamilyOutcome> {
+    rpc::head(&fixture.pool, block).await?;
+    let (outcome, error) = apply(fixture, block, mode, rpc).await;
+    if let Some(error) = error {
+        return Err(error.into());
+    }
     assert_eq!(outcome.marker, Some(marker(block)));
-    Ok(())
+    Ok(outcome)
 }
 
 async fn manifest(fixture: &Fixture, block: i64, active: bool) -> Result<()> {
@@ -152,44 +176,87 @@ async fn text_follow_hydrates_new_writes_retries_failures_and_preserves_empty_re
         vec![(hash(1), 1)],
         "canonical text is not reread just because the head advanced"
     );
+    // Block 3 replaces the write, and the endpoint fails every aggregate sent at block 3. The
+    // batch observed nothing, so hydration writes nothing: the overlay and the block it was read
+    // at stay as block 1 left them. The event's own write still lands, and the old overlay is
+    // not served for the new write.
     text(&fixture, 3, None).await?;
     rpc.answer(3, None);
-    run(&fixture, 3, FamilyMode::Normal, &rpc).await?;
-    assert!(value_row(&fixture).await?["hydrated_value"].is_null());
+    let outcome = run(&fixture, 3, FamilyMode::Normal, &rpc).await?;
+    let unobserved = value_row(&fixture).await?;
+    assert_eq!(
+        unobserved["block_number"], 3,
+        "the event write is published"
+    );
+    assert_eq!(unobserved["hydrated_value"], first["hydrated_value"]);
+    assert_eq!(unobserved["hydrated_at_block"], 1);
     assert_eq!(
         entry(&fixture).await?["status"],
         "unsupported",
-        "failure restores baseline and still publishes"
+        "an overlay read for the replaced write is not served"
     );
-    rpc.answer(4, Some(""));
-    run(&fixture, 4, FamilyMode::Normal, &rpc).await?;
+    let text_outcome = outcome.hydration.text;
+    assert_eq!(
+        (
+            text_outcome.rpc_calls,
+            text_outcome.rpc_failures,
+            text_outcome.not_observed,
+            text_outcome.value_writes + text_outcome.schedule_writes
+        ),
+        (1, 1, 1, 0)
+    );
+    assert_eq!(outcome.hydration.unserved_passes, 1);
+    assert_eq!(rpc.probes(), 1, "one probe told the endpoint failure apart");
+    // Block 4's aggregate is answered, but the resolver call inside it fails. That is the
+    // fail-closed case: a null overlay stamped with the attempt.
+    rpc.answer(4, Some("unused"));
+    rpc.fail_call(RESOLVER);
+    let outcome = run(&fixture, 4, FamilyMode::Normal, &rpc).await?;
+    rpc.clear_faults();
+    let failed = value_row(&fixture).await?;
+    assert!(failed["hydrated_value"].is_null());
+    assert_eq!(failed["hydrated_at_block"], 4);
+    assert_eq!(entry(&fixture).await?["status"], "unsupported");
+    let text_outcome = outcome.hydration.text;
+    assert_eq!(
+        (
+            text_outcome.rpc_failures,
+            text_outcome.failed_calls,
+            text_outcome.value_writes
+        ),
+        (0, 1, 1)
+    );
+    // Fresh on-chain evidence clears the failed-child delay before a successful empty read.
+    text(&fixture, 5, None).await?;
+    rpc.answer(5, Some(""));
+    run(&fixture, 5, FamilyMode::Normal, &rpc).await?;
     assert_eq!(entry(&fixture).await?["status"], "not_found");
     let journal: Value = sqlx::query_scalar(
         "SELECT before_image FROM project_family_undo
-        WHERE chain_id=$1 AND block_number=4 AND family='project_node_record_value'",
+        WHERE chain_id=$1 AND block_number=5 AND family='project_node_record_value'",
     )
     .bind(CHAIN)
     .fetch_one(&fixture.pool)
     .await?;
     assert!(
         journal["hydrated_value"].is_null(),
-        "empty-block retry is journalled"
+        "retry after new evidence is journalled"
     );
     let calls = rpc.calls().len();
-    run(&fixture, 4, FamilyMode::Redo { from: 4, to: 4 }, &rpc).await?;
+    run(&fixture, 5, FamilyMode::Redo { from: 5, to: 5 }, &rpc).await?;
     assert_eq!(rpc.calls().len(), calls, "replay never hydrates");
     assert!(
         value_row(&fixture).await?["hydrated_value"].is_null(),
         "undo restored baseline"
     );
-    rpc.answer(5, Some("refreshed"));
-    run(&fixture, 5, FamilyMode::Normal, &rpc).await?;
+    rpc.answer(6, Some("refreshed"));
+    run(&fixture, 6, FamilyMode::Normal, &rpc).await?;
     assert_eq!(entry(&fixture).await?["value"], "refreshed");
-    run(&fixture, 5, FamilyMode::Rebuild, &rpc).await?;
+    run(&fixture, 6, FamilyMode::Rebuild, &rpc).await?;
     assert_eq!(rpc.calls().len(), calls + 1, "rebuild never hydrates");
     assert!(value_row(&fixture).await?["hydrated_value"].is_null());
-    rpc.answer(6, Some("after rebuild"));
-    run(&fixture, 6, FamilyMode::Normal, &rpc).await?;
+    rpc.answer(7, Some("after rebuild"));
+    run(&fixture, 7, FamilyMode::Normal, &rpc).await?;
     assert_eq!(entry(&fixture).await?["value"], "after rebuild");
     fixture.cleanup().await
 }
@@ -312,8 +379,12 @@ async fn text_rebuild_backlog_rolls_over_blocks_under_the_limit_with_changes_fir
     // A rebuild never hydrates, so every eligible selector is left with a null overlay.
     run(&fixture, 1, FamilyMode::Rebuild, &rpc).await?;
     assert!(rpc.calls().is_empty());
-    // Block 2's reads fail: the first 250 keys are stamped with the attempt and nothing is served.
+    // Block 2's aggregate is answered but every resolver call in it fails: the first 250 keys are
+    // stamped with the attempt and nothing is served.
+    rpc.answer(2, Some("unused"));
+    rpc.fail_call(RESOLVER);
     run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
+    rpc.clear_faults();
     let rows = attempts(&fixture).await?;
     assert_eq!(keys_at(&rows, 2), range(0, 250));
     assert!(rows.iter().all(|(_, _, status)| status.is_none()));
@@ -326,27 +397,26 @@ async fn text_rebuild_backlog_rolls_over_blocks_under_the_limit_with_changes_fir
     let mut expected = range(250, 499);
     expected.push("zz".to_owned());
     assert_eq!(keys_at(&attempts(&fixture).await?, 3), expected);
-    // Then the rest of the never-read keys, then the oldest failed attempts.
+    // The remaining never-read keys drain; the 250 failed children keep their original stamp.
     run(&fixture, 4, FamilyMode::Normal, &rpc).await?;
-    let mut expected = range(0, 149);
-    expected.extend(range(499, BACKLOG));
-    assert_eq!(keys_at(&attempts(&fixture).await?, 4), expected);
-    run(&fixture, 5, FamilyMode::Normal, &rpc).await?;
-    assert_eq!(keys_at(&attempts(&fixture).await?, 5), range(149, 250));
-    run(&fixture, 6, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(keys_at(&attempts(&fixture).await?, 4), range(499, BACKLOG));
+    for block in [5, 6] {
+        let outcome = run(&fixture, block, FamilyMode::Normal, &rpc).await?;
+        assert_eq!(outcome.hydration.text.rpc_calls, 0);
+    }
     let rows = attempts(&fixture).await?;
     assert_eq!(rows.len(), BACKLOG + 1);
-    assert!(
-        rows.iter()
-            .all(|(_, _, status)| status.as_deref() == Some("success")),
-        "the whole backlog is hydrated"
-    );
-    let per_call: Vec<usize> = rpc.calls().into_iter().map(|(_, count)| count).collect();
+    assert_eq!(keys_at(&rows, 2), range(0, 250));
     assert_eq!(
-        per_call,
-        vec![250, 250, 250, 101],
-        "one bounded batch per block, none once the backlog is drained"
+        rows.iter()
+            .filter(|(_, _, status)| status.is_some())
+            .count(),
+        351
     );
+    assert!(selected(&fixture, 7201).await?.is_empty());
+    assert_eq!(selected(&fixture, 7202).await?, range(0, 250));
+    let per_call: Vec<usize> = rpc.calls().into_iter().map(|(_, count)| count).collect();
+    assert_eq!(per_call, vec![250, 250, 101]);
     fixture.cleanup().await
 }
 
@@ -373,6 +443,10 @@ async fn selected(fixture: &Fixture, block: i64) -> Result<Vec<String>> {
 
 fn text_selection_sql() -> String {
     include_str!("../src/families/hydrate/text.sql")
+        .replace(
+            "{eligibility}",
+            include_str!("../src/families/hydrate/text_eligible.sql"),
+        )
         .replace(
             "{value_emission_ordinal}",
             &bigname_storage::families::position::emission_ordinal_sql(
@@ -465,7 +539,7 @@ async fn text_backlog_is_cut_in_the_query_behind_thousands_of_current_selectors(
         json!({"hydrated_value": null, "hydrated_at_block": null}),
     )
     .await?;
-    // Failed reads at block 1. They sort first by key, yet wait behind every never-read selector.
+    // Old stamped work, including legacy rows without failure metadata, gets reserved slots.
     copies(
         &fixture,
         "a",
@@ -491,18 +565,17 @@ async fn text_backlog_is_cut_in_the_query_behind_thousands_of_current_selectors(
 
     sync_text_work(&fixture, 2).await?;
 
-    // The query itself returns only the block's share: never-read selectors, in key order.
-    assert_eq!(selected(&fixture, 2).await?, keys("n", 1, 250));
+    // Both the old stamped rows and the orphaned overlays get the reserved slots first.
+    let mut first = keys("a", 1, 5);
+    first.extend(keys("r", 1, 5));
+    first.extend(keys("n", 1, 240));
+    assert_eq!(selected(&fixture, 2).await?, first);
     rpc.answer(2, Some("fresh"));
     run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
-    assert_eq!(keys_at(&attempts(&fixture).await?, 2), keys("n", 1, 250));
-    // Then the rest of the never-read selectors, then the older attempts, failed or orphaned.
-    let mut expected = keys("a", 1, 5);
-    expected.extend(keys("n", 251, 300));
-    expected.extend(keys("r", 1, 5));
-    let mut share = selected(&fixture, 3).await?;
-    share.sort();
-    assert_eq!(share, expected);
+    first.sort();
+    assert_eq!(keys_at(&attempts(&fixture).await?, 2), first);
+    let expected = keys("n", 241, 300);
+    assert_eq!(selected(&fixture, 3).await?, expected);
     rpc.answer(3, Some("fresh"));
     run(&fixture, 3, FamilyMode::Normal, &rpc).await?;
     assert_eq!(keys_at(&attempts(&fixture).await?, 3), expected);
@@ -510,7 +583,7 @@ async fn text_backlog_is_cut_in_the_query_behind_thousands_of_current_selectors(
     assert!(selected(&fixture, 4).await?.is_empty());
     run(&fixture, 4, FamilyMode::Normal, &rpc).await?;
     let per_call: Vec<usize> = rpc.calls().into_iter().map(|(_, count)| count).collect();
-    assert_eq!(per_call, vec![1, 250, 60]);
+    assert_eq!(per_call, vec![1, 10, 240, 60]);
     let rows = attempts(&fixture).await?;
     assert_eq!(rows.len(), 1 + 3000 + 300 + 5 + 5);
     assert!(
@@ -719,6 +792,12 @@ async fn text_selection_visits_only_pending_rows_among_fifty_thousand_completed_
         plans::visits(&plan, "project_node_record_value") <= 8.0,
         "{plan}"
     );
+    // The extra history leaves the readable lineage, so block 2 is the head again.
+    sqlx::query(
+        "UPDATE chain_lineage SET canonicality_state = 'orphaned' WHERE block_hash LIKE 'extra-%'",
+    )
+    .execute(&fixture.pool)
+    .await?;
     keyed_text(&fixture, 2, 1, "new-same-partition").await?;
     rpc.answer(2, Some("filled"));
     run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
@@ -785,7 +864,21 @@ async fn hydration_work_upgrade_reset_is_atomic_idempotent_and_rebuilds_pending_
         .skip(1)
         .step_by(2)
         .collect();
+    // The ENSv2 registry entry and history catalogue tables came later, with
+    // 20261005140000_project_ens_v2_registry_entries.sql and
+    // 20261005170000_project_address_history_catalogue.sql.
     let expected: std::collections::BTreeSet<_> = families::family_tables()
+        .filter(|table| {
+            !matches!(
+                *table,
+                "project_ens_v2_entry_owner"
+                    | "project_ens_v2_registry_parent"
+                    | "project_address_history_anchor"
+                    | "project_history_source"
+                    | "project_history_source_edge"
+                    | "project_history_catalogue_marker"
+            )
+        })
         .chain([
             "project_family_marker",
             "project_family_undo",
@@ -795,7 +888,7 @@ async fn hydration_work_upgrade_reset_is_atomic_idempotent_and_rebuilds_pending_
         .collect();
     assert_eq!(
         reset_tables, expected,
-        "the first installation resets every owned table"
+        "the first installation resets every family owned when the migration was published"
     );
     let (fixture, rpc) = fixture().await?;
     text(&fixture, 1, None).await?;
@@ -839,6 +932,12 @@ async fn hydration_work_upgrade_reset_is_atomic_idempotent_and_rebuilds_pending_
         .fetch_one(&fixture.pool)
         .await?;
     assert_eq!(markers, 0);
+    // The new binary requires the scheduling migration after the historical work-table install.
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/20261005180000_project_hydration_schedule.sql"
+    ))
+    .execute(&fixture.pool)
+    .await?;
     run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
     assert_eq!(
         pending_text(&fixture).await?,
@@ -880,6 +979,7 @@ async fn range_and_per_block_rebuilds_derive_identical_work_after_dependency_cha
     manifest(&fixture, 5, false).await?;
     manifest(&fixture, 6, true).await?;
     let mut expected = None;
+    rpc::head(&fixture.pool, 6).await?;
     for ranges in [RebuildRanges::Through(6), RebuildRanges::Off] {
         let token = families::input_token(&fixture.pool, CHAIN).await?;
         let outcome = families::apply(
@@ -948,3 +1048,342 @@ async fn completed_delta_keys_do_not_consume_the_rolling_text_share() -> Result<
     assert_eq!(pending_text(&fixture).await?, 0);
     fixture.cleanup().await
 }
+
+#[tokio::test]
+async fn text_split_stamps_the_selector_it_cannot_read_and_an_unserved_block_writes_nothing()
+-> Result<()> {
+    let (fixture, rpc) = fixture().await?;
+    keyed_text(&fixture, 1, 2, "badkey").await?;
+    keyed_text(&fixture, 1, 3, "goodkey").await?;
+    rpc.answer(1, Some("value"));
+    // Any aggregate asking for `badkey` fails whole; the endpoint serves the block otherwise.
+    rpc.poison(&alloy_primitives::hex::encode("badkey"));
+    let outcome = run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
+    let text_outcome = outcome.hydration.text;
+    assert_eq!(
+        (
+            text_outcome.rpc_calls,
+            text_outcome.rpc_failures,
+            text_outcome.answered,
+            text_outcome.deferred,
+            text_outcome.value_writes,
+            text_outcome.schedule_writes,
+        ),
+        (3, 2, 1, 1, 1, 1)
+    );
+    assert_eq!(outcome.hydration.probes, 1);
+    // The readable selector is hydrated; the other has nothing observed and is stamped with the
+    // attempt, so it waits behind the never-read backlog.
+    assert_eq!(
+        attempts(&fixture).await?,
+        vec![
+            ("badkey".to_owned(), Some(1), None),
+            ("goodkey".to_owned(), Some(1), Some("success".to_owned())),
+        ]
+    );
+    assert_eq!(pending_text(&fixture).await?, 1);
+
+    // The endpoint fails every aggregate at block 2: no text row or work entry changes.
+    let before = fixture.rows("project_node_record_value").await?;
+    let outcome = run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(fixture.rows("project_node_record_value").await?, before);
+    assert_eq!(
+        (
+            outcome.hydration.text.not_observed,
+            outcome.hydration.unserved_passes
+        ),
+        (1, 1)
+    );
+    assert_eq!(pending_text(&fixture).await?, 1);
+
+    // Once it can be read, it is: the selector stayed work throughout.
+    rpc.clear_faults();
+    rpc.answer(3, Some("late"));
+    run(&fixture, 3, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(rpc.calls().last(), Some(&(hash(3), 1)));
+    assert!(
+        attempts(&fixture)
+            .await?
+            .iter()
+            .all(|(_, _, status)| status.as_deref() == Some("success"))
+    );
+    assert_eq!(pending_text(&fixture).await?, 0);
+    fixture.cleanup().await
+}
+
+/// Keys whose overlay holds a successful read.
+async fn read_keys(fixture: &Fixture) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*) FROM project_node_record_value
+         WHERE hydrated_value ->> 'status' = 'success'",
+    )
+    .fetch_one(&fixture.pool)
+    .await?)
+}
+
+#[tokio::test]
+async fn text_selectors_beside_unreadable_ones_are_all_read_over_the_following_heads() -> Result<()>
+{
+    const UNREADABLE: [i64; 9] = [1, 2, 3, 4, 8, 16, 32, 63, 126];
+    let (fixture, rpc) = fixture().await?;
+    for position in 1..=250 {
+        keyed_text(&fixture, 1, position + 1, &format!("key{position:03}")).await?;
+    }
+    for block in 1..=8 {
+        rpc.answer(block, Some("value"));
+    }
+    // Any aggregate asking for one of nine keys fails whole, at every block. They sit where
+    // almost every aggregate the first head has calls for holds one of them.
+    for position in UNREADABLE {
+        rpc.poison(&alloy_primitives::hex::encode(format!("key{position:03}")));
+    }
+    let outcome = run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
+    let first = outcome.hydration.text;
+    assert_eq!(
+        (first.answered, first.deferred, first.rpc_calls),
+        (3, 247, 17)
+    );
+    assert_eq!(read_keys(&fixture).await?, 3);
+
+    // Each later head starts from the sizes the one before left, so the readable keys are read.
+    let mut heads = 1;
+    while read_keys(&fixture).await? < 241 {
+        heads += 1;
+        assert!(heads <= 8, "readable keys were never read");
+        let outcome = run(&fixture, heads, FamilyMode::Normal, &rpc).await?;
+        assert!(outcome.hydration.text.rpc_calls <= 17);
+    }
+    assert!(heads <= 6, "{heads} heads");
+    // The nine stay pending, each alone, and are tried again without holding anything back.
+    assert_eq!(pending_text(&fixture).await?, 9);
+    let limits: Vec<Option<i32>> = sqlx::query_scalar(
+        "SELECT hydration_limit FROM project_node_record_value
+         WHERE hydrated_value IS NULL ORDER BY record_key",
+    )
+    .fetch_all(&fixture.pool)
+    .await?;
+    assert_eq!(limits, vec![Some(1); 9]);
+    let outcome = run(&fixture, heads + 1, FamilyMode::Normal, &rpc).await?;
+    let text_outcome = outcome.hydration.text;
+    assert_eq!((text_outcome.rpc_calls, text_outcome.deferred), (9, 9));
+    assert_eq!(
+        (text_outcome.value_writes, text_outcome.schedule_writes),
+        (0, 9)
+    );
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn slow_reverse_reads_leave_time_for_the_text_selectors_of_the_same_block() -> Result<()> {
+    use std::time::Duration;
+    let (fixture, rpc) = fixture().await?;
+    reverse::seed(&fixture, 1, 1).await?;
+    keyed_text(&fixture, 1, 9, "waiting").await?;
+    rpc.answer(1, Some("value"));
+    // The reverse tuple's aggregate outlasts the whole block's time. Reverse names are read
+    // first, but only within half of that time while a text selector is waiting.
+    rpc.slow(&reverse::node(1), Duration::from_secs(20));
+    rpc::head(&fixture.pool, 1).await?;
+    let limits = bigname_project::families::HydrationTimeLimits {
+        call: Duration::from_secs(4),
+        block: Duration::from_secs(4),
+    };
+    let options = reverse::options(&rpc).with_hydration_time_limits(limits);
+    let (outcome, error) = reverse::apply(&fixture, &marker(1), FamilyMode::Normal, &options).await;
+    assert!(error.is_none(), "{error:?}");
+    let hydration = &outcome.hydration;
+    assert_eq!(
+        (hydration.reverse.rpc_calls, hydration.reverse.not_observed),
+        (1, 1)
+    );
+    assert_eq!(
+        (
+            hydration.reverse.deferred,
+            hydration.reverse.schedule_writes
+        ),
+        (0, 0)
+    );
+    assert_eq!(
+        (hydration.text.answered, hydration.text.value_writes),
+        (1, 1)
+    );
+    assert_eq!(
+        (hydration.timed_out_passes, hydration.unserved_passes),
+        (1, 0)
+    );
+    assert_eq!(
+        attempts(&fixture).await?,
+        vec![("waiting".to_owned(), Some(1), Some("success".to_owned()))]
+    );
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn fast_rejections_followed_by_a_slow_half_still_record_where_to_resume() -> Result<()> {
+    use std::time::Duration;
+    let (fixture, rpc) = fixture().await?;
+    for index in 1..=16 {
+        reverse::seed(&fixture, 1, index).await?;
+        keyed_text(&fixture, 1, 40 + index, &format!("key{index:02}")).await?;
+    }
+    for block in 1..=8 {
+        rpc.answer(block, Some("value"));
+    }
+    // The endpoint rejects an aggregate of four or more calls after 500 ms and takes 1.9 s, most
+    // of a call's time, to answer a smaller one; the probe answers at once. Reverse has 3.5 of
+    // the block's seven seconds: after the aggregates of 16, 8 and 4 are rejected it has less
+    // than one call's time left, so a half sent then would be cut and nothing recorded.
+    rpc.reject_from(4, Duration::from_millis(500), Duration::from_millis(1900));
+    let limits = bigname_project::families::HydrationTimeLimits {
+        call: Duration::from_secs(2),
+        block: Duration::from_secs(7),
+    };
+    let options = reverse::options(&rpc).with_hydration_time_limits(limits);
+    let observed = |table: &'static str, column: &'static str| {
+        let pool = fixture.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(&format!(
+                "SELECT count(*) FROM {table} WHERE {column} IS NOT NULL"
+            ))
+            .fetch_one(&pool)
+            .await
+        }
+    };
+
+    // The first head observes no reverse name, but every rejected aggregate leaves its tuples
+    // a smaller size and no call is cut. How far the splitting got depends on the machine: the
+    // third rejection, at the latest, leaves less than a call's time.
+    rpc::head(&fixture.pool, 1).await?;
+    let (outcome, error) = reverse::apply(&fixture, &marker(1), FamilyMode::Normal, &options).await;
+    assert!(error.is_none(), "{error:?}");
+    let first = outcome.hydration.reverse;
+    assert_eq!(
+        (first.answered, first.deferred, first.not_observed),
+        (0, 16, 0),
+        "{first:?}"
+    );
+    assert_eq!(first.schedule_writes, 16);
+    assert_eq!(first.rpc_calls, first.rpc_failures);
+    let limits: Vec<Option<i32>> =
+        sqlx::query_scalar("SELECT attempt_limit FROM project_reverse_tuple ORDER BY address")
+            .fetch_all(&fixture.pool)
+            .await?;
+    assert!(
+        limits
+            .iter()
+            .all(|limit| limit.is_some_and(|limit| (1..=8).contains(&limit))),
+        "{limits:?}"
+    );
+    let text_first = outcome.hydration.text;
+    assert!(
+        text_first.answered + text_first.deferred > 0,
+        "text is read or records where to resume: {text_first:?}"
+    );
+
+    // The second head, against the same endpoint, starts from those sizes: it reads tuples or
+    // records smaller sizes again, for both kinds.
+    rpc::head(&fixture.pool, 2).await?;
+    let (outcome, error) = reverse::apply(&fixture, &marker(2), FamilyMode::Normal, &options).await;
+    assert!(error.is_none(), "{error:?}");
+    let second = outcome.hydration.reverse;
+    assert!(second.answered + second.deferred > 0, "{second:?}");
+    let smaller: Vec<Option<i32>> =
+        sqlx::query_scalar("SELECT attempt_limit FROM project_reverse_tuple ORDER BY address")
+            .fetch_all(&fixture.pool)
+            .await?;
+    assert!(
+        smaller
+            .iter()
+            .zip(&limits)
+            .all(|(now, before)| now.is_none() || now <= before),
+        "{smaller:?}"
+    );
+    assert_ne!(smaller, limits, "the second head made progress");
+    let text_second = outcome.hydration.text;
+    assert!(
+        text_second.answered + text_second.deferred > 0,
+        "text is read or records where to resume: {text_second:?}"
+    );
+
+    // With small aggregates answered quickly and large ones still rejected, the following heads
+    // read everything left, for both kinds.
+    rpc.clear_faults();
+    rpc.reject_from(4, Duration::from_millis(100), Duration::from_millis(10));
+    let mut heads = 2;
+    while observed("project_reverse_tuple", "hydrated_name").await? < 16
+        || observed("project_node_record_value", "hydrated_value").await? < 16
+    {
+        heads += 1;
+        assert!(heads <= 8, "selectors were never observed");
+        rpc::head(&fixture.pool, heads).await?;
+        let (_, error) =
+            reverse::apply(&fixture, &marker(heads), FamilyMode::Normal, &options).await;
+        assert!(error.is_none(), "{error:?}");
+    }
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn undo_restores_a_deferred_text_selector_and_its_work_entry() -> Result<()> {
+    let (fixture, rpc) = fixture().await?;
+    keyed_text(&fixture, 1, 2, "badkey").await?;
+    keyed_text(&fixture, 1, 3, "goodkey").await?;
+    // The endpoint does not serve block 1: both selectors stay unread and untouched.
+    run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
+    let rows = fixture.rows("project_node_record_value").await?;
+    let work = fixture.rows("project_text_hydration_work").await?;
+
+    // At block 2 the aggregate holding `badkey` fails: it is deferred with scheduling state.
+    rpc.answer(2, Some("value"));
+    rpc.poison(&alloy_primitives::hex::encode("badkey"));
+    let outcome = run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(
+        (
+            outcome.hydration.text.answered,
+            outcome.hydration.text.deferred
+        ),
+        (1, 1)
+    );
+    let deferred: (Option<i64>, Option<i32>, Option<i32>) = sqlx::query_as(
+        "SELECT hydrated_at_block, hydration_limit, hydration_failures
+         FROM project_node_record_value WHERE selector_key = 'badkey'",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(deferred, (Some(2), Some(1), Some(1)));
+    let failures: Vec<Option<i32>> =
+        sqlx::query_scalar("SELECT hydration_failures FROM project_text_hydration_work")
+            .fetch_all(&fixture.pool)
+            .await?;
+    assert_eq!(failures, vec![Some(1)], "the work index follows the row");
+
+    // Block 2 is replaced: the undo restores both rows and both work entries exactly.
+    sqlx::query(
+        "UPDATE chain_lineage SET canonicality_state = 'orphaned'
+         WHERE chain_id = $1 AND block_number = 2",
+    )
+    .bind(CHAIN)
+    .execute(&fixture.pool)
+    .await?;
+    let replacement = reverse::fork_block(&fixture, 2, &hash(1)).await?;
+    let calls = (rpc.calls(), rpc.probes());
+    let options = reverse::options(&rpc).with_max_blocks_per_run(1);
+    let (outcome, error) =
+        reverse::apply(&fixture, &replacement, FamilyMode::Normal, &options).await;
+    assert!(error.is_none(), "{error:?}");
+    assert_eq!((outcome.undone_blocks, outcome.blocks), (1, 0));
+    assert_eq!(fixture.rows("project_node_record_value").await?, rows);
+    assert_eq!(fixture.rows("project_text_hydration_work").await?, work);
+    // The replay makes no call and leaves them so.
+    let (outcome, error) =
+        reverse::apply(&fixture, &replacement, FamilyMode::Normal, &options).await;
+    assert!(error.is_none(), "{error:?}");
+    assert_eq!(outcome.marker, Some(replacement));
+    assert_eq!((rpc.calls(), rpc.probes()), calls);
+    assert_eq!(fixture.rows("project_node_record_value").await?, rows);
+    assert_eq!(fixture.rows("project_text_hydration_work").await?, work);
+    fixture.cleanup().await
+}
+
+#[path = "families_hydration/text_schedule.rs"]
+mod schedule;

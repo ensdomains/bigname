@@ -141,3 +141,236 @@ fn checked_in_approvals_compile_only_for_declared_roles_and_intervals() -> Resul
     assert_eq!(approval_count, 19);
     Ok(())
 }
+
+const ENS_V2_APPROVAL_START: u64 = 10_893_181;
+
+fn approval_for_all_topic0() -> String {
+    format!(
+        "{}",
+        alloy_primitives::keccak256(crate::APPROVAL_FOR_ALL_SIGNATURE.as_bytes())
+    )
+}
+
+fn sepolia_manifest(source_family: &str) -> Result<SourceManifest> {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let repository = crate::load_repository(workspace_root.join("manifests/sepolia"))?;
+    Ok(repository
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == source_family)
+        .with_context(|| format!("official Sepolia {source_family} manifest"))?
+        .manifest
+        .clone())
+}
+
+#[test]
+fn ens_v2_registry_approvals_compile_family_wide_from_their_declared_start() -> Result<()> {
+    let topic0 = approval_for_all_topic0();
+    let registry = sepolia_manifest(crate::ENS_V2_REGISTRY_SOURCE_FAMILY)?;
+    let entries = compile_watch_scope(&registry)?
+        .into_iter()
+        .filter(|entry| entry.topic0 == topic0)
+        .map(|entry| (entry.emitter, entry.start))
+        .collect::<BTreeSet<_>>();
+    let address = |address: &str| WatchEmitter::Address {
+        family: crate::ENS_V2_REGISTRY_SOURCE_FAMILY.to_owned(),
+        address: address.to_owned(),
+    };
+    assert_eq!(
+        entries,
+        BTreeSet::from([
+            (
+                WatchEmitter::Family {
+                    namespace: "ens".to_owned(),
+                    family: crate::ENS_V2_REGISTRY_SOURCE_FAMILY.to_owned(),
+                },
+                ENS_V2_APPROVAL_START,
+            ),
+            (
+                address("0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4"),
+                11_820_399
+            ),
+        ]),
+        "discovered registries are watched from the event start, the declared ETHRegistry from its own"
+    );
+    for entry in compile_watch_scope(&registry)? {
+        if matches!(entry.emitter, WatchEmitter::Family { .. }) && entry.topic0 != topic0 {
+            assert_eq!(entry.start, 0, "other family topics keep block zero");
+        }
+    }
+
+    // The root family has no discovered emitters, so only its declared RootRegistry is watched.
+    let root = sepolia_manifest(crate::ENS_V2_ROOT_SOURCE_FAMILY)?;
+    let entries = compile_watch_scope(&root)?
+        .into_iter()
+        .filter(|entry| entry.topic0 == topic0)
+        .map(|entry| (entry.emitter, entry.start))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        entries,
+        BTreeSet::from([(
+            WatchEmitter::Address {
+                family: crate::ENS_V2_ROOT_SOURCE_FAMILY.to_owned(),
+                address: "0xb458d6a3a77919449d03e7a6903c26827c1ec43f".to_owned(),
+            },
+            11_820_291
+        )])
+    );
+    Ok(())
+}
+
+#[test]
+fn adding_ens_v2_registry_approvals_widens_from_the_event_start() -> Result<()> {
+    let chain_id = "ethereum-sepolia";
+    let widened_from = |edit: fn(&mut crate::ManifestAbiEvent)| -> Result<Option<u64>> {
+        let mut previous = Snapshot::default();
+        let mut desired = Snapshot::default();
+        for family in [
+            crate::ENS_V2_REGISTRY_SOURCE_FAMILY,
+            crate::ENS_V2_ROOT_SOURCE_FAMILY,
+        ] {
+            let mut manifest = sepolia_manifest(family)?;
+            for event in &mut manifest.abi.events {
+                if event.name == "ApprovalForAll" {
+                    edit(event);
+                }
+            }
+            record(&mut desired, &manifest, &manifest_payload(&manifest)?)?;
+            manifest
+                .abi
+                .events
+                .retain(|event| event.name != "ApprovalForAll");
+            record(&mut previous, &manifest, &manifest_payload(&manifest)?)?;
+        }
+        widening_start(
+            &previous,
+            &desired,
+            chain_id,
+            &PersistedWatchCoverage::new(),
+            false,
+        )
+    };
+    assert_eq!(widened_from(|_| {})?, Some(ENS_V2_APPROVAL_START));
+    assert_eq!(
+        widened_from(|event| event.start_block = None)?,
+        Some(0),
+        "without the event start the family-wide entry widens from block zero"
+    );
+    Ok(())
+}
+
+#[test]
+fn an_event_start_is_refused_where_no_family_wide_entry_compiles() -> Result<()> {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = workspace_root.join("manifests/sepolia/ethereum/ens");
+    for (family, event) in [
+        // Not a discovered-emitter family.
+        ("ens_v2_root_l1", "name = \"ApprovalForAll\""),
+        // An all-emitter event.
+        ("ens_v2_registry_l1", "name = \"RegistryCreated\""),
+    ] {
+        let root = std::env::temp_dir().join(format!(
+            "bigname-event-start-{family}-{}",
+            std::process::id()
+        ));
+        let directory = root.join("ethereum/ens").join(family);
+        std::fs::create_dir_all(&directory)?;
+        let manifest = std::fs::read_to_string(source.join(family).join("v2.toml"))?;
+        let edited = manifest.replacen(event, &format!("{event}\nstart_block = 5"), 1);
+        assert_ne!(edited, manifest);
+        std::fs::write(directory.join("v2.toml"), edited)?;
+        let error = crate::load_repository(&root)
+            .err()
+            .map(|error| format!("{error:#}"));
+        std::fs::remove_dir_all(&root)?;
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|error| error.contains("compiles no family-wide watch entry")),
+            "{family}: {error:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn the_mainnet_deployment_profile_declares_no_ens_v2_approval_and_no_event_start() -> Result<()> {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let repository = crate::load_repository(workspace_root.join("manifests/mainnet"))?;
+    for loaded in repository.manifests() {
+        assert!(
+            !loaded.manifest.source_family.starts_with("ens_v2_"),
+            "mainnet declares no ENSv2 family"
+        );
+        for event in &loaded.manifest.abi.events {
+            assert_eq!(event.start_block, None, "{}", event.name);
+        }
+        for entry in compile_watch_scope(&loaded.manifest)? {
+            if matches!(entry.emitter, WatchEmitter::Family { .. }) {
+                assert_eq!(entry.start, 0);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn user_registry_origin_metadata_widens_only_its_declared_address() -> Result<()> {
+    let desired = sepolia_manifest("ens_v2_migration_l1")?;
+    let mut previous = desired.clone();
+    previous
+        .contracts
+        .retain(|contract| contract.role != "user_registry_implementation");
+    assert_eq!(desired.contracts.len(), previous.contracts.len() + 1);
+    let before = compile_watch_scope(&previous)?;
+    let after = compile_watch_scope(&desired)?;
+    assert!(before.iter().all(|entry| after.contains(entry)));
+    let added: Vec<_> = after
+        .iter()
+        .filter(|entry| !before.contains(entry))
+        .collect();
+    assert_eq!(before.len(), 16);
+    assert_eq!(after.len(), 18);
+    assert_eq!(added.len(), 2);
+    for entry in &added {
+        assert_eq!(entry.start, 11_820_439);
+        assert_eq!(
+            entry.emitter,
+            WatchEmitter::Address {
+                family: "ens_v2_migration_l1".to_owned(),
+                address: "0x9bd8a88719068d09ecee662f36c0e3856708366a".to_owned(),
+            }
+        );
+    }
+    assert_eq!(
+        added
+            .iter()
+            .map(|entry| entry.topic0.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "0x0a2c575ff341b41da136c9ccae74ec230a927a024d18f0dccf46d123f28f5f54",
+            "0xbd0c01e5bf66003280556423db4a8bf79043c146ac57f657c30049dd43316649",
+        ])
+    );
+    let mut old_snapshot = Snapshot::default();
+    let mut new_snapshot = Snapshot::default();
+    record(&mut old_snapshot, &previous, &manifest_payload(&previous)?)?;
+    record(&mut new_snapshot, &desired, &manifest_payload(&desired)?)?;
+    assert_eq!(
+        widening_start(
+            &old_snapshot,
+            &new_snapshot,
+            "ethereum-sepolia",
+            &PersistedWatchCoverage::new(),
+            false
+        )?,
+        Some(11_820_439)
+    );
+    println!(
+        "registry_origin_watch_plan={}",
+        serde_json::json!({
+            "before": before, "after": after, "added": added, "widening_start": 11_820_439
+        })
+    );
+    Ok(())
+}

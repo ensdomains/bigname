@@ -1,7 +1,10 @@
-//! The schema-migration that adds `project_name_summary.owner`
-//! (migrations/20260929170000_project_name_summary_owner.sql). On a database without the column it
-//! resets every owned key family, so the next family run rebuilds them and writes every owner.
-//! It takes the marker table before touching anything and holds it to commit. So a family run
+//! The schema-migrations that add `project_name_summary.owner`
+//! (migrations/20260929170000_project_name_summary_owner.sql) and the expiry selector columns
+//! `expiry_listable` and `public_authority` with their indexes
+//! (migrations/20261005150000_project_name_summary_expiry_selector.sql). On a database without
+//! its columns each resets every owned key family, so the next family run rebuilds them and
+//! writes every summary whole.
+//! Each takes the marker table before touching anything and holds it to commit. So a family run
 //! already holding a marker finishes first, and a run that starts meanwhile, including one that
 //! would create the marker of a chain that has none, waits for the column instead of publishing
 //! summaries that lost their owner.
@@ -24,6 +27,8 @@ use tokio::sync::oneshot;
 
 const MIGRATION: &str =
     include_str!("../../../migrations/20260929170000_project_name_summary_owner.sql");
+const SELECTOR_MIGRATION: &str =
+    include_str!("../../../migrations/20261005150000_project_name_summary_expiry_selector.sql");
 const V2_REGISTRY: &str = "ens_v2_registry_l1";
 const REGISTRY: &str = "0x00000000000000000000000000000000000000e5";
 const OWNER: &str = "0x00000000000000000000000000000000000000aa";
@@ -41,10 +46,10 @@ const CONTROL_TABLES: [&str; 3] = [
 
 /// The quoted names of the migration's `ARRAY[...]` reset list, read as text: it does not parse
 /// SQL, so a name inside a comment would still count.
-fn reset_literal() -> BTreeSet<String> {
-    let start = MIGRATION.find("ARRAY ARRAY[").expect("reset list") + "ARRAY ARRAY[".len();
-    let end = start + MIGRATION[start..].find(']').expect("end of reset list");
-    MIGRATION[start..end]
+fn reset_literal(migration: &str) -> BTreeSet<String> {
+    let start = migration.find("ARRAY ARRAY[").expect("reset list") + "ARRAY ARRAY[".len();
+    let end = start + migration[start..].find(']').expect("end of reset list");
+    migration[start..end]
         .split('\'')
         .skip(1)
         .step_by(2)
@@ -53,8 +58,9 @@ fn reset_literal() -> BTreeSet<String> {
 }
 
 /// The family inventory when this historical migration was introduced. The Universal Resolver
-/// table was added later by 20260929200000_project_universal_resolver_proxy.sql, so the owner
-/// migration cannot reset it. Keep it installed for the current family runner used below, but
+/// table was added later by 20260929200000_project_universal_resolver_proxy.sql and the ENSv2
+/// registry entry tables by 20261005140000_project_ens_v2_registry_entries.sql, so the owner
+/// migration cannot reset them. Keep it installed for the current family runner used below, but
 /// do not seed it as predecessor state or include it in the historical reset assertion.
 fn reset_tables() -> Vec<String> {
     families::family_tables()
@@ -62,8 +68,14 @@ fn reset_tables() -> Vec<String> {
             !matches!(
                 *table,
                 "project_universal_resolver_proxy"
+                    | "project_ens_v2_entry_owner"
+                    | "project_ens_v2_registry_parent"
                     | "project_text_hydration_work"
                     | "project_reverse_hydration_work"
+                    | "project_address_history_anchor"
+                    | "project_history_source"
+                    | "project_history_source_edge"
+                    | "project_history_catalogue_marker"
             )
         })
         .map(str::to_owned)
@@ -77,11 +89,37 @@ fn reset_tables() -> Vec<String> {
 #[test]
 fn the_reset_literal_names_every_family_table() {
     assert_eq!(
-        reset_literal(),
+        reset_literal(MIGRATION),
         reset_tables()
             .into_iter()
             .chain(support::RETIRED_FAMILY_TABLES.map(str::to_owned))
             .collect::<BTreeSet<_>>()
+    );
+}
+
+/// The selector migration resets the inventory that preceded the catalogue migration.
+/// Keep the published migration immutable; the catalogue tables are added afterward.
+fn selector_reset_tables() -> Vec<String> {
+    families::family_tables()
+        .filter(|table| {
+            !matches!(
+                *table,
+                "project_address_history_anchor"
+                    | "project_history_source"
+                    | "project_history_source_edge"
+                    | "project_history_catalogue_marker"
+            )
+        })
+        .map(str::to_owned)
+        .chain(CONTROL_TABLES.map(str::to_owned))
+        .collect()
+}
+
+#[test]
+fn the_selector_reset_literal_names_every_family_table() {
+    assert_eq!(
+        reset_literal(SELECTOR_MIGRATION),
+        selector_reset_tables().into_iter().collect::<BTreeSet<_>>()
     );
 }
 
@@ -353,7 +391,36 @@ async fn assert_summary_owner(
 ///    column, storing its name's owner.
 #[tokio::test]
 async fn the_migration_takes_the_marker_table_before_any_reset() -> Result<()> {
-    let fixture = Fixture::new("summary_owner_migration", 12).await?;
+    takes_the_marker_table_before_any_reset(
+        "summary_owner_migration",
+        MIGRATION,
+        "ALTER TABLE project_name_summary DROP COLUMN owner",
+        reset_tables(),
+    )
+    .await
+}
+
+/// The same interleaving for the expiry selector: afterwards both chains' summaries carry a
+/// selector that matches their composed rows, read through the two partial indexes' columns.
+#[tokio::test]
+async fn the_selector_migration_takes_the_marker_table_before_any_reset() -> Result<()> {
+    takes_the_marker_table_before_any_reset(
+        "summary_selector_migration",
+        SELECTOR_MIGRATION,
+        "ALTER TABLE project_name_summary
+             DROP COLUMN expiry_listable, DROP COLUMN public_authority",
+        selector_reset_tables(),
+    )
+    .await
+}
+
+async fn takes_the_marker_table_before_any_reset(
+    prefix: &str,
+    migration_sql: &'static str,
+    predecessor: &str,
+    tables: Vec<String>,
+) -> Result<()> {
+    let fixture = Fixture::new(prefix, 12).await?;
     fixture.lineage(NEW_CHAIN, 12).await?;
     register_on(
         &fixture,
@@ -378,13 +445,10 @@ async fn the_migration_takes_the_marker_table_before_any_reset() -> Result<()> {
     )
     .await?;
     fixture.apply(7, FamilyMode::Normal).await?;
-    // A database from before the column, with a row in every table the reset must empty.
-    sqlx::query("ALTER TABLE project_name_summary DROP COLUMN owner")
-        .execute(&fixture.pool)
-        .await?;
+    // A database from before the columns, with a row in every table the reset must empty.
+    raw_sql(predecessor).execute(&fixture.pool).await?;
     let options = fixture.pool.connect_options().as_ref().clone();
     let mut observer = session(&options, "observer").await?;
-    let tables = reset_tables();
     for table in &tables {
         populate(&mut observer, table).await?;
         ensure!(
@@ -417,7 +481,7 @@ async fn the_migration_takes_the_marker_table_before_any_reset() -> Result<()> {
     let (commit_tx, commit) = oneshot::channel::<()>();
     let migrate = async {
         raw_sql("BEGIN").execute(&mut migration).await?;
-        raw_sql(MIGRATION).execute(&mut migration).await?;
+        raw_sql(migration_sql).execute(&mut migration).await?;
         // What the migration left, seen from its own uncommitted transaction.
         let mut left = Vec::new();
         for table in &tables {
@@ -497,5 +561,27 @@ async fn the_migration_takes_the_marker_table_before_any_reset() -> Result<()> {
     // The reset chain rebuilds on its next run and stores its owner too.
     fixture.apply(7, FamilyMode::Normal).await?;
     assert_summary_owner(&fixture.pool, CHAIN, NAME, OWNER).await?;
+    // Both chains' registrations are listable again, and the reviewed indexes exist.
+    let listable = fixture.assert_expiry_selector().await?;
+    ensure!(
+        listable
+            == [NAME, NEW_NAME].map(|name| {
+                (
+                    name.to_owned(),
+                    "2000000000".to_owned(),
+                    Some("ens_v2".to_owned()),
+                )
+            }),
+        "{listable:?}"
+    );
+    let indexes: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_indexes WHERE schemaname = 'bigname_phase'
+           AND indexname IN ('project_name_summary_expiry_idx',
+                             'project_name_summary_authority_expiry_idx')
+           AND indexdef LIKE '%WHERE (expiry_listable AND (expires_at IS NOT NULL))'",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    ensure!(indexes == 2, "{indexes} selector indexes");
     fixture.cleanup().await
 }

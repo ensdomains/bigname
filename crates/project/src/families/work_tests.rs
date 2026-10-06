@@ -102,8 +102,9 @@ async fn an_update_after_the_work_list_is_invisible_to_the_blocks_populated_unde
                 revision: &NO_INTERPRET,
                 role: block::Role::Follow,
                 manifests: &history,
+                head: None,
             };
-            block::apply(pool, CHAIN, number, &plan, options).await?;
+            block::apply(pool, CHAIN, number, &plan, options, &mut Default::default()).await?;
             anyhow::Ok(marker::read(pool, CHAIN).await?.admission_manifests)
         }
     };

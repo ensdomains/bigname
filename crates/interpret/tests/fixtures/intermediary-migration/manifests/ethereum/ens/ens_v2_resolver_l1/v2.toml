@@ -1,0 +1,135 @@
+chain = "ethereum-sepolia"
+deployment_epoch = "ens_v2_sepolia_20261001"
+discovery_rules = []
+manifest_version = 2
+namespace = "ens"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+rollout_status = "active"
+roots = []
+source_family = "ens_v2_resolver_l1"
+
+[[abi.events]]
+fragment = "event ResolverCreated()"
+name = "ResolverCreated"
+normalized_events = ["ContractDiscovered"]
+
+[[abi.events]]
+fragment = "event Linked(uint256 indexed recordId, bytes32 indexed node, bytes name)"
+name = "Linked"
+normalized_events = ["ResolverRecordLinked", "PreimageObserved"]
+
+[[abi.events]]
+fragment = "event AddressUpdated(uint256 indexed recordId, uint256 coinType, bytes addressBytes)"
+name = "AddressUpdated"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+fragment = "event ContenthashUpdated(uint256 indexed recordId, bytes hash)"
+name = "ContenthashUpdated"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+fragment = "event ABIUpdated(uint256 indexed recordId, uint256 indexed contentType)"
+name = "ABIUpdated"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+fragment = "event InterfaceUpdated(uint256 indexed recordId, bytes4 indexed interfaceId, address implementer)"
+name = "InterfaceUpdated"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+fragment = "event TextUpdated(uint256 indexed recordId, string indexed keyHash, string key, string value)"
+name = "TextUpdated"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+fragment = "event DataUpdated(uint256 indexed recordId, string indexed keyHash, string key, bytes value)"
+name = "DataUpdated"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+fragment = "event NameUpdated(uint256 indexed recordId, string primaryName)"
+name = "NameUpdated"
+normalized_events = ["RecordChanged", "PreimageObserved"]
+
+[[abi.events]]
+fragment = "event ResourceArgument(uint256 indexed resource, bytes arg)"
+name = "ResourceArgument"
+normalized_events = ["ResolverPermissionArgument"]
+
+[[abi.events]]
+fragment = "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)"
+name = "EACRolesChanged"
+normalized_events = ["PermissionChanged"]
+
+[[abi.events]]
+fragment = "event Upgraded(address indexed implementation)"
+name = "Upgraded"
+normalized_events = ["Upgraded"]
+
+[[abi.events]]
+emitter_roles = ["public_resolver_v2"]
+fragment = "event ABIChanged(bytes32 indexed node, uint256 indexed contentType)"
+name = "ABIChanged"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+emitter_roles = ["public_resolver_v2"]
+fragment = "event AddrChanged(bytes32 indexed node, address a)"
+name = "AddrChanged"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+emitter_roles = ["public_resolver_v2"]
+fragment = "event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress)"
+name = "AddressChanged"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+emitter_roles = ["public_resolver_v2"]
+fragment = "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)"
+name = "TextChanged"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+emitter_roles = ["public_resolver_v2"]
+fragment = "event ContenthashChanged(bytes32 indexed node, bytes hash)"
+name = "ContenthashChanged"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+emitter_roles = ["public_resolver_v2"]
+fragment = "event NameChanged(bytes32 indexed node, string name)"
+name = "NameChanged"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+emitter_roles = ["public_resolver_v2"]
+fragment = "event VersionChanged(bytes32 indexed node, uint64 newVersion)"
+name = "VersionChanged"
+normalized_events = ["RecordVersionChanged"]
+
+[capability_flags]
+
+[[contracts]]
+address = "0x42c2168fdaac8c79c26f2836df47f54140c1c43f"
+proxy_kind = "none"
+role = "ensv1_mirror_resolver"
+start_block = 0
+
+[[contracts]]
+address = "0x04ff297d18b2b3ae2dc0ec50c97822f3ee8e6c1a"
+proxy_kind = "none"
+read_features = ["ensip19_default_address"]
+role = "public_resolver_v2"
+start_block = 0
+
+[correlation_addresses]
+ens_v1_registry = "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512"
+
+[[resolver_implementations]]
+address = "0x115eb53f0c60696633855f90b138178fb40b2b2c"
+read_features = ["ensip19_default_address"]
+role = "permissioned_resolver"
+start_block = 11820406

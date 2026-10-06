@@ -215,6 +215,28 @@ table exists. It opens the same `409 stale` window until the rebuild finishes,
 and, as above, a family run in flight when it applies fails once and the next
 run rebuilds.
 
+`20261005170000_project_address_history_catalogue.sql` installs the compact Project
+address-history tables, replaces four source-event indexes with the full public history
+order, and adds two complementary noncanonical name/resource indexes for conservative work
+discovery. On a populated database, first follow the
+[concurrent prebuild and adoption runbook](../ops/address-history-catalogue-indexes/README.md).
+It retains the four old indexes while building their replacements under temporary names,
+and builds the two new indexes concurrently. The migration validates all six before any
+old-index drop and adopts the replacements by a short transactional rename; missing or
+invalid prebuilt candidates fail before old-index loss. Empty databases can build directly.
+Record the preceding migration versions before prebuilding, and budget the temporary index,
+WAL and sort-file space described in the runbook. Installing it alone publishes no catalogue. This producer changes the interpreter
+content hash: use matching runner/API binaries and complete the full-history Interpret redo
+and the Project redo it installs before serving with the new binary. Existing interpreted
+inputs are replayed through the normal lifecycle; no request backfill, manual marker edit or
+extra Ingest fetch is part of this change. The per-chain completeness stamp must match the
+family marker's content hash, version, sequence and block/hash; absent or mismatched state
+remains stale. When another release change already requires replay, one replay under the final
+combined binary covers both changes. A replay under an earlier hash does not cover this one.
+After applying this schema-migration, grant an existing API role SELECT on all four
+[address-history catalogue](glossary.md#address-history-catalogue) tables using the
+[upgrade grants below](#address-history-catalogue-role-upgrade) before starting the new API.
+
 `20260929160000_remove_served_projections.sql` drops the tables the API and
 Project used before the [owned key families](glossary.md#owned-key-family)
 became the only serving path: `name_current`, `children_current`,
@@ -790,6 +812,23 @@ repair. The one-shot `phase-runner redo` does not need the entry: its Project
 undo and replay read no hydration RPC, and the supervised runner refreshes the
 values the replay leaves empty.
 
+Hydration reads run only on a head block, the highest readable block Project
+holds, never while it catches up, replays or rebuilds
+([follow-only hydration](projections.md#follow-only-hydration)). The endpoint
+must therefore answer `eth_call` by block hash at the newest ingested blocks;
+it needs no deep historical state for hydration. The runner gives each
+hydration request a 5-second connect and 10-second total timeout, and Project
+limits the time one block waits for its reads to 30 seconds. An endpoint that fails does not stop
+publication. When it does not serve the block, no stored value changes. When
+it answers some calls and fails others, a call that fails inside an answered
+aggregate clears its own overlay, and a batch that fails as a whole removes no
+reverse name and no text value that was still served: the only overlay it can
+clear is a text overlay that no longer matched its selector and so was already
+not served. See [follow-only hydration](projections.md#follow-only-hydration)
+for the outcomes and
+[Project family work](runbooks/pipeline-monitoring.md#project-family-work) for
+the counters and log lines.
+
 The retained ENS chain set is the union of chains in ENS [name
 surfaces](glossary.md#surface-name-surface) and active ENS manifests. Later
 `run` and `redo` synchronization allows an empty retained set only when the
@@ -1151,6 +1190,8 @@ GRANT SELECT ON TABLE
     bigname_phase.project_grant,
     bigname_phase.project_resource_admin_aggregate,
     bigname_phase.project_account_approval,
+    bigname_phase.project_ens_v2_entry_owner,
+    bigname_phase.project_ens_v2_registry_parent,
     bigname_phase.project_child_edge_candidate,
     bigname_phase.project_parent_subregistry,
     bigname_phase.project_reverse_tuple,
@@ -1159,6 +1200,10 @@ GRANT SELECT ON TABLE
     bigname_phase.project_address_name_fold,
     bigname_phase.project_address_controller_candidate,
     bigname_phase.project_address_name_index,
+    bigname_phase.project_address_history_anchor,
+    bigname_phase.project_history_source,
+    bigname_phase.project_history_source_edge,
+    bigname_phase.project_history_catalogue_marker,
     bigname_phase.project_address_record_node_index,
     bigname_phase.project_address_record_id_index,
     bigname_phase.project_name_history,
@@ -1167,6 +1212,22 @@ TO bigname_api;
 GRANT EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state_read_only(
     text, bigint, text, jsonb, jsonb, uuid, text, text
 ) TO bigname_api;
+```
+
+<a id="address-history-catalogue-role-upgrade"></a>
+For an existing API role, after applying
+`20261005170000_project_address_history_catalogue.sql`, the schema owner must apply these
+additional SELECT grants before serving the new API binary. On a serving standby, wait for
+the schema-migration and grants applied on the primary to replay there. The API startup check
+refuses to start if any of these relations is absent or unreadable.
+
+```sql
+GRANT SELECT ON TABLE
+    bigname_phase.project_address_history_anchor,
+    bigname_phase.project_history_source,
+    bigname_phase.project_history_source_edge,
+    bigname_phase.project_history_catalogue_marker
+TO bigname_api;
 ```
 
 For an existing deployment, apply
@@ -2360,6 +2421,15 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_record_id_link_idx
 ANALYZE bigname_phase.normalized_events;
 ```
 
+These statements are the historical definition required by that target version. The later
+`20261005170000_project_address_history_catalogue.sql` replaces the write index with the full
+history order. Apply migrations in order; do not prebuild the later definition before this
+historical migration has been recorded. The current walk-index installer uses the later
+catalogue definition and belongs after that upgrade. The dedicated
+[catalogue prebuild](../ops/address-history-catalogue-indexes/README.md) instead builds
+replacement candidates after this historical version is recorded and before the catalogue
+migration; its temporary names preserve the historical indexes until adoption.
+
 Then apply the schema-migrations with `--target-version 20261003120000` and the same
 `lock_timeout`, `statement_timeout` and retry procedure; it finds both indexes and skips the
 build. `CREATE INDEX IF NOT EXISTS` matches the name only, so the schema-migration then checks
@@ -2574,6 +2644,108 @@ with the same rows and counts. The change is breaking for clients that relied on
 counting under `owner`. A released lease, and a child the NameWrapper that named it holds,
 are still served for no one.
 
+### ENSv2 registry operator approvals and registry entries
+
+The build that captures ENSv2 registry `ApprovalForAll` and keeps each registry
+entry's current token owner (TYR-236, see
+[ENSv2 registry operator approvals](manifests.md#ensv2-registry-operator-approvals)
+and [ENSv2 registry entries](projections.md#ensv2-registry-entries)) changes
+`crates/manifests/src`, `crates/adapters/src`, `crates/project/src` and the
+Sepolia `ens_v2_registry_l1` and `ens_v2_root_l1` manifests, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. Permissions exposure is unchanged: `GET /v1/permissions` still names
+`ens_v2_registry_operators` as an unlisted surface. The shared product-history
+reader excludes the marked tokenless expiry described below from listing and
+counting before pagination; that reader change does not by itself rotate the
+interpreter content hash. Besides the approval rows,
+stored events gain one kind of row: an `ExpiryChanged` with no name, no resource
+and `token_state_absent = true` for an `ExpiryUpdated` whose token the adapter
+holds no state for, such as a renewal that revives an unregistered entry or a
+renewal of an entry registered before the registry's retained history. It
+updates the registry entry row and creates no named lifecycle or ownership
+state. `/v1/diagnostics/events` shows it. `GET /v1/events` and the other
+product history reads neither list nor count it: the shared history query
+omits it before pagination (see
+[`GET /v1/events`](api-v1-routes.md#get-v1events)). That reader change is
+outside the interpreter content hash. The Mainnet and Base
+manifests are unchanged, so those chains get the hash rotation and its
+Interpret and Project redo pair and no Ingest redo.
+
+On Sepolia the two manifest payloads change and the
+[compiled watch plan](glossary.md#compiled-watch-plan) widens by the registry
+family's `ApprovalForAll` entry, from block `10893181`, and by the same event at
+the declared ETHRegistry and RootRegistry from their own start blocks. Roll it
+out in this order:
+
+1. Apply schema-migration `20261005140000_project_ens_v2_registry_entries.sql`.
+   It adds the empty tables `project_ens_v2_entry_owner` and
+   `project_ens_v2_registry_parent` with three indexes and corrects one column
+   comment. It rewrites no existing row and needs no prebuild.
+2. Start the build. Manifest synchronization records a
+   [manifest-authority marker](glossary.md#manifest-authority-marker) on
+   Sepolia's Interpret and Project rows and stamps a required Ingest redo from
+   block `10893181`, clamped to the chain's first ingest cursor, to the
+   published head. That is the same lower bound the
+   [Sepolia ENSv2 redeploy](#sepolia-ensv2-redeploy-of-2026-10-01) stamped. The
+   redo fetches the one added topic at the admitted registries; size it from
+   the range `chain_phase_state` records.
+3. Complete that Ingest redo, then the full-history Interpret redo with
+   `--attest-watch-set-coverage`, then the Project redo it installs, before the
+   matching API serves. This build targets the next hash-rotating release; when
+   it ships with other rotating changes, one Interpret and Project redo pair
+   discharges them all.
+
+The floor is one value for the family, the earliest start of any admitted
+registry on a database that retains Sepolia's history; the manifests document
+says how to re-derive it. A deployment whose admitted registries start earlier
+must lower the manifest value before it starts the build, or approvals below
+the floor stay unfetched. An approval a registry emitted before its own
+admission start is not fetched either way; on Sepolia every admitted registry's
+first retained log is at its admission start. After the redo, check that
+`project_account_approval` holds `authority_kind = 'ens_v2_registry'` rows with
+an empty `effective_powers`, that `project_ens_v2_entry_owner` has a row for a
+known ETHRegistry name with its current owner, and that no
+`AccountPermissionChanged` row names a resolver as its authority contract.
+
+### ENSv2 registry operators and root holders on permission reads
+
+The build that serves ENSv2 registry operators and lists registry root holders
+on a registration's permission read changes readers and the API only. It adds
+no schema-migration and does not rotate the
+[interpreter content hash](glossary.md#interpreter-content-hash), so it needs
+no redo of its own. It reads the approval rows and the registry entry rows of
+[the build above](#ensv2-registry-operator-approvals-and-registry-entries), so
+it must not serve before that build's schema-migration and redo sequence has
+completed on the database: until the families are rebuilt, the entry table is
+empty and no ENSv2 operator is listed.
+
+The API startup check now requires `bigname_phase.project_ens_v2_entry_owner`.
+Grant the API role `SELECT` on it, as in the
+[API role grant list](#surviving-services), before starting this API build; a role without
+it fails startup.
+
+What changes on `GET /v1/permissions` and `include=role_summary`
+([route contract](api-v1-routes.md#get-v1permissions)):
+
+- An ENSv2 registration gains one `grant_relation=operator` row per account,
+  other than the owner itself, that its current token owner approved on the
+  registry, while the owner has a served grant on the token and the entry has
+  not expired: the registry adds the current owner's token roles to each
+  operator that owner approved, and reports no owner once the entry's expiry
+  has passed. The row has `authority_kind` `ens_v2_registry`, a value the
+  account scope did not use before.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L350-L352 @ ens_v2_sepolia_20261001@07e55a05)
+- A `name` or `registration_id` read of an ENSv2 registration gains the
+  registry's root holders as `root` rows of that registration, because a
+  role check on a token reads the caller's root roles together with its token
+  roles. Its row count and pages change. `role_summary` does not repeat them.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L454-L465 @ ens_v2_sepolia_20261001@07e55a05)
+- A registration of a manifest-declared ENSv2 registry stops reporting
+  `ens_v2_registry_operators` and reports `["resolver_approvals"]`. A
+  registration of a discovered registry, a discovered registry's root and an
+  address-only read keep the code.
+
 ### v0.4.0 rollout
 
 v0.4.0 carries four hash-rotating builds: the end of NameWrapper authority
@@ -2637,8 +2809,8 @@ runner behavior, so it needs no redo and no historical ingest fetch. Deploying i
 nothing until an operator runs the scripts.
 
 The scripts are an optional step for a from-zero walk or a full-history Interpret redo:
-`drop.sql` drops the 35 `normalized_events` indexes Interpret does not read, so Interpret
-maintains 17 indexes on the table instead of 52, and `install.sql` rebuilds them concurrently with their
+`drop.sql` drops the 37 `normalized_events` indexes Interpret does not read, so Interpret
+maintains 17 indexes on the table instead of 54, and `install.sql` rebuilds them concurrently with their
 reviewed definitions and analyzes the table before Project runs. `drop.sql` refuses while any
 chain on the database may be served. Rebuilding takes a pass over the table per index; on a
 large database, schedule it before Project starts, as the
@@ -2785,3 +2957,268 @@ stopped. The schema-migration checks that the name is an index on `normalized_ev
 `indisvalid` and `indisready` with the reviewed `pg_get_indexdef`, and fails without recording
 itself otherwise; the runbook's recovery applies. Start the new API only after the
 schema-migration has applied. API standbys receive the index through replication.
+
+### Name surfaces without raw label bytes
+
+The build that lets a [name surface](glossary.md#surface-name-surface) exist before the raw
+bytes of its labels are known changes the identity baseline, one schema-migration, the adapter
+surface model and Interpret's surface writer, redo re-anchoring and flag recompute
+([storage](storage.md#name-identity-and-raw-evidence)). Those sources are inside the
+[interpreter content hash](glossary.md#interpreter-content-hash), so the hash rotates for
+every chain. No adapter produces a surface without raw bytes yet: a re-derivation under this
+build writes the same surfaces, bindings and normalized events as before, and each surface
+additionally names its [preimage witness](glossary.md#preimage-witness).
+
+`20261005130000_name_surfaces_optional_raw_evidence.sql` drops `NOT NULL` from
+`name_surfaces.raw_name`, `raw_labels` and `dns_encoded_name`, adds the nullable
+`preimage_event_identity` column, replaces the label-count check with
+`name_surfaces_raw_evidence_check`, and fills the new column for each existing row that has
+a canonical `PreimageObserved` event on a canonical block, from the earliest one. A row with
+no such event keeps a NULL witness; the full-range Interpret redo below fills it if the
+replay observes the name's bytes. No existing row loses a value. The
+schema-migration takes an ACCESS EXCLUSIVE lock on `name_surfaces` and holds it while the
+backfill and the new check's validation of every row run. The backfill is one statement: it
+reads every canonical `PreimageObserved` event with a name, joins each to its
+`chain_lineage` row, keeps the earliest per chain and name, and joins that result to
+`name_surfaces`. Its cost follows the amount of preimage history as well as the number of
+surfaces, and the plan PostgreSQL chooses has not been measured at production size; time it
+on a copy of the database first. Apply it with
+the phase runner, redo processes and API stopped, with the same `lock_timeout`,
+`statement_timeout` and retry procedure as the other schema-migrations and `--target-version
+20261005130000`; it is not a concurrent step.
+A binary from before this build can still read and write the migrated table, because it
+writes all three raw columns on every row.
+
+After the schema-migration, an existing deployment finishes the full-range Interpret redo and
+the stamped Project redo the rotation installs before the matching API serves, as the
+[handoff](#phase-runner-configuration) describes. This build targets the next hash-rotating
+release; when it ships with other rotating changes, one redo pair discharges them all.
+
+### Expiry selector on the name summary
+
+`20261005150000_project_name_summary_expiry_selector.sql` adds two columns to the
+[name summary](glossary.md#name-summary), `project_name_summary.expiry_listable` and
+`project_name_summary.public_authority`, and two partial indexes over them,
+`project_name_summary_expiry_idx` on `(namespace, expires_at, logical_name_id, chain_id)` and
+`project_name_summary_authority_expiry_idx` on
+`(namespace, public_authority, expires_at, logical_name_id, chain_id)`, both
+`WHERE expiry_listable AND expires_at IS NOT NULL`. The family step fills the columns from the
+same composition as the rest of the summary.
+[`GET /v1/names`](api-v1-routes.md#get-v1names) selects each page's names by them (see
+[Expiry listing reads the selector](#expiry-listing-reads-the-selector)).
+
+The composition that fills the columns lives in hashed storage sources
+(`crates/storage/src/families`), so this build rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) and needs a full re-derivation.
+Stop the phase runner, apply the schema-migration, then start the new build. On a database
+without the columns the schema-migration resets every owned key family with the
+[family marker](glossary.md#family-marker), undo journal and repair records, exactly as
+[the owner column's schema-migration](#registry-label-owner-filters) does and under the same
+`EXCLUSIVE` lock on the marker table, held to commit. It is a blocking maintenance
+schema-migration: in one transaction it waits for the locks it needs behind any transaction
+already holding them, deletes every family row, alters the summary table and builds both
+indexes (on the emptied summary), so how long it runs depends on those transactions and on the
+volume of family data. Run it in a maintenance window. The next family run
+rebuilds the families and writes every selector; fenced routes answer `409 stale` until it
+finishes. The reset adds no second rebuild, because the rotated hash rebuilds the families
+anyway. Do not run the previous build against the migrated schema: its family writer inserts
+summary rows by column name and fails on the new `NOT NULL` column. The reverse order does
+not fail: the new build's writer run against a schema without the columns drops the two values
+it has no column for and publishes summaries with no selector, so apply the schema-migration
+before the new build ever starts. API requests that read the
+name summary or lock the marker wait for the schema-migration, up to their timeouts.
+
+### Expiry listing reads the selector
+
+The build that makes [`GET /v1/names`](api-v1-routes.md#get-v1names) select its names from the
+[name summary](glossary.md#name-summary)'s expiry selector changes reader sources only
+(`crates/storage/src/families/name/list.rs`, `list/expiring.rs` and
+`crates/storage/src/name_current`), all outside the
+[interpreter content hash](glossary.md#interpreter-content-hash): it does not rotate the hash
+itself and needs no redo, manifest or environment change. It depends on the selector columns
+of [the previous entry](#expiry-selector-on-the-name-summary), so it ships in the same
+release, after that entry's schema-migration and the re-derivation it requires. The route's
+contract does not change: the same rows, order, cursors and errors. A page composes at most
+`page_size + 1` names.
+
+`20261005160000_project_families_drop_expiry_walk_indexes.sql` drops
+`project_lifecycle_event_expiry_idx`, `project_lifecycle_event_inexact_expiry_idx` and
+`project_wrapper_state_expiry_idx`, which only the previous reader's event walk read. No other
+statement, the [walk index set](../ops/walk-index-set/README.md) and no index installer under
+`ops/` names them; the `expiry_seconds` columns stay. It also rewords the comment on
+`project_name_summary.public_authority`. Each `DROP INDEX` takes a brief `ACCESS EXCLUSIVE`
+lock on `project_lifecycle_event` or `project_wrapper_state` and waits behind transactions
+that hold the table, so apply it with the selector schema-migration while the phase runner is
+stopped, with the same `lock_timeout`, `statement_timeout` and retry procedure as the other
+schema-migrations. Rollout order: stop the phase runner, apply both schema-migrations, start
+the new phase runner and the new API. The new API must not start before
+`20261005150000` has applied: its listing reads the selector columns and fails without them.
+After the schema-migrations and until the family rebuild publishes, the listing answers
+`409 stale`, as every fenced route does. An API from before this build still answers the
+listing after the indexes are dropped, by scanning the two tables, so it is slower there and
+nowhere else; replace it rather than leave it running.
+
+
+### ENSv1 registry node identity production
+
+The producer now establishes a name identity from an admitted ENSv1 `NewOwner`
+whose complete labelhash path is proven from the root or a directly witnessed
+ancestor. This changes Interpret output and Project's named inputs. Rollout
+requires a full Interpret re-derivation followed by full Project re-derivation
+under the new interpreter content hash; a bounded replay of recent owner changes
+cannot recover all historical ancestor paths or repair all older same-block
+preimage witnesses. Keep the preceding compatible publication until both phases
+finish and ordinary publication admission accepts the new generation.
+
+Apply `20261005190000_name_surfaces_byte_shadow_path.sql` with the normal schema
+upgrade. It narrowly permits a shadow with empty decoded text, a nonempty full
+hash path and a nonempty byte witness. It neither backfills a path nor relaxes
+active raw-backed or unknown-byte bundles. Full Interpret re-derivation repairs
+legacy paths from the actual bytes. Witness repair uses the earliest surviving
+byte observation's plain block timestamp and orders event identities separately,
+including replacement within one block.
+
+Admitted registry histories must begin at their declared deployment bounds.
+Missing ancestry is not synthesized from imports, arbitrary owner/resolver logs,
+or guessed `.eth` suffixes. A deployment that omits the ancestor's actual path
+must restore that intake coverage before claiming complete node production.
+The shared reader policies for imports, bracketed exact inputs, search fragments,
+parent filters and between-page spelling changes remain as documented in
+[API v1](api-v1.md). Capacity and full rebuild measurements remain separate
+release gates; the schema upgrade alone does not satisfy them.
+
+### Hydration only at the head
+
+The build that makes [hydration](glossary.md#hydration) run only on the head
+block changes `crates/project/src`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. It carries one schema-migration,
+`20261005180000_project_hydration_schedule.sql`, and no manifest change,
+watch-plan change or environment variable; no API response shape changes.
+
+The schema-migration adds hydration's scheduling columns: `attempt_limit` and
+`attempt_failures` on `project_reverse_tuple`, `hydration_limit` and
+`hydration_failures` on `project_node_record_value`, and a copy of each
+failure count on the two hydration work indexes. They are nullable and added
+without a default, so no row is rewritten and no family is reset; on an empty
+schema-migration database it is a no-op and `phase-runner init-schema`
+installs the same columns. It takes the family marker table in `EXCLUSIVE`
+mode until it commits. Apply it with the runner stopped and before the new
+binary starts: hydration selection now reads these columns directly and fails
+if they are absent. The generic family writer also cannot persist scheduling
+fields missing from the schema. A previous binary on the new schema leaves
+the columns null, which reads as no limit.
+
+Behavior changes on `ethereum-mainnet`, the only hydrated chain
+([follow-only hydration](projections.md#follow-only-hydration)):
+
+- Project no longer calls the hydration endpoint for blocks it applies while
+  catching up. Before this build every such block read up to 250 text
+  selectors and up to 250 reverse tuples of the rolling refresh, plus the
+  tuples it changed, at its own block hash; against an endpoint without that
+  block's state each read failed, cleared the reverse name it was refreshing
+  and recorded a failed attempt on the text selector.
+- An RPC batch that fails as a whole no longer clears hydrated reverse names.
+  A served primary name can therefore be the last one successfully observed
+  rather than absent while the endpoint fails. Against an endpoint that does
+  not serve the block nothing is written at all. Against one that answers
+  other calls at the block, the failed batch is split, within a call and time
+  limit per block, and what is still unread records only where to resume. A
+  call that fails inside an answered aggregate still clears its value.
+- Old waiting work receives 63 of the 250 text selection slots and a rounded-up
+  quarter of each kind's call budget, before new arrivals can use that time.
+  Unused shares stay available. A failed child response waits 7,200 blocks
+  before retry; fresh selector evidence clears obsolete scheduling state.
+  Outer failures keep the separate non-observation and split policy above.
+- Seven hydration metrics and two `warn` log lines are new
+  ([Project family work](runbooks/pipeline-monitoring.md#project-family-work)).
+  The hydration HTTP client now has a 5-second connect and 10-second total
+  timeout.
+
+Adoption and restart plan for an existing deployment, following the
+[planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary):
+
+1. Stop the supervised phase runner. Do not run a binary of the previous hash
+   against the database again once the next step has started, and do not
+   alternate the two: a rebuild left part-way by one hash is not resumed by the
+   other.
+2. Apply the release's schema-migrations, `20261005180000` among them.
+3. Under the new binary, run the full-history Interpret redo and then the
+   Project redo it installs, to completion, as for any rotation. A bounded
+   range cannot adopt a new hash. Neither redo needs
+   `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS`: replay and rebuild make no
+   hydration call.
+4. Start the supervised phase runner with the hydration URL configured, and
+   the matching API once the family publication is live.
+
+The rebuild starts every hydrated value from the event-derived baseline: text
+overlays are empty and event-silent reverse names are absent, including on the
+block the rebuild ends on, which is not hydrated. Values return as new blocks
+arrive after the restart, 250 text selectors per head block at most, with the
+reverse tuples in rotation beside them. How long that takes depends on the
+head blocks that arrive and on the endpoint, so it is not a fixed time; watch
+`phase_runner_project_hydration_selectors_total`. A release that rotates the
+hash for another change discharges this rotation with the same redo pair.
+
+### WrapperRegistry permission reader upgrade
+
+The reader additionally needs `SELECT` on
+`bigname_phase.project_ens_v2_registry_parent`. Before restarting an existing
+API role, apply the grant below on the primary and allow it to replay on any
+serving standby. Fresh role setup above already includes it. Startup preflight
+refuses an API role without the grant.
+
+```sql
+GRANT SELECT ON bigname_phase.project_ens_v2_registry_parent TO bigname_api;
+```
+
+Schema-migration `20261005200000_registry_permission_history_indexes.sql`
+installs four read-only normalized-event indexes for registry origin, ordinary
+announcement and upgrade-disqualifier probes, plus the parent root-grant lookup index on
+`project_grant`. Each populated target table requires its corresponding indexes.
+Before applying the migration on an initialized database, run
+[`ops/registry-permission-indexes/install.sql`](../ops/registry-permission-indexes/install.sql)
+outside a transaction. It builds missing indexes concurrently and validates the
+whole set; follow its [ordered prebuild, headroom and recovery instructions](../ops/registry-permission-indexes/README.md).
+The schema-migration validates every index against its actual target relation,
+refuses a populated target with a missing index or any invalid definition,
+then adopts a complete set without rebuilding or changing its OIDs. Empty
+schemas build directly. The independent
+factory-origin retention and UserRegistry implementation metadata ship in the
+held content-hash rotation and require its normal full Interpret/Project
+rebuild. The existing compiler also adds the migration family’s two topics at
+the UserRegistry implementation address from block `11820439`; complete the
+required Ingest repair first. An earlier release-wide repair boundary already
+covers this start. See the [measured watch-plan change](manifests.md).
+Metadata and retained origins do not replace ordinary registry
+announcement admission or introduce pre-initialization approval capture.
+
+### Wrapper expiry in the bounded names listing
+
+The integrated expiry-selector reader attaches the stored wrapper expiry before
+serving scalar or multi-window `/v1/names` pages. It uses the existing batched
+reader on the page's snapshot, without loading resolution topology or expanding
+the `page_size + 1` composition bound. This preserves the `ens_v1.wrapper_expires_at`
+contract for backed, lapsed and unwrapped entries. The correction changes reader
+sources only and does not rotate the interpreter content hash itself, add a
+schema-migration or require an additional redo. It ships within the release's
+existing hash rotation and schema-migration sequence described above.
+
+### ENSv1 intermediary migration and retired registrar renewal
+
+The migration adapter now selects the exact terminal controller-entry and
+cleanup transfers while preserving earlier ordinary transfers in the same
+transaction. The renewal adapter applies the existing same-lease retirement rule before
+creating a new ENSv1 binding from later name readability. Actual renewal and
+expiry observations remain available. This changes `crates/adapters/src` and
+rotates the [interpreter content hash](glossary.md#interpreter-content-hash) for
+every chain, without changing the schema, manifests or watch coverage. Deploy
+matching runner and API binaries and finish the full-history Interpret redo
+and the Project redo it installs before serving the new generation, following
+the [planned migration and fingerprint
+boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary).
+One redo pair under the final combined release covers this correction and
+other changes in that release; an earlier hash does not. Preserve raw facts
+and verify that intermediary migrations publish their current ENSv2
+registration with no active ENSv1 predecessor, including after a later ENSv1
+renewal of that retired lease.

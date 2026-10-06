@@ -27,7 +27,16 @@ fn reset_tables() -> BTreeSet<&'static str> {
         .filter(|table| {
             !matches!(
                 *table,
-                "project_text_hydration_work" | "project_reverse_hydration_work"
+                "project_text_hydration_work"
+                    | "project_reverse_hydration_work"
+                    // Added later, by 20261005140000_project_ens_v2_registry_entries.sql.
+                    | "project_ens_v2_entry_owner"
+                    | "project_ens_v2_registry_parent"
+                    // Added later, by 20261005170000_project_address_history_catalogue.sql.
+                    | "project_address_history_anchor"
+                    | "project_history_source"
+                    | "project_history_source_edge"
+                    | "project_history_catalogue_marker"
             )
         })
         .chain(CONTROL_TABLES)
@@ -56,6 +65,11 @@ fn exact_expiry_migration_reset_inventory_matches_owned_families() {
 /// The pending LabelRegistered grant followed by TokenResource's bound grant, owner and expiry,
 /// matching the producer shape in protocol/v2_registry/{transfer.rs,v2_registry.rs}.
 async fn register(fixture: &Fixture, expiry: u64) -> Result<()> {
+    register_expiry(fixture, json!(expiry)).await
+}
+
+/// `register` with any JSON expiry, kept as written.
+async fn register_expiry(fixture: &Fixture, expiry: Value) -> Result<()> {
     let resource = uuid(0x6671);
     let binding = uuid(0x6672);
     let instance = uuid(0x6673);
@@ -187,6 +201,15 @@ async fn assert_expiry(fixture: &Fixture, expected: u64, retained: &[u64]) -> Re
             .get("expires_at_reason")
             .is_none()
     );
+    // The expiry selector lists the name at the same exact seconds, undo and rebuild included.
+    assert_eq!(
+        fixture.assert_expiry_selector().await?,
+        [(
+            NAME.to_owned(),
+            expected.to_string(),
+            Some("ens_v2".to_owned())
+        )]
+    );
     Ok(())
 }
 
@@ -225,6 +248,31 @@ async fn finite_expiry_above_i64_survives_incremental_renewal_undo_and_rebuild()
     fixture.apply(3, FamilyMode::Normal).await?;
     fixture.assert_rebuild_equal(3).await?;
     assert_expiry(&fixture, renewed, &[granted, renewed]).await?;
+    fixture.cleanup().await
+}
+
+// A fractional expiry has no integral `expiry_seconds`, yet the summary keeps it exactly and the
+// selector lists the name at it, as the expiry listing does.
+#[tokio::test]
+async fn a_fractional_expiry_is_selected_at_its_exact_value() -> Result<()> {
+    let fixture = Fixture::new("families_exact_expiry_fraction", 4).await?;
+    register_expiry(&fixture, json!(2_000_000_000.25)).await?;
+    fixture.apply(2, FamilyMode::Normal).await?;
+    let integral: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM project_lifecycle_event WHERE expiry_seconds IS NOT NULL",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(integral, 0);
+    assert_eq!(
+        fixture.assert_expiry_selector().await?,
+        [(
+            NAME.to_owned(),
+            "2000000000.25".to_owned(),
+            Some("ens_v2".to_owned())
+        )]
+    );
+    fixture.assert_rebuild_equal(2).await?;
     fixture.cleanup().await
 }
 

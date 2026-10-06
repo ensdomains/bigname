@@ -402,6 +402,31 @@ async fn api_preflight_and_documented_grant_cover_the_family_reads() -> Result<(
         }
     };
     assert_eq!(missing().await?, Vec::<String>::new());
+    let mut catalogue_diagnostics = Vec::new();
+    for relation in [
+        "project_address_history_anchor",
+        "project_history_source",
+        "project_history_source_edge",
+        "project_history_catalogue_marker",
+    ] {
+        sqlx::query(&format!(
+            "REVOKE SELECT ON bigname_phase.{relation} FROM {role}"
+        ))
+        .execute(&database.lookup_pool)
+        .await?;
+        let unavailable = missing().await?;
+        let startup_error = crate::startup_preflight::ensure_verified_lookup_ddl_available(&pool)
+            .await
+            .err()
+            .map(|error| format!("{error:#}"));
+        catalogue_diagnostics.push((format!("bigname_phase.{relation}"), unavailable, startup_error));
+        sqlx::query(&format!(
+            "GRANT SELECT ON bigname_phase.{relation} TO {role}"
+        ))
+        .execute(&database.lookup_pool)
+        .await?;
+        assert_eq!(missing().await?, Vec::<String>::new());
+    }
     for relation in ["project_name_state", "label_preimages"] {
         sqlx::query(&format!(
             "REVOKE SELECT ON bigname_phase.{relation} FROM {role}"
@@ -424,5 +449,12 @@ async fn api_preflight_and_documented_grant_cover_the_family_reads() -> Result<(
     sqlx::query(&format!("DROP ROLE {role}"))
         .execute(&database.lookup_pool)
         .await?;
+    assert!(
+        catalogue_diagnostics.iter().all(|(relation, unavailable, error)| {
+            unavailable == &vec![relation.clone()]
+                && error.as_ref().is_some_and(|error| error.contains(relation))
+        }),
+        "each unreadable catalogue relation must be named by startup preflight: {catalogue_diagnostics:#?}"
+    );
     database.cleanup().await
 }

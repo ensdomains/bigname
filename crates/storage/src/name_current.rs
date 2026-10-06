@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use sqlx::types::Uuid;
 
-pub use expiring::NameCurrentExpiringFilter;
+pub use expiring::{NameCurrentExpiringFilter, NameCurrentExpiryWindow};
 pub(crate) use expiring::{expiring_page_from, parent_like_patterns, push_parent_predicate};
 pub(crate) use list::{COMPOSED_NC_COLUMNS, escape_like_pattern, list_page_from};
 pub use list::{
@@ -28,7 +28,7 @@ pub use public_authority::{
     name_current_registry_generation, name_current_registry_handoff_block_number,
 };
 pub(crate) use public_authority::{
-    public_authority_arms, push_public_authority_filter_in, push_public_authority_predicate,
+    push_public_authority_filter_in, push_public_authority_predicate,
 };
 pub use row::NameCurrentRow;
 use row::decode_name_current_row;
@@ -72,6 +72,30 @@ pub async fn load_name_current_by_logical_name_ids(
     }
 
     crate::families::name::load_family_names_by_logical_name_ids(db, logical_name_ids).await
+}
+
+/// Current served names with the same composition, visibility and preimage rules as exact-name rows,
+/// without record inventory or resolution-topology enrichment that display names do not use.
+pub async fn load_current_normalized_names(
+    db: impl Into<crate::ReadDb<'_>>,
+    logical_name_ids: &[String],
+) -> Result<BTreeMap<String, String>> {
+    if logical_name_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let mut snapshot = db.into().snapshot().await?;
+    let mut rows = crate::families::name::load_composed_base(
+        &mut snapshot,
+        logical_name_ids,
+        crate::families::name::CoverageShape::Plain,
+    )
+    .await?;
+    crate::rendered_name::enrich(&mut snapshot, &mut rows).await?;
+    snapshot.close().await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, row)| (id, row.normalized_name))
+        .collect())
 }
 
 /// Load the canonical representative current name for each resource (registration).

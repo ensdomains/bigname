@@ -7,14 +7,18 @@
 //!   time, the ENSv2 path-expiry drop, the empty-row drop and the NameWrapper operator fan-out).
 //! - Registry-operator rows are the F9 approvals of the resource's F2c registry binding
 //!   (`operators.rs`).
+//! - ENSv2 registry operator rows and the root-holder rows of a token resource are derived from
+//!   the F16 entry rows and the root grants (`ens_v2.rs`). Supported WrapperRegistry roots
+//!   additionally replace qualifying owner/operator grants through `wrapper_registry.rs`.
 //! - The summary's authority kind, registry root and readability come from the identity and
 //!   event inputs by key (`facts.rs`); the restriction block is the family one.
 //!
 //! Each read runs in one read-only REPEATABLE READ snapshot and describes the family marker's
 //! publication of every chain it touches; a chain whose marker is not servable (a rebuild in
 //! flight, or another build's) fails the read with [`FamilyPublicationUnavailable`], which the
-//! API answers with the stale 409. No per-row canonicality or lineage check is needed: the
-//! family undo removes what a dropped block wrote.
+//! API answers with the stale 409. Family undo restores projected rows after a dropped block;
+//! the WrapperRegistry recognition reader separately checks canonical origin/upgrade history
+//! through that same publication before replacing a root grant.
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
@@ -71,6 +75,7 @@ pub async fn load_family_effective_permissions_page(
         namespace,
         cursor,
         size + 1,
+        true,
     )
     .await?;
     snapshot.close().await?;
@@ -85,6 +90,9 @@ pub async fn load_family_effective_permissions_page(
 }
 
 /// A sentinel-bounded inline expansion for address `include=role_summary`, in one read snapshot.
+/// It leaves out the registry root holders a permissions read of one ENSv2 registration lists:
+/// they are the same for every name of a registry, and repeating them per name would spend the
+/// grant budget on rows that say nothing about the name.
 pub async fn load_family_bounded_permissions(
     db: impl Into<crate::ReadDb<'_>>,
     resource_ids: &[Uuid],
@@ -110,6 +118,7 @@ pub async fn load_family_bounded_permissions(
                 namespace,
                 None,
                 limit - rows.len(),
+                false,
             )
             .await?,
         );
@@ -128,16 +137,30 @@ async fn page_rows(
     namespace: Option<&str>,
     cursor: Option<&PermissionsCurrentAccountResourceCursor>,
     limit: usize,
+    root_holders: bool,
 ) -> Result<Vec<EffectivePermissionRow>> {
-    if let Some(resource) = resource {
-        if let Some(namespace) = namespace
-            && !in_namespace(conn, &[resource], namespace)
-                .await?
-                .contains(&resource)
-        {
-            return Ok(Vec::new());
-        }
-        published(conn, &[resource]).await?;
+    if let Some(resource) = resource
+        && let Some(namespace) = namespace
+        && !in_namespace(conn, &[resource], namespace)
+            .await?
+            .contains(&resource)
+    {
+        return Ok(Vec::new());
+    }
+    // A read bound to an ENSv2 registry token resource also lists the registry's root holders.
+    let mut token = None;
+    if let Some(resource) = resource
+        && let Some((publication, _)) = published(conn, &[resource]).await?.first()
+    {
+        let root = if root_holders {
+            super::ens_v2::token_registry_root(conn, publication, resource).await?
+        } else {
+            None
+        };
+        token = Some(super::candidates::TokenRead {
+            chain_id: publication.chain_id.clone(),
+            root,
+        });
     }
     let mut after = cursor.cloned();
     let mut rows = Vec::new();
@@ -150,13 +173,14 @@ async fn page_rows(
             namespace,
             after.as_ref(),
             batch_size as i64,
+            token.as_ref(),
         )
         .await?;
         let exhausted = keys.len() < batch_size;
         after = keys
             .last()
             .map(PermissionsCurrentAccountResourceCursor::from);
-        rows.extend(effective_rows(conn, &keys).await?);
+        rows.extend(effective_rows(conn, &keys, root_holders).await?);
         if exhausted {
             break;
         }
@@ -182,6 +206,19 @@ pub async fn load_family_permission_summaries(
             chain_id,
             publication.block_number,
             &resources,
+        )
+        .await?;
+        let instances: Vec<Uuid> = facts
+            .values()
+            .filter_map(|facts| facts.registry_instance)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let declared = crate::registries::load_manifest_declared_registry_instances(
+            &mut snapshot,
+            chain_id,
+            &instances,
+            publication.block_number,
         )
         .await?;
         let inputs: Vec<ResourceInput> = resources
@@ -212,6 +249,10 @@ pub async fn load_family_permission_summaries(
                         .as_deref()
                         .map(str::parse)
                         .transpose()?,
+                    registry_manifest_declared: facts
+                        .get(&resource)
+                        .and_then(|facts| facts.registry_instance)
+                        .map(|instance| declared.contains(&instance)),
                     resource_restrictions: restrictions,
                     provenance: json!({"chain_id": chain_id}),
                     chain_positions: publication_positions(&publication),
@@ -300,6 +341,7 @@ fn canonicality(publication: &FamilyPublication) -> Value {
 async fn effective_rows(
     conn: &mut PgConnection,
     keys: &[super::candidates::Key],
+    root_holders: bool,
 ) -> Result<Vec<EffectivePermissionRow>> {
     let resources: Vec<Uuid> = keys
         .iter()
@@ -316,18 +358,22 @@ async fn effective_rows(
                 ..ResourceInput::default()
             })
             .collect();
-        let shadows = load_permissions_on(
-            conn,
-            &publication.chain_id,
-            &clock(&publication),
-            &inputs,
-            Some(keys),
-        )
-        .await?;
+        let clock = clock(&publication);
+        let shadows =
+            load_permissions_on(conn, &publication.chain_id, &clock, &inputs, Some(keys)).await?;
         for shadow in shadows.values() {
             for grant in &shadow.grants {
                 rows.push(direct_row(grant, &publication)?);
             }
+        }
+        for grant in super::ens_v2::root_holder_rows(conn, &publication, &clock, keys).await? {
+            rows.push(direct_row(&grant, &publication)?);
+        }
+        for row in super::ens_v2::operator_rows(conn, &publication, &clock, keys).await? {
+            rows.push(operator_row(&row, &publication)?);
+        }
+        if root_holders {
+            super::wrapper_registry::compose(conn, &publication, &clock, keys, &mut rows).await?;
         }
         let bindings = bindings_for(conn, &publication.chain_id, &resources).await?;
         for (resource, binding) in bindings {
@@ -372,7 +418,7 @@ async fn effective_rows(
 
 /// A family permission row in the served effective row's shape. The provenance, coverage,
 /// positions and recompute time describe the publication; the route reads none of them.
-fn direct_row(
+pub(super) fn direct_row(
     grant: &ServedGrant,
     publication: &FamilyPublication,
 ) -> Result<EffectivePermissionRow> {
@@ -409,7 +455,7 @@ fn direct_row(
     })
 }
 
-fn operator_row(
+pub(super) fn operator_row(
     row: &OperatorRow,
     publication: &FamilyPublication,
 ) -> Result<EffectivePermissionRow> {

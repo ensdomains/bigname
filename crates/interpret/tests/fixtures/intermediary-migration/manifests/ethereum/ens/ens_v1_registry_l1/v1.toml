@@ -1,0 +1,59 @@
+chain = "ethereum-sepolia"
+deployment_epoch = "ens_v1"
+discovery_rules = []
+manifest_version = 1
+namespace = "ens"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+rollout_status = "active"
+source_family = "ens_v1_registry_l1"
+
+[[abi.events]]
+emitter_roles = ["registry", "registry_old"]
+fragment = "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)"
+name = "NewOwner"
+normalized_events = ["SubregistryChanged", "AuthorityTransferred", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged"]
+
+[[abi.events]]
+emitter_roles = ["registry", "registry_old"]
+fragment = "event Transfer(bytes32 indexed node, address owner)"
+name = "Transfer"
+normalized_events = ["AuthorityTransferred", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged"]
+
+[[abi.events]]
+emitter_roles = ["registry", "registry_old"]
+fragment = "event NewResolver(bytes32 indexed node, address resolver)"
+name = "NewResolver"
+normalized_events = ["ResolverChanged", "PermissionChanged"]
+
+[[abi.events]]
+emitter_roles = ["registry", "registry_old"]
+fragment = "event NewTTL(bytes32 indexed node, uint64 ttl)"
+name = "NewTTL"
+normalized_events = []
+
+[[abi.events]]
+emitter_roles = ["registry", "registry_old"]
+fragment = "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)"
+name = "ApprovalForAll"
+normalized_events = []
+
+[capability_flags.declared_children]
+notes = "registry-controlled child surfaces are authoritative inputs"
+status = "supported"
+
+[[contracts]]
+address = "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512"
+proxy_kind = "none"
+role = "registry"
+start_block = 2
+
+[[contracts]]
+address = "0x5fbdb2315678afecb367f032d93f642f64180aa3"
+proxy_kind = "none"
+role = "registry_old"
+start_block = 1
+
+[[roots]]
+address = "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512"
+name = "ENSRegistry"
+start_block = 2

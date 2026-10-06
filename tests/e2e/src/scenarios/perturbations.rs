@@ -223,7 +223,7 @@ async fn rich_chain_successive_fixture_replays_match_single_pass() -> Result<()>
 }
 
 #[tokio::test]
-async fn pre_surface_records_converge_fresh_incremental_and_restored() -> Result<()> {
+async fn registry_child_records_converge_fresh_incremental_and_restored() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let rpc = anvil.client();
     let deployment = ens_v1::deploy_ens_v1(&rpc, &repo_root()).await?;
@@ -245,18 +245,18 @@ async fn pre_surface_records_converge_fresh_incremental_and_restored() -> Result
     .await?;
     ens_v1::set_text_record(&rpc, resolver, owner, name, "description", "converged").await?;
     let record_target = rpc.block_number().await?;
-    let null_ready = format!(
+    let record_ready = format!(
         "SELECT EXISTS (SELECT 1 FROM normalized_events \
-         WHERE logical_name_id IS NULL AND event_kind = 'RecordChanged' \
+         WHERE logical_name_id = '{logical_name_id}' AND event_kind = 'RecordChanged' \
            AND after_state->>'record_key' = 'text:description' \
            AND lower(after_state->>'node') = lower('{node}'))"
     );
 
     let (incremental_db, incremental_scratch, mut incremental_replay) =
-        resolver_records::start_split_replay(&anvil, &deployment, record_target, &null_ready)
+        resolver_records::start_split_replay(&anvil, &deployment, record_target, &record_ready)
             .await?;
     let (restored_db, restored_scratch, restored_before_surface) =
-        resolver_records::start_split_replay(&anvil, &deployment, record_target, &null_ready)
+        resolver_records::start_split_replay(&anvil, &deployment, record_target, &record_ready)
             .await?;
     drop(restored_before_surface);
 
@@ -311,14 +311,14 @@ async fn pre_surface_records_converge_fresh_incremental_and_restored() -> Result
         )
         .await?;
 
-    let fresh = support::ingest_at_current_head(&anvil, &deployment, Some(&null_ready)).await?;
+    let fresh = support::ingest_at_current_head(&anvil, &deployment, Some(&record_ready)).await?;
     let incremental =
         support::serve_existing_db(incremental_db, incremental_scratch, &anvil).await?;
     let restored = support::serve_existing_db(restored_db, restored_scratch, &anvil).await?;
 
     let fresh_event = pre_surface_event_snapshot(&fresh.db.pool, &node).await?;
-    assert_eq!(fresh_event["logical_name_id"], Value::Null);
-    assert_eq!(fresh_event["resource_id"], Value::Null);
+    assert_eq!(fresh_event["logical_name_id"], logical_name_id);
+    assert!(fresh_event["resource_id"].is_string());
     for pool in [&incremental.db.pool, &restored.db.pool] {
         assert_eq!(pre_surface_event_snapshot(pool, &node).await?, fresh_event);
     }
