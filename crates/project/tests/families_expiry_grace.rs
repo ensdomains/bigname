@@ -1106,7 +1106,7 @@ async fn cutover_search_fields_cross_chunks_keep_first_images_and_undo_exactly()
     ensure!(
         before
             .iter()
-            .all(|row| row["search_fields"]["expires_at"] == LEASE_EXPIRY.to_string())
+            .all(|row| row["search_fields"]["expires_at"] == json!(LEASE_EXPIRY.to_string()))
     );
     upgraded(
         &fixture,
@@ -1136,7 +1136,7 @@ async fn cutover_search_fields_cross_chunks_keep_first_images_and_undo_exactly()
     ensure!(
         after
             .iter()
-            .all(|row| row["search_fields"]["expires_at"] == RESERVED_EXPIRY.to_string())
+            .all(|row| row["search_fields"]["expires_at"] == json!(RESERVED_EXPIRY.to_string()))
     );
     let images: Vec<Value> = sqlx::query_scalar(
         "SELECT before_image-'chain_id'
