@@ -30,11 +30,14 @@ async fn components(database: &TestDatabase) -> Result<Value> {
     Ok(Value::Object(out))
 }
 
-async fn assert_full_parity(database: &TestDatabase) -> Result<Value> {
-    let detail = path_get(database, &format!("/v1/names/{CHILD}")).await?;
+pub(super) async fn assert_name_prepared_parity(
+    database: &TestDatabase,
+    name: &str,
+) -> Result<Value> {
+    let detail = path_get(database, &format!("/v1/names/{name}")).await?;
     let lookup = path_lookup(
         database,
-        json!({"profile":"detail","inputs":[{"name":CHILD}]}),
+        json!({"profile":"detail","inputs":[{"name":name}]}),
     )
     .await?;
     assert_eq!(lookup["data"][0]["status"], "ok", "{lookup:#}");
@@ -43,10 +46,22 @@ async fn assert_full_parity(database: &TestDatabase) -> Result<Value> {
         "full detail record and null/absence semantics"
     );
     assert_eq!(lookup["meta"]["as_of"], detail["meta"]["as_of"]);
-    let id = format!("ens:{}", bigname_lookup::ens_namehash_hex(CHILD)?);
+    let id = format!("ens:{}", bigname_lookup::ens_namehash_hex(name)?);
     let row = load_family_name(&database.pool, &id)
         .await?
         .context("composed child")?;
+    let prepared: Option<Uuid> = sqlx::query_scalar(
+        "SELECT record_serving_resource_id FROM project_lookup_name WHERE chain_id=$1 AND logical_name_id=$2",
+    )
+    .bind(PATH_CHAIN)
+    .bind(&id)
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(
+        prepared,
+        row.record_serving_resource_id(),
+        "prepared resource for {name}"
+    );
     let mut stored =
         bigname_storage::load_phase_identity_records_by_ids(&database.pool, &[id]).await?;
     let stored = stored.pop().context("stored child")?;
@@ -108,21 +123,21 @@ async fn lookup_precomputation_produced_full_records_incremental_undo_and_empty_
         .filter(|log| log.block_number <= BASE + 121)
         .collect();
     seed_and_run(&database, &initial, 120, 121).await?;
-    let before = assert_full_parity(&database).await?;
+    let before = assert_name_prepared_parity(&database, CHILD).await?;
     assert_eq!(
         before["primary_address"], HOLDER,
         "the ordinary and stored paths must both serve"
     );
     let first = text(resolver, 122, "display name,a", "first")?;
     seed_and_run_with(&database, &first, 122, 122, &[(122, 0, GRANTEE)], None).await?;
-    let first = assert_full_parity(&database).await?;
+    let first = assert_name_prepared_parity(&database, CHILD).await?;
     assert_eq!(first["records"]["texts"]["display name,a"], "first");
     let second = text(resolver, 123, "kept", "unchanged")?;
     seed_and_run_with(&database, &second, 123, 123, &[(123, 0, GRANTEE)], None).await?;
     let before_update = components(&database).await?;
     let changed = text(resolver, 124, "display name,a", "second")?;
     seed_and_run_with(&database, &changed, 124, 124, &[(124, 0, GRANTEE)], None).await?;
-    let after = assert_full_parity(&database).await?;
+    let after = assert_name_prepared_parity(&database, CHILD).await?;
     assert_eq!(after["records"]["texts"]["display name,a"], "second");
     assert_eq!(after["records"]["texts"]["kept"], "unchanged");
     let journal: Vec<(String,String)> = sqlx::query_as("SELECT family,key FROM project_family_undo
@@ -162,7 +177,7 @@ async fn lookup_precomputation_produced_full_records_incremental_undo_and_empty_
         "undo restores exact factored components"
     );
     publish(&database, 125).await?;
-    assert_full_parity(&database).await?;
+    assert_name_prepared_parity(&database, CHILD).await?;
     assert_eq!(
         components(&database).await?,
         before_empty,

@@ -595,7 +595,8 @@ async fn assert_name_consumers(
     resolver: Address,
     reason: Option<&str>,
 ) -> Result<()> {
-    let detail = path_get(database, &format!("/v1/names/{name}")).await?;
+    let detail_record = lookup_publication::assert_name_prepared_parity(database, name).await?;
+    let detail = json!({"data":detail_record});
     let lookup = path_lookup(database, json!({"profile":"detail","inputs":[{"name":name},{"address":address,"relation":"resolves_to"}]})).await?;
     for field in [
         "resolver",
