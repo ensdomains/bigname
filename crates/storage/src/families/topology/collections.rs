@@ -198,6 +198,7 @@ pub async fn load_resolver_roles_shadow(
                 "subject": grant.subject, "resource_id": grant.resource_id,
                 "powers": grant.effective_powers,
                 "selector": grant.scope_detail.get("resource_selector"),
+                "grant_source": grant.grant_source,
                 "event_ids": ids,
             }));
         }
@@ -207,7 +208,8 @@ pub async fn load_resolver_roles_shadow(
                 jsonb_strip_nulls(jsonb_build_object('address', granted -> 'subject',
                     'registration_id', granted -> 'resource_id', 'powers', granted -> 'powers',
                     'record_resource_selector', granted -> 'selector',
-                    'event_ids', granted -> 'event_ids')) AS item
+                    'event_ids', granted -> 'event_ids',
+                    'grant_source', granted -> 'grant_source')) AS item
             FROM jsonb_array_elements($7::jsonb) granted
         )";
     let page = page(

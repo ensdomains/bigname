@@ -70,6 +70,8 @@ pub(crate) struct PermissionRow {
     #[serde(flatten)]
     pub(crate) grant: AddressNameGrant,
     pub(crate) registration_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) eac_resource: Option<String>,
     /// Present for a grant on an ENSv2 record-ID resolver, whose resource is the keccak
     /// of a setter argument: which record the granted resource is about.
     /// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L307-L338 @ ens_v2@a971bd64)
@@ -360,6 +362,7 @@ pub(crate) fn build_permission_row(
             powers: permission_powers_value(&row.effective_powers)?,
         },
         registration_id: row.resource_id.to_string(),
+        eac_resource: super::permission_values::permission_eac_resource_value(row)?,
         record_resource: row
             .record_resource_selector
             .as_ref()
@@ -434,7 +437,7 @@ mod tests {
             grant_source: json!({
                 "kind": "raw_log",
                 "source_event": "EACRolesChanged",
-                "upstream_resource": "root",
+                "upstream_resource": "0x00",
                 "root_resource": true,
                 "changed_powers": ["set_resolver"],
                 "resolver_contract_instance_id": "00000000-0000-0000-0000-000000000010"
@@ -442,7 +445,7 @@ mod tests {
             revocation_source: Some(json!({
                 "kind": "raw_log",
                 "source_event": "EACRolesChanged",
-                "upstream_resource": "root",
+                "upstream_resource": "0x00",
                 "root_resource": true,
                 "changed_powers": ["set_resolver"],
                 "resolver_contract_instance_id": "00000000-0000-0000-0000-000000000011"
@@ -513,7 +516,7 @@ mod tests {
                 "kind": "resolver_root_fallback",
                 "chain_id": "ethereum-mainnet",
                 "resolver_address": "0x0000000000000000000000000000000000000ABC",
-                "upstream_resource": "root"
+                "upstream_resource": "0x00"
             }]),
             Value::Null,
         );
@@ -529,6 +532,7 @@ mod tests {
 
         assert_eq!(mapped.address, ADDRESS);
         assert_eq!(mapped.registration_id, REGISTRATION_ID);
+        assert_eq!(mapped.eac_resource.as_deref(), Some("0"));
         assert_eq!(mapped.name, Some("alice.eth".to_owned()));
         assert_eq!(mapped.grant.powers, json!(["set_resolver"]));
         assert_eq!(

@@ -362,6 +362,13 @@ The candidate SQL can inspect or sort more index entries than it returns, and
 masked candidates can require additional seeks; production query plans and
 latency still require production-scale qualification before activation.
 
+Resolver roles and resolver permission reads expose `eac_resource` from the
+current served grant's already-retained `grant_source.upstream_resource` when
+`source_event` is `EACRolesChanged`. The API converts this uint256 word to an
+exact decimal string independently of display selectors. Selection, publication
+bounds, grant identity, and Project retention are unchanged; this read-path
+field requires no schema migration or replay.
+
 
 ## Table ownership
 

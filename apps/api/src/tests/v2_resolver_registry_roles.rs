@@ -335,11 +335,12 @@ async fn assert_role_followthrough(
 ) -> Result<()> {
     assert_eq!(role["registration_id"], expected.to_string(), "{role}");
     assert!(role.get("name").is_none(), "{role}");
+    assert!(role.get("eac_resource").is_none(), "{role}");
     assert!(role.get("grant_event").is_some(), "{role}");
     let address = role["address"].as_str().unwrap();
     let followed = v2_permissions_payload_for_database(
         database,
-        &format!("/v1/permissions?registration_id={expected}&address={address}"),
+        &format!("/v1/permissions?registration_id={expected}&address={address}&include=lineage"),
     )
     .await?;
     assert!(
@@ -350,7 +351,9 @@ async fn assert_role_followthrough(
             .any(|r| r["grant_scope"]["kind"] == "resolver"
                 && r["grant_scope"]["detail"]["resolver"]["address"] == RESOLVER
                 && r["address"] == role["address"]
-                && r["powers"] == role["powers"]),
+                && r["powers"] == role["powers"]
+                && r.get("eac_resource").is_none()
+                && r["lineage"]["grant"]["kind"] == "ens_v1_authority"),
         "role {role} did not select its grant: {followed}"
     );
     Ok(())
