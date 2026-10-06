@@ -11,6 +11,8 @@ use bigname_adapters::schema_v2::{
 mod compatibility;
 #[path = "v2_registry_token_ids/history.rs"]
 mod history;
+#[path = "v2_registry_token_ids/history_details.rs"]
+mod history_details;
 #[path = "v2_registry_token_ids/history_positions.rs"]
 mod history_positions;
 #[path = "v2_registry_token_ids/history_v1_payments.rs"]

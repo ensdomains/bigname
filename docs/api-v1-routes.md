@@ -2280,17 +2280,17 @@ Per friendly `type`, `data` may contain:
 
 | `type` | `data` fields |
 | --- | --- |
-| `registration` | `registrant`, `owner`, `expires_at`, `expires_at_reason` when null, `resolver: {chain_id, address}`, `subregistry: {chain_id, address}`, `token_id`, `canonical_id`, retained `cost` or `base_cost`/`premium`, `payment_token`, `referrer`, `action_id`, `action_role` (see [registration actions](#registration-actions)) |
+| `registration` | `registrant`, `owner`, `expires_at`, `expires_at_reason` when null, `resolver: {chain_id, address}`, `subregistry: {chain_id, address}`, `token_id`, `canonical_id`, retained ENSv2 `sender`, retained `cost` or `base_cost`/`premium`, `payment_token`, `referrer`, `action_id`, `action_role` (see [registration actions](#registration-actions)) |
 | `renewal` | `expires_at`, `expires_at_reason` when null, retained `cost`, `payment_token`, `referrer`, `canonical_id` |
 | `release` | `expires_at`, `expires_at_reason` when null, `canonical_id` |
 | `expiry` | `expires_at`, `expires_at_reason` when null, `fuses` (uint32 word when the change came through NameWrapper), event-local ENSv2 `canonical_id` |
 | `transfer` | `from`, `to`, `fuses`, recorded ERC-1155 `operator`, ENSv2 `token_id`, `canonical_id` |
 | `authority` | `owner` (the new registry owner), `from` (the previous owner when the row retains it) |
-| `resolver` | `resolver: {chain_id, address}` (absent when the pointer was cleared), event-local ENSv2 `canonical_id` |
+| `resolver` | `resolver: {chain_id, address}` (absent when the pointer was cleared), event-local ENSv2 `canonical_id`, retained ENSv2 `sender` |
 | `record` | `key`, `value`, `coin_type` (number, for `addr:<coin_type>` keys). `key` is the stored record key; history retains writes outside the public record grammar (for example `name` or `abi:<content_type>`), so `key` may name a family the records route does not serve. `value` is present only when the write's value was retained: ordinary text values are strings and ordinary binary values are hex strings. Retained non-text values can instead use the closed `HexBytes`, `DeletedRecordValue`, `DnsZonehashValue`, or `DataHashValue` forms listed in [HistoryEventData](api-v1.md#historyeventdata); history preserves those stored write forms. A record-version reset (raw kind `RecordVersionChanged`, visible with `include=raw`) carries no `key` or `value`. Every record row also says where the record lives: `resolver: {chain_id, address}`, and `node` (the node a node-keyed resolver wrote, lower-case hex) or `record_id` (the decimal record ID a record-ID resolver wrote), which identifies the write whether or not the row carries a `name`; see [record event names](#record-event-names). The record row a `NameForAddrChanged` (Basenames, or the ENS `default.reverse` registrar) stores beside its `primary_name` row carries the reverse node as `node` and the reverse registrar as `resolver`. |
 | `primary_name` | `address`, `coin_type` (number), `name`, `name_status` (see [primary-name values](#primary-name-values)) |
-| `permission` | `address` (the subject), `grant_scope` (as on permission rows, plus the history-only `registrar_controller` scope), `powers`, `added_powers` and `removed_powers` (product power vocabulary), `approved` (registrar-controller changes), `fuses` (uint32 word for NameWrapper fuse changes), proven non-root ENSv2 `token_id` and event-local `canonical_id`; see [permission change values](#permission-change-values) |
-| `subregistry` | `subregistry: {chain_id, address}` (absent when the link was cleared), event-local ENSv2 `canonical_id` |
+| `permission` | `address` (the subject), `grant_scope` (as on permission rows, plus the history-only `registrar_controller` scope), `powers`, `added_powers` and `removed_powers` (product power vocabulary), original EAC `old_role_bitmap` and `new_role_bitmap`, `approved` (registrar-controller changes), `fuses` (uint32 word for NameWrapper fuse changes), proven non-root ENSv2 `token_id` and event-local `canonical_id`; see [permission change values](#permission-change-values) |
+| `subregistry` | `subregistry: {chain_id, address}` (absent when the link was cleared), event-local ENSv2 `canonical_id`, retained ENSv2 `sender` |
 | `migration` | `migration_path` (`unwrapped`, `unlocked_wrapped`, `locked_wrapped`, `locked_child`, or `emancipated_child`) |
 
 Example row from `GET /v1/names/alice.eth/history?include=data&type=record`:
@@ -2386,6 +2386,15 @@ inherit registration payment. The registrar observation remains supporting evide
 visible registration row; `contract_address` remains the original row's emitter.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/ETHRegistrar.sol:L150-L159 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L501-L506 @ ens_v2_sepolia_20261001@07e55a05)
+
+`sender` is the immediate caller recorded by an ENSv2 registry's `LabelRegistered`,
+`ResolverUpdated` or `SubregistryUpdated` log, as a lowercase 20-byte `0x` address.
+It can be a registrar or another contract, independently of the owner, emitter
+(`contract_address`), transaction origin, or ERC-1155 `operator`. Only rows retaining
+that log's sender expose it; derived rows without that evidence and other source
+events omit it. Current state or a later registration never supplies a missing sender.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/interfaces/IRegistryEvents.sol:L17-L24 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/interfaces/IRegistryEvents.sol:L52-L69 @ ens_v2_sepolia_20261001@07e55a05)
 
 Payment amounts are unsigned decimal strings with full uint256 precision. ENSv1 amounts are
 native wei; ENSv2 amounts are raw units of the explicitly named `payment_token`. A registration's
@@ -2505,6 +2514,14 @@ granted and revoked; either list may be empty, and the previous set is
 (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L17-L27 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L274 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L308 @ ens_v2@a971bd64)
+The same EAC history rows expose retained `old_role_bitmap` and `new_role_bitmap`
+as canonical unsigned decimal uint256 strings. These are the original log words,
+including zero, high bits and bits without a product power name; they are never
+reconstructed from the power arrays. Missing or malformed retained words are omitted.
+This applies to registry, registry-root and resolver role changes. Like `sender`,
+these fields require `include=data`; `include=raw` alone only adds normalized `kind`.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L17-L27 @ ens_v2_sepolia_20261001@07e55a05)
+
 ENSv1, Basenames and NameWrapper permission rows are derived from ownership,
 registration and wrapper events that state no previous permission set, so
 they omit both lists rather than report an unobserved previous set; their

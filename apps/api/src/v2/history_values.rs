@@ -1,4 +1,6 @@
-//! Retained history payment/operator fields and the event-local ENSv2 canonical key.
+//! Retained history values and the event-local ENSv2 canonical key.
+mod details;
+
 use alloy_primitives::U256;
 use bigname_storage::HistoryEvent;
 use serde_json::{Map, Value, json};
@@ -11,6 +13,7 @@ pub(super) fn append(
     event_type: HistoryEventType,
     context: &HistoryRowContext,
 ) {
+    details::append(data, row);
     if let Some(canonical) = canonical_id(row) {
         data.insert("canonical_id".into(), Value::String(canonical));
     }
