@@ -158,7 +158,7 @@ jobs:
 
       - name: cargo clippy (strict workspace packages)
         if: github.event_name != 'push'
-        run: cargo clippy --workspace --all-targets --features bigname-adapters/test-activation,bigname-storage/test-support --exclude bigname-adapters --no-deps -- -D warnings
+        run: cargo clippy --keep-going --workspace --all-targets --features bigname-adapters/test-activation,bigname-storage/test-support --exclude bigname-adapters --no-deps -- -D warnings
 
       # The adapter crate still carries pre-existing warning classes. Deny
       # every other warning here so new lint classes cannot silently widen the

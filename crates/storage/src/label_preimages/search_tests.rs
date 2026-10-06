@@ -187,7 +187,7 @@ async fn different_label_imports_wait_for_shared_names_and_use_fresh_post_wait_r
     let right = words[second].clone();
     let a = preimage(&left);
     let b = preimage(&right);
-    let ids = vec![
+    let ids = [
         surface(&db, 3, &[a.labelhash.clone(), b.labelhash.clone()]).await?,
         surface(&db, 4, &[b.labelhash.clone(), a.labelhash.clone()]).await?,
     ];
