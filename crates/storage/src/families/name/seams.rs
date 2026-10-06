@@ -138,3 +138,6 @@ pub(crate) use super::{bound::bound_candidates_sql, list::search_candidates_sql}
 
 #[cfg(any(test, feature = "test-support"))]
 pub use super::list::explain_expiring_selection;
+
+#[cfg(any(test, feature = "test-support"))]
+pub use super::list::search_test_support::{load_full_search_page, load_search_component};

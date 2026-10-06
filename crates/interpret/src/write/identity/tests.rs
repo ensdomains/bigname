@@ -36,6 +36,11 @@ async fn setup(pool: &sqlx::PgPool) -> TestResult {
     ))
     .execute(pool)
     .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../../storage/schema/baseline/07_labels.sql"
+    ))
+    .execute(pool)
+    .await?;
     sqlx::raw_sql(
         "INSERT INTO chain_lineage (
              chain_id, block_hash, block_number, block_timestamp, canonicality_state
@@ -74,6 +79,7 @@ async fn setup(pool: &sqlx::PgPool) -> TestResult {
 
 async fn database() -> TestResult<TestDatabase> {
     let database = TestDatabase::create(TestDatabaseConfig::new("interpret_authority")).await?;
+    database.create_phase_schema().await?;
     setup(database.pool()).await?;
     Ok(database)
 }

@@ -42,6 +42,7 @@ pub mod selection;
 pub mod serving;
 mod summary;
 mod topology;
+mod wrapper_fields;
 
 use sqlx::types::time::OffsetDateTime;
 

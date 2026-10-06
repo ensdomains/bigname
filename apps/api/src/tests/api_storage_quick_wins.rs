@@ -164,6 +164,9 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
         .map(|object| format!("{}: {}", object.kind.as_str(), object.identity))
         .collect::<BTreeSet<_>>();
     let expected = BTreeSet::from([
+        "column: bigname_phase.project_name_summary.search_supported",
+        "column: bigname_phase.project_name_summary.search_fields",
+        "column: bigname_phase.project_name_summary.search_creation_transport_resource_id",
         "function: bigname_phase.revalidate_resolution_lookup_state_read_only(text,bigint,text,jsonb,jsonb,uuid,text,text)",
         "relation: bigname_phase.chain_header_audit",
         "relation: bigname_phase.chain_heads",
@@ -178,6 +181,8 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
         "relation: bigname_phase.migration_discovery_associations",
         "relation: bigname_phase.migration_event_associations",
         "relation: bigname_phase.name_surfaces",
+        "relation: bigname_phase.name_search_documents",
+        "relation: bigname_phase.name_search_postings",
         "relation: bigname_phase.normalized_events",
         "relation: bigname_phase.project_account_approval",
         "relation: bigname_phase.project_address_controller_candidate",
@@ -232,7 +237,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
     .map(str::to_owned));
 
     assert_eq!(actual, expected);
-    assert_eq!(actual.len(), 64);
+    assert_eq!(actual.len(), 69);
     database.cleanup().await
 }
 
@@ -368,5 +373,16 @@ async fn v2_address_history_rejects_unrecognized_namespace() -> Result<()> {
 
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(payload["error"]["code"], json!("not_found"));
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn api_preflight_reports_missing_search_payload_column() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    sqlx::query("ALTER TABLE bigname_phase.project_name_summary DROP COLUMN search_fields")
+        .execute(&database.lookup_pool).await?;
+    let missing = bigname_storage::load_missing_api_lookup_ddl(&database.lookup_pool).await?;
+    assert!(missing.iter().any(|object| object.kind==bigname_storage::ApiLookupDdlKind::Column
+        && object.identity=="bigname_phase.project_name_summary.search_fields"));
     database.cleanup().await
 }

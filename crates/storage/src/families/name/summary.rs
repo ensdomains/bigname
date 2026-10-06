@@ -65,7 +65,7 @@ pub async fn compose_name_summaries(
     logical_name_ids: &[String],
 ) -> Result<BTreeMap<String, Value>> {
     Ok(
-        compose_name_summary_publication(conn, publication, logical_name_ids)
+        compose_summaries(conn, publication, logical_name_ids, false)
             .await?
             .rows,
     )
@@ -76,6 +76,15 @@ pub async fn compose_name_summary_publication(
     conn: &mut PgConnection,
     publication: &FamilyPublication,
     logical_name_ids: &[String],
+) -> Result<NameSummaryPublication> {
+    compose_summaries(conn, publication, logical_name_ids, true).await
+}
+
+async fn compose_summaries(
+    conn: &mut PgConnection,
+    publication: &FamilyPublication,
+    logical_name_ids: &[String],
+    include_relations: bool,
 ) -> Result<NameSummaryPublication> {
     if logical_name_ids.is_empty() {
         return Ok(NameSummaryPublication::default());
@@ -89,7 +98,7 @@ pub async fn compose_name_summary_publication(
                 && surface.block_number <= publication.block_number
         })
         .collect();
-    let composed = load_chain(
+    let mut composed = load_chain(
         &mut *conn,
         publication,
         &surfaces,
@@ -97,19 +106,32 @@ pub async fn compose_name_summary_publication(
         false,
     )
     .await?;
-    let current_history_relations = crate::families::records::publication_relations(
+    super::wrapper_fields::attach_published_wrapper_expiries(
         conn,
-        publication,
-        &composed
-            .values()
-            .filter_map(|name| name.row.as_ref())
-            .collect::<Vec<_>>(),
+        composed
+            .values_mut()
+            .filter_map(|name| name.row.as_mut())
+            .filter(|row| !list_keys::unsupported(&row.coverage)),
     )
     .await?;
-    let null_resolver_names = if matches!(
-        publication.chain_id.as_str(),
-        "ethereum-mainnet" | "ethereum-sepolia"
-    ) {
+    let current_history_relations = if include_relations {
+        crate::families::records::publication_relations(
+            conn,
+            publication,
+            &composed
+                .values()
+                .filter_map(|name| name.row.as_ref())
+                .collect::<Vec<_>>(),
+        )
+        .await?
+    } else {
+        Vec::new()
+    };
+    let null_resolver_names = if include_relations
+        && matches!(
+            publication.chain_id.as_str(),
+            "ethereum-mainnet" | "ethereum-sepolia"
+        ) {
         composed
             .values()
             .filter_map(|composed| composed.row.as_ref())
@@ -127,7 +149,13 @@ pub async fn compose_name_summary_publication(
         composed
             .iter()
             .map(|(name, composed)| {
-                json!({
+                let search = super::super::search_dictionary::shape::from_composed(
+                    composed.row.as_ref(), false,
+                )?;
+                // Serialize fallibly before building the row: a pending wrapper marker is an
+                // integrity error, never a partially published field or a json! panic.
+                let search_fields = serde_json::to_value(&search.search_fields)?;
+                Ok(json!({
                     "logical_name_id": name,
                     "authority_arm": composed.authority_arm,
                     "declared_summary": composed.row.as_ref().map(|row| &row.declared_summary),
@@ -137,13 +165,17 @@ pub async fn compose_name_summary_publication(
                         .row
                         .as_ref()
                         .is_some_and(|row| !list_keys::unsupported(&row.coverage)),
-                    "public_authority": composed
-                        .row
-                        .as_ref()
+                    // Existing list consumers retain these values even on an unsupported row.
+                    "public_authority": composed.row.as_ref()
                         .and_then(|row| list_keys::public_authority(&row.provenance)),
-                })
+                    "owner": composed.row.as_ref()
+                        .and_then(|row| crate::public_name_fields::declared_owner(&row.declared_summary)),
+                    "search_supported": search.search_supported,
+                    "search_fields": search_fields,
+                    "search_creation_transport_resource_id": search.search_creation_transport_resource_id,
+                }))
             })
-            .collect(),
+            .collect::<Result<Vec<Value>>>()?,
     );
     // The chain and block bind first, as `$1` and `$2`, which `zero_owner` reads.
     let mut builder = QueryBuilder::<Postgres>::new(
@@ -167,7 +199,8 @@ pub async fn compose_name_summary_publication(
     builder.push_bind(&source);
     builder.push(
         ") AS nc(logical_name_id text, authority_arm text, declared_summary jsonb, provenance jsonb,
-                 recompose_at bigint, listing_supported boolean, public_authority text)
+                 recompose_at bigint, listing_supported boolean, public_authority text, owner text,
+                 search_supported boolean, search_fields jsonb, search_creation_transport_resource_id uuid)
            ON nc.logical_name_id = named.logical_name_id
          CROSS JOIN LATERAL (
              SELECT params.chain_id, named.logical_name_id, named.namespace,
@@ -181,9 +214,10 @@ pub async fn compose_name_summary_publication(
     push_registered_at_timestamp_expr(&mut builder);
     builder.push(format!(
         " AS registered_at, {} AS zero_owner,
-                nc.recompose_at, {SERVED_OWNER} AS owner,
+                nc.recompose_at, nc.owner,
                 COALESCE(nc.listing_supported AND {}, FALSE) AS expiry_listable,
-                nc.public_authority) summary",
+                nc.public_authority, COALESCE(nc.search_supported, FALSE) AS search_supported,
+                nc.search_fields, nc.search_creation_transport_resource_id) summary",
         zero_owner(),
         list_keys::FINITE_REGISTRATION_EXPIRY_SQL
     ));
@@ -198,12 +232,6 @@ pub async fn compose_name_summary_publication(
         current_history_relations,
     })
 }
-
-/// The owner the composed name row serves, `control.owner`, lower-cased; null when it is null,
-/// blank or absent and when the name composes no row.
-const SERVED_OWNER: &str = "(SELECT CASE WHEN btrim(served.owner) = '' THEN NULL
-                 ELSE lower(served.owner) END
-         FROM (SELECT nc.declared_summary #>> '{control,owner}' AS owner) served)";
 
 /// `zero_owner` of the name `named.logical_name_id` at the block `$2` of chain `$1` (the binds of
 /// the summary statement): its candidate Transfers are those naming it, the unnamed ones at its

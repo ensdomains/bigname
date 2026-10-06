@@ -289,7 +289,7 @@ pub(crate) async fn compose_expiring_page(
     let mut composed = batch::load_base(conn, names, CoverageShape::Plain).await?;
     rendered::enrich(conn, &mut composed).await?;
     // Listings omit resolution topology, but still serve each wrapper's own expiry.
-    crate::families::name::topology::attach_wrapper_expiries(conn, &mut composed).await?;
+    crate::families::name::wrapper_fields::attach_wrapper_expiries(conn, &mut composed).await?;
     let source = Value::Array(composed.values().map(source_row).collect());
     crate::families::name::seams::note_submitted_rows(composed.len());
     let page = expiring_page_from(&mut *conn, filter, order, cursor, page_size, &source).await?;

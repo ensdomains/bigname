@@ -3,22 +3,22 @@ use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct WrapperFuses {
-    pub(crate) fuses: u32,
-    pub(crate) cannot_unwrap: bool,
-    pub(crate) cannot_burn_fuses: bool,
-    pub(crate) cannot_transfer: bool,
-    pub(crate) cannot_set_resolver: bool,
-    pub(crate) cannot_set_ttl: bool,
-    pub(crate) cannot_create_subdomain: bool,
-    pub(crate) cannot_approve: bool,
-    pub(crate) parent_cannot_control: bool,
-    pub(crate) is_dot_eth: bool,
-    pub(crate) can_extend_expiry: bool,
+pub struct WrapperFuses {
+    pub fuses: u32,
+    pub cannot_unwrap: bool,
+    pub cannot_burn_fuses: bool,
+    pub cannot_transfer: bool,
+    pub cannot_set_resolver: bool,
+    pub cannot_set_ttl: bool,
+    pub cannot_create_subdomain: bool,
+    pub cannot_approve: bool,
+    pub parent_cannot_control: bool,
+    pub is_dot_eth: bool,
+    pub can_extend_expiry: bool,
 }
 
 impl WrapperFuses {
-    pub(crate) fn from_summary(summary: &Value) -> Option<Self> {
+    pub fn from_summary(summary: &Value) -> Option<Self> {
         let value = summary.get("wrapper_fuses")?;
         let fuses = serde_json::from_value::<Self>(value.clone()).ok()?;
         fuses.is_consistent().then_some(fuses)
@@ -26,7 +26,7 @@ impl WrapperFuses {
 
     /// Expands a raw NameWrapper fuse word into the named Booleans.
     /// (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L10-L20 @ ens_v1@91c966f)
-    pub(crate) const fn from_word(fuses: u32) -> Self {
+    pub const fn from_word(fuses: u32) -> Self {
         Self {
             fuses,
             cannot_unwrap: fuses & 1 != 0,

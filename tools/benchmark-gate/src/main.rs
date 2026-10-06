@@ -14,6 +14,7 @@ mod budgets;
 mod compiler_attestation;
 mod database;
 mod indexing;
+mod node_scale;
 mod smoke;
 
 use budgets::{BudgetProfile, BudgetsFile};
@@ -34,6 +35,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Run the local synthetic ENSv1 node-identity feature screen.
+    NodeScale(node_scale::NodeScaleArgs),
     /// Mutate a disposable production-shaped copy to benchmark Interpret and Project.
     Index(IndexArgs),
     /// Load a drained API while keeping the corpus database connection read-only.
@@ -125,6 +128,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let budgets = BudgetsFile::load(Path::new(BUDGETS_PATH))?;
     match cli.command {
+        Command::NodeScale(args) => node_scale::run(args, cli.report.as_deref()).await,
         Command::CheckBudgets => {
             println!("benchmark budgets are valid: {BUDGETS_PATH}");
             Ok(())
@@ -402,7 +406,7 @@ fn worktree_is_clean() -> Result<bool> {
     Ok(output.stdout.is_empty())
 }
 
-fn emit_report<T: Serialize>(report: &GateReport<T>, path: Option<&Path>) -> Result<()> {
+fn emit_report<T: Serialize>(report: &T, path: Option<&Path>) -> Result<()> {
     let json =
         serde_json::to_string_pretty(report).context("failed to serialize benchmark report")?;
     println!("{json}");

@@ -63,6 +63,7 @@ async fn surface_loader_ignores_orphaned_surfaces_and_fallback_events() -> TestR
         include_str!("../../storage/schema/baseline/03_identity.sql"),
         include_str!("../../storage/schema/baseline/04_manifests.sql"),
         include_str!("../../storage/schema/baseline/05_normalized_events.sql"),
+        include_str!("../../storage/schema/baseline/07_labels.sql"),
     ] {
         sqlx::raw_sql(sql).execute(database.pool()).await?;
     }
@@ -136,6 +137,7 @@ async fn recompute_keeps_a_surface_without_raw_bytes_visible_and_unknown() -> Te
         include_str!("../../storage/schema/baseline/03_identity.sql"),
         include_str!("../../storage/schema/baseline/04_manifests.sql"),
         include_str!("../../storage/schema/baseline/05_normalized_events.sql"),
+        include_str!("../../storage/schema/baseline/07_labels.sql"),
     ] {
         sqlx::raw_sql(sql).execute(database.pool()).await?;
     }
@@ -196,6 +198,7 @@ async fn recompute_deactivates_at_the_later_preimage_witness() -> TestResult {
             include_str!("../../storage/schema/baseline/03_identity.sql"),
             include_str!("../../storage/schema/baseline/04_manifests.sql"),
             include_str!("../../storage/schema/baseline/05_normalized_events.sql"),
+            include_str!("../../storage/schema/baseline/07_labels.sql"),
         ] {
             sqlx::raw_sql(sql).execute(database.pool()).await?;
         }
@@ -258,6 +261,7 @@ async fn recompute_reads_later_raw_hex_and_repairs_same_block_null_position_witn
         include_str!("../../storage/schema/baseline/03_identity.sql"),
         include_str!("../../storage/schema/baseline/04_manifests.sql"),
         include_str!("../../storage/schema/baseline/05_normalized_events.sql"),
+        include_str!("../../storage/schema/baseline/07_labels.sql"),
     ] {
         sqlx::raw_sql(sql).execute(database.pool()).await?;
     }
@@ -287,6 +291,99 @@ async fn recompute_reads_later_raw_hex_and_repairs_same_block_null_position_witn
             Some(OffsetDateTime::from_unix_timestamp(12)?)
         )
     );
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn recompute_and_actual_rainbow_import_preserve_both_changes_after_waits() -> TestResult {
+    use std::time::{Duration, Instant};
+    let database = bigname_test_support::TestDatabase::create(
+        bigname_test_support::TestDatabaseConfig::new("recompute_search_import_overlap")
+            .pool_max_connections(6),
+    )
+    .await?;
+    for source in [
+        include_str!("../../storage/schema/baseline/01_chain.sql"),
+        include_str!("../../storage/schema/baseline/03_identity.sql"),
+        include_str!("../../storage/schema/baseline/04_manifests.sql"),
+        include_str!("../../storage/schema/baseline/05_normalized_events.sql"),
+        include_str!("../../storage/schema/baseline/07_labels.sql"),
+    ] {
+        sqlx::raw_sql(source).execute(database.pool()).await?;
+    }
+    let first = format!("{:#x}", alloy_primitives::keccak256(b"first"));
+    let second = format!("{:#x}", alloy_primitives::keccak256(b"second"));
+    sqlx::raw_sql("INSERT INTO chain_lineage(chain_id,block_hash,block_number,block_timestamp,canonicality_state)
+        VALUES ('recompute','one',1,to_timestamp(1),'canonical')").execute(database.pool()).await?;
+    sqlx::query("INSERT INTO name_surfaces(logical_name_id,namespace,namehash,labelhashes,normalizer_version,
+        visibility_state,chain_id,block_hash,block_number,canonicality_state)
+        VALUES ('ens:overlap','ens','overlap',$1,'old','active','recompute','one',1,'canonical')")
+        .bind(vec![first.clone(),second.clone()]).execute(database.pool()).await?;
+    sqlx::query(
+        "INSERT INTO label_preimages(labelhash,raw_label,decoded_label,normalizer_version,
+        normalized_under_version,normalization_error,source_kind,source_priority,provenance)
+        VALUES ($1,$2,'first','old',false,'old verdict',$3,10,'{}')",
+    )
+    .bind(first)
+    .bind(b"first".as_slice())
+    .bind(bigname_storage::ENS_RAINBOW_SOURCE_KIND)
+    .execute(database.pool())
+    .await?;
+    sqlx::query("INSERT INTO ens_names VALUES ($1,'second')")
+        .bind(second)
+        .execute(database.pool())
+        .await?;
+    let mut blocker = database.pool().begin().await?;
+    sqlx::query("SELECT logical_name_id FROM name_surfaces FOR NO KEY UPDATE")
+        .execute(&mut *blocker)
+        .await?;
+    async fn wait(pool: &sqlx::PgPool, text: &str) -> TestResult {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let n: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity
+                WHERE datname=current_database() AND pid<>pg_backend_pid()
+                  AND wait_event_type='Lock' AND query LIKE $1",
+            )
+            .bind(format!("%{text}%"))
+            .fetch_one(pool)
+            .await?;
+            if n > 0 {
+                return Ok(());
+            }
+            assert!(Instant::now() < deadline, "writer did not wait at {text}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    let pool = database.pool().clone();
+    let recompute = tokio::spawn(async move { run(&pool, "recompute", 0, 1).await });
+    wait(database.pool(), "identity_search.name_locks").await?;
+    let pool = database.pool().clone();
+    let importer = tokio::spawn(async move {
+        bigname_storage::import_label_preimages_from_ens_names_table(&pool, Some(1), Some(1)).await
+    });
+    wait(database.pool(), "identity_search.label_locks").await?;
+    blocker.commit().await?;
+    let _ = tokio::time::timeout(Duration::from_secs(10), recompute).await???;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), importer)
+            .await???
+            .retained_row_count,
+        1
+    );
+    let name: String = sqlx::query_scalar("SELECT name FROM name_search_documents")
+        .fetch_one(database.pool())
+        .await?;
+    assert_eq!(name, "first.second");
+    let hits: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM name_search_postings
+        WHERE token_kind=2 AND token_bytes=$1",
+    )
+    .bind(b"fir".as_slice())
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(hits, 1);
     database.cleanup().await?;
     Ok(())
 }

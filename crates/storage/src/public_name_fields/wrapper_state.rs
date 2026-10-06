@@ -2,14 +2,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum WrapperState {
+pub enum WrapperState {
     Wrapped,
     Emancipated,
     Locked,
 }
 
 impl WrapperState {
-    pub(crate) fn from_wire(value: &str) -> Option<Self> {
+    pub fn from_wire(value: &str) -> Option<Self> {
         match value {
             "wrapped" => Some(Self::Wrapped),
             "emancipated" => Some(Self::Emancipated),

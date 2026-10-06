@@ -372,7 +372,7 @@ async fn install(conn: &mut PgConnection) -> Result<()> {
         -- with no summary, 3821..=3830 ENSv1, 4591..=4600 (ENSv2 only) with no arm.
         INSERT INTO project_name_summary (chain_id, logical_name_id, namespace, authority_arm,
             serving, registration_status, expires_at, registered_at, zero_owner, owner,
-            expiry_listable)
+            expiry_listable, search_supported)
         SELECT '{CHAIN}', 'ens:' || pg_temp.node(n), 'ens',
                CASE WHEN n BETWEEN 3801 AND 3810 OR n BETWEEN 3831 AND 3835
                          OR n BETWEEN 4591 AND 4600 THEN NULL
@@ -383,7 +383,7 @@ async fn install(conn: &mut PgConnection) -> Result<()> {
                CASE WHEN n % 10 = 0 THEN 1600000000 ELSE 1900000000 END,
                to_timestamp(1700000000 + n), false,
                CASE WHEN n % 3 = 0 THEN pg_temp.address(2827) ELSE pg_temp.address(n) END,
-               true
+               true, false
         FROM generate_series(1, 5100) n
         WHERE n NOT BETWEEN 3811 AND 3820;
         INSERT INTO project_registry_node_state (chain_id, namespace, node, block_number,

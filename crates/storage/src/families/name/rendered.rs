@@ -9,8 +9,9 @@
 //!
 //! The rule has one SQL spelling ([`rendered_name_sql`]) and one Rust spelling
 //! ([`placeholder_name`], the name when no label is known). The composition Project's summary
-//! step reaches uses only the Rust one, so an imported preimage never changes a stored summary;
-//! the serving readers apply the SQL one afterwards ([`enrich`]).
+//! step reaches uses only the Rust one, so an imported preimage never changes a stored summary.
+//! Identity lexical maintenance uses the SQL renderer atomically with imports; other serving
+//! readers apply it afterwards ([`enrich`]).
 use std::collections::BTreeMap;
 
 use alloy_primitives::{hex, keccak256};

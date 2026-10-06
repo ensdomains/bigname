@@ -10,8 +10,37 @@ pub(super) async fn write(
     transaction: &mut Transaction<'_, Postgres>,
     output: &BatchOutput,
 ) -> Result<()> {
+    let names: Vec<String> = output
+        .name_surfaces
+        .iter()
+        .map(|surface| surface.logical_name_id.clone())
+        .collect();
+    let paths: Vec<Vec<String>> = output
+        .name_surfaces
+        .iter()
+        .map(|surface| surface.labelhashes.clone())
+        .collect();
+    let labels: Vec<String> = preimages_for_submission(output)
+        .map(|preimage| preimage.labelhash.clone())
+        .collect();
+    bigname_storage::identity_search::prepare(transaction, &labels, &paths, &names)
+        .await
+        .map_err(super::search::failure)?;
+    // Existing rows cannot change bytes or normalization verdict through this writer.
+    // Only absent labels can change an existing structural spelling.
+    let changed: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT label FROM unnest($1::text[]) AS input(label)
+         WHERE NOT EXISTS (SELECT 1 FROM label_preimages WHERE labelhash=label) ORDER BY label",
+    )
+    .bind(&labels)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|error| InterpretError::database("failed to select new search labels", error))?;
     write_preimages(transaction, output).await?;
-    write_surfaces(transaction, output).await
+    write_surfaces(transaction, output).await?;
+    bigname_storage::identity_search::refresh(transaction, &names, &changed)
+        .await
+        .map_err(super::search::failure)
 }
 
 async fn write_preimages(

@@ -416,6 +416,14 @@ pub(crate) async fn finish(
             error,
         )
     })?;
+    if recompute_flags && phase == PhaseName::Interpret {
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| {
+                RunnerError::database("failed to set normalization completion isolation", error)
+            })?;
+    }
     if let crate::redo_completion::CompletionCoverage::Widened(persisted) =
         crate::redo_completion::lock_completion_coverage(
             &mut transaction,

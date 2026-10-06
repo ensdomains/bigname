@@ -9,9 +9,30 @@ const TEMPORARILY_UNAVAILABLE: &str = "temporarily_unavailable";
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct ExplicitNamespaceRequestScope {
     meta: Meta,
+    selected: Option<SelectedSnapshot>,
     selected_heads: BTreeMap<String, Option<(i64, String)>>,
     project_generations: Option<BTreeMap<String, String>>,
     interpret_redo_state: bigname_storage::SelectedInterpretRedoState,
+}
+
+impl ExplicitNamespaceRequestScope {
+    pub(crate) fn has_publication(&self) -> bool {
+        self.selected.is_some()
+    }
+
+    /// Preserve unavailable-scope disclosure. A ready capture must still be the same
+    /// publication on the request's snapshot, including an empty search page.
+    pub(crate) async fn served_on(&self, conn: &mut sqlx::PgConnection) -> V2Result<bool> {
+        let Some(selected) = self.selected.as_ref() else {
+            return Ok(true);
+        };
+        let current = load_selected_project_generations_on(conn, selected, true)
+            .await
+            .map_err(|_| {
+                crate::v2::V2Error::internal_error("failed to validate request-scope metadata")
+            })?;
+        Ok(current == self.project_generations)
+    }
 }
 
 pub(crate) fn request_scope_meta(scopes: &[RequestScopeSnapshot]) -> V2Result<Meta> {
@@ -151,7 +172,11 @@ pub(crate) async fn explicit_namespace_request_scope(
             Err(error) => return Err(api_error_to_v2(snapshot_selection_api_error(error))),
         };
     Ok(ExplicitNamespaceRequestScope {
-        meta: request_scope_meta(&[RequestScopeSnapshot { scope, selected }])?,
+        meta: request_scope_meta(&[RequestScopeSnapshot {
+            scope,
+            selected: selected.clone(),
+        }])?,
+        selected,
         selected_heads,
         project_generations,
         interpret_redo_state,

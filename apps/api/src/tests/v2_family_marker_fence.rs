@@ -402,8 +402,10 @@ async fn api_preflight_and_documented_grant_cover_the_family_reads() -> Result<(
         }
     };
     assert_eq!(missing().await?, Vec::<String>::new());
-    let mut catalogue_diagnostics = Vec::new();
+    let mut relation_diagnostics = Vec::new();
     for relation in [
+        "name_search_documents",
+        "name_search_postings",
         "project_address_history_anchor",
         "project_history_source",
         "project_history_source_edge",
@@ -419,7 +421,7 @@ async fn api_preflight_and_documented_grant_cover_the_family_reads() -> Result<(
             .await
             .err()
             .map(|error| format!("{error:#}"));
-        catalogue_diagnostics.push((format!("bigname_phase.{relation}"), unavailable, startup_error));
+        relation_diagnostics.push((format!("bigname_phase.{relation}"), unavailable, startup_error));
         sqlx::query(&format!(
             "GRANT SELECT ON bigname_phase.{relation} TO {role}"
         ))
@@ -450,11 +452,11 @@ async fn api_preflight_and_documented_grant_cover_the_family_reads() -> Result<(
         .execute(&database.lookup_pool)
         .await?;
     assert!(
-        catalogue_diagnostics.iter().all(|(relation, unavailable, error)| {
+        relation_diagnostics.iter().all(|(relation, unavailable, error)| {
             unavailable == &vec![relation.clone()]
                 && error.as_ref().is_some_and(|error| error.contains(relation))
         }),
-        "each unreadable catalogue relation must be named by startup preflight: {catalogue_diagnostics:#?}"
+        "each unreadable serving relation must be named by startup preflight: {relation_diagnostics:#?}"
     );
     database.cleanup().await
 }

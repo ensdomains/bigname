@@ -1648,6 +1648,7 @@ dependencies = [
  "bigname-domain",
  "bigname-interpret",
  "bigname-lookup",
+ "bigname-manifests",
  "bigname-project",
  "bigname-storage",
  "bigname-test-support",

@@ -4,6 +4,7 @@ use sqlx::{PgPool, Row};
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ApiLookupDdlKind {
     Relation,
+    Column,
     Function,
     Type,
 }
@@ -12,6 +13,7 @@ impl ApiLookupDdlKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Relation => "relation",
+            Self::Column => "column",
             Self::Function => "function",
             Self::Type => "type",
         }
@@ -48,6 +50,8 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
                 ('relation', 'bigname_phase.migration_event_associations'),
                 ('relation', 'bigname_phase.child_registration_events'),
                 ('relation', 'bigname_phase.name_surfaces'),
+                ('relation', 'bigname_phase.name_search_documents'),
+                ('relation', 'bigname_phase.name_search_postings'),
                 ('relation', 'bigname_phase.resources'),
                 ('relation', 'bigname_phase.surface_bindings'),
                 ('relation', 'bigname_phase.token_lineages'),
@@ -102,6 +106,10 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
                 ('relation', 'bigname_phase.project_address_record_id_index'),
                 ('relation', 'bigname_phase.project_name_history'),
                 ('relation', 'bigname_phase.project_name_summary'),
+                ('column', 'bigname_phase.project_name_summary.search_supported'),
+                ('column', 'bigname_phase.project_name_summary.search_fields'),
+                ('column', 'bigname_phase.project_name_summary.search_creation_transport_resource_id'),
+
                 (
                     'function',
                     'bigname_phase.revalidate_resolution_lookup_state_read_only(text,bigint,text,jsonb,jsonb,uuid,text,text)'
@@ -114,6 +122,12 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
             WHEN 'relation' THEN CASE WHEN to_regnamespace(split_part(identity, '.', 1)) IS NULL THEN TRUE
                 WHEN NOT has_schema_privilege(current_user, to_regnamespace(split_part(identity, '.', 1)), 'USAGE') THEN TRUE
                 WHEN to_regclass(identity) IS NULL THEN TRUE ELSE NOT has_table_privilege(current_user, identity, 'SELECT') END
+            WHEN 'column' THEN CASE WHEN to_regnamespace(split_part(identity, '.', 1)) IS NULL THEN TRUE
+                WHEN NOT has_schema_privilege(current_user, to_regnamespace(split_part(identity, '.', 1)), 'USAGE') THEN TRUE
+                WHEN to_regclass(split_part(identity, '.', 1) || '.' || split_part(identity, '.', 2)) IS NULL THEN TRUE
+                ELSE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                WHERE attrelid=to_regclass(split_part(identity, '.', 1) || '.' || split_part(identity, '.', 2))
+                  AND attname=split_part(identity, '.', 3) AND attnum>0 AND NOT attisdropped) END
             WHEN 'function' THEN CASE WHEN to_regnamespace(split_part(identity, '.', 1)) IS NULL THEN TRUE WHEN NOT has_schema_privilege(current_user, to_regnamespace(split_part(identity, '.', 1)), 'USAGE') THEN TRUE WHEN to_regprocedure(identity) IS NULL THEN TRUE ELSE NOT has_function_privilege(current_user, identity, 'EXECUTE') END
             WHEN 'type' THEN CASE WHEN to_regnamespace(split_part(identity, '.', 1)) IS NULL THEN TRUE WHEN NOT has_schema_privilege(current_user, to_regnamespace(split_part(identity, '.', 1)), 'USAGE') THEN TRUE ELSE to_regtype(identity) IS NULL END
         END
@@ -128,6 +142,7 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
         .map(|row| {
             let kind = match row.try_get::<&str, _>("kind")? {
                 "relation" => ApiLookupDdlKind::Relation,
+                "column" => ApiLookupDdlKind::Column,
                 "function" => ApiLookupDdlKind::Function,
                 "type" => ApiLookupDdlKind::Type,
                 unexpected => {

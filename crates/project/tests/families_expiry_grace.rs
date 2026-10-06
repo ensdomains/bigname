@@ -1036,3 +1036,140 @@ async fn extending_only_the_reservation_leaves_the_lease_date_and_splits_the_gra
     fixture.assert_rebuild_equal(6).await?;
     fixture.cleanup().await
 }
+
+/// More than one composition chunk, with a same-block renewal overlapping the proxy change.
+/// This enters through normalized events and ordinary Project publication, without writing
+/// search summaries or their journal directly.
+#[tokio::test]
+async fn cutover_search_fields_cross_chunks_keep_first_images_and_undo_exactly() -> Result<()> {
+    let fixture = Fixture::new("families_search_cutover_chunks", 6).await?;
+    execution_manifest(&fixture, None, 0, TOP_PROXY, 0).await?;
+    let mut names = Vec::new();
+    for n in 0..1001_u32 {
+        let name = surface(&fixture, &format!("cutover-{n:04}.eth")).await?;
+        let resource = uuid(30_000 + n);
+        fixture
+            .binding(
+                &uuid(20_000 + n),
+                &name,
+                &resource,
+                "ens_v1",
+                1,
+                i64::from(n),
+                None,
+            )
+            .await?;
+        fixture
+            .write(
+                1,
+                i64::from(n),
+                "SurfaceBound",
+                "ens_v1_registrar_l1",
+                Some(&name),
+                Some(&resource),
+                json!({"authority_kind":"registrar", "state_derived":false,
+            "registry_contract":REGISTRY,"owner_getter":OWNER}),
+                REGISTRAR,
+            )
+            .await?;
+        fixture
+            .write(
+                2,
+                i64::from(n),
+                "RegistrationGranted",
+                "ens_v1_registrar_l1",
+                Some(&name),
+                Some(&resource),
+                json!({"authority_kind":"registrar","status":"registered",
+            "registrant":OWNER,"expiry":LEASE_EXPIRY}),
+                REGISTRAR,
+            )
+            .await?;
+        fixture
+            .write(
+                3,
+                i64::from(n),
+                "RegistrationReserved",
+                "ens_v2_registry_l1",
+                Some(&name),
+                Some(&uuid(40_000 + n)),
+                json!({"registry_contract_instance_id":"eth",
+            "token_id":n.to_string(),"status":"reserved","expiry":RESERVED_EXPIRY}),
+                V2_REGISTRY,
+            )
+            .await?;
+        names.push(name);
+    }
+    fixture.apply(4, FamilyMode::Normal).await?;
+    let before = fixture.rows("project_name_summary").await?;
+    ensure!(before.len() == 1001);
+    ensure!(
+        before
+            .iter()
+            .all(|row| row["search_fields"]["expires_at"] == json!(LEASE_EXPIRY.to_string()))
+    );
+    upgraded(
+        &fixture,
+        5,
+        TOP_PROXY,
+        "universal_resolver",
+        ADMITTED,
+        "admitted_universal_resolver",
+    )
+    .await?;
+    fixture
+        .write(
+            5,
+            2,
+            "RegistrationRenewed",
+            "ens_v1_registrar_l1",
+            Some(&names[0]),
+            Some(&uuid(30_000)),
+            json!({"authority_kind":"registrar",
+        "status":"registered", "registrant":OWNER, "expiry":LEASE_EXPIRY+DAY}),
+            REGISTRAR,
+        )
+        .await?;
+    fixture.apply(5, FamilyMode::Normal).await?;
+    let after = fixture.rows("project_name_summary").await?;
+    ensure!(after.len() == 1001);
+    ensure!(
+        after
+            .iter()
+            .all(|row| row["search_fields"]["expires_at"] == json!(RESERVED_EXPIRY.to_string()))
+    );
+    let images: Vec<Value> = sqlx::query_scalar(
+        "SELECT before_image-'chain_id'
+        FROM project_family_undo WHERE family='project_name_summary' AND block_number=5
+        ORDER BY (before_image-'chain_id')::text",
+    )
+    .fetch_all(&fixture.pool)
+    .await?;
+    let mut expected = before.clone();
+    expected.sort_by_key(Value::to_string);
+    // Compare as a set; PostgreSQL JSONB's text key order differs from serde_json's.
+    let mut images = images.iter().map(Value::to_string).collect::<Vec<_>>();
+    images.sort();
+    ensure!(
+        images == expected.iter().map(Value::to_string).collect::<Vec<_>>(),
+        "the cutover must journal each original summary once"
+    );
+    fixture.apply(6, FamilyMode::Normal).await?;
+    ensure!(
+        fixture.rows("project_name_summary").await? == after,
+        "empty block rewrote static fields"
+    );
+    let empty_undo: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM project_family_undo
+        WHERE family='project_name_summary' AND block_number=6",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    ensure!(empty_undo == 0);
+    ensure!(bigname_project::families::undo_to(&fixture.pool, CHAIN, 4).await? == 2);
+    ensure!(fixture.rows("project_name_summary").await? == before);
+    fixture.apply(5, FamilyMode::Normal).await?;
+    ensure!(fixture.rows("project_name_summary").await? == after);
+    fixture.assert_rebuild_equal(5).await?;
+    fixture.cleanup().await
+}

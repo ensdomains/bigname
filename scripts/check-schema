@@ -531,7 +531,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=461
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=74
+expected_predecessor_shape_proof_count=75
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -733,6 +733,12 @@ check_served_projection_removal() {
             fi
             emit_phase_migration "$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql" baseline-first
             if [ "$suffix" = removal ]; then
+                printf 'DROP TABLE name_search_postings, name_search_documents; DROP INDEX name_surfaces_search_labelhashes_idx;\n'
+                emit_phase_migration "$ROOT/migrations/20261005210000_durable_name_search.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261005210000_durable_name_search.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261005210000_durable_name_search.sql" baseline-first
+            if [ "$suffix" = removal ]; then
                 emit_phase_migration "$ROOT/migrations/20261006080000_normalized_events_history_registrar_lease_index.sql" preceding-shape
             else
                 emit_phase_migration "$ROOT/migrations/20261006080000_normalized_events_history_registrar_lease_index.sql" baseline-first
@@ -878,6 +884,7 @@ for migration_file in \
     "$ROOT/migrations/20261005180000_project_hydration_schedule.sql" \
     "$ROOT/migrations/20261005190000_name_surfaces_byte_shadow_path.sql" \
     "$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql" \
+    "$ROOT/migrations/20261005210000_durable_name_search.sql" \
     "$ROOT/migrations/20261006080000_normalized_events_history_registrar_lease_index.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
@@ -5445,6 +5452,8 @@ BEGIN
             ('migration_event_associations'),
             ('name_current'),
             ('name_surfaces'),
+            ('name_search_documents'),
+            ('name_search_postings'),
             ('normalized_events'),
             ('project_family_marker'),
             ('project_address_history_anchor'),
@@ -5559,6 +5568,8 @@ BEGIN
             ('migration_event_associations'),
             ('name_current'),
             ('name_surfaces'),
+            ('name_search_documents'),
+            ('name_search_postings'),
             ('normalized_events'),
             ('project_family_marker'),
             ('project_address_history_anchor'),

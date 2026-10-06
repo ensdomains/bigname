@@ -644,3 +644,69 @@ $$;
 CREATE INDEX IF NOT EXISTS name_surfaces_project_label_hashes_idx ON name_surfaces USING gin(label_hashes(raw_labels));
 CREATE INDEX IF NOT EXISTS name_surfaces_project_suffix_hash_idx ON name_surfaces(namespace, hash_array_extended(raw_labels, 0));
 CREATE INDEX IF NOT EXISTS name_surfaces_project_node_idx ON name_surfaces(namespace, lower(namehash));
+
+-- Current spelling and lexical membership are derived atomically by Interpret and verified imports.
+CREATE TABLE IF NOT EXISTS name_search_documents (
+    search_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    logical_name_id text NOT NULL UNIQUE REFERENCES name_surfaces(logical_name_id) ON DELETE CASCADE,
+    chain_id text NOT NULL,
+    namespace text NOT NULL,
+    namehash text NOT NULL,
+    name text NOT NULL CHECK (name <> ''),
+    display_name_override text,
+    spelling_class smallint NOT NULL,
+    CONSTRAINT name_search_documents_class_check CHECK (
+        (spelling_class IN (0, 1) AND octet_length(name) <= 2000)
+        OR (spelling_class = 2 AND octet_length(name) > 2000)),
+    CONSTRAINT name_search_documents_display_check CHECK (
+        display_name_override IS NULL OR spelling_class = 0)
+);
+COMMENT ON TABLE name_search_documents IS
+    'Identity-derived current search spelling. Class 0 is raw-backed, 1 structural through 2000 bytes, 2 longer structural. Only raw-backed display may differ. Interpret and verified imports update this atomically with postings; Project owns no text.';
+COMMENT ON COLUMN name_search_documents.search_id IS
+    'Database-generated key for this current search document, referenced by its token postings.';
+COMMENT ON COLUMN name_search_documents.logical_name_id IS
+    'Source name_surfaces identity for this spelling; deleting the identity deletes this document.';
+COMMENT ON COLUMN name_search_documents.chain_id IS
+    'Chain of the source identity, used to match its published search eligibility.';
+COMMENT ON COLUMN name_search_documents.namespace IS
+    'Source namespace used to partition lexical search candidates.';
+COMMENT ON COLUMN name_search_documents.namehash IS
+    'Source namehash used to verify identity and order search results.';
+COMMENT ON COLUMN name_search_documents.name IS
+    'Current search spelling: normalized for a raw-backed name, or rendered from the structural label-hash path and verified preimages.';
+COMMENT ON COLUMN name_search_documents.display_name_override IS
+    'Canonical display spelling when it differs from the normalized raw-backed name; absent for structural spellings.';
+COMMENT ON COLUMN name_search_documents.spelling_class IS
+    'Spelling source and byte-size class: 0 raw-backed, 1 structural through 2000 UTF-8 bytes, 2 structural above 2000 bytes.';
+CREATE INDEX IF NOT EXISTS name_search_documents_structural_order_idx
+    ON name_search_documents (name, namespace, namehash, logical_name_id)
+    WHERE spelling_class = 1;
+CREATE INDEX IF NOT EXISTS name_search_documents_class_idx
+    ON name_search_documents (namespace, spelling_class, search_id);
+CREATE TABLE IF NOT EXISTS name_search_postings (
+    namespace text NOT NULL,
+    spelling_class smallint NOT NULL CHECK (spelling_class BETWEEN 0 AND 2),
+    token_kind smallint NOT NULL CHECK (token_kind IN (1, 2)),
+    token_length smallint NOT NULL CHECK (token_length BETWEEN 1 AND 3),
+    token_bytes bytea NOT NULL CHECK (octet_length(token_bytes) BETWEEN 1 AND 12),
+    search_id bigint NOT NULL REFERENCES name_search_documents(search_id) ON DELETE CASCADE,
+    PRIMARY KEY (namespace, spelling_class, token_kind, token_length, token_bytes, search_id)
+);
+COMMENT ON TABLE name_search_postings IS
+    'Distinct Unicode-scalar contains (kind 1) and anchored-prefix (kind 2) tokens of lengths 1 through 3. The leading key supports a bounded ordered probe; search_id supports atomic exact membership replacement.';
+COMMENT ON COLUMN name_search_postings.namespace IS
+    'Namespace copied from the owning search document for lexical probes.';
+COMMENT ON COLUMN name_search_postings.spelling_class IS
+    'Spelling class copied from the owning search document: 0 raw-backed, 1 short structural, 2 long structural.';
+COMMENT ON COLUMN name_search_postings.token_kind IS
+    'Lexical token kind: 1 contains, 2 anchored prefix.';
+COMMENT ON COLUMN name_search_postings.token_length IS
+    'Number of Unicode scalar values in the token, from 1 through 3.';
+COMMENT ON COLUMN name_search_postings.token_bytes IS
+    'Exact UTF-8 bytes of the token, from 1 through 12 bytes.';
+COMMENT ON COLUMN name_search_postings.search_id IS
+    'Owning search document key; deleting the document deletes its postings.';
+CREATE INDEX IF NOT EXISTS name_search_postings_document_idx ON name_search_postings (search_id);
+CREATE INDEX IF NOT EXISTS name_surfaces_search_labelhashes_idx
+    ON name_surfaces USING gin (labelhashes) WHERE raw_name IS NULL;

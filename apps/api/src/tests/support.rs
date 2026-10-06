@@ -1928,6 +1928,14 @@ async fn upsert_test_name_surfaces(
             .iter()
             .map(|label| format!("{:#x}", alloy_primitives::keccak256(label.as_bytes())))
             .collect::<Vec<_>>();
+        let mut transaction = pool.begin().await?;
+        bigname_storage::identity_search::prepare(
+            &mut transaction,
+            &[],
+            std::slice::from_ref(&labelhashes),
+            std::slice::from_ref(&logical_name_id),
+        )
+        .await?;
         sqlx::query(
             r#"
             INSERT INTO bigname_phase.name_surfaces (
@@ -1944,7 +1952,7 @@ async fn upsert_test_name_surfaces(
                 canonicality_state = EXCLUDED.canonicality_state
             "#,
         )
-        .bind(logical_name_id)
+        .bind(&logical_name_id)
         .bind(&row.namespace)
         .bind(&row.normalized_name)
         .bind(raw_labels)
@@ -1958,8 +1966,15 @@ async fn upsert_test_name_surfaces(
         .bind(block_number)
         .bind(&row.provenance)
         .bind(row.canonicality_state.as_str())
-        .execute(pool)
+        .execute(&mut *transaction)
         .await?;
+        bigname_storage::identity_search::refresh(
+            &mut transaction,
+            std::slice::from_ref(&logical_name_id),
+            &[],
+        )
+        .await?;
+        transaction.commit().await?;
     }
     Ok(name_surfaces.to_vec())
 }
@@ -3700,6 +3715,14 @@ async fn insert_textless_surface(
 ) -> Result<String> {
     let node = label_path_node(labelhashes)?;
     let logical_name_id = format!("{namespace}:{node}");
+    let mut transaction = pool.begin().await?;
+    bigname_storage::identity_search::prepare(
+        &mut transaction,
+        &[],
+        &[labelhashes.to_vec()],
+        std::slice::from_ref(&logical_name_id),
+    )
+    .await?;
     sqlx::query(
         "INSERT INTO bigname_phase.name_surfaces (logical_name_id, namespace, namehash,
              labelhashes, normalizer_version, visibility_state, chain_id, block_hash,
@@ -3715,8 +3738,15 @@ async fn insert_textless_surface(
     .bind(format!("0xhistory{block}"))
     .bind(block)
     .bind(json!({"seed": "family_differential"}))
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
+    bigname_storage::identity_search::refresh(
+        &mut transaction,
+        std::slice::from_ref(&logical_name_id),
+        &[],
+    )
+    .await?;
+    transaction.commit().await?;
     Ok(logical_name_id)
 }
 
@@ -3866,22 +3896,43 @@ async fn read_family_pages_in(database: &TestDatabase, uri: &str, holder: &str) 
 /// this helper when its label preimage has not been observed.
 async fn insert_family_label_preimage(pool: &PgPool, raw_label: &[u8]) -> Result<String> {
     let hash = format!("{:#x}", alloy_primitives::keccak256(raw_label));
-    let decoded = std::str::from_utf8(raw_label).ok().filter(|label| !label.contains('\0'));
+    let decoded = std::str::from_utf8(raw_label)
+        .ok()
+        .filter(|label| !label.contains('\0'));
     let normalization_error = match decoded {
-        Some(label) => match bigname_domain::normalization::normalize_label_under_suffix(label, &[]) {
-            Ok(name) if name.normalized_name == label => None,
-            Ok(_) => Some("raw label is not byte-identical to its normalized form".to_owned()),
-            Err(error) => Some(error.to_string()),
-        },
+        Some(label) => {
+            match bigname_domain::normalization::normalize_label_under_suffix(label, &[]) {
+                Ok(name) if name.normalized_name == label => None,
+                Ok(_) => Some("raw label is not byte-identical to its normalized form".to_owned()),
+                Err(error) => Some(error.to_string()),
+            }
+        }
         None => Some("raw label has no PostgreSQL-safe UTF-8 decoding".to_owned()),
     };
-    sqlx::query("INSERT INTO label_preimages (labelhash, raw_label, decoded_label, normalizer_version,
+    let mut transaction = pool.begin().await?;
+    bigname_storage::identity_search::prepare(
+        &mut transaction,
+        std::slice::from_ref(&hash),
+        &[],
+        &[],
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO label_preimages (labelhash, raw_label, decoded_label, normalizer_version,
         normalized_under_version, normalization_error, source_kind, source_priority)
-        VALUES ($1, $2, $3, $4, $5, $6, 'fixture', 0) ON CONFLICT DO NOTHING")
-        .bind(&hash).bind(raw_label).bind(decoded)
-        .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION).bind(normalization_error.is_none())
-        .bind(normalization_error)
-        .execute(pool).await?;
+        VALUES ($1, $2, $3, $4, $5, $6, 'fixture', 0) ON CONFLICT DO NOTHING",
+    )
+    .bind(&hash)
+    .bind(raw_label)
+    .bind(decoded)
+    .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
+    .bind(normalization_error.is_none())
+    .bind(normalization_error)
+    .execute(&mut *transaction)
+    .await?;
+    bigname_storage::identity_search::refresh(&mut transaction, &[], std::slice::from_ref(&hash))
+        .await?;
+    transaction.commit().await?;
     Ok(hash)
 }
 

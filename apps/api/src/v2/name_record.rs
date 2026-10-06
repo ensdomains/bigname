@@ -42,11 +42,8 @@ mod verified;
 #[path = "name_record/wrapper.rs"]
 mod wrapper;
 
+use declared::chain_positions_created_at;
 pub(crate) use declared::{LapsedRegistration, lapsed_registration, registration_id};
-use declared::{
-    chain_positions_created_at, declared_created_at, declared_expires_at, declared_grace_ends_at,
-    declared_owner, declared_registered_at, declared_registration, declared_registry_owner,
-};
 pub(crate) use ens_v1::{
     EnsV1, ens_v1, ens_v1_of_registry_child, ens_v1_of_row, fill_wrapper_expiries,
 };
@@ -57,9 +54,7 @@ pub(super) use values::{
     network_from_parts, row_has_current_registration, row_serves_resolver, string_field,
     value_to_string,
 };
-use values::{
-    has_name_binding, json_chain_id, json_value_present, network, object_field, response_chain_id,
-};
+use values::{has_name_binding, json_chain_id, network, object_field, response_chain_id};
 pub(crate) use wrapper::{
     served_manager, wrapper_expiry, wrapper_lifecycle_matches_fuses, wrapper_metadata,
 };
@@ -471,71 +466,26 @@ fn registration_fields_from_parts(
     chain_positions: &Value,
     has_binding: bool,
 ) -> NameRegistrationFields {
-    let registration = declared_registration(declared_summary);
-    let owner = declared_owner(declared_summary);
-
+    let fields = bigname_storage::public_name_fields::registration_fields(
+        namespace,
+        declared_summary,
+        has_binding,
+    );
     NameRegistrationFields {
-        manager: served_manager(
-            declared_summary,
-            owner.as_ref(),
-            declared_registry_owner(declared_summary).as_ref(),
-        ),
-        registered_at: declared_registered_at(declared_summary),
-        created_at: declared_created_at(declared_summary)
+        owner: fields.owner,
+        manager: fields.manager,
+        registered_at: fields.registered_at,
+        created_at: fields
+            .created_at_declared
             .or_else(|| chain_positions_created_at(chain_positions)),
-        expires_at: declared_expires_at(declared_summary),
-        expires_at_reason: declared_summary
-            .pointer("/registration/expires_at_reason")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        grace_ends_at: declared_grace_ends_at(declared_summary),
-        registration_status: classify_registration_status(
-            namespace,
-            registration,
-            owner.as_deref(),
-            has_binding,
-        ),
-        owner,
+        expires_at: fields.expires_at,
+        expires_at_reason: fields.expires_at_reason,
+        grace_ends_at: fields.grace_ends_at,
+        registration_status: fields.registration_status,
     }
 }
 
-pub(crate) fn classify_registration_status(
-    namespace: &str,
-    registration: Option<&Value>,
-    owner: Option<&str>,
-    has_binding: bool,
-) -> RegistrationStatus {
-    // Classification is state at the indexed head. A registrar name past grace
-    // whose release block is not indexed yet still reads active with a past
-    // expires_at until reprojection observes released_at/status=released.
-    if !has_binding {
-        return RegistrationStatus::Unregistered;
-    }
-
-    let status = registration.and_then(|value| string_field(value.get("status")));
-    let authority_kind = registration.and_then(|value| string_field(value.get("authority_kind")));
-    let released_at = registration.and_then(|value| value.get("released_at"));
-
-    if released_at.is_some_and(json_value_present) || status.as_deref() == Some("released") {
-        return RegistrationStatus::Released;
-    }
-
-    match authority_kind.as_deref() {
-        Some("registrar") => RegistrationStatus::Active,
-        Some("registry_only") if owner.is_some_and(|value| !value.trim().is_empty()) => {
-            RegistrationStatus::Registered
-        }
-        Some("ens_v2_registry") if owner.is_some_and(|value| !value.trim().is_empty()) => {
-            RegistrationStatus::Registered
-        }
-        Some("wrapper") if namespace != bigname_storage::BASENAMES_NAMESPACE => {
-            RegistrationStatus::Wrapped
-        }
-        // At this point the name is bound; an unrecognized authority_kind or
-        // missing required owner evidence cannot be classified as registered.
-        _ => RegistrationStatus::Unregistered,
-    }
-}
+pub(crate) use bigname_storage::public_name_fields::classify_registration_status;
 
 pub(super) fn resolver(summary: &Value) -> Option<Resolver> {
     let resolver = object_field(summary, "resolver")?;
