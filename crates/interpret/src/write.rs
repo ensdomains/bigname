@@ -39,7 +39,9 @@ pub(crate) async fn batch(
         .map_err(|error| {
             crate::InterpretError::database("failed to set Interpret write isolation", error)
         })?;
-    let search_redo_names = match redo_range {
+    // Only range preparation and final repair mutate identities beyond this batch.
+    // Middle batches maintain their own names and changed-label fanout in identity::write_rows.
+    let search_redo_names = match redo_range.filter(|_| prepare_redo || complete) {
         Some(range) => search::prepare_redo(&mut transaction, chain_id, range, output).await?,
         None => Vec::new(),
     };

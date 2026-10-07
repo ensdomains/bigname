@@ -92,6 +92,9 @@ mod intermediary_migration;
 #[path = "tests/sunny_seal.rs"]
 mod sunny_seal;
 
+#[path = "tests/search_redo.rs"]
+mod search_redo;
+
 /// Exercises the checked-in Sepolia manifests through the production adapter and transition
 /// writer. Its BaseRegistrar address is pinned upstream here:
 /// (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L2 @ ens_v1@91c966f)
