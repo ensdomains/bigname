@@ -14,6 +14,8 @@ mod lookup_publication;
 mod lookup_import;
 #[path = "migrated_subnames/lookup_late_registry.rs"]
 mod lookup_late_registry;
+#[path = "migrated_subnames/lookup_links.rs"]
+mod lookup_links;
 #[path = "migrated_subnames/nested.rs"]
 mod nested;
 #[path = "migrated_subnames/replay.rs"]
