@@ -32,6 +32,8 @@ pub(crate) struct MirrorNearest {
     pub(crate) mirrored_pointer_source_family: String,
     pub(crate) mirrored_pointer_namespace: String,
     pub(crate) mirrored_block_number: i64,
+    /// Supported and admitted in the pointer's namespace, independently of structural limits.
+    pub(crate) mirrored_classification_supported: bool,
     pub(crate) forwarding: &'static str,
     pub(crate) mirrored_unsupported_reason: Option<String>,
 }
@@ -271,6 +273,7 @@ async fn nearest(
             mirrored_pointer_source_family: row.try_get("source_family")?,
             mirrored_pointer_namespace: row.try_get("namespace")?,
             mirrored_block_number: row.try_get("block_number")?,
+            mirrored_classification_supported: false,
             forwarding: "direct_call",
             mirrored_unsupported_reason: None,
         }));
@@ -299,6 +302,9 @@ fn latest_registry_first(alias: &str) -> String {
 
 /// The forwarding mode and the stopping rules of the mirror selection.
 fn classify(nearest: &mut MirrorNearest, resolver: Option<&ResolverClassification>) {
+    nearest.mirrored_classification_supported = resolver.is_some_and(|resolver| {
+        resolver.supported() && resolver.declared_in(&nearest.mirrored_pointer_namespace)
+    });
     let extended =
         resolver.is_some_and(|resolver| resolver.has_read_feature("ensip10_extended_resolver"));
     nearest.forwarding = if extended {

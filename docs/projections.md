@@ -410,6 +410,9 @@ ordinary child pointer admission, directly or through the ENSv1 mirror. A
 proven absence sets `unresolvable_reason`; a different or unproved target sets
 `resolution_unsupported_reason`. Both withhold the record-serving resource and
 direct topology without changing ownership, registration or authority coverage.
+For a mirror, the inner target must have a supported classification declared in
+its pointer's namespace before it can be treated as a known target. This proof
+is independent of the mirror record row's structural rejection reason.
 See the [API reasons and limits](api-v1.md#expiry-and-grace).
 
 For a recognized WrapperRegistry, retained activated `MigrationApplied` evidence

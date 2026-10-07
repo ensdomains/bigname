@@ -257,6 +257,14 @@ impl Walk {
         )
         .await?;
         outcome.decision = if mirror
+            .nearest
+            .as_ref()
+            .is_some_and(|nearest| !nearest.mirrored_classification_supported)
+        {
+            // A structural mirror reason can precede support/namespace checks. It does not
+            // prove a known target, even when the address matches the retained pointer.
+            Decision::Unknown
+        } else if mirror
             .substituted(&pointer)
             .is_some_and(|target| retained_resolver == Some(target.resolver_address.as_str()))
         {

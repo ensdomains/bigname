@@ -2065,6 +2065,11 @@ resolver, indexed records, primary address, direct resolution topology and
 authority coverage remain independent. Verified execution uses current Universal
 Resolver discovery and may supply a request-scoped answer.
 
+The same classification requirement applies to the inner ENSv1 resolver selected
+by a mirror. A missing, inactive, unsupported or differently namespaced declaration
+leaves that target unproved, even when its address matches the retained child
+pointer. Existing mirror record-row reasons and provenance remain unchanged.
+
 A direct leaf at a declared ENSv1 node-based resolver preserves records when it
 selects the same resolver and requested node as the ordinary child row. An
 ENSV1Resolver path preserves exact-child records only when the mirror's ENSv1
