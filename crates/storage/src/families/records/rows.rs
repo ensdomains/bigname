@@ -1,6 +1,6 @@
 //! The F6 and F7 rows one serving pointer admits (record_inventory.rs, `attributed_events`), read
 //! as record candidates, and the partition version events that are boundary candidates.
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
@@ -153,7 +153,7 @@ pub(crate) type PartitionKey = (String, &'static str, String);
 #[derive(Default)]
 pub(crate) struct PartitionRows {
     versions: HashMap<(String, String, String), Vec<FamilyPosition>>,
-    values: HashMap<(String, String, String), Vec<RecordCandidate>>,
+    values: HashMap<(String, String, String), BTreeMap<String, RecordCandidate>>,
 }
 
 impl PartitionRows {
@@ -162,6 +162,7 @@ impl PartitionRows {
     pub(crate) fn of(
         &self,
         partitions: &[PartitionKey],
+        requested: Option<&BTreeSet<String>>,
     ) -> (Vec<FamilyPosition>, Vec<RecordCandidate>) {
         let mut versions: Vec<FamilyPosition> = Vec::new();
         let mut values = Vec::new();
@@ -172,7 +173,7 @@ impl PartitionRows {
                     versions.push(version.clone());
                 }
             }
-            values.extend(self.values.get(&key).into_iter().flatten().cloned());
+            values.extend(select_values(self.values.get(&key), requested));
         }
         (versions, values)
     }
@@ -185,7 +186,9 @@ pub(crate) async fn load_partitions(
     chain_id: &str,
     partitions: &[PartitionKey],
     publication_block: i64,
+    requested: Option<&BTreeSet<(PartitionKey, String)>>,
 ) -> Result<PartitionRows> {
+    let started = super::seams::lookup_work_timer();
     let unique: BTreeSet<&PartitionKey> = partitions.iter().collect();
     if unique.is_empty() {
         return Ok(PartitionRows::default());
@@ -213,6 +216,7 @@ pub(crate) async fn load_partitions(
     .fetch_all(&mut *conn)
     .await
     .context("failed to load the admitted record partitions")?;
+    let version_count = versions.len();
     for row in versions {
         let Some(position) = row
             .try_get::<Value, _>("version_position")
@@ -227,18 +231,41 @@ pub(crate) async fn load_partitions(
             .or_default()
             .push(position);
     }
+    let version_elapsed = started.map(|t| t.elapsed().as_secs_f64() * 1000.0);
+    let values_started = super::seams::lookup_work_timer();
     let columns = VALUE_COLUMNS
         .split(',')
         .map(|column| format!("value.{}", column.trim()))
         .collect::<Vec<_>>()
         .join(", ");
-    let values = sqlx::query(&format!(
+    // Separate all-key and exact-key query shapes keep every requested tuple index-bounded.
+    // Partition versions above are read even when none of the requested values exist.
+    let (resolvers, arms, identities, keys): (Vec<&str>, Vec<&str>, Vec<&str>, Vec<&str>) =
+        match requested {
+            None => (resolvers, arms, identities, Vec::new()),
+            Some(requested) => (
+                requested.iter().map(|((r, _, _), _)| r.as_str()).collect(),
+                requested.iter().map(|((_, a, _), _)| *a).collect(),
+                requested.iter().map(|((_, _, i), _)| i.as_str()).collect(),
+                requested.iter().map(|(_, k)| k.as_str()).collect(),
+            ),
+        };
+    let admitted = if requested.is_some() {
+        "JOIN unnest($2::text[], $3::text[], $4::text[], $6::text[]) admitted (resolver_address, arm, arm_identity, record_key)
+           ON admitted.resolver_address = value.resolver_address
+          AND admitted.arm = value.arm AND admitted.arm_identity = value.arm_identity
+          AND admitted.record_key = value.record_key"
+    } else {
+        "JOIN unnest($2::text[], $3::text[], $4::text[]) admitted (resolver_address, arm, arm_identity)
+           ON admitted.resolver_address = value.resolver_address
+          AND admitted.arm = value.arm AND admitted.arm_identity = value.arm_identity"
+    };
+    let statement = format!(
+
         "SELECT {columns}, value.resolver_address, value.arm, value.arm_identity,
                 value.sibling_position, {}
          FROM bigname_phase.project_node_record_value value
-         JOIN unnest($2::text[], $3::text[], $4::text[]) admitted (resolver_address, arm, arm_identity)
-           ON admitted.resolver_address = value.resolver_address
-          AND admitted.arm = value.arm AND admitted.arm_identity = value.arm_identity
+         {admitted}
          LEFT JOIN bigname_phase.project_node_record_partition partition
            ON (partition.chain_id, partition.resolver_address, partition.arm, partition.arm_identity) =
               (value.chain_id, value.resolver_address, value.arm, value.arm_identity)
@@ -249,21 +276,37 @@ pub(crate) async fn load_partitions(
            ON surface.logical_name_id = value.logical_name_id
          WHERE value.chain_id = $1",
         text_hydration::COLUMNS
-    ))
-    .bind(chain_id)
-    .bind(&resolvers)
-    .bind(&arms)
-    .bind(&identities)
-    .bind(publication_block)
-    .fetch_all(&mut *conn)
-    .await
-    .context("failed to load the admitted record values")?;
+    );
+    let query = sqlx::query(&statement)
+        .bind(chain_id)
+        .bind(&resolvers)
+        .bind(&arms)
+        .bind(&identities)
+        .bind(publication_block);
+    let query = if requested.is_some() {
+        query.bind(&keys)
+    } else {
+        query
+    };
+    let values = query
+        .fetch_all(&mut *conn)
+        .await
+        .context("failed to load the admitted record values")?;
     for row in &values {
-        rows.values
-            .entry(partition_key(row)?)
-            .or_default()
-            .push(RecordCandidate::from_row(row, true)?);
+        rows.values.entry(partition_key(row)?).or_default().insert(
+            row.try_get("record_key")?,
+            RecordCandidate::from_row(row, true)?,
+        );
     }
+    super::seams::note_lookup_work(|| {
+        serde_json::json!({
+            "stage":"partition_sources", "key_only":requested.is_some(),
+            "distinct_partitions":unique.len(), "distinct_source_key_requests":requested.map(|r| r.len()),
+            "version_rows":version_count, "candidate_rows_loaded":values.len(),
+            "version_load_ms":version_elapsed,
+            "candidate_load_and_decode_ms":values_started.map(|t| t.elapsed().as_secs_f64()*1000.0),
+        })
+    });
     Ok(rows)
 }
 
@@ -281,9 +324,11 @@ pub(crate) async fn load_record_id_values(
     conn: &mut PgConnection,
     chain_id: &str,
     record_ids: &[(String, String)],
-) -> Result<HashMap<(String, String), Vec<RecordCandidate>>> {
+    requested: Option<&BTreeSet<((String, String), String)>>,
+) -> Result<HashMap<(String, String), BTreeMap<String, RecordCandidate>>> {
+    let started = super::seams::lookup_work_timer();
     let unique: BTreeSet<&(String, String)> = record_ids.iter().collect();
-    let mut out: HashMap<(String, String), Vec<RecordCandidate>> = HashMap::new();
+    let mut out: HashMap<(String, String), BTreeMap<String, RecordCandidate>> = HashMap::new();
     if unique.is_empty() {
         return Ok(out);
     }
@@ -292,24 +337,70 @@ pub(crate) async fn load_record_id_values(
         .map(|(resolver, _)| resolver.as_str())
         .collect();
     let ids: Vec<&str> = unique.iter().map(|(_, id)| id.as_str()).collect();
-    let rows = sqlx::query(&format!(
+    let (resolvers, ids, keys): (Vec<&str>, Vec<&str>, Vec<&str>) = match requested {
+        None => (resolvers, ids, Vec::new()),
+        Some(requested) => (
+            requested.iter().map(|((r, _), _)| r.as_str()).collect(),
+            requested.iter().map(|((_, i), _)| i.as_str()).collect(),
+            requested.iter().map(|(_, k)| k.as_str()).collect(),
+        ),
+    };
+    let predicate = if requested.is_some() {
+        "(resolver_address, record_id, record_key) IN (
+            SELECT * FROM unnest($2::text[], $3::text[], $4::text[]))"
+    } else {
+        "(resolver_address, record_id) IN (
+            SELECT * FROM unnest($2::text[], $3::text[]))"
+    };
+    let statement = format!(
         "SELECT {VALUE_COLUMNS}, resolver_address, record_id
-         FROM bigname_phase.project_record_id_value
-         WHERE chain_id = $1
-           AND (resolver_address, record_id) IN (
-               SELECT requested.resolver_address, requested.record_id
-               FROM unnest($2::text[], $3::text[]) requested (resolver_address, record_id))"
-    ))
-    .bind(chain_id)
-    .bind(&resolvers)
-    .bind(&ids)
-    .fetch_all(&mut *conn)
-    .await
-    .context("failed to load the linked record values")?;
+        FROM bigname_phase.project_record_id_value WHERE chain_id=$1 AND {predicate}"
+    );
+    let query = sqlx::query(&statement)
+        .bind(chain_id)
+        .bind(&resolvers)
+        .bind(&ids);
+    let query = if requested.is_some() {
+        query.bind(&keys)
+    } else {
+        query
+    };
+    let rows = query
+        .fetch_all(&mut *conn)
+        .await
+        .context("failed to load the linked record values")?;
     for row in &rows {
         out.entry((row.try_get("resolver_address")?, row.try_get("record_id")?))
             .or_default()
-            .push(RecordCandidate::from_row(row, false)?);
+            .insert(
+                row.try_get("record_key")?,
+                RecordCandidate::from_row(row, false)?,
+            );
     }
+    super::seams::note_lookup_work(|| {
+        serde_json::json!({
+            "stage":"record_id_sources", "key_only":requested.is_some(),
+            "distinct_record_ids":unique.len(), "distinct_source_key_requests":requested.map(|r| r.len()),
+            "candidate_rows_loaded":rows.len(),
+            "load_and_decode_ms":started.map(|t| t.elapsed().as_secs_f64()*1000.0),
+        })
+    });
     Ok(out)
+}
+
+/// Exact map lookups avoid copying other keys requested by a different resource sharing a source.
+pub(crate) fn select_values(
+    values: Option<&BTreeMap<String, RecordCandidate>>,
+    requested: Option<&BTreeSet<String>>,
+) -> Vec<RecordCandidate> {
+    let Some(values) = values else {
+        return Vec::new();
+    };
+    match requested {
+        None => values.values().cloned().collect(),
+        Some(keys) => keys
+            .iter()
+            .filter_map(|key| values.get(key).cloned())
+            .collect(),
+    }
 }

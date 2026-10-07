@@ -11,6 +11,70 @@ sol! {
     event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value);
 }
 
+pub(super) async fn observed<F: std::future::Future>(future: F) -> (F::Output, Vec<Value>) {
+    let work = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let result =
+        bigname_storage::families::records::seams::with_lookup_work(work.clone(), future).await;
+    let observations = work.lock().unwrap().clone();
+    (result, observations)
+}
+
+pub(super) fn count(work: &[Value], stage: &str, field: &str) -> u64 {
+    work.iter()
+        .filter(|v| v["stage"] == stage)
+        .map(|v| v[field].as_u64().unwrap_or(0))
+        .sum()
+}
+
+pub(super) fn assert_key_work(work: &[Value], keys: u64, old: u64) {
+    assert_eq!(
+        count(work, "resource_work", "full_resources"),
+        0,
+        "{work:#?}"
+    );
+    assert_eq!(
+        count(work, "key_components", "requested_resource_keys"),
+        keys,
+        "{work:#?}"
+    );
+    assert_eq!(
+        count(work, "key_components", "constructed_components"),
+        keys,
+        "{work:#?}"
+    );
+    assert_eq!(
+        count(work, "key_serialization", "payloads"),
+        keys,
+        "{work:#?}"
+    );
+    assert_eq!(
+        count(work, "old_record_keys", "rows_loaded"),
+        old,
+        "{work:#?}"
+    );
+    let comparisons: Vec<_> = work
+        .iter()
+        .filter(|v| v["stage"] == "comparison" && v["table"] == "project_lookup_record")
+        .collect();
+    assert_eq!(
+        comparisons
+            .iter()
+            .map(|v| v["compared_keys"].as_u64().unwrap())
+            .sum::<u64>(),
+        keys,
+        "{work:#?}"
+    );
+    assert!(
+        work.iter()
+            .filter(|v| v["stage"] == "journal_and_write"
+                && v["table"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with("project_lookup_")))
+            .all(|v| v["table"] == "project_lookup_record"),
+        "{work:#?}"
+    );
+}
+
 pub(super) async fn components(database: &TestDatabase) -> Result<Value> {
     let mut out = serde_json::Map::new();
     for table in [
@@ -141,7 +205,36 @@ async fn lookup_precomputation_produced_full_records_incremental_undo_and_empty_
     seed_and_run_with(&database, &second, 123, 123, &[(123, 0, GRANTEE)], None).await?;
     let before_update = components(&database).await?;
     let changed = text(resolver, 124, "display name,a", "second")?;
-    seed_and_run_with(&database, &changed, 124, 124, &[(124, 0, GRANTEE)], None).await?;
+    let (result, work) = observed(seed_and_run_with(
+        &database,
+        &changed,
+        124,
+        124,
+        &[(124, 0, GRANTEE)],
+        None,
+    ))
+    .await;
+    result?;
+    assert_key_work(&work, 1, 1);
+    assert!(
+        count(&work, "partition_sources", "candidate_rows_loaded") <= 2,
+        "{work:#?}"
+    );
+    let bookkeeping: Vec<String> = sqlx::query_scalar("SELECT family FROM project_family_undo WHERE chain_id=$1 AND block_number=$2 AND family IN ('project_node_record_partition','project_resolver_classification')")
+        .bind(PATH_CHAIN).bind(BASE+124).fetch_all(&database.pool).await?;
+    assert!(
+        bookkeeping
+            .iter()
+            .any(|family| family == "project_node_record_partition"),
+        "real F6 write touches its partition"
+    );
+    assert!(
+        !bookkeeping
+            .iter()
+            .any(|family| family == "project_resolver_classification"),
+        "a record value does not propose a new resolver classification"
+    );
+    eprintln!("incremental_f6_work={}", json!(work));
     let after = assert_name_prepared_parity(&database, CHILD).await?;
     assert_eq!(after["records"]["texts"]["display name,a"], "second");
     assert_eq!(after["records"]["texts"]["kept"], "unchanged");
@@ -159,8 +252,7 @@ async fn lookup_precomputation_produced_full_records_incremental_undo_and_empty_
     assert!(
         journal
             .iter()
-            .all(|(family, _)| family == "project_lookup_record"
-                || family == "project_lookup_inventory"),
+            .all(|(family, _)| family == "project_lookup_record"),
         "a value edit does not fan out to aliases/relations/dependencies: {journal:?}"
     );
     let before_empty = components(&database).await?;

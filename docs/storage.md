@@ -379,8 +379,15 @@ links and linked record IDs. Empty and losing inputs remain dependencies, so
 later insertions are considered. Name work uses the shared summary and resolution
 path selectors before their clocks are consumed. Project composes against its
 upcoming publication, diffs complete rows, and journals only changed keys through
-`project_family_undo`. A value edit does not rewrite other selected values or
-unchanged aliases. An unreferenced inventory and its keys/dependencies are removed
+`project_family_undo`. An ordinary value edit retains its exact record key and
+reselects only that key across the admitted partitions and selected record ID,
+using the same cutoff and winner rules as full composition. Indexed source reads,
+component construction and old-row comparison are bounded to those keys; other
+selected values, inventory metadata and dependencies are not recomposed or rewritten.
+Partition bookkeeping and classification usage touches do not force full refresh:
+Project compares the journalled old selection inputs with the final base rows.
+Changes to pointer/link/reference selection, partition version, classification or
+admission still select full refresh, which takes precedence over key work. An unreferenced inventory and its keys/dependencies are removed
 in that transaction. Undo and full reset cover all five tables.
 
 Spelling, publication positions, surface provenance and primary claims remain

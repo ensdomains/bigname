@@ -9,6 +9,6 @@ pub(crate) use read::load_on;
 pub use read::{ensure_publications, load_lookup_records};
 mod types;
 pub use super::name::compose_lookup_names_at;
-pub use super::records::compose_lookup_inventories_at;
+pub use super::records::{compose_lookup_inventories_at, compose_lookup_record_keys_at};
 pub use inventory::LookupInventoryMetadata;
 pub use types::*;

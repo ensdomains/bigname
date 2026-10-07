@@ -71,7 +71,7 @@ pub(super) async fn refresh(
         }
         let resources: Vec<_> = resources.into_iter().collect();
         sqlx::query("/* project:families.lookup.reference_work */ INSERT INTO pg_temp.bigname_lookup_inventory_work
-            SELECT resource, false FROM unnest($1::uuid[]) resource ON CONFLICT DO NOTHING")
+            SELECT resource, true FROM unnest($1::uuid[]) resource ON CONFLICT (resource_id) DO UPDATE SET refresh=true")
             .bind(resources).execute(&mut **transaction).await
             .map_err(|e| ProjectError::database("failed to retain changed lookup references", e))?;
         changed(

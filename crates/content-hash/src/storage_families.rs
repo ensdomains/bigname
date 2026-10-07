@@ -27,6 +27,7 @@ pub(crate) const COMPOSITION_FILES: &[&str] = &[
     "crates/storage/src/families/records/address_names.rs",
     "crates/storage/src/families/records/assemble.rs",
     "crates/storage/src/families/records/inventory_publication.rs",
+    "crates/storage/src/families/records/inventory_selection.rs",
     "crates/storage/src/families/records/inventory_types.rs",
     "crates/storage/src/families/records/inventory_cutoff.rs",
     "crates/storage/src/families/records/links.rs",

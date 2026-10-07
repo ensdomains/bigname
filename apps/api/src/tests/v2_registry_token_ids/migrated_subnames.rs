@@ -10,6 +10,8 @@ mod direct;
 mod lookup_hydration;
 #[path = "migrated_subnames/lookup_import.rs"]
 mod lookup_import;
+#[path = "migrated_subnames/lookup_incremental.rs"]
+mod lookup_incremental;
 #[path = "migrated_subnames/lookup_late_registry.rs"]
 mod lookup_late_registry;
 #[path = "migrated_subnames/lookup_lifecycle.rs"]

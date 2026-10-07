@@ -2,6 +2,7 @@
 use super::*;
 use alloy_primitives::B256;
 
+const COMPANION: &str = "companion.envoy1084.eth";
 const LINKED: &str = "0x0000000000000000000000000000000000025910";
 const IMPLEMENTATION: &str = "0x115eb53f0c60696633855f90b138178fb40b2b2c";
 const FACTORY: &str = "0xda70306c98e97ece36f997a21368e53298572991";
@@ -43,16 +44,24 @@ fn text(id: u64, key: &str, value: &str) -> Result<(Address, alloy_primitives::L
     ))
 }
 
-fn address(id: u64, value: &str) -> Result<(Address, alloy_primitives::LogData)> {
+fn address_bytes(
+    id: u64,
+    coin: u64,
+    value: Vec<u8>,
+) -> Result<(Address, alloy_primitives::LogData)> {
     Ok((
         LINKED.parse()?,
         AddressUpdated {
             recordId: U256::from(id),
-            coinType: U256::from(60),
-            addressBytes: value.parse::<Address>()?.to_vec().into(),
+            coinType: U256::from(coin),
+            addressBytes: value.into(),
         }
         .encode_log_data(),
     ))
+}
+
+fn address(id: u64, value: &str) -> Result<(Address, alloy_primitives::LogData)> {
+    address_bytes(id, 60, value.parse::<Address>()?.to_vec())
 }
 
 async fn update(
@@ -79,6 +88,26 @@ async fn dependency(database: &TestDatabase, kind: &str, key2: &str) -> Result<b
         WHERE name.logical_name_id=$1 AND dependency.kind=$2 AND dependency.key1=$3 AND dependency.key2=$4)")
         .bind(format!("ens:{}", bigname_lookup::ens_namehash_hex(CHILD)?))
         .bind(kind).bind(LINKED).bind(key2).fetch_one(&database.pool).await?)
+}
+
+async fn child_inventory(database: &TestDatabase) -> Result<Value> {
+    let resource: Uuid = sqlx::query_scalar(
+        "SELECT record_serving_resource_id FROM project_lookup_name WHERE logical_name_id=$1",
+    )
+    .bind(format!("ens:{}", bigname_lookup::ens_namehash_hex(CHILD)?))
+    .fetch_one(&database.pool)
+    .await?;
+    let mut out = serde_json::Map::new();
+    for table in [
+        "project_lookup_inventory",
+        "project_lookup_record",
+        "project_lookup_dependency",
+    ] {
+        let rows: Vec<Value> = sqlx::query_scalar(&format!("SELECT to_jsonb(row) FROM {table} row WHERE resource_id=$1 ORDER BY to_jsonb(row)::text"))
+            .bind(resource).fetch_all(&database.pool).await?;
+        out.insert(table.into(), json!(rows));
+    }
+    Ok(Value::Object(out))
 }
 
 #[tokio::test]
@@ -140,6 +169,30 @@ async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_u
             .encode_log_data(),
         )],
     ));
+    creation.extend(transaction(
+        122,
+        2,
+        vec![
+            (
+                "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".parse()?,
+                NewOwner {
+                    node: bigname_lookup::ens_namehash_hex(NAME)?.parse()?,
+                    label: keccak256("companion"),
+                    owner,
+                }
+                .encode_log_data(),
+            ),
+            (
+                "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".parse()?,
+                NewResolver {
+                    node: bigname_lookup::ens_namehash_hex(COMPANION)?.parse()?,
+                    resolver,
+                }
+                .encode_log_data(),
+            ),
+        ],
+    ));
+    creation.extend(transaction(122, 3, vec![link(COMPANION, 0)?]));
     for (index, log) in creation.iter_mut().enumerate() {
         log.log_index = index as i64;
     }
@@ -148,7 +201,12 @@ async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_u
         &creation,
         122,
         122,
-        &[(122, 0, GRANTEE), (122, 1, GRANTEE)],
+        &[
+            (122, 0, GRANTEE),
+            (122, 1, GRANTEE),
+            (122, 2, HOLDER),
+            (122, 3, GRANTEE),
+        ],
         &[(122, 0, FACTORY)],
         None,
     )
@@ -173,6 +231,9 @@ async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_u
             link("", 1)?,
             address(1, HOLDER)?,
             text(1, "display name,a", "default")?,
+            text(1, "unchanged-1", "one")?,
+            text(1, "unchanged-2", "two")?,
+            text(1, "unchanged-3", "three")?,
         ],
     )
     .await?;
@@ -195,12 +256,12 @@ async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_u
     let value = update(&database, 125, vec![address(2, GRANTEE)?]).await?;
     assert_eq!(value["primary_address"], GRANTEE);
 
-    let components = lookup_publication::components(&database).await?;
+    let components = child_inventory(&database).await?;
     // A losing default link is still consulted, but its change cannot rewrite the current
     // exact-record result. Both ids already exist, satisfying linkToRecord's guard.
     // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/PermissionedResolver.sol:L242-L251 @ ens_v2_sepolia_20261001@07e55a05)
     update(&database, 126, vec![link("", 2)?]).await?;
-    assert_eq!(lookup_publication::components(&database).await?, components);
+    assert_eq!(child_inventory(&database).await?, components);
     let cleared = update(&database, 127, vec![link(CHILD, 0)?]).await?;
     assert_eq!(
         cleared["primary_address"], GRANTEE,
@@ -212,9 +273,39 @@ async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_u
     assert_eq!(restored["primary_address"], HOLDER);
     assert_eq!(restored["records"]["texts"]["display name,a"], "default");
     let restored_components = lookup_publication::components(&database).await?;
-    let edited = update(&database, 130, vec![text(1, "display name,a", "changed")?]).await?;
+    let full_reads = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (result, work) = lookup_publication::observed(
+        bigname_storage::families::records::seams::with_inventory_read_counter(
+            full_reads.clone(),
+            seed_and_run_with(
+                &database,
+                &transaction(130, 0, vec![text(1, "display name,a", "changed")?]),
+                130,
+                130,
+                &[(130, 0, GRANTEE)],
+                None,
+            ),
+        ),
+    )
+    .await;
+    result?;
+    lookup_publication::assert_key_work(&work, 2, 2);
+    assert_eq!(
+        lookup_publication::count(&work, "record_id_sources", "candidate_rows_loaded"),
+        1,
+        "shared source key is read once: {work:#?}"
+    );
+    eprintln!("incremental_f7_work={}", json!(work));
+    let companion = lookup_publication::assert_name_prepared_parity(&database, COMPANION).await?;
+    assert_eq!(companion["records"]["texts"]["display name,a"], "changed");
+    let edited = lookup_publication::assert_name_prepared_parity(&database, CHILD).await?;
     assert_eq!(edited["records"]["texts"]["display name,a"], "changed");
     assert_eq!(edited["primary_address"], HOLDER);
+    assert!(
+        full_reads.lock().unwrap().is_empty(),
+        "one value edit must not compose full inventories: {:?}",
+        full_reads.lock().unwrap()
+    );
     bigname_project::families::undo_to(&database.pool, PATH_CHAIN, BASE + 129).await?;
     assert_eq!(
         lookup_publication::components(&database).await?,
@@ -222,7 +313,48 @@ async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_u
     );
     publish(&database, 130).await?;
     lookup_publication::assert_name_prepared_parity(&database, CHILD).await?;
-    replay::assert_rebuild(&database, 130).await?;
+    // Empty exact EVM bytes select the default at read time; these remain separate keys.
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/AbstractRecordResolver.sol:L170-L177 @ ens_v2_sepolia_20261001@07e55a05)
+    let fallback = update(
+        &database,
+        131,
+        vec![
+            address_bytes(1, 2147483648, GRANTEE.parse::<Address>()?.to_vec())?,
+            address_bytes(1, 60, Vec::new())?,
+        ],
+    )
+    .await?;
+    assert_eq!(fallback["primary_address"], GRANTEE);
+    let exact = update(&database, 132, vec![address(1, HOLDER)?]).await?;
+    assert_eq!(exact["primary_address"], HOLDER);
+    let cleared = update(&database, 133, vec![address_bytes(1, 60, Vec::new())?]).await?;
+    assert_eq!(cleared["primary_address"], GRANTEE);
+    let fallback = update(
+        &database,
+        134,
+        vec![address_bytes(
+            1,
+            2147483648,
+            HOLDER.parse::<Address>()?.to_vec(),
+        )?],
+    )
+    .await?;
+    assert_eq!(fallback["primary_address"], HOLDER);
+    let names = path_get(
+        &database,
+        &format!("/v1/addresses/{HOLDER}/names?namespace=ens&relation=resolves_to&coin_type=60"),
+    )
+    .await?;
+    assert!(
+        names["data"]
+            .as_array()
+            .context("resolves-to names")?
+            .iter()
+            .any(|record| record["name"] == CHILD),
+        "{names:#}"
+    );
+    replay::assert_rebuild(&database, 134).await?;
     lookup_publication::assert_name_prepared_parity(&database, CHILD).await?;
+    lookup_publication::assert_name_prepared_parity(&database, COMPANION).await?;
     database.cleanup().await
 }

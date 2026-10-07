@@ -254,7 +254,10 @@ async fn lookup_precomputation_publishes_successful_failed_and_undone_text_hydra
 
     text(&database, 124).await?;
     *state.value.lock().unwrap() = None;
-    apply_hydrated(&database, 124, &endpoint).await?;
+    let (result, work) =
+        lookup_publication::observed(apply_hydrated(&database, 124, &endpoint)).await;
+    result?;
+    lookup_publication::assert_key_work(&work, 1, 1);
     let failed = parity(&database).await?;
     assert!(failed["records"]["texts"]["url"].is_null(), "{failed:#}");
     let failed_components = lookup_publication::components(&database).await?;
@@ -273,10 +276,11 @@ async fn lookup_precomputation_publishes_successful_failed_and_undone_text_hydra
     let journal:Vec<String>=sqlx::query_scalar("SELECT family FROM project_family_undo WHERE chain_id=$1 AND block_number=$2 AND family LIKE 'project_lookup_%'")
         .bind(CHAIN).bind(BASE+124).fetch_all(&database.pool).await?;
     assert!(!journal.is_empty());
-    assert!(journal.iter().all(|family| matches!(
-        family.as_str(),
-        "project_lookup_record" | "project_lookup_inventory"
-    )));
+    assert!(
+        journal
+            .iter()
+            .all(|family| family == "project_lookup_record")
+    );
     server.abort();
     database.cleanup().await
 }

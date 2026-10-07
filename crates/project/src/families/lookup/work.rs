@@ -9,10 +9,13 @@ pub(in crate::families) async fn prepare(
     block: &BlockHeader,
     after: i64,
 ) -> Result<()> {
+    let started = bigname_storage::families::records::seams::lookup_work_timer();
     sqlx::query("/* project:families.lookup.create_name_work */ CREATE TEMP TABLE bigname_lookup_name_work (logical_name_id text COLLATE \"C\" PRIMARY KEY) ON COMMIT DROP")
         .execute(&mut **transaction).await.map_err(|e| ProjectError::database("failed to create lookup name work", e))?;
     sqlx::query("/* project:families.lookup.create_inventory_work */ CREATE TEMP TABLE bigname_lookup_inventory_work (resource_id uuid PRIMARY KEY, refresh boolean NOT NULL) ON COMMIT DROP")
         .execute(&mut **transaction).await.map_err(|e| ProjectError::database("failed to create lookup inventory work", e))?;
+    sqlx::query("/* project:families.lookup.create_record_work */ CREATE TEMP TABLE bigname_lookup_record_work (resource_id uuid, record_key text COLLATE \"C\", PRIMARY KEY (resource_id, record_key)) ON COMMIT DROP")
+        .execute(&mut **transaction).await.map_err(|e| ProjectError::database("failed to create lookup record work", e))?;
     sqlx::query(&format!("/* project:families.lookup.name_work */ INSERT INTO pg_temp.bigname_lookup_name_work {SUMMARY_WORK_LIST} ON CONFLICT DO NOTHING"))
         .bind(chain).bind(block.number).bind(block.timestamp_seconds).bind(after)
         .execute(&mut **transaction).await.map_err(|e| ProjectError::database("failed to capture lookup name work", e))?;
@@ -41,5 +44,10 @@ pub(in crate::families) async fn prepare(
         .map_err(|e| {
             ProjectError::database("failed to capture lookup inventory dependencies", e)
         })?;
+    bigname_storage::families::records::seams::note_lookup_work(|| {
+        serde_json::json!({
+            "stage":"work_selection", "elapsed_ms":started.map(|t| t.elapsed().as_secs_f64()*1000.0),
+        })
+    });
     Ok(())
 }

@@ -305,34 +305,13 @@ pub(crate) fn assemble(
         let Some(record) = by_key.get(key.as_str()) else {
             continue;
         };
-        let zero_absent = payload::coin60_zero_address_is_absent(
-            &record.payload,
-            &record.source_family,
-            &pointer.source_family,
-        );
-        if zero_absent {
+        let component = record_component(record, pointer);
+        if component.zero_address_absent {
             zero_keys.push(json!(key));
         }
-        let selected_entries: Vec<_> = payload::entry(
-            &record.payload,
-            record.stored_status.as_deref(),
-            zero_absent,
-        )
-        .into_iter()
-        .collect();
-        let selected_selectors: Vec<_> = payload::selector(&record.payload).into_iter().collect();
-        entries.extend(selected_entries.iter().cloned());
-        selectors.extend(selected_selectors.iter().cloned());
-        components.insert(
-            key.clone(),
-            crate::families::lookup::LookupRecordEntry {
-                entries: selected_entries,
-                selectors: selected_selectors,
-                normalized_event_id: record.normalized_event_id,
-                zero_address_absent: zero_absent,
-                unsupported_family: payload::unsupported_family(&record.payload),
-            },
-        );
+        entries.extend(component.entries.iter().cloned());
+        selectors.extend(component.selectors.iter().cloned());
+        components.insert(key.clone(), component);
     }
     let mut unsupported_families: Vec<Value> = reads
         .ordered(&families)
@@ -522,4 +501,31 @@ pub(crate) fn unsupported_mirror_row(
         false,
         Some(&reason),
     )
+}
+
+/// The persisted component is per key. Observed unsupported families are recombined at read;
+/// the only fixed missing-getter family is contenthash, which unsupported_family never emits.
+/// This keeps metadata independent of other keys when one value changes.
+pub(super) fn record_component(
+    record: &ServedRecord,
+    pointer: &ServingPointer,
+) -> crate::families::lookup::LookupRecordEntry {
+    let zero_absent = payload::coin60_zero_address_is_absent(
+        &record.payload,
+        &record.source_family,
+        &pointer.source_family,
+    );
+    crate::families::lookup::LookupRecordEntry {
+        entries: payload::entry(
+            &record.payload,
+            record.stored_status.as_deref(),
+            zero_absent,
+        )
+        .into_iter()
+        .collect(),
+        selectors: payload::selector(&record.payload).into_iter().collect(),
+        normalized_event_id: record.normalized_event_id,
+        zero_address_absent: zero_absent,
+        unsupported_family: payload::unsupported_family(&record.payload),
+    }
 }
