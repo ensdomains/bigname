@@ -69,14 +69,15 @@ async fn update(
     block: i64,
     events: Vec<(Address, alloy_primitives::LogData)>,
 ) -> Result<Value> {
-    seed_and_run_with(
+    // Bound the debug test frame while retaining the real producer and every assertion.
+    Box::pin(seed_and_run_with(
         database,
         &transaction(block, 0, events),
         block,
         block,
         &[(block, 0, GRANTEE)],
         None,
-    )
+    ))
     .await?;
     lookup_publication::assert_name_prepared_parity(database, CHILD).await
 }
@@ -113,14 +114,14 @@ async fn child_inventory(database: &TestDatabase) -> Result<Value> {
 #[tokio::test]
 async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_updates()
 -> Result<()> {
-    let (database, mut logs, _) = setup().await?;
+    let (database, mut logs, _) = Box::pin(setup()).await?;
     // Keep ENSv1 as the active resolution path for this independently admitted resolver.
     // Other actual producer cases cover the later Universal Resolver cutover and mirror path.
     logs.retain(|log| {
         log.block_number <= BASE + 121
             && !(log.block_number == BASE + 120 && log.transaction_index == 0)
     });
-    seed_and_run(&database, &logs, 120, 121).await?;
+    Box::pin(seed_and_run(&database, &logs, 120, 121)).await?;
     let resolver: Address = LINKED.parse()?;
     let owner: Address = GRANTEE.parse()?;
     let implementation: Address = IMPLEMENTATION.parse()?;
@@ -196,7 +197,7 @@ async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_u
     for (index, log) in creation.iter_mut().enumerate() {
         log.log_index = index as i64;
     }
-    seed_and_run_with_targets(
+    Box::pin(seed_and_run_with_targets(
         &database,
         &creation,
         122,
@@ -209,7 +210,7 @@ async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_u
         ],
         &[(122, 0, FACTORY)],
         None,
-    )
+    ))
     .await?;
     let empty = lookup_publication::assert_name_prepared_parity(&database, CHILD).await?;
     assert_eq!(empty["resolver"]["address"], LINKED, "{empty:#}");
@@ -277,14 +278,14 @@ async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_u
     let (result, work) = lookup_publication::observed(
         bigname_storage::families::records::seams::with_inventory_read_counter(
             full_reads.clone(),
-            seed_and_run_with(
+            Box::pin(seed_and_run_with(
                 &database,
                 &transaction(130, 0, vec![text(1, "display name,a", "changed")?]),
                 130,
                 130,
                 &[(130, 0, GRANTEE)],
                 None,
-            ),
+            )),
         ),
     )
     .await;
@@ -353,7 +354,7 @@ async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_u
             .any(|record| record["name"] == CHILD),
         "{names:#}"
     );
-    replay::assert_rebuild(&database, 134).await?;
+    Box::pin(replay::assert_rebuild(&database, 134)).await?;
     lookup_publication::assert_name_prepared_parity(&database, CHILD).await?;
     lookup_publication::assert_name_prepared_parity(&database, COMPANION).await?;
     database.cleanup().await
