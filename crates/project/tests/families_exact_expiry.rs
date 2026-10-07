@@ -37,6 +37,12 @@ fn reset_tables() -> BTreeSet<&'static str> {
                     | "project_history_source"
                     | "project_history_source_edge"
                     | "project_history_catalogue_marker"
+                    // Added later, by 20261007120000_project_lookup_precomputation.sql.
+                    | "project_lookup_name"
+                    | "project_lookup_relation"
+                    | "project_lookup_inventory"
+                    | "project_lookup_record"
+                    | "project_lookup_dependency"
             )
         })
         .chain(CONTROL_TABLES)
@@ -293,6 +299,13 @@ async fn prior_expiry_types_upgrade_resets_once_and_rebuilds_exactly_like_fresh_
     let large_baseline = fixture.snapshot().await?;
     assert_eq!(families::undo_to(&fixture.pool, CHAIN, 2).await?, 1);
     assert_eq!(fixture.snapshot().await?, ordinary_baseline);
+    // Recreate the predecessor schema: this historical migration predates lookup tables.
+    sqlx::raw_sql(
+        "DROP TABLE project_lookup_relation, project_lookup_record,
+        project_lookup_dependency, project_lookup_name, project_lookup_inventory",
+    )
+    .execute(&fixture.pool)
+    .await?;
     // Only ordinary values remain published, so recreating the prior types is lossless.
     sqlx::raw_sql(
         "ALTER TABLE project_lifecycle_event ALTER COLUMN expiry_seconds TYPE bigint
@@ -329,6 +342,11 @@ async fn prior_expiry_types_upgrade_resets_once_and_rebuilds_exactly_like_fresh_
         .fetch_one(&fixture.pool)
         .await?;
     assert_eq!(after, retained, "migration preserves normalized inputs");
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/20261007120000_project_lookup_precomputation.sql"
+    ))
+    .execute(&fixture.pool)
+    .await?;
     let rebuilt = fixture.apply(2, FamilyMode::Normal).await?;
     assert!(
         rebuilt.reset,

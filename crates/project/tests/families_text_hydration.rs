@@ -295,10 +295,11 @@ async fn text_read_rejects_orphaned_hydration_and_follow_invalidates_old_record_
     assert_eq!(entry(&fixture).await?["value"], "first");
     sqlx::query("UPDATE chain_lineage SET canonicality_state='orphaned' WHERE chain_id=$1 AND block_number=2")
         .bind(CHAIN).execute(&fixture.pool).await?;
-    assert_eq!(
-        entry(&fixture).await?["status"],
-        "unsupported",
-        "read rejects orphaned execution immediately"
+    assert!(
+        bigname_storage::families::name::is_publication_unavailable(
+            &entry(&fixture).await.unwrap_err()
+        ),
+        "an orphaned publication cannot serve a record inventory"
     );
     sqlx::query("UPDATE chain_lineage SET canonicality_state='canonical' WHERE chain_id=$1 AND block_number=2")
         .bind(CHAIN).execute(&fixture.pool).await?;
@@ -824,7 +825,9 @@ async fn undo_requeues_a_completed_text_read_after_its_block_is_orphaned() -> Re
     assert_eq!(pending_text(&fixture).await?, 0);
     sqlx::query("UPDATE chain_lineage SET canonicality_state='orphaned' WHERE chain_id=$1 AND block_number=2")
         .bind(CHAIN).execute(&fixture.pool).await?;
-    assert_eq!(entry(&fixture).await?["status"], "unsupported");
+    assert!(bigname_storage::families::name::is_publication_unavailable(
+        &entry(&fixture).await.unwrap_err()
+    ));
     assert_eq!(families::undo_to(&fixture.pool, CHAIN, 1).await?, 1);
     assert_eq!(
         pending_text(&fixture).await?,
@@ -877,6 +880,12 @@ async fn hydration_work_upgrade_reset_is_atomic_idempotent_and_rebuilds_pending_
                     | "project_history_source"
                     | "project_history_source_edge"
                     | "project_history_catalogue_marker"
+                    // Added later, by 20261007120000_project_lookup_precomputation.sql.
+                    | "project_lookup_name"
+                    | "project_lookup_relation"
+                    | "project_lookup_inventory"
+                    | "project_lookup_record"
+                    | "project_lookup_dependency"
             )
         })
         .chain([

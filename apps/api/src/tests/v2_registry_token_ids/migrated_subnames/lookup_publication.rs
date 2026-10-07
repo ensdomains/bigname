@@ -97,7 +97,12 @@ pub(super) async fn assert_name_prepared_parity(
     Ok(detail["data"].clone())
 }
 
-fn text(resolver: Address, block: i64, key: &str, value: &str) -> Result<Vec<RawLogInput>> {
+pub(super) fn text(
+    resolver: Address,
+    block: i64,
+    key: &str,
+    value: &str,
+) -> Result<Vec<RawLogInput>> {
     Ok(transaction(
         block,
         0,
