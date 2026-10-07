@@ -715,6 +715,9 @@ async fn undo_restores_a_clock_only_summary_and_rewrites_nothing_for_an_empty_bl
             == [
                 "marker",
                 "project_history_catalogue_marker",
+                "project_lookup_dependency",
+                "project_lookup_inventory",
+                "project_lookup_name",
                 "project_name_summary"
             ],
         "block 8 journalled {journalled:?}"
@@ -749,6 +752,17 @@ async fn undo_restores_a_clock_only_summary_and_rewrites_nothing_for_an_empty_bl
     .fetch_one(&fixture.pool)
     .await?;
     ensure!(summaries == 0, "block 9 journalled {summaries} summaries");
+    let journalled: Vec<String> = sqlx::query_scalar(
+        "SELECT family FROM project_family_undo WHERE chain_id = $1 AND block_number = 9
+         ORDER BY family",
+    )
+    .bind(CHAIN)
+    .fetch_all(&fixture.pool)
+    .await?;
+    ensure!(
+        journalled == ["marker", "project_history_catalogue_marker"],
+        "empty block 9 journalled {journalled:?}"
+    );
     let undone = families::undo_to(&fixture.pool, CHAIN, 8).await?;
     ensure!(undone == 1, "undid {undone} blocks");
     let after: Vec<(String, String)> =

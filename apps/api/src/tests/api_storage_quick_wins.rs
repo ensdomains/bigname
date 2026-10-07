@@ -207,6 +207,10 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
         "relation: bigname_phase.project_lifecycle_event",
         "relation: bigname_phase.project_lifecycle_key_state",
         "relation: bigname_phase.project_lifecycle_triple_summary",
+        "relation: bigname_phase.project_lookup_inventory",
+        "relation: bigname_phase.project_lookup_name",
+        "relation: bigname_phase.project_lookup_record",
+        "relation: bigname_phase.project_lookup_relation",
         "relation: bigname_phase.project_name_history",
         "relation: bigname_phase.project_name_state",
         "relation: bigname_phase.project_name_summary",
@@ -237,7 +241,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
     .map(str::to_owned));
 
     assert_eq!(actual, expected);
-    assert_eq!(actual.len(), 69);
+    assert_eq!(actual.len(), 73);
     database.cleanup().await
 }
 

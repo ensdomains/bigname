@@ -200,7 +200,7 @@ fn reservation(label: &str, expiry: u64) -> Result<alloy_primitives::LogData> {
     .encode_log_data())
 }
 
-async fn seed_both_generations(pool: &PgPool) -> Result<()> {
+fn both_generations() -> Result<Vec<(i64, &'static str, alloy_primitives::LogData)>> {
     let upgraded = |implementation: &str| -> Result<alloy_primitives::LogData> {
         Ok(Upgraded {
             implementation: implementation.parse()?,
@@ -253,7 +253,46 @@ async fn seed_both_generations(pool: &PgPool) -> Result<()> {
         (11_821_695, OLD_REGISTRY, registration),
         (11_821_696, OLD_REGISTRY, resource),
     ];
-    seed_raw_facts(pool, facts).await
+    Ok(facts.into())
+}
+
+// Keep real timestamps and deployment-relative ordering, but represent this fixture's
+// empty early history with a small genesis-based range for actual runner adoption.
+const BLOCK_OFFSET: i64 = 11_700_000;
+const COMPACT_HEAD: i64 = HEAD - BLOCK_OFFSET;
+
+fn compact_profile(root: &std::path::Path) -> Result<()> {
+    for entry in std::fs::read_dir(root)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            compact_profile(&path)?;
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "toml")
+        {
+            let text = std::fs::read_to_string(&path)?;
+            let mut parts = text.split("start_block = ");
+            let mut compact = parts.next().unwrap_or_default().to_owned();
+            for suffix in parts {
+                let length = suffix.bytes().take_while(u8::is_ascii_digit).count();
+                let original: i64 = suffix[..length].parse()?;
+                compact.push_str(&format!(
+                    "start_block = {}",
+                    (original - BLOCK_OFFSET).max(0)
+                ));
+                compact.push_str(&suffix[length..]);
+            }
+            std::fs::write(path, compact)?;
+        }
+    }
+    Ok(())
+}
+
+fn compact_facts() -> Result<Vec<(i64, &'static str, alloy_primitives::LogData)>> {
+    Ok(both_generations()?
+        .into_iter()
+        .map(|(number, emitter, data)| (number - BLOCK_OFFSET, emitter, data))
+        .collect())
 }
 
 /// The canonical chain from `FIRST` to `HEAD`, one transaction and log per fact at its block,
@@ -262,27 +301,67 @@ pub(super) async fn seed_raw_facts(
     pool: &PgPool,
     facts: impl IntoIterator<Item = (i64, &'static str, alloy_primitives::LogData)>,
 ) -> Result<()> {
+    seed_raw_facts_in_range(pool, facts, FIRST, HEAD, 0).await
+}
+
+async fn seed_raw_facts_in_range(
+    pool: &PgPool,
+    facts: impl IntoIterator<Item = (i64, &'static str, alloy_primitives::LogData)>,
+    first: i64,
+    head: i64,
+    timestamp_offset: i64,
+) -> Result<()> {
     sqlx::query(
         "INSERT INTO chain_lineage (
              chain_id, block_hash, parent_hash, block_number, block_timestamp, canonicality_state
          )
          SELECT $1, $1 || '-block-' || height::text,
                 CASE WHEN height > $2 THEN $1 || '-block-' || (height - 1)::text END,
-                height, to_timestamp(height), 'canonical'::canonicality_state
+                height, to_timestamp(height + $4::bigint), 'canonical'::canonicality_state
          FROM generate_series($2::bigint, $3::bigint) AS height",
     )
     .bind(CHAIN)
-    .bind(FIRST)
-    .bind(HEAD)
+    .bind(first)
+    .bind(head)
+    .bind(timestamp_offset)
     .execute(pool)
     .await?;
+    load_raw_facts(pool, facts).await?;
+    sqlx::query(
+        "INSERT INTO chain_heads (chain_id, latest_block_hash, latest_block_number)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(CHAIN)
+    .bind(block_hash(head))
+    .bind(head)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO ingest_cursors (
+             chain_id, source_key, source_kind, seed_basis, start_block_number,
+             next_block_number, target_block_number, last_processed_block_number,
+             last_processed_block_hash
+         ) VALUES ($1, 'intake', 'drpc', 'ethereum_head', 0, $2 + 1, $2, $2, $3)",
+    )
+    .bind(CHAIN)
+    .bind(head)
+    .bind(block_hash(head))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn load_raw_facts(
+    pool: &PgPool,
+    facts: impl IntoIterator<Item = (i64, &'static str, alloy_primitives::LogData)>,
+) -> Result<()> {
     for (number, emitter, fact) in facts {
         let transaction = format!("{CHAIN}-transaction-{number}");
         sqlx::query(
             "INSERT INTO raw_transactions (
                  chain_id, block_hash, block_number, transaction_hash, transaction_index,
                  from_address, to_address
-             ) VALUES ($1, $2, $3, $4, 0, $5, $6)",
+             ) VALUES ($1, $2, $3, $4, 0, $5, $6) ON CONFLICT DO NOTHING",
         )
         .bind(CHAIN)
         .bind(block_hash(number))
@@ -301,7 +380,7 @@ pub(super) async fn seed_raw_facts(
             "INSERT INTO raw_logs (
                  chain_id, block_hash, block_number, transaction_hash, transaction_index,
                  log_index, emitting_address, topics, data
-             ) VALUES ($1, $2, $3, $4, 0, 0, $5, $6, $7)",
+             ) VALUES ($1, $2, $3, $4, 0, 0, $5, $6, $7) ON CONFLICT DO NOTHING",
         )
         .bind(CHAIN)
         .bind(block_hash(number))
@@ -313,32 +392,15 @@ pub(super) async fn seed_raw_facts(
         .execute(pool)
         .await?;
     }
-    sqlx::query(
-        "INSERT INTO chain_heads (chain_id, latest_block_hash, latest_block_number)
-         VALUES ($1, $2, $3)",
-    )
-    .bind(CHAIN)
-    .bind(block_hash(HEAD))
-    .bind(HEAD)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "INSERT INTO ingest_cursors (
-             chain_id, source_key, source_kind, seed_basis, start_block_number,
-             next_block_number, target_block_number, last_processed_block_number,
-             last_processed_block_hash
-         ) VALUES ($1, 'intake', 'drpc', 'ethereum_head', 0, $2 + 1, $2, $2, $3)",
-    )
-    .bind(CHAIN)
-    .bind(HEAD)
-    .bind(block_hash(HEAD))
-    .execute(pool)
-    .await?;
     Ok(())
 }
 
 /// Every phase completed at `HEAD` under the current content hash, as a running deployment.
 pub(super) async fn complete_phases(pool: &PgPool) -> Result<()> {
+    complete_phases_at(pool, HEAD).await
+}
+
+async fn complete_phases_at(pool: &PgPool, head: i64) -> Result<()> {
     phase_runner::state::PhaseStore::new(pool.clone())
         .initialize_chain(CHAIN)
         .await?;
@@ -346,12 +408,14 @@ pub(super) async fn complete_phases(pool: &PgPool) -> Result<()> {
         "UPDATE chain_phase_state
          SET phase_status = 'completed', started_at = now(), finished_at = now(),
              current_block_number = $2, current_block_hash = $3,
+             live_handoff_block_number = CASE WHEN phase_name='ingest' THEN $2 END,
+             live_handoff_block_hash = CASE WHEN phase_name='ingest' THEN $3 END,
              input_content_hash = CASE WHEN phase_name IN ('interpret', 'project') THEN $4 END
          WHERE chain_id = $1",
     )
     .bind(CHAIN)
-    .bind(HEAD)
-    .bind(block_hash(HEAD))
+    .bind(head)
+    .bind(block_hash(head))
     .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
     .execute(pool)
     .await?;
@@ -359,6 +423,15 @@ pub(super) async fn complete_phases(pool: &PgPool) -> Result<()> {
 }
 
 pub(super) async fn interpret_and_project(pool: &PgPool, mode: RunMode) -> Result<()> {
+    interpret_and_project_range(pool, mode, FIRST, HEAD).await
+}
+
+async fn interpret_and_project_range(
+    pool: &PgPool,
+    mode: RunMode,
+    first: i64,
+    head: i64,
+) -> Result<()> {
     let engine = Engine::new(pool.clone())
         .with_blocks_per_batch(std::num::NonZeroU32::new(200_000).expect("non-zero"));
     let mut resume_current = None;
@@ -366,8 +439,8 @@ pub(super) async fn interpret_and_project(pool: &PgPool, mode: RunMode) -> Resul
         let outcome = engine
             .run_batch(BatchRequest {
                 chain_id: CHAIN.to_owned(),
-                from_block: FIRST,
-                to_block: HEAD,
+                from_block: first,
+                to_block: head,
                 resume_current,
                 mode,
             })
@@ -382,8 +455,8 @@ pub(super) async fn interpret_and_project(pool: &PgPool, mode: RunMode) -> Resul
         pool,
         CHAIN,
         &bigname_project::Marker {
-            number: HEAD,
-            hash: block_hash(HEAD),
+            number: head,
+            hash: block_hash(head),
         },
         bigname_project::families::FamilyMode::Rebuild,
         &token,
@@ -395,9 +468,142 @@ pub(super) async fn interpret_and_project(pool: &PgPool, mode: RunMode) -> Resul
     .await?;
     anyhow::ensure!(
         !outcome.budget_exhausted
-            && outcome.marker.as_ref().map(|marker| marker.number) == Some(HEAD),
+            && outcome.marker.as_ref().map(|marker| marker.number) == Some(head),
         "{outcome:?}"
     );
+    Ok(())
+}
+
+/// Finite intake source for the known fixture chain. Reload the declared event facts before
+/// reporting coverage; the runner owns the cursor, redo boundary and phase metadata.
+struct RedeploymentIntake(PgPool);
+
+impl phase_runner::phase::Phase for RedeploymentIntake {
+    fn name(&self) -> phase_runner::phase::PhaseName {
+        phase_runner::phase::PhaseName::Ingest
+    }
+
+    fn run_batch(
+        &self,
+        context: phase_runner::phase::PhaseContext,
+    ) -> phase_runner::phase::PhaseFuture<'_> {
+        Box::pin(async move {
+            use phase_runner::{
+                error::RunnerError,
+                phase::{LoopbackPhase, PhaseBatchOutcome},
+            };
+            let range = context
+                .mode
+                .range()
+                .expect("fixture intake only runs during redo");
+            assert!(range.from >= 0 && range.to <= COMPACT_HEAD);
+            let facts =
+                compact_facts().map_err(|error| RunnerError::data_integrity(error.to_string()))?;
+            load_raw_facts(
+                &self.0,
+                facts
+                    .into_iter()
+                    .filter(|(number, _, _)| (range.from..=range.to).contains(number))
+                    .collect::<Vec<_>>(),
+            )
+            .await
+            .map_err(|error| RunnerError::data_integrity(error.to_string()))?;
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM chain_lineage WHERE chain_id=$1 AND canonicality_state='canonical' AND block_number BETWEEN $2 AND $3")
+                .bind(CHAIN).bind(range.from).bind(range.to).fetch_one(&self.0).await
+                .map_err(|error| RunnerError::data_integrity(error.to_string()))?;
+            assert_eq!(count, range.to - range.from + 1);
+            let PhaseBatchOutcome::Complete(mut progress) =
+                LoopbackPhase::new(self.name()).run_batch(context).await?
+            else {
+                unreachable!()
+            };
+            for source in &mut progress.source_progress {
+                source.redo_loaded_boundary = progress.current.clone();
+            }
+            Ok(PhaseBatchOutcome::Complete(progress))
+        })
+    }
+}
+
+/// Adopt the synced declaration epoch through the runner, using this fixture's already
+/// retained raw logs from both deployments and its complete canonical intake range.
+async fn adopt_redeployment(pool: &PgPool) -> Result<()> {
+    use phase_runner::{
+        capacity::CapacityGuard,
+        config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
+        database::RunnerDatabase,
+        interpret_phase::InterpretPhase,
+        phase::{BlockRange, PhaseName, PhaseSet},
+        project_phase::ProjectPhase,
+        runner::{PhaseRunner, RedoPhase},
+    };
+    use std::sync::Arc;
+    let input: String = sqlx::query_scalar(
+        "SELECT input_content_hash FROM chain_phase_state WHERE chain_id=$1 AND phase_name='interpret'",
+    )
+    .bind(CHAIN)
+    .fetch_one(pool)
+    .await?;
+    assert!(input.starts_with("manifest-authority:"), "{input}");
+    let (_, generation) = input.rsplit_once(':').context("declaration generation")?;
+    let capacity = CapacityConfig {
+        writable_path: std::env::temp_dir(),
+        interpret_blocks_per_batch: std::num::NonZeroU32::new(200_000).unwrap(),
+        ..Default::default()
+    };
+    let database =
+        RunnerDatabase::connect_with_options(pool.connect_options().as_ref().clone(), 4).await?;
+    let phases = PhaseSet::with_ingest_interpret_and_project(
+        Arc::new(RedeploymentIntake(database.pool().clone())),
+        Arc::new(InterpretPhase::from_capacity(
+            database.pool().clone(),
+            &capacity,
+        )),
+        Arc::new(ProjectPhase::new(database.pool().clone())),
+    )?;
+    let runner = PhaseRunner::new(
+        database,
+        phases,
+        CapacityGuard::system(capacity),
+        "api-sepolia-redeployment",
+        TimingConfig::default(),
+    )?;
+    let chain = ChainConfig::new(
+        CHAIN,
+        vec![SourceConfig::new(
+            CHAIN,
+            "intake",
+            "drpc",
+            SeedBasis::EthereumHead,
+            0,
+            "http://unused.invalid",
+        )?],
+        false,
+    )?;
+    runner
+        .redo(
+            &chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(0, COMPACT_HEAD)?,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await?;
+    let runner = runner.with_watch_set_coverage_attestation(CHAIN, generation);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        runner.redo(
+            &chain,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, COMPACT_HEAD)?,
+            tokio_util::sync::CancellationToken::new(),
+        ),
+    )
+    .await
+    .context("redeployment adoption exceeded60seconds")??;
+    let adopted: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM chain_phase_state WHERE chain_id=$1 AND phase_name IN ('interpret','project') AND input_content_hash=$2 AND phase_status='completed' AND NOT redo_in_progress AND current_block_number=$3",
+    ).bind(CHAIN).bind(bigname_content_hash::INTERPRETER_CONTENT_HASH).bind(COMPACT_HEAD).fetch_one(pool).await?;
+    assert_eq!(adopted, 2);
     Ok(())
 }
 
@@ -486,15 +692,20 @@ async fn sepolia_redeploy_serves_names_only_the_dropped_registry_named_as_never_
     let database = TestDatabase::new_migrated().await?;
     let pool = &database.pool;
     let previous = previous_profile()?;
+    compact_profile(&previous)?;
+    let current =
+        std::env::temp_dir().join(format!("bigname-api-sepolia-compact-{}", Uuid::new_v4()));
+    copy_dir(&checked_in_profile(), &current)?;
+    compact_profile(&current)?;
     bigname_manifests::sync_schema_v2_repository(
         pool,
         &bigname_manifests::load_repository(&previous)?,
     )
     .await?;
     std::fs::remove_dir_all(&previous)?;
-    seed_both_generations(pool).await?;
-    complete_phases(pool).await?;
-    interpret_and_project(pool, RunMode::Normal).await?;
+    seed_raw_facts_in_range(pool, compact_facts()?, 0, COMPACT_HEAD, BLOCK_OFFSET).await?;
+    complete_phases_at(pool, COMPACT_HEAD).await?;
+    interpret_and_project_range(pool, RunMode::Normal, 0, COMPACT_HEAD).await?;
 
     for label in DROPPED {
         let (status, body) = get(&database, &format!("/v1/names/{label}.eth")).await?;
@@ -530,10 +741,16 @@ async fn sepolia_redeploy_serves_names_only_the_dropped_registry_named_as_never_
 
     bigname_manifests::sync_schema_v2_repository(
         pool,
-        &bigname_manifests::load_repository(checked_in_profile())?,
+        &bigname_manifests::load_repository(&current)?,
     )
     .await?;
-    interpret_and_project(pool, RunMode::Redo).await?;
+    for profile in ["feed", "detail"] {
+        let (status, body) = lookup(&database, lookup_body(profile)).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body:#}");
+        assert_eq!(body["error"]["code"], "stale", "{body:#}");
+    }
+    std::fs::remove_dir_all(&current)?;
+    adopt_redeployment(pool).await?;
 
     let (status, nick) = get(&database, "/v1/names/nick.eth").await?;
     assert_eq!(status, StatusCode::OK, "{nick:#}");

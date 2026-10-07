@@ -730,7 +730,7 @@ async fn lookup_inventory_reads(
 }
 
 #[tokio::test]
-async fn a_lookup_reads_every_inventory_of_the_batch_at_once() -> Result<()> {
+async fn a_lookup_serves_prepared_inventories_without_fresh_composition() -> Result<()> {
     const NAMES: usize = 25;
     let database = TestDatabase::new_migrated().await?;
     let (names, _) = seed_abi_batch(&database, NAMES).await?;
@@ -739,17 +739,17 @@ async fn a_lookup_reads_every_inventory_of_the_batch_at_once() -> Result<()> {
         .map(|name| json!({"name": name}))
         .collect::<Vec<_>>();
 
-    // The composed rows read the inventories their topology needs in one read for the batch,
-    // never one per name. Each read runs a fixed number of statements.
+    // Project already composed the inventories; neither lookup profile should invoke the
+    // fresh inventory compositor during the request.
     let (payload, reads) = lookup_inventory_reads(
         &database,
         json!({"profile": "feed", "inputs": inputs.clone()}),
     )
     .await?;
     assert_eq!(payload["data"].as_array().map(Vec::len), Some(NAMES));
-    assert_eq!(reads, [NAMES]);
+    assert!(reads.is_empty(), "feed freshly composed inventories: {reads:?}");
 
-    // The detail profile adds one more read for the batch, with the attributed events.
+    // Detail reads the prepared keys while preserving every public ABI content type.
     let (payload, reads) = lookup_inventory_reads(
         &database,
         json!({"profile": "detail", "inputs": inputs}),
@@ -764,7 +764,7 @@ async fn a_lookup_reads_every_inventory_of_the_batch_at_once() -> Result<()> {
             "{index}: {result}"
         );
     }
-    assert_eq!(reads, [NAMES, NAMES]);
+    assert!(reads.is_empty(), "detail freshly composed inventories: {reads:?}");
     database.cleanup().await
 }
 
@@ -797,11 +797,9 @@ async fn abi_content_types_for_a_full_lookup_batch_use_one_batched_read() -> Res
     }
     // One batched read for the whole request, never one per name.
     assert_eq!(calls.lock().expect("calls").as_slice(), &[NAMES]);
-    // So are the record inventories: one read for the composed rows, one for the inventories.
-    // This counts inventory-reader calls, not statements, for directly bound names. A mirror
-    // pointer still walks its registry per resource, and wildcard bindings still read their
-    // topology per name.
-    assert_eq!(reads, [NAMES, NAMES]);
+    // Project produced the prepared inventories; serving the batch never recomposes them.
+    // The separate ABI evidence read above remains batched and validates its event lineage.
+    assert!(reads.is_empty(), "detail freshly composed inventories: {reads:?}");
 
     let plan = bigname_storage::explain_record_inventory_abi_evidence_for_test(
         &database.lookup_pool,
