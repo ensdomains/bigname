@@ -25,6 +25,7 @@ mod records;
 mod reduce;
 mod registry;
 mod repair;
+mod resolution_paths;
 mod resolver;
 mod reverse;
 mod store;

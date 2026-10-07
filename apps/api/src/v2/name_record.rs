@@ -106,6 +106,9 @@ pub(crate) struct NameRecord {
     /// `.eth` name has no live ENSv2 entry. Its resolver and records are then withheld.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unresolvable_reason: Option<String>,
+    /// Resolution follows an ENSv2 path whose target cannot be projected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) resolution_unsupported_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subregistry: Option<RegistryRef>,
     /// Present when the name may serve resolver records and has a record inventory, or on a
@@ -376,6 +379,7 @@ pub(crate) fn build_name_record(
         namehash: row.namehash.clone(),
         resolver,
         unresolvable_reason: row.unresolvable_reason().map(str::to_owned),
+        resolution_unsupported_reason: row.resolution_unsupported_reason().map(str::to_owned),
         subregistry: None,
         records: record_inventory.map(|inventory| RecordGroups::indexed(inventory.into())),
         primary_name: json_string_at_paths(

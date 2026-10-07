@@ -187,6 +187,15 @@ pub(crate) async fn load_classifications_on(
     chain_id: &str,
     resolver_addresses: &[String],
 ) -> Result<HashMap<String, ResolverClassification>> {
+    load_classifications_at(conn, chain_id, resolver_addresses, None).await
+}
+
+pub(crate) async fn load_classifications_at(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    resolver_addresses: &[String],
+    publication_block: Option<i64>,
+) -> Result<HashMap<String, ResolverClassification>> {
     let addresses: Vec<String> = resolver_addresses
         .iter()
         .map(|address| address.to_ascii_lowercase())
@@ -234,14 +243,15 @@ pub(crate) async fn load_classifications_on(
                AND manifest.canonicality_state IN ('canonical', 'safe', 'finalized')
                AND (manifest.block_hash IS NULL
                     OR lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
-               AND (manifest.block_number IS NULL OR marker.block IS NULL
-                    OR manifest.block_number <= marker.block)
+               AND (manifest.block_number IS NULL OR COALESCE($3, marker.block) IS NULL
+                    OR manifest.block_number <= COALESCE($3, marker.block))
              ORDER BY manifest.normalized_event_id DESC
              LIMIT 1
          ) declaration ON declaration.active",
     )
     .bind(chain_id)
     .bind(&addresses)
+    .bind(publication_block)
     .fetch_all(&mut *conn)
     .await
     .context("failed to load resolver classifications")?;

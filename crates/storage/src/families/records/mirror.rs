@@ -16,11 +16,7 @@ use sqlx::{PgConnection, Row};
 
 use crate::families::{name::rendered::rendered_name_sql, position::emission_ordinal_sql};
 
-use super::{
-    facts::{ResolverClassification, load_classification_on as load_classification},
-    is_cleared,
-    serving::ServingPointer,
-};
+use super::{facts::ResolverClassification, is_cleared, serving::ServingPointer};
 
 const V2_POINTER_FAMILIES: [&str; 2] = ["ens_v2_registry_l1", "ens_v2_root_l1"];
 
@@ -36,6 +32,8 @@ pub(crate) struct MirrorNearest {
     pub(crate) mirrored_pointer_source_family: String,
     pub(crate) mirrored_pointer_namespace: String,
     pub(crate) mirrored_block_number: i64,
+    /// Supported and admitted in the pointer's namespace, independently of structural limits.
+    pub(crate) mirrored_classification_supported: bool,
     pub(crate) forwarding: &'static str,
     pub(crate) mirrored_unsupported_reason: Option<String>,
 }
@@ -158,12 +156,28 @@ pub(crate) async fn evaluate_family_mirror(
     pointer: &ServingPointer,
     mirror: ResolverClassification,
 ) -> Result<MirrorSelection> {
+    evaluate_family_mirror_at(conn, chain_id, pointer, mirror, None).await
+}
+
+pub(crate) async fn evaluate_family_mirror_at(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    pointer: &ServingPointer,
+    mirror: ResolverClassification,
+    publication_block: Option<i64>,
+) -> Result<MirrorSelection> {
     let mirror_namespace_matches = mirror.declared_in(&pointer.namespace);
     let nearest = nearest(conn, chain_id, pointer).await?;
     let nearest = match nearest {
         Some(mut nearest) => {
-            let classification =
-                load_classification(conn, chain_id, &nearest.mirrored_resolver_address).await?;
+            let classification = super::facts::load_classifications_at(
+                conn,
+                chain_id,
+                std::slice::from_ref(&nearest.mirrored_resolver_address),
+                publication_block,
+            )
+            .await?
+            .remove(&nearest.mirrored_resolver_address);
             classify(&mut nearest, classification.as_ref());
             Some(nearest)
         }
@@ -259,6 +273,7 @@ async fn nearest(
             mirrored_pointer_source_family: row.try_get("source_family")?,
             mirrored_pointer_namespace: row.try_get("namespace")?,
             mirrored_block_number: row.try_get("block_number")?,
+            mirrored_classification_supported: false,
             forwarding: "direct_call",
             mirrored_unsupported_reason: None,
         }));
@@ -287,6 +302,9 @@ fn latest_registry_first(alias: &str) -> String {
 
 /// The forwarding mode and the stopping rules of the mirror selection.
 fn classify(nearest: &mut MirrorNearest, resolver: Option<&ResolverClassification>) {
+    nearest.mirrored_classification_supported = resolver.is_some_and(|resolver| {
+        resolver.supported() && resolver.declared_in(&nearest.mirrored_pointer_namespace)
+    });
     let extended =
         resolver.is_some_and(|resolver| resolver.has_read_feature("ensip10_extended_resolver"));
     nearest.forwarding = if extended {

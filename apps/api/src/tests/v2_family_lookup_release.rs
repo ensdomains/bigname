@@ -1,24 +1,30 @@
 //! A live reservation resolves ENSv1 names until its expiry or explicit unregister.
-//! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L223-L234 @ ens_v2_sepolia_20260916@366de741)
-//! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L277-L286 @ ens_v2_sepolia_20260916@366de741)
-//! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/interfaces/IRegistryEvents.sol:L33-L44 @ ens_v2_sepolia_20260916@366de741)
-//! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
+//! (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/BatchRegistrar.sol:L48-L71 @ ens_v2_sepolia_20261001@07e55a05)
+//! (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20261001@07e55a05)
 use super::*;
-use alloy_primitives::{U256, keccak256};
+use alloy_primitives::{Address, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use bigname_adapters::schema_v2::{
-    AddressAdmissionInput, BatchInput, ManifestInput, RawBlockInput, RawLogInput,
-    StateCacheCapacity, prepare_schema_v2_batch_incremental,
+    AddressAdmissionInput, BatchInput, DiscoveryRuleInput, ManifestInput, RawBlockInput,
+    RawLogInput, StateCacheCapacity, prepare_schema_v2_batch_incremental,
 };
 
 const PROXY: &str = "0xeeeeeeee14d718c2b47d9923deab1335e144eeee";
 const IMPLEMENTATION: &str = "0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3";
-const REGISTRY: &str = "0x657ea849311d3d5823348dded7c2aaafb3ede09e";
+const ROOT: &str = "0xb458d6a3a77919449d03e7a6903c26827c1ec43f";
+const REGISTRY: &str = "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4";
+const MIRROR: &str = "0x322b7581ca210a69c6d0e0d7c88a7688d2789cb0";
+const BATCH_REGISTRAR: &str = "0x4a4c8b7cdab6b19dc2cdb417cdb53a2ccbaf5322";
 const RESOLVER: &str = "0x1000000000000000000000000000000000000001";
 const START: i64 = 1_800_000_000;
 sol! {
+    event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender);
     event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender);
     event LabelUnregistered(uint256 indexed tokenId, address indexed sender);
+    event TokenResource(uint256 indexed tokenId, uint256 indexed resource);
+    event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value);
+    event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender);
+    event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender);
 }
 
 fn at(block: i64) -> String {
@@ -36,8 +42,10 @@ fn token(label: &str) -> U256 {
     U256::from_be_bytes(bytes)
 }
 
-/// Real admitted LabelReserved input followed by the adapter's block-boundary expiry or
-/// LabelUnregistered. The unchanged second reservation is the live-parent control.
+/// Admitted root/ETH path and mirrored reservations, followed by the adapter's
+/// block-boundary expiry or LabelUnregistered. The second reservation stays live.
+/// This scales the October 1 deployment to local block 200 on two chains for isolation;
+/// it does not claim that Mainnet has this deployment or these deployment starts.
 fn producer(
     chain: &str,
     explicit: bool,
@@ -45,41 +53,132 @@ fn producer(
     let repository = bigname_manifests::load_repository(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests/sepolia"),
     )?;
-    let loaded = repository
-        .manifests()
-        .iter()
-        .find(|m| m.manifest.source_family == "ens_v2_registry_l1")
-        .unwrap();
-    let mut manifest = loaded.manifest.clone();
-    manifest.chain = chain.into();
-    manifest
-        .abi
-        .events
-        .retain(|event| matches!(event.name.as_str(), "LabelReserved" | "LabelUnregistered"));
-    let manifests = vec![ManifestInput {
-        manifest_id: 988100,
-        manifest_version: 1,
-        namespace: "ens".into(),
-        source_family: "ens_v2_registry_l1".into(),
-        chain_id: chain.into(),
-        deployment_label: manifest.deployment_epoch.clone(),
-        normalizer_version: manifest.normalizer_version.clone(),
-        payload_json: serde_json::to_string(&manifest)?,
-    }];
-    let raw = |data: alloy_primitives::LogData, block, index| RawLogInput {
+    let mut manifests = Vec::new();
+    let mut discovery_rules = Vec::new();
+    for (id, family) in [
+        (988100, "ens_v2_registry_l1"),
+        (988101, "ens_v2_root_l1"),
+        (988102, "ens_v2_resolver_l1"),
+    ] {
+        let mut manifest = repository
+            .manifests()
+            .iter()
+            .find(|m| m.manifest.source_family == family)
+            .unwrap()
+            .manifest
+            .clone();
+        manifest.chain = chain.into();
+        for root in &mut manifest.roots {
+            root.start_block = Some(0);
+        }
+        for contract in &mut manifest.contracts {
+            contract.start_block = Some(0);
+        }
+        // This direct adapter batch has only declared registry emitters, without the
+        // factory discovery that fills dynamic emitter roles in the full runner.
+        manifest.abi.events.retain(|event| {
+            matches!(
+                event.name.as_str(),
+                "LabelRegistered"
+                    | "LabelReserved"
+                    | "LabelUnregistered"
+                    | "TokenResource"
+                    | "TransferSingle"
+                    | "SubregistryUpdated"
+                    | "ResolverUpdated"
+            )
+        });
+        discovery_rules.extend(
+            manifest
+                .discovery_rules
+                .iter()
+                .map(|rule| DiscoveryRuleInput {
+                    manifest_id: id,
+                    edge_kind: rule.edge_kind.clone(),
+                    from_role: Some(rule.from_role.clone()),
+                    admission: rule.admission.clone(),
+                }),
+        );
+        manifests.push(ManifestInput {
+            manifest_id: id,
+            manifest_version: manifest.manifest_version as i64,
+            namespace: manifest.namespace.clone(),
+            source_family: family.into(),
+            chain_id: chain.into(),
+            deployment_label: manifest.deployment_epoch.clone(),
+            normalizer_version: manifest.normalizer_version.clone(),
+            payload_json: serde_json::to_string(&manifest)?,
+        });
+    }
+    let raw = |data: alloy_primitives::LogData, emitter: &str, block, tx, index| RawLogInput {
         chain_id: chain.into(),
         block_hash: at(block),
         block_number: block,
         block_timestamp: timestamp(START + block),
         canonicality_state: "canonical".into(),
-        transaction_hash: format!("0x{block:064x}"),
-        transaction_index: 0,
+        transaction_hash: format!("0x{block:062x}{tx:02x}"),
+        transaction_index: tx,
         log_index: index,
-        emitting_address: REGISTRY.into(),
+        emitting_address: emitter.into(),
         topics: data.topics().iter().map(|t| format!("{t:#x}")).collect(),
         data: data.data.to_vec(),
     };
-    let mut logs = Vec::new();
+    let owner = FAMILY_ALICE.parse()?;
+    let eth = token("eth");
+    let mut logs = vec![
+        raw(
+            LabelRegistered {
+                tokenId: eth,
+                labelHash: keccak256("eth"),
+                label: "eth".into(),
+                owner,
+                expiry: u64::MAX,
+                sender: owner,
+            }
+            .encode_log_data(),
+            ROOT,
+            200,
+            0,
+            0,
+        ),
+        raw(
+            TransferSingle {
+                operator: owner,
+                from: Address::ZERO,
+                to: owner,
+                id: eth,
+                value: U256::from(1),
+            }
+            .encode_log_data(),
+            ROOT,
+            200,
+            0,
+            1,
+        ),
+        raw(
+            TokenResource {
+                tokenId: eth,
+                resource: eth,
+            }
+            .encode_log_data(),
+            ROOT,
+            200,
+            0,
+            2,
+        ),
+        raw(
+            SubregistryUpdated {
+                tokenId: eth,
+                subregistry: REGISTRY.parse()?,
+                sender: owner,
+            }
+            .encode_log_data(),
+            ROOT,
+            200,
+            0,
+            3,
+        ),
+    ];
     for (i, label) in ["ledger", "live"].into_iter().enumerate() {
         logs.push(raw(
             LabelReserved {
@@ -92,11 +191,25 @@ fn producer(
                     } else {
                         1000
                     }) as u64,
-                sender: FAMILY_ALICE.parse()?,
+                sender: BATCH_REGISTRAR.parse()?,
             }
             .encode_log_data(),
+            REGISTRY,
             200,
-            i as i64,
+            1,
+            4 + i as i64 * 2,
+        ));
+        logs.push(raw(
+            ResolverUpdated {
+                tokenId: token(label),
+                resolver: MIRROR.parse()?,
+                sender: BATCH_REGISTRAR.parse()?,
+            }
+            .encode_log_data(),
+            REGISTRY,
+            200,
+            1,
+            5 + i as i64 * 2,
         ));
     }
     if explicit {
@@ -106,7 +219,9 @@ fn producer(
                 sender: FAMILY_ALICE.parse()?,
             }
             .encode_log_data(),
+            REGISTRY,
             203,
+            0,
             0,
         ));
     }
@@ -114,18 +229,25 @@ fn producer(
         BatchInput {
             chain_id: chain.into(),
             manifests: manifests.clone(),
-            discovery_rules: vec![],
-            admissions: vec![AddressAdmissionInput {
-                address: REGISTRY.into(),
-                contract_instance_id: Uuid::from_u128(988100),
-                source_manifest_id: Some(988100),
-                role: Some("registry".into()),
+            discovery_rules,
+            admissions: [
+                (REGISTRY, 988100, "registry"),
+                (ROOT, 988101, "root_registry"),
+                (MIRROR, 988102, "ensv1_mirror_resolver"),
+            ]
+            .into_iter()
+            .map(|(address, id, role)| AddressAdmissionInput {
+                address: address.into(),
+                contract_instance_id: Uuid::from_u128(id as u128),
+                source_manifest_id: Some(id),
+                role: Some(role.into()),
                 discovery_edge_kind: None,
                 discovery_from_contract_instance_id: None,
                 discovery_observation_key: None,
                 active_from_block: Some(0),
                 active_to_block: None,
-            }],
+            })
+            .collect(),
             prior_events: vec![],
             blocks: (200..=203)
                 .map(|n| RawBlockInput {
@@ -275,6 +397,17 @@ async fn parent_release_retires_only_affected_descendant_evidence() -> Result<()
                 &output,
             )
             .await?;
+            for declaration in &manifests {
+                seed_fixture_manifest_update(
+                    &database.pool,
+                    declaration.manifest_id,
+                    chain,
+                    &declaration.namespace,
+                    &declaration.source_family,
+                    &serde_json::from_str(&declaration.payload_json)?,
+                )
+                .await?;
+            }
             let resolver_manifest = declare_family_fixture_resolver(
                 &database.pool,
                 "ens",
@@ -308,6 +441,31 @@ async fn parent_release_retires_only_affected_descendant_evidence() -> Result<()
             upgrade.after_state = json!({"proxy_address":PROXY,"implementation":IMPLEMENTATION});
             bigname_storage::insert_normalized_event_fixtures(&database.pool, &[upgrade]).await?;
             publish_test_families_on(&database.pool, chain, 200).await?;
+            for id in [&target, &live] {
+                let row = bigname_storage::families::name::load_family_name(&database.pool, id)
+                    .await?
+                    .context("child before release")?;
+                assert_eq!(row.declared_summary["resolver"]["address"], RESOLVER);
+                assert_eq!(row.unresolvable_reason(), None);
+                assert_eq!(row.resolution_unsupported_reason(), None);
+                let inventory = bigname_storage::families::records::load_family_record_inventory(
+                    &database.pool,
+                    chain,
+                    row.record_serving_resource_id()
+                        .context("retained child resource")?,
+                )
+                .await?
+                .context("indexed child records before divergence")?;
+                let address = inventory
+                    .entries
+                    .as_array()
+                    .context("inventory entries")?
+                    .iter()
+                    .find(|entry| entry["record_key"] == "addr:60")
+                    .context("indexed child address")?;
+                assert_eq!(address["status"], "success");
+                assert_eq!(address["value"], FAMILY_ALICE);
+            }
             assert_eq!(
                 cutover_lookup(&database, chain, &target, FAMILY_BOB).await?,
                 bigname_lookup::LedgerAction::Written

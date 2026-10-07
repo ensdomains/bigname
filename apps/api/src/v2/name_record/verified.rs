@@ -77,6 +77,7 @@ pub(super) fn unsupported_name_record(row: &NameCurrentRow) -> V2Result<Option<N
         namehash: row.namehash.clone(),
         resolver: None,
         unresolvable_reason: None,
+        resolution_unsupported_reason: None,
         records: None,
         primary_name: None,
         primary_address: None,

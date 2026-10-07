@@ -8,6 +8,8 @@
 //! undo and rebuild restore them. The registration time of such a name is its ENSv1
 //! registration's through renewals, the reservation, the cutover and the ENSv1→ENSv2 migration;
 //! only a new registration after a release starts a new one (TYR-131).
+#[path = "families_expiry_grace/declared_path.rs"]
+mod declared_path;
 #[path = "families_support/mod.rs"]
 mod support;
 
@@ -233,7 +235,7 @@ async fn upgraded(
 }
 
 /// The served expiry, the ENSv1 lease's own expiry, grace end, resolver address and
-/// unresolvable reason of a composed name.
+/// resolution reasons of a composed name.
 async fn served(fixture: &Fixture, logical_name_id: &str) -> Result<Value> {
     let row = load_family_name(&fixture.pool, logical_name_id)
         .await?
@@ -246,6 +248,7 @@ async fn served(fixture: &Fixture, logical_name_id: &str) -> Result<Value> {
         "grace_ends_at": summary["registration"]["grace_ends_at"],
         "resolver": summary["resolver"]["address"],
         "unresolvable_reason": summary.get("unresolvable_reason").cloned().unwrap_or(Value::Null),
+        "resolution_unsupported_reason": summary.get("resolution_unsupported_reason").cloned().unwrap_or(Value::Null),
     }))
 }
 
@@ -269,6 +272,7 @@ fn expect(expiry: u64, grace_days: u64, resolver: Option<&str>, reason: Option<&
         "grace_ends_at": (expiry + grace_days * DAY).to_string(),
         "resolver": resolver,
         "unresolvable_reason": reason,
+        "resolution_unsupported_reason": Value::Null,
     })
 }
 
@@ -352,6 +356,7 @@ async fn after_the_cutover_an_eth_name_without_a_live_entry_and_its_subnames_do_
 -> Result<()> {
     let fixture = Fixture::new("families_expiry_grace_unresolvable", 12).await?;
     execution_manifest(&fixture, None, 0, TOP_PROXY, 0).await?;
+    declared_path::root_eth_entry(&fixture).await?;
     let bob = leased(&fixture, "bob.eth", 2, 1).await?;
     let sub = surface(&fixture, "sub.bob.eth").await?;
     let sub_lease = uuid(0x3000);
@@ -373,13 +378,19 @@ async fn after_the_cutover_an_eth_name_without_a_live_entry_and_its_subnames_do_
         .await?;
     resolver(&fixture, &sub, 3).await?;
     fixture.apply(4, FamilyMode::Normal).await?;
+    declared_path::assert_deployed_path(&fixture).await?;
     ensure!(
         served(&fixture, &bob).await? == expect(LEASE_EXPIRY, 90, Some(RESOLVER), None),
         "{}",
         served(&fixture, &bob).await?
     );
     let sub_before = served(&fixture, &sub).await?;
-    ensure!(sub_before["resolver"] == json!(RESOLVER), "{sub_before}");
+    ensure!(
+        sub_before["resolver"] == json!(RESOLVER)
+            && sub_before["unresolvable_reason"].is_null()
+            && sub_before["resolution_unsupported_reason"].is_null(),
+        "{sub_before}"
+    );
 
     upgraded(
         &fixture,
@@ -401,7 +412,8 @@ async fn after_the_cutover_an_eth_name_without_a_live_entry_and_its_subnames_do_
     let sub_after = served(&fixture, &sub).await?;
     ensure!(
         sub_after["resolver"].is_null()
-            && sub_after["unresolvable_reason"] == json!("no_live_ens_v2_entry"),
+            && sub_after["unresolvable_reason"] == json!("no_live_ens_v2_entry")
+            && sub_after["resolution_unsupported_reason"].is_null(),
         "{sub_after}"
     );
 

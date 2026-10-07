@@ -9,6 +9,10 @@
 mod search_cutover;
 mod summary;
 pub(crate) use search_cutover::refresh as refresh_search_cutover;
+pub(crate) use summary::{
+    WORK_LIST as SUMMARY_WORK_LIST, replace_chunk as replace_summary_chunk,
+    retire_null_resolver_divergences,
+};
 #[cfg(test)]
 mod summary_plan_tests;
 

@@ -99,7 +99,13 @@ pub(crate) fn build_indexed_name_records(
         .map(|record| {
             Ok((
                 record.record_key.clone(),
-                indexed_record_answer(record_inventory, record)?,
+                if let Some(reason) = row.resolution_unsupported_reason() {
+                    unsupported_answer(reason)?
+                } else if row.unresolvable_reason().is_some() {
+                    not_found_answer(None)?
+                } else {
+                    indexed_record_answer(record_inventory, record)?
+                },
             ))
         })
         .collect::<V2Result<BTreeMap<_, _>>>()?;

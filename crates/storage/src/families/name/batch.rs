@@ -350,6 +350,13 @@ pub(super) async fn load_chain(
         .collect();
     let mut facts = load_name_facts_on(conn, chain_id, &inputs).await?;
     let resolvability = Resolvability::load(conn, chain_id, &facts).await?;
+    let mut path = if facts.iter().any(|facts| {
+        facts.resolution_cutover && matches!(facts.input.place, NamePlace::BelowEthSecondLevel(_))
+    }) {
+        Some(super::resolution_path::Walk::new(conn, publication).await?)
+    } else {
+        None
+    };
     let histories = histories(conn, chain_id, &ids).await?;
     let mut migrations = migrations(conn, chain_id, &ids).await?;
     let mut wanted: BTreeSet<String> = BTreeSet::new();
@@ -485,7 +492,7 @@ pub(super) async fn load_chain(
             );
             continue;
         }
-        let row = compose(
+        let mut row = compose(
             &Parts {
                 surface,
                 publication,
@@ -499,17 +506,46 @@ pub(super) async fn load_chain(
                 node_pointer: node_pointers.get(&node),
                 heads: &heads,
                 token_lineage_id: token.and_then(|(token, _)| *token),
-                unresolvable: resolvability
-                    .unresolvable(facts, decided.selection.authority_arm.as_deref()),
             },
             shape,
         )?;
+        let mut resolution = super::resolution_path::Outcome::default();
+        if facts.input.selection.authority_arm.as_deref() == Some("ens_v1") {
+            if matches!(facts.input.place, NamePlace::BelowEthSecondLevel(_))
+                && let Some(path) = path.as_mut()
+            {
+                resolution = path
+                    .evaluate(
+                        conn,
+                        publication,
+                        surface,
+                        row.declared_summary
+                            .pointer("/resolver/address")
+                            .and_then(Value::as_str),
+                    )
+                    .await?;
+                if resolution.decision == super::resolution_path::Decision::Absent
+                    && resolvability.unresolvable(facts, Some("ens_v1"))
+                {
+                    resolution.decision = super::resolution_path::Decision::NoLiveEntry;
+                }
+            } else if resolvability.unresolvable(facts, Some("ens_v1")) {
+                resolution.decision = super::resolution_path::Decision::NoLiveEntry;
+            }
+        }
+        super::compose::apply_resolution(&mut row, resolution.decision);
         out.insert(
             name.to_owned(),
             Composed {
                 row: Some(row),
                 authority_arm: decided.selection.authority_arm,
-                recompose_at: recompose_at(facts, clock.timestamp_seconds),
+                recompose_at: [
+                    recompose_at(facts, clock.timestamp_seconds),
+                    resolution.deadline,
+                ]
+                .into_iter()
+                .flatten()
+                .min(),
             },
         );
     }

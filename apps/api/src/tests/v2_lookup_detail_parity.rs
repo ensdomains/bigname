@@ -462,6 +462,7 @@ const DETAIL_ONLY_FIELDS: &[&str] = &[
     "lapsed_registration",
     "resolver",
     "unresolvable_reason",
+    "resolution_unsupported_reason",
     "records",
     "primary_address",
     "primary_name",

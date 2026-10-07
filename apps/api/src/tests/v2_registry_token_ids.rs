@@ -21,6 +21,8 @@ mod history_positions;
 mod history_v1_payments;
 #[path = "v2_registry_token_ids/history_wrapper.rs"]
 mod history_wrapper;
+#[path = "v2_registry_token_ids/migrated_subnames.rs"]
+mod migrated_subnames;
 #[path = "v2_registry_token_ids/node_identity.rs"]
 mod node_identity;
 #[path = "v2_registry_token_ids/races.rs"]

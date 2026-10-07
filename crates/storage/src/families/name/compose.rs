@@ -48,9 +48,6 @@ pub(super) struct Parts<'a> {
     pub(super) token_lineage_id: Option<Uuid>,
     /// The history heads (`heads.rs`), given the row's resource.
     pub(super) heads: &'a super::heads::Heads,
-    /// Whether the name resolves to nothing through the Universal Resolver
-    /// (`resolvability.rs`): its resolver and records are withheld.
-    pub(super) unresolvable: bool,
 }
 
 fn trace_text<'a>(shadow: &'a ShadowName, key: &str) -> Option<&'a str> {
@@ -265,7 +262,7 @@ pub(super) fn compose(parts: &Parts<'_>, shape: CoverageShape) -> Result<NameCur
             Some("RegistrationReleased" | "RegistrationReserved")
         ) && selection.authority_arm.as_deref() == Some("ens_v2"))
             || selection.released_tombstone,
-        unresolvable: parts.unresolvable,
+        unresolvable: false,
     };
     let (resolver, source_family) = resolver_block(
         &scope,
@@ -278,12 +275,6 @@ pub(super) fn compose(parts: &Parts<'_>, shape: CoverageShape) -> Result<NameCur
     summary.insert("registration".into(), Value::Object(registration));
     summary.insert("control".into(), Value::Object(shadow.control.clone()));
     summary.insert("resolver".into(), resolver);
-    if parts.unresolvable {
-        summary.insert(
-            "unresolvable_reason".into(),
-            json!(super::resolvability::NO_LIVE_ENS_V2_ENTRY),
-        );
-    }
     summary.insert("coverage".into(), coverage_block.clone());
     let staged: Vec<&str> = parts
         .facts
@@ -421,4 +412,22 @@ pub(super) fn compose(parts: &Parts<'_>, shape: CoverageShape) -> Result<NameCur
         manifest_version: 1,
         last_recomputed_at: publication.block_timestamp,
     })
+}
+
+/// Apply the registry-path result after ordinary pointer admission, so target equivalence uses
+/// the same retained resolver that every consumer would otherwise serve.
+pub(super) fn apply_resolution(
+    row: &mut NameCurrentRow,
+    decision: super::resolution_path::Decision,
+) {
+    if decision.withheld() {
+        row.declared_summary["resolver"]["chain_id"] = Value::Null;
+        row.declared_summary["resolver"]["address"] = Value::Null;
+    }
+    if let Some(reason) = decision.absent_reason() {
+        row.declared_summary["unresolvable_reason"] = json!(reason);
+    }
+    if let Some(reason) = decision.unsupported_reason() {
+        row.declared_summary["resolution_unsupported_reason"] = json!(reason);
+    }
 }

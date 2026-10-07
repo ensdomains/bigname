@@ -15,11 +15,11 @@ mod address_relations;
 mod address_roles;
 mod assemble;
 mod candidates;
-mod facts;
+pub(crate) mod facts;
 mod former_owners;
 mod inventory;
 mod links;
-mod mirror;
+pub(crate) mod mirror;
 mod payload;
 mod pointer;
 mod primary;
@@ -31,7 +31,7 @@ mod reverse;
 mod reverse_page;
 mod rows;
 pub mod seams;
-mod serving;
+pub(crate) mod serving;
 
 use sqlx::{Row, postgres::PgRow};
 

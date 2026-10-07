@@ -36,6 +36,7 @@ mod list;
 mod list_keys;
 mod loaders;
 pub mod rendered;
+mod resolution_path;
 mod resolvability;
 pub mod seams;
 pub mod selection;
@@ -59,8 +60,10 @@ pub use list::{load_family_expiring_page, load_family_search_page};
 pub(crate) use list_keys::{FINITE_REGISTRATION_EXPIRY_SQL, public_authority};
 #[cfg(test)]
 pub(crate) use loaders::{MIGRATIONS_SQL, RESOURCE_POINTERS_SQL, RESOURCES_SQL, canonical_uuid};
+pub use resolution_path::PHYSICAL_POINTER_EVENT_SQL;
 pub use summary::{
-    NameSummaryPublication, compose_name_summaries, compose_name_summary_publication,
+    NameSummaryPublication, compose_name_resolution_summaries, compose_name_summaries,
+    compose_name_summary_publication,
 };
 
 pub use batch::{

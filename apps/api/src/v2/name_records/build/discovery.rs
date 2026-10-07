@@ -9,6 +9,9 @@ use super::string_field;
 use crate::v2::name_record::row_has_current_registration;
 
 pub(super) fn terminal_no_declared_resolver(row: &NameCurrentRow) -> bool {
+    if row.resolution_unsupported_reason().is_some() {
+        return false;
+    }
     if !row_has_current_registration(row) {
         return true;
     }

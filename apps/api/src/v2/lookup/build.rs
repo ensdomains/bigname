@@ -56,6 +56,7 @@ pub(super) fn build_forward_feed_record(
         lapsed_registration: None,
         resolver: None,
         unresolvable_reason: None,
+        resolution_unsupported_reason: None,
         subregistry: None,
         records: None,
         abi_source: None,
@@ -176,6 +177,12 @@ fn build_detail_record(
         registration_status: Some(registration.registration_status),
         lapsed_registration: name_record::lapsed_registration(&record.row.declared_summary),
         resolver,
+        resolution_unsupported_reason: record
+            .row
+            .declared_summary
+            .get("resolution_unsupported_reason")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
         unresolvable_reason: record
             .row
             .declared_summary
@@ -241,6 +248,7 @@ fn authority_unsupported_record(
         lapsed_registration: None,
         resolver: None,
         unresolvable_reason: None,
+        resolution_unsupported_reason: None,
         subregistry: None,
         records: None,
         abi_source: None,

@@ -56,7 +56,8 @@ step-3-gate vocabulary needed by the route schemas:
 | `expires_at` | expiry as a decimal string of Unix seconds: for a `.eth` second-level name with a live ENSv2 entry, that entry's expiry once the chain is past the [Universal Resolver cutover](glossary.md#universal-resolver-cutover), whichever arm holds authority (see [Expiry and grace](#expiry-and-grace)); otherwise the registrar lease for registrar-backed names; for a wrapped ENSv1 name with no registrar lease (a wrapped subname) the NameWrapper entry's expiry, which is the only expiry the chain holds for it (zero means the parent set none). Finite values retain every digit, including after year 9999 or above JavaScript’s safe integer range. In a registration context, a classified absent expiry is `null` with `expires_at_reason`; see [Timestamp format and absent expiry](#timestamp-format-and-absent-expiry) | `expiry_date`, `expiration` (unix), `expiry` |
 | `expires_at_reason` | present exactly when a registration’s `expires_at` is `null`: `no_expiry`, `not_set`, or `released`; omitted for finite expiry and for a row with no registration context | new in v2 |
 | `grace_ends_at` | when the renewal grace of `expires_at` ends, as a decimal string of Unix seconds: `expires_at` plus 90 days for an ENSv1 `.eth` lease or a Basenames name, plus 28 days (the ENSv2 `.eth` registrar's grace period) for a `.eth` name that serves an ENSv2 expiry, and equal to `expires_at` for a name with no registrar grace, such as a subname; finite exactly when `expires_at` is finite, and `null` alongside a classified null expiry, whose `expires_at_reason` also explains the absent grace deadline (see [Expiry and grace](#expiry-and-grace)) | new in v2 |
-| `unresolvable_reason` | on name detail and lookup: why a name resolves to nothing although its authority records a resolver. `no_live_ens_v2_entry`: the chain is past the [Universal Resolver cutover](glossary.md#universal-resolver-cutover), ENSv1 decides the name, and neither it nor its `.eth` second-level ancestor has a live ENSv2 entry. The resolver and records are then withheld (see [Expiry and grace](#expiry-and-grace)) | new in v2 |
+| `unresolvable_reason` | on name detail and lookup: a proven absence of a resolver after the [Universal Resolver cutover](glossary.md#universal-resolver-cutover): `no_live_ens_v2_entry` or `ens_v2_path_no_resolver`. Resolver and records are withheld; see [Expiry and grace](#expiry-and-grace) | new in v2 |
+| `resolution_unsupported_reason` | on name detail and lookup: the current ENSv2 path is unproved (`ens_v2_path_not_projected`) or its selected target is not the retained projected target (`ens_v2_path_target_not_projected`). Resolver and indexed records are withheld without an absence claim; authority coverage is unchanged | new in v2 |
 | `registered_at` | start of the current registration, as a decimal string of Unix seconds. A registration is one continuous holding of the name: renewals keep its start, and so does the ENSv1→ENSv2 migration, so a migrated `.eth` second-level name serves its ENSv1 lease's registration time, not `migrated_at`, and a `.eth` name that premigration reserved serves its ENSv1 lease's registration time before and after the [Universal Resolver cutover](glossary.md#universal-resolver-cutover). Only a release (an ENSv1 lease running out past its grace period, or an ENSv2 entry unregistered or expired) followed by a new registration starts a new one. A name with no ENSv1 registrar lease, such as a subname, has no registration time before ENSv2, so its migration's ENSv2 registration starts one | `registration_date` |
 | `created_at` | first observation of the name, as a decimal string of Unix seconds; served only for a name with a name row, so a registry child listed without one omits it | `created_at` (now defined and distinguished from `registered_at`) |
 | `registration_status` | registration/control lifecycle label: `active`, `wrapped`, `registered`, `released`, or `unregistered` | `ControlVector.status`, role-summary `status` |
@@ -2036,6 +2037,61 @@ does not apply ([known divergence](upstream.md#ensv1-authority-without-an-ensv2-
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ETHRegistry.ts:L39-L51 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
 
+After cutover, an ENSv1-selected descendant also follows the current ENSv2 registry
+path at the published block. A live parent alone does not establish that the
+child can resolve. The reader recognizes the admitted October 1 root and ETH
+registries and factory-proven UserRegistry/WrapperRegistry implementations,
+checks current entry expiry and pointer clears, and retains the nearest resolver
+until a deeper resolver replaces it. Ancestor resolvers must support ENSIP-10.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L22-L85 @ ens_v2_sepolia_20261001@07e55a05)
+
+A registry's canonical name can expire while another live mount still reaches
+its physical entries. That canonical retirement does not clear the physical
+resolver or subregistry; the alternate path remains usable until a real pointer
+reset, a route change, or the physical entry's own expiry stops it.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L279-L288 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L474-L513 @ ens_v2_sepolia_20261001@07e55a05)
+
+A proven path with no valid resolver reports
+`unresolvable_reason: "ens_v2_path_no_resolver"`; a missing second-level entry
+keeps `no_live_ens_v2_entry` where no other resolver is reachable. If the selected
+path reaches a different target whose requested-node records cannot be projected,
+`resolution_unsupported_reason: "ens_v2_path_target_not_projected"` replaces an
+absence claim. Unknown registry behavior, incomplete physical provenance or
+unsupported resolver classification reports `resolution_unsupported_reason:
+"ens_v2_path_not_projected"`. In both unsupported cases the retained child
+resolver, indexed records, primary address, direct resolution topology and
+`resolves_to` membership are withheld. Ownership, registration, expiry and
+authority coverage remain independent. Verified execution uses current Universal
+Resolver discovery and may supply a request-scoped answer.
+
+The same classification requirement applies to the inner ENSv1 resolver selected
+by a mirror. A missing, inactive, unsupported or differently namespaced declaration
+leaves that target unproved, even when its address matches the retained child
+pointer. Existing mirror record-row reasons and provenance remain unchanged.
+
+A direct leaf at a declared ENSv1 node-based resolver preserves records when it
+selects the same resolver and requested node as the ordinary child row. An
+ENSV1Resolver path preserves exact-child records only when the mirror's ENSv1
+walk reaches that same admitted target. Ancestor wildcard targets
+are explicit unsupported indexed targets, not borrowed ancestor records. A
+recognized migration-created WrapperRegistry can supply this mirror fallback
+when the original wrapped node's child has unexpired PARENT_CANNOT_CONTROL fuses,
+a nonzero ENSv1 registry getter and no positive stored ENSv2 entry expiry. The
+getter can be nonzero even when the public owner display is empty for Graveyard;
+registry-self ownership remains zero-equivalent. Missing getter evidence is
+unknown, not proven absence. Unwrap alone does not remove that fallback. Ordinary
+name authority and pointer admission still apply: an original child whose post-unwrap selection cannot project its old
+wrapper-bound pointer reports `ens_v2_path_target_not_projected`; this rule does
+not create new pointer inheritance. Activated migration evidence proves the
+wrapper's immutable original node, even after the registry is mounted elsewhere;
+the mirror still queries the full requested name. A generic factory salt is not
+proof of the initializer's node.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L312-L327 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/LockedWrapperReceiver.sol:L148-L164 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20261001@07e55a05)
+
 ### Lapsed registration
 
 A released name carries `lapsed_registration` when it is an ENSv1 lease that lapsed
@@ -2696,7 +2752,8 @@ Flat name-detail object, also used by resolver bound names. An identity-only uns
 | `namespace` | string | always | Resolved public namespace slug. |
 | `namehash` | string | always | Hexadecimal ENS namehash. |
 | `resolver` | object ContractRef | optional | Resolver contract for this answer. |
-| `unresolvable_reason` | string | optional | Why the retained resolver cannot resolve this name; currently `no_live_ens_v2_entry`. |
+| `unresolvable_reason` | string | optional | Why the retained resolver cannot resolve this name: `no_live_ens_v2_entry` or `ens_v2_path_no_resolver`. |
+| `resolution_unsupported_reason` | string | optional | The current ENSv2 path is unknown (`ens_v2_path_not_projected`) or reaches a different target whose indexed records cannot be attributed (`ens_v2_path_target_not_projected`). |
 | `subregistry` | object ContractRef | only when supported_name | Current subregistry pointer. Absent on every status=unsupported record, including verified unsupported records that retain registration fields. |
 | `records` | object RecordGroups | optional | Grouped resolver keys and known values when the name may serve resolver records and an inventory or verified read supplies them. |
 | `primary_name` | string | optional | Selected primary name when known. |
@@ -2809,7 +2866,8 @@ Shared lookup feed/detail record. Feed records carry identity, `chain_id`, `netw
 | `registration_status` | enum RegistrationStatus | optional | Current registration and control lifecycle label. |
 | `lapsed_registration` | object LapsedRegistration | optional | Last holder and release cause for a supported lapsed registration; absent for other release causes and for non-released names. |
 | `resolver` | object ContractRef | optional | Resolver contract for this answer. |
-| `unresolvable_reason` | string | optional | Why the retained resolver cannot resolve this name; currently `no_live_ens_v2_entry`. |
+| `unresolvable_reason` | string | optional | Why the retained resolver cannot resolve this name: `no_live_ens_v2_entry` or `ens_v2_path_no_resolver`. |
+| `resolution_unsupported_reason` | string | optional | The current ENSv2 path is unknown (`ens_v2_path_not_projected`) or reaches a different target whose indexed records cannot be attributed (`ens_v2_path_target_not_projected`). |
 | `subregistry` | object ContractRef | only when supported_name | Current subregistry pointer. Absent on every status=unsupported record, including verified unsupported records that retain registration fields. |
 | `records` | object RecordGroups | optional | Grouped records on detail results when a current inventory is available; absent on feed results. |
 | `primary_name` | string | optional | Selected primary name when known. |

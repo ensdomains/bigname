@@ -6,7 +6,7 @@ mod facts;
 mod grants;
 mod operators;
 pub mod page;
-mod registry_support;
+pub(crate) mod registry_support;
 mod restrictions;
 mod summary;
 mod wrapper_registry;
