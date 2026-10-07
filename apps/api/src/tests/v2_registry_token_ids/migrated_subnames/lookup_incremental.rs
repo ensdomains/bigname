@@ -49,14 +49,15 @@ async fn apply(
     events: Vec<(Address, alloy_primitives::LogData)>,
 ) -> Result<Vec<Value>> {
     let logs = transaction(block, 0, events);
-    let (result, work) = observed(seed_and_run_with(
+    // Keep the producer future out of this helper's frame on the default debug test stack.
+    let (result, work) = observed(Box::pin(seed_and_run_with(
         database,
         &logs,
         block,
         block,
         &[(block, 0, GRANTEE)],
         None,
-    ))
+    )))
     .await;
     result?;
     Ok(work)
@@ -65,12 +66,12 @@ async fn apply(
 #[tokio::test]
 async fn lookup_precomputation_exact_keys_preserve_pairs_opaque_abi_and_mixed_boundaries()
 -> Result<()> {
-    let (database, logs, resolver) = setup().await?;
+    let (database, logs, resolver) = Box::pin(setup()).await?;
     let initial: Vec<_> = logs
         .into_iter()
         .filter(|log| log.block_number <= BASE + 121)
         .collect();
-    seed_and_run(&database, &initial, 120, 121).await?;
+    Box::pin(seed_and_run(&database, &initial, 120, 121)).await?;
     let node = bigname_lookup::ens_namehash_hex(CHILD)?.parse()?;
     let mut events = vec![
         text(resolver, "kept", "value")?,
@@ -259,7 +260,7 @@ async fn lookup_precomputation_exact_keys_preserve_pairs_opaque_abi_and_mixed_bo
     assert_eq!(components(&database).await?, before_version);
     publish(&database, 127).await?;
     assert_eq!(components(&database).await?, final_components);
-    replay::assert_rebuild(&database, 127).await?;
+    Box::pin(replay::assert_rebuild(&database, 127)).await?;
     assert_name_prepared_parity(&database, CHILD).await?;
     database.cleanup().await
 }
