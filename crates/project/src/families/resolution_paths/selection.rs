@@ -85,6 +85,14 @@ pub(super) fn statement(normal_work: &str) -> String {
           AND event.source_family IN ('ens_v2_registry_l1','ens_v2_migration_l1')
           AND event.consumer_visibility='activated' AND event.canonicality_state IN ('canonical','safe','finalized')
         UNION
+        -- Initialization may announce a previously factory-created proxy in a later block,
+        -- changing support for every observed name mounted below that registry.
+        SELECT lower(event.after_state->>'registry') FROM normalized_events event
+        WHERE event.chain_id=$1 AND event.block_number>$4 AND event.block_number<=$2
+          AND event.event_kind='RegistryCreated' AND event.source_family='ens_v2_registry_l1'
+          AND event.consumer_visibility='activated' AND event.canonicality_state IN ('canonical','safe','finalized')
+          AND event.after_state->>'registry' ~ '^0x[0-9a-fA-F]{{40}}$'
+        UNION
         -- An original wrapper child's owner/fuses can affect a registry now mounted at another
         -- logical parent. Read retained activated migration evidence, never discovery diagnostics.
         SELECT lower(created.after_state->>'registry')

@@ -10,6 +10,10 @@ mod direct;
 mod missing_parent;
 #[path = "migrated_subnames/lookup_publication.rs"]
 mod lookup_publication;
+#[path = "migrated_subnames/lookup_import.rs"]
+mod lookup_import;
+#[path = "migrated_subnames/lookup_late_registry.rs"]
+mod lookup_late_registry;
 #[path = "migrated_subnames/nested.rs"]
 mod nested;
 #[path = "migrated_subnames/replay.rs"]

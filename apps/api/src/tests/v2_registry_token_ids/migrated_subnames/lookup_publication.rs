@@ -11,7 +11,7 @@ sol! {
     event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value);
 }
 
-async fn components(database: &TestDatabase) -> Result<Value> {
+pub(super) async fn components(database: &TestDatabase) -> Result<Value> {
     let mut out = serde_json::Map::new();
     for table in [
         "project_lookup_name",

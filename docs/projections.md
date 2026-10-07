@@ -2389,6 +2389,13 @@ existing first-before-image journal. Resource inventories are shared by aliases
 and retained only while referenced. The factored tables and indexes are detailed
 in [storage](storage.md#published-lookup-state).
 
+A later admitted `RegistryCreated` announcement also refreshes names mounted
+below that registry: factory origin alone did not prove that the registry was
+initialized. This can change a stored unsupported path into a retained resolver
+without any name, pointer or record write in that block. It uses the existing
+physical-registry selector and publication transaction.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/UserRegistry.sol:L57-L69 @ ens_v2_sepolia_20261001@07e55a05)
+
 Stored name cores omit current spelling, publication-derived timestamps and
 positions, diagnostic history and unused execution topology. Per-key inventory
 evidence rebuilds key lists and provenance without copying the full record set
