@@ -531,7 +531,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=476
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=76
+expected_predecessor_shape_proof_count=77
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -1264,6 +1264,10 @@ render_phase_migration "$ROOT/ops/history-registrar-lease-index/install.sql" | r
 emit_phase_migration "$ROOT/migrations/20261006080000_normalized_events_history_registrar_lease_index.sql" preceding-shape | run_psql
 render_phase_migration "$ROOT/ops/history-direct-account-indexes/install.sql" | run_psql
 emit_phase_migration "$ROOT/migrations/20261006160000_normalized_events_history_direct_account_indexes.sql" preceding-shape | run_psql
+# The historical baseline predates the lookup families. Install the additive
+# upgrade here too, before the historical schema's final table/constraint lint.
+emit_phase_migration "$ROOT/migrations/20261007120000_project_lookup_precomputation.sql" preceding-shape | run_psql
+emit_phase_migration "$ROOT/migrations/20261007120000_project_lookup_precomputation.sql" baseline-first | run_psql
 # The permission-reader indexes must be prebuilt for a populated table. Preserve
 # exact baseline definitions, then prove concurrent installation, OID-preserving
 # adoption/rerun, each refusal, and full-set validation before the first build.
@@ -5517,6 +5521,7 @@ BEGIN
             ('project_lookup_relation'),
             ('project_lookup_inventory'),
             ('project_lookup_record'),
+            ('project_lookup_dependency'),
             ('project_generation_failures'),
             ('project_redo_child_registration_history'),
             ('project_redo_expiry_roots'),
@@ -5637,6 +5642,7 @@ BEGIN
             ('project_lookup_relation'),
             ('project_lookup_inventory'),
             ('project_lookup_record'),
+            ('project_lookup_dependency'),
             ('project_generation_failures'),
             ('project_redo_child_registration_history'),
             ('project_redo_expiry_roots'),

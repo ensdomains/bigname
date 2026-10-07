@@ -59,7 +59,8 @@ async fn shared_lookup_publication_matches_name_selection_and_inventory() -> Res
     .await?
     .expect("inventory");
     let mut conn = fixture.pool.acquire().await?;
-    let names = compose_lookup_names_at(&mut conn, &publication, &[name.clone()]).await?;
+    let names =
+        compose_lookup_names_at(&mut conn, &publication, std::slice::from_ref(&name)).await?;
     let selected = names[&name].core.as_ref().expect("lookup name");
     assert_eq!(selected.resource_id, ordinary.resource_id);
     assert_eq!(

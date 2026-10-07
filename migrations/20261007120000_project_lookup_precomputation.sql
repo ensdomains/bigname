@@ -176,5 +176,59 @@ ALTER TABLE pg_temp.project_lookup_name ADD CONSTRAINT project_lookup_name_inven
     END LOOP;
     DROP TABLE pg_temp.project_lookup_relation, pg_temp.project_lookup_record,
         pg_temp.project_lookup_dependency, pg_temp.project_lookup_name, pg_temp.project_lookup_inventory;
+COMMENT ON TABLE bigname_phase.project_lookup_name IS
+    'Project-owned lookup name composition, atomically published and journalled with the other families. Spelling, primary claims and publication metadata remain read-time.';
+COMMENT ON COLUMN bigname_phase.project_lookup_name.chain_id IS
+    'Chain of the logical name.';
+COMMENT ON COLUMN bigname_phase.project_lookup_name.logical_name_id IS
+    'Stable identity of the logical name.';
+COMMENT ON COLUMN bigname_phase.project_lookup_name.record_serving_resource_id IS
+    'Resource whose factored record inventory serves this name, or null when absent.';
+COMMENT ON COLUMN bigname_phase.project_lookup_name.core IS
+    'Shared composed lookup core with omission and null semantics preserved; null records an evaluated absence.';
+COMMENT ON COLUMN bigname_phase.project_lookup_name.supported IS
+    'Whether the composed core has supported coverage.';
+COMMENT ON TABLE bigname_phase.project_lookup_relation IS
+    'Project-owned reverse lookup membership for the public token-holder and effective-controller relations.';
+COMMENT ON COLUMN bigname_phase.project_lookup_relation.chain_id IS
+    'Chain of the logical name.';
+COMMENT ON COLUMN bigname_phase.project_lookup_relation.logical_name_id IS
+    'Logical name participating in the relation.';
+COMMENT ON COLUMN bigname_phase.project_lookup_relation.address IS
+    'Lowercase nonempty address participating in the relation.';
+COMMENT ON COLUMN bigname_phase.project_lookup_relation.relation IS
+    'Public relation kind: token_holder or effective_controller.';
+COMMENT ON TABLE bigname_phase.project_lookup_inventory IS
+    'Project-owned record inventory metadata, shared by every lookup name selecting the same serving resource.';
+COMMENT ON COLUMN bigname_phase.project_lookup_inventory.chain_id IS
+    'Chain of the serving resource.';
+COMMENT ON COLUMN bigname_phase.project_lookup_inventory.resource_id IS
+    'Serving resource whose records were composed.';
+COMMENT ON COLUMN bigname_phase.project_lookup_inventory.metadata IS
+    'Shared inventory metadata without per-key payloads; null records an evaluated absence.';
+COMMENT ON TABLE bigname_phase.project_lookup_record IS
+    'Project-owned record payloads factored by serving resource and record key so unchanged keys need no rewrite.';
+COMMENT ON COLUMN bigname_phase.project_lookup_record.chain_id IS
+    'Chain of the serving resource.';
+COMMENT ON COLUMN bigname_phase.project_lookup_record.resource_id IS
+    'Serving resource owning the inventory.';
+COMMENT ON COLUMN bigname_phase.project_lookup_record.record_key IS
+    'Stable composed record key within the resource inventory.';
+COMMENT ON COLUMN bigname_phase.project_lookup_record.payload IS
+    'Shared composed record payload with omission and null semantics preserved.';
+COMMENT ON TABLE bigname_phase.project_lookup_dependency IS
+    'Project-owned inverse dependencies selecting the resource inventories affected by a changed family fact.';
+COMMENT ON COLUMN bigname_phase.project_lookup_dependency.chain_id IS
+    'Chain of the dependent serving resource.';
+COMMENT ON COLUMN bigname_phase.project_lookup_dependency.resource_id IS
+    'Serving resource whose inventory depends on this source.';
+COMMENT ON COLUMN bigname_phase.project_lookup_dependency.kind IS
+    'Source family selector: resource_pointer, identity, classification, registry_node, partition, link or record_id.';
+COMMENT ON COLUMN bigname_phase.project_lookup_dependency.key1 IS
+    'First nonempty component of the source selector.';
+COMMENT ON COLUMN bigname_phase.project_lookup_dependency.key2 IS
+    'Second source selector component, or empty when unused by this kind.';
+COMMENT ON COLUMN bigname_phase.project_lookup_dependency.key3 IS
+    'Third source selector component for a partition, or empty for other kinds.';
 END
 $migration$;

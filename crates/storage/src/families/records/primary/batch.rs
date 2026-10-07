@@ -116,21 +116,22 @@ pub(crate) async fn load(
             let names_addr_reverse =
                 addr_has_resolver && loaded.is_some_and(|claim| !claim.claim_value_empty);
             let mut claim = loaded.map(|claim| claim.snapshot.clone());
-            if input.coin_type == "60" && !names_addr_reverse {
-                if let Some(fallback) = tuples.get(&(
+            if input.coin_type == "60"
+                && !names_addr_reverse
+                && let Some(fallback) = tuples.get(&(
                     address.clone(),
                     namespace.clone(),
                     DEFAULT_COIN_TYPE.to_owned(),
-                )) {
-                    let mut fallback = fallback.snapshot.clone();
-                    fallback.row.coin_type = input.coin_type.clone();
-                    fallback.default_past_resolver = if loaded.is_some() {
-                        addr_has_resolver
-                    } else {
-                        addr_reverse_has_resolver(conn, &fallback, &address, namespace).await?
-                    };
-                    claim = Some(fallback);
-                }
+                ))
+            {
+                let mut fallback = fallback.snapshot.clone();
+                fallback.row.coin_type = input.coin_type.clone();
+                fallback.default_past_resolver = if loaded.is_some() {
+                    addr_has_resolver
+                } else {
+                    addr_reverse_has_resolver(conn, &fallback, &address, namespace).await?
+                };
+                claim = Some(fallback);
             }
             if let Some(claim) = claim {
                 group.insert((namespace.clone(), input.coin_type.clone()), claim);

@@ -349,7 +349,7 @@ pub(crate) async fn name_relations_at(
     let clock_seconds = publication.timestamp_seconds();
     let roles = RoleHolderLoad::Skip;
     let inputs =
-        ChainInputs::load(conn, &chain, names.iter().copied(), clock_seconds, roles).await?;
+        ChainInputs::load(conn, chain, names.iter().copied(), clock_seconds, roles).await?;
     for row in names {
         let input = inputs.input(row, clock_seconds);
         let related = relations(&input)
