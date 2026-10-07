@@ -6,6 +6,8 @@
 mod cost;
 #[path = "migrated_subnames/direct.rs"]
 mod direct;
+#[path = "migrated_subnames/mirror.rs"]
+mod mirror;
 #[path = "migrated_subnames/missing_parent.rs"]
 mod missing_parent;
 #[path = "migrated_subnames/lookup_publication.rs"]

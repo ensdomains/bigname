@@ -225,3 +225,151 @@ fn a_suffix_without_raw_labels_is_hashed_from_its_labelhashes() {
     );
     assert!(suffix_namehash(None, &malformed).is_err());
 }
+
+/// Internal classification states, not claims of new deployed resolver models. Structural
+/// record-row reasons retain their priority while the name path gets an independent proof.
+#[test]
+fn mirror_target_support_is_independent_of_structural_rejection_reasons() {
+    use super::{MirrorNearest, ResolverClassification, classify};
+    use serde_json::json;
+
+    let admitted = ResolverClassification {
+        classification: json!({"source_family":"ens_v1_resolver_l1","role":"public_resolver"}),
+        support_status: Some("supported".into()),
+        declaration_namespace: Some("ens".into()),
+        ..Default::default()
+    };
+    let mut inactive = admitted.clone();
+    inactive.declaration_namespace = None;
+    let mut wrong_namespace = admitted.clone();
+    wrong_namespace.declaration_namespace = Some("base".into());
+    let mut unsupported = admitted.clone();
+    unsupported.support_status = Some("unsupported".into());
+    unsupported.unsupported_reason = Some("resolver_not_declared".into());
+    let mut unsupported_mirror = unsupported.clone();
+    unsupported_mirror.classification["role"] = json!("ensv1_mirror_resolver");
+    let mut wrong_family_namespace = wrong_namespace.clone();
+    wrong_family_namespace.classification["source_family"] = json!("ens_v2_resolver_l1");
+    let mut known_other_family = admitted.clone();
+    known_other_family.classification["source_family"] = json!("ens_v2_resolver_l1");
+    let mut known_mirror = admitted.clone();
+    known_mirror.classification["role"] = json!("ensv1_mirror_resolver");
+    let mut extended = admitted.clone();
+    extended.classification["read_features"] = json!(["ensip10_extended_resolver"]);
+    for (label, resolver, depth, supported, reason, forwarding) in [
+        (
+            "missing",
+            None,
+            0,
+            false,
+            Some("resolver_classification_missing"),
+            "direct_call",
+        ),
+        (
+            "inactive",
+            Some(&inactive),
+            0,
+            false,
+            Some("resolver_classification_missing"),
+            "direct_call",
+        ),
+        (
+            "unsupported",
+            Some(&unsupported),
+            0,
+            false,
+            Some("resolver_not_declared"),
+            "direct_call",
+        ),
+        (
+            "wrong namespace",
+            Some(&wrong_namespace),
+            0,
+            false,
+            Some("resolver_classification_missing"),
+            "direct_call",
+        ),
+        (
+            "role precedes support",
+            Some(&unsupported_mirror),
+            0,
+            false,
+            Some("mirrored_resolver_is_mirror"),
+            "direct_call",
+        ),
+        (
+            "family precedes namespace",
+            Some(&wrong_family_namespace),
+            0,
+            false,
+            Some("mirrored_resolver_not_ensv1"),
+            "direct_call",
+        ),
+        (
+            "known other family",
+            Some(&known_other_family),
+            0,
+            true,
+            Some("mirrored_resolver_not_ensv1"),
+            "direct_call",
+        ),
+        (
+            "known mirror",
+            Some(&known_mirror),
+            0,
+            true,
+            Some("mirrored_resolver_is_mirror"),
+            "direct_call",
+        ),
+        (
+            "known direct",
+            Some(&admitted),
+            0,
+            true,
+            None,
+            "direct_call",
+        ),
+        (
+            "known nonextended ancestor",
+            Some(&admitted),
+            1,
+            true,
+            Some("ancestor_resolver_not_extended"),
+            "direct_call",
+        ),
+        (
+            "known extended ancestor",
+            Some(&extended),
+            1,
+            true,
+            Some("ensip10_extended_resolver"),
+            "extended_resolve",
+        ),
+    ] {
+        let mut nearest = MirrorNearest {
+            ancestor_depth: depth,
+            mirrored_node: "node".into(),
+            mirrored_name: "child.parent.eth".into(),
+            mirrored_resource_id: None,
+            mirrored_resolver_address: "0xresolver".into(),
+            mirrored_pointer_event_id: None,
+            mirrored_pointer_source_family: "ens_v1_registry_l1".into(),
+            mirrored_pointer_namespace: "ens".into(),
+            mirrored_block_number: 1,
+            mirrored_classification_supported: false,
+            forwarding: "direct_call",
+            mirrored_unsupported_reason: None,
+        };
+        classify(&mut nearest, resolver);
+        assert_eq!(
+            nearest.mirrored_classification_supported, supported,
+            "{label}"
+        );
+        assert_eq!(
+            nearest.mirrored_unsupported_reason.as_deref(),
+            reason,
+            "{label}"
+        );
+        assert_eq!(nearest.forwarding, forwarding, "{label}");
+    }
+}
