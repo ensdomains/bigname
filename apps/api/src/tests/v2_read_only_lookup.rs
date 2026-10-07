@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "v2_read_only_lookup/prepared.rs"]
+mod prepared;
+
 const READ_ONLY_GUARD: &str = "bigname_phase.revalidate_resolution_lookup_state_read_only(text,bigint,text,jsonb,jsonb,uuid,text,text)";
 
 async fn read_only_pool(database: &TestDatabase) -> Result<(PgPool, String)> {

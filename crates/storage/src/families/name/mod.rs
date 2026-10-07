@@ -35,6 +35,8 @@ mod heads;
 mod list;
 mod list_keys;
 mod loaders;
+mod lookup;
+pub use lookup::compose_lookup_names_at;
 pub mod rendered;
 mod resolution_path;
 mod resolvability;

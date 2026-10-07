@@ -94,16 +94,33 @@ async fn load_name_records(
     logical_name_ids: &[String],
     selected_snapshot: Option<&SelectedSnapshot>,
 ) -> V2Result<BTreeMap<String, bigname_storage::IdentityNameRecordRow>> {
-    let records = match profile {
-        LookupProfile::Feed => {
-            bigname_storage::load_phase_identity_name_feed_records_by_ids(
-                &state.pool,
-                logical_name_ids,
-            )
-            .await
-        }
-        LookupProfile::Detail => {
-            bigname_storage::load_phase_identity_records_by_ids(&state.pool, logical_name_ids).await
+    let records = if let Some(selected) = selected_snapshot {
+        let chains: Vec<_> = selected
+            .chain_positions
+            .as_map()
+            .values()
+            .map(|position| position.chain_id.clone())
+            .collect();
+        bigname_storage::families::lookup::load_lookup_records(
+            &state.pool,
+            logical_name_ids,
+            matches!(profile, LookupProfile::Detail),
+            Some(&chains),
+        )
+        .await
+    } else {
+        match profile {
+            LookupProfile::Feed => {
+                bigname_storage::load_phase_identity_name_feed_records_by_ids(
+                    &state.pool,
+                    logical_name_ids,
+                )
+                .await
+            }
+            LookupProfile::Detail => {
+                bigname_storage::load_phase_identity_records_by_ids(&state.pool, logical_name_ids)
+                    .await
+            }
         }
     }
     .map_err(crate::v2::snapshots::name_rows_error(

@@ -568,3 +568,6 @@ async fn migrated_subname_pro_canonical_expiry_keeps_alternate_physical_path() -
         database.cleanup().await
     }
 }
+
+#[path = "physical/classifier.rs"]
+mod classifier;

@@ -337,45 +337,39 @@ fn address_name_row(
 
 /// Address relations for composed names on the caller's snapshot, used by batch lookup. They
 /// hold no `role_holder` relations: reverse lookup does not serve it ([`RoleHolderLoad::Skip`]).
-pub(crate) async fn name_relations_on(
+/// Exact lookup ownership/control from the supplied publication. Project calls this before
+/// the marker advances; role holders remain excluded by the same lookup relation fold.
+pub(crate) async fn name_relations_at(
     conn: &mut PgConnection,
-    composed: &BTreeMap<String, NameCurrentRow>,
+    publication: &FamilyPublication,
+    names: &[&NameCurrentRow],
 ) -> Result<BTreeMap<String, Vec<crate::IdentityAddressRelationRow>>> {
-    let mut chains: BTreeMap<String, Vec<&NameCurrentRow>> = BTreeMap::new();
-    for row in composed.values() {
-        let chain = row.provenance["chain_id"]
-            .as_str()
-            .context("composed name has no chain")?;
-        chains.entry(chain.to_owned()).or_default().push(row);
-    }
+    let chain = &publication.chain_id;
     let mut out = BTreeMap::new();
-    for (chain, names) in chains {
-        let publication = servable_publication(conn, &chain).await?;
-        let clock_seconds = publication.timestamp_seconds();
-        let roles = RoleHolderLoad::Skip;
-        let inputs =
-            ChainInputs::load(conn, &chain, names.iter().copied(), clock_seconds, roles).await?;
-        for row in names {
-            let input = inputs.input(row, clock_seconds);
-            let related = relations(&input)
-                .into_iter()
-                .map(|(address, relation)| {
-                    let relation = match relation {
-                        "token_holder" => AddressNameRelation::TokenHolder,
-                        "effective_controller" => AddressNameRelation::EffectiveController,
-                        "role_holder" => AddressNameRelation::RoleHolder,
-                        _ => unreachable!("family relations have three defined kinds"),
-                    };
-                    crate::IdentityAddressRelationRow {
-                        address,
-                        logical_name_id: row.logical_name_id.clone(),
-                        relation,
-                        chain_positions: row.chain_positions.clone(),
-                    }
-                })
-                .collect();
-            out.insert(row.logical_name_id.clone(), related);
-        }
+    let clock_seconds = publication.timestamp_seconds();
+    let roles = RoleHolderLoad::Skip;
+    let inputs =
+        ChainInputs::load(conn, chain, names.iter().copied(), clock_seconds, roles).await?;
+    for row in names {
+        let input = inputs.input(row, clock_seconds);
+        let related = relations(&input)
+            .into_iter()
+            .map(|(address, relation)| {
+                let relation = match relation {
+                    "token_holder" => AddressNameRelation::TokenHolder,
+                    "effective_controller" => AddressNameRelation::EffectiveController,
+                    "role_holder" => AddressNameRelation::RoleHolder,
+                    _ => unreachable!("family relations have three defined kinds"),
+                };
+                crate::IdentityAddressRelationRow {
+                    address,
+                    logical_name_id: row.logical_name_id.clone(),
+                    relation,
+                    chain_positions: row.chain_positions.clone(),
+                }
+            })
+            .collect();
+        out.insert(row.logical_name_id.clone(), related);
     }
     Ok(out)
 }

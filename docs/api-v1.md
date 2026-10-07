@@ -1090,16 +1090,19 @@ grouped `records` (`GET /v1/names/{name}`, both sources) and for
 and the composed names, its `relation=resolves_to` pages (both the exact coin
 type and `coin_type=evm`) from the node-keyed and record-ID inverse address indexes, the record counts of
 `include=counts`, and the indexed primary-name claim of
-`GET /v1/addresses/{address}/primary-name`. Batch lookup identity records,
-address relations, inventory readback, and verified lookup inputs use those same
-family publications. Reverse address pages and their exact counts in `POST /v1/lookup`
-also read the address index and primary claims from the families. Candidate keys
-are sought in bounded batches before composing names and applying relation masks.
-Primary claims, page membership, counts, and returned inventories share one
-repeatable-read snapshot over the route's selected authority chains. Exact counts
-visit all matching candidates; page-only relation scans stop at the page limit
-and overflow row. Primary-first ordering, role ranking, filters, and cursors are
-unchanged. History and event routes retain their event sources and join composed
+`GET /v1/addresses/{address}/primary-name`. Batch lookup reads stable indexed name decisions, exact owner/manager relations
+and per-resource selected record keys published by Project in those same family
+publications. Current spelling and primary claims are joined at read. Feed skips
+inventory payloads; detail assembles the full existing inventory and grouped
+record shape. Reverse membership and exact counts use compact exact relation
+keys before hydrating returned names. Primary claims, page membership, counts
+and inventories share one repeatable-read snapshot over the selected authority
+chains. Counts can visit every matching key; page hydration retains only the
+page and overflow row. Primary-first ordering, role ranking, filters, cursors and
+post-filtered null-count behavior are unchanged. These stored reads require the
+live marker and matching Interpret and Project phase input hashes, including for
+empty results. A schema-only installation is not ready lookup state.
+History and event routes retain their event sources and join composed
 name rows: `GET /v1/names/{name}/history` (whether the name exists),
 `GET /v1/events`, `GET /v1/diagnostics/events` and
 `GET /v1/addresses/{address}/history` (each event's name). Each composed read sees one committed family

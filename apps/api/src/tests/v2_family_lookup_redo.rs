@@ -425,7 +425,7 @@ async fn forward_lookup_keeps_unrelated_database_failures_internal() -> Result<(
         .await
         .context("forward read did not reach family snapshot")?;
     // A genuine query failure is not a stale publication. The marker and lineage stay valid.
-    sqlx::query("ALTER TABLE project_name_history RENAME TO fixture_unavailable_name_history")
+    sqlx::query("ALTER TABLE project_lookup_record RENAME TO fixture_unavailable_lookup_record")
         .execute(&database.pool)
         .await?;
     resume.notify_one();

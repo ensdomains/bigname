@@ -5,7 +5,7 @@
 //! Every production `.rs` file under the root must be listed in exactly one of the two lists below.
 //! A listed composition file that is missing, or an unlisted `.rs` file, fails the hash, so a file
 //! cannot move into or out of the composition without a reviewed edit here. Keep the composition
-//! list closed under what `compose_name_summary_publication` reaches: a composition file that
+//! list closed under what Project's summary, path and lookup compositors reach: a composition file that
 //! starts calling a reader file, or embeds another file (such as SQL), lists that file in
 //! COMPOSITION_FILES in the same change.
 
@@ -19,6 +19,23 @@ pub(crate) const ROOT: &str = "crates/storage/src/families";
 /// composition (`derived/summary.rs`), its `RequiredOwnerMissing` check, and the family position
 /// ordinals (`position.rs`, `hydrate/{reverse,text}.rs`).
 pub(crate) const COMPOSITION_FILES: &[&str] = &[
+    // Shared lookup decisions, per-key output and inventory dependency emission.
+    "crates/storage/src/families/lookup/mod.rs",
+    "crates/storage/src/families/lookup/types.rs",
+    "crates/storage/src/families/lookup/inventory.rs",
+    "crates/storage/src/families/name/lookup.rs",
+    "crates/storage/src/families/records/address_names.rs",
+    "crates/storage/src/families/records/assemble.rs",
+    "crates/storage/src/families/records/inventory_publication.rs",
+    "crates/storage/src/families/records/inventory_selection.rs",
+    "crates/storage/src/families/records/inventory_types.rs",
+    "crates/storage/src/families/records/inventory_cutoff.rs",
+    "crates/storage/src/families/records/links.rs",
+    "crates/storage/src/families/records/payload.rs",
+    "crates/storage/src/families/records/pointer.rs",
+    "crates/storage/src/families/records/profiles.rs",
+    "crates/storage/src/families/records/rows.rs",
+    "crates/storage/src/families/records/text_hydration.rs",
     // Family positions and the emission ordinal Project orders journal rows and hydration by.
     "crates/storage/src/families/position.rs",
     // The summary composition and the composed-row loader it calls (`batch::load_chain`).
@@ -72,6 +89,11 @@ pub(crate) const COMPOSITION_FILES: &[&str] = &[
 
 /// Serving reads and module wiring the composition does not call.
 const READER_FILES: &[&str] = &[
+    "crates/storage/src/families/lookup/read.rs",
+    "crates/storage/src/families/lookup/read_inventory.rs",
+    "crates/storage/src/families/lookup/reverse.rs",
+    "crates/storage/src/families/records/primary/batch.rs",
+    "crates/storage/src/families/records/reverse/batch.rs",
     "crates/storage/src/families/search_dictionary.rs",
     "crates/storage/src/families/search_dictionary/candidates.rs",
     "crates/storage/src/families/search_dictionary/pointer_parity.rs",
@@ -97,25 +119,16 @@ const READER_FILES: &[&str] = &[
     "crates/storage/src/families/name/list/expiring/measure.rs",
     "crates/storage/src/families/name/seams.rs",
     "crates/storage/src/families/name/topology.rs",
-    "crates/storage/src/families/records/address_names.rs",
-    "crates/storage/src/families/records/assemble.rs",
     "crates/storage/src/families/records/candidates.rs",
     "crates/storage/src/families/records/former_owners.rs",
     "crates/storage/src/families/records/inventory.rs",
-    "crates/storage/src/families/records/inventory_cutoff.rs",
-    "crates/storage/src/families/records/links.rs",
-    "crates/storage/src/families/records/payload.rs",
-    "crates/storage/src/families/records/pointer.rs",
     "crates/storage/src/families/records/primary.rs",
-    "crates/storage/src/families/records/profiles.rs",
     "crates/storage/src/families/records/registry_children.rs",
     "crates/storage/src/families/records/resolves_to.rs",
     "crates/storage/src/families/records/resolves_to_serving.rs",
     "crates/storage/src/families/records/reverse.rs",
     "crates/storage/src/families/records/reverse_page.rs",
-    "crates/storage/src/families/records/rows.rs",
     "crates/storage/src/families/records/seams.rs",
-    "crates/storage/src/families/records/text_hydration.rs",
     "crates/storage/src/families/topology/children.rs",
     "crates/storage/src/families/topology/children_page.rs",
     "crates/storage/src/families/topology/children_page/child_flags.rs",

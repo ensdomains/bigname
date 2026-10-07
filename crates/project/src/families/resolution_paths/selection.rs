@@ -78,12 +78,45 @@ pub(super) fn statement(normal_work: &str) -> String {
         JOIN normalized_events event ON event.event_identity=pointer.pointer_position->>'event_identity'
           AND event.chain_id=$1 AND event.source_family IN ('ens_v2_root_l1','ens_v2_registry_l1')
           AND event.after_state->>'token_id' ~ '^0x[0-9a-fA-F]{{64}}$'
+        UNION
+        -- Canonical retirement clears F5, but an independently mounted physical entry may
+        -- still use its resolver. Last-nonzero narrows candidates; latest physical wins.
+        SELECT lower(physical.emitter), left(lower(physical.token_id),58)||'00000000'
+        FROM changed_resolvers changed JOIN project_resource_pointer pointer
+          ON pointer.chain_id=$1 AND pointer.resolver_address IS NULL
+          AND pointer.nonzero_resolver_address=changed.resolver
+          AND pointer.source_family IN ('ens_v2_root_l1','ens_v2_registry_l1')
+        JOIN normalized_events event ON event.event_identity=pointer.pointer_position->>'event_identity'
+          AND event.chain_id=$1 AND event.resource_id=pointer.resource_id AND event.event_kind='ResolverChanged'
+          AND event.source_family IN ('ens_v2_root_l1','ens_v2_registry_l1')
+          AND event.consumer_visibility='activated' AND event.canonicality_state IN ('canonical','safe','finalized')
+          AND event.block_number<=$2 AND NOT ({PHYSICAL_POINTER_EVENT_SQL})
+        CROSS JOIN LATERAL (
+            SELECT event.raw_fact_ref->>'emitting_address' AS emitter,
+                   event.after_state->>'token_id' AS token_id, event.after_state->>'resolver' AS resolver
+            FROM normalized_events event
+            WHERE event.chain_id=$1 AND event.resource_id=pointer.resource_id AND event.event_kind='ResolverChanged'
+              AND event.source_family IN ('ens_v2_root_l1','ens_v2_registry_l1')
+              AND event.consumer_visibility='activated' AND event.canonicality_state IN ('canonical','safe','finalized')
+              AND event.block_number<=$2 AND {PHYSICAL_POINTER_EVENT_SQL}
+            ORDER BY event.block_number DESC, event.transaction_index DESC NULLS LAST,
+                     event.log_index DESC NULLS LAST, event.event_identity COLLATE "C" DESC LIMIT 1
+        ) physical
+        WHERE physical.resolver=changed.resolver AND physical.token_id ~ '^0x[0-9a-fA-F]{{64}}$'
     ), changed_registries AS MATERIALIZED (
         SELECT lower(event.after_state->>'proxy_address') AS registry FROM normalized_events event
         WHERE event.chain_id=$1 AND event.block_number>$4 AND event.block_number<=$2
           AND event.event_kind IN ('Upgraded','ContractDiscovered')
           AND event.source_family IN ('ens_v2_registry_l1','ens_v2_migration_l1')
           AND event.consumer_visibility='activated' AND event.canonicality_state IN ('canonical','safe','finalized')
+        UNION
+        -- Initialization may announce a previously factory-created proxy in a later block,
+        -- changing support for every observed name mounted below that registry.
+        SELECT lower(event.after_state->>'registry') FROM normalized_events event
+        WHERE event.chain_id=$1 AND event.block_number>$4 AND event.block_number<=$2
+          AND event.event_kind='RegistryCreated' AND event.source_family='ens_v2_registry_l1'
+          AND event.consumer_visibility='activated' AND event.canonicality_state IN ('canonical','safe','finalized')
+          AND event.after_state->>'registry' ~ '^0x[0-9a-fA-F]{{40}}$'
         UNION
         -- An original wrapper child's owner/fuses can affect a registry now mounted at another
         -- logical parent. Read retained activated migration evidence, never discovery diagnostics.

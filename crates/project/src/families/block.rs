@@ -359,6 +359,7 @@ async fn refresh_derived(
     stats: &mut BlockStats,
 ) -> Result<()> {
     super::resolution_paths::prepare(transaction, chain_id, block, after).await?;
+    super::lookup::prepare(transaction, chain_id, block, after).await?;
     let touched = super::derived::touched(transaction, chain_id, block.number, Some(after)).await?;
     let summary = super::derived::refresh(transaction, chain_id, &touched).await?;
     if summary.rows > 0 {
@@ -382,6 +383,7 @@ async fn refresh_derived(
         super::derived::refresh_search_cutover(transaction, chain_id, block).await?;
     *stats.rows.entry(NAME_SUMMARY.name).or_default() += rows;
     stats.undo_rows += undo_rows;
+    super::lookup::refresh(transaction, chain_id, block, stats).await?;
     Ok(())
 }
 
@@ -399,7 +401,9 @@ pub(crate) async fn insert_journal(
          )
          SELECT $1, $2, $3, entry.family, entry.key, NULLIF(entry.before_image, 'null'::jsonb)
          FROM jsonb_to_recordset($4) AS entry(family text, key text, before_image jsonb)
-         WHERE entry.family <> 'project_name_summary' OR NOT EXISTS (
+         WHERE entry.family NOT IN ('project_name_summary', 'project_lookup_name',
+             'project_lookup_relation', 'project_lookup_inventory', 'project_lookup_record',
+             'project_lookup_dependency') OR NOT EXISTS (
              SELECT 1 FROM project_family_undo prior
              WHERE prior.chain_id=$1 AND prior.block_number=$2
                AND prior.family=entry.family AND prior.key=entry.key)",

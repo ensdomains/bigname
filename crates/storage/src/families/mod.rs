@@ -3,6 +3,7 @@
 #[path = "name/basenames_context.rs"]
 pub(crate) mod basenames_context;
 pub mod control;
+pub mod lookup;
 pub mod name;
 pub mod position;
 pub mod records;

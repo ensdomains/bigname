@@ -18,6 +18,10 @@ mod candidates;
 pub(crate) mod facts;
 mod former_owners;
 mod inventory;
+mod inventory_publication;
+mod inventory_selection;
+mod inventory_types;
+pub use inventory_publication::{compose_lookup_inventories_at, compose_lookup_record_keys_at};
 mod links;
 pub(crate) mod mirror;
 mod payload;
@@ -39,7 +43,7 @@ pub use address_names::load_family_address_names_page;
 pub(crate) use address_names::{
     AddressComposer, ComposedName, address_name_candidates, compose_candidate_rows, includes_roles,
 };
-pub(crate) use address_names::{compose_address_name_rows, name_relations_on};
+pub(crate) use address_names::{compose_address_name_rows, name_relations_at};
 pub use address_publication::CurrentHistoryRelation;
 pub(crate) use address_publication::publication_relations;
 pub use facts::{

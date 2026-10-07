@@ -45,6 +45,8 @@ pub(crate) struct MirrorSelection {
     pub(crate) mirror: ResolverClassification,
     pub(crate) mirror_namespace_matches: bool,
     pub(crate) nearest: Option<MirrorNearest>,
+    /// Every node consulted, including absent nodes before the selected ancestor.
+    pub(crate) consulted_nodes: Vec<(String, String)>,
 }
 
 impl MirrorSelection {
@@ -150,15 +152,6 @@ pub(crate) fn is_mirror_pointer(
 /// Walk the ENSv1 registry for a mirror pointer: at most one `project_registry_pointer` probe per
 /// label of the queried name, then one classification probe for the nearest resolver. A tie at one
 /// depth follows the canonical event order, never the generated event id.
-pub(crate) async fn evaluate_family_mirror(
-    conn: &mut PgConnection,
-    chain_id: &str,
-    pointer: &ServingPointer,
-    mirror: ResolverClassification,
-) -> Result<MirrorSelection> {
-    evaluate_family_mirror_at(conn, chain_id, pointer, mirror, None).await
-}
-
 pub(crate) async fn evaluate_family_mirror_at(
     conn: &mut PgConnection,
     chain_id: &str,
@@ -167,7 +160,7 @@ pub(crate) async fn evaluate_family_mirror_at(
     publication_block: Option<i64>,
 ) -> Result<MirrorSelection> {
     let mirror_namespace_matches = mirror.declared_in(&pointer.namespace);
-    let nearest = nearest(conn, chain_id, pointer).await?;
+    let (nearest, consulted_nodes) = nearest(conn, chain_id, pointer).await?;
     let nearest = match nearest {
         Some(mut nearest) => {
             let classification = super::facts::load_classifications_at(
@@ -187,6 +180,7 @@ pub(crate) async fn evaluate_family_mirror_at(
         mirror,
         mirror_namespace_matches,
         nearest,
+        consulted_nodes,
     })
 }
 
@@ -194,7 +188,7 @@ async fn nearest(
     conn: &mut PgConnection,
     chain_id: &str,
     pointer: &ServingPointer,
-) -> Result<Option<MirrorNearest>> {
+) -> Result<(Option<MirrorNearest>, Vec<(String, String)>)> {
     let surface = sqlx::query(
         "SELECT namespace, raw_labels, labelhashes FROM bigname_phase.name_surfaces
          WHERE logical_name_id = $1 AND chain_id = $2
@@ -207,7 +201,7 @@ async fn nearest(
     .await
     .context("failed to load the queried name of a mirror pointer")?;
     let Some(surface) = surface else {
-        return Ok(None);
+        return Ok((None, Vec::new()));
     };
     let namespace: String = surface.try_get("namespace")?;
     // A surface without raw bytes is walked by its label hashes alone.
@@ -258,27 +252,34 @@ async fn nearest(
         .fetch_all(&mut *conn)
         .await
         .context("failed to walk the ENSv1 registry pointers of a mirror pointer")?;
+    let consulted: Vec<_> = nodes
+        .into_iter()
+        .map(|node| (namespace.clone(), node))
+        .collect();
     for row in rows {
         let resolver: String = row.try_get("resolver_address")?;
         if is_cleared(Some(&resolver)) {
             continue;
         }
-        return Ok(Some(MirrorNearest {
-            ancestor_depth: row.try_get("ancestor_depth")?,
-            mirrored_node: row.try_get("node")?,
-            mirrored_name: row.try_get("raw_name")?,
-            mirrored_resource_id: row.try_get("resource_id")?,
-            mirrored_resolver_address: resolver,
-            mirrored_pointer_event_id: row.try_get("normalized_event_id")?,
-            mirrored_pointer_source_family: row.try_get("source_family")?,
-            mirrored_pointer_namespace: row.try_get("namespace")?,
-            mirrored_block_number: row.try_get("block_number")?,
-            mirrored_classification_supported: false,
-            forwarding: "direct_call",
-            mirrored_unsupported_reason: None,
-        }));
+        return Ok((
+            Some(MirrorNearest {
+                ancestor_depth: row.try_get("ancestor_depth")?,
+                mirrored_node: row.try_get("node")?,
+                mirrored_name: row.try_get("raw_name")?,
+                mirrored_resource_id: row.try_get("resource_id")?,
+                mirrored_resolver_address: resolver,
+                mirrored_pointer_event_id: row.try_get("normalized_event_id")?,
+                mirrored_pointer_source_family: row.try_get("source_family")?,
+                mirrored_pointer_namespace: row.try_get("namespace")?,
+                mirrored_block_number: row.try_get("block_number")?,
+                mirrored_classification_supported: false,
+                forwarding: "direct_call",
+                mirrored_unsupported_reason: None,
+            }),
+            consulted,
+        ));
     }
-    Ok(None)
+    Ok((None, consulted))
 }
 
 /// The canonical event order, latest first, over the position columns of `alias`, a

@@ -52,6 +52,11 @@ const FAMILY_TABLES: &[&str] = &[
     "project_address_record_id_index",
     "project_name_history",
     "project_name_summary",
+    "project_lookup_name",
+    "project_lookup_relation",
+    "project_lookup_inventory",
+    "project_lookup_record",
+    "project_lookup_dependency",
 ];
 
 const BASELINE: &[&str] = &[
@@ -590,4 +595,103 @@ async fn search_schema_upgrade_resets_old_fields_preserves_identity_and_matches_
     );
     fresh.cleanup().await?;
     upgraded.cleanup().await
+}
+
+const LOOKUP_PRECOMPUTATION: &str =
+    include_str!("../../../migrations/20261007120000_project_lookup_precomputation.sql");
+const LOOKUP_TABLES: &[&str] = &[
+    "project_lookup_name",
+    "project_lookup_relation",
+    "project_lookup_inventory",
+    "project_lookup_record",
+    "project_lookup_dependency",
+];
+
+#[tokio::test]
+async fn lookup_schema_upgrade_repeat_and_baseline_preserve_publication() -> Result<()> {
+    let installed = database("lookup_schema_installed").await?;
+    initialize_schema_v2(installed.pool()).await?;
+    let upgraded = database("lookup_schema_upgraded").await?;
+    install_baseline(&upgraded, false).await?;
+    sqlx::raw_sql(
+        "DROP TABLE bigname_phase.project_lookup_relation,
+        bigname_phase.project_lookup_record, bigname_phase.project_lookup_dependency,
+        bigname_phase.project_lookup_name, bigname_phase.project_lookup_inventory;
+        INSERT INTO bigname_phase.project_family_marker
+            (chain_id,current_block_number,current_block_hash,sequence,state)
+        VALUES ('lookup-untouched',7,'0x7',1,'live')",
+    )
+    .execute(upgraded.pool())
+    .await?;
+    let mut tx = upgraded.pool().begin().await?;
+    for _ in 0..2 {
+        // Repeat within one transaction also proves the migration releases its temporary schema.
+        sqlx::raw_sql(LOOKUP_PRECOMPUTATION)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    for table in LOOKUP_TABLES {
+        assert_eq!(
+            load_table_structure(upgraded.pool(), table).await?,
+            load_table_structure(installed.pool(), table).await?,
+            "{table}"
+        );
+    }
+    let marker: (i64, String) = sqlx::query_as("SELECT sequence,state FROM bigname_phase.project_family_marker WHERE chain_id='lookup-untouched'")
+        .fetch_one(upgraded.pool()).await?;
+    assert_eq!(
+        marker,
+        (1, "live".into()),
+        "schema installation cannot publish lookup state"
+    );
+    installed.cleanup().await?;
+    upgraded.cleanup().await
+}
+
+#[tokio::test]
+async fn lookup_schema_refuses_drift_and_defers_complete_resource_references() -> Result<()> {
+    let database = database("lookup_schema_constraints").await?;
+    initialize_schema_v2(database.pool()).await?;
+    for mutation in [
+        "ALTER TABLE bigname_phase.project_lookup_name ADD COLUMN unknown text",
+        "ALTER TABLE bigname_phase.project_lookup_record ALTER COLUMN payload DROP NOT NULL",
+        "ALTER TABLE bigname_phase.project_lookup_relation DROP CONSTRAINT project_lookup_relation_relation_check",
+        "ALTER TABLE bigname_phase.project_lookup_name DROP CONSTRAINT project_lookup_name_inventory_fkey",
+        "DROP INDEX bigname_phase.project_lookup_dependency_source_idx; CREATE INDEX project_lookup_dependency_source_idx ON bigname_phase.project_lookup_dependency (chain_id)",
+    ] {
+        let mut tx = database.pool().begin().await?;
+        sqlx::raw_sql(mutation).execute(&mut *tx).await?;
+        let outcome = sqlx::raw_sql(LOOKUP_PRECOMPUTATION).execute(&mut *tx).await;
+        assert!(
+            outcome
+                .unwrap_err()
+                .to_string()
+                .contains("incompatible lookup table")
+        );
+        tx.rollback().await?;
+    }
+    let mut tx = database.pool().begin().await?;
+    sqlx::raw_sql(
+        "INSERT INTO bigname_phase.project_lookup_name
+        VALUES ('lookup', 'ens:test', '00000000-0000-0000-0000-000000000001', '{}', true);
+        INSERT INTO bigname_phase.project_lookup_inventory
+        VALUES ('lookup', '00000000-0000-0000-0000-000000000001', NULL);
+        SET CONSTRAINTS ALL IMMEDIATE",
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.rollback().await?;
+    let mut tx = database.pool().begin().await?;
+    sqlx::raw_sql(
+        "INSERT INTO bigname_phase.project_lookup_name
+        VALUES ('lookup', 'ens:incomplete', '00000000-0000-0000-0000-000000000002', '{}', true)",
+    )
+    .execute(&mut *tx)
+    .await?;
+    assert!(
+        tx.commit().await.is_err(),
+        "incomplete inventory publication must not commit"
+    );
+    database.cleanup().await
 }

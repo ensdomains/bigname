@@ -16,6 +16,7 @@ mod identity;
 mod input;
 mod keys;
 mod lifecycle;
+mod lookup;
 mod manifests;
 mod marker;
 mod permissions;

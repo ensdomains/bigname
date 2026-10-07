@@ -349,18 +349,56 @@ older schema; raw facts, manifest identities,
 normalized-event identities, and unrelated phase rows remain in place for the
 mandatory full Interpret and Project redos.
 
-Reverse address lookup uses `project_address_name_index` to admit candidate name surfaces, seeks those
-keys in primary-first, role, and lexical order (role order ranks names whose
-`owner` is the address before names it is only the `manager` of), and recomputes their current
-relations in batches of at most 64 names. Project writes that index with the
-`token_holder` and `effective_controller` relations only, every address under
-both, because a name with no token is owned by its registry owner; it writes no
-`registrant` rows. The primary claims, relation masks,
-exact count, and page inventories share one read-only repeatable-read snapshot.
-The count visits every candidate but retains only a page and its overflow row.
-The candidate SQL can inspect or sort more index entries than it returns, and
-masked candidates can require additional seeks; production query plans and
-latency still require production-scale qualification before activation.
+`POST /v1/lookup` reads the Project-owned lookup state described below. Other
+address-name collections retain their existing family composition and predicates.
+
+### Published lookup state
+
+Project publishes five current-state tables in the same transaction as the family
+marker. `project_lookup_name` holds stable name decisions and an explicit null
+core for an evaluated absence, plus its small supported flag for count/page filtering
+without reading the JSON payload; `project_lookup_relation` holds exact current
+`token_holder` and `effective_controller` relations. `project_lookup_inventory`
+holds small metadata or a known absence for each referenced record-serving resource.
+`project_lookup_record` stores selected entries and evidence per resource/key;
+`project_lookup_dependency` records the typed inputs consulted by that inventory
+selection, including absent inputs. Deferred foreign keys keep names, relations,
+inventories, selected keys and dependencies complete at commit.
+
+The name-to-resource index bounds reference checks. The address-first relation
+index supplies reverse membership and exact counts before page hydration. Its
+compact keys are ordered with the current identity spelling and current primary
+claim; owner ranks before manager, and the existing primary-first/name/namespace/
+namehash cursor remains unchanged. Counts may inspect all matching relation keys,
+but neither counts nor feed pages load inventory payloads. Detail reads share
+inventories across aliases and read at most 256 requested resources per batch.
+
+The dependency source index finds inventories affected by resource pointers,
+classification, consulted registry nodes, admitted partitions, exact/default
+links and linked record IDs. Empty and losing inputs remain dependencies, so
+later insertions are considered. Name work uses the shared summary and resolution
+path selectors before their clocks are consumed. Project composes against its
+upcoming publication, diffs complete rows, and journals only changed keys through
+`project_family_undo`. An ordinary value edit retains its exact record key and
+reselects only that key across the admitted partitions and selected record ID,
+using the same cutoff and winner rules as full composition. Indexed source reads,
+component construction and old-row comparison are bounded to those keys; other
+selected values, inventory metadata and dependencies are not recomposed or rewritten.
+Partition bookkeeping and classification usage touches do not force full refresh:
+Project compares the journalled old selection inputs with the final base rows.
+Changes to pointer/link/reference selection, partition version, classification or
+admission still select full refresh, which takes precedence over key work. An unreferenced inventory and its keys/dependencies are removed
+in that transaction. Undo and full reset cover all five tables.
+
+Spelling, publication positions, surface provenance and primary claims remain
+read-time joins. Verified label imports therefore affect lookup without a Project
+rewrite. API requests never populate these tables. Stored reads require the live
+marker and matching Interpret/Project phase input hashes; a missing prepared name
+or inventory is an integrity error, while an explicitly evaluated absence retains
+its ordinary result. There is no automatic composition fallback. The API role
+receives SELECT on the first four tables; dependency maintenance remains private
+to the writer. See [deployment](deployment.md#published-lookup-state) for the
+required full epoch adoption and rollback procedure.
 
 Resolver roles and resolver permission reads expose `eac_resource` from the
 current served grant's already-retained `grant_source.upstream_resource` when
@@ -379,6 +417,7 @@ field requires no schema migration or replay.
 | `manifest_*` | manifest synchronization | Authored source declarations and admitted capability versions. |
 | `discovery_*` | Interpret | Canonical discovered edges and admission evidence. |
 | `name_surfaces`, `surface_bindings`, `resources`, `token_lineages` | Interpret | Stable identity anchors. |
+| `project_lookup_name`, `project_lookup_relation`, `project_lookup_inventory`, `project_lookup_record`, `project_lookup_dependency` | Project | Journalled current lookup facts, exact relations and per-resource selected records/dependencies; published with the family marker. |
 | `name_search_documents`, `name_search_postings` | Interpret and the verified label-preimage importer | Atomic current spelling and lexical indexes; rebuilt from surface and retained verified label evidence. |
 | `label_preimages` | Interpret and `phase-runner label-preimages import-ens-rainbow` | Verified labelhash-to-label observations from chain events and the proof-checked rainbow import. |
 | `ens_names` | operator rainbow load | Unverified rainbow-table candidates consumed by the import command. |

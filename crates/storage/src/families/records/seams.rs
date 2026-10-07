@@ -10,11 +10,32 @@ mod scoped {
 
     tokio::task_local! {
         static INVENTORY_READS: Arc<Mutex<Vec<usize>>>;
+        static LOOKUP_WORK: Arc<Mutex<Vec<serde_json::Value>>>;
         static ROLE_READS: Arc<Mutex<Vec<&'static str>>>;
         static COMPOSE_CHUNK: usize;
         static COMPOSED_NAME_BATCHES: Arc<Mutex<Vec<usize>>>;
         static EXACT_TOTAL_CAP: usize;
         static ADDRESS_NAME_PATHS: Arc<Mutex<Vec<&'static str>>>;
+    }
+
+    /// Passive work/stage observations for one caller. No selection or write behavior changes.
+    pub async fn with_lookup_work<F: Future>(
+        observations: Arc<Mutex<Vec<serde_json::Value>>>,
+        future: F,
+    ) -> F::Output {
+        LOOKUP_WORK.scope(observations, future).await
+    }
+
+    pub fn lookup_work_timer() -> Option<std::time::Instant> {
+        LOOKUP_WORK.try_with(|_| std::time::Instant::now()).ok()
+    }
+
+    pub fn note_lookup_work(observation: impl FnOnce() -> serde_json::Value) {
+        let _ = LOOKUP_WORK.try_with(|observations| {
+            if let Ok(mut observations) = observations.lock() {
+                observations.push(observation());
+            }
+        });
     }
 
     /// Runs `future` with an address-names page walking instead of composing every candidate
@@ -124,12 +145,13 @@ const EXACT_TOTAL_CAP: usize = 1_000;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use scoped::{compose_chunk, exact_total_cap, note_address_name_path};
 #[cfg(any(test, feature = "test-support"))]
-pub(super) use scoped::{note_composed_batch, note_inventory_read, note_role_read};
-#[cfg(any(test, feature = "test-support"))]
 pub use scoped::{
-    with_address_name_paths, with_compose_chunk, with_composed_name_batches, with_exact_total_cap,
-    with_inventory_read_counter, with_role_read_counter,
+    lookup_work_timer, note_lookup_work, with_address_name_paths, with_compose_chunk,
+    with_composed_name_batches, with_exact_total_cap, with_inventory_read_counter,
+    with_lookup_work, with_role_read_counter,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub(super) use scoped::{note_composed_batch, note_inventory_read, note_role_read};
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(crate) fn exact_total_cap() -> usize {
@@ -152,3 +174,11 @@ pub(super) fn note_inventory_read(_resources: usize) {}
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(super) fn note_role_read(_query: &'static str) {}
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub fn lookup_work_timer() -> Option<std::time::Instant> {
+    None
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub fn note_lookup_work(_observation: impl FnOnce() -> serde_json::Value) {}

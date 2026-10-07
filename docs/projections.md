@@ -286,6 +286,7 @@ Project's families and publication marker; the normal rebuild repopulates them b
 | Permissions | Grants, resource admin aggregates and account approvals | Compose masked powers, operators, restrictions and coverage |
 | Resolvers | Classification, pointers, links and grants | Classify the resolver and page current collections |
 | Record inventory | Current pointer, classification, partitions, values and links | Compose selectors, values, boundary and provenance |
+| Batch lookup | Published stable name decisions, exact address relations and per-resource selected record keys | Join current spelling, primary claims and publication positions; hydrate inventories only for detail |
 | Primary claims | Reverse tuples, node claims and normalization | Compose declared claim and any valid hydration overlay |
 | Child registration history | `child_registration_events` | Retain direct-child registration membership by parent and event identity |
 
@@ -2372,3 +2373,44 @@ new truth family.
 [^owner-v2]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L482 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L531 @ ens_v2@a971bd64)
 [^owner-v1]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172 @ ens_v1@91c966f)
 [^owner-bn]: (upstream: .refs/basenames/src/L2/Registry.sol:L165 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L285 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L321 @ basenames@1809bbc)
+
+## Published lookup state
+
+The indexed part of `POST /v1/lookup` uses a Project-owned serving slice in the
+existing family publication. The shared explicit-publication name compositor
+returns stable name decisions, current owner/manager relations and deadlines.
+The shared inventory compositor returns a known inventory or absence, small
+metadata, selected keys and the typed positive/negative inputs it consulted.
+Neither compositor loads a serving marker, opens a second snapshot or calls a
+provider. Project supplies its upcoming publication and the ordinary record
+reader supplies its admitted publication to the same inventory selector.
+
+Lookup captures name work before summary clocks are consumed, reuses the shared
+resolution-path work, and refreshes after the other derived families and before
+the marker advances. It adds no range boundary. Only changed rows enter the
+existing first-before-image journal. Resource inventories are shared by aliases
+and retained only while referenced. The factored tables and indexes are detailed
+in [storage](storage.md#published-lookup-state).
+
+A later admitted `RegistryCreated` announcement also refreshes names mounted
+below that registry: factory origin alone did not prove that the registry was
+initialized. This can change a stored unsupported path into a retained resolver
+without any name, pointer or record write in that block. It uses the existing
+physical-registry selector and publication transaction.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/UserRegistry.sol:L57-L69 @ ens_v2_sepolia_20261001@07e55a05)
+
+Resolver classification changes also refresh names that still reach a physical
+ENSv2 entry after its canonical name was retired. The cached last nonzero pointer
+only narrows candidates: the latest physical pointer event for that same resource
+must still select the changed resolver. Explicit zero and registration resets
+therefore cannot revive an older resolver through this dependency calculation.
+The existing semantic classification gate excludes usage-counter-only changes.
+
+Stored name cores omit current spelling, publication-derived timestamps and
+positions, diagnostic history and unused execution topology. Per-key inventory
+evidence rebuilds key lists and provenance without copying the full record set
+into every name. A mirror retains its node identity and joins current rendered
+spelling at read. Primary claims are still composed from the reverse families.
+Manifest changes use the existing phase input invalidation and full runner
+adoption; canonical repair, undo, redo and reset use the existing Project authority.
+Verified/provider behavior and final request generation revalidation are unchanged.

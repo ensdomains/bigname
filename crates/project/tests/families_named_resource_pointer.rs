@@ -145,21 +145,47 @@ async fn migration_matches_baseline_resets_old_publication_and_is_idempotent() -
     let baseline = shape(&fixture).await?;
     let published = fixture.snapshot().await?;
     assert_eq!(fixture.rows(TABLE).await?.len(), 2);
+    // Recreate the historical predecessor: lookup families were introduced afterwards.
+    raw_sql(
+        "DROP TABLE project_lookup_relation, project_lookup_record,
+         project_lookup_dependency, project_lookup_name, project_lookup_inventory",
+    )
+    .execute(&fixture.pool)
+    .await?;
     raw_sql("DROP TABLE project_named_resource_pointer")
         .execute(&fixture.pool)
         .await?;
     raw_sql(MIGRATION).execute(&fixture.pool).await?;
     assert_eq!(shape(&fixture).await?, baseline);
-    for table in FAMILY_TABLES.iter().copied().chain([
-        "project_family_marker",
-        "project_family_undo",
-        "project_repair_record",
-    ]) {
+    for table in FAMILY_TABLES
+        .iter()
+        .copied()
+        .filter(|table| {
+            !matches!(
+                *table,
+                "project_lookup_name"
+                    | "project_lookup_relation"
+                    | "project_lookup_inventory"
+                    | "project_lookup_record"
+                    | "project_lookup_dependency"
+            )
+        })
+        .chain([
+            "project_family_marker",
+            "project_family_undo",
+            "project_repair_record",
+        ])
+    {
         assert!(
             fixture.rows(table).await?.is_empty(),
             "migration kept {table}"
         );
     }
+    raw_sql(include_str!(
+        "../../../migrations/20261007120000_project_lookup_precomputation.sql"
+    ))
+    .execute(&fixture.pool)
+    .await?;
     let rebuilt = fixture.apply(14, FamilyMode::Normal).await?;
     assert_eq!(
         rebuilt.marker.as_ref().map(|marker| marker.number),

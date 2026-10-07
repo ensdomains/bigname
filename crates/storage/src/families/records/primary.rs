@@ -32,6 +32,13 @@ const HYDRATION: &str = "canonical_head_multicall_hydration";
 const DEFAULT_COIN_TYPE: &str = "2147483648";
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
+#[path = "primary/batch.rs"]
+pub(super) mod batch;
+
+#[cfg(test)]
+#[path = "primary/batch_tests.rs"]
+mod batch_tests;
+
 /// `load_primary_name_current_snapshot` over the families.
 pub async fn load_family_primary_name_snapshot(
     db: impl Into<crate::ReadDb<'_>>,
@@ -263,6 +270,14 @@ async fn hydrate(
     let Some(row) = row else {
         return Ok(None);
     };
+    Ok(Some(apply_hydration(chain_id, claim, &row)?))
+}
+
+fn apply_hydration(
+    chain_id: &str,
+    claim: &mut PrimaryNameCurrentSnapshot,
+    row: &sqlx::postgres::PgRow,
+) -> Result<bool> {
     let name: String = row.try_get("hydrated_name")?;
     let name_empty = name.is_empty();
     let block: i64 = row.try_get("attempt_block")?;
@@ -305,5 +320,5 @@ async fn hydrate(
             }),
         );
     }
-    Ok(Some(name_empty))
+    Ok(name_empty)
 }

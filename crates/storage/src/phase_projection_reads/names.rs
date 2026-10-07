@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use sqlx::PgPool;
 
-use crate::{IdentityNameRecordRow, NameCurrentRow, rendered_name::RenderedName};
+use crate::{IdentityNameRecordRow, NameCurrentRow};
 
 pub async fn load_phase_identity_records_by_ids(
     pool: &PgPool,
@@ -95,20 +95,6 @@ pub(crate) const BOUND_NAME_PREDICATES: &str = r#"
       OR resolver_capability.declared_summary #>> '{bindings,status}' = 'supported'
   )
 "#;
-
-/// The served name of a composed row split into labels. A name whose surface stores no raw
-/// bytes may carry bracketed labelhash labels, which are kept.
-pub(super) fn normalize_phase_name(logical_name_id: &str, name: &str) -> Result<RenderedName> {
-    crate::rendered_name::parse(name).with_context(|| {
-        format!("phase name row {logical_name_id} has an unreadable active raw_name")
-    })
-}
-
-pub(super) fn phase_labelhash(name: &RenderedName) -> Option<String> {
-    name.labelhashes
-        .first()
-        .map(|labelhash| format!("0x{}", alloy_primitives::hex::encode(labelhash)))
-}
 
 fn dedupe(values: &[String]) -> Vec<String> {
     values

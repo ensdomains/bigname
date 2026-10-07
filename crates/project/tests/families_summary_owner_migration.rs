@@ -76,6 +76,11 @@ fn reset_tables() -> Vec<String> {
                     | "project_history_source"
                     | "project_history_source_edge"
                     | "project_history_catalogue_marker"
+                    | "project_lookup_name"
+                    | "project_lookup_relation"
+                    | "project_lookup_inventory"
+                    | "project_lookup_record"
+                    | "project_lookup_dependency"
             )
         })
         .map(str::to_owned)
@@ -108,6 +113,11 @@ fn selector_reset_tables() -> Vec<String> {
                     | "project_history_source"
                     | "project_history_source_edge"
                     | "project_history_catalogue_marker"
+                    | "project_lookup_name"
+                    | "project_lookup_relation"
+                    | "project_lookup_inventory"
+                    | "project_lookup_record"
+                    | "project_lookup_dependency"
             )
         })
         .map(str::to_owned)

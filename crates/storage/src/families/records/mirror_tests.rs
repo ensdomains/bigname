@@ -125,7 +125,7 @@ async fn walked(
         block_number: 2,
     };
     let mut conn = pool.acquire().await?;
-    let nearest = nearest(&mut conn, CHAIN, &pointer).await?;
+    let (nearest, _) = nearest(&mut conn, CHAIN, &pointer).await?;
     Ok(nearest.map(|nearest| {
         assert_eq!(
             nearest.mirrored_node,

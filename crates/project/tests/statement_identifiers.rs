@@ -9,8 +9,10 @@
 //!   identifier, and the file's first line is one;
 //! - every Rust string literal outside test code that begins, after any leading comments, with one
 //!   of the SQL command keywords in `KEYWORDS` in any letter case or with an identifier: it must
-//!   carry an identifier
-//!   among those leading comments. Fragments spliced into a larger statement carry one too;
+//!   carry an identifier among those leading comments. An unmarked literal followed by a
+//!   single colon is an object key, so only this broad keyword heuristic exempts it; execution
+//!   sites below still require identifiers, and `::` does not qualify. Fragments spliced into a
+//!   larger statement carry one too;
 //!   PostgreSQL treats the nested comment as whitespace;
 //! - every literal, `format!` of a literal, or `include_str!` written as the first argument of a
 //!   sqlx statement constructor spelled `sqlx::query`, `query_as`, `query_scalar`, their `_with`
@@ -124,6 +126,44 @@ fn an_unnamed_lowercase_statement_fails() {
             .iter()
             .all(|failure| failure.contains("select 1"))
     );
+}
+
+#[test]
+fn object_keys_are_not_sql_but_table_statements_still_require_identifiers() {
+    let report = check_one(
+        r##"fn f() { json!({"table": name, r#"TABLE"#
+ : value}); }"##,
+    );
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert_eq!(report.rust_sites, 0);
+
+    // A marker-bearing key is still counted and checked by the identifier rules.
+    let report = check_one(r#"fn f() { json!({"/* project:a.key */ TABLE": value}); }"#);
+    assert_eq!(
+        (
+            report.rust_sites,
+            report.markers_in_text,
+            report.identified()
+        ),
+        (1, 1, 1)
+    );
+
+    for text in [
+        r#"const SQL: &str = "TABLE names";"#,
+        r#"fn f() { let fragment = "table "; }"#,
+        r#"fn f() { tokens!("table"::suffix); }"#,
+    ] {
+        assert_eq!(check_one(text).failures.len(), 1, "{text}");
+    }
+    for text in [
+        r#"fn f() { sqlx::query("table"); }"#,
+        r#"fn f() { QueryBuilder::new("table"); }"#,
+        r#"fn f() { connection.execute("table"); }"#,
+    ] {
+        let report = check_one(text);
+        assert_eq!(report.failures.len(), 2, "{text}: {:?}", report.failures);
+        assert_eq!(report.execution_sites, 1, "{text}");
+    }
 }
 
 #[test]
@@ -328,7 +368,9 @@ impl Report {
         {
             self.markers_in_text += literal.text.matches(MARKER_OPEN).count();
             let leading = Leading::of(&literal.text);
-            if leading.marker.is_none() && !leading.keyword {
+            let after = text[literal.end..].trim_start();
+            let object_key = after.starts_with(':') && !after.starts_with("::");
+            if leading.marker.is_none() && (!leading.keyword || object_key) {
                 continue;
             }
             self.rust_sites += 1;
@@ -738,6 +780,7 @@ fn normalize(path: &Path) -> PathBuf {
 
 struct Literal {
     start: usize,
+    end: usize,
     text: String,
 }
 
@@ -778,17 +821,19 @@ impl Scanned {
                 let open = hashes.len() + 2;
                 let close = format!("\"{hashes}");
                 let body_end = index + open + rest[open..].find(&close).unwrap();
+                let end = body_end + close.len();
                 literals.push(Literal {
                     start: index,
+                    end,
                     text: text[index + open..body_end].to_owned(),
                 });
-                let end = body_end + close.len();
                 blank(&mut code, index, end);
                 index = end;
             } else if bytes[index] == b'"' {
                 let (decoded, end) = cooked_string(text, index);
                 literals.push(Literal {
                     start: index,
+                    end,
                     text: decoded,
                 });
                 blank(&mut code, index, end);

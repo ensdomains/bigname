@@ -1209,7 +1209,11 @@ GRANT SELECT ON TABLE
     bigname_phase.project_address_record_node_index,
     bigname_phase.project_address_record_id_index,
     bigname_phase.project_name_history,
-    bigname_phase.project_name_summary
+    bigname_phase.project_name_summary,
+    bigname_phase.project_lookup_name,
+    bigname_phase.project_lookup_relation,
+    bigname_phase.project_lookup_inventory,
+    bigname_phase.project_lookup_record
 TO bigname_api;
 GRANT EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state_read_only(
     text, bigint, text, jsonb, jsonb, uuid, text, text
@@ -3262,3 +3266,35 @@ manifest/admission or raw-intake change is introduced by this correction. Do not
 mark old rows ready under the new hash or treat a recent parent replay as a full
 re-derivation. Validate retained mirror/direct paths, disconnected descendants,
 wrapper rebinding/unwrap eligibility, and no-child-write expiry after publication.
+
+## Published lookup state
+
+Apply `20261007120000_project_lookup_precomputation.sql` before deploying the
+matching writer and API. It adds five Project tables and their eight indexes,
+checks preexisting definitions, and leaves the old publication intact. Fresh
+baseline and upgrade definitions match. Apply the explicit API SELECT grants
+above for name, relation, inventory and record tables; the API does not read the
+dependency table. Startup checks require those four tables to be readable.
+
+The shared producer now persists lookup name and inventory composition, so the
+interpreter content hash changes. Run the normal full retained-history Interpret
+rederivation followed by the full Project rebuild under the new binary. Creating
+the tables, copying reader results, or changing marker hashes is not adoption.
+The API refuses stored lookup while the marker or Interpret/Project input hashes
+belong to the old epoch, including the manifest-sync interval before redo starts.
+It admits the new state only after the normal runner publishes a complete live
+family generation. Cross-chain execution declaration changes retain the ordinary
+phase dependency invalidation. No new raw intake is required.
+
+Budget rebuild time, WAL, journal space and the current name/resource/key/relation/
+dependency cardinalities before rollout. The factored representation bounds
+unchanged-value writes; it still adds rows, indexes and genuine dependency fanout.
+Use the matched footprint evidence for the release, rather than treating the old
+frozen lookup experiment as its production storage or throughput estimate.
+
+For rollback, stop the changed writer, restore the intended prior binary and
+perform its normal compatible Interpret/Project epoch adoption and full rebuild
+before admitting its API. Additive tables may remain, but their existence does
+not make an older binary compatible with a newer publication hash. Preserve the
+ordinary retained-undo/reorg procedures; the lookup families share that journal,
+reset and repair authority and have no independent cache generation.

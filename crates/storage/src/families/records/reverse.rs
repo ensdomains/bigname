@@ -11,6 +11,9 @@ use sqlx::{PgConnection, Row};
 use super::{FamilyPosition, facts::probe_events, payload::strip_nulls};
 use crate::{PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot};
 
+#[path = "reverse/batch.rs"]
+pub(super) mod batch;
+
 /// A family reverse claim and whether the families could represent it.
 #[derive(Clone, Debug)]
 pub struct FamilyReverseClaim {
@@ -132,9 +135,6 @@ pub(crate) async fn load_family_reverse_claim_on(
     let mut identities = vec![reverse.event_identity.clone()];
     identities.extend(claim_identity.clone());
     let probed = probe_events(conn, &identities).await?;
-    let claim = claim_identity
-        .as_ref()
-        .and_then(|identity| probed.get(identity));
     let normalization = match &claim_identity {
         Some(identity) => sqlx::query(
             "SELECT status, normalized_name FROM bigname_phase.project_claim_normalization
@@ -147,11 +147,42 @@ pub(crate) async fn load_family_reverse_claim_on(
         .context("failed to load the family claim normalization")?,
         None => None,
     };
-    let status: String = match &normalization {
+    Ok(Some(assemble_claim(
+        chain_id,
+        &address,
+        namespace,
+        coin_type,
+        &tuple,
+        &reverse,
+        pointer,
+        claim_identity.as_deref(),
+        normalization.as_ref(),
+        &probed,
+        node_claim_at_other_resolver,
+    )?))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_claim(
+    chain_id: &str,
+    address: &str,
+    namespace: &str,
+    coin_type: &str,
+    tuple: &sqlx::postgres::PgRow,
+    reverse: &FamilyPosition,
+    pointer: Option<(Option<i64>, Option<String>)>,
+    claim_identity: Option<&str>,
+    normalization: Option<&sqlx::postgres::PgRow>,
+    probed: &std::collections::HashMap<String, super::facts::ProbedEvent>,
+    node_claim_at_other_resolver: bool,
+) -> Result<FamilyReverseClaim> {
+    let claim = claim_identity.and_then(|identity| probed.get(identity));
+    let reverse_node: Option<String> = tuple.try_get("reverse_node")?;
+    let status: String = match normalization {
         Some(row) => row.try_get("status")?,
         None => "not_found".to_owned(),
     };
-    let normalized_name: Option<String> = match &normalization {
+    let normalized_name: Option<String> = match normalization {
         Some(row) => row.try_get("normalized_name")?,
         None => None,
     };
@@ -211,7 +242,7 @@ pub(crate) async fn load_family_reverse_claim_on(
         "invalid_name" => PrimaryNameClaimStatus::InvalidName,
         _ => PrimaryNameClaimStatus::NotFound,
     };
-    Ok(Some(FamilyReverseClaim {
+    Ok(FamilyReverseClaim {
         snapshot: PrimaryNameCurrentSnapshot {
             normalized_claim_name: crate::normalized_claim_name(
                 claim_status,
@@ -219,7 +250,7 @@ pub(crate) async fn load_family_reverse_claim_on(
                 raw_claim_name.as_deref(),
             ),
             row: PrimaryNameCurrentRow {
-                address,
+                address: address.to_owned(),
                 namespace: namespace.to_owned(),
                 coin_type: coin_type.to_owned(),
                 claim_status,
@@ -231,7 +262,7 @@ pub(crate) async fn load_family_reverse_claim_on(
         },
         node_claim_at_other_resolver,
         claim_value_empty,
-    }))
+    })
 }
 
 /// The reverse node's latest `ResolverChanged` by the family's derived node keys, clears

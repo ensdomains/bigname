@@ -123,11 +123,11 @@ async fn v2_family_reverse_count_crosses_candidate_batches_and_ignores_cursor() 
     let mut names = Vec::new();
     for _ in 0..3 {
         let mut groups = bigname_storage::families::records::load_family_reverse_identity_groups(
-            &database.pool, &[input.clone()], &namespaces, Some(&chains), true).await?;
+            &database.pool, &[input.clone()], &namespaces, Some(&chains), true, true).await?;
         let group = groups.pop().unwrap();
         assert_eq!(group.total_count, Some(67));
         let mut page_only = bigname_storage::families::records::load_family_reverse_identity_groups(
-            &database.pool, &[input.clone()], &namespaces, Some(&chains), false).await?;
+            &database.pool, &[input.clone()], &namespaces, Some(&chains), false, true).await?;
         let page_only = page_only.pop().unwrap();
         assert_eq!(page_only.entries, group.entries);
         assert_eq!(page_only.has_more, group.has_more);
@@ -163,7 +163,7 @@ async fn v2_family_reverse_page_count_and_claim_hold_one_publication() -> Result
     let read = bigname_storage::families::name::seams::with_pause_after_publication(
         reached.clone(), resume.clone(),
         bigname_storage::families::records::load_family_reverse_identity_groups(
-            &read_pool, &inputs, &namespaces, Some(&chains), true),
+            &read_pool, &inputs, &namespaces, Some(&chains), true, true),
     );
     tokio::pin!(read);
     let mut advanced = false;
@@ -194,7 +194,7 @@ async fn v2_family_reverse_page_count_and_claim_hold_one_publication() -> Result
     assert_eq!(groups[0].entries.iter().map(|e| e.name_record.row.normalized_name.as_str()).collect::<Vec<_>>(), ["beta.eth", "alpha.eth"]);
     assert_eq!(groups[0].entries[0].primary_name.as_ref().unwrap().normalized_claim_name.as_deref(), Some("beta.eth"));
     let next = bigname_storage::families::records::load_family_reverse_identity_groups(
-        &database.pool, &inputs, &namespaces, Some(&chains), true).await?;
+        &database.pool, &inputs, &namespaces, Some(&chains), true, true).await?;
     assert_eq!(next[0].total_count, Some(3));
     assert_eq!(next[0].entries[0].name_record.row.normalized_name, "alpha.eth");
     assert_eq!(next[0].entries[0].primary_name.as_ref().unwrap().normalized_claim_name.as_deref(), Some("alpha.eth"));

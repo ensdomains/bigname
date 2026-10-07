@@ -6,6 +6,20 @@
 mod cost;
 #[path = "migrated_subnames/direct.rs"]
 mod direct;
+#[path = "migrated_subnames/lookup_hydration.rs"]
+mod lookup_hydration;
+#[path = "migrated_subnames/lookup_import.rs"]
+mod lookup_import;
+#[path = "migrated_subnames/lookup_incremental.rs"]
+mod lookup_incremental;
+#[path = "migrated_subnames/lookup_late_registry.rs"]
+mod lookup_late_registry;
+#[path = "migrated_subnames/lookup_lifecycle.rs"]
+mod lookup_lifecycle;
+#[path = "migrated_subnames/lookup_links.rs"]
+mod lookup_links;
+#[path = "migrated_subnames/lookup_publication.rs"]
+mod lookup_publication;
 #[path = "migrated_subnames/mirror.rs"]
 mod mirror;
 #[path = "migrated_subnames/missing_parent.rs"]
@@ -595,7 +609,8 @@ async fn assert_name_consumers(
     resolver: Address,
     reason: Option<&str>,
 ) -> Result<()> {
-    let detail = path_get(database, &format!("/v1/names/{name}")).await?;
+    let detail_record = lookup_publication::assert_name_prepared_parity(database, name).await?;
+    let detail = json!({"data":detail_record});
     let lookup = path_lookup(database, json!({"profile":"detail","inputs":[{"name":name},{"address":address,"relation":"resolves_to"}]})).await?;
     for field in [
         "resolver",
