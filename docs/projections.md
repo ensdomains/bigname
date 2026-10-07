@@ -2399,6 +2399,13 @@ without any name, pointer or record write in that block. It uses the existing
 physical-registry selector and publication transaction.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/UserRegistry.sol:L57-L69 @ ens_v2_sepolia_20261001@07e55a05)
 
+Resolver classification changes also refresh names that still reach a physical
+ENSv2 entry after its canonical name was retired. The cached last nonzero pointer
+only narrows candidates: the latest physical pointer event for that same resource
+must still select the changed resolver. Explicit zero and registration resets
+therefore cannot revive an older resolver through this dependency calculation.
+The existing semantic classification gate excludes usage-counter-only changes.
+
 Stored name cores omit current spelling, publication-derived timestamps and
 positions, diagnostic history and unused execution topology. Per-key inventory
 evidence rebuilds key lists and provenance without copying the full record set
