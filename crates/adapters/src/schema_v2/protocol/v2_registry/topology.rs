@@ -184,7 +184,6 @@ use std::collections::BTreeSet;
         }
     }
 }
-
 pub(super) fn boundary_expiration(
     transition: V2NameTransition,
     released_at: i64,
@@ -196,7 +195,6 @@ pub(super) fn boundary_expiration(
     append_removed_name(&mut output, &transition, released_at)?;
     Ok(output)
 }
-
 pub(in crate::schema_v2) fn boundary_reassertion(
     transition: &V2NameTransition,
     block: &crate::schema_v2::RawBlockInput,
