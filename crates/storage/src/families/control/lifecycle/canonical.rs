@@ -90,6 +90,7 @@ fn v2_instance<'a>(tagged: &[Tagged<'a>]) -> Option<Instance<'a>> {
             instance.latest = event;
             // LabelRegistered precedes TokenResource. Its initial pending grant acquires
             // the resource from this same allocation's later backed association.
+            // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L501-L505 @ ens_v2_sepolia_20261001@07e55a05)
             instance.resource_id = event.resource_id.as_deref().or(instance.resource_id);
             match kind {
                 "RegistrationReleased"

@@ -5,7 +5,9 @@ use axum::{
     http::{Uri, request::Parts},
 };
 
-use crate::v2::{QueryParamAllowlist, QueryParams, RawQueryParams, V2Error};
+use crate::v2::{
+    QueryParamAllowlist, QueryParams, RawQueryParams, V2Error, params::parse_expiry_bound,
+};
 
 use super::{
     NamesQueryParams,
@@ -69,9 +71,16 @@ where
                     )));
                 }
                 // Reuse exact scalar timestamp parsing without adding grace filters to other routes.
+                // A grace bound is checked here, so its error names the parameter that was sent.
                 let scalar_key = match key.as_str() {
-                    "grace_ends_after" => "expires_after",
-                    "grace_ends_before" => "expires_before",
+                    "grace_ends_after" => {
+                        parse_expiry_bound(Some(value.clone()), "grace_ends_after")?;
+                        "expires_after"
+                    }
+                    "grace_ends_before" => {
+                        parse_expiry_bound(Some(value.clone()), "grace_ends_before")?;
+                        "expires_before"
+                    }
                     other => other,
                 };
                 scalar.append_pair(scalar_key, value);

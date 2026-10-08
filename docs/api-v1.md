@@ -1416,7 +1416,7 @@ holder. Both cases are listed under
 
 ## Status Vocabulary
 
-`unregistered` describes the absence of a proved canonical allocation; it
+`unregistered` describes the absence of a proved canonical allocation. It
 does not assert that resolver data is absent. A supported row may therefore have
 `status=unregistered` when it is
 an ownerless ENSv1 or Basenames registry row whose current registry resolver
@@ -1427,7 +1427,7 @@ An ENSv2 TLD whose root-registry token is reserved or whose registration is
 not projected serves the same way from its current
 [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
 while its coverage stays `current_authority_not_projected`. A proved canonical
-allocation supplies its lifecycle status and dates; without one the TLD is
+allocation supplies its lifecycle status and dates. Without one the TLD is
 `unregistered`. Neither status nor the pointer establishes current authority or
 a public registration handle. The root registry stores the pointer per token
 and returns it while the label is unexpired, and bigname serves that pointer
@@ -2012,7 +2012,7 @@ presentation, not a Solidity timestamp type.
 One flat `status` describes the registration at the relevant chain's
 `meta.as_of.timestamp` (`T`), independently of current ownership, resolver paths,
 permissions and wrapping. `read_status` describes the NameRecord/LookupRecord read
-outcome; the outer lookup result retains its existing `status`. There is no
+outcome. The outer lookup result retains its existing `status`. There is no
 `registration_status` compatibility alias.
 
 | Registration policy | active | expired | released |
@@ -2024,7 +2024,7 @@ outcome; the outer lookup result retains its existing `status`. There is no
 | Wrapper-only, plain wrapped | while wrapped | never | never |
 
 Here E is `expires_at` and G is `grace_ends_at`. ENSv1 and Basenames add
-7,776,000 seconds; the exact admitted October 1 Sepolia ETHRegistry uses its
+7,776,000 seconds. The exact admitted October 1 Sepolia ETHRegistry uses its
 reviewed registrar's 2,419,200 seconds. A custom registry gets no inferred grace
 from a `.eth` suffix. Equality follows the respective contract comparisons.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
@@ -2044,9 +2044,9 @@ Before the Universal Resolver cutover, an ENSv1-controlled name uses its lease
 schedule. After cutover, its admitted ENSv2 reservation/registration supplies E/G
 through expiry and release. Passage of time never falls back to the older lease.
 `ens_v1.expires_at` remains the lease's own date. Renewal or extension changes the
-schedule from actual events; claim alone preserves it. Re-registration or
+schedule from actual events. Claim alone preserves it. Re-registration or
 re-reservation establishes a new instance. The emitted premigration bonus and
-renewer bonus can differ by one second; neither is reconstructed from the lease.
+renewer bonus can differ by one second. Neither is reconstructed from the lease.
 
 Explicit unregister immediately gives `status=released` while preserving the
 ended instance's scheduled E/G and `lapsed_registration.release_kind=unregistered`.
@@ -2058,19 +2058,19 @@ full uint64 expiry range, even when the next boundary exceeds the chain clock.
 
 Name detail, search, lists and lookup detail/feed use the same publication and
 lifecycle. `GET /v1/names` can discover either expiry or grace deadlines directly.
-Neither `expired` nor `released` implies current control or universal availability;
+Neither `expired` nor `released` implies current control or universal availability.
 ENSv2 grace does not restore owner, resolver records or permissions. A reservation
 has no invented owner. All public registration coordinates—ID, continuous start,
 E/G and lapsed holder/cause—belong to the canonical instance or its proved ENSv1
 lease continuation. A new ownerless reservation without an earlier qualifying
-grant omits `registration_id` and `registered_at`; it cannot borrow either field
+grant omits `registration_id` and `registered_at`. It cannot borrow either field
 or a former holder from another registry's control tombstone. A v1-backed
 reservation keeps its legitimate lease handle and original start.
 
 Allocation origin and latest genuine name association are separate facts. If the
 parent points A → B → A, reattaching A retains A's original registration start and
 schedule through passive expiry and later release. A subsequent allocation or
-association can supersede it; a detached predecessor's later renewal or lapse
+association can supersede it. A detached predecessor's later renewal or lapse
 cannot. This October 8 presentation rule supersedes ADR 0007's September 26
 registration-metadata rule while preserving its current-control selection.
 
@@ -2203,7 +2203,7 @@ absent.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
 The block appears on `GET /v1/names/{name}`, detail-profile
 `POST /v1/lookup` rows and `GET /v1/names` rows while the corresponding control registration has ended, including ENSv2 canonical
-`expired` grace; a replacement registration removes it. It is never an input to the authority
+`expired` grace. A replacement registration removes it. It is never an input to the authority
 relations, permissions or counts: the lapsed holder lists the name under
 `GET /v1/addresses/{address}/names` only with `relation=former_owner`. A name whose
 NameWrapper expiry alone has passed while its registrar lease is live is not
@@ -2312,7 +2312,7 @@ name-shaped routes or diagnostics for the name in question.
 
 Lifecycle discovery also includes an admitted canonical allocation when current authority
 coverage is unsupported for exactly `current_authority_not_projected`. Detail and lookup
-retain their existing partial `read_status=ok`; search and finite expiry/grace lists expose
+retain their existing partial `read_status=ok`. Search and finite expiry/grace lists expose
 the same allocation dates and status. This does not establish current control, permissions
 or resolver access, and all other unsupported reasons remain excluded from discovery.
 

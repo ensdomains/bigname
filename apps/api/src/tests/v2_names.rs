@@ -826,6 +826,34 @@ async fn v2_get_names_rejects_unbounded_or_malformed_requests() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_get_names_names_the_sent_parameter_for_an_invalid_date_bound() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_names_fixture(&database).await?;
+
+    for parameter in [
+        "expires_after",
+        "expires_before",
+        "grace_ends_after",
+        "grace_ends_before",
+    ] {
+        let uri = format!("/v1/names?namespace=ens&{parameter}=not-a-time");
+        let response = v2_names_response(&database, &uri).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        let body: Value = read_json(response).await?;
+        assert_eq!(body["error"]["code"], json!("invalid_input"), "{uri}");
+        assert_eq!(
+            body["error"]["message"],
+            json!(format!(
+                "{parameter} must be Unix seconds or an RFC 3339 UTC timestamp"
+            )),
+            "{uri}"
+        );
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_indexed_name_read_carries_weak_etag_and_honours_if_none_match() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_alice_name_inputs(&database).await?;

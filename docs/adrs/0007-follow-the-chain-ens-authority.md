@@ -7,7 +7,7 @@ Amended: 2026-09-25 (the remaining ENSv2 authority exceptions are removed)
 Amended: 2026-09-25 (a released or expired ENSv2 registration stays with ENSv2, product ruling)
 Amended: 2026-09-26 (the registration section follows authority selection for a nameless path-expiry release, product ruling)
 Amended: 2026-09-26 (a lapsed last-bound registration is presented over a live reservation elsewhere, ruling applied by the reviewer)
-Amended: 2026-10-08 (canonical registration coordinates supersede the September 26 presentation rule; control selection is preserved)
+Amended: 2026-10-08 (canonical registration coordinates supersede the September 26 presentation rule, and control selection is preserved)
 Note: 2026-09-29 (dual-current halts and old serving tables removed)
 
 ## 2026-09-29 Note: Dual-Current Halts Removed
@@ -58,7 +58,7 @@ decisions kept. Linear TYR-36 step 6.
 - **October 8 amendment:** public registration status, scheduled expiry/grace,
   registration ID/start and historical holder/cause follow the canonical allocation
   or a proved ENSv1 lease continuation. Latest genuine name association selects
-  that allocation independently of passive binding closure; A → B → A retains A's
+  that allocation independently of passive binding closure. A → B → A retains A's
   origin and dates through expiry/release. A new B reservation without a qualifying
   grant cannot inherit A's ID, start or lapsed holder merely because control still
   selects A's tombstone. An old detached event cannot supersede B. The two
