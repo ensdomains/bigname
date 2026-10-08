@@ -168,8 +168,11 @@ pub(crate) async fn lock_completion_coverage(
 /// Interpret repair ends by stamping Project, so the next supervisor start redoes
 /// Project on the new chain. Without it nothing would, so the caller refuses.
 ///
-/// A plain read is enough. Only a head publication stamps a running Project redo,
-/// and it stamps Interpret before Project in one transaction. The changed Project
+/// A plain read is enough. A head publication stamps a running Project redo, and
+/// it stamps Interpret before Project in one transaction. The completion of an
+/// Interpret flag recomputation stamps the two in the same order and in one
+/// transaction as well. It holds the Project lock while it runs, so it meets a
+/// Project redo only between that redo's attempts. The changed Project
 /// generation was read from a committed publication, so this later statement sees
 /// that publication's Interpret stamp as well. The stamp cannot have been used up
 /// since: an Interpret redo cannot start while this Project redo is running. A

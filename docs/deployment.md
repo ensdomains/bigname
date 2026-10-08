@@ -1465,8 +1465,9 @@ runs, and the Live batch already in flight can still write for up to one live
 poll interval, one second by default. Its head publication can commit later
 than that when its connection stalls. A publication that replaces readable
 blocks stamps a reorg repair on a running Interpret, Project or Verify redo.
-An Ingest redo is not stamped. The stamped redo then fails and stays in
-progress with the repair in place. It fails in one of two ways:
+An Ingest redo is not stamped. When the stamp leaves the redo's range as it
+was, the redo fails and stays in progress with the repair in place. A Project
+redo at completion can be an exception. The redo fails in one of two ways:
 
 - `redo attempt superseded; progress not recorded`, at a progress write. This
   error names no command.
@@ -1474,7 +1475,8 @@ progress with the repair in place. It fails in one of two ways:
   command to rerun.
 
 [Table ownership](storage.md#table-ownership) says what to run after each, by
-phase, and what the supervisor does next.
+phase, and what the supervisor does next. It also covers the Project rule and
+a stamp that widens the redo's range.
 
 The advisory locks do **not** serialize explicit processes against each other:
 they only prevent the same phase from running twice on the same chain. A

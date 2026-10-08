@@ -251,6 +251,21 @@ async fn interpret_redo(
     .expect("the fixture phases are ordered")
 }
 
+async fn current_hash(
+    scratch: &ScratchDatabase,
+    chain_id: &str,
+    phase: PhaseName,
+) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT current_block_hash FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = $2",
+    )
+    .bind(chain_id)
+    .bind(phase.as_str())
+    .fetch_one(scratch.pool())
+    .await?)
+}
+
 type InterpretRow = (bool, Option<i64>, Option<i64>, Option<String>);
 
 async fn interpret_row(scratch: &ScratchDatabase, chain_id: &str) -> Result<InterpretRow> {
@@ -518,6 +533,10 @@ async fn a_project_redo_overtaken_at_completion_is_refused_when_interpret_is_not
         store.status(chain_id, PhaseName::Project).await?,
         PhaseStatus::Completed
     );
+    assert_eq!(
+        current_hash(&scratch, chain_id, PhaseName::Project).await?,
+        Some(format!("{chain_id}-tip-only-fork"))
+    );
     scratch.cleanup().await
 }
 
@@ -617,6 +636,10 @@ async fn a_verify_redo_beside_live_overtaken_at_completion_keeps_the_repair() ->
     assert_eq!(
         store.status(chain_id, PhaseName::Verify).await?,
         PhaseStatus::Completed
+    );
+    assert_eq!(
+        current_hash(&scratch, chain_id, PhaseName::Verify).await?,
+        Some(fork_hash(chain_id, TIP))
     );
     scratch.cleanup().await
 }

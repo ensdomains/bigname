@@ -1189,15 +1189,24 @@ after the redo finishes.
 The lost attempt's head publication can still commit while that redo runs.
 When it replaces readable blocks, it stamps a required redo on Interpret,
 Project and Verify, as every such publication does. An Ingest redo's row is
-never stamped. A stamped redo that is already running is refused in one of two
+never stamped. What happens to a redo that is already running depends on the
+stamp.
+
+A stamp that leaves the redo's range as it was refuses the redo in one of two
 ways:
 
 - At its next progress write, with `redo attempt superseded; progress not
   recorded`. This error names no command and records nothing on the row.
 - At completion, with `was overtaken before it completed`. This error names
-  the command to rerun and is recorded on the row.
+  the command to rerun and is recorded on the row. A Project redo is the
+  exception described below.
 
-Either way the redo stays in progress with the repair in place. What follows
+A stamp that starts below the redo's range widens the marker. The next
+progress write is refused in the same way. A redo that reaches completion
+returns without an error, and the widened marker stays in place.
+
+In every case but the Project exception the redo stays in progress with the
+repair in place. What follows
 depends on the redo:
 
 - An operator Interpret redo is rerun with the same command.
