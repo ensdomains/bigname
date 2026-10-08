@@ -37,6 +37,10 @@ impl RunnerDatabase {
         maximum_connections: u32,
     ) -> RunnerResult<Self> {
         let connect_options = stamp_interpreter_content_hash(options);
+        // The identity search refresh keeps one temporary table on each connection that runs
+        // it. PostgreSQL cannot advance the database's `datfrozenxid` past that table while
+        // the connection lives. sqlx's default `max_lifetime` of 30 minutes is the bound. Do
+        // not set `max_lifetime(None)` on this pool.
         let pool = PgPoolOptions::new()
             .max_connections(maximum_connections.max(1))
             .connect_with(connect_options.clone())
