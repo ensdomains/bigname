@@ -1,6 +1,6 @@
 ---
 name: linear-issue
-description: Create or update a Linear issue for bigname work. Fire when filing a ticket, splitting work out of a PR, or recording a decision.
+description: Create or update a Linear issue in the Tyrell Corporation team (TYR) for bigname work. Fire when filing a ticket, splitting work out of a PR, or recording a decision.
 metadata:
   kind: playbook
 ---
