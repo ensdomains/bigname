@@ -675,7 +675,7 @@ carries `lapsed_registration` when its `source_event` is `RegistryPathExpired` o
 `LabelUnregistered`. A release on another control tombstone cannot supply that block. Its exact shape is
 `{owner, held_through: "registry", released_at, release_kind}`: the last registry
 token holder on the selected lifecycle key, from its grant, transfer or release.
-For `RegistryPathExpired`, `release_kind` is `expired`; the registration keeps its expiry
+For `RegistryPathExpired`, `release_kind` is `expired`. The registration keeps its expiry
 and applicable grace, and `released_at` is the retained path-release time. For
 `LabelUnregistered`, `release_kind` is `unregistered`. The canonical scheduled expiry
 and grace remain, and `released_at` comes from that event's canonical block timestamp, already loaded with the

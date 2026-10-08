@@ -178,7 +178,7 @@ pub(super) fn response_is_populated(endpoint: &str, body: &Value) -> bool {
             .is_some(),
         "records" => false,
         "status" => status_is_ready(body),
-        "name" => body.pointer("/data/status").and_then(Value::as_str) == Some("ok"),
+        "name" => body.pointer("/data/read_status").and_then(Value::as_str) == Some("ok"),
         "namespace" => body.get("data").is_some(),
         _ => false,
     }
@@ -233,7 +233,10 @@ fn lookup_kind_populated(body: &Value, kind: &str) -> bool {
                 }
                 match kind {
                     "name" => {
-                        result.pointer("/record/status").and_then(Value::as_str) == Some("ok")
+                        result
+                            .pointer("/record/read_status")
+                            .and_then(Value::as_str)
+                            == Some("ok")
                     }
                     "address" => result
                         .get("records")
@@ -402,5 +405,28 @@ mod tests {
             &json!({"data": [{"registration_id": "00000000-0000-0000-0000-000000000043"}]}),
         );
         assert!(probe.permission_audit_populated);
+    }
+
+    #[test]
+    fn name_probes_read_the_read_outcome_beside_the_lifecycle_status() {
+        // A served name carries the lifecycle in `status` and the read outcome in `read_status`.
+        assert!(response_is_populated(
+            "name",
+            &json!({"data": {"name": "known.eth", "status": "active", "read_status": "ok"}})
+        ));
+        assert!(!response_is_populated(
+            "name",
+            &json!({"data": {"name": "known.eth", "read_status": "unsupported"}})
+        ));
+        let lookup =
+            |record: Value| json!({"data": [{"kind": "name", "status": "ok", "record": record}]});
+        assert!(lookup_kind_populated(
+            &lookup(json!({"name": "known.eth", "status": "active", "read_status": "ok"})),
+            "name"
+        ));
+        assert!(!lookup_kind_populated(
+            &lookup(json!({"name": "known.eth", "read_status": "unsupported"})),
+            "name"
+        ));
     }
 }

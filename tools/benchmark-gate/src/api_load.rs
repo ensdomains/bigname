@@ -697,7 +697,7 @@ mod tests {
                 "data": [{
                     "kind": "address",
                     "status": "failed",
-                    "records": [{"name": "failed.eth", "status": "failed"}]
+                    "records": [{"name": "failed.eth", "read_status": "failed"}]
                 }]
             })
         ));

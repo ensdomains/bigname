@@ -71,16 +71,9 @@ where
                     )));
                 }
                 // Reuse exact scalar timestamp parsing without adding grace filters to other routes.
-                // A grace bound is checked here, so its error names the parameter that was sent.
                 let scalar_key = match key.as_str() {
-                    "grace_ends_after" => {
-                        parse_expiry_bound(Some(value.clone()), "grace_ends_after")?;
-                        "expires_after"
-                    }
-                    "grace_ends_before" => {
-                        parse_expiry_bound(Some(value.clone()), "grace_ends_before")?;
-                        "expires_before"
-                    }
+                    "grace_ends_after" => "expires_after",
+                    "grace_ends_before" => "expires_before",
                     other => other,
                 };
                 scalar.append_pair(scalar_key, value);
@@ -112,7 +105,11 @@ where
         if sort_wire.as_deref() == Some("grace_ends_at") {
             raw.sort = Some("expires_at".to_owned());
         }
-        let mut params = QueryParams::try_from(raw)?;
+        let grace_bounds = grace.then(|| (raw.expires_after.clone(), raw.expires_before.clone()));
+        let mut params = QueryParams::try_from(raw).map_err(|error| match grace_bounds {
+            Some((after, before)) => name_grace_bound(error, after, before),
+            None => error,
+        })?;
         params.sort_wire = sort_wire;
         if let Some(sort) = params.sort_wire.as_deref()
             && sort != deadline.column()
@@ -127,4 +124,20 @@ where
             deadline,
         })
     }
+}
+
+/// A grace bound reuses the expiry parser, so its error would name the expiry parameter. Raise
+/// the same error under the parameter that was sent, at the same point in the validation order.
+fn name_grace_bound(error: V2Error, after: Option<String>, before: Option<String>) -> V2Error {
+    for (value, expiry, grace) in [
+        (after, "expires_after", "grace_ends_after"),
+        (before, "expires_before", "grace_ends_before"),
+    ] {
+        if parse_expiry_bound(value.clone(), expiry).is_err_and(|bound| bound == error)
+            && let Err(named) = parse_expiry_bound(value, grace)
+        {
+            return named;
+        }
+    }
+    error
 }

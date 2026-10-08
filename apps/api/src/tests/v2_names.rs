@@ -850,6 +850,26 @@ async fn v2_get_names_names_the_sent_parameter_for_an_invalid_date_bound() -> Re
         );
     }
 
+    // Both date families report the same earlier failure ahead of an invalid bound.
+    for family in ["expires", "grace_ends"] {
+        for (query, message) in [
+            (
+                format!("{family}_after=not-a-time&{family}_window=1..2"),
+                "date windows cannot be combined with scalar date bounds",
+            ),
+            (
+                format!("{family}_after=not-a-time&unknown=x"),
+                "unknown query parameter: unknown",
+            ),
+        ] {
+            let uri = format!("/v1/names?namespace=ens&{query}");
+            let response = v2_names_response(&database, &uri).await?;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let body: Value = read_json(response).await?;
+            assert_eq!(body["error"]["message"], json!(message), "{uri}");
+        }
+    }
+
     database.cleanup().await
 }
 
