@@ -6564,7 +6564,7 @@
           },
           "subregistry": {
             "$ref": "#/components/schemas/ContractRef",
-            "description": "Current subregistry pointer. Absent on every status=unsupported record, including verified unsupported records that retain registration fields.\n\nPresence condition: The name-level record has read_status other than unsupported. This excludes both identity-only unsupported records and verified unsupported records that retain registration fields.",
+            "description": "Current subregistry pointer. Absent on every read_status=unsupported record, including verified unsupported records that retain registration fields.\n\nPresence condition: The name-level record has read_status other than unsupported. This excludes both identity-only unsupported records and verified unsupported records that retain registration fields.",
             "x-presence": "only when supported_name"
           },
           "records": {
@@ -6604,12 +6604,12 @@
           },
           "unsupported_reason": {
             "type": "string",
-            "description": "Open product reason vocabulary explaining an unsupported answer.\n\nPresence condition: The object status is unsupported.",
+            "description": "Open product reason vocabulary explaining an unsupported answer.\n\nPresence condition: The object's result status is unsupported. That field is read_status on NameRecord and LookupRecord, and status elsewhere.",
             "x-presence": "when status_unsupported"
           },
           "failure_reason": {
             "type": "string",
-            "description": "Open product reason vocabulary explaining a failed, stale, missing or mismatched answer.\n\nPresence condition: The object status is failed, stale, not_found or mismatch.",
+            "description": "Open product reason vocabulary explaining a failed, stale, missing or mismatched answer.\n\nPresence condition: The object's result status is failed, stale, not_found or mismatch. That field is read_status on NameRecord and LookupRecord, and status elsewhere.",
             "x-presence": "only when failure_status"
           },
           "unsupported_fields": {
@@ -6752,12 +6752,12 @@
           },
           "unsupported_reason": {
             "type": "string",
-            "description": "Open product reason vocabulary explaining an unsupported answer.\n\nPresence condition: The object status is unsupported.",
+            "description": "Open product reason vocabulary explaining an unsupported answer.\n\nPresence condition: The object's result status is unsupported. That field is read_status on NameRecord and LookupRecord, and status elsewhere.",
             "x-presence": "when status_unsupported"
           },
           "failure_reason": {
             "type": "string",
-            "description": "Open product reason vocabulary explaining a failed, stale, missing or mismatched answer.\n\nPresence condition: The object status is failed, stale, not_found or mismatch.",
+            "description": "Open product reason vocabulary explaining a failed, stale, missing or mismatched answer.\n\nPresence condition: The object's result status is failed, stale, not_found or mismatch. That field is read_status on NameRecord and LookupRecord, and status elsewhere.",
             "x-presence": "only when failure_status"
           },
           "normalization": {
@@ -6932,7 +6932,7 @@
           },
           "subregistry": {
             "$ref": "#/components/schemas/ContractRef",
-            "description": "Current subregistry pointer. Absent on every status=unsupported record, including verified unsupported records that retain registration fields.\n\nPresence condition: The name-level record has read_status other than unsupported. This excludes both identity-only unsupported records and verified unsupported records that retain registration fields.",
+            "description": "Current subregistry pointer. Absent on every read_status=unsupported record, including verified unsupported records that retain registration fields.\n\nPresence condition: The name-level record has read_status other than unsupported. This excludes both identity-only unsupported records and verified unsupported records that retain registration fields.",
             "x-presence": "only when supported_name"
           },
           "records": {
@@ -6989,12 +6989,12 @@
           },
           "unsupported_reason": {
             "type": "string",
-            "description": "Open product reason vocabulary explaining an unsupported answer.\n\nPresence condition: The object status is unsupported.",
+            "description": "Open product reason vocabulary explaining an unsupported answer.\n\nPresence condition: The object's result status is unsupported. That field is read_status on NameRecord and LookupRecord, and status elsewhere.",
             "x-presence": "when status_unsupported"
           },
           "failure_reason": {
             "type": "string",
-            "description": "Open product reason vocabulary explaining a failed, stale, missing or mismatched answer.\n\nPresence condition: The object status is failed, stale, not_found or mismatch.",
+            "description": "Open product reason vocabulary explaining a failed, stale, missing or mismatched answer.\n\nPresence condition: The object's result status is failed, stale, not_found or mismatch. That field is read_status on NameRecord and LookupRecord, and status elsewhere.",
             "x-presence": "only when failure_status"
           },
           "unsupported_fields": {
@@ -7576,12 +7576,12 @@
           },
           "unsupported_reason": {
             "type": "string",
-            "description": "Open product reason vocabulary explaining an unsupported answer.\n\nPresence condition: The object status is unsupported.",
+            "description": "Open product reason vocabulary explaining an unsupported answer.\n\nPresence condition: The object's result status is unsupported. That field is read_status on NameRecord and LookupRecord, and status elsewhere.",
             "x-presence": "when status_unsupported"
           },
           "failure_reason": {
             "type": "string",
-            "description": "Open product reason vocabulary explaining a failed, stale, missing or mismatched answer.\n\nPresence condition: The object status is failed, stale, not_found or mismatch.",
+            "description": "Open product reason vocabulary explaining a failed, stale, missing or mismatched answer.\n\nPresence condition: The object's result status is failed, stale, not_found or mismatch. That field is read_status on NameRecord and LookupRecord, and status elsewhere.",
             "x-presence": "only when failure_status"
           },
           "meta": {
@@ -7723,12 +7723,12 @@
           },
           "unsupported_reason": {
             "type": "string",
-            "description": "Open product reason vocabulary explaining an unsupported answer.\n\nPresence condition: The object status is unsupported.",
+            "description": "Open product reason vocabulary explaining an unsupported answer.\n\nPresence condition: The object's result status is unsupported. That field is read_status on NameRecord and LookupRecord, and status elsewhere.",
             "x-presence": "when status_unsupported"
           },
           "failure_reason": {
             "type": "string",
-            "description": "Open product reason vocabulary explaining a failed, stale, missing or mismatched answer.\n\nPresence condition: The object status is failed, stale, not_found or mismatch.",
+            "description": "Open product reason vocabulary explaining a failed, stale, missing or mismatched answer.\n\nPresence condition: The object's result status is failed, stale, not_found or mismatch. That field is read_status on NameRecord and LookupRecord, and status elsewhere.",
             "x-presence": "only when failure_status"
           }
         },
@@ -7751,12 +7751,12 @@
           },
           "unsupported_reason": {
             "type": "string",
-            "description": "Open product reason vocabulary explaining an unsupported answer.\n\nPresence condition: The object status is unsupported.",
+            "description": "Open product reason vocabulary explaining an unsupported answer.\n\nPresence condition: The object's result status is unsupported. That field is read_status on NameRecord and LookupRecord, and status elsewhere.",
             "x-presence": "when status_unsupported"
           },
           "failure_reason": {
             "type": "string",
-            "description": "Open product reason vocabulary explaining a failed, stale, missing or mismatched answer.\n\nPresence condition: The object status is failed, stale, not_found or mismatch.",
+            "description": "Open product reason vocabulary explaining a failed, stale, missing or mismatched answer.\n\nPresence condition: The object's result status is failed, stale, not_found or mismatch. That field is read_status on NameRecord and LookupRecord, and status elsewhere.",
             "x-presence": "only when failure_status"
           }
         },

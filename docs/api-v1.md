@@ -2802,7 +2802,7 @@ Flat name-detail object, also used by resolver bound names. An identity-only uns
 | `resolver` | object ContractRef | optional | Resolver contract for this answer. |
 | `unresolvable_reason` | string | optional | Why the retained resolver cannot resolve this name: `no_live_ens_v2_entry` or `ens_v2_path_no_resolver`. |
 | `resolution_unsupported_reason` | string | optional | The current ENSv2 path is unknown (`ens_v2_path_not_projected`) or reaches a different target whose indexed records cannot be attributed (`ens_v2_path_target_not_projected`). |
-| `subregistry` | object ContractRef | only when supported_name | Current subregistry pointer. Absent on every status=unsupported record, including verified unsupported records that retain registration fields. |
+| `subregistry` | object ContractRef | only when supported_name | Current subregistry pointer. Absent on every read_status=unsupported record, including verified unsupported records that retain registration fields. |
 | `records` | object RecordGroups | optional | Grouped resolver keys and known values when the name may serve resolver records and an inventory or verified read supplies them. |
 | `primary_name` | string | optional | Selected primary name when known. |
 | `primary_address` | string | optional | Primary address when the read can serve it. |
@@ -2916,7 +2916,7 @@ Shared lookup feed/detail record. Feed records carry identity, `chain_id`, `netw
 | `resolver` | object ContractRef | optional | Resolver contract for this answer. |
 | `unresolvable_reason` | string | optional | Why the retained resolver cannot resolve this name: `no_live_ens_v2_entry` or `ens_v2_path_no_resolver`. |
 | `resolution_unsupported_reason` | string | optional | The current ENSv2 path is unknown (`ens_v2_path_not_projected`) or reaches a different target whose indexed records cannot be attributed (`ens_v2_path_target_not_projected`). |
-| `subregistry` | object ContractRef | only when supported_name | Current subregistry pointer. Absent on every status=unsupported record, including verified unsupported records that retain registration fields. |
+| `subregistry` | object ContractRef | only when supported_name | Current subregistry pointer. Absent on every read_status=unsupported record, including verified unsupported records that retain registration fields. |
 | `records` | object RecordGroups | optional | Grouped records on detail results when a current inventory is available; absent on feed results. |
 | `primary_name` | string | optional | Selected primary name when known. |
 | `primary_address` | string | optional | Primary address when the read can serve it. |
@@ -3782,8 +3782,8 @@ Extends Envelope.
 | --- | --- |
 | full_record | The record is not the identity-only unsupported name object. Indexed coverage downgrades produce that identity-only object; a verified lookup failure can retain the registration summary even when its result status is unsupported. |
 | supported_name | The name-level record has read_status other than unsupported. This excludes both identity-only unsupported records and verified unsupported records that retain registration fields. |
-| status_unsupported | The object status is unsupported. |
-| failure_status | The object status is failed, stale, not_found or mismatch. |
+| status_unsupported | The object's result status is unsupported. That field is read_status on NameRecord and LookupRecord, and status elsewhere. |
+| failure_status | The object's result status is failed, stale, not_found or mismatch. That field is read_status on NameRecord and LookupRecord, and status elsewhere. |
 | registration_identity | The record is full and has an established public registration identity under the [registration identity rules](#registration-identity-of-wrapped-names), independently of [lifecycle status](#status-vocabulary). Preserved ended and continuous identities qualify; a new unclaimed ownerless reservation without a qualifying identity does not. |
 | wrapper_evidence | The composed ENSv1 name has backed wrapper state, proven lapse/unwrap, registry custody evidence, or incomplete wrapping evidence described by unknown. |
 | wrapper_backed | wrapper_state is wrapped, emancipated or locked under the expiry-effective fuse rule; wrapper_fuses accompanies those backed states only. |
