@@ -270,7 +270,17 @@ same transaction deletes the earlier rows first. A refresh on a connection that 
 has the table therefore writes no system catalog row, unless it stages more than 50,000
 names and gathers planner statistics on them. The refresh must run inside the writer's
 open transaction and fails without one. The writer's database role needs PostgreSQL's
-`TEMPORARY` privilege on the database, which every role has by default.
+`TEMPORARY` privilege on the database, which every role has by default. Creating the
+table runs a `DO` block, so the role also needs `USAGE` on the `plpgsql` language, which
+every role has by default.
+
+While a connection holds its temporary table, PostgreSQL cannot advance the database's
+`datfrozenxid` past that table. Two kinds of connection run the refresh. A pool
+connection is bounded by the pool's maximum connection lifetime. That is sqlx's default
+of 30 minutes, and no pool sets another value. No crate may set `max_lifetime(None)` on
+a pool that refreshes search. The phase runner's advisory-lock connection runs the
+refresh when a redo with a normalization-flag recompute completes. It is not a pool
+connection. It lives until the runner releases that phase lock and closes it.
 
 Project extends its existing `project_name_summary` with `search_supported`,
 `search_fields` and `search_creation_transport_resource_id`. The supported payload

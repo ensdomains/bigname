@@ -3291,6 +3291,8 @@ The temporary table belongs to the database connection. The first refresh on a
 connection creates it, PostgreSQL empties it at each commit, and it goes away
 when the connection closes. The database role of each of those writers must be
 able to create temporary tables, which PostgreSQL allows every role by default.
+Creating the table runs a `DO` block, so the role also needs `USAGE` on the
+`plpgsql` language, which every role has by default.
 A refresh over N names writes N rows of temporary table and index on the
 database host until its transaction ends. Budget about 300 bytes of disk per
 affected name for a full-history redo.

@@ -23,15 +23,20 @@
 //! | r | rows staged by an earlier commit or rollback | `later_refresh_never_reads_rows_staged_before` |
 //! | s | 1,000 small transactions on one connection | `small_refreshes_after_the_first_write_no_catalog_row` |
 //! | t | staged set at and over the statistics threshold | `names_beyond_one_staging_statement_are_bound_once` |
-//! | u | page plan after the table changed size | `page_statement_is_not_kept_prepared` |
+//! | u | the page statement is not kept prepared | `page_statement_is_not_kept_prepared` |
 mod wire;
 
 use super::{documents, prepare, refresh};
 use anyhow::{Context, Result, ensure};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+use futures_util::FutureExt;
 use sqlx::{
     ConnectOptions, Connection, PgConnection,
     postgres::{PgConnectOptions, PgSslMode},
+};
+use std::{
+    panic::AssertUnwindSafe,
+    time::{Duration, Instant},
 };
 use wire::{Sent, Wire};
 
@@ -774,7 +779,12 @@ async fn role_without_temporary_tables_is_refused() -> Result<()> {
     let fixture = Fixture::create("search_pages_privilege").await?;
     fixture.structural(1..=3).await?;
     let pool = fixture.db.pool();
+    // A crashed run can leave its role behind. The name is this process's own, and a role
+    // left under the same name is dropped first, so no earlier run can block this one.
     let role = format!("search_pages_no_temp_{}", std::process::id());
+    sqlx::query(&format!("DROP ROLE IF EXISTS {role}"))
+        .execute(pool)
+        .await?;
     sqlx::query(&format!("CREATE ROLE {role}"))
         .execute(pool)
         .await?;
@@ -842,6 +852,17 @@ async fn catalog_writes(conn: &mut PgConnection) -> Result<Vec<(String, i64)>> {
 #[tokio::test]
 async fn small_refreshes_after_the_first_write_no_catalog_row() -> Result<()> {
     let fixture = Fixture::create("search_pages_catalogs").await?;
+    // The database is dropped on every way out of the measurement: success, error or panic.
+    let outcome = AssertUnwindSafe(catalog_rows_stay_flat(&fixture))
+        .catch_unwind()
+        .await;
+    // The measurement's own failure is reported before any failure to clean up.
+    let cleaned = fixture.db.cleanup().await;
+    outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+    cleaned
+}
+
+async fn catalog_rows_stay_flat(fixture: &Fixture) -> Result<()> {
     fixture.structural(1..=3).await?;
     // A backend reports its counters when it exits. End the fixture's own backends so that
     // their catalog writes are counted before the first reading. The pool reconnects later.
@@ -852,6 +873,7 @@ async fn small_refreshes_after_the_first_write_no_catalog_row() -> Result<()> {
     )
     .execute(&mut conn)
     .await?;
+    let deadline = Instant::now() + Duration::from_secs(10);
     while sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
          WHERE datname = current_database() AND pid <> pg_backend_pid())",
@@ -859,7 +881,11 @@ async fn small_refreshes_after_the_first_write_no_catalog_row() -> Result<()> {
     .fetch_one(&mut conn)
     .await?
     {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        ensure!(
+            Instant::now() < deadline,
+            "the fixture's other backends were still connected 10 seconds after termination"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let start = catalog_writes(&mut conn).await?;
     let mut first = Vec::new();
@@ -887,7 +913,7 @@ async fn small_refreshes_after_the_first_write_no_catalog_row() -> Result<()> {
     .await?;
     ensure!(statistics == 0, "a small refresh gathered statistics");
     ensure!(fixture.documents().await? == 3);
-    fixture.db.cleanup().await
+    Ok(())
 }
 
 #[tokio::test]

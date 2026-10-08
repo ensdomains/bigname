@@ -59,6 +59,8 @@ pub async fn run() -> Result<()> {
         ("search_path", "bigname_phase,public"),
         ("statement_timeout", "25000"),
     ]);
+    // This pool reaches the identity search refresh. Keep sqlx's default `max_lifetime`
+    // (docs/storage.md, "Durable search data").
     let pool = PgPoolOptions::new()
         .max_connections(2)
         .connect_with(options)

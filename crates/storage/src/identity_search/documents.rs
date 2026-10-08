@@ -23,6 +23,8 @@ const STAGED_PER_STATEMENT: usize = 20_000;
 /// Staged sets larger than this get planner statistics. Smaller ones write no catalog row.
 pub(super) const ANALYZE_ABOVE: u64 = 50_000;
 const STAGED: &str = "pg_temp.identity_search_names";
+/// SQLSTATE `no_active_sql_transaction`.
+const NO_ACTIVE_TRANSACTION: &str = "25P01";
 /// DELETE, not TRUNCATE. Measured over 1,000 transactions, a TRUNCATE of a table created by an
 /// earlier transaction writes new `pg_class` rows each time, and DELETE writes none.
 const CLEAR: &str = "DELETE FROM pg_temp.identity_search_names";
@@ -64,7 +66,16 @@ pub(super) async fn stage(
     ))
     .execute(&mut *conn)
     .await
-    .context("an identity search refresh requires the caller's open transaction")?;
+    .map_err(|error| {
+        let outside = error
+            .as_database_error()
+            .is_some_and(|database| database.code().as_deref() == Some(NO_ACTIVE_TRANSACTION));
+        anyhow::Error::new(error).context(if outside {
+            "an identity search refresh requires the caller's open transaction"
+        } else {
+            "failed to lock the search name staging table"
+        })
+    })?;
     let mut staged = 0;
     for names in names.chunks(STAGED_PER_STATEMENT) {
         staged += sqlx::query(&format!(
@@ -105,8 +116,10 @@ pub(super) async fn stage(
 /// most one page of surfaces and renders at most one page of names however the join is planned.
 /// A staged name with no surface advances the cursor and yields no row.
 ///
-/// The statement is planned on every execution. A plan cached while the connection's table was
-/// small would otherwise sort a later, larger set on every page of the same transaction.
+/// The statement is planned on every execution. Once a large refresh has stored statistics for
+/// the connection's table, a plan cached while the table is small scans and sorts it. That plan
+/// would then sort a later, larger set on every page of the same transaction. A table that was
+/// never analyzed does not get that plan.
 pub(super) async fn load(
     conn: &mut PgConnection,
     after: &str,
