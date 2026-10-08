@@ -13,6 +13,7 @@ const BASE_REGISTRAR: &str = "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85";
 const PROXY: &str = "0xeeeeeeee14d718c2b47d9923deab1335e144eeee";
 const IMPLEMENTATION: &str = "0x24e1d8e068620b647ca097f961a61055f4f42d72";
 const OWNER: &str = "0x0000000000000000000000000000000000000051";
+const SECOND_OWNER: &str = "0x0000000000000000000000000000000000000052";
 const NAME: &str = "continuinglease.eth";
 const LEASE: u64 = 2_000_000_000;
 const EXTENDED: u64 = LEASE + 92 * 86_400;
@@ -26,9 +27,87 @@ sol! {
     event Upgraded(address indexed implementation);
 }
 
-#[tokio::test]
-async fn released_continuing_lease_keeps_its_former_holder_on_public_routes() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
+type Logs = Vec<(&'static str, alloy_primitives::LogData)>;
+
+fn label() -> &'static str {
+    NAME.strip_suffix(".eth").unwrap()
+}
+
+/// A BaseRegistrar registration and the ownerless reservation premigration writes with it.
+fn registered(previous: Option<&str>, owner: &str, lease: u64) -> Result<Logs> {
+    let hash = keccak256(label().as_bytes());
+    let eth = keccak256([B256::ZERO.as_slice(), keccak256(b"eth").as_slice()].concat());
+    let owner: Address = owner.parse()?;
+    let lease_token = U256::from_be_bytes(hash.0);
+    let mut logs = Vec::new();
+    // Registering an expired token burns it first.
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f)
+    if let Some(previous) = previous {
+        logs.push((
+            BASE_REGISTRAR,
+            Transfer {
+                from: previous.parse()?,
+                to: Address::ZERO,
+                tokenId: lease_token,
+            }
+            .encode_log_data(),
+        ));
+    }
+    logs.extend([
+        (
+            BASE_REGISTRAR,
+            Transfer {
+                from: Address::ZERO,
+                to: owner,
+                tokenId: lease_token,
+            }
+            .encode_log_data(),
+        ),
+        (
+            ENS_REGISTRY,
+            NewOwner {
+                node: eth,
+                label: hash,
+                owner,
+            }
+            .encode_log_data(),
+        ),
+        (
+            BASE_REGISTRAR,
+            NameRegistered {
+                id: lease_token,
+                owner,
+                expires: U256::from(lease),
+            }
+            .encode_log_data(),
+        ),
+        (
+            NEW_REGISTRY,
+            LabelReserved {
+                tokenId: lease_token >> 32 << 32,
+                labelHash: hash,
+                label: label().into(),
+                expiry: lease + 62 * 86_400,
+                sender: owner,
+            }
+            .encode_log_data(),
+        ),
+    ]);
+    Ok(logs)
+}
+
+fn cutover() -> Result<Logs> {
+    Ok(vec![(
+        PROXY,
+        Upgraded {
+            implementation: IMPLEMENTATION.parse()?,
+        }
+        .encode_log_data(),
+    )])
+}
+
+/// One Engine batch per block ending at `HEAD`, then a full Project publication.
+async fn publish(database: &TestDatabase, blocks: Vec<(u64, Logs)>) -> Result<()> {
     let pool = &database.pool;
     bigname_manifests::sync_schema_v2_repository(
         pool,
@@ -36,84 +115,16 @@ async fn released_continuing_lease_keeps_its_former_holder_on_public_routes() ->
     )
     .await?;
     let block_hash = |block: i64| format!("{CHAIN}-block-{block}");
-    // The last block carries no log: the lease passes its 90-day grace by the clock alone,
-    // one second before the extended reservation expires.
-    let times = [LEASE - 100, LEASE - 90, LEASE - 80, EXTENDED - 1];
-    let first = HEAD - 3;
-    for (offset, time) in times.into_iter().enumerate() {
+    let first = HEAD + 1 - blocks.len() as i64;
+    for (offset, (time, _)) in blocks.iter().enumerate() {
         let block = first + offset as i64;
         sqlx::query("INSERT INTO chain_lineage(chain_id,block_hash,parent_hash,block_number,block_timestamp,canonicality_state)
             VALUES($1,$2,$3,$4,to_timestamp($5),'canonical')")
             .bind(CHAIN).bind(block_hash(block)).bind((offset > 0).then(|| block_hash(block - 1)))
-            .bind(block).bind(time as f64).execute(pool).await?;
+            .bind(block).bind(*time as f64).execute(pool).await?;
     }
-    let label = NAME.strip_suffix(".eth").unwrap();
-    let hash = keccak256(label.as_bytes());
-    let eth = keccak256([B256::ZERO.as_slice(), keccak256(b"eth").as_slice()].concat());
-    let owner: Address = OWNER.parse()?;
-    let lease_token = U256::from_be_bytes(hash.0);
-    let token = lease_token >> 32 << 32;
-    let blocks = [
-        vec![
-            (
-                BASE_REGISTRAR,
-                Transfer {
-                    from: Address::ZERO,
-                    to: owner,
-                    tokenId: lease_token,
-                }
-                .encode_log_data(),
-            ),
-            (
-                ENS_REGISTRY,
-                NewOwner {
-                    node: eth,
-                    label: hash,
-                    owner,
-                }
-                .encode_log_data(),
-            ),
-            (
-                BASE_REGISTRAR,
-                NameRegistered {
-                    id: lease_token,
-                    owner,
-                    expires: U256::from(LEASE),
-                }
-                .encode_log_data(),
-            ),
-            (
-                NEW_REGISTRY,
-                LabelReserved {
-                    tokenId: token,
-                    labelHash: hash,
-                    label: label.into(),
-                    expiry: LEASE + 62 * 86_400,
-                    sender: owner,
-                }
-                .encode_log_data(),
-            ),
-        ],
-        vec![(
-            PROXY,
-            Upgraded {
-                implementation: IMPLEMENTATION.parse()?,
-            }
-            .encode_log_data(),
-        )],
-        vec![(
-            NEW_REGISTRY,
-            ExpiryUpdated {
-                tokenId: token,
-                newExpiry: EXTENDED,
-                sender: owner,
-            }
-            .encode_log_data(),
-        )],
-        vec![],
-    ];
     let mut previous = None;
-    for (offset, logs) in blocks.into_iter().enumerate() {
+    for (offset, (_, logs)) in blocks.into_iter().enumerate() {
         let block = first + offset as i64;
         let transaction = format!("{CHAIN}-transaction-{block}");
         if !logs.is_empty() {
@@ -170,6 +181,35 @@ async fn released_continuing_lease_keeps_its_former_holder_on_public_routes() ->
     )
     .await?;
     assert_eq!(publication.marker.map(|marker| marker.number), Some(HEAD));
+    Ok(())
+}
+
+#[tokio::test]
+async fn released_continuing_lease_keeps_its_former_holder_on_public_routes() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    // The last block carries no log: the lease passes its 90-day grace by the clock alone,
+    // one second before the extended reservation expires.
+    let times = [LEASE - 100, LEASE - 90, LEASE - 80, EXTENDED - 1];
+    let token = U256::from_be_bytes(keccak256(label().as_bytes()).0) >> 32 << 32;
+    let extended = vec![(
+        NEW_REGISTRY,
+        ExpiryUpdated {
+            tokenId: token,
+            newExpiry: EXTENDED,
+            sender: OWNER.parse()?,
+        }
+        .encode_log_data(),
+    )];
+    publish(
+        &database,
+        vec![
+            (times[0], registered(None, OWNER, LEASE)?),
+            (times[1], cutover()?),
+            (times[2], extended),
+            (times[3], vec![]),
+        ],
+    )
+    .await?;
 
     let (status, detail) = get(&database, &format!("/v1/names/{NAME}?namespace=ens")).await?;
     assert_eq!(status, StatusCode::OK, "{detail}");
@@ -214,5 +254,62 @@ async fn released_continuing_lease_keeps_its_former_holder_on_public_routes() ->
     .await?;
     assert_eq!(status, StatusCode::OK, "{current}");
     assert!(!listed(&current), "released lease still owned: {current}");
+    database.cleanup().await
+}
+
+/// Once the first lease and its reservation have both ended, the name is available on both
+/// registries and premigration registers it again with a new reservation.
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L161-L178 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L41 @ ens_v2_sepolia_20261001@07e55a05)
+#[tokio::test]
+async fn a_lease_registered_after_an_ended_reservation_keeps_its_own_identity() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let ended = LEASE + 90 * 86_400;
+    let again = ended + 20;
+    let fresh = again + 365 * 86_400;
+    publish(
+        &database,
+        vec![
+            (LEASE - 100, registered(None, OWNER, LEASE)?),
+            (LEASE - 90, cutover()?),
+            (ended + 10, vec![]),
+            (again, registered(Some(OWNER), SECOND_OWNER, fresh)?),
+        ],
+    )
+    .await?;
+    let lease: Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM normalized_events
+         WHERE chain_id=$1 AND block_number=$2 AND event_kind='RegistrationGranted'
+           AND source_family='ens_v1_registrar_l1'",
+    )
+    .bind(CHAIN)
+    .bind(HEAD)
+    .fetch_one(&database.pool)
+    .await?;
+    let (status, detail) = get(&database, &format!("/v1/names/{NAME}?namespace=ens")).await?;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    let record = &detail["data"];
+    assert_eq!(record["status"], "active", "{record}");
+    assert_eq!(record["owner"], SECOND_OWNER, "{record}");
+    assert_eq!(
+        record["expires_at"],
+        (fresh + 62 * 86_400).to_string(),
+        "{record}"
+    );
+    assert_eq!(record["registration_id"], lease.to_string(), "{record}");
+    assert_eq!(record["registered_at"], again.to_string(), "{record}");
+    assert!(record.get("lapsed_registration").is_none(), "{record}");
+    let (status, permissions) = get(
+        &database,
+        &format!("/v1/permissions?registration_id={lease}"),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{permissions}");
+    assert!(
+        permissions["data"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["address"] == SECOND_OWNER)),
+        "fresh lease grants: {permissions}"
+    );
     database.cleanup().await
 }
