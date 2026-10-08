@@ -70,13 +70,14 @@ impl TransactionIndex {
         Ok(index)
     }
 
-    pub(super) fn apply(
-        &self,
+    pub(super) fn apply<'a>(
+        &'a self,
         selected: &Selected,
         raw: &RawLogInput,
-        context: &mut RegistrarContext,
+        context: &mut RegistrarContext<'a>,
     ) -> anyhow::Result<()> {
-        context.stale_wrapper_completion = self.wrapper_completions.stale(raw);
+        context.matched_wrapper_completion = self.wrapper_completions.matched(raw);
+        context.wrapper_mint_completion = self.wrapper_completions.mint_completion(raw);
         if let Some((namehash, owner)) = registrar_registration_namehash(selected, raw)? {
             context.transaction_has_registry_setup = self
                 .registry_setups

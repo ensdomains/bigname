@@ -15,16 +15,19 @@ use crate::{
     },
 };
 
-/// The first readable registry binding after a proven wrapper callback may have no earlier
-/// named binding. Its normalized opener explicitly carries the surviving registrar resource.
+/// A registry binding after a proven wrapper callback may have no earlier named lease binding.
+/// Its normalized opener explicitly carries the surviving live registrar resource, whether the
+/// name was learned at the matched mint or first materialized at a historical completion.
 /// Attach that lease at this observation, without inventing a historical binding or changing
 /// registry control. Later transfers and renewals use the ordinary retained-lease rules.
 pub(super) fn attach_callback_lease(row: &mut Row, opening: Option<&super::BlockEvent>) {
     let Some(event) = opening.filter(|event| {
-        event.source_family == "ens_v1_registry_l1"
-            && event.after["source_event"] == "NameWrapped"
-            && event.after["state_derived"] == true
-            && event.after["authority_kind"] == "registry_only"
+        event.after["authority_kind"] == "registry_only"
+            && ((event.source_family == "ens_v1_registry_l1"
+                && event.after["source_event"] == "NameWrapped"
+                && event.after["state_derived"] == true)
+                || (event.source_family == "ens_v1_registrar_l1"
+                    && event.after["source_event"] == "Transfer"))
     }) else {
         return;
     };

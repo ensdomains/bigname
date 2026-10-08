@@ -75,13 +75,13 @@ fn callback_burn_and_nested_rewrap_keep_the_actual_final_wrapper_state() -> anyh
             .iter()
             .filter(|event| {
                 event.event_kind == "TokenControlTransferred"
-                    && event.after_state["source_event"] == "NameWrapped"
+                    && event.after_state["wrapper_mint"] == true
             })
             .collect();
-        assert_eq!(completions.len(), usize::from(nested));
+        assert_eq!(completions.len(), 1 + usize::from(nested));
         if nested {
-            assert_eq!(completions[0].after_state["to"], SECOND_OWNER);
-            assert_eq!(completions[0].after_state["fuses"], DOT_ETH_FUSES | 1);
+            assert_eq!(completions[1].after_state["to"], SECOND_OWNER);
+            assert_eq!(completions[1].after_state["fuses"], DOT_ETH_FUSES | 1);
         }
         let stale_permissions = output
             .normalized_events
@@ -146,7 +146,7 @@ fn ordinary_same_transaction_rewrap_and_expired_premint_unwrap_complete_normally
             .normalized_events
             .iter()
             .filter(|event| event.event_kind == "TokenControlTransferred"
-                && event.after_state["source_event"] == "NameWrapped")
+                && event.after_state["wrapper_mint"] == true)
             .count(),
         2
     );
@@ -172,7 +172,7 @@ fn ordinary_same_transaction_rewrap_and_expired_premint_unwrap_complete_normally
             .normalized_events
             .iter()
             .filter(|event| event.event_kind == "TokenControlTransferred"
-                && event.after_state["source_event"] == "NameWrapped")
+                && event.after_state["wrapper_mint"] == true)
             .count(),
         1
     );
@@ -187,5 +187,164 @@ fn ordinary_same_transaction_rewrap_and_expired_premint_unwrap_complete_normally
         assert_eq!(restored_output.normalized_events, output.normalized_events);
         assert_eq!(restored, live);
     }
+    Ok(())
+}
+
+#[test]
+fn generic_callback_inheritance_restores_complete_and_compacted_state() -> anyhow::Result<()> {
+    let (chain, manifests, admissions) = profile(
+        "sepolia",
+        &[
+            "ens_v1_registry_l1",
+            "ens_v1_registrar_l1",
+            "ens_v1_wrapper_l1",
+        ],
+    )?;
+    let contracts = Contracts::new(&admissions);
+    let mut parent = register_and_wrap(
+        &contracts,
+        REGISTERED,
+        FIRST_OWNER,
+        FIRST_EXPIRY,
+        None,
+        None,
+    );
+    let completion = parent.last_mut().expect("parent completion");
+    completion.data = events::NameWrapped {
+        node: label().2,
+        name: b"\x08relinked\x03eth\0".to_vec().into(),
+        owner: address(FIRST_OWNER),
+        fuses: DOT_ETH_FUSES | 1,
+        expiry: (FIRST_EXPIRY + GRACE_PERIOD) as u64,
+    }
+    .encode_log_data()
+    .data
+    .to_vec();
+    let (parent_output, parent_session) = interpret_test_batch_incremental(
+        batch(&chain, &manifests, &admissions, vec![], parent),
+        None,
+    )?;
+    let node = keccak256([label().2.as_slice(), keccak256(b"child").as_slice()].concat());
+    let token = U256::from_be_bytes(node.0);
+    let holder = address(FIRST_OWNER);
+    let wrapper = address(&contracts.wrapper);
+    let mint = |from, to| {
+        events::TransferSingle {
+            operator: holder,
+            from,
+            to,
+            id: token,
+            value: U256::from(1),
+        }
+        .encode_log_data()
+    };
+    let completion = |fuses, expiry| {
+        events::NameWrapped {
+            node,
+            name: b"\x05child\x08relinked\x03eth\0".to_vec().into(),
+            owner: holder,
+            fuses,
+            expiry,
+        }
+        .encode_log_data()
+    };
+    // The authorization is an ENS-registry operator approval, before the one-shot callback.
+    alloy_sol_types::sol! { event ApprovalForAll(address indexed owner,address indexed operator,bool approved); }
+    let logs = [
+        (
+            &contracts.registry,
+            ApprovalForAll {
+                owner: holder,
+                operator: wrapper,
+                approved: true,
+            }
+            .encode_log_data(),
+        ),
+        (
+            &contracts.registry,
+            events::NewOwner {
+                node: label().2,
+                label: keccak256(b"child"),
+                owner: wrapper,
+            }
+            .encode_log_data(),
+        ),
+        (&contracts.wrapper, mint(Address::ZERO, holder)),
+        (&contracts.wrapper, mint(holder, Address::ZERO)),
+        (
+            &contracts.registry,
+            events::registry::Transfer {
+                node,
+                owner: holder,
+            }
+            .encode_log_data(),
+        ),
+        (
+            &contracts.wrapper,
+            events::NameUnwrapped {
+                node,
+                owner: holder,
+            }
+            .encode_log_data(),
+        ),
+        (
+            &contracts.registry,
+            events::registry::Transfer {
+                node,
+                owner: wrapper,
+            }
+            .encode_log_data(),
+        ),
+        (&contracts.wrapper, mint(Address::ZERO, holder)),
+        (&contracts.wrapper, completion(0, 0)),
+        (&contracts.wrapper, completion(1 << 16, FIRST_EXPIRY as u64)),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (emitter, data))| raw_at(data, REGISTERED + 1, index as i64, emitter))
+    .collect();
+    let (output, live) = interpret_test_batch_incremental(
+        batch(&chain, &manifests, &admissions, vec![], logs),
+        Some(parent_session),
+    )?;
+    let mut all = parent_output.normalized_events;
+    all.extend(output.normalized_events);
+    let later = vec![raw_at(
+        mint(holder, address(SECOND_OWNER)),
+        REGISTERED + 2,
+        0,
+        &contracts.wrapper,
+    )];
+    let priors: [Vec<PriorEventInput>; 2] =
+        [all.iter().map(prior_event).collect(), compact_prior(&all)];
+    for prior in &priors {
+        let (_, restored) = interpret_test_batch_incremental(
+            batch(&chain, &manifests, &admissions, prior.clone(), vec![]),
+            None,
+        )?;
+        assert_eq!(
+            restored, live,
+            "generic retained expiry/fuses/authority changed across restore"
+        );
+    }
+    let (expected, expected_state) = interpret_test_batch_incremental(
+        batch(&chain, &manifests, &admissions, vec![], later.clone()),
+        Some(live),
+    )?;
+    for prior in priors {
+        let (actual, actual_state) = interpret_test_batch_incremental(
+            batch(&chain, &manifests, &admissions, prior, later.clone()),
+            None,
+        )?;
+        assert_eq!(actual.normalized_events, expected.normalized_events);
+        assert_eq!(
+            actual_state, expected_state,
+            "later real transfer changed after restore"
+        );
+    }
+    let name = expected_state
+        .v1_name("ens", &format!("{node:#x}"))
+        .expect("generic name");
+    assert_eq!(name.owner.as_deref(), Some(SECOND_OWNER));
     Ok(())
 }

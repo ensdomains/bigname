@@ -485,8 +485,10 @@ collection route carry neither header.
   below unless its reason is `current_authority_not_projected`, which serves
   `read_status=ok` with the registration and identity fields that can be served,
   their omissions and `unsupported_fields` unchanged, and no `resolver` outside
-  the TLD case above. Such a row is `status=unregistered` with no
-  `registration_id`, but it can still carry `authority`: the arm the name's
+  the TLD case above. Without a proved canonical allocation such a row is
+  `status=unregistered` with no `registration_id`; an admitted allocation instead
+  supplies its own lifecycle status and dates, without inventing a holder or handle.
+  The row can still carry `authority`: the arm the name's
   history selected (for example `ens_v1` after a named ENSv1 registration
   event) even though no binding of that arm is current. `read_status=ok` on such a
   record is not evidence of ownership, and `authority` on it is not evidence
@@ -706,6 +708,11 @@ collection route carry neither header.
   `parent=eth` selects second-level `.eth` names and excludes deeper subnames.
   Both filters apply before paging. Empty or invalid parents and invalid
   authority sets return `400 invalid_input`.
+- A proved canonical allocation remains discoverable when current authority is
+  unprojected with exactly `current_authority_not_projected`. Its lifecycle fields
+  agree with detail and lookup; coverage, resolver and current-control restrictions
+  remain unchanged. Other unsupported reasons, absent allocation evidence and
+  nonfinite deadlines remain excluded.
 - `sort` defaults to the selected deadline: `expires_at` or `grace_ends_at`.
   An explicit sort must match that family. Results are globally ordered by
   that exact stored deadline, then namespace, rendered name and namehash.
@@ -3811,7 +3818,8 @@ introduces it rebuilds Project from full history before serving the option; see
   address relation can be established and the name is structurally absent;
   callers use name detail or batch lookup for its status: a downgraded row
   carries its `unsupported_reason`, and a `current_authority_not_projected`
-  row is served `read_status=ok` and `status=unregistered`.
+  row is served `read_status=ok`, with `status=unregistered` only when no canonical
+  allocation is proved. A proved allocation does not establish a current relation.
   A name bigname has never materialized as a
   [name surface](glossary.md#surface-name-surface) has no current name row.
   On the ENSv1 arm an admitted `NewOwner` creates a surface without raw label
@@ -4390,20 +4398,16 @@ introduces it rebuilds Project from full history before serving the option; see
   registration: a migrated name uses its ENSv2 owner, manager, status, and
   expiry. Each result carries the `authority` its name detail serves, and a
   name that ENSv1 decides carries the `ens_v1` object, as on
-  `GET /v1/names`. A name whose exact-name projection is unsupported is omitted from
-  search results whatever the reason. Today that is a name with no selected
-  current binding (`current_authority_not_projected`, for example when both
-  arms have only history and nothing is open), or a row an earlier Project
-  generation derived with a retired reason. A mixed-history name is served like
-  any other name when its selected exact-name projection is supported.
-  Search carries no row-local status or
-  unsupported-reason field, so it omits such a name rather than serving
-  registration fields no selected authority backs; callers use name detail or
-  batch lookup for an omitted name's status: a downgraded row carries its
-  `unsupported_reason`, and a `current_authority_not_projected` row is served
-  `read_status=ok` and `status=unregistered`. The
-  omission is applied before paging, so returned counts, page order, and cursor
-  continuation all reflect the same filtered set.
+  `GET /v1/names`. An unsupported exact-name projection is omitted unless its
+  reason is exactly `current_authority_not_projected` and composition has selected
+  an admitted canonical allocation. That exception serves the allocation's
+  lifecycle fields even without a current binding; it leaves coverage unsupported
+  and does not establish ownership, permissions or resolver access. Finite dates
+  or a lifecycle string alone are insufficient evidence. The same rule governs
+  both deadline-list families, whose finite-date requirements still apply.
+  Detail and lookup keep their partial `read_status=ok`; without allocation
+  evidence they remain `status=unregistered`. Every other unsupported reason is
+  omitted before paging, so counts, order and cursors use the same filtered set.
 - Pagination behavior: standard collection pagination. Without an explicit
   namespace, the cursor binds the deployment-derived namespace set and is
   rejected if that set changes.
@@ -4694,7 +4698,7 @@ For a registrar lease first identified by a later readable observation, registra
   mixed-authority status, so callers use name detail or batch lookup for the
   name's `read_status` (a downgraded row carries its `unsupported_reason`; a
   `current_authority_not_projected` row is served `read_status=ok` and
-  unregistered). A row classified as
+  unregistered when no canonical allocation is proved). A row classified as
   `current_authority_not_projected` is absent from `bound_names` unless its
   serving resource is a TLD's root-registry resolver pointer; otherwise
   retained resolver-pointer evidence does not establish listing membership.

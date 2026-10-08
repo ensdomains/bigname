@@ -457,7 +457,9 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
         return;
     }
     match source_event {
-        Some("NameWrapped") if event.event_kind == "TokenControlTransferred" => {
+        Some("NameWrapped" | "TransferSingle")
+            if event.event_kind == "TokenControlTransferred"
+                && (source_event == Some("NameWrapped") || event.after_state["wrapper_mint"] == true) => {
             let Some(namehash) = event.after_state.get("node").and_then(Value::as_str) else {
                 return;
             };

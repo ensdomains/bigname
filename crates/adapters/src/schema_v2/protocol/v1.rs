@@ -131,7 +131,7 @@ pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
-    registrar_context: super::super::migration::RegistrarContext,
+    registrar_context: super::super::migration::RegistrarContext<'_>,
 ) -> anyhow::Result<Interpreted> {
     match selected.source.source_family.as_str() {
         "ens_v1_registrar_l1" | "basenames_base_registrar" => {
@@ -147,7 +147,8 @@ pub(super) fn interpret(
             selected,
             raw,
             state,
-            registrar_context.stale_wrapper_completion,
+            registrar_context.matched_wrapper_completion,
+            registrar_context.wrapper_mint_completion,
         ),
         "ens_v1_reverse_l1" | "basenames_base_primary" => reverse::interpret(selected, raw),
         family if family.ends_with("_execution") || family == "basenames_l1_compat" => {

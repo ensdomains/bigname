@@ -30,8 +30,9 @@ const CANDIDATE: &str = "candidate";
 const TRANSITION_KIND: &str = "authority_transition";
 
 #[derive(Clone, Copy, Debug, Default)]
-pub(super) struct RegistrarContext {
-    pub(super) stale_wrapper_completion: bool,
+pub(super) struct RegistrarContext<'a> {
+    pub(super) matched_wrapper_completion: bool,
+    pub(super) wrapper_mint_completion: Option<&'a super::RawLogInput>,
     pub(super) migration_enabled: bool,
     pub(super) graveyard_cleanup: bool,
     pub(super) transaction_has_registry_setup: bool,
@@ -39,11 +40,11 @@ pub(super) struct RegistrarContext {
     pub(super) wrapper_custody: super::protocol::v1::WrapperCustody,
 }
 
-pub(super) fn registrar_context(
+pub(super) fn registrar_context<'a>(
     catalog: &Catalog,
     selected: &Selected,
     raw: &super::RawLogInput,
-) -> anyhow::Result<RegistrarContext> {
+) -> anyhow::Result<RegistrarContext<'a>> {
     if selected.source.source_family != V1_REGISTRAR_FAMILY
         || selected.emitter_role.as_deref() != Some("registrar")
     {

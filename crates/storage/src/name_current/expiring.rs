@@ -162,8 +162,7 @@ pub(crate) async fn expiring_page_from(
         "name_current expiring page_size exceeds SQL limit",
     )?;
 
-    // A listing row carries no status or unsupported_reason field, so unsupported names are
-    // omitted here exactly as search omits them.
+    // Apply the same lifecycle discovery eligibility as search, preserving authority coverage.
     let list_filter = NameCurrentListFilter {
         namespace: Some(filter.namespace.clone()),
         supported_only: true,

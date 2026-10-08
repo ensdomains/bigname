@@ -257,7 +257,8 @@ fn reconcile_registration(
         .filter_map(|index| {
             let event = &output.normalized_events[*index];
             (event.source_family == "ens_v1_wrapper_l1"
-                && event.after_state["source_event"] == "NameWrapped"
+                && (event.after_state["source_event"] == "NameWrapped"
+                    || event.after_state["wrapper_mint"] == true)
                 && event.after_state["authority_kind"] == "wrapper")
                 .then_some((event.resource_id?, events.fields[*index].position?))
         })

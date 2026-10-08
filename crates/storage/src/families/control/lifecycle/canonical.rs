@@ -10,6 +10,10 @@ use crate::{UnixSeconds, families::control::rows::LifecycleEvent};
 
 struct Instance<'a> {
     origin: &'a LifecycleEvent,
+    association: &'a LifecycleEvent,
+    grant: Option<&'a LifecycleEvent>,
+    resource_id: Option<&'a str>,
+    key: String,
     latest: &'a LifecycleEvent,
     expiry: Value,
     terminal: Option<&'a LifecycleEvent>,
@@ -20,11 +24,7 @@ struct Instance<'a> {
 /// Retain one instance per admitted registry/token/resource key. The origin is distinct from the
 /// public registration handle. Unnamed changes belong only while the key still names this name;
 /// another name's association cannot renew or terminate its predecessor's retained instance.
-fn v2_instance<'a>(
-    facts: &NameFacts,
-    tagged: &[Tagged<'a>],
-    clock: &Clock,
-) -> Option<Instance<'a>> {
+fn v2_instance<'a>(tagged: &[Tagged<'a>]) -> Option<Instance<'a>> {
     let mut keys: BTreeMap<&str, Vec<&Tagged<'a>>> = BTreeMap::new();
     for item in tagged.iter().filter(|item| item.event.is_v2_family()) {
         if let Some(key) = item.key.as_deref() {
@@ -60,6 +60,10 @@ fn v2_instance<'a>(
                 if current.is_none() || (!claim && explicit_origin) {
                     current = Some(Instance {
                         origin: event,
+                        association: event,
+                        grant: (kind == "RegistrationGranted").then_some(event),
+                        resource_id: event.resource_id.as_deref(),
+                        key: key.to_owned(),
                         latest: event,
                         expiry: event.expiry.clone(),
                         terminal: None,
@@ -76,10 +80,17 @@ fn v2_instance<'a>(
                 continue;
             }
             if starts {
+                instance.association = event;
+                if kind == "RegistrationGranted" && instance.grant.is_none() {
+                    instance.grant = Some(event);
+                }
                 instance.attached = true;
                 instance.reserved = kind == "RegistrationReserved";
             }
             instance.latest = event;
+            // LabelRegistered precedes TokenResource. Its initial pending grant acquires
+            // the resource from this same allocation's later backed association.
+            instance.resource_id = event.resource_id.as_deref().or(instance.resource_id);
             match kind {
                 "RegistrationReleased"
                     if event.source_event.as_deref() != Some("RegistryPathExpired") =>
@@ -108,23 +119,16 @@ fn v2_instance<'a>(
             instances.push((key, instance));
         }
     }
-    let binding = facts
-        .input
-        .selection
-        .resource_id
-        .as_deref()
-        .filter(|resource| {
-            facts.candidates.iter().any(|candidate| {
-                candidate.resource_id == *resource && candidate.open_at(clock.timestamp_seconds)
-            })
-        });
+    // A topology reattachment names the existing allocation again. Its association survives
+    // passive binding closure and subsequent release; neither a clock fact nor a detached
+    // renewal/lapse associates an older allocation with this name again.
     instances
         .into_iter()
-        .max_by(|(a_key, a), (b_key, b)| {
-            (binding == Some(*a_key) && a.terminal.is_none())
-                .cmp(&(binding == Some(*b_key) && b.terminal.is_none()))
+        .max_by(|(_, a), (_, b)| {
+            a.association
+                .position
+                .cmp(&b.association.position)
                 .then_with(|| a.origin.position.cmp(&b.origin.position))
-                .then_with(|| a.latest.position.cmp(&b.latest.position))
         })
         .map(|(_, instance)| instance)
 }
@@ -185,8 +189,8 @@ pub(super) fn apply(
     registration: &mut Map<String, Value>,
     trace: &mut Map<String, Value>,
 ) -> anyhow::Result<()> {
-    let canonical = v2_instance(facts, tagged, clock)
-        .filter(|_| facts.input.selection.is_v2() || facts.resolution_cutover);
+    let canonical =
+        v2_instance(tagged).filter(|_| facts.input.selection.is_v2() || facts.resolution_cutover);
     let mut terminal = false;
     // An authority-kind hint or a binding alone is not an observed allocation. During a
     // historical rebuild a later authority can already have a resource identity while its
@@ -222,14 +226,54 @@ pub(super) fn apply(
     let (grace, boundary) = if let Some(instance) = canonical {
         terminal = instance.terminal.is_some();
         allocated = true;
-        // A replacement reservation, including one already expired when emitted, does not
-        // inherit a former holder from the older ENSv2 tombstone selected for control.
-        let selected = trace.get("selected_event").and_then(Value::as_str);
-        if tagged.iter().any(|item| {
-            Some(item.event.position.event_identity.as_str()) == selected
-                && item.event.is_v2_family()
-                && item.event.position < instance.origin.position
-        }) {
+        // Internal composition evidence, never a public registration field. Discovery may
+        // expose this admitted allocation even when no current authority is projected.
+        registration.insert("canonical_allocation".into(), Value::Bool(true));
+        // Every public coordinate belongs to this allocation. A later release on an older
+        // key is not a successor allocation, even when control still selects its tombstone.
+        let same_instance = tagged.iter().any(|item| {
+            Some(item.event.position.event_identity.as_str()) == selected_event
+                && item.key.as_deref() == Some(instance.key.as_str())
+                && item.event.position >= instance.origin.position
+        });
+        if !same_instance {
+            registration.remove("lapsed_registration");
+            registration.insert("released_at".into(), Value::Null);
+        }
+        // The existing ENSv1 lease remains the public handle/start while an admitted ENSv2
+        // reservation supplies post-cutover dates. An unrelated ENSv2 grant cannot continue it.
+        let continuing_lease = !facts.input.selection.is_v2()
+            // A later allocation cannot revive the premigration lease, even when current
+            // control falls back to its retained ENSv1 binding after the ENSv2 release.
+            && !tagged.iter().any(|item| {
+                item.staged == StagedName::Ours
+                    && item.event.is_v2_family()
+                    && item.event.position < instance.origin.position
+                    && matches!(item.event.event_kind.as_str(), "RegistrationGranted" | "RegistrationReserved")
+                    && matches!(item.event.source_event.as_deref(), Some("LabelRegistered" | "LabelReserved"))
+                    && item.event.derived_from.as_deref() != Some("registry_state")
+            })
+            && registration
+                .get("resource_id")
+                .is_some_and(Value::is_string)
+            && registration
+                .get("registered_at")
+                .is_some_and(|value| !value.is_null());
+        if let Some(grant) = instance.grant {
+            let start = super::laterals::migrated_lease(facts, tagged, grant).unwrap_or(grant);
+            registration.insert(
+                "registered_at".into(),
+                super::laterals::registered_at(facts, start),
+            );
+            registration.insert("identity_resource_id".into(), json!(instance.resource_id));
+        } else if continuing_lease {
+            registration.insert(
+                "identity_resource_id".into(),
+                registration["resource_id"].clone(),
+            );
+        } else {
+            registration.insert("registered_at".into(), Value::Null);
+            registration.insert("identity_resource_id".into(), Value::Null);
             registration.remove("lapsed_registration");
         }
         registration.insert("expiry".into(), instance.expiry);
@@ -246,6 +290,7 @@ pub(super) fn apply(
                 "state_key": instance.origin.state_key,
                 "event_identity": instance.origin.position.event_identity,
                 "source_family": instance.origin.source_family,
+                "association_event": instance.association.position.event_identity,
                 "terminal_event": instance.terminal.map(|event| &event.position.event_identity),
             }),
         );

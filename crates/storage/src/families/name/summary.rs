@@ -26,7 +26,7 @@
 //!   (apps/api/src/v2/name_record/declared.rs, `declared_owner`); the registry labels' `owner` and
 //!   `exclude_owner` filters read it;
 //! - `expiry_listable`: whether the expiry listing of `/v1/names` lists the name: it composes a
-//!   row whose coverage is not unsupported and whose registration carries a finite expiry
+//!   row eligible for lifecycle discovery whose registration carries a finite expiry
 //!   (`list_keys.rs`); for such a row `expires_at` is the expiry the listing serves and orders by;
 //! - `public_authority`: the public `authority` the row serves (`ens_v0`, `ens_v1` or `ens_v2`),
 //!   null when it serves none or the name composes no row (`list_keys.rs`);
@@ -172,7 +172,7 @@ async fn compose_summaries(
                     "listing_supported": composed
                         .row
                         .as_ref()
-                        .is_some_and(|row| !list_keys::unsupported(&row.coverage)),
+                        .is_some_and(|row| list_keys::listing_eligible(&row.coverage, &row.declared_summary)),
                     // Existing list consumers retain these values even on an unsupported row.
                     "public_authority": composed.row.as_ref()
                         .and_then(|row| list_keys::public_authority(&row.provenance)),

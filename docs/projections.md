@@ -322,13 +322,11 @@ coverage, and display context for one logical name. Ordinary lifecycle changes
 within the same authority anchor preserve `resource_id`; wrap, unwrap,
 re-registration, or another authority-anchor change follows the identity rules
 in [`architecture.md`](architecture.md#identity-model).
-For ENSv2, a selected binding's non-terminal lifecycle remains the exact-name
-registration until it becomes terminal, even if another lifecycle has a later
-grant or reservation event.
-After it becomes terminal, composition prefers another surviving lifecycle;
-if all lifecycles are terminal, it prefers the selected binding's terminal
-event over a later terminal event from another lifecycle, then prefers the
-later canonical event position, including the emission ordinal within one log.
+For ENSv2, current-control selection retains the binding/tombstone policy in
+ADR 0007. The public registration coordinates follow the independent
+[canonical lifecycle](#canonical-registration-lifecycle): latest genuine name
+association selects the allocation, and passive binding closure never changes
+that selection. A later detached event does not create a new association.
 `resource_id` identifies the current control or registration resource. The nullable
 `serving_resource_id` identifies a separate, event-derived resolver and record-serving
 [serving resource](glossary.md#serving-resource) when no control binding is open. It is not a binding, registration,
@@ -672,14 +670,15 @@ relation.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L265 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L297 @ ens_v1@91c966f)
 
-An ENSv2 selected `RegistrationReleased` also carries `lapsed_registration` when its
-`source_event` is `RegistryPathExpired` or `LabelUnregistered`. Its exact shape is
+An ENSv2 `RegistrationReleased` for the canonical allocation or its proved continuation
+carries `lapsed_registration` when its `source_event` is `RegistryPathExpired` or
+`LabelUnregistered`. A release on another control tombstone cannot supply that block. Its exact shape is
 `{owner, held_through: "registry", released_at, release_kind}`: the last registry
 token holder on the selected lifecycle key, from its grant, transfer or release.
 For `RegistryPathExpired`, `release_kind` is `expired`; the registration keeps its expiry
 and applicable grace, and `released_at` is the retained path-release time. For
-`LabelUnregistered`, `release_kind` is `unregistered`; expiry and grace are null, and
-`released_at` comes from that event's canonical block timestamp, already loaded with the
+`LabelUnregistered`, `release_kind` is `unregistered`; the canonical scheduled expiry
+and grace remain, and `released_at` comes from that event's canonical block timestamp, already loaded with the
 lifecycle facts. The unregister payload itself does not contain that time. Fields remain
 null when their retained evidence is unavailable.
 
@@ -1998,6 +1997,13 @@ discovery edge, address or declaration of it, or the [active manifest
 set](glossary.md#active-manifest-set-family-block), with the
 manifests active at that block.
 
+Lifecycle discovery eligibility is separate from authority coverage. A selected canonical
+allocation sets internal evidence during the shared fold; only that evidence plus the exact
+`current_authority_not_projected` reason admits an otherwise unsupported row to search and
+finite expiry/grace discovery. The composed list transport preserves the original coverage
+and carries a separate eligibility bit. No binding, relation, permission or resolver access
+is created, and other unsupported reasons remain excluded.
+
 One family is not event-keyed: the [name summary](glossary.md#name-summary)
 (`project_name_summary`) holds, per name, the fields the child and label lists
 filter, sort and count by inside one statement: the selected authority arm,
@@ -2010,7 +2016,7 @@ else an active surface at its node), and the owner the name row serves
 released name; lower-cased), which the
 registry labels' `owner` and `exclude_owner` filters read. It also holds the
 expiry selector of the names-by-expiry listing: `expiry_listable`, whether the
-name composes a supported row whose registration carries a finite expiry, and
+name composes a lifecycle-eligible row whose registration carries a finite expiry, and
 `public_authority`, the public `authority` that row serves; for a listable name
 the stored expiry is the expiry the listing serves, and the listing selects its
 page's names by these fields before it composes any. Every name with a
@@ -2419,10 +2425,14 @@ Verified/provider behavior and final request generation revalidation are unchang
 
 Composition retains a registration instance independently of its live control and resolver path. A post-cutover ENSv2 reservation does not surrender its canonical schedule when the interpreter emits RegistryPathExpired. The retained lifecycle facts select its origin, actual expiry, configured grace and explicit terminal evidence; renewal/claim/replacement and name reassociation preserve their separate meanings. Public registration handles retain the existing lease/migration rules. Explicit unregister keeps the scheduled dates while terminating the instance.
 
-Topology and TokenResource registration snapshots carry `derived_from=registry_state`. They can refresh a retained schedule but do not start a new origin, even when the snapshot retains the original `source_event=LabelRegistered`. Actual label allocation starts an instance; claiming a live reservation and regenerating its token retain that instance.
+Topology and TokenResource registration snapshots carry `derived_from=registry_state`. They can refresh a retained schedule but do not start a new origin, even when the snapshot retains the original `source_event=LabelRegistered`. Actual label allocation starts an instance; claiming a live reservation and regenerating its token retain that instance. Composition separately retains the latest named grant/reservation/reattachment position. Reattaching A after B selects A through expiry and release without resetting A's original start. Nameless renewals, lapses and clock-generated path expiry do not change this association.
+
+All public registration coordinates come from that canonical allocation or a proved ENSv1 lease continuation. Composition explicitly records whether it has a public identity so detail and nested lookup cannot fall back to a different control resource. A new ownerless reservation without a qualifying grant omits its public handle/start and removes another allocation's lapsed-holder metadata, even when ADR 0007 still selects that older control tombstone. The October 8 rule supersedes the September 26 registration presentation rule, preserving control, resolution and permission selection.
 
 The publication clock evaluates active/expired/released/unregistered once for every consumer. The name summary stores numeric grace_ends_at and the next canonical lifecycle boundary: E and G for ENSv2, E and G+1 for ENSv1/Basenames, E+1 for wrapper-only finite expiry. Existing binding/wrapper boundaries remain. A time-only block refreshes summary, search and prepared lookup from the same work set. No timer is needed beyond the achievable signed chain clock, although public deadlines retain exact arithmetic.
 
 The grace policy loads referenced registry identities in one bounded batch query and recognizes only the reviewed admitted deployment. Missing required expiry remains an integrity failure; classified sentinels and registry-only allocations are the explicit no-expiry cases. See the [public policy](api-v1.md#expiry-and-grace).
 
 A suppressed NameWrapped completion still reveals its verified name bytes. If this is the first readable observation after a callback unwrap, the current registry binding records the surviving registrar resource and node. Project and composed reads follow that explicit lease attachment through the existing indexed candidate columns; they do not require an earlier named wrapper binding. The token holder remains the public owner and the registry owner remains the manager. The general registrar-disclosure rule is unchanged.
+
+Matched NameWrapper completions supply validated name and initial token-data arguments to their actual mint positions. The normalized mint keeps its TransferSingle provenance and explicit matched-completion reference, including the completion-derived registration resource. Callback transfers/burns/unwraps then run in execution order; late completion records name evidence without repeating authority or holder powers. Full and compacted state restoration retain the effective fuses, expiry, holder and revocations. This preserves temporary real holder history without treating registrar custody by NameWrapper as public ownership.

@@ -1129,7 +1129,7 @@ async fn restarted_interpret_redo_and_family_replay_match_fresh_after_suffix_ret
     .bind(block_hash(chain, 501))
     .execute(scratch.pool())
     .await?;
-    sqlx::query("INSERT INTO normalized_events (event_identity, namespace, logical_name_id, event_kind, source_family, manifest_version, source_manifest_id, chain_id, block_number, block_hash, raw_fact_ref, derivation_kind, canonicality_state, after_state) VALUES ('retracted-child-history-suffix', 'ens', 'ens:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'RegistrationReserved', 'ens_v2_registry_l1', 1, $1, $2, 501, $3, '{}'::jsonb, 'ens_v2_registry_resource_surface', 'canonical', jsonb_build_object('registry_contract_instance_id', $4))")
+    sqlx::query("INSERT INTO normalized_events (event_identity, namespace, logical_name_id, event_kind, source_family, manifest_version, source_manifest_id, chain_id, block_number, block_hash, raw_fact_ref, derivation_kind, canonicality_state, after_state) VALUES ('retracted-child-history-suffix', 'ens', 'ens:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'RegistrationReserved', 'ens_v2_registry_l1', 1, $1, $2, 501, $3, '{}'::jsonb, 'ens_v2_registry_resource_surface', 'canonical', jsonb_build_object('registry_contract_instance_id', $4, 'expiry', 500))")
         .bind(registry_manifest_id).bind(chain).bind(block_hash(chain, 501))
         .bind(registry_instance.to_string()).execute(scratch.pool()).await?;
     sqlx::query(
@@ -1147,7 +1147,9 @@ async fn restarted_interpret_redo_and_family_replay_match_fresh_after_suffix_ret
                  'source_event', 'RegistryPathExpired',
                  'derived_from', 'interpreter_state',
                  'terminal_reason', 'registry_name_binding_expired',
-                 'status', 'released'
+                 'status', 'released',
+                 'expiry', 500,
+                 'released_at', 500
              )
          )",
     )
@@ -1181,7 +1183,9 @@ async fn restarted_interpret_redo_and_family_replay_match_fresh_after_suffix_ret
                  'source_event', 'RegistryPathExpired',
                  'derived_from', 'interpreter_state',
                  'terminal_reason', 'registry_name_binding_expired',
-                 'status', 'released'
+                 'status', 'released',
+                 'expiry', 500,
+                 'released_at', 500
              )
          )",
     )
@@ -1237,7 +1241,9 @@ async fn restarted_interpret_redo_and_family_replay_match_fresh_after_suffix_ret
                  'source_event', 'RegistryPathExpired',
                  'derived_from', 'interpreter_state',
                  'terminal_reason', 'registry_name_binding_expired',
-                 'status', 'released'
+                 'status', 'released',
+                 'expiry', 500,
+                 'released_at', 500
              )
          )",
     )
@@ -5591,9 +5597,153 @@ async fn a_detached_renewal_serves_the_same_fields_resumed_and_in_one_batch() ->
 // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
 // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L425-L471 @ ens_v2@a971bd64)
 // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L628-L660 @ ens_v2@a971bd64)
+// Both admitted registries keep their own entries. Reattaching A is a name association,
+// not another allocation; passive expiry cannot switch the name back to detached B.
 #[tokio::test]
-async fn a_replaced_registrys_lapse_presents_its_tombstone_over_a_live_reservation_elsewhere()
--> Result<()> {
+async fn reattached_registry_retains_its_own_schedule_after_passive_expiry() -> Result<()> {
+    const B: &str = "0x000000000000000000000000000000000000004f";
+    let scratch = ScratchDatabase::create("production_interpret_reattached_lifecycle").await?;
+    let pool = scratch.pool();
+    let chain = "interpret-reattached-lifecycle";
+    child_registry_fixture(pool, chain, 4, None, Some(B), 5).await?;
+    insert_registry_transaction(pool, chain, 3, "transaction-3").await?;
+    sqlx::query("DELETE FROM raw_logs WHERE chain_id=$1 AND block_number=2")
+        .bind(chain)
+        .execute(pool)
+        .await?;
+    let token = versioned_token("leaf", 0);
+    let logs = [
+        (
+            B,
+            v2_registry_events::LabelRegistered {
+                tokenId: token,
+                labelHash: keccak256(b"leaf"),
+                label: "leaf".into(),
+                owner: "0x0000000000000000000000000000000000000062".parse()?,
+                expiry: 20,
+                sender: SENDER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        (
+            B,
+            v2_registry_events::TokenResource {
+                tokenId: token,
+                resource: token,
+            }
+            .encode_log_data(),
+        ),
+        (
+            CONTRACT,
+            v2_registry_events::SubregistryUpdated {
+                tokenId: versioned_token("alice", 0),
+                subregistry: ANNOUNCED_REGISTRY.parse()?,
+                sender: SENDER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+    ];
+    for (index, (emitter, event)) in logs.into_iter().enumerate() {
+        let block = if emitter == CONTRACT { 3 } else { 2 };
+        insert_log_at(
+            pool,
+            chain,
+            block,
+            &format!("{chain}-transaction-{block}"),
+            i64::try_from(index)?,
+            emitter,
+            event.topics(),
+            event.data.as_ref(),
+        )
+        .await?;
+    }
+    run_engine(pool, chain, 1, 5, InterpretRunMode::Redo).await?;
+    let (leaf, resource): (String, Uuid) = sqlx::query_as(
+        "SELECT logical_name_id, resource_id FROM normalized_events
+         WHERE chain_id=$1 AND block_number=1 AND event_kind='RegistrationReleased'
+           AND logical_name_id IS NOT NULL AND resource_id IS NOT NULL",
+    )
+    .bind(chain)
+    .fetch_one(pool)
+    .await?;
+    let served = served_after_each_batch(pool, chain, &[3, 4, 5], &leaf).await?;
+    for (index, fields) in served.iter().enumerate() {
+        let registration = &fields["registration"];
+        assert_eq!(
+            registration["expiry"],
+            "4",
+            "A deadline at t={}: {fields}",
+            index + 3
+        );
+        assert_eq!(registration["grace_ends_at"], "4");
+        assert_eq!(
+            registration["lifecycle_status"],
+            if index == 0 { "active" } else { "released" }
+        );
+        assert_eq!(fields["resource_id"], resource.to_string());
+    }
+    for fields in &served {
+        assert_eq!(
+            bigname_storage::public_name_fields::declared_registered_at(fields).as_deref(),
+            Some("1"),
+            "A retains its original grant start: {fields}"
+        );
+    }
+    assert_eq!(
+        served_after_one_batch(pool, chain, 5, &leaf).await?,
+        served[2]
+    );
+    // Retract only the reattachment, preserving B's actual grant. B becomes canonical even
+    // after detached A lapses; replaying the original branch restores A's original episode.
+    sqlx::query("UPDATE chain_lineage SET canonicality_state='orphaned' WHERE chain_id=$1 AND block_number BETWEEN 3 AND 5")
+        .bind(chain).execute(pool).await?;
+    for block in 3..=5 {
+        sqlx::query("INSERT INTO chain_lineage(chain_id,block_hash,parent_hash,block_number,block_timestamp,canonicality_state)
+            VALUES($1,$2,$3,$4,to_timestamp($4),'canonical')")
+            .bind(chain).bind(format!("{chain}-fork-{block}"))
+            .bind(if block==3 {block_hash(chain,2)}else{format!("{chain}-fork-{}",block-1)})
+            .bind(block).execute(pool).await?;
+    }
+    run_engine(pool, chain, 3, 5, InterpretRunMode::Redo).await?;
+    publish_families(pool, chain, 5, FamilyMode::Redo { from: 3, to: 5 }).await?;
+    let replaced = served_fields(pool, &leaf).await?;
+    assert_eq!(
+        replaced["registration"]["expiry"], "20",
+        "removed reattachment: {replaced}"
+    );
+    assert_eq!(replaced["registration"]["lifecycle_status"], "active");
+    assert_eq!(
+        bigname_storage::public_name_fields::declared_registered_at(&replaced).as_deref(),
+        Some("2")
+    );
+    assert!(replaced["registration"]["lapsed_registration"].is_null());
+    assert_eq!(
+        served_after_one_batch(pool, chain, 5, &leaf).await?,
+        replaced
+    );
+    sqlx::query("UPDATE chain_lineage SET canonicality_state='orphaned' WHERE chain_id=$1 AND block_hash LIKE $2")
+        .bind(chain).bind(format!("{chain}-fork-%")).execute(pool).await?;
+    for block in 3..=5 {
+        sqlx::query("UPDATE chain_lineage SET canonicality_state='canonical' WHERE chain_id=$1 AND block_hash=$2")
+            .bind(chain).bind(block_hash(chain,block)).execute(pool).await?;
+    }
+    run_engine(pool, chain, 3, 5, InterpretRunMode::Redo).await?;
+    publish_families(pool, chain, 5, FamilyMode::Redo { from: 3, to: 5 }).await?;
+    assert_eq!(
+        served_fields(pool, &leaf).await?,
+        served[2],
+        "restored association after bounded redo"
+    );
+    assert_eq!(
+        served_after_one_batch(pool, chain, 5, &leaf).await?,
+        served[2]
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn a_replaced_registrys_lapse_preserves_the_replacements_reservation_identity() -> Result<()>
+{
     const REPLACEMENT: &str = "0x000000000000000000000000000000000000004f";
     let scratch = ScratchDatabase::create("production_interpret_replaced_registry_lapse").await?;
     let chain = "interpret-replaced-registry-lapse";
@@ -5675,6 +5825,33 @@ async fn a_replaced_registrys_lapse_presents_its_tombstone_over_a_live_reservati
         "right after the batch at 2: {}",
         served[1]
     );
+    for (target, fields) in [(2, &served[1]), (3, &served[2]), (4, &served[3])] {
+        let registration = &fields["registration"];
+        assert_eq!(
+            registration["expiry"], "4000000000",
+            "B's schedule at {target}"
+        );
+        assert_eq!(registration["grace_ends_at"], "4000000000");
+        assert_eq!(registration["lifecycle_status"], "active");
+        // A's old control tombstone cannot supply coordinates for B's ownerless
+        // reservation. B has never received a grant, so has no public start/handle.
+        assert!(
+            bigname_storage::public_name_fields::declared_registered_at(fields).is_none(),
+            "B's reservation must not inherit A's registration start at {target}: {fields}"
+        );
+        assert!(
+            !bigname_storage::public_name_fields::has_registration_identity(
+                "ens",
+                fields,
+                fields["surface_binding_id"].is_string()
+            ),
+            "B's reservation must not acquire A's public registration identity at {target}: {fields}"
+        );
+        assert!(
+            registration["lapsed_registration"].is_null(),
+            "A's holder must not survive on B at {target}: {fields}"
+        );
+    }
     let (resource, binding) = (resource.to_string(), binding.to_string());
     for (target, fields) in [(3, &served[2]), (4, &served[3])] {
         assert_eq!(
@@ -5685,8 +5862,8 @@ async fn a_replaced_registrys_lapse_presents_its_tombstone_over_a_live_reservati
                 Some(binding.as_str()),
                 Some("released"),
                 Some("unregistered"),
-                Some(3),
-                Some("3"),
+                None,
+                Some("4000000000"),
             ),
             "right after the batch at {target}: {fields}"
         );
@@ -5771,7 +5948,8 @@ enum LapseRetraction {
 /// 3 without a name. Project follows to block 3 and serves that lapse; a reorg then retracts it as
 /// `retraction` says, and Project redoes the replaced blocks. Right after the redo the child serves
 /// what a full rebuild of the same database serves: the release by name at the path cut in block
-/// 1, which carries neither a release time nor an expiry, not the retracted lapse's 3 and 3.
+/// 1 without the retracted lapse's release time. The canonical schedule remains 3 unless
+/// the winning fork renews the same detached registration to 100.
 async fn detached_lapse_retracted(chain: &str, retraction: LapseRetraction) -> Result<()> {
     let scratch = ScratchDatabase::create(&chain.replace('-', "_")).await?;
     let pool = scratch.pool();
@@ -5906,6 +6084,12 @@ async fn detached_lapse_retracted(chain: &str, retraction: LapseRetraction) -> R
     .await?;
     let redone = served_fields(pool, &leaf).await?;
     let (resource, binding) = (resource.to_string(), binding.to_string());
+    let expected_expiry = match retraction {
+        LapseRetraction::ProjectOnly => "3",
+        LapseRetraction::InterpretDeletes => "100",
+    };
+    assert_eq!(redone["registration"]["grace_ends_at"], expected_expiry);
+    assert_eq!(redone["registration"]["lifecycle_status"], "released");
     assert_eq!(
         detached_child_served(&redone),
         (
@@ -5915,7 +6099,7 @@ async fn detached_lapse_retracted(chain: &str, retraction: LapseRetraction) -> R
             Some("released"),
             Some("unregistered"),
             None,
-            None,
+            Some(expected_expiry),
         ),
         "right after the redo: {redone}"
     );
@@ -5993,9 +6177,11 @@ async fn a_redo_rebuilds_a_name_whose_deciding_release_is_no_longer_activated() 
             redone["registration"]["released_at"].as_i64(),
             redone["registration"]["expiry"].as_str(),
         ),
-        (Some("released"), None, None),
+        (Some("released"), None, Some("3")),
         "{redone}"
     );
+    assert_eq!(redone["registration"]["grace_ends_at"], "3");
+    assert_eq!(redone["registration"]["lifecycle_status"], "released");
     let cited = cited_events(pool, &leaf).await?;
     assert_eq!(served_after_one_batch(pool, chain, 3, &leaf).await?, redone);
     assert_eq!(cited_events(pool, &leaf).await?, cited);

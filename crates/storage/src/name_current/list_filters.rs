@@ -7,7 +7,7 @@ fn push_name_current_filter_predicates<'a>(
     filter: &'a NameCurrentListFilter,
 ) {
     if filter.supported_only {
-        builder.push(" AND nc.support_status = 'supported'");
+        builder.push(" AND nc.listing_eligible IS TRUE");
     }
     if let Some(namespaces) = filter
         .namespaces

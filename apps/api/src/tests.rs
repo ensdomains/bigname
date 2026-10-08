@@ -599,3 +599,9 @@ include!("tests/v2_unix_timestamps.rs");
 
 include!("tests/v2_names_windows_measure.rs");
 include!("tests/v2_search_lean.rs");
+
+#[path = "tests/v2_wrapper_callback.rs"]
+mod v2_wrapper_callback;
+
+#[path = "tests/v2_canonical_association.rs"]
+mod v2_canonical_association;

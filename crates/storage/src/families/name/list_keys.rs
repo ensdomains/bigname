@@ -5,10 +5,19 @@
 //! selector and the served page cannot drift apart.
 use serde_json::Value;
 
-/// Whether the composed row's coverage is `unsupported`. A listing row carries no status or
-/// unsupported reason, so the listings omit such a row.
+/// Whether the composed row's authority coverage is unsupported, independently of lifecycle
+/// discovery eligibility.
 pub(crate) fn unsupported(coverage: &Value) -> bool {
     coverage.get("status").and_then(Value::as_str) == Some("unsupported")
+}
+
+/// Lifecycle discovery can serve a proved canonical allocation without a current binding.
+/// Preserve unsupported coverage: this exception grants no current control or resolver access.
+pub(crate) fn listing_eligible(coverage: &Value, summary: &Value) -> bool {
+    !unsupported(coverage)
+        || coverage.get("unsupported_reason").and_then(Value::as_str)
+            == Some("current_authority_not_projected")
+            && summary.pointer("/registration/canonical_allocation") == Some(&Value::Bool(true))
 }
 
 /// The public `authority` a composed row serves, from its `provenance.authority_selection`:
@@ -39,3 +48,40 @@ pub(crate) fn public_authority(provenance: &Value) -> Option<&'static str> {
 /// it writes.
 pub(crate) const FINITE_REGISTRATION_EXPIRY_SQL: &str =
     "(nc.declared_summary #>> '{registration,expiry}') ~ '^-?[0-9]+(\\.[0-9]+)?$'";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn lifecycle_discovery_requires_selected_allocation_and_exact_reason() {
+        let absent = crate::families::search_dictionary::shape::from_composed(None, false).unwrap();
+        assert!(!absent.search_supported && absent.search_fields.is_none());
+        let allocation = json!({"registration":{"canonical_allocation":true,"expiry":"100","lifecycle_status":"active"}});
+        assert!(listing_eligible(&json!({"status":"projected"}), &json!({})));
+        for reason in [
+            None,
+            Some(""),
+            Some("unknown"),
+            Some("manifest_not_projected"),
+            Some("current_authority_not_projected"),
+        ] {
+            let coverage = json!({"status":"unsupported","unsupported_reason":reason});
+            assert_eq!(
+                listing_eligible(&coverage, &allocation),
+                reason == Some("current_authority_not_projected")
+            );
+            for marker in [Value::Null, json!(false), json!("true")] {
+                let unproved = json!({"registration":{"canonical_allocation":marker,"expiry":"100","lifecycle_status":"active","identity_resource_id":"resource"}});
+                assert!(!listing_eligible(&coverage, &unproved));
+            }
+        }
+        let no_expiry =
+            json!({"registration":{"canonical_allocation":true,"expires_at_reason":"no_expiry"}});
+        assert!(listing_eligible(
+            &json!({"status":"unsupported","unsupported_reason":"current_authority_not_projected"}),
+            &no_expiry
+        ));
+    }
+}

@@ -115,6 +115,11 @@ fn control_status(
 }
 
 pub fn has_registration_identity(namespace: &str, summary: &Value, has_binding: bool) -> bool {
+    // Explicit absence belongs to the selected canonical allocation; the control binding
+    // may still be a different registration's tombstone.
+    if let Some(identity) = summary.pointer("/registration/identity_resource_id") {
+        return identity.is_string();
+    }
     control_status(
         namespace,
         declared_registration(summary),

@@ -85,9 +85,8 @@ pub struct NameCurrentListFilter {
     /// registry (`declared_summary.registration.authority_kind = 'ens_v2_registry'`). Backs the
     /// subgraph `isMigrated` filter. `Some(false)` / `None` apply no migration predicate.
     pub is_migrated: Option<bool>,
-    /// When true, omit every row the exact-name projection does not support. A collection with no
-    /// row-local status field cannot report why a name is unsupported, so it omits the name rather
-    /// than serving registration fields no selected authority backs.
+    /// When true, require lifecycle discovery eligibility. Unsupported current authority is
+    /// eligible only when an admitted canonical allocation independently backs its fields.
     pub supported_only: bool,
 }
 
@@ -226,7 +225,7 @@ pub(crate) const COMPOSED_NC_COLUMNS: &str =
     "nc(logical_name_id text, namespace text, raw_name text, display_name text,
     namehash text, surface_binding_id uuid, resource_id uuid, serving_resource_id uuid,
     token_lineage_id uuid, binding_kind text, declared_summary jsonb, provenance jsonb,
-    support_status text, unsupported_reason text, chain_positions jsonb,
+    support_status text, unsupported_reason text, listing_eligible boolean, chain_positions jsonb,
     canonicality_summary jsonb, manifest_version bigint, last_recomputed_at timestamptz)";
 
 /// Push the `filtered_names` CTE over the served rows, or over `composed` rows, which the

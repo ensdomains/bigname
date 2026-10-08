@@ -1,10 +1,7 @@
-//! Match wrapping completions to their mint frames within a complete raw transaction.
-//! `_mint` emits before its receiver callback and `NameWrapped` after it. A nested wrap therefore
-//! completes in stack order; an already-burned outer mint cannot restore its old token data.
-//! Missing mint logs remain historical partial evidence: a completion with no matching frame
-//! follows the existing NameWrapped interpretation. Positive same-transaction burn evidence
-//! alone suppresses a matched completion; it never changes source admission.
-//! (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L257-L266 @ ens_v1@91c966f)
+//! Match complete-transaction wrapper mints to their later name/data evidence in stack order.
+//! `_mint` emits before its receiver callback, while `_wrap` emits its original arguments after
+//! it. Interpret the effective mint at its actual position; a completion must never replay it.
+//! (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L228-L278 @ ens_v1@91c966f)
 //! (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L903 @ ens_v1@91c966f)
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -12,18 +9,27 @@ use crate::evm_abi::{decode_event_log, hex_string, u256_word_hex};
 use crate::schema_v2::{
     RawLogInput,
     catalog::{Catalog, Selected},
-    protocol::v1::wrapper::{NameWrapped, TransferBatch, TransferSingle},
+    common::{decode_dns_labels, namehash_raw},
+    protocol::v1::wrapper::{NameWrapped, TransferSingle},
 };
 use alloy_primitives::{Address, U256};
 
-// Namespace, contract instance, block, transaction, node. Neither another wrapper deployment nor
-// another transaction may complete this stack. The index is dropped with the prepared batch.
+// Neither another namespace, wrapper deployment, block, transaction nor node may complete a frame.
 type Key = (String, uuid::Uuid, String, String, String);
 type LogKey = (String, String, i64);
 
 #[derive(Default)]
 pub(super) struct WrapperCompletions {
-    stale: BTreeSet<LogKey>,
+    matched: BTreeSet<LogKey>,
+    mints: BTreeMap<LogKey, RawLogInput>,
+}
+
+fn log_key(raw: &RawLogInput) -> LogKey {
+    (
+        raw.block_hash.clone(),
+        raw.transaction_hash.clone(),
+        raw.log_index,
+    )
 }
 
 fn key(selected: &Selected, raw: &RawLogInput, node: String) -> Key {
@@ -39,7 +45,7 @@ fn key(selected: &Selected, raw: &RawLogInput, node: String) -> Key {
 impl WrapperCompletions {
     pub(super) fn build(catalog: &Catalog, logs: &[RawLogInput]) -> anyhow::Result<Self> {
         let mut out = Self::default();
-        let mut frames: BTreeMap<Key, Vec<bool>> = BTreeMap::new();
+        let mut frames: BTreeMap<Key, Vec<(&RawLogInput, Address)>> = BTreeMap::new();
         for raw in logs {
             let Some(selected) = catalog.select(raw)? else {
                 continue;
@@ -47,41 +53,20 @@ impl WrapperCompletions {
             if selected.source.source_family != "ens_v1_wrapper_l1" {
                 continue;
             }
-            let mut transfer = |from: Address, to: Address, id: U256, value: U256| {
-                if value != U256::from(1) {
-                    return;
-                }
-                let node = key(&selected, raw, u256_word_hex(id));
-                if from == Address::ZERO {
-                    frames.entry(node).or_default().push(true);
-                } else if to == Address::ZERO
-                    && let Some(frame) = frames
-                        .get_mut(&node)
-                        .and_then(|stack| stack.iter_mut().rev().find(|live| **live))
-                {
-                    *frame = false;
-                }
-            };
-            // Decoding errors belong to the normal dispatch, which handles declared-emitter
-            // integrity failures and diagnostic skips without letting malformed bytes alter state.
+            // Decode/validation failures remain with normal dispatch. In particular invalid
+            // completion names cannot supply lookahead facts to an earlier mint.
             match selected.event.name.as_str() {
                 "TransferSingle" => {
-                    if let Ok(event) = decode_event_log::<TransferSingle>(
-                        &raw.topics,
-                        &raw.data,
-                        "wrapper transfer",
-                    ) {
-                        transfer(event.from, event.to, event.id, event.value);
-                    }
-                }
-                "TransferBatch" => {
                     if let Ok(event) =
-                        decode_event_log::<TransferBatch>(&raw.topics, &raw.data, "wrapper batch")
-                        && event.ids.len() == event.values.len()
+                        decode_event_log::<TransferSingle>(&raw.topics, &raw.data, "wrapper mint")
+                        && event.value == U256::from(1)
+                        && event.from == Address::ZERO
+                        && event.to != Address::ZERO
                     {
-                        for (id, value) in event.ids.into_iter().zip(event.values) {
-                            transfer(event.from, event.to, id, value);
-                        }
+                        frames
+                            .entry(key(&selected, raw, u256_word_hex(event.id)))
+                            .or_default()
+                            .push((raw, event.to));
                     }
                 }
                 "NameWrapped" => {
@@ -89,15 +74,15 @@ impl WrapperCompletions {
                         &raw.topics,
                         &raw.data,
                         "wrapper completion",
-                    ) {
-                        let node = key(&selected, raw, hex_string(event.node));
-                        if frames.get_mut(&node).and_then(Vec::pop) == Some(false) {
-                            out.stale.insert((
-                                raw.block_hash.clone(),
-                                raw.transaction_hash.clone(),
-                                raw.log_index,
-                            ));
-                        }
+                    ) && let Ok(labels) = decode_dns_labels(&event.name)
+                        && namehash_raw(labels.iter().map(Vec::as_slice)) == hex_string(event.node)
+                        && let Some((mint, receiver)) = frames
+                            .get_mut(&key(&selected, raw, hex_string(event.node)))
+                            .and_then(Vec::pop)
+                        && receiver == event.owner
+                    {
+                        out.matched.insert(log_key(raw));
+                        out.mints.insert(log_key(mint), raw.clone());
                     }
                 }
                 _ => {}
@@ -106,11 +91,11 @@ impl WrapperCompletions {
         Ok(out)
     }
 
-    pub(super) fn stale(&self, raw: &RawLogInput) -> bool {
-        self.stale.contains(&(
-            raw.block_hash.clone(),
-            raw.transaction_hash.clone(),
-            raw.log_index,
-        ))
+    pub(super) fn matched(&self, raw: &RawLogInput) -> bool {
+        self.matched.contains(&log_key(raw))
+    }
+
+    pub(super) fn mint_completion(&self, raw: &RawLogInput) -> Option<&RawLogInput> {
+        self.mints.get(&log_key(raw))
     }
 }

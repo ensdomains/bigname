@@ -1562,9 +1562,8 @@ async fn v2_search_response_for_database_with_public_namespaces(
         .context("v2 search request failed")
 }
 
-// Search carries no row-local status or unsupported-reason field, so a name whose exact-name
-// authority is unsupported is omitted whatever the reason rather than served from a registration
-// no selected authority backs. Callers read name detail or batch lookup for the reason.
+// Missing current authority without an admitted canonical allocation remains absent from
+// discovery. Callers read name detail or batch lookup for the partial identity record.
 #[tokio::test]
 async fn v2_search_omits_a_name_without_current_authority() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

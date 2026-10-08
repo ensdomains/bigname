@@ -204,11 +204,22 @@ async fn canonical_reservation_deadline_survives_engine_restart_and_passive_expi
         assert_eq!(fields["lifecycle_status"], expected);
         assert_eq!(prepared["status"], expected);
         assert!(prepared.get("registration_status").is_none());
-        let public_id = fields["resource_id"]
+        assert!(
+            bigname_storage::public_name_fields::has_registration_identity(
+                "ens",
+                &row.declared_summary,
+                row.resource_id.is_some()
+            )
+        );
+        assert_eq!(
+            bigname_storage::public_name_fields::declared_registered_at(&row.declared_summary),
+            Some(times[0].to_string()),
+            "continuous lease start: {fields}"
+        );
+        let public_id = fields["identity_resource_id"]
             .as_str()
             .map(str::to_owned)
-            .or_else(|| row.resource_id.map(|id| id.to_string()))
-            .expect("retained public lease handle");
+            .expect("canonical reservation retains the public lease handle");
         if let Some(id) = &registration_id {
             assert_eq!(
                 &public_id, id,
@@ -704,6 +715,24 @@ async fn canonical_mutations_preserve_schedule_until_actual_replacement() -> Tes
         );
         if offset == 4 {
             claimed_resource = Some(row.resource_id.ok_or("claimed registration resource")?);
+        }
+        if (4..=7).contains(&offset) {
+            assert_eq!(
+                fields["identity_resource_id"],
+                claimed_resource.expect("claim handle").to_string()
+            );
+            assert_eq!(
+                bigname_storage::public_name_fields::declared_registered_at(&row.declared_summary),
+                Some(times[4].to_string()),
+                "claim start remains through regeneration and release: {fields}"
+            );
+        }
+        if offset >= 8 {
+            assert!(fields["identity_resource_id"].is_null());
+            assert!(
+                bigname_storage::public_name_fields::declared_registered_at(&row.declared_summary)
+                    .is_none()
+            );
         }
         if (5..=6).contains(&offset) {
             assert_eq!(

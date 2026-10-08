@@ -65,7 +65,7 @@ pub(in crate::schema_v2) fn admitted(
 pub(super) fn keeps_authority(
     previous: Option<&V1NameState>,
     owner: &str,
-    context: RegistrarContext,
+    context: RegistrarContext<'_>,
 ) -> bool {
     let custody = context.wrapper_custody;
     previous.is_some_and(|authority| authority.authority_source_family == WRAPPER_FAMILY)
@@ -77,7 +77,10 @@ pub(super) fn keeps_authority(
 
 /// Whether a zero-equivalent registry owner write closes the active authority: a registry-only
 /// one always, a NameWrapper one unless the NameWrapper's own `_unwrap(node, 0)` wrote it.
-pub(super) fn zero_write_closes(previous: Option<&V1NameState>, context: RegistrarContext) -> bool {
+pub(super) fn zero_write_closes(
+    previous: Option<&V1NameState>,
+    context: RegistrarContext<'_>,
+) -> bool {
     previous.is_some_and(|authority| {
         authority.token_lineage_id.is_none()
             || (authority.authority_source_family == WRAPPER_FAMILY

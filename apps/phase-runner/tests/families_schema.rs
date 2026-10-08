@@ -197,6 +197,9 @@ async fn structures(database: &TestDatabase) -> Result<Vec<Vec<String>>> {
     Ok(structures)
 }
 
+// Storage addresses summary columns by name. The grace column is appended by the
+// migration but declared beside expiry in fresh schemas; compare every semantic
+// property while excluding only that table's physical column positions.
 async fn load_table_structure(pool: &sqlx::PgPool, table: &str) -> Result<Vec<String>> {
     Ok(sqlx::query_scalar(
         r#"
@@ -204,7 +207,8 @@ async fn load_table_structure(pool: &sqlx::PgPool, table: &str) -> Result<Vec<St
         FROM (
             SELECT format(
                        'column:%s:%s:%s:%s:%s',
-                       attribute.attnum,
+                       CASE WHEN relation.relname = 'project_name_summary' THEN ''
+                            ELSE attribute.attnum::text END,
                        attribute.attname,
                        pg_catalog.format_type(attribute.atttypid, attribute.atttypmod),
                        attribute.attnotnull,
@@ -480,6 +484,9 @@ async fn byte_shadow_path_constraint_rejects_partial_or_active_raw_bundles() -> 
     Ok(())
 }
 
+const REGISTRATION_LIFECYCLE: &str =
+    include_str!("../../../migrations/20261008120000_registration_lifecycle.sql");
+
 const DURABLE_SEARCH: &str =
     include_str!("../../../migrations/20261005210000_durable_name_search.sql");
 const SEARCH_TABLES: &[&str] = &[
@@ -542,9 +549,9 @@ async fn search_schema_upgrade_resets_old_fields_preserves_identity_and_matches_
         VALUES ('0x01',convert_to('retained','UTF8'),'retained','old',true,'fixture',1)")
         .execute(&mut *tx).await?;
     tx.commit().await?;
-    sqlx::raw_sql(DURABLE_SEARCH)
-        .execute(upgraded.pool())
-        .await?;
+    for migration in [DURABLE_SEARCH, REGISTRATION_LIFECYCLE] {
+        sqlx::raw_sql(migration).execute(upgraded.pool()).await?;
+    }
     for table in SEARCH_TABLES {
         assert_eq!(
             load_table_structure(upgraded.pool(), table).await?,
@@ -574,9 +581,9 @@ async fn search_schema_upgrade_resets_old_fields_preserves_identity_and_matches_
     )
     .execute(upgraded.pool())
     .await?;
-    sqlx::raw_sql(DURABLE_SEARCH)
-        .execute(upgraded.pool())
-        .await?;
+    for migration in [DURABLE_SEARCH, REGISTRATION_LIFECYCLE] {
+        sqlx::raw_sql(migration).execute(upgraded.pool()).await?;
+    }
     let summaries: i64 =
         sqlx::query_scalar("SELECT count(*) FROM bigname_phase.project_name_summary")
             .fetch_one(upgraded.pool())

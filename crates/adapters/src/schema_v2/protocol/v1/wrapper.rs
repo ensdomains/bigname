@@ -46,10 +46,11 @@ pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
-    stale_completion: bool,
+    matched_completion: bool,
+    mint_completion: Option<&RawLogInput>,
 ) -> anyhow::Result<Interpreted> {
     match selected.event.name.as_str() {
-        "NameWrapped" => name_wrapped(selected, raw, state, stale_completion),
+        "NameWrapped" => name_wrapped(selected, raw, state, matched_completion, None),
         "NameUnwrapped" => name_unwrapped(selected, raw, state),
         "ExpiryExtended" => {
             let event = decode_event_log::<ExpiryExtended>(
@@ -118,6 +119,9 @@ pub(super) fn interpret(
             });
             Ok(output)
         }
+        "TransferSingle" if mint_completion.is_some() => {
+            name_wrapped(selected, raw, state, false, mint_completion)
+        }
         "TransferSingle" => transfer_single(selected, raw, state),
         "TransferBatch" => transfer_batch(selected, raw, state),
         name => bail!("unsupported wrapper event {name}"),
@@ -128,19 +132,24 @@ fn name_wrapped(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
-    stale_completion: bool,
+    matched_completion: bool,
+    mint_completion: Option<&RawLogInput>,
 ) -> anyhow::Result<Interpreted> {
-    let event =
-        decode_event_log::<NameWrapped>(&raw.topics, &raw.data, "NameWrapped log is malformed")?;
+    let completion = mint_completion.unwrap_or(raw);
+    let event = decode_event_log::<NameWrapped>(
+        &completion.topics,
+        &completion.data,
+        "NameWrapped log is malformed",
+    )?;
     let raw_labels = decode_dns_labels(&event.name)?;
     let raw_namehash = namehash_raw(raw_labels.iter().map(Vec::as_slice));
     if raw_namehash != hex_string(event.node) {
         bail!("NameWrapped DNS name does not match its node");
     }
     let labels = surface_labels(&raw_labels);
-    if stale_completion {
-        // The bytes still prove the name; the callback's surviving authority remains untouched.
-        // Surface materialization later in dispatch attaches that existing authority by evidence.
+    if matched_completion {
+        // The mint already consumed this matched evidence in execution order. The completion
+        // proves name bytes without replaying a mint or changing surviving callback authority.
         let mut output = Interpreted::new();
         if let Some(labels) = labels {
             output.names.push(NameDraft {
@@ -169,7 +178,11 @@ fn name_wrapped(
     let surface_known = labels.is_some();
     let authority_key = format!(
         "wrapper:{}:{}:{}:{}:{}",
-        raw.chain_id, selected.source.manifest_id, raw_namehash, raw.block_hash, raw.log_index,
+        raw.chain_id,
+        selected.source.manifest_id,
+        raw_namehash,
+        completion.block_hash,
+        completion.log_index,
     );
     let resource_id = stable_uuid(&format!("resource:{authority_key}"));
     let token_lineage_id = stable_uuid(&format!("token-lineage:{authority_key}"));
@@ -217,7 +230,22 @@ fn name_wrapped(
         "PermissionScopeChanged",
     ];
     ensure_declared(selected, &["TokenControlTransferred"])?;
-    let after = json!({"source_event":"NameWrapped","node":raw_namehash,"owner":address_hex(event.owner),"fuses":wrapper_data.fuses,"wrapper_state":wrapper_state(wrapper_data.fuses),"expiry":wrapper_data.expiry,"token_lineage_id":token_lineage_id.to_string(),"wrapped_registrar_resource_id":wrapped_registrar_resource_id,"authority_kind":"wrapper","authority_key":authority_key.clone(),"surface_known":surface_known});
+    let source_event = if mint_completion.is_some() {
+        "TransferSingle"
+    } else {
+        "NameWrapped"
+    };
+    let mut after = json!({"source_event":source_event,"node":raw_namehash,"owner":address_hex(event.owner),"fuses":wrapper_data.fuses,"wrapper_state":wrapper_state(wrapper_data.fuses),"expiry":wrapper_data.expiry,"token_lineage_id":token_lineage_id.to_string(),"wrapped_registrar_resource_id":wrapped_registrar_resource_id,"authority_kind":"wrapper","authority_key":authority_key.clone(),"surface_known":surface_known});
+    let correlation = mint_completion.map(|completion| {
+        json!({
+            "block_hash": completion.block_hash, "transaction_hash": completion.transaction_hash,
+            "log_index": completion.log_index, "source_event": "NameWrapped",
+        })
+    });
+    if let Some(correlation) = &correlation {
+        after["matched_wrapper_completion"] = correlation.clone();
+        after["wrapper_mint"] = json!(true);
+    }
     let mut output = events_linked(kinds, logical_name_id, resource_id, after.clone());
     if let Some(transfer) = output
         .events
@@ -225,7 +253,7 @@ fn name_wrapped(
         .find(|event| event.event_kind == "TokenControlTransferred")
     {
         transfer.explicit_before = Some(json!({
-            "from": previous.as_ref().and_then(|state| state.owner.clone()),
+            "from": if mint_completion.is_some() { Some(address_hex(alloy_primitives::Address::ZERO)) } else { previous.as_ref().and_then(|state| state.owner.clone()) },
             "authority_kind": previous.as_ref().map(|state| {
                 if state.authority_source_family == "ens_v1_wrapper_l1" {
                     "wrapper"
@@ -269,8 +297,8 @@ fn name_wrapped(
             resolver: state.v1_resolver(&selected.source.namespace, &raw_namehash),
             chain_id: &raw.chain_id,
             wrapper: raw.emitting_address.to_ascii_lowercase(),
-            source_event_kind: "NameWrapped",
-            identity_suffix: "NameWrapped",
+            source_event_kind: source_event,
+            identity_suffix: source_event,
         };
         append_holder_permissions(&mut output, &context, &address_hex(event.owner), true);
     }
@@ -288,7 +316,8 @@ fn name_wrapped(
             binding_kind: "observed_only".to_owned(),
             authority_arm: "ens_v1".to_owned(),
             source_kind: "NameWrapped_name".to_owned(),
-            preimage_metadata: None,
+            preimage_metadata: correlation
+                .map(|completion| json!({"matched_wrapper_completion": completion})),
         });
     } else {
         output.shadow_names.push(ShadowNameDraft {

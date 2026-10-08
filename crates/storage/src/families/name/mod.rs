@@ -59,7 +59,7 @@ pub use bound::load_family_bound_names;
 #[cfg(test)]
 pub(crate) use list::SEARCH_CANDIDATES_SQL;
 pub use list::{load_family_expiring_page, load_family_search_page};
-pub(crate) use list_keys::{FINITE_REGISTRATION_EXPIRY_SQL, public_authority};
+pub(crate) use list_keys::{FINITE_REGISTRATION_EXPIRY_SQL, listing_eligible, public_authority};
 #[cfg(test)]
 pub(crate) use loaders::{MIGRATIONS_SQL, RESOURCE_POINTERS_SQL, RESOURCES_SQL, canonical_uuid};
 pub use resolution_path::PHYSICAL_POINTER_EVENT_SQL;

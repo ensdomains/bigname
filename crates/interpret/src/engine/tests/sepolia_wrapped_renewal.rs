@@ -393,6 +393,8 @@ async fn a_wrapper_minted_registration_unwrapped_in_its_mint_callback_is_no_owne
         super::graveyard_burned::owner_history(pool, NAME_WRAPPER, REGISTRATION_BLOCK).await?;
     let registrant =
         super::graveyard_burned::owner_history(pool, REGISTRANT, REGISTRATION_BLOCK).await?;
+    let receiver_history =
+        super::graveyard_burned::owner_history(pool, OWNER, REGISTRATION_BLOCK).await?;
     let resurrected: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM surface_bindings WHERE chain_id=$1 AND logical_name_id=$2
          AND active_to IS NULL AND provenance->>'source_family'='ens_v1_wrapper_l1'",
@@ -455,6 +457,10 @@ async fn a_wrapper_minted_registration_unwrapped_in_its_mint_callback_is_no_owne
     assert_eq!(unlinked, None);
     assert!(wrapper.is_empty(), "{wrapper:?}");
     assert!(!registrant.is_empty(), "{registrant:?}");
+    assert!(
+        !receiver_history.is_empty(),
+        "the real temporary receiver lost owner history"
+    );
     Ok(())
 }
 
@@ -585,3 +591,6 @@ async fn seed_wrapped_renewal(
     )
     .await
 }
+
+#[path = "wrapper_callback_inheritance.rs"]
+mod callback_inheritance;

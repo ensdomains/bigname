@@ -2039,8 +2039,19 @@ Name detail, search, lists and lookup detail/feed use the same publication and
 lifecycle. `GET /v1/names` can discover either expiry or grace deadlines directly.
 Neither `expired` nor `released` implies current control or universal availability;
 ENSv2 grace does not restore owner, resolver records or permissions. A reservation
-has no invented owner. Historical `lapsed_registration` may coexist with an active
-or expired canonical reservation, because it describes the ended authority holder.
+has no invented owner. All public registration coordinates—ID, continuous start,
+E/G and lapsed holder/cause—belong to the canonical instance or its proved ENSv1
+lease continuation. A new ownerless reservation without an earlier qualifying
+grant omits `registration_id` and `registered_at`; it cannot borrow either field
+or a former holder from another registry's control tombstone. A v1-backed
+reservation keeps its legitimate lease handle and original start.
+
+Allocation origin and latest genuine name association are separate facts. If the
+parent points A → B → A, reattaching A retains A's original registration start and
+schedule through passive expiry and later release. A subsequent allocation or
+association can supersede it; a detached predecessor's later renewal or lapse
+cannot. This October 8 presentation rule supersedes ADR 0007's September 26
+registration-metadata rule while preserving its current-control selection.
 
 From the cutover the Universal Resolver reads only ENSv2 registries, so a `.eth`
 name that ENSv1 decides with no live ENSv2 entry, and every name below it,
@@ -2274,6 +2285,12 @@ name with no selected binding, such as a `current_authority_not_projected`
 row, has no current address relation and is structurally absent from this collection.
 Listed unsupported rows do not carry a per-row reason; read the reason from the
 name-shaped routes or diagnostics for the name in question.
+
+Lifecycle discovery also includes an admitted canonical allocation when current authority
+coverage is unsupported for exactly `current_authority_not_projected`. Detail and lookup
+retain their existing partial `read_status=ok`; search and finite expiry/grace lists expose
+the same allocation dates and status. This does not establish current control, permissions
+or resolver access, and all other unsupported reasons remain excluded from discovery.
 
 ## Error Model
 
