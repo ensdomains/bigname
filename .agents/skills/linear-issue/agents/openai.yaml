@@ -1,0 +1,7 @@
+interface:
+  display_name: "Linear Issue"
+  short_description: "Title, labels and description shape for a TYR ticket"
+  default_prompt: "Use $linear-issue to write or correct this Linear ticket's title, labels and description."
+
+policy:
+  allow_implicit_invocation: true

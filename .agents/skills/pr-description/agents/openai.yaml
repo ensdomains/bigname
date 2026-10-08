@@ -1,0 +1,7 @@
+interface:
+  display_name: "PR Description"
+  short_description: "Title and body shape for a bigname pull request"
+  default_prompt: "Use $pr-description to write or correct this pull request's title and body."
+
+policy:
+  allow_implicit_invocation: true
