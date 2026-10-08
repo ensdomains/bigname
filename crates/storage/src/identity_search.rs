@@ -85,7 +85,10 @@ pub async fn prepare(
 /// After the prepared source mutation, derive complete spelling from fresh statements. Held
 /// label buckets stop new affected paths entering; the inserted surfaces are locked by their
 /// own insert. Imports of different labels in one name use the locks acquired by `prepare`.
-/// Buffers hold at most 100 documents; all fanout remains in the source transaction.
+/// The affected names are staged once in the connection's temporary table, so no page
+/// statement carries them again. Buffers hold at most 100 documents. All fanout remains in
+/// the source transaction. A refresh requires the caller's open transaction and fails
+/// without one.
 pub async fn refresh(conn: &mut PgConnection, names: &[String], labels: &[String]) -> Result<()> {
     require_read_committed(conn).await?;
     if names.is_empty() && labels.is_empty() {
@@ -95,18 +98,19 @@ pub async fn refresh(conn: &mut PgConnection, names: &[String], labels: &[String
         .iter()
         .map(|label| label.to_ascii_lowercase())
         .collect();
-    let mut after = String::new();
-    loop {
-        // This runs after all lock waits and the source mutation on READ COMMITTED.
-        let rows = documents::load(conn, names, &labels, &after).await?;
-        let Some(last) = rows.last() else {
-            break;
-        };
-        after = last.logical_name_id.clone();
+    // This runs after all lock waits and the source mutation on READ COMMITTED.
+    documents::stage(conn, names, &labels).await?;
+    let mut after = Some(String::new());
+    while let Some(cursor) = after {
+        let (rows, next) = documents::load(conn, &cursor).await?;
         documents::replace(conn, rows).await?;
+        after = next;
     }
     Ok(())
 }
 
 const AFFECTED: &str = "(logical_name_id=ANY($1) OR
     (raw_name IS NULL AND labelhashes && $2::text[]))";
+
+#[cfg(test)]
+mod tests;

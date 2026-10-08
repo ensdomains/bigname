@@ -3267,6 +3267,34 @@ mark old rows ready under the new hash or treat a recent parent replay as a full
 re-derivation. Validate retained mirror/direct paths, disconnected descendants,
 wrapper rebinding/unwrap eligibility, and no-child-write expiry after publication.
 
+### Search refresh pages by cursor
+
+Interpret, the normalization-flag recompute and the label-preimage import
+refresh the search documents of the names a write affects. Each page statement
+of that refresh used to carry the whole set of affected names. A redo from a
+chain's first block affects every name on the chain, so on a chain with millions
+of names its first batch could not finish. The refresh now writes the affected
+names once into a temporary table, and each page statement carries only a
+cursor.
+
+The stored documents and postings are the same, row for row. No schema-migration,
+manifest or watch-plan change is included. The change edits
+`crates/storage/src/identity_search.rs` and
+`crates/storage/src/identity_search/documents.rs`. Both are inputs of the
+[interpreter content hash](glossary.md#interpreter-content-hash), so the compiled
+hash rotates for every chain. A database derived under the previous hash needs
+the full-history Interpret redo and the Project redo it installs before the new
+binaries serve it. Follow the [planned fingerprint
+boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary).
+
+The temporary table belongs to the database connection. The first refresh on a
+connection creates it, PostgreSQL empties it at each commit, and it goes away
+when the connection closes. The database role of each of those writers must be
+able to create temporary tables, which PostgreSQL allows every role by default.
+A refresh over N names writes N rows of temporary table and index on the
+database host until its transaction ends. Budget about 300 bytes of disk per
+affected name for a full-history redo.
+
 ## Published lookup state
 
 Apply `20261007120000_project_lookup_precomputation.sql` before deploying the

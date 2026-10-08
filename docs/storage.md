@@ -255,6 +255,23 @@ set replacement commit atomically. An aborted import or Interpret write exposes
 none of those changes. Reorg re-anchoring and normalizer recompute use the same
 writer; retained verified preimages are not deleted with a chain observation.
 
+After changing the source rows, the writer refreshes the affected documents. It first
+writes the affected names once into a temporary table. These are the names it changed
+and every surface without raw bytes whose path holds a changed label. It then reads
+that table in logical-name order, 100 names per statement, and each of those statements
+carries only the last name of the page before. The cost of one page therefore does not
+grow with the number of affected names. A redo from a chain's first block affects every
+name on that chain.
+
+The temporary table belongs to the database connection. The first refresh on a
+connection creates it, and it stays until the connection closes. PostgreSQL empties it
+at each commit, and a rollback discards the rows written since. A later refresh in the
+same transaction deletes the earlier rows first. A refresh on a connection that already
+has the table therefore writes no system catalog row, unless it stages more than 50,000
+names and gathers planner statistics on them. The refresh must run inside the writer's
+open transaction and fails without one. The writer's database role needs PostgreSQL's
+`TEMPORARY` privilege on the database, which every role has by default.
+
 Project extends its existing `project_name_summary` with `search_supported`,
 `search_fields` and `search_creation_transport_resource_id`. The supported payload
 holds the shared public registration and ENSv1 fields, including resolved wrapper

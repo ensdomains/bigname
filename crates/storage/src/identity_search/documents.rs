@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use bigname_domain::normalization::normalize_name;
 use serde_json::json;
-use sqlx::{FromRow, PgConnection};
+use sqlx::{Executor, FromRow, PgConnection, Row};
 
 use super::tokens;
 
@@ -16,27 +16,128 @@ pub(super) struct Source {
     name: Option<String>,
 }
 
-pub(super) async fn load(
+/// Rows a page statement reads and `replace` buffers.
+const PAGE: usize = 100;
+/// Names bound by one staging statement, which bounds the largest message of a refresh.
+const STAGED_PER_STATEMENT: usize = 20_000;
+/// Staged sets larger than this get planner statistics. Smaller ones write no catalog row.
+pub(super) const ANALYZE_ABOVE: u64 = 50_000;
+const STAGED: &str = "pg_temp.identity_search_names";
+/// DELETE, not TRUNCATE. Measured over 1,000 transactions, a TRUNCATE of a table created by an
+/// earlier transaction writes new `pg_class` rows each time, and DELETE writes none.
+const CLEAR: &str = "DELETE FROM pg_temp.identity_search_names";
+
+/// Write the affected name set once: the given names, and every surface without raw bytes whose
+/// path holds a given label. Pages then read it in key order and bind only a cursor. The label
+/// matches are complete here because the caller holds those label buckets.
+///
+/// The table belongs to the connection and is created on its first refresh. PostgreSQL empties
+/// it at each commit, a rollback discards its rows, and a later refresh in the same transaction
+/// deletes them first. So no refresh reads another's names, and a refresh on a connection that
+/// already has the table changes no system catalog unless it gathers statistics.
+pub(super) async fn stage(
     conn: &mut PgConnection,
     names: &[String],
     labels: &[String],
-    after: &str,
-) -> Result<Vec<Source>> {
-    sqlx::query_as(&format!(
-        "/* storage:identity_search.spellings */
-         SELECT surface.logical_name_id, surface.chain_id, surface.namespace, surface.namehash,
-                surface.raw_name, surface.visibility_state, {rendered} AS name
-         FROM name_surfaces surface WHERE {affected} AND logical_name_id > $3
-         ORDER BY logical_name_id LIMIT 100",
-        rendered = crate::families::name::rendered::rendered_name_sql_unqualified("surface"),
-        affected = super::AFFECTED,
+) -> Result<()> {
+    // An unbound string is sent as one simple query, which may hold both statements. The
+    // existence test keeps `IF NOT EXISTS` from raising a notice on every refresh.
+    conn.execute(
+        format!(
+            "/* storage:identity_search.names_table */
+             DO $$ BEGIN
+                 IF to_regclass('{STAGED}') IS NULL THEN
+                     CREATE TEMP TABLE identity_search_names (logical_name_id text PRIMARY KEY)
+                         ON COMMIT DELETE ROWS;
+                 END IF;
+             END $$;
+             {CLEAR}"
+        )
+        .as_str(),
+    )
+    .await
+    .context("failed to create the search name staging table")?;
+    // Outside a transaction block every statement commits by itself, which would empty the
+    // table before the first page. LOCK TABLE is refused there and changes nothing here.
+    sqlx::query(&format!(
+        "/* storage:identity_search.open_transaction */ LOCK TABLE {STAGED} IN ROW EXCLUSIVE MODE"
     ))
-    .bind(names)
-    .bind(labels)
+    .execute(&mut *conn)
+    .await
+    .context("an identity search refresh requires the caller's open transaction")?;
+    let mut staged = 0;
+    for names in names.chunks(STAGED_PER_STATEMENT) {
+        staged += sqlx::query(&format!(
+            "/* storage:identity_search.stage_names */ INSERT INTO {STAGED} (logical_name_id)
+             SELECT name FROM unnest($1::text[]) AS input(name) ON CONFLICT DO NOTHING"
+        ))
+        .bind(names)
+        .execute(&mut *conn)
+        .await
+        .context("failed to stage the affected search names")?
+        .rows_affected();
+    }
+    if !labels.is_empty() {
+        staged += sqlx::query(&format!(
+            "/* storage:identity_search.stage_labels */ INSERT INTO {STAGED} (logical_name_id)
+             SELECT logical_name_id FROM name_surfaces
+             WHERE raw_name IS NULL AND labelhashes && $1::text[] ON CONFLICT DO NOTHING"
+        ))
+        .bind(labels)
+        .execute(&mut *conn)
+        .await
+        .context("failed to stage the search names of the changed labels")?
+        .rows_affected();
+    }
+    if staged > ANALYZE_ABOVE {
+        sqlx::query(&format!(
+            "/* storage:identity_search.names_stats */ ANALYZE {STAGED}"
+        ))
+        .execute(&mut *conn)
+        .await
+        .context("failed to gather statistics on the staged search names")?;
+    }
+    Ok(())
+}
+
+/// The stored surfaces among the next staged names after `after`, and the cursor for the page
+/// after that, if any. The limit applies to the staged keys alone, so the statement reads at
+/// most one page of surfaces and renders at most one page of names however the join is planned.
+/// A staged name with no surface advances the cursor and yields no row.
+///
+/// The statement is planned on every execution. A plan cached while the connection's table was
+/// small would otherwise sort a later, larger set on every page of the same transaction.
+pub(super) async fn load(
+    conn: &mut PgConnection,
+    after: &str,
+) -> Result<(Vec<Source>, Option<String>)> {
+    let rows = sqlx::query(&format!(
+        "/* storage:identity_search.spellings */
+         SELECT page.logical_name_id, surface.logical_name_id IS NOT NULL AS stored,
+                surface.chain_id, surface.namespace, surface.namehash,
+                surface.raw_name, surface.visibility_state, {rendered} AS name
+         FROM (SELECT logical_name_id FROM {STAGED} WHERE logical_name_id > $1
+               ORDER BY logical_name_id LIMIT {PAGE}) page
+         LEFT JOIN name_surfaces surface ON surface.logical_name_id = page.logical_name_id
+         ORDER BY page.logical_name_id",
+        rendered = crate::families::name::rendered::rendered_name_sql_unqualified("surface"),
+    ))
     .bind(after)
+    .persistent(false)
     .fetch_all(&mut *conn)
     .await
-    .context("failed to derive current search spellings")
+    .context("failed to derive current search spellings")?;
+    let next = match rows.last() {
+        Some(last) if rows.len() == PAGE => Some(last.try_get("logical_name_id")?),
+        _ => None,
+    };
+    let mut sources = Vec::with_capacity(rows.len());
+    for row in &rows {
+        if row.try_get("stored")? {
+            sources.push(Source::from_row(row)?);
+        }
+    }
+    Ok((sources, next))
 }
 
 pub(super) async fn replace(conn: &mut PgConnection, source: Vec<Source>) -> Result<()> {
