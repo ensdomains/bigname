@@ -40,8 +40,9 @@ There is no `registration_status` compatibility field.
 A registration becomes `expired` while within its protocol's renewal grace.
 ENSv1/Basenames include the exact grace-end second; ENSv2 releases at that
 second. Entries with no registrar grace move directly from active to released,
-with wrapper-only finite entries retaining the contract's strict expiry
-comparison. Read the protocol boundary table rather than applying a universal
+with emancipated or locked wrapper-only entries retaining the contract's strict
+expiry comparison. A plain wrapped name with no registrar lease keeps its holder
+past its wrapper expiry, so it stays `active` with a past `expires_at`. Read the protocol boundary table rather than applying a universal
 comparison to every row.
 
 Canonical dates remain with the same registration after passive expiry and

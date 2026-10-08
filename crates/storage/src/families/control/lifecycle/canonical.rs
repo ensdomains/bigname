@@ -105,6 +105,8 @@ fn v2_instance<'a>(tagged: &[Tagged<'a>]) -> Option<Instance<'a>> {
                     // the block time, which is shorter. That is terminal evidence, not the ended
                     // registration's previously scheduled deadline.
                     // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L237 @ ens_v2_sepolia_20261001@07e55a05)
+                    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L664-L666 @ ens_v2_sepolia_20261001@07e55a05)
+                    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L671-L673 @ ens_v2_sepolia_20261001@07e55a05)
                     // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L41 @ ens_v2_sepolia_20261001@07e55a05)
                     if event.source_event.as_deref() != Some("LabelUnregistered")
                         && !event.expiry.is_null()
@@ -226,6 +228,7 @@ pub(super) fn apply(
             .is_some_and(|status| status != "unregistered");
     let wrapper_only = registration.get("ens_v1_expiry").is_none_or(Value::is_null)
         && registration.get("authority_kind").and_then(Value::as_str) == Some("wrapper");
+    let mut holder_outlives_expiry = false;
     let (grace, boundary) = if let Some(instance) = canonical {
         terminal = instance.terminal.is_some();
         allocated = true;
@@ -340,6 +343,19 @@ pub(super) fn apply(
         };
         (grace, Boundary::Exclusive)
     } else if wrapper_only {
+        // Past its expiry the NameWrapper clears the owner only when PARENT_CANNOT_CONTROL is
+        // burned. A plain wrapped token keeps its holder, so its expiry releases nothing.
+        // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
+        holder_outlives_expiry = facts
+            .input
+            .selection
+            .resource_id
+            .as_deref()
+            .and_then(|resource| facts.wrappers.get(resource))
+            .is_some_and(|wrapper| {
+                wrapper.wrapper_state.as_deref() == Some("wrapped")
+                    && wrapper.lifecycle_unwrapped != Some(true)
+            });
         (Grace::None, Boundary::InclusiveExpiry)
     } else if registration.get("authority_kind").and_then(Value::as_str) == Some("ens_v2_registry")
     {
@@ -375,7 +391,7 @@ pub(super) fn apply(
         super::expiry::grace_ends_at(registration.get("expiry"), grace),
     );
     let (status, next) = schedule(
-        expiry,
+        expiry.filter(|_| !holder_outlives_expiry),
         grace,
         boundary,
         terminal,

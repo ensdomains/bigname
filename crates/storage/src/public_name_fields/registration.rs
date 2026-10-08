@@ -129,7 +129,8 @@ pub fn has_registration_identity(namespace: &str, summary: &Value, has_binding: 
 }
 
 /// Current control deliberately ignores lifecycle_status: canonical grace can continue after
-/// the ENSv2 control path ended, and wrapper-only release need not clear its plain token owner.
+/// the ENSv2 control path ended, and a wrapper-only name's holder is cleared by the NameWrapper
+/// expiry mask during composition, only when PARENT_CANNOT_CONTROL is burned.
 pub fn has_current_control(namespace: &str, summary: &Value, has_binding: bool) -> bool {
     control_status(
         namespace,

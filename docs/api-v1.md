@@ -2020,7 +2020,8 @@ outcome; the outer lookup result retains its existing `status`. There is no
 | ENSv1/Basenames registrar | T < E | E <= T <= G | T > G |
 | Admitted ENSv2 ETHRegistrar | T < E | E <= T < G | T >= G |
 | ENSv2 entry without registrar grace | T < E | never | T >= E |
-| Wrapper-only finite registration | T <= E | never | T > E |
+| Wrapper-only, emancipated or locked | T <= E | never | T > E |
+| Wrapper-only, plain wrapped | while wrapped | never | never |
 
 Here E is `expires_at` and G is `grace_ends_at`. ENSv1 and Basenames add
 7,776,000 seconds; the exact admitted October 1 Sepolia ETHRegistry uses its
@@ -2029,6 +2030,14 @@ from a `.eth` suffix. Equality follows the respective contract comparisons.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
 (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L294-L297 @ basenames@1809bbc)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/ETHRegistrar.sol:L275-L292 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
+
+A wrapper-only registration is a wrapped name with no registrar lease, such as a
+wrapped subname. Past its wrapper expiry the NameWrapper clears the owner only
+when `PARENT_CANNOT_CONTROL` is burned, so an emancipated or locked one is
+`released`. A plain wrapped one keeps its holder. Its expiry bounds fuses, not
+ownership, so it stays `active` with its `owner` and `manager`, and `expires_at`
+and `grace_ends_at` keep the wrapper expiry even when that date has passed.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
 
 Before the Universal Resolver cutover, an ENSv1-controlled name uses its lease
