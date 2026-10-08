@@ -1,6 +1,6 @@
 ---
 name: linear-issue
-description: Create or update a Linear issue in the Tyrell Corporation team (TYR) for bigname work. Fire when filing a ticket, splitting work out of a PR, or recording a decision.
+description: Create or update a Linear issue for bigname work. Fire when filing a ticket, splitting work out of a PR, or recording a decision.
 metadata:
   kind: playbook
 ---
@@ -34,7 +34,7 @@ What is wrong or missing and why, as the reader above would understand it.
 
 ### `## Decision (<who>, <date>)`
 
-Only once someone has ruled. Name the person who decided. Quote or paraphrase the ruling in one or two sentences.
+Only once someone has ruled. Name who decided. Quote or paraphrase the ruling in one or two sentences.
 
 ### `## Do`
 

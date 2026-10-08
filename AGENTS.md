@@ -114,7 +114,7 @@ Citation rules:
 - `$replay-safety`: review raw facts, normalized events, canonicality, projection rebuilds, invalidation, and migrations.
 - `$verify-loop`: user-invoked reviewer/fix loop that spawns a fresh `verification_reviewer`, confirms real findings with failing tests or checks, fixes them, and repeats until clean.
 - `$pr-description`: title and body shape for a pull request, including when to say the interpreter content hash rotates.
-- `$linear-issue`: title, labels and description shape for a Tyrell Corporation (TYR) ticket.
+- `$linear-issue`: title, labels and description shape for a Linear ticket.
 
 ## Core Agents
 

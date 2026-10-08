@@ -28,7 +28,7 @@ One opening sentence naming the Linear ticket, with a GitHub closing keyword whe
 
 - Response or schema changes a client will notice, and what a client has to do.
 - Whether a database schema migration is included.
-- Whether the interpreter content hash rotates. It rotates when the diff touches any of the hashed paths in `crates/content-hash/src/compute.rs`: the roots `crates/adapters/src`, `crates/manifests/src`, `manifests/`, `crates/project/src`, `crates/interpret/src/write`, the composition files under `crates/storage/src/families`, and every file in `SEMANTIC_SOURCE_FILES`. If it rotates, say so in one sentence with the consequence: adopting the change needs a full re-derivation, so it rides a re-derivation release rather than a patch, and `docs/deployment.md` gets an entry in the same PR.
+- Whether the interpreter content hash rotates. It rotates when the diff touches any of the hashed paths in `crates/content-hash/src/compute.rs`: the roots `crates/adapters/src`, `crates/manifests/src`, `manifests/`, `crates/project/src`, `crates/interpret/src/write`, the composition files under `crates/storage/src/families`, `Cargo.lock`, and every file in `SEMANTIC_SOURCE_FILES`. If it rotates, say so in one sentence with the consequence: adopting the change needs a full re-derivation, so it rides a re-derivation release rather than a patch, and `docs/deployment.md` gets an entry in the same PR.
 - What is deliberately not included.
 
 ### Validation
@@ -37,6 +37,6 @@ Only tests that exist in this diff, named by file or by what they prove. No test
 
 ## Rules
 
-- No commit shas, no chronology ("after review", "in round two"), no reviewer or agent names.
+- No commit shas, no chronology, no reviewer or agent names.
 - Every sentence must still be true at merge. Re-read the body after each fix round and change what no longer holds.
 - Short sentences and short paragraphs. Lists for parallel items. No semicolon-joined clauses.
