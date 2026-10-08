@@ -50,6 +50,10 @@ impl Wire {
                 let Ok(server) = TcpStream::connect((upstream.0.as_str(), upstream.1)) else {
                     continue;
                 };
+                // Without this each forwarded message waits for the peer's delayed acknowledgement.
+                if client.set_nodelay(true).is_err() || server.set_nodelay(true).is_err() {
+                    continue;
+                }
                 let (Ok(mut replies), Ok(mut back)) = (server.try_clone(), client.try_clone())
                 else {
                     continue;
@@ -99,8 +103,7 @@ fn relay(
     let mut startup = vec![0_u8; u32::from_be_bytes(length) as usize - 4];
     client.read_exact(&mut startup)?;
     assert_eq!(startup[..4], [0, 3, 0, 0], "expected a plain 3.0 startup");
-    server.write_all(&length)?;
-    server.write_all(&startup)?;
+    server.write_all(&[length.as_slice(), startup.as_slice()].concat())?;
     let mut statements = HashMap::new();
     loop {
         let mut head = [0_u8; 5];
@@ -136,7 +139,8 @@ fn relay(
             }),
             _ => {}
         }
-        server.write_all(&head)?;
-        server.write_all(&body)?;
+        let mut message = head.to_vec();
+        message.extend_from_slice(&body);
+        server.write_all(&message)?;
     }
 }
