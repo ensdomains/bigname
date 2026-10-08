@@ -26,6 +26,8 @@ Skills are checklists you follow inline (they shape how you act now); subagents 
 | `/replay-safety` | touch raw facts, normalized events, projections, canonicality/reorg, migrations, or fixtures |
 | `/consumer-slice` | build or claim one end-to-end capability (route → projection → tests), or any "we've replaced X" claim (blocks it without conformance evidence) |
 | `/verify-loop` | finish a change and want the pre-commit gate (user-invoked only; spawns a blind reviewer, confirms each finding with a failing test first, loops until clean) |
+| `/pr-description` | open a pull request, or change what an open PR does |
+| `/linear-issue` | file a ticket, split work out of a PR, or record a decision on one |
 
 ## Subagents
 
