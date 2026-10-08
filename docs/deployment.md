@@ -3298,3 +3298,43 @@ before admitting its API. Additive tables may remain, but their existence does
 not make an older binary compatible with a newer publication hash. Preserve the
 ordinary retained-undo/reorg procedures; the lookup families share that journal,
 reset and repair authority and have no independent cache generation.
+
+## Registration lifecycle status
+
+Apply `20261008120000_registration_lifecycle.sql` before deploying the matching
+phase runner and API. It adds `project_name_summary.grace_ends_at`, two partial
+indexes on it, and replaces the search-payload check constraint so the payload
+carries `status`. Fresh baseline and upgrade definitions match.
+
+When the schema-migration finds the earlier shape, it also deletes every row of
+the Project tables in place, including the family publication markers. It does
+this under an exclusive lock on the marker table, in the migration transaction.
+Raw facts and Interpret's tables are untouched. The API refuses name reads until
+Project publishes again. Adopt the release by a full rebuild, or by promoting a
+database that was already rebuilt under the new binary. Do not apply it to a
+serving database and expect the old publication to keep answering. Budget the
+delete's WAL and lock time on a large database.
+
+The [interpreter content hash](glossary.md#interpreter-content-hash) rotates.
+NameWrapper mints are interpreted at the `TransferSingle` position, and the
+shared lifecycle composition under
+`crates/storage/src/families/control/lifecycle` changed. Every chain needs a
+full-history Interpret redo, then the Project redo it installs, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching
+runner and API binaries. Do not mark old rows ready under the new hash.
+
+The manifest-authority fingerprint changes on Ethereum Mainnet and Ethereum
+Sepolia. Both `ens_v1_wrapper_l1` manifests now declare the normalized events a
+NameWrapper `TransferSingle` mint produces. Synchronization records a
+[manifest-authority marker](glossary.md#manifest-authority-marker) on those two
+chains, so each needs the token-attested full-range Interpret redo and the
+downstream stamped Project redo described under [phase-runner
+configuration](#phase-runner-configuration). The one redo per chain discharges
+both the hash rotation and the marker. The compiled watch plan is unchanged, so
+no Ingest redo is needed. The Ethereum Mainnet `basenames_execution` authority
+is unchanged, so Base needs no Project redo for that reason. Base still follows
+the hash rotation above.
+
+Registrar grace for an ENSv2 `.eth` name is keyed to the one admitted Sepolia
+ETHRegistry deployment. A later deployment gets no registrar grace until the
+policy in `crates/storage/src/families/control/lifecycle/policy.rs` names it.
