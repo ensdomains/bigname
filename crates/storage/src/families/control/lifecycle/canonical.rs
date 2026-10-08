@@ -101,8 +101,11 @@ fn v2_instance<'a>(tagged: &[Tagged<'a>]) -> Option<Instance<'a>> {
                 | "RegistrationReserved"
                 | "RegistrationRenewed"
                 | "ExpiryChanged" => {
-                    // LabelUnregistered writes a shorter registry expiry, but that is terminal
-                    // evidence, not the ended registration's previously scheduled deadline.
+                    // `unregister` needs an entry that has not expired and sets its expiry to
+                    // the block time, which is shorter. That is terminal evidence, not the ended
+                    // registration's previously scheduled deadline.
+                    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L237 @ ens_v2_sepolia_20261001@07e55a05)
+                    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L41 @ ens_v2_sepolia_20261001@07e55a05)
                     if event.source_event.as_deref() != Some("LabelUnregistered")
                         && !event.expiry.is_null()
                     {
@@ -272,10 +275,13 @@ pub(super) fn apply(
                 .is_some_and(|value| !value.is_null());
         // The continued lease is this registration, so its own release and former holder stay.
         // Any other instance's ended-holder evidence belongs to a superseded registration.
-        if !same_instance && !(instance.grant.is_none() && continuing_lease) {
+        let lease_continues = !same_instance && instance.grant.is_none() && continuing_lease;
+        if !same_instance && !lease_continues {
             registration.remove("lapsed_registration");
             registration.insert("released_at".into(), Value::Null);
         }
+        // That block names the lease's holder, so it keeps the lease's own release.
+        let lease_released = lease_continues && registration.contains_key("lapsed_registration");
         if let Some(grant) = instance.grant {
             let start = super::laterals::migrated_lease(facts, tagged, grant).unwrap_or(grant);
             registration.insert(
@@ -313,6 +319,7 @@ pub(super) fn apply(
         );
         if let Some(event) = instance.terminal
             && event.source_event.as_deref() == Some("LabelUnregistered")
+            && !lease_released
         {
             let released_at = facts.block_seconds.get(&event.position.block_number);
             // Preserve independently established historical holder metadata, if any.

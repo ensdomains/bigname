@@ -25,6 +25,7 @@ sol! {
     event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender);
     event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender);
     event Upgraded(address indexed implementation);
+    event LabelUnregistered(uint256 indexed tokenId, address indexed sender);
 }
 
 type Logs = Vec<(&'static str, alloy_primitives::LogData)>;
@@ -312,4 +313,80 @@ async fn a_lease_registered_after_an_ended_reservation_keeps_its_own_identity() 
         "fresh lease grants: {permissions}"
     );
     database.cleanup().await
+}
+
+/// Unregistering the ownerless reservation ends the registration, while the ENSv1 lease
+/// lapses by its own 90-day grace. The former holder keeps the lease's release, whichever
+/// of the two happens first.
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L237 @ ens_v2_sepolia_20261001@07e55a05)
+#[tokio::test]
+async fn an_unregistered_reservation_keeps_the_lease_release_on_the_former_holder() -> Result<()> {
+    let token = U256::from_be_bytes(keccak256(label().as_bytes()).0) >> 32 << 32;
+    let sender: Address = OWNER.parse()?;
+    let unregistered = || -> Logs {
+        vec![(
+            NEW_REGISTRY,
+            LabelUnregistered {
+                tokenId: token,
+                sender,
+            }
+            .encode_log_data(),
+        )]
+    };
+    let lapsed = LEASE + 90 * 86_400 + 10;
+    for unregister_first in [true, false] {
+        let database = TestDatabase::new_migrated().await?;
+        let mut blocks = vec![
+            (LEASE - 100, registered(None, OWNER, LEASE)?),
+            (LEASE - 90, cutover()?),
+        ];
+        if unregister_first {
+            blocks.push((LEASE + 86_400, unregistered()));
+            blocks.push((lapsed, vec![]));
+        } else {
+            blocks.push((
+                LEASE - 80,
+                vec![(
+                    NEW_REGISTRY,
+                    ExpiryUpdated {
+                        tokenId: token,
+                        newExpiry: EXTENDED,
+                        sender,
+                    }
+                    .encode_log_data(),
+                )],
+            ));
+            blocks.push((lapsed, vec![]));
+            blocks.push((LEASE + 91 * 86_400, unregistered()));
+        }
+        publish(&database, blocks).await?;
+        let (status, detail) = get(&database, &format!("/v1/names/{NAME}?namespace=ens")).await?;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        let (status, looked_up) = lookup(
+            &database,
+            json!({"profile":"detail","inputs":[{"name":NAME}]}),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{looked_up}");
+        let (status, former) = get(
+            &database,
+            &format!("/v1/addresses/{OWNER}/names?namespace=ens&relation=former_owner"),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{former}");
+        let listed = former["data"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["name"] == NAME))
+            .with_context(|| format!("former holder row: {former}"))?;
+        for record in [&detail["data"], &looked_up["data"][0]["record"], listed] {
+            assert_eq!(record["status"], "released", "{record}");
+            let block = &record["lapsed_registration"];
+            assert_eq!(block["owner"], OWNER, "{record}");
+            assert_eq!(block["held_through"], "registrar", "{record}");
+            assert_eq!(block["release_kind"], "expired", "{record}");
+            assert_eq!(block["released_at"], lapsed.to_string(), "{record}");
+        }
+        database.cleanup().await?;
+    }
+    Ok(())
 }

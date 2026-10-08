@@ -694,7 +694,9 @@ does not classify those releases as an explicit unregister or expose them throug
 `relation=former_owner`. A later registration removes the block, so a row never carries
 another registration's former holder. An ENSv1 lease that an ownerless ENSv2 reservation
 continues keeps its own block after the lease is released, while the reservation's schedule
-is still `active` or `expired`. The former relation reads this block only and does not restore any current authority
+is still `active` or `expired`. That block names the lease's holder, so it keeps the lease's
+own `release_kind` and `released_at` when the reservation is unregistered, before or after
+the lease is released. The former relation reads this block only and does not restore any current authority
 relation or permission.
 
 
