@@ -19,10 +19,7 @@ pub struct PublicationFields {
 
 pub fn from_composed(row: Option<&NameCurrentRow>, raw_backed: bool) -> Result<PublicationFields> {
     let supported = row.is_some_and(|row| {
-        row.coverage
-            .get("status")
-            .and_then(serde_json::Value::as_str)
-            != Some("unsupported")
+        super::super::name::listing_eligible(&row.coverage, &row.declared_summary)
     });
     let mut fields = PublicationFields {
         search_supported: supported,

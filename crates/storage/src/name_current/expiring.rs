@@ -27,9 +27,46 @@ pub struct NameCurrentExpiryWindow {
     pub expires_before: Option<UnixSeconds>,
 }
 
-/// A disjoint union of expiry intervals over current names in one namespace.
+/// The stored canonical deadline selected by a names request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NameCurrentDeadline {
+    Expiry,
+    GraceEnds,
+}
+
+impl NameCurrentDeadline {
+    pub const fn column(self) -> &'static str {
+        match self {
+            Self::Expiry => "expires_at",
+            Self::GraceEnds => "grace_ends_at",
+        }
+    }
+
+    fn sort(self) -> NameCurrentListSort {
+        match self {
+            Self::Expiry => NameCurrentListSort::ExpiryDate,
+            Self::GraceEnds => NameCurrentListSort::GraceEndsAt,
+        }
+    }
+
+    pub fn value(self, row: &super::list::NameCurrentListRow) -> Option<UnixSeconds> {
+        match self {
+            Self::Expiry => row.expiry_date,
+            // Keep the canonical numeric value exact. Public timestamp formatting emits whole
+            // seconds and must never determine a fractional keyset cursor or membership.
+            Self::GraceEnds => row
+                .row
+                .declared_summary
+                .pointer("/registration/grace_ends_at")
+                .and_then(UnixSeconds::from_json),
+        }
+    }
+}
+
+/// A disjoint union of deadline intervals over current names in one namespace.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NameCurrentExpiringFilter {
+    pub deadline: NameCurrentDeadline,
     pub namespace: String,
     pub windows: Vec<NameCurrentExpiryWindow>,
     /// Public `authority` values (`ens_v0`, `ens_v1`, `ens_v2`); a row matches when the value it
@@ -125,8 +162,7 @@ pub(crate) async fn expiring_page_from(
         "name_current expiring page_size exceeds SQL limit",
     )?;
 
-    // A listing row carries no status or unsupported_reason field, so unsupported names are
-    // omitted here exactly as search omits them.
+    // Apply the same lifecycle discovery eligibility as search, preserving authority coverage.
     let list_filter = NameCurrentListFilter {
         namespace: Some(filter.namespace.clone()),
         supported_only: true,
@@ -146,7 +182,8 @@ pub(crate) async fn expiring_page_from(
         }
     });
     builder.push(NAME_CURRENT_LIST_SELECT);
-    builder.push(" WHERE expiry_date IS NOT NULL");
+    let date_column = filter.deadline.sort().as_str();
+    builder.push(format!(" WHERE {date_column} IS NOT NULL"));
     builder.push(" AND (");
     for (index, window) in filter.windows.iter().enumerate() {
         if index > 0 {
@@ -154,23 +191,22 @@ pub(crate) async fn expiring_page_from(
         }
         builder.push("(TRUE");
         if let Some(after) = window.expires_after {
-            builder.push(" AND expiry_date >= ").push_bind(after);
+            builder
+                .push(format!(" AND {date_column} >= "))
+                .push_bind(after);
         }
         if let Some(before) = window.expires_before {
-            builder.push(" AND expiry_date < ").push_bind(before);
+            builder
+                .push(format!(" AND {date_column} < "))
+                .push_bind(before);
         }
         builder.push(")");
     }
     builder.push(")");
     if let Some(cursor) = cursor {
-        push_name_current_list_cursor_after(
-            &mut builder,
-            NameCurrentListSort::ExpiryDate,
-            order,
-            cursor,
-        );
+        push_name_current_list_cursor_after(&mut builder, filter.deadline.sort(), order, cursor);
     }
-    push_name_current_list_order(&mut builder, NameCurrentListSort::ExpiryDate, order);
+    push_name_current_list_order(&mut builder, filter.deadline.sort(), order);
     builder.push(" LIMIT ");
     builder.push_bind(page_limit);
 
@@ -186,7 +222,7 @@ pub(crate) async fn expiring_page_from(
     let next_cursor = if rows.len() > page_size {
         rows.truncate(page_size);
         rows.last()
-            .map(|row| name_current_list_cursor_from_row(row, NameCurrentListSort::ExpiryDate))
+            .map(|row| name_current_list_cursor_from_row(row, filter.deadline.sort()))
     } else {
         None
     };

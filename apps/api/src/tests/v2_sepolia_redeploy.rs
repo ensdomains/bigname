@@ -623,7 +623,7 @@ pub(super) async fn get(database: &TestDatabase, uri: &str) -> Result<(StatusCod
     send(database, Request::builder().uri(uri).body(Body::empty())?).await
 }
 
-async fn lookup(database: &TestDatabase, body: Value) -> Result<(StatusCode, Value)> {
+pub(super) async fn lookup(database: &TestDatabase, body: Value) -> Result<(StatusCode, Value)> {
     send(
         database,
         Request::builder()
@@ -716,15 +716,33 @@ async fn sepolia_redeploy_serves_names_only_the_dropped_registry_named_as_never_
         );
     }
     let kept = vec!["kept.eth".to_owned()];
-    for uri in [
-        LISTING.to_owned(),
-        "/v1/search?q=kept&namespace=ens".to_owned(),
-        format!("/v1/addresses/{SENDER}/names?namespace=ens&relation=any"),
+    for (uri, expected) in [
+        (
+            LISTING.to_owned(),
+            vec![
+                "nick.eth".to_owned(),
+                "kept.eth".to_owned(),
+                "later.eth".to_owned(),
+            ],
+        ),
+        ("/v1/search?q=kept&namespace=ens".to_owned(), kept.clone()),
+        (
+            format!("/v1/addresses/{SENDER}/names?namespace=ens&relation=any"),
+            kept.clone(),
+        ),
+        (
+            "/v1/search?q=later&namespace=ens".to_owned(),
+            vec!["later.eth".to_owned()],
+        ),
+        (
+            "/v1/search?q=nick&namespace=ens".to_owned(),
+            vec!["nick.eth".to_owned()],
+        ),
     ] {
         let (status, body) = get(&database, &uri).await?;
         assert_eq!(
             (status, names(&body)),
-            (StatusCode::OK, kept.clone()),
+            (StatusCode::OK, expected),
             "before the swap {uri}: {body:#}"
         );
     }
@@ -756,6 +774,16 @@ async fn sepolia_redeploy_serves_names_only_the_dropped_registry_named_as_never_
     assert_eq!(status, StatusCode::OK, "{nick:#}");
     assert_eq!(nick["data"]["created_at"], json!("11821474"), "{nick:#}");
     assert_eq!(nick["data"]["expires_at"], json!("1803965433"), "{nick:#}");
+
+    for uri in [LISTING, "/v1/search?q=nick&namespace=ens"] {
+        let (status, body) = get(&database, uri).await?;
+        assert_eq!(
+            (status, names(&body)),
+            (StatusCode::OK, vec!["nick.eth".to_owned()]),
+            "surviving reservation: {body:#}"
+        );
+        assert_eq!(body["data"][0]["expires_at"], "1803965433", "{body:#}");
+    }
 
     let (never_status, never) = get(&database, "/v1/names/neverseen.eth").await?;
     for label in DROPPED {

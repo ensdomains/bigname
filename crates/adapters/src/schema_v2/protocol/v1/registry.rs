@@ -44,7 +44,7 @@ pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
-    context: crate::schema_v2::migration::RegistrarContext,
+    context: crate::schema_v2::migration::RegistrarContext<'_>,
 ) -> anyhow::Result<Interpreted> {
     // Only ENSv1 admits the LLL-era unmasked-word tolerance (#361).
     let tolerate_unmasked_words = selected.source.source_family == "ens_v1_registry_l1";

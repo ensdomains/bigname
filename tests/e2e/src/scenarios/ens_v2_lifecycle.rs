@@ -536,16 +536,17 @@ async fn a_replaced_subregistry_stops_serving_its_old_child() -> Result<()> {
             &orphan.registrant,
             &orphan.resolver,
             &orphan.records_resolver,
-            &orphan.expiry
         ),
-        (&None, &None, &None, &None),
-        "a detached registry's child keeps no owner, resolver, records or expiry: {orphan:?}"
+        (&None, &None, &None),
+        "a detached registry's child keeps no owner, resolver or records: {orphan:?}"
     );
+    assert_eq!(orphan.expiry, Some(json!(expiry.to_string())), "{orphan:?}");
 
     let expected = MovedOverHttp {
         leaf_owner: format!("{carol:#x}"),
         leaf_registration_id: leaf_resource_b.to_string(),
         leaf_expires_at: expiry.to_string(),
+        orphan_expires_at: expiry.to_string(),
         leaf_resolver: format!("{resolver_b:#x}"),
     };
     assert_moved_over_http(&mut moved.db, &anvil, &expected, "full derivation").await?;
@@ -571,6 +572,7 @@ struct MovedOverHttp {
     leaf_owner: String,
     leaf_registration_id: String,
     leaf_expires_at: String,
+    orphan_expires_at: String,
     leaf_resolver: String,
 }
 
@@ -603,10 +605,7 @@ async fn assert_moved_over_http(
             "{path} leaf {field}: {leaf}"
         );
     }
-    assert_eq!(
-        leaf["data"]["registration_status"], "registered",
-        "{path}: {leaf}"
-    );
+    assert_eq!(leaf["data"]["status"], "active", "{path}: {leaf}");
     assert_eq!(
         leaf["data"]["resolver"]["address"],
         json!(expected.leaf_resolver),
@@ -620,22 +619,19 @@ async fn assert_moved_over_http(
     );
 
     let orphan = get("/v1/names/orphan.cut.eth").await?;
-    assert_eq!(
-        orphan["data"]["registration_status"], "released",
-        "{path}: {orphan}"
-    );
+    assert_eq!(orphan["data"]["status"], "released", "{path}: {orphan}");
     assert_eq!(
         orphan["data"].get("expires_at"),
-        Some(&Value::Null),
+        Some(&json!(expected.orphan_expires_at)),
         "{path}: {orphan}"
     );
     assert_eq!(
         orphan["data"].get("grace_ends_at"),
-        Some(&Value::Null),
+        Some(&json!(expected.orphan_expires_at)),
         "{path}: {orphan}"
     );
-    assert_eq!(
-        orphan["data"]["expires_at_reason"], "released",
+    assert!(
+        orphan["data"].get("expires_at_reason").is_none(),
         "{path}: {orphan}"
     );
     for field in ["owner", "resolver"] {

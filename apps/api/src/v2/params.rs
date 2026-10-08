@@ -477,7 +477,7 @@ fn parse_block_bound(value: Option<String>, field_name: &'static str) -> V2Resul
         })
 }
 
-fn parse_expiry_bound(
+pub(super) fn parse_expiry_bound(
     value: Option<String>,
     field_name: &'static str,
 ) -> V2Result<Option<bigname_storage::UnixSeconds>> {

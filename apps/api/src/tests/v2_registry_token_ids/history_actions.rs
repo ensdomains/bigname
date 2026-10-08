@@ -86,3 +86,43 @@ async fn history_actions_reject_previous_cursor_binding_with_restart() -> Result
     }
     database.cleanup().await
 }
+
+pub(super) async fn assert_small_pages_match(
+    database: &TestDatabase,
+    route: &str,
+    full: &Value,
+) -> Result<()> {
+    let rows = full["data"].as_array().context("history rows")?;
+    assert_eq!(full["page"]["total_count"], rows.len(), "{full:#}");
+    let mut cursor = None::<String>;
+    let mut paged = Vec::new();
+    loop {
+        let url = format!(
+            "{route}&include=data,raw,total_count&order=asc&page_size=1{}",
+            cursor
+                .as_ref()
+                .map(|value| format!("&cursor={value}"))
+                .unwrap_or_default()
+        );
+        let (status, body) = read_family_response(database, &url).await?;
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+        assert_eq!(body["page"]["total_count"], rows.len(), "{body:#}");
+        paged.extend(
+            body["data"]
+                .as_array()
+                .context("page rows")?
+                .iter()
+                .cloned(),
+        );
+        assert!(
+            paged.len() <= rows.len(),
+            "duplicate or unbounded history page: {body:#}"
+        );
+        cursor = body["page"]["next_cursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(paged, *rows, "{route}");
+    Ok(())
+}

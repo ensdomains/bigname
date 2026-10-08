@@ -334,10 +334,10 @@ fn every_named_openapi_enum_matches_its_complete_producer_vocabulary() {
     serde_enum!(Source: Indexed, Verified);
     serde_enum!(Finality: Latest, Safe, Finalized);
     serde_enum!(HistoryScope: Name, Registration, Both);
-    serde_enum!(RegistrationStatus: Active, Wrapped, Registered, Released, Unregistered);
+    serde_enum!(RegistrationStatus: Active, Expired, Released, Unregistered);
     serde_enum!(AuthorityContext: CurrentForName, ResourceAudit);
     serde_enum!(AddressNamesDedupe: Name, Registration);
-    serde_enum!(WrapperState: Wrapped, Emancipated, Locked);
+    serde_enum!(WrapperState: Wrapped, Emancipated, Locked, Lapsed, Unwrapped, Unknown);
     serde_enum!(Authority: EnsV0, EnsV1, EnsV2);
     serde_enum!(ResolutionProtocol: EnsV1, EnsV2);
     serde_enum!(Relation: Owner, Manager, RoleHolder, ResolvesTo, FormerOwner);

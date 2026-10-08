@@ -184,7 +184,7 @@ async fn competing_grants_in_one_block_associate_the_later_transaction() -> Resu
                 Event::new(identity, 10, 0, "RegistrationGranted", V2_REGISTRY)
                     .name(&name(1))
                     .resource(resource)
-                    .after(json!({"registry_contract_instance_id": "R", "token_id": "7"}))
+                    .after(json!({"registry_contract_instance_id": "R", "token_id": "7", "expiry": 1_900_000_000u64}))
                     .at(transaction, 0),
             )
             .await?;
@@ -611,8 +611,7 @@ async fn maxima_follow_the_reducer_table() -> Result<()> {
 async fn child_rows_select_granted_renewed_released_and_count_reservations() -> Result<()> {
     let fixture = Fixture::new("families_lifecycle_child", 20).await?;
     let resource = uuid(1);
-    let after =
-        |registrant: &str| json!({"registry_contract_instance_id": "C", "registrant": registrant});
+    let after = |registrant: &str| json!({"registry_contract_instance_id": "C", "registrant": registrant, "expiry": 1_900_000_000u64});
     fixture
         .write(
             10,

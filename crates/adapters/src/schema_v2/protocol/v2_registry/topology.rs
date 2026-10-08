@@ -184,7 +184,6 @@ use std::collections::BTreeSet;
         }
     }
 }
-
 pub(super) fn boundary_expiration(
     transition: V2NameTransition,
     released_at: i64,
@@ -196,7 +195,6 @@ pub(super) fn boundary_expiration(
     append_removed_name(&mut output, &transition, released_at)?;
     Ok(output)
 }
-
 pub(in crate::schema_v2) fn boundary_reassertion(
     transition: &V2NameTransition,
     block: &crate::schema_v2::RawBlockInput,
@@ -372,6 +370,7 @@ fn append_removed_name(
             after_state: json!({
                 "source_event":source_event,
                 "authority_kind":"ens_v2_registry",
+                "derived_from":"registry_state",
                 "authority_key":authority_key,
                 "registrant":registrant,
                 "expiry":expiry,
@@ -438,6 +437,7 @@ fn append_removed_name(
             after_state: json!({
                 "source_event":source_event,
                 "status":"reserved",
+                "derived_from":"registry_state",
                 "expiry":expiry,
                 "token_id":transition.token_id,
                 "current_token_id":transition.token_id,

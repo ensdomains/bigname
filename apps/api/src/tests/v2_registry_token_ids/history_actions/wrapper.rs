@@ -84,6 +84,9 @@ async fn history_actions_wrap_and_unwrap_keep_the_explicit_action_and_zero_desti
     for row in wrapped {
         assert_eq!(row["data"]["node"], format!("{node:#x}"));
         assert_eq!(row["data"]["expires_at"], "1900000000");
+        assert_eq!(row["data"]["fuses"], 196608);
+        let block = row["block_number"].as_i64().context("wrap block")?;
+        assert_eq!(row["log_index"], if block == 121 { 2 } else { 0 });
     }
     let transfers = action_rows(&body, "token_transferred");
     assert_eq!(transfers.len(), 1, "{body:#}");
@@ -97,5 +100,38 @@ async fn history_actions_wrap_and_unwrap_keep_the_explicit_action_and_zero_desti
         format!("{:#x}", Address::ZERO)
     );
     assert_eq!(unwrapped[1]["data"]["owner"], HOLDER);
+    let mint_positions: Vec<(i64, i64, String, String, Value)> = sqlx::query_as(
+        "SELECT block_number,log_index,block_hash,transaction_hash,after_state FROM normalized_events
+         WHERE source_family='ens_v1_wrapper_l1' AND event_kind='TokenControlTransferred'
+           AND after_state->'wrapper_mint'='true'::jsonb ORDER BY block_number,log_index")
+        .fetch_all(&database.pool).await?;
+    assert_eq!(mint_positions.len(), 3, "one normalized mint per wrap");
+    for ((block, index, hash, transaction, after), (want_block, want_index)) in
+        mint_positions.iter().zip([(120, 0), (121, 2), (124, 0)])
+    {
+        assert_eq!((*block, *index), (want_block, want_index));
+        assert_eq!(after["source_event"], "TransferSingle");
+        assert_eq!(
+            after["matched_wrapper_completion"]["source_event"],
+            "NameWrapped"
+        );
+        assert_eq!(after["matched_wrapper_completion"]["block_hash"], *hash);
+        assert_eq!(
+            after["matched_wrapper_completion"]["transaction_hash"],
+            *transaction
+        );
+        assert_eq!(after["matched_wrapper_completion"]["log_index"], index + 1);
+    }
+    for route in [
+        format!("/v1/events?contract_address={wrapper:#x}"),
+        format!("/v1/names/{NAME}/history?scope=both"),
+        format!("/v1/addresses/{HOLDER}/history?namespace=ens"),
+    ] {
+        let full = page(&database, &route).await?;
+        assert_eq!(action_rows(&full, "name_wrapped").len(), 3, "{full:#}");
+        assert_eq!(action_rows(&full, "name_unwrapped").len(), 3, "{full:#}");
+        assert_eq!(action_rows(&full, "token_transferred").len(), 1, "{full:#}");
+        assert_small_pages_match(&database, &route, &full).await?;
+    }
     database.cleanup().await
 }

@@ -66,7 +66,7 @@ pub(super) fn unsupported_name_record(row: &NameCurrentRow) -> V2Result<Option<N
         expires_at: None,
         expires_at_reason: None,
         grace_ends_at: None,
-        registration_status: None,
+        status: None,
         authority: None,
         ens_v1: None,
         lapsed_registration: None,
@@ -85,7 +85,7 @@ pub(super) fn unsupported_name_record(row: &NameCurrentRow) -> V2Result<Option<N
         network: None,
         subname_count: None,
         record_count: None,
-        status: Status::Unsupported,
+        read_status: Status::Unsupported,
         unsupported_reason: Some(reason),
         failure_reason: None,
         unsupported_fields: Vec::new(),
@@ -141,7 +141,7 @@ async fn build_verified_name_record(
         .flatten();
     record.records =
         (has_current_registration && row.unresolvable_reason().is_none()).then_some(groups);
-    record.status = status;
+    record.read_status = status;
     record.unsupported_reason = verified_profile_unsupported_reason(answers, status);
     record.failure_reason = verified_profile_failure_reason(answers, status);
     record.unsupported_fields = if primary_address_unserved {

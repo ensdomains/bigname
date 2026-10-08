@@ -224,7 +224,7 @@ pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
-    registrar_context: super::migration::RegistrarContext,
+    registrar_context: super::migration::RegistrarContext<'_>,
 ) -> anyhow::Result<Interpreted> {
     if let Some(output) = standard_approvals::interpret(selected, raw, state)? {
         return Ok(output);
@@ -311,7 +311,8 @@ fn state_scope(selected: &Selected, raw: &RawLogInput, event: &EventDraft) -> St
         .and_then(Value::as_str)
         .unwrap_or(event.event_kind.as_str());
     let selector = if selected.source.source_family == "ens_v1_wrapper_l1"
-        && matches!(source_event, "NameWrapped" | "ExpiryExtended" | "FusesSet")
+        && (matches!(source_event, "NameWrapped" | "ExpiryExtended" | "FusesSet")
+            || after["wrapper_mint"] == true)
     {
         "wrapper".to_owned()
     } else if event.event_kind == "RecordChanged"

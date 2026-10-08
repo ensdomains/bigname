@@ -94,7 +94,7 @@ async fn v2_history_wrapper_single_and_batch_keep_only_retained_operators() -> R
     ] {
         let (status, body) = read_family_response(
             &database,
-            &format!("{route}&include=data,raw&order=asc&page_size=200"),
+            &format!("{route}&include=data,raw,total_count&order=asc&page_size=200"),
         )
         .await?;
         assert_eq!(status, StatusCode::OK, "{body:#}");
@@ -112,6 +112,16 @@ async fn v2_history_wrapper_single_and_batch_keep_only_retained_operators() -> R
                 .iter()
                 .any(|r| r["data"]["action"] == "name_wrapped")
         );
+        let wraps = body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["data"]["action"] == "name_wrapped")
+            .collect::<Vec<_>>();
+        assert_eq!(wraps.len(), 1);
+        assert_eq!(wraps[0]["block_number"], 120);
+        assert_eq!(wraps[0]["log_index"], 0);
+        super::history_actions::assert_small_pages_match(&database, &route, &body).await?;
         for row in rows {
             if row["block_number"] == 120 {
                 assert!(row["data"].get("operator").is_none());

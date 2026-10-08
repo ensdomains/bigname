@@ -71,6 +71,7 @@ impl Candidates {
         for row in changed.values().flatten() {
             arrived.extend(text(row, "resource_id"));
             arrived.extend(text(row, "wrapped_registrar_resource_id"));
+            arrived.extend(text(row, "lease_resource_id"));
         }
         let mut leases: Vec<String> = events
             .iter()
@@ -93,7 +94,8 @@ impl Candidates {
              FROM project_binding_candidate candidate
              WHERE candidate.chain_id = $1
                AND (candidate.resource_id = ANY($2::uuid[])
-                    OR candidate.wrapped_registrar_resource_id = ANY($2::uuid[]))",
+                    OR candidate.wrapped_registrar_resource_id = ANY($2::uuid[])
+                    OR candidate.lease_resource_id = ANY($2::uuid[]))",
         )
         .bind(context.chain_id)
         .bind(&leases)
@@ -109,7 +111,9 @@ impl Candidates {
             text(row, column).is_some_and(|value| lowered.contains(&value.to_lowercase()))
         };
         let stored = rows.overlay(table, store::objects(stored), |row| {
-            named(row, "resource_id") || named(row, "wrapped_registrar_resource_id")
+            named(row, "resource_id")
+                || named(row, "wrapped_registrar_resource_id")
+                || named(row, "lease_resource_id")
         });
         let mut by_key: BTreeMap<String, Row> = stored
             .into_iter()
@@ -142,7 +146,11 @@ impl Candidates {
         let namehash = text(row, "namehash")?;
         let lower = |value: Option<String>| value.map(|value| value.to_lowercase());
         let direct = self.rows.iter().filter(|candidate| {
-            text(candidate, "resource_id").as_deref() == Some(resource.as_str())
+            (text(candidate, "resource_id").as_deref() == Some(resource.as_str())
+                || candidate.get("registry_only") == Some(&Value::Bool(true))
+                    && text(candidate, "lease_resource_id").as_deref() == Some(resource.as_str())
+                    && lower(text(candidate, "predecessor_node")).as_deref()
+                        == Some(namehash.as_str()))
                 && lower(text(candidate, "surface_namehash")).as_deref() == Some(namehash.as_str())
         });
         let wrapped = self.rows.iter().filter(|candidate| {

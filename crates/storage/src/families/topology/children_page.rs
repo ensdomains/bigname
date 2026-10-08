@@ -5,8 +5,8 @@
 //! narrowed by the owner each serves (`project_name_summary.owner`). The total
 //! is an exact count over the same filtered relation, taken in the same statement as the page;
 //! there is no maintained child count, because eligibility depends on the parent's current
-//! state. The expiry fence reads the family marker's block timestamp unless the caller fixes
-//! `evaluated_at`, never the database's transaction time.
+//! state. Expiry filtering uses the canonical status stored at the publication clock. A caller's
+//! fixed `evaluated_at` adds an expiry fence; neither uses the database's transaction time.
 //!
 //! The registration and expiry times the timestamp sorts and the fence use, the released
 //! status the fence checks and the owner the labels' owner filter reads are the child's name summary (`project_name_summary`), which the
@@ -388,21 +388,19 @@ pub(super) fn push_children<'a>(
         builder.push(" ESCAPE '\\'");
     }
     if !filter.include_expired {
-        // A child with no name summary, no registration or no expiry is not expired.
+        // A child with no name summary or no registration remains listable. The stored scalar
+        // uses the publication clock and the protocol's own equality boundary.
         builder.push(format!(
-            " AND COALESCE(summary.registration_status, '') <> 'released' \
-             AND NOT {released_lease} AND COALESCE(summary.expires_at >= ",
+            " AND COALESCE(summary.registration_status, '') NOT IN ('expired','released') AND NOT {released_lease}",
             released_lease = released_lease(),
         ));
-        match filter.evaluated_at {
-            Some(evaluated_at) => {
-                builder.push_bind(UnixSeconds::from(evaluated_at));
-            }
-            None => {
-                builder.push("EXTRACT(EPOCH FROM clock.block_timestamp)");
-            }
+        // Preserve the caller's additional fixed-time fence; API snapshots pass the same
+        // publication time, while direct storage callers may deliberately evaluate later.
+        if let Some(evaluated_at) = filter.evaluated_at {
+            builder.push(" AND COALESCE(summary.expires_at >= ");
+            builder.push_bind(UnixSeconds::from(evaluated_at));
+            builder.push(", TRUE)");
         }
-        builder.push(", TRUE)");
     }
 }
 

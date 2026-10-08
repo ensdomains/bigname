@@ -351,6 +351,7 @@ async fn candidates(
         if registry_only {
             handoff(&mut row, by_name.get(&name).map(Vec::as_slice));
         }
+        lease::attach_callback_lease(&mut row, opening);
         by_name.entry(name).or_default().push(row.clone());
         rows.put(table, row).map_err(in_family(table.name))?;
     }

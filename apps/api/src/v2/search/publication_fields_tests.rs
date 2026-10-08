@@ -6,11 +6,11 @@ use serde_json::{Value, json};
 fn stored_presence_reaches_the_actual_search_http_builder() {
     for (payload, present) in [
         (
-            json!({"registration_status":"unregistered","ens_v1":{"expires_at":null}}),
+            json!({"status":"unregistered","ens_v1":{"expires_at":null}}),
             false,
         ),
         (
-            json!({"registration_status":"wrapped","expires_at":null,"expires_at_reason":"no_expiry","grace_ends_at":null,"ens_v1":{"expires_at":null}}),
+            json!({"status":"active","expires_at":null,"expires_at_reason":"no_expiry","grace_ends_at":null,"ens_v1":{"expires_at":null}}),
             true,
         ),
     ] {

@@ -65,64 +65,68 @@ async fn v2_names_windows_equal_the_globally_ordered_scalar_union() -> Result<()
         "1840000001..1849999999",
     ]
     .map(str::to_owned);
-    for order in ["asc", "desc"] {
-        for extra in [
-            "",
-            "&parent=eth&authority=ens_v1,ens_v0",
-            "&parent=late.eth&authority=ens_v2",
-        ] {
-            let mut groups = Vec::new();
-            for (index, window) in windows.iter().enumerate() {
-                let (after, before) = window.split_once("..").unwrap();
-                let uri = format!(
-                    "/v1/names?namespace=ens&expires_after={after}&expires_before={before}&order={order}&page_size=200{extra}"
-                );
-                let scalar = v2_names_payload(&database, &uri).await?;
-                assert!(
-                    !scalar["page"]["has_more"].as_bool().unwrap(),
-                    "fixture exceeds scalar page"
-                );
-                let mut group = Vec::new();
-                for row in scalar["data"].as_array().unwrap() {
-                    assert!(row.get("expires_window_index").is_none());
-                    let mut row = row.clone();
-                    row["expires_window_index"] = json!(index);
-                    group.push(row);
+    for family in ["expires", "grace_ends"] {
+        for order in ["asc", "desc"] {
+            for extra in [
+                "",
+                "&parent=eth&authority=ens_v1,ens_v0",
+                "&parent=late.eth&authority=ens_v2",
+            ] {
+                let mut groups = Vec::new();
+                for (index, window) in windows.iter().enumerate() {
+                    let (after, before) = window.split_once("..").unwrap();
+                    let uri = format!(
+                        "/v1/names?namespace=ens&{family}_after={after}&{family}_before={before}&order={order}&page_size=200{extra}"
+                    );
+                    let scalar = v2_names_payload(&database, &uri).await?;
+                    assert!(
+                        !scalar["page"]["has_more"].as_bool().unwrap(),
+                        "fixture exceeds scalar page"
+                    );
+                    let mut group = Vec::new();
+                    for row in scalar["data"].as_array().unwrap() {
+                        assert!(row.get(format!("{family}_window_index")).is_none());
+                        let mut row = row.clone();
+                        row[format!("{family}_window_index")] = json!(index);
+                        group.push(row);
+                    }
+                    groups.push((after.parse::<WindowSeconds>()?, group));
                 }
-                groups.push((after.parse::<WindowSeconds>()?, group));
-            }
-            // The wire formatter can round fractional fixture expiries. Preserve each scalar
-            // page's exact selector order and sort these disjoint groups by their exact bounds.
-            groups.sort_by(|a, b| {
-                if order == "desc" {
-                    b.0.cmp(&a.0)
-                } else {
-                    a.0.cmp(&b.0)
-                }
-            });
-            let expected: Vec<Value> = groups.into_iter().flat_map(|(_, rows)| rows).collect();
-            assert!(!expected.is_empty(), "{extra}");
-            let unique: std::collections::BTreeSet<_> = expected
-                .iter()
-                .map(|row| row["name"].as_str().unwrap())
-                .collect();
-            assert_eq!(
-                unique.len(),
-                expected.len(),
-                "a scalar result overlapped another window"
-            );
-            for page_size in [1, 200] {
-                let uri = names_windows_uri(&windows, order, page_size, extra);
-                let actual = names_windows_walk(&database, &uri).await?;
-                assert_eq!(actual.len(), expected.len(), "{uri}");
-                for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
-                    assert_eq!(actual, expected, "{uri}: row {index}");
+                // The wire formatter can round fractional fixture expiries. Preserve each scalar
+                // page's exact selector order and sort these disjoint groups by their exact bounds.
+                groups.sort_by(|a, b| {
+                    if order == "desc" {
+                        b.0.cmp(&a.0)
+                    } else {
+                        a.0.cmp(&b.0)
+                    }
+                });
+                let expected: Vec<Value> = groups.into_iter().flat_map(|(_, rows)| rows).collect();
+                assert!(!expected.is_empty(), "{extra}");
+                let unique: std::collections::BTreeSet<_> = expected
+                    .iter()
+                    .map(|row| row["name"].as_str().unwrap())
+                    .collect();
+                assert_eq!(
+                    unique.len(),
+                    expected.len(),
+                    "a scalar result overlapped another window"
+                );
+                for page_size in [1, 200] {
+                    let uri = names_windows_uri(&windows, order, page_size, extra)
+                        .replace("expires", family);
+                    let actual = names_windows_walk(&database, &uri).await?;
+                    assert_eq!(actual.len(), expected.len(), "{uri}");
+                    for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+                        assert_eq!(actual, expected, "{uri}: row {index}");
+                    }
                 }
             }
         }
     }
     // Reuse the dependency's unbounded oracle on the real union filter too.
     let filter = bigname_storage::NameCurrentExpiringFilter {
+        deadline: bigname_storage::NameCurrentDeadline::Expiry,
         namespace: "ens".to_owned(),
         windows: windows
             .iter()
@@ -191,48 +195,66 @@ async fn v2_names_windows_compose_one_global_page_for_one_seven_and_thirty_two_w
     }
     fixture.insert(&database).await?;
     publish_test_families(&database, 240).await?;
-    for count in [1, 7, 32] {
-        for (page_size, first, expected) in [
-            (1, "1850000000..1850000001", 2),
-            (200, "1850000000..1850000001", 201),
-            (200, "1850000001..1850000002", 0),
-        ] {
-            let uri = names_windows_uri(
-                &names_windows_with_empty_arms(count, first),
-                "asc",
-                page_size,
-                "&parent=eth&authority=ens_v1",
-            );
-            let (composed, peak, submitted) = (
-                Arc::new(AtomicU64::new(0)),
-                Arc::new(AtomicU64::new(0)),
-                Arc::new(AtomicU64::new(0)),
-            );
-            let body = seams::with_composed_names_counter(
-                composed.clone(),
-                seams::with_peak_source_counter(
-                    peak.clone(),
-                    seams::with_submitted_rows_counter(
-                        submitted.clone(),
-                        names_windows_payload(&database, &uri),
+    for grace in [false, true] {
+        for count in [0, 1, 7, 32] {
+            for (page_size, first, expected) in [
+                (1, "1850000000..1850000001", 2),
+                (200, "1850000000..1850000001", 201),
+                (200, "1850000001..1850000002", 0),
+            ] {
+                let mut uri = names_windows_uri(
+                    &names_windows_with_empty_arms(count, first),
+                    "asc",
+                    page_size,
+                    "&parent=eth&authority=ens_v1",
+                );
+                if count == 0 {
+                    let (after, before) = first.split_once("..").unwrap();
+                    uri = format!(
+                        "/v1/names?namespace=ens&expires_after={after}&expires_before={before}&page_size={page_size}&parent=eth&authority=ens_v1"
+                    );
+                }
+                if grace {
+                    uri = uri
+                        .replace("expires_at", "grace_ends_at")
+                        .replace("expires_window", "grace_ends_window")
+                        .replace("expires_after", "grace_ends_after")
+                        .replace("expires_before", "grace_ends_before")
+                        .replace("1850000000", "1857776000")
+                        .replace("1850000001", "1857776001")
+                        .replace("1850000002", "1857776002");
+                }
+                let (composed, peak, submitted) = (
+                    Arc::new(AtomicU64::new(0)),
+                    Arc::new(AtomicU64::new(0)),
+                    Arc::new(AtomicU64::new(0)),
+                );
+                let body = seams::with_composed_names_counter(
+                    composed.clone(),
+                    seams::with_peak_source_counter(
+                        peak.clone(),
+                        seams::with_submitted_rows_counter(
+                            submitted.clone(),
+                            names_windows_payload(&database, &uri),
+                        ),
                     ),
-                ),
-            )
-            .await?;
-            assert_eq!(
-                (
-                    composed.load(Ordering::Relaxed),
-                    peak.load(Ordering::Relaxed),
-                    submitted.load(Ordering::Relaxed)
-                ),
-                (expected, expected, expected),
-                "{count} windows page_size={page_size}"
-            );
-            assert_eq!(
-                body["data"].as_array().unwrap().len() as u64,
-                expected.min(page_size)
-            );
-            assert_eq!(body["page"]["has_more"], json!(expected > page_size));
+                )
+                .await?;
+                assert_eq!(
+                    (
+                        composed.load(Ordering::Relaxed),
+                        peak.load(Ordering::Relaxed),
+                        submitted.load(Ordering::Relaxed)
+                    ),
+                    (expected, expected, expected),
+                    "{count} windows page_size={page_size}"
+                );
+                assert_eq!(
+                    body["data"].as_array().unwrap().len() as u64,
+                    expected.min(page_size)
+                );
+                assert_eq!(body["page"]["has_more"], json!(expected > page_size));
+            }
         }
     }
     database.cleanup().await

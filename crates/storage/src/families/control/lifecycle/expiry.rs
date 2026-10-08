@@ -105,7 +105,7 @@ pub(super) enum Grace {
 }
 
 impl Grace {
-    fn seconds(self) -> i64 {
+    pub(super) fn seconds(self) -> i64 {
         match self {
             Self::EnsV1 => ENS_V1_GRACE_PERIOD_SECONDS,
             Self::EnsV2 => ENS_V2_GRACE_PERIOD_SECONDS,

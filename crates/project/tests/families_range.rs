@@ -183,7 +183,7 @@ async fn registrar_event(
             "ens_v1_registrar_l1",
             Some(&name(1)),
             Some(resource),
-            json!({"namehash": node(1), "registrant": OWNER}),
+            json!({"namehash": node(1), "registrant": OWNER, "expiry": 1_900_000_000u64}),
             REGISTRAR,
         )
         .await?;
@@ -507,7 +507,7 @@ async fn a_registrant_refold_reads_the_latest_grant_from_earlier_in_the_range() 
             "ens_v1_registrar_l1",
             Some(&name(1)),
             Some(&lease),
-            json!({"namehash": node(1), "registrant": OTHER}),
+            json!({"namehash": node(1), "registrant": OTHER, "expiry": 1_900_000_000u64}),
             REGISTRAR,
         )
         .await?;

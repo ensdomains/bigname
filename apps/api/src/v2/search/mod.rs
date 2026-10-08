@@ -8,7 +8,7 @@ use axum::{
 use bigname_storage::{
     NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListRow,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tracing::error;
 
 use crate::{AppState, state::is_recognized_public_namespace};
@@ -50,41 +50,8 @@ const SEARCH_QUERY_PARAMS: &[&str] = &[
     "page_size",
 ];
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub(crate) struct SearchName {
-    pub(crate) name: String,
-    pub(crate) display_name: String,
-    pub(crate) namespace: String,
-    pub(crate) namehash: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) owner: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) manager: Option<String>,
-    pub(crate) registration_status: RegistrationStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) registered_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) created_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) expires_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) expires_at_reason: Option<String>,
-    /// Zero-based request-window membership, omitted on scalar expiry requests and search.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) expires_window_index: Option<u8>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) grace_ends_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
-    /// The `authority` the name's detail serves.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) authority: Option<crate::v2::vocab::Authority>,
-    /// Present while `authority` is `ens_v1` or `ens_v0`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) ens_v1: Option<crate::v2::name_record::EnsV1>,
-    /// On `GET /v1/names` rows only: the last holder of a released registration
-    /// (`name_record::lapsed_registration`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) lapsed_registration: Option<crate::v2::name_record::LapsedRegistration>,
-}
+mod types;
+pub(crate) use types::SearchName;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SearchQueryParams {
@@ -330,7 +297,7 @@ pub(crate) fn build_compact_search_name(
         namehash: row.namehash.clone(),
         owner: row.owner.clone(),
         manager: registration.manager.clone(),
-        registration_status: registration.registration_status,
+        status: registration.status,
         registered_at: registration.registered_at.clone(),
         created_at: row.created_at.clone(),
         expires_at: registration.expires_at.clone(),
@@ -340,6 +307,7 @@ pub(crate) fn build_compact_search_name(
         ens_v1: row.fields.ens_v1.clone(),
         lapsed_registration: None,
         expires_window_index: None,
+        grace_ends_window_index: None,
     })
 }
 
@@ -354,7 +322,7 @@ pub(crate) fn build_search_name(row: &NameCurrentListRow) -> V2Result<SearchName
         namehash: row.row.namehash.clone(),
         owner: registration.owner,
         manager: registration.manager,
-        registration_status: registration.registration_status,
+        status: registration.status,
         registered_at: registration.registered_at,
         created_at: registration.created_at,
         expires_at: registration.expires_at,
@@ -364,6 +332,7 @@ pub(crate) fn build_search_name(row: &NameCurrentListRow) -> V2Result<SearchName
         ens_v1,
         lapsed_registration: None,
         expires_window_index: None,
+        grace_ends_window_index: None,
     })
 }
 

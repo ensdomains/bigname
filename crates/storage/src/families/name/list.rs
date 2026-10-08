@@ -67,6 +67,7 @@ pub(super) fn source_row(row: &NameCurrentRow) -> Value {
         "binding_kind": row.binding_kind.map(|kind| kind.as_str()),
         "declared_summary": row.declared_summary,
         "provenance": row.provenance,
+        "listing_eligible": super::list_keys::listing_eligible(&row.coverage, &row.declared_summary),
         "support_status": if unsupported { "unsupported" } else { "supported" },
         "unsupported_reason": row.coverage.get("unsupported_reason"),
         "chain_positions": row.chain_positions,

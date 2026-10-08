@@ -103,6 +103,10 @@ impl PriorWritePosition {
 }
 
 #[derive(Clone, Debug)]
+/// One ordered range of complete canonical blocks. Each transaction's admitted raw logs must
+/// be supplied together: transaction-local registry setup, custody and wrapper completion
+/// interpretation relies on this caller contract. Splitting a transaction across batches or
+/// restoring from its prefix is unsupported. Historical intake may still omit unadmitted logs.
 pub struct BatchInput {
     pub chain_id: String,
     pub manifests: Vec<ManifestInput>,

@@ -282,7 +282,7 @@ async fn locked_parent_publishes_only_migratable_ens_v1_children() -> Result<()>
                AND canonicality_state = 'canonical' \
                AND consumer_visibility = 'activated' \
                AND logical_name_id = $2 \
-               AND after_state->>'source_event' = 'NameWrapped' \
+               AND after_state->>'source_event' = 'TransferSingle' \
                AND (after_state->>'fuses')::BIGINT = 0)",
     )
     .bind(&blocked_node)
@@ -293,6 +293,14 @@ async fn locked_parent_publishes_only_migratable_ens_v1_children() -> Result<()>
         blocked_registry_input && blocked_wrapper_input,
         "blocked child inputs did not reach normalized events"
     );
+    support::assert_wrapper_mint_completion(
+        &run.db.pool,
+        "blocked.locked-migration.eth",
+        "PermissionScopeChanged",
+        harness.ens_v1.name_wrapper.address,
+        path.blocked.owner,
+    )
+    .await?;
     let (status, children_body) = body(&run, "/v1/names/ens/locked-migration.eth/children").await?;
     assert_eq!(status, 200, "children route failed: {children_body}");
     let children = children_body

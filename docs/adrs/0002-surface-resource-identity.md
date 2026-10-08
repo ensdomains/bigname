@@ -142,9 +142,10 @@ current registry-registration lookup. (upstream: .refs/ens_v2_sepolia_20260629/c
 
 An ownerless version-zero ENSv2 reservation establishes an unbound registry-entry
 `resource_id` and token-lineage identity before any token mint. Their existence
-alone is not a registration, current authority, or `SurfaceBinding`. A later
-successful claim for that registry entry reuses the identities, and its
-`TokenResource` emission confirms the resource. A reservation whose version
+alone does not establish a public registration handle, current authority, or
+`SurfaceBinding`. A reservation can still establish a proved canonical allocation
+with lifecycle dates and status. A later successful claim for that registry
+entry reuses the identities, and its `TokenResource` emission confirms the resource. A reservation whose version
 bits prevent deriving that resource remains resource-less.
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L25-L34 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L428-L471 @ ens_v2@a971bd64)

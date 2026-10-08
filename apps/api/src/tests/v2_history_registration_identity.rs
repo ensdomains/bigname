@@ -2434,6 +2434,8 @@ async fn reservation_product_rows_omit_registration_identity() -> Result<()> {
         Uuid::from_u128(0x91a1),
     )
     .await?;
+    sqlx::query("UPDATE surface_bindings SET authority_arm='ens_v2' WHERE surface_binding_id=$1")
+        .bind(Uuid::from_u128(0x91a1)).execute(&database.pool).await?;
     // Select the full retained range before publishing the fixture.
     seed_schema_v2_ens_lookup_head(&database.pool, 125, "0xhistory125", "2023-11-14T22:15:25Z")
         .await?;
@@ -2476,6 +2478,10 @@ async fn reservation_product_rows_omit_registration_identity() -> Result<()> {
         event.source_family = "ens_v2_registry_l1".to_owned();
         event.derivation_kind = "ens_v2_registry_resource_surface".to_owned();
         event.after_state["source_event"] = json!(source_event);
+        // A real LabelReserved always carries the reservation's actual expiry.
+        if kind == "RegistrationReserved" {
+            event.after_state["expiry"] = json!(1_900_000_000_i64);
+        }
         if kind == "RegistrationGranted" {
             event.after_state["authority_kind"] = json!("ens_v2_registry");
         }

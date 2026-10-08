@@ -138,7 +138,8 @@ fn mask_open(input: &NameRelationsInput<'_>) -> bool {
         .declared_summary
         .get("wrapper_state")
         .and_then(Value::as_str)
-        .is_some()
+        .and_then(crate::public_name_fields::WrapperState::from_wire)
+        .is_some_and(crate::public_name_fields::WrapperState::is_backed)
         && in_grace(modifier, input.clock_seconds) == Some(false)
 }
 

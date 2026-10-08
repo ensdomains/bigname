@@ -9,7 +9,7 @@
 //!   even when token readability withholds the name row;
 //! - `serving`: whether `provenance.read_reachability.serving_resource_id` is set, which admits
 //!   an ownerless child;
-//! - `registration_status`: `declared_summary.registration.status`, whose `released` the expiry
+//! - `registration_status`: `declared_summary.registration.lifecycle_status`, whose `expired`/`released` the expiry
 //!   fence drops;
 //! - `expires_at` and `registered_at`: the timestamp reads of the subnames sorts and fence, the
 //!   same SQL expressions (`address_names::query`) over the composed summary;
@@ -26,7 +26,7 @@
 //!   (apps/api/src/v2/name_record/declared.rs, `declared_owner`); the registry labels' `owner` and
 //!   `exclude_owner` filters read it;
 //! - `expiry_listable`: whether the expiry listing of `/v1/names` lists the name: it composes a
-//!   row whose coverage is not unsupported and whose registration carries a finite expiry
+//!   row eligible for lifecycle discovery whose registration carries a finite expiry
 //!   (`list_keys.rs`); for such a row `expires_at` is the expiry the listing serves and orders by;
 //! - `public_authority`: the public `authority` the row serves (`ens_v0`, `ens_v1` or `ens_v2`),
 //!   null when it serves none or the name composes no row (`list_keys.rs`);
@@ -172,7 +172,7 @@ async fn compose_summaries(
                     "listing_supported": composed
                         .row
                         .as_ref()
-                        .is_some_and(|row| !list_keys::unsupported(&row.coverage)),
+                        .is_some_and(|row| list_keys::listing_eligible(&row.coverage, &row.declared_summary)),
                     // Existing list consumers retain these values even on an unsupported row.
                     "public_authority": composed.row.as_ref()
                         .and_then(|row| list_keys::public_authority(&row.provenance)),
@@ -215,10 +215,10 @@ async fn compose_summaries(
                 nc.authority_arm,
                 COALESCE(nc.provenance #>> '{read_reachability,serving_resource_id}' IS NOT NULL,
                          FALSE) AS serving,
-                nc.declared_summary #>> '{registration,status}' AS registration_status, ",
+                nc.declared_summary #>> '{registration,lifecycle_status}' AS registration_status, ",
     );
     push_expires_at_timestamp_expr(&mut builder);
-    builder.push(" AS expires_at, ");
+    builder.push(" AS expires_at, (nc.declared_summary #>> '{registration,grace_ends_at}')::numeric AS grace_ends_at, ");
     push_registered_at_timestamp_expr(&mut builder);
     builder.push(format!(
         " AS registered_at, {} AS zero_owner,

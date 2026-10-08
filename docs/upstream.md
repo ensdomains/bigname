@@ -484,8 +484,11 @@ to the applicable entries below.
 
 > **Ownerless ENSv2 reservation resolver serving narrowing** — bigname retains
 > reservation resolver facts for diagnostics, but product name, record, batch
-> lookup, and resolver-listing routes classify an ownerless reservation as no
-> current registration and do not serve that resolver or its record inventory.
+> lookup, and resolver-listing routes treat an ownerless reservation as lacking
+> current ownership/control and do not serve that resolver or its record
+> inventory. A proved canonical allocation still supplies lifecycle status and
+> dates on name/detail/discovery surfaces. A public registration handle and
+> start require a qualifying identity independently of that allocation.
 > An unbound TLD with an observed ENSv2 root-registry resolver pointer is the
 > exception: these routes serve its pointer and eligible records through the
 > [serving resource](glossary.md#serving-resource), while its current authority
@@ -501,8 +504,9 @@ to the applicable entries below.
 > Projection storage rules.
 > **Why**: ordinary reservation records remain outside the serving boundary.
 > The root-registry TLD exception exposes observed resolution without inventing
-> registration ownership. Diagnostics retain the other reservation facts for
-> comparison without presenting them as current name data.
+> registration ownership. Diagnostics retain the other reservation resolver
+> facts for comparison without presenting them as current resolution data.
+> This does not hide the proved canonical allocation's lifecycle fields.
 > **Since**: `2026-09-02`
 
 > **ENSv1 and Basenames ownerless registry reads use event-linked reachability** — registry owner events retain their literal owner word as history, while control uses the [getter-visible owner](glossary.md#getter-visible-owner). In the current ENS Solidity registry and Basenames, a literal zero word and the emitting registry's own address are control-equivalent, but neither clears an independently selected resolver. ENSv1 emits the literal owner argument, maps current-registry self storage to getter zero, stores the resolver separately, and its fallback writes current-registry self when asked to store zero `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L67-L68 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L81-L82 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L141 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L170-L172 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L55 @ ens_v1@91c966f)`. The admitted 2017 mainnet LLL registry instead returns its stored owner word unchanged, and the fallback delegates to that getter when the current registry has no record, so an owner equal to that emitter remains authentic `(upstream: .refs/ens_v1_lll/contracts/ENS.lll:L65-L66 @ ens_v1_lll@7e377df)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L29-L34 @ ens_v1@91c966f)`. The similarly named Sepolia legacy deployment uses the Solidity registry artifact and therefore retains the Solidity self-to-zero getter rule `(upstream: .refs/ens_v1/deploy/registry/00_deploy_registry.ts:L14-L19 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)`. Basenames emits the literal owner arguments, maps registry-self to getter zero, and stores owner and resolver independently `(upstream: .refs/basenames/src/L2/Registry.sol:L100-L134 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/Registry.sol:L165-L180 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/Registry.sol:L214-L216 @ basenames@1809bbc)`.
@@ -782,3 +786,11 @@ parent. Unknown histories keep ordinary direct rows and conservative coverage.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/utils/PermissionedAddressSet.sol:L51-L61 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L311-L314 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/erc1155/ERC1155Singleton.sol:L70-L75 @ ens_v2_sepolia_20261001@07e55a05)
+
+## Registration lifecycle presentation and callback completion
+
+Bigname presents one registration lifecycle separately from ownership and resolution. Canonical schedules survive passive expiry, and explicit unregister keeps the ended instance's scheduled expiry while reporting an immediate released state and the observed terminal cause. These are public presentation rules, not an assertion that the contract preserves current ownership or permits every registrar to allocate immediately. Protocol equality and deployment-specific grace are documented in [Expiry and grace](api-v1.md#expiry-and-grace).
+
+NameWrapper `_mint` writes and emits before the receiver callback, while `_wrap` emits NameWrapped after it. A callback burn can therefore precede a stale outer completion. Nested rewrapping can establish a newer inner owner/fuse word. Bigname matches mint/completion frames by admitted wrapper instance, namespace, transaction and node. A burned outer frame cannot restore current wrapper state, while ordinary and inner successful wraps remain effective. The prior documented callback-resurrection gap is closed. (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L257-L266 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L903 @ ens_v1@91c966f)
+
+The expanded wrapper_state vocabulary describes backed entry/fuse states, proven lapse/unwrap, or incomplete wrapping evidence. It does not claim equivalence to every upstream isWrapped helper. In particular, the `.eth` helper additionally checks the BaseRegistrar owner. (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L748-L783 @ ens_v1@91c966f)

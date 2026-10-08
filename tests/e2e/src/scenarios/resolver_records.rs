@@ -1309,7 +1309,7 @@ fn assert_zero_name_shape(record: &Value, namespace: &str, name: &str) {
         "created_at",
         "expires_at",
         "grace_ends_at",
-        "registration_status",
+        "status",
         "name",
         "display_name",
         "namespace",
@@ -1318,16 +1318,16 @@ fn assert_zero_name_shape(record: &Value, namespace: &str, name: &str) {
         "records",
         "chain_id",
         "network",
-        "status",
+        "read_status",
     ];
     if namespace == "ens" {
         keys.push("token_id");
         keys.push("authority");
         keys.push("ens_v1");
         assert_eq!(record["authority"], "ens_v1");
-        // An unwrapped lease before any cutover: the lease date is the served expiry and no
-        // wrapper fields appear.
-        assert_keys(&record["ens_v1"], &["expires_at"]);
+        // An unwrapped lease reports its ended wrapper state without fuse restrictions.
+        assert_keys(&record["ens_v1"], &["expires_at", "wrapper_state"]);
+        assert_eq!(record["ens_v1"]["wrapper_state"], "unwrapped");
         assert_eq!(record["ens_v1"]["expires_at"], record["expires_at"]);
     }
     assert_keys(record, &keys);
@@ -1338,7 +1338,8 @@ fn assert_zero_name_shape(record: &Value, namespace: &str, name: &str) {
     // An unwrapped lease serves its token holder as owner and its registry owner as manager,
     // here the same account.
     assert_eq!(record["manager"], record["owner"]);
-    assert_eq!(record["status"], "ok");
+    assert_eq!(record["read_status"], "ok");
+    assert_eq!(record["status"], "active");
     assert_eq!(record["name"], name);
     assert_eq!(record["namespace"], namespace);
     assert_keys(&record["resolver"], &["chain_id", "address"]);

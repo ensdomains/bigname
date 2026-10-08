@@ -368,14 +368,14 @@ collection route carry neither header.
   serializes as `owner,manager` and reordered sets use canonical
   dictionary order. `profile=feed` returns a documented core-field subset of
   the same record object; it does not introduce another DTO. A feed record
-  carries the identity fields, `chain_id`, `network`, `status` and its
-  reasons, `subregistry` on name results, `is_primary` and `relations` on
+  carries the identity fields, `chain_id`, `network`, `read_status` and its
+  reasons, the registration lifecycle `status`, `subregistry` on name results, `is_primary` and `relations` on
   reverse rows, `resolution` on `resolves_to` rows, and the expiry fields
   `expires_at`, `expires_at_reason` and `grace_ends_at` with the `ens_v1`
   object, each with the value and presence it has on the `profile=detail`
   record for the same name, which are those of name detail and
   `GET /v1/names`. Every other registration field (`owner`, `manager`,
-  `registration_status`, `registration_id`, `token_id`, `registered_at`,
+  `registration_id`, `token_id`, `registered_at`,
   `created_at`, `lapsed_registration`, `authority`, `migrated_at`), the
   resolver fields and `records` are detail-only. ENSv2 token values follow
   [ENSv2 token identity](api-v1.md#ensv2-token-identity): the recorded version
@@ -385,7 +385,7 @@ collection route carry neither header.
   projection selected an ENSv1/ENSv2 arm for the name, and `migrated_at` when
   that `ens_v2` authority was proven by an ENSv1→ENSv2 migration transition;
   both apply to name results and reverse rows alike and are omitted on feed
-  records, on `status=unsupported` records, and, for `authority`, on ownerless
+  records, on `read_status=unsupported` records, and, for `authority`, on ownerless
   registry rows. `profile=detail` records whose `authority` is `ens_v1` or
   `ens_v0` also carry the `ens_v1` object (`{expires_at, wrapper_state?,
   wrapper_fuses?, wrapper_expires_at?, wrapper_expires_at_reason?}`, the ENSv1
@@ -394,30 +394,36 @@ collection route carry neither header.
   Reverse inputs accept no
   `authority` filter yet; filter client-side or use
   `GET /v1/addresses/{address}/names?authority=`.
-  A name result classified as `registration_status=unregistered` always omits
-  `registration_id`. It also omits `resolver` and resolver-record fields unless
+  A detail name result carries `registration_id` only with an established
+  [public registration identity](api-v1.md#registration-identity-of-wrapped-names),
+  independently of lifecycle status; feed results always omit it. An ownerless
+  allocation may be `active`, `expired`, or `released` without a qualifying
+  identity or `registered_at`, while legitimate ended or continuous identities
+  retain their handle and start. Without current control, the result omits
+  `resolver` and resolver-record fields regardless of status or handle unless
   it is
   an ownerless ENSv1 or Basenames registry row whose current registry resolver
   pointer is retained (a [serving resource](glossary.md#serving-resource)), or
   an ENSv2 TLD with a current
   [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
   and no projected authority.
-  That classified row serves its resolver without acquiring registration
-  identity or control. Indexed records are served when its serving resource has
-  supported inventory. The TLD row stays `current_authority_not_projected` and
-  unregistered, and like name detail it serves `status=ok` with no
-  `unsupported_reason` and no `registration_id`; only the resolver and
-  resolver-record fields are added. `authority` follows the rule below for
-  rows with no selected binding.
+  That row serves its resolver without acquiring registration identity or
+  control. Indexed records are served when its serving resource has
+  supported inventory. The TLD row stays `current_authority_not_projected`; a
+  proved canonical allocation supplies lifecycle status and dates, and otherwise
+  it is unregistered. Like name detail it serves `read_status=ok` with no
+  `unsupported_reason`. The pointer adds resolver and resolver-record fields
+  without supplying an unproved `registration_id` or current control. `authority`
+  follows the rule below for rows with no selected binding.
   `profile=detail` name results and reverse rows carry the indexed
   [grouped records](#grouped-name-profile-records) object `records` with the
   same shape, presence, and meaning as indexed name detail: key lists from the
   serving inventory row whatever its coverage, values only from a row whose
   coverage is authoritative, and `primary_address` listed in
-  `unsupported_fields` when no authoritative inventory serves it. `status` and
+  `unsupported_fields` when no authoritative inventory serves it. `read_status` and
   `resolver` keep following the name row. The whole batch reads the ABI
   evidence behind `seen_abis` at once rather than once per name. `records` is
-  omitted on a `status=unsupported` record, with every other field outside the
+  omitted on a `read_status=unsupported` record, with every other field outside the
   identity-only shape, and on a served record that has no serving inventory (an
   unregistered record outside the classified serving paths, a reservation, a
   released name, or a name whose serving resource has no inventory row). This
@@ -450,6 +456,9 @@ collection route carry neither header.
   binds the address, coin type, relation, and public namespace set, and its
   `total_count` is null.
 - Status semantics: per-result `status` uses the common result vocabulary.
+  Inside `record` or `records`, `read_status` describes the read result and
+  `status` is the registration lifecycle: `active`, `expired`, `released`, or
+  `unregistered`.
   Name misses are in-band `not_found`; invalid names are in-band
   `invalid_name`. Name-only and exact-scope latest reads return retryable `409
   stale` when the selected namespace is undergoing an Interpret redo. Reverse
@@ -476,20 +485,22 @@ collection route carry neither header.
   `reverse`, and `addr.reverse` follow the same rule as every other name. An
   address lookup
   returns `409 conflict` when the deployment has no ready public namespace.
-  A name result's `status` and `unsupported_reason` follow the
+  A name result record's `read_status` and `unsupported_reason` follow the
   `GET /v1/names/{name}` rule for the same row at the same snapshot, for both
   profiles: an unsupported projected row downgrades to the unsupported record
   below unless its reason is `current_authority_not_projected`, which serves
-  `status=ok` with the registration and identity fields that can be served,
+  `read_status=ok` with the registration and identity fields that can be served,
   their omissions and `unsupported_fields` unchanged, and no `resolver` outside
-  the TLD case above. Such a row is `registration_status=unregistered` with no
-  `registration_id`, but it can still carry `authority`: the arm the name's
+  the TLD case above. Without a proved canonical allocation such a row is
+  `status=unregistered` with no `registration_id`; an admitted allocation instead
+  supplies its own lifecycle status and dates, without inventing a holder or handle.
+  The row can still carry `authority`: the arm the name's
   history selected (for example `ens_v1` after a named ENSv1 registration
-  event) even though no binding of that arm is current. `status=ok` on such a
-  result is not evidence of ownership, and `authority` on it is not evidence
-  of a current registration; read `registration_status` and `owner`.
+  event) even though no binding of that arm is current. `read_status=ok` on such a
+  record is not evidence of ownership, and `authority` on it is not evidence
+  of a current registration; read `status` and `owner`.
   An unsupported name result retains `input`, `kind`, and a `record` containing
-  only `name`, `display_name`, `namespace`, `namehash`, `status`, and
+  only `name`, `display_name`, `namespace`, `namehash`, `read_status`, and
   `unsupported_reason`. It omits registration, control, lifecycle, resolver,
   record, relation, permission, and primary-name fields from both source
   families rather than presenting either binding as current.
@@ -618,7 +629,8 @@ collection route carry neither header.
   `null` during an Interpret or Project redo.
 - Pagination behavior: none.
 - Status semantics: route-local ops `status` is `ready`, `degraded`, or
-  `stale`. This is the only non-result `status` enum in `v2`. `project`
+  `stale`. This operations vocabulary is separate from registration lifecycle
+  `status`. `project`
   publication lag beyond either configured threshold, or a fresh provider
   comparison beyond either configured ingestion-lag threshold, is `stale`.
   Missing stored readiness or a provider observation
@@ -643,10 +655,13 @@ collection route carry neither header.
 | `namespace` | query | string | yes | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
 | `expires_after` | query | string | no | none | Inclusive finite-expiry lower bound, as decimal Unix seconds or RFC 3339. Classified null expiry never matches. |
 | `expires_before` | query | string | no | none | Exclusive finite-expiry upper bound, as decimal Unix seconds or RFC 3339; must be later than expires_after when both are supplied. |
-| `expires_window` | query | repeated array [1, 32] of string | no | none | Repeat for 1–32 disjoint finite half-open windows, each `after..before` in decimal Unix seconds or RFC 3339. Adjacent windows are allowed; overlap, duplicates, missing bounds, and combination with either scalar expiry parameter are invalid. Input order defines each row’s expires_window_index. |
+| `expires_window` | query | repeated array [1, 32] of string | no | none | Repeat for 1–32 disjoint finite half-open windows, each `after..before` in decimal Unix seconds or RFC 3339. Adjacent windows are allowed; overlap, duplicates, missing bounds, scalar expiry bounds, and any grace parameter are invalid. Input order defines each row’s expires_window_index. |
+| `grace_ends_after` | query | string | no | none | Inclusive finite grace-deadline lower bound, as decimal Unix seconds or RFC 3339. Cannot combine with expiry parameters. |
+| `grace_ends_before` | query | string | no | none | Exclusive finite grace-deadline upper bound, as decimal Unix seconds or RFC 3339; later than grace_ends_after when both are supplied. Cannot combine with expiry parameters. |
+| `grace_ends_window` | query | repeated array [1, 32] of string | no | none | Repeat for disjoint half-open grace-deadline windows with the same rules as expires_window. Input order defines grace_ends_window_index. Cannot combine with scalar grace or any expiry parameter. |
 | `authority` | query | array of enum Authority | no | none | Comma-separated served `authority` values; a row matches when the `authority` it serves is any listed value. Rows that serve no `authority` match no set. |
 | `parent` | query | string | no | none | A name; only names exactly one label below it, by normalized name spelling, are listed. parent=eth lists every `<label>.eth` name and no deeper subname. |
-| `sort` | query | enum `expires_at` | no | `expires_at` | Row sort key; ties use the route's stable identity order. |
+| `sort` | query | enum `expires_at`, `grace_ends_at` | no | none | Defaults to the supplied date family; explicit sort must match it. Ties use the route's stable identity order. |
 | `order` | query | enum SortOrder | no | `asc` | Ascending or descending result order. |
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
 | `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
@@ -666,166 +681,89 @@ collection route carry neither header.
 
 - Method/path: `GET /v1/names`
 - Tier: product read.
-- Purpose: the namespace-wide listing of current names by registration expiry
-  — the "which names expire between t1 and t2" sweep. It lives under
-  `/v1/names` rather than a `/v1/registrations` route because its rows are
-  names in the dictionary shape `GET /v1/search` serves, each carrying its
-  selected current registration, and because no route addresses a registration
-  as a resource of its own: registrations appear only as `registration_id` on
-  history and permission rows. The listing mixes registrar leases, ENSv2
-  registrations and subnames; `parent=eth` keeps only the `.eth` second-level
-  names, and `authority` tells ENSv1 leases from ENSv2 registrations.
-  [Running an expiry sweep](guides/expiry-sweep.md) shows how a notification
-  service applies the rules below.
-- Request parameters: query `namespace` (required), `expires_after`,
-  `expires_before`, repeated `expires_window`, `authority`, `parent`, `sort=expires_at`,
-  `order=asc|desc`, `cursor`, `page_size`, and optional `finality=latest`. `at` and historical `finality`
-  values are rejected by the shared latest-state collection rule.
-  `namespace` is required: the listing is one namespace's index scan, and a
-  missing namespace returns `400 invalid_input`; an unsupported one returns
-  `404 not_found`. Supply at least one of `expires_after` and `expires_before`,
-  or use repeated `expires_window`, so the request can never be an unbounded
-  scan. Scalar bounds accept decimal
-  Unix seconds or RFC 3339 timestamps, including offsets and fractional
-  seconds. `expires_after` is inclusive and `expires_before` exclusive, so
-  consecutive windows tile without overlap or gap; `expires_after` must be
-  earlier than `expires_before`. `sort` defaults to `expires_at` and accepts
-  nothing else; `order` defaults to `asc`. Any other value, an invalid timestamp
-  bound, or an equal or inverted pair returns `400 invalid_input`. Finite
-  expiry bounds are exact numeric seconds, including beyond year 9999; public
-  whole-second formatting does not round an RFC 3339 filter boundary.
-  Alternatively, repeat `expires_window=after..before` for 1–32 finite,
-  disjoint windows. Each bound uses the same exact timestamp parser as the
-  scalar bounds, with at most nanosecond precision. Both bounds are required
-  and `after < before`; the lower bound is inclusive and the upper exclusive.
-  Whitespace around bounds is ignored. Encode a literal `+` in an RFC 3339
-  offset as `%2B`. Adjacent windows are allowed; overlap, duplicates after
-  normalization, more than 32 windows, blank or malformed windows, and a
-  mixture with either scalar expiry parameter (even a blank one) return
-  `400 invalid_input`. Each row belongs to exactly one input window and
-  carries its zero-based `expires_window_index` in the original request order.
-  Input order does not affect result ordering. This parameter is supported
-  only on `GET /v1/names`; every other parameter remains single-valued.
-  `authority` keeps only rows whose served `authority` is a listed value, with
-  the grammar of
-  [`GET /v1/addresses/{address}/names`](#get-v1addressesaddressnames): an
-  unordered comma-separated set of `ens_v0`, `ens_v1` and `ens_v2` whose blank
-  segments are skipped and repeats collapse; a whitespace-only value is treated
-  as absent. `authority=ens_v1` does not match a name served as `ens_v0`, and
-  `authority=ens_v0,ens_v1` matches both. Rows that serve no `authority`
-  (Basenames rows and ownerless registry rows) match no set.
-  `parent` keeps only names exactly one label below the given name, compared
-  by served name spelling after the ENSIP-15 normalization name routes
-  apply to a path name, not by node or registry topology: a bracketed labelhash
-  label matches only names served with that bracketed spelling (a
-  [rendered name](glossary.md#rendered-name) whose label has no verified
-  text), never a name that spells the label as text, except the labelhashes of
-  `eth` and `base`, which that normalization spells as text. `parent=eth` selects the `.eth`
-  second-level names before and after the
-  [Universal Resolver cutover](glossary.md#universal-resolver-cutover), ENSv1
-  BaseRegistrar leases
-  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L150 @ ens_v1@91c966f)
-  and ENSv2 `eth` registry registrations
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L151-L158 @ ens_v2_sepolia_20260916@366de741)
-  alike, and no subname, wrapped or ENSv2; adding `authority=ens_v0,ens_v1`
-  keeps the ENSv1 leases and `authority=ens_v2` the ENSv2 registrations.
-  `parent=base.eth` with `namespace=basenames` selects the Basenames
-  second-level names. Both filters apply before paging. A value that names no
-  authority (`authority=,`), an unknown authority, an empty `parent`, a
-  `parent` that is not a valid name, or a repeated parameter other than
-  `expires_window` returns
-  `400 invalid_input`.
-- Response shape: `data` is an array of the same record-shaped rows
-  `GET /v1/search` serves: `name`, `display_name`, `namespace`, `namehash`,
-  `owner`, `manager`, `registration_status`, `registered_at`,
-  `created_at`,
-  `expires_at`, `grace_ends_at`, `authority` as `GET /v1/names/{name}` serves
-  it, and the `ens_v1` object while that `authority` is `ens_v1` or `ens_v0` (see
-  [the naming dictionary](api-v1.md#naming-dictionary)). Every row's exact
-  stored expiry falls in a requested window. With repeated windows, every row
-  also carries `expires_window_index` (0–31); scalar requests and search omit
-  that field. Membership uses the exact stored expiry, before public
-  whole-second formatting. `expires_at` is the served expiry of
-  [Expiry and grace](api-v1.md#expiry-and-grace): from the Universal Resolver
-  cutover a `.eth` name with a live ENSv2 entry is listed by that entry's
-  expiry, before it by its ENSv1 lease's. A name
-  whose exact-name authority is unsupported is omitted, as on search, because
-  a listing row carries no `unsupported_reason`.
-- Coverage: the listing serves [composed name rows](glossary.md#composed-name-row)
-  whose registration has a finite numeric expiry in Unix seconds, including
-  registrar leases, ENSv2 registrations, and wrapped subnames; `parent=eth`
-  narrows it to the `.eth` second-level names. The public
-  `expires_at` is a decimal string; the index and comparisons use exact numeric
-  seconds, never floating point or lexicographic string order. It selects a
-  page's names from the stored [name summary](glossary.md#name-summary), which
-  holds each name's exact listing selector: whether the name is listed, its
-  expiry and the public `authority` its row serves. One statement applies the
-  expiry bounds, `authority`, `parent` and the cursor and takes the first
-  `page_size + 1` names in the listing's order, through
-  `project_name_summary_expiry_idx` or
-  `project_name_summary_authority_expiry_idx`; only those names are composed.
-  For repeated windows, that statement selects at most `page_size + 1` keys
-  per window and takes the first `page_size + 1` across their ordered union,
-  then composes those names once under the page's shared snapshot.
-  A page therefore composes at most `page_size + 1` names however many names
-  the namespace holds or the filters leave out, though a sparse `parent` or a
-  second that many names share still reads many index entries. The selector
-  is written with each publication from the same composition the page runs;
-  a selected name whose composed row does not match is a failure
-  (`500 internal_error`), not a shorter page. A row with no finite registration expiry is outside this
-  listing. Finite values after year 9999, above `2^53 - 1` or above `i64::MAX`
-  remain eligible and keep every digit through filtering, sorting and paging.
-  A negative or malformed stored expiry is not a no-expiry sentinel.
-  The Sepolia root registry registers `eth` and `reverse` with the largest
-  uint64 expiry
-  (upstream: .refs/ens_v2_sepolia_20261001/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20261001@07e55a05)
-  (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ETHRegistry.ts:L39-L51 @ ens_v2_sepolia_20261001@07e55a05)
-  (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ReverseMirror.ts:L30-L42 @ ens_v2_sepolia_20261001@07e55a05).
-  Such contract-specific no-expiry registrations serve `expires_at: null`,
-  `expires_at_reason: "no_expiry"` and `grace_ends_at: null` across detail,
-  lookup and collections. Null expiry never matches a window; collections with
-  `sort=expires_at` treat a null as the smallest value, first ascending and
-  last descending. A row
-  without a registration context omits these fields. See
-  [Timestamp format and absent expiry](api-v1.md#timestamp-format-and-absent-expiry).
-- Released names: the listing means "registrations whose expiry falls in this
-  window", whether the registration is live, in grace or released. A released
-  name keeps the lapsed registration's expiry, so it appears in every window
-  that covers that old expiry: every released ENSv1 `.eth` lease, and an ENSv2
-  registration that lapsed by path expiry, whose registry entry still holds
-  the expiry. An ENSv2 registration ended by an explicit release loses its
-  expiry with the entry, so it is outside every window; `GET /v1/names/{name}`
-  serves it as `released` with `expires_at: null`,
-  `expires_at_reason: "released"` and `grace_ends_at: null`. A released row has
-  `registration_status: released`, its old `expires_at`, and
-  no `owner` or `manager`, and carries the
-  [`lapsed_registration`](api-v1.md#lapsed-registration) block with the ended
-  registration's last `owner`, as `GET /v1/names/{name}` serves it. A name in
-  grace has not lapsed: it keeps its current `owner` and carries no block. A
-  client that wants only held names filters rows on `registration_status`; one
-  that wants the names a given address last held asks
-  `GET /v1/addresses/{address}/names?relation=former_owner`.
-- Pagination behavior: standard collection pagination by `expires_at` in the
-  requested expiry order; namespace, name and namehash tie breakers remain
-  ascending in either direction. Cursors bind namespace, scalar bounds or the
-  complete ordered normalized window list, `authority`, `parent`, and order,
-  and hold the last row's position. Reordering, adding, removing or changing a
-  window invalidates the cursor; equivalent timestamp spellings are accepted.
-  Scalar and repeated-window cursors are not interchangeable, even for one
-  equivalent window. `page_size` may change within its 1–200 limit;
-  see [current-state list cursors](api-v1.md#current-state-list-cursors).
-  `page.total_count` is `null`.
-- Snapshot behavior: each page is read on one database snapshot of the
-  publication current when the request is admitted and discloses it in
-  `meta.as_of`. A continuation is not refused when a newer
-  publication has landed since the previous page: it returns the rows after the
-  cursor's position in the new publication, so a name renewed between pages can
-  appear twice or not at all. A publication that lands between admission and the
-  page's first read returns `409 stale` and the request can simply be retried,
-  with or without its cursor; a publication during the read does not affect the
-  page.
-  Historical replay through `at` is not supported.
-- Status semantics: an empty window returns `200` with empty `data`.
+- Purpose: bounded current-state discovery by a canonical registration's
+  `expires_at` or `grace_ends_at`, including ended registrations whose scheduled
+  dates are retained. Rows use the name dictionary shape served by search;
+  see [the naming dictionary](api-v1.md#naming-dictionary) and the
+  [sweep guide](guides/expiry-sweep.md).
+- Supply exactly one date family: scalar `expires_after`/`expires_before` or
+  repeated `expires_window`, or scalar `grace_ends_after`/`grace_ends_before`
+  or repeated `grace_ends_window`. A scalar request needs at least one nonblank
+  bound; a blank scalar is treated as absent. When both bounds are supplied,
+  `after` must be earlier than `before`. The lower bound is inclusive and the
+  upper bound exclusive. Bounds accept exact decimal Unix seconds or RFC 3339,
+  including offsets and up to nanosecond precision. Finite values beyond the
+  calendar range retain every digit. Public whole-second timestamp formatting
+  does not determine filtering, ordering, window membership or cursor positions.
+  Encode a literal `+` in an RFC 3339 offset as `%2B`.
+- Repeated windows require 1–32 disjoint `after..before` ranges, with both
+  bounds present and `after < before`; whitespace around each bound is ignored.
+  Adjacent windows are valid. Overlap, duplicates after normalization, missing
+  or malformed bounds, more than 32 windows, mixing date families, or mixing
+  repeated windows with scalar bounds return `400 invalid_input`. A scalar
+  parameter still counts as a conflicting parameter when its value is blank.
+  Only the selected window parameter may repeat; all other parameters are
+  single-valued.
+- `namespace` is required; omission returns `400 invalid_input` and an
+  unsupported namespace returns `404 not_found`. `authority` selects an
+  unordered comma-separated set of served authority values using the grammar
+  of [address names](#get-v1addressesaddressnames); rows that serve no authority
+  match no set. `parent` selects names exactly one label below the supplied
+  ENSIP-15-normalized name by served spelling, including its
+  [rendered-name](glossary.md#rendered-name) rules, not registry topology.
+  `parent=eth` selects second-level `.eth` names and excludes deeper subnames.
+  Both filters apply before paging. Empty or invalid parents and invalid
+  authority sets return `400 invalid_input`.
+- A proved canonical allocation remains discoverable when current authority is
+  unprojected with exactly `current_authority_not_projected`. Its lifecycle fields
+  agree with detail and lookup; coverage, resolver and current-control restrictions
+  remain unchanged. Other unsupported reasons, absent allocation evidence and
+  nonfinite deadlines remain excluded.
+- `sort` defaults to the selected deadline: `expires_at` or `grace_ends_at`.
+  An explicit sort must match that family. Results are globally ordered by
+  that exact stored deadline, then namespace, rendered name and namehash.
+  `order=desc` reverses only the deadline direction; tie keys always ascend.
+  `order` defaults to `asc`. Page size is 1–200, default 50, and
+  `page.total_count` is null. Only current state is supported: `at` is rejected,
+  and `finality` must be omitted or `latest`.
+- A repeated-window request adds only its selected `expires_window_index` or
+  `grace_ends_window_index` (0–31), identifying the original zero-based input
+  window, even when only one window was supplied. Input window order does not
+  change result order. Scalar requests and other routes omit both fields.
+- Coverage: names with a finite canonical registration deadline are eligible,
+  including ended registrations. Classified null or omitted deadlines never
+  match. Unsupported names are omitted because these rows carry no
+  `unsupported_reason`; partial names retain their established eligibility and
+  field omissions. The stored selector applies bounds, filters and cursor
+  before selecting at most `page_size + 1` names for composition. A repeated
+  request selects at most that many narrow keys per window, then composes only
+  the global first `page_size + 1` once. Namespace/deadline and
+  namespace/authority/deadline indexes support both families. Composition is
+  bounded even when a sparse parent filter or many names sharing a deadline
+  require inspecting more narrow keys; the database chooses the query plan.
+  A mismatch between a selected stored deadline and its composed row fails
+  with `500 internal_error` rather than returning a shortened page.
+- Each page reads one publication snapshot. Its cursor binds the date family,
+  exact normalized bounds or all normalized windows in their supplied order,
+  namespace, parent, authority and ordering. Its position preserves the exact
+  selected deadline and tie keys. Changing the family, bounds, window order or
+  filters, supplying a malformed or incomplete cursor, or reusing an old
+  expiry-only cursor returns `400 invalid_input`. Restart pagination after
+  adopting this lifecycle release. Page size may change between requests.
+  Continuation reads the current publication; it does not freeze the first
+  page's publication or introduce a historical snapshot guarantee.
+- `status`, `expires_at`, `grace_ends_at`, public registration identity,
+  authority and holder data agree with name detail at that publication.
+  Lifecycle status uses the publication timestamp and the shared equality
+  rules in [Expiry and grace](api-v1.md#expiry-and-grace), never the request's
+  wall clock. Passing expiry or grace does not change the canonical scheduled
+  dates or registration handle. An explicit unregister keeps its scheduled
+  dates and immediately serves `status=released`; use
+  `lapsed_registration.release_kind` to distinguish its cause. The last ended
+  instance remains until a new registration supersedes it. Neither date
+  family implies current ownership or notification eligibility. This route
+  does not accept `include_expired`; date membership includes active, expired
+  and released registrations with eligible finite deadlines.
 
 ### `GET /v1/names/{name}`
 
@@ -866,7 +804,7 @@ collection route carry neither header.
   as `page.total_count`), and `record_count`, the known record-selector count
   of the current registration's record inventory with the same meaning as on
   address-name rows; `record_count` is omitted when the row has no current
-  record inventory. Neither count is added to any `status=unsupported`
+  record inventory. Neither count is added to any `read_status=unsupported`
   name-level record, including a verified unsupported record that retains its
   registration fields. There is no `event_count`: bigname keeps no
   precomputed per-name event total, and counting history rows on the request
@@ -879,18 +817,15 @@ collection route carry neither header.
   them. Historical profiles without counts retain their existing behavior.
 
 - Response shape: `data` is one flat record object using dictionary fields.
-  Every name-level record with `status=unsupported` omits `subregistry`,
-  including verified unsupported records that retain registration fields;
-  the same withholding applies to batch-lookup name-level records.
-  Every name-level record with `status=unsupported` omits `subregistry`,
-  including verified unsupported records that retain registration fields;
-  the same withholding applies to batch-lookup name-level records.
-  Every name-level record with `status=unsupported` omits `subregistry`,
+  `read_status` describes the read result; `status` is the registration
+  lifecycle (`active`, `expired`, `released`, or `unregistered`) at the
+  publication timestamp, independently of current control.
+  Every name-level record with `read_status=unsupported` omits `subregistry`,
   including verified unsupported records that retain registration fields;
   the same withholding applies to batch-lookup name-level records.
   The registration summary is not nested; it is represented by
   `registration_id`, `token_id`, `owner`, `manager`,
-  `registered_at`, `created_at`, `expires_at`, and `registration_status` on
+  `registered_at`, `created_at`, `expires_at`, and `status` on
   the same object when backed, plus the `ens_v1` object while `authority` is
   `ens_v1` or `ens_v0`. For a `.eth` second-level name
   `registration_id` is the BaseRegistrar lease whether or not the name is
@@ -901,8 +836,10 @@ collection route carry neither header.
   with its last `owner` and how it ended; see
   [lapsed registration](api-v1.md#lapsed-registration) for the supported causes,
   pinned contract evidence, and expiry/grace field rules. It serves no current
-  `owner`. The block is omitted for names that are not released and for other
-  release causes. `ens_v1` is `{expires_at, wrapper_state?, wrapper_fuses?,
+  `owner`. This historical block can coexist with an `active` or `expired`
+  canonical reservation schedule; it describes the ended authority instance,
+  not the lifecycle of that schedule. It is omitted when no supported ended
+  registration is established. `ens_v1` is `{expires_at, wrapper_state?, wrapper_fuses?,
   wrapper_expires_at?, wrapper_expires_at_reason?}`:
   `expires_at` is the BaseRegistrar lease's own expiry, `null` without a
   lease, which after the Universal Resolver cutover can differ from the
@@ -910,45 +847,46 @@ collection route carry neither header.
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L96-L98 @ ens_v1@91c966f)
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UniversalResolverV2.sol:L55-L63 @ ens_v2_sepolia_20260916@366de741)
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L326-L329 @ ens_v2_sepolia_20260916@366de741)
-  An ENSv1 wrapper-backed name's `ens_v1` also carries
-  `wrapper_state` with the current [`wrapped`](glossary.md#wrapped-namewrapper-state),
-  [`emancipated`](glossary.md#emancipated-namewrapper-state), or
-  [`locked`](glossary.md#locked-namewrapper-state) lifecycle value and the typed
-  `wrapper_fuses` object defined in [`api-v1.md`](api-v1.md#naming-dictionary).
-  Neither field is served at the top level, and an `ens_v2` name has no
-  `ens_v1` object.
-  The tristate is bigname vocabulary derived from the enforcing NameWrapper
-  guards, not an upstream enum. Both fields are omitted after an emancipated or
-  locked wrapper position expires; a plain wrapped position remains `wrapped`
-  with `wrapper_fuses.fuses=0` and every named boolean false because expiry
-  clears its fuses without clearing its owner.
+  An ENSv1 name's `ens_v1.wrapper_state` describes six states: `wrapped`,
+  `emancipated`, `locked`, `lapsed`, `unwrapped`, and `unknown`. The first
+  three are backed NameWrapper states and carry the typed `wrapper_fuses`
+  object defined in [`api-v1.md`](api-v1.md#naming-dictionary). `lapsed`
+  means an emancipated or locked position is past its own wrapper expiry;
+  its wrapper expiry remains visible, but current wrapper ownership, manager,
+  permissions and fuses are withheld. A plain wrapped position past that
+  expiry remains `wrapped` with `wrapper_fuses.fuses=0` and every named
+  boolean false because expiry clears its fuses without clearing its owner.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
-  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L848 @ ens_v1@91c966f)
-  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L849 @ ens_v1@91c966f)
-  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L852 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L848-L852 @ ens_v1@91c966f)
+  `unwrapped` records a proven burn or unwrap and omits the old wrapper
+  expiry and fuses; independent registry facts can still be served. `unknown`
+  records incomplete wrapping evidence without inventing a current holder,
+  manager, fuse word or wrapper expiry. Genuinely inapplicable or partial
+  lifecycle-shadow rows can omit wrapper fields. None of these fields is
+  served at the top level, and an `ens_v2` name has no `ens_v1` object.
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1032 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269-L279 @ ens_v1@91c966f)
+  This vocabulary is derived from admitted lifecycle evidence and enforcing
+  NameWrapper guards; it is not an upstream enum or an equivalent of every
+  `isWrapped` helper. The `.eth` helper also checks the BaseRegistrar owner.
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L748-L783 @ ens_v1@91c966f)
   `ens_v1.wrapper_expires_at` is the NameWrapper entry's own stored expiry,
   with `wrapper_expires_at_reason` when it is `null`, as in wrapper
-  `restrictions`. It is present whenever the name has a current NameWrapper
-  entry: beside `wrapper_state` while the wrapper is backed, and still present,
-  in the past, after an emancipated or locked position lapses and the two
-  fields above are omitted. A plain wrapped position past expiry keeps
-  `wrapper_state: wrapped` and serves the past expiry beside it. A name with no
-  NameWrapper entry omits it, and so does a registry child listed without a
-  name row, whose `ens_v1` carries no wrapper fields, so absence alone does
-  not prove the name is unwrapped. It is not the lease plus 90 days: a renewal
-  through an ENSv1 `ETHRegistrarController` that calls only
+  `restrictions`. It is retained beside backed states and `lapsed`, and a
+  plain wrapped position past expiry keeps the past value. A registry child
+  listed without a name row carries no wrapper fields, so absence alone does
+  not prove the name is unwrapped. The value is not the lease plus 90 days:
+  a renewal through an ENSv1 `ETHRegistrarController` that calls only
   `BaseRegistrar.renew` leaves it unchanged while `ens_v1.expires_at` moves on.
   (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L352-L368 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L312-L337 @ ens_v1@91c966f)
-  A name whose latest NameWrapper lifecycle event is an unwrap omits it, even
-  where `wrapper_state` is still served: the burnt entry keeps its expiry, but
-  it is no longer the name's current one.
-  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1032 @ ens_v1@91c966f)
-  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269-L279 @ ens_v1@91c966f)
-  Known gap: a receiver contract that unwraps inside the mint callback of the
-  wrap produces mint, burn, `NameUnwrapped`, `NameWrapped`; bigname records
-  that as wrapped, so the wrapper fields, this expiry and the `restrictions`
-  expiry included, are served although the token is burnt.
+  Callback completion is reconciled at the complete transaction boundary.
+  A receiver can unwrap during mint, producing mint, burn, `NameUnwrapped`,
+  then the outer `NameWrapped`. Bigname matches nested mint/completion frames
+  by admitted wrapper instance, namespace, transaction and node: that late
+  outer completion cannot resurrect a burned token, while a successful
+  nested rewrap retains its newer owner and fuse state. Partial transaction
+  prefixes do not establish the final current wrapper state.
   (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L257-L266 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L903 @ ens_v1@91c966f)
   Fuse-effect gating accepts the full upstream `uint64` expiry domain. A valid
@@ -961,10 +899,11 @@ collection route carry neither header.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L57 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L848 @ ens_v1@91c966f)
-  A `.eth` second-level name keeps its lifecycle value during the registrar
-  grace period, even though owner modification and transfer powers stop at the
-  earlier grace boundary; `wrapper_state` is not itself a complete permission
-  summary. (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L48 @ ens_v1@91c966f)
+  A `.eth` second-level name can retain a backed wrapper state during
+  registrar grace, but its own wrapper expiry independently determines lapse.
+  Wrapper expiry equality retains the position; lapse occurs strictly after
+  it. Owner modification and transfer powers can stop earlier, so
+  `wrapper_state` is not itself a complete permission summary. (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L48 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L218 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L221 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L820 @ ens_v1@91c966f)
@@ -973,11 +912,13 @@ collection route carry neither header.
   lookup records, `GET /v1/names` and search rows, subname rows and
   address-name rows by the rule in
   [Manager](api-v1.md#manager): the registry owner of a name with no
-  NameWrapper state and the `owner` (the NameWrapper token holder) of a wrapped
-  name in any `ens_v1.wrapper_state`, except while a wrapped `.eth`
+  NameWrapper state or a proven `unwrapped` state, and the
+  `owner` (the NameWrapper token holder) of a name in `wrapped`,
+  `emancipated`, or `locked`, except while a wrapped `.eth`
   second-level name is in its registrar grace period. It is absent then,
-  wherever the address it copies is absent, and on `profile=feed` lookup records, which
-  carry no registration fields beyond expiry and grace. No null placeholder is emitted. `authority` names where the chain
+  for `lapsed` or `unknown` wrapper state, wherever the address it copies is
+  absent, and on `profile=feed` lookup records, which
+  carry lifecycle status, expiry and grace but no owner or manager. No null placeholder is emitted. `authority` names where the chain
   reads the current registration fields from: `ens_v2` or `ens_v1`, read from
   the projection's selected [authority epoch](glossary.md#authority-epoch), or
   `ens_v0` for an ENSv1 name whose registry record is still read from the 2017
@@ -991,7 +932,7 @@ collection route carry neither header.
   `ens_v0` name keeps every field it would have as `ens_v1`, including a
   registry-only name's `registration_id`. `authority` is omitted for Basenames
   names, on a supported, unregistered ownerless registry row, and on the
-  `status=unsupported` identity-only object. A zero registry owner does not
+  `read_status=unsupported` identity-only object. A zero registry owner does not
   remove `authority` supplied by a retained registrar binding. `migrated_at` is present only when ENSv2 is the currently selected
   `authority` and the name's history retains an activated `MigrationApplied`
   [migration boundary](glossary.md#migration-boundary): it is the decimal Unix-seconds block
@@ -1001,7 +942,7 @@ collection route carry neither header.
   registered in ENSv2 has `authority=ens_v2` and no `migrated_at`. The
   name-profile portion uses `name`, `display_name`, `namespace`, `namehash`, `resolver`,
   `subregistry`, `records`, `primary_name`, `primary_address`, `chain_id`,
-  `network`, `status`, and
+  `network`, `read_status`, and
   `unsupported_reason`/`failure_reason`/`unsupported_fields` when those fields
   are served. `unsupported_fields` can only name `primary_address`; the
   record categories report what is known inside
@@ -1030,12 +971,12 @@ collection route carry neither header.
   entry or singleton value. The verified lookup does not read the forward
   `name` record, so verified `records` never carries or lists `name`. `primary_address` is the `addr:60`
   answer, omitted and listed in `unsupported_fields` when that key could not be
-  served; the name-level `status` and reason come from the answers. The set is not an enumeration of every text key or coin type
+  served; the name-level `read_status` and reason come from the answers. The set is not an enumeration of every text key or coin type
   the resolver holds; read others through the records route with `keys`. A
   name that is not eligible to serve resolver records (no current
   registration and no classified serving path, for example a released name, a
   reservation, or an unbound `current_authority_not_projected` row) requests
-  no key, dispatches no call, and returns `status=unsupported` with
+  no key, dispatches no call, and returns `read_status=unsupported` with
   `verified_records_not_supported`. So does a name whose surface stores no raw
   label bytes unless every label has verified bytes (see the refusal reasons
   under [`GET /v1/names/{name}/records`](#get-v1namesnamerecords)). An inventory-derived set above 200 keys
@@ -1046,7 +987,7 @@ collection route carry neither header.
   Each requested key is one record call; a route that follows CCIP-Read can
   add continuation calls per key. The registration and identity summary
   fields (`registration_id`, `token_id`, `owner`, `manager`, dates,
-  `registration_status`, `authority`, `ens_v1`,
+  `status`, `authority`, `ens_v1`,
   `migrated_at`, `name`, `display_name`, `namespace`, `namehash`,
   `resolver`, `primary_name`, `chain_id`, and `network`) remain indexed
   projection values because they are not resolver records. Verified responses
@@ -1058,15 +999,15 @@ collection route carry neither header.
   newer; an anchor at the same height must have the same block hash. They create
   no legacy trace or reusable execution outcome. Provider connect, DNS, TLS,
   connection-reset, and other transport failures abort the whole request with
-  `500 internal_error`; they are not flat-record `status=stale` results. On a
+  `500 internal_error`; they are not flat-record `read_status=stale` results. On a
   `200` name-profile response,
-  `status` is the flat-record result: `ok` for clean indexed reads; `failed`
+  `read_status` is the flat-record result: `ok` for clean indexed reads; `failed`
   and `stale` may appear only when `source=verified` cannot serve the verified
   sections. `unsupported` is keyed on the projected row's own coverage status,
   not on a list of reasons: any row whose `coverage.status=unsupported` returns
-  `200` with `status=unsupported` and the minimal identity-only object below.
+  `200` with `read_status=unsupported` and the minimal identity-only object below.
   The single exception is `current_authority_not_projected`, which keeps the
-  ratified partial `status=ok` described at the end of this section. Every other
+  ratified partial `read_status=ok` described at the end of this section. Every other
   unsupported reason downgrades, including the retired
   `conflicting_current_ens_authority` and
   `independent_ens_deployments_overlap` on a row derived before the
@@ -1075,23 +1016,27 @@ collection route carry neither header.
   an unsupported reason this build does not recognize, so a reason added to the
   projection later serves `unsupported` by default rather than silently serving
   `ok` ([#487](https://github.com/ensdomains/bigname/issues/487)). A proven
-  migration boundary returns the selected ENSv2 registration and `status=ok`;
+  migration boundary returns the selected ENSv2 registration and `read_status=ok`;
   it does not expose the retained ENSv1 registration as current. `failure_reason`
   or `unsupported_reason` carries the product reason when available;
   `not_found` and `invalid_name` are unreachable in-record. The unsupported
   object retains only `name`, `display_name`, `namespace`,
-  `namehash`, `status`, and `unsupported_reason`; registration, control,
+  `namehash`, `read_status`, and `unsupported_reason`; registration, control,
   lifecycle, resolver, record, relation, permission, and primary-name fields
   from both source families are omitted.
-  A row classified as `registration_status=unregistered` always omits
-  `registration_id`. It also omits `resolver` and resolver-record fields unless
-  it is
+  A row carries `registration_id` only with an established
+  [public registration identity](api-v1.md#registration-identity-of-wrapped-names),
+  independently of lifecycle status. An ownerless allocation may be `active`,
+  `expired`, or `released` without a qualifying identity or `registered_at`,
+  while legitimate ended or continuous identities retain their handle and
+  start. Without current control, the row omits `resolver` and resolver-record
+  fields regardless of status or handle unless it is
   an ownerless ENSv1 or Basenames registry row whose current registry resolver
   pointer is retained (a [serving resource](glossary.md#serving-resource)), or
   an ENSv2 TLD with a current
   [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
   and no projected authority.
-  For that classified row, indexed name detail serves the resolver and records
+  For that row, indexed name detail serves the resolver and records
   present in its serving resource's inventory. `source=verified` executes lookup
   through the surviving resolver when the ordinary lookup capability supports
   it. Neither path acquires registration identity or control.
@@ -1101,7 +1046,7 @@ collection route carry neither header.
   resolver whose implementation is not an admitted profile, still lists its
   keys in `records` but maps none of them, and omits `primary_address` and
   lists it in `unsupported_fields` exactly as a missing inventory does;
-  `status` and `resolver` keep following the name row, and
+  `read_status` and `resolver` keep following the name row, and
   `GET /v1/names/{name}/records` serves the per-key reason.
   An ownerless ENSv2
   reservation does not meet this exception, even if identity attached to a
@@ -1115,14 +1060,16 @@ collection route carry neither header.
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
   For `source=indexed`, a row classified as
-  `current_authority_not_projected` remains `status=ok` for the identity and
+  `current_authority_not_projected` remains `read_status=ok` for the identity and
   registration fields that can be served, but omits `resolver`; retained
   resolver-pointer evidence is not presented as current authority. The one
   exception is an ENSv2 TLD whose current
   [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
-  is its serving resource: the row stays `current_authority_not_projected` and
-  unregistered, has no `registration_id`, and `resolver` and the
-  resolver-record fields are served from that pointer and its inventory.
+  is its serving resource: the row stays `current_authority_not_projected`,
+  follows any proved canonical allocation's lifecycle status and dates (or is
+  unregistered without one), and serves `resolver` and resolver-record fields
+  from that pointer and its inventory. The pointer supplies neither an unproved
+  `registration_id` nor current control.
   `authority` is omitted unless the name's history selected an arm, which a
   row with no selected binding can still carry.
   An ownerless ENSv1 or Basenames registry row with a zero [getter-visible
@@ -1212,7 +1159,7 @@ its value map:
 - Indexed `records` is present when the name may serve resolver records and
   its serving resource has an inventory row; verified `records` is present
   when the name is eligible for verified reads. It is omitted otherwise,
-  including on the `status=unsupported` identity-only object.
+  including on the `read_status=unsupported` identity-only object.
 - `primary_address` stays a top-level field: the name's `addr` answer for its
   primary coin type. Indexed `records.addresses` holds only exact observed
   writes and never synthesizes the ENSIP-19 default-address fallback, while
@@ -1778,7 +1725,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 | `match` | query | enum NameMatch | no | `prefix` | Prefix or substring matching for q. |
 | `sort` | query | enum `name`, `expires_at`, `registered_at` | no | `name` | Row sort key; ties use the route's stable identity order. |
 | `order` | query | enum SortOrder | no | `asc` | Ascending or descending result order. |
-| `include_expired` | query | boolean | no | `true` | Whether released and already-expired children are included. Evaluation uses the published block timestamp. |
+| `include_expired` | query | boolean | no | `true` | Include children whose lifecycle status is expired or released. False excludes both at the publication timestamp, using the shared lifecycle equality rules; unregistered and expiry-less children keep their existing eligibility. |
 | `include` | query | array of enum `counts` | no | none | Comma-separated expansion names; unlisted values are invalid. |
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
 | `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
@@ -1825,17 +1772,22 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   whole `name` sort, break
   by served name and then by child identity. Any other `sort` or `order` value
   returns `400 invalid_input`.
-  `include_expired` defaults to `true`, which is the route's prior behaviour:
-  released children and children whose `expires_at` has passed are listed with
-  their `registration_status` and `expires_at` as served. `include_expired=false`
-  omits a child whose current registration status is `released` or whose
-  `expires_at` is earlier than the published block's timestamp used for the page. A child with no registration or no expiry — an unregistered subname, or
-  one under a parent that carries no expiry — is not expired and stays. bigname
-  applies no grace period here: the comparison is against the served
-  `expires_at`. Any other value returns `400 invalid_input`.
+  `include_expired` defaults to `true`: the last ended registration remains
+  listable until a later registration supersedes it, subject to the route's
+  other eligibility rules. `include_expired=false` omits children whose
+  lifecycle `status` is `expired` or `released` at the publication timestamp.
+  It follows the same expiry/grace and exact-equality boundaries as name
+  detail; it does not apply a separate strict comparison against `expires_at`
+  or use the request's wall clock. See
+  [Expiry and grace](api-v1.md#expiry-and-grace). A supported child with no
+  registration or no expiry retains its existing eligibility: an
+  `unregistered` child is not excluded merely for lacking a date. Partial
+  registry children retain the field omissions and released-lease rules below.
+  This filter does not promise current ownership or renewal eligibility.
+  Any value other than `true` or `false` returns `400 invalid_input`.
 - Response shape: `data` is an array of dedicated subname rows in dictionary
   vocabulary: `name`, `display_name`, `namespace`, `namehash`, `labelhash`,
-  `owner`, `manager`, `registration_status`, `registered_at`,
+  `owner`, `manager`, `status`, `registered_at`,
   `created_at`, `expires_at`, and `authority`, and the `ens_v1` object while the
   child's `authority` is `ens_v1` or `ens_v0`: a subname has no lease, so its
   `ens_v1.expires_at` is `null`, and a wrapped one carries its NameWrapper
@@ -2296,7 +2248,7 @@ There is no action query parameter; the existing type, kind and record-key filte
 
 | Retained row | Type / action and additional fields |
 | --- | --- |
-| Explicit wrap / unwrap authority epoch | `authority` / `name_wrapped` or `name_unwrapped`: owner, node, retained fuses and expiry. Literal zero owner is preserved. The derived wrap transfer row is selected only for two different proven nonzero owners; actual token transfers remain independent rows. |
+| Explicit wrap / unwrap authority epoch | `authority` / `name_wrapped` or `name_unwrapped`: owner, node, retained fuses and expiry. Literal zero owner is preserved. A validated later completion may supply these wrap fields at the actual mint position. The derived wrap transfer row is selected only for two different proven nonzero owners; actual token transfers remain independent rows. |
 | Account-wide operator approval | `permission` / `operator_approval_changed`: owner, operator as address, approved, account grant_scope and retained powers. No token-specific powers are inferred. |
 | Reservation | `reservation` / `registration_reserved`: exact token_id, proven canonical_id, retained expiry/node. A topology restatement uses `reservation_became_reachable`, describing the triggering reachability event rather than a new reserve transaction. |
 | Resolver record link | `resolver` / `resolver_record_linked`: resolver, node, exact record_id and retained dns_encoded_name. Record ID "0" is an unlink and remains present. A link is not a record write or a resolver pointer change. |
@@ -3599,7 +3551,8 @@ introduces it rebuilds Project from full history before serving the option; see
   `owner` lists the name for the new holder and `manager` for the previous
   registry owner until the holder calls `reclaim`
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f). `manager` matches the address the row serves as `manager`, in
-  every wrapper state outside the registrar grace period of a wrapped `.eth`
+  backed wrapper states (`wrapped`, `emancipated`, and `locked`) outside the
+  registrar grace period of a wrapped `.eth`
   second-level name ([Manager](api-v1.md#manager) lists the known cases where
   the relation and the field differ). The storage
   relations map as token-holder -> `owner`, effective-controller -> `manager`,
@@ -3624,23 +3577,27 @@ introduces it rebuilds Project from full history before serving the option; see
   it. `dedupe=name` groups by name surface and is the
   default; `dedupe=registration` groups by registration resource on the authority
   and `resolves_to` listings.
-  `relation=former_owner` lists the released names whose ended
+  `relation=former_owner` lists names whose ended
   registration the path address last held, for renewal reminders: an ENSv1
   lease that lapsed past its grace, or an ENSv2 registration that expired or was
   unregistered (the row's `lapsed_registration.owner`; see
   [lapsed registration](api-v1.md#lapsed-registration)). Only those
-  registrations lapse; a subname with no registrar lease never lists here, and
-  a name still in its grace period has not lapsed and lists under `owner`. It
+  registrations supply this history; a subname with no registrar lease never
+  lists here. An ENSv1 lease still in registrar grace retains its holder; an
+  ENSv2 canonical grace schedule can continue after current control ends. It
   stands alone like `resolves_to`: combined with another relation or `any` it
   returns `400 invalid_input`, `any` never includes it, and it never feeds
   `owner`, `manager` or a permission. A re-registration of the name drops
-  it. Rows carry `relations: ["former_owner"]`, `registration_status:
-  released`, the ended registration's `expires_at` and `grace_ends_at`, and the
-  `lapsed_registration` block, and no current `owner` or `manager`. The read
+  it. Rows carry `relations: ["former_owner"]`, the canonical lifecycle
+  `status`, `expires_at` and `grace_ends_at`, and the `lapsed_registration`
+  block, with no current `owner` or `manager`. The history block can coexist
+  with an `active` or `expired` canonical reservation schedule. Explicit
+  ENSv2 unregister immediately serves `status=released`, retains the ended
+  instance's known scheduled dates, and carries
+  `lapsed_registration.release_kind=unregistered`. The read
   takes `expires_after` (inclusive) and `expires_before` (exclusive) as decimal
   Unix-seconds or RFC 3339 bounds on `expires_at`, which only this relation
-  accepts; a row without a finite expiry (an explicitly unregistered ENSv2 name serves null with
-  reason `released`) is outside every window. It sorts by
+  accepts; a row without a finite expiry is outside every window. It sorts by
   `expires_at` only (`sort=expires_at` is the default here; any other value is
   `400 invalid_input`), ties broken by namespace, name and namehash, with null
   expiry as the smallest value, first ascending and last descending. Finite values and cursor
@@ -3649,12 +3606,13 @@ introduces it rebuilds Project from full history before serving the option; see
   `authority`, `is_migrated`, `q` and nonempty `include` return `400 invalid_input` with
   it; `parent` applies as on the other relations. Only name deduplication is supported: omitted `dedupe` and `dedupe=name`
   are equivalent; `dedupe=registration` returns `400 invalid_input`, including
-  with a continuation cursor. Released names have no current registration resource
+  with a continuation cursor. These ended registrations have no current resource
   by which this relation can group them. `page.total_count` is `null`. Its cursor binds the address,
   namespace, both bounds, `parent` when sent, and order, and holds the last row's position, as on
-  `GET /v1/names`. An app looking for names still renewable in grace asks for
-  `expires_after` at `now` minus the longest grace and checks `grace_ends_at`
-  and the contract's own renewal rules: an explicitly unregistered ENSv2
+  `GET /v1/names`. For grace-deadline discovery across names, use the
+  `grace_ends_after`/`grace_ends_before` selector on `GET /v1/names`. A
+  scheduled grace date alone does not prove renewability: check lifecycle,
+  terminal cause, and the contract's renewal rules. An explicitly unregistered ENSv2
   name cannot be renewed through the ETHRegistrar, whose grace renewal requires
   a retained latest owner; unregister burns that owner and advances the token
   version.
@@ -3714,7 +3672,7 @@ introduces it rebuilds Project from full history before serving the option; see
   `include=total_count` returns `400 invalid_input`.
 - Response shape: `data` is an array of record-shaped rows with `name`,
   `display_name`, `namespace`, `namehash`, `owner`, `manager`,
-  `registration_status`, `registered_at`, `created_at`, and `expires_at`.
+  `status`, `registered_at`, `created_at`, and `expires_at`.
   Address-name rows also return `permission_resource_id`, the handle
   `GET /v1/permissions?registration_id=` resolves to the permission authority
   resource behind the row's inline summary. While the name retains a current
@@ -3872,7 +3830,8 @@ introduces it rebuilds Project from full history before serving the option; see
   address relation can be established and the name is structurally absent;
   callers use name detail or batch lookup for its status: a downgraded row
   carries its `unsupported_reason`, and a `current_authority_not_projected`
-  row is served `status=ok` and `registration_status=unregistered`.
+  row is served `read_status=ok`, with `status=unregistered` only when no canonical
+  allocation is proved. A proved allocation does not establish a current relation.
   A name bigname has never materialized as a
   [name surface](glossary.md#surface-name-surface) has no current name row.
   On the ENSv1 arm an admitted `NewOwner` creates a surface without raw label
@@ -3901,7 +3860,7 @@ introduces it rebuilds Project from full history before serving the option; see
   `permission_resource_id` the node's registry-only resource. The registry
   records no lease for it, so `registered_at`, `created_at`,
   `expires_at`, and `migrated_at` are absent,
-  `registration_status` is the value the subnames route serves for a child with
+  `status` is the value the subnames route serves for a child with
   no name row, and `is_primary` is `false`. `authority` is the registry
   generation that owns the node: `ens_v1`, or `ens_v0` while only the 2017
   registry holds its record, because the current registry's `owner(node)` and
@@ -4451,20 +4410,16 @@ introduces it rebuilds Project from full history before serving the option; see
   registration: a migrated name uses its ENSv2 owner, manager, status, and
   expiry. Each result carries the `authority` its name detail serves, and a
   name that ENSv1 decides carries the `ens_v1` object, as on
-  `GET /v1/names`. A name whose exact-name projection is unsupported is omitted from
-  search results whatever the reason. Today that is a name with no selected
-  current binding (`current_authority_not_projected`, for example when both
-  arms have only history and nothing is open), or a row an earlier Project
-  generation derived with a retired reason. A mixed-history name is served like
-  any other name when its selected exact-name projection is supported.
-  Search carries no row-local status or
-  unsupported-reason field, so it omits such a name rather than serving
-  registration fields no selected authority backs; callers use name detail or
-  batch lookup for an omitted name's status: a downgraded row carries its
-  `unsupported_reason`, and a `current_authority_not_projected` row is served
-  `status=ok` and `registration_status=unregistered`. The
-  omission is applied before paging, so returned counts, page order, and cursor
-  continuation all reflect the same filtered set.
+  `GET /v1/names`. An unsupported exact-name projection is omitted unless its
+  reason is exactly `current_authority_not_projected` and composition has selected
+  an admitted canonical allocation. That exception serves the allocation's
+  lifecycle fields even without a current binding; it leaves coverage unsupported
+  and does not establish ownership, permissions or resolver access. Finite dates
+  or a lifecycle string alone are insufficient evidence. The same rule governs
+  both deadline-list families, whose finite-date requirements still apply.
+  Detail and lookup keep their partial `read_status=ok`; without allocation
+  evidence they remain `status=unregistered`. Every other unsupported reason is
+  omitted before paging, so counts, order and cursors use the same filtered set.
 - Pagination behavior: standard collection pagination. Without an explicit
   namespace, the cursor binds the deployment-derived namespace set and is
   rejected if that set changes.
@@ -4742,18 +4697,20 @@ For a registrar lease first identified by a later readable observation, registra
   `{kind: "ensv1_registry", registry: {chain_id, address}}` names the ENSv1
   registry whose resolvers answer for the names bound to it; `bound_names`
   still lists this resolver's own bindings, not the mirrored ENSv1 resolvers'.
-  Those rows use the same `ens_v1` object as exact-name detail; its optional,
-  atomic `wrapper_state` and `wrapper_fuses` are present only for a current
-  ENSv1 NameWrapper registration at the served projection timestamp.
+  Those rows use the same `ens_v1` object as exact-name detail, including its
+  six-state `wrapper_state`. Effective `wrapper_fuses` appear only with
+  `wrapped`, `emancipated`, or `locked`; `lapsed` retains the wrapper expiry,
+  while proven `unwrapped` and incomplete `unknown` states do not invent
+  current wrapper fields.
   Once exact-name authority is activated, `bound_names` includes a logical
   name only under the resolver selected by its current registration. A
   migrated name is absent from its superseded ENSv1 resolver's listing, and a
   mixed-history name whose selected arm has a current registration is listed
   like any other name. This nested collection adds no row-local
   mixed-authority status, so callers use name detail or batch lookup for the
-  name's status (a downgraded row carries its `unsupported_reason`; a
-  `current_authority_not_projected` row is served `status=ok` and
-  unregistered). A row classified as
+  name's `read_status` (a downgraded row carries its `unsupported_reason`; a
+  `current_authority_not_projected` row is served `read_status=ok` and
+  unregistered when no canonical allocation is proved). A row classified as
   `current_authority_not_projected` is absent from `bound_names` unless its
   serving resource is a TLD's root-registry resolver pointer; otherwise
   retained resolver-pointer evidence does not establish listing membership.

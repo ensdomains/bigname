@@ -181,8 +181,8 @@ def main():
             row = result["body"]["data"]
             assert row["namehash"] == sample["namehash"], result
             assert row["owner"].lower() == sample["owner"].lower(), result
-            expected_registration = "wrapped" if args.epoch == "bytes" and sample["byte_observation"] == "valid" else "registered"
-            assert row["registration_status"] == expected_registration, result
+            # Every sampled node is a held allocation in both epochs, so its lifecycle is active.
+            assert row["status"] == "active", result
             if args.epoch == "structural":
                 assert row.get("expires_at") is None and row.get("registered_at") is None, result
             if sample["direct_children"]:

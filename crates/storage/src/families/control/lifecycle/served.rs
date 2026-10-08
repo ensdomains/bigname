@@ -11,7 +11,7 @@ use super::{
     Clock, NameFacts, ShadowName,
     admission::{Authority, Probe, REGISTRAR, StagedName},
     control::{control_owner, served_owner},
-    expiry::{choose, classify_expiry, grace_ends_at, live_entry},
+    expiry::{choose, classify_expiry, live_entry},
     laterals::{
         authority_context, expiry_event, latest_event_kind, migrated_lease, registered_at,
         registrant, registrar_resource,
@@ -279,9 +279,6 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
 
     let wrapper_row = event_resource.and_then(|resource| facts.wrappers.get(resource));
     let effective = wrapper_row.map(|row| effective_wrapper(row, clock.timestamp_seconds));
-    let owner_lapsed = effective
-        .as_ref()
-        .is_some_and(|wrapper| wrapper.owner_lapsed);
     // A wrapped ENSv1 name with no registrar lease expires with its NameWrapper entry.
     let wrapper_fallback = wrapper_row
         .filter(|row| row.wrapper_state.is_some() && !is_v2)
@@ -337,7 +334,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     // The expiry and renewal grace the name serves: after the Universal Resolver cutover a live
     // ENSv2 entry's, whatever arm holds authority (`expiry::choose`).
     let entry = live_entry(facts, &tagged)?;
-    let (registration_expiry, grace) = choose(
+    let (registration_expiry, _grace) = choose(
         facts,
         is_v2,
         registration_expiry,
@@ -366,6 +363,13 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     };
     trace.insert("registrant_position".into(), registrant_position);
     let context = authority_context(facts, &authority, &in_scope, is_v2, selected_key.as_deref());
+    // An unwrap ends wrapper custody. A restored registrar/registry authority can serve its
+    // own owner even when the same resource retains the wrapper's ended lifecycle row.
+    let owner_lapsed = effective
+        .as_ref()
+        .is_some_and(|wrapper| wrapper.owner_lapsed)
+        && (wrapper_row.is_none_or(|row| row.lifecycle_unwrapped != Some(true))
+            || context.kind.as_str() == Some("wrapper"));
     trace.insert("authority_context_event".into(), context.event.clone());
     trace.insert("authority_context_kind".into(), context.kind.clone());
     let latest_event_kind =
@@ -498,11 +502,6 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         &facts.input.namehash,
     )?;
 
-    registration.insert(
-        "grace_ends_at".into(),
-        grace_ends_at(registration.get("expiry"), grace),
-    );
-
     let (folded, owner_kind) =
         control_owner(facts, &authority, &in_scope, is_v2, selected_key.as_deref());
     // An unwrapped ENSv1 or Basenames registration on its lease or registry record has a
@@ -592,6 +591,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
             json!({"registration": unreleased, "control": live_control()}),
         );
     }
+    super::canonical::apply(facts, &tagged, clock, &mut registration, &mut trace)?;
     Ok(ShadowName {
         registration,
         control,

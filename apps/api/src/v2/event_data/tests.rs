@@ -646,3 +646,44 @@ fn root_role_changes_render_as_permission_rows_with_logged_changes() {
         })
     );
 }
+
+#[test]
+fn wrapping_action_requires_positive_completion_evidence_at_the_mint() {
+    let after = json!({"source_event":"TransferSingle","wrapper_mint":true,
+        "matched_wrapper_completion":{"source_event":"NameWrapped"},
+        "node":"0xnode","fuses":17,"expiry":1900000000});
+    let mut event = row("AuthorityEpochChanged", json!({}), after.clone());
+    event.source_family = "ens_v1_wrapper_l1".into();
+    let data = row_detail(&event, HistoryEventType::Authority).data;
+    assert_eq!(data["action"], "name_wrapped");
+    assert_eq!(data["node"], "0xnode");
+    assert_eq!(data["fuses"], 17);
+    assert_eq!(data["expires_at"], "1900000000");
+    for (family, field, value) in [
+        ("ens_v1_registry_l1", "wrapper_mint", json!(true)),
+        ("ens_v1_wrapper_l1", "wrapper_mint", Value::Null),
+        ("ens_v1_wrapper_l1", "wrapper_mint", json!(false)),
+        ("ens_v1_wrapper_l1", "wrapper_mint", json!("true")),
+        ("ens_v1_wrapper_l1", "matched_wrapper_completion", json!({})),
+        (
+            "ens_v1_wrapper_l1",
+            "matched_wrapper_completion",
+            json!({"source_event":"Other"}),
+        ),
+        ("ens_v1_wrapper_l1", "source_event", json!("TransferBatch")),
+    ] {
+        event.source_family = family.into();
+        event.after_state = after.clone();
+        event.after_state[field] = value;
+        let data = row_detail(&event, HistoryEventType::Authority).data;
+        assert_eq!(data["action"], "authority_changed", "{event:?}");
+        assert!(!data.contains_key("node"), "{data:?}");
+        assert!(!data.contains_key("fuses"), "{data:?}");
+    }
+    event.after_state =
+        json!({"source_event":"NameWrapped","node":"0xnode","fuses":17,"expiry":1900000000});
+    assert_eq!(
+        row_detail(&event, HistoryEventType::Authority).data["action"],
+        "name_wrapped"
+    );
+}

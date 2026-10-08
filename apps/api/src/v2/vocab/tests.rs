@@ -131,8 +131,7 @@ fn history_event_type_sets_canonicalize_order_and_duplicates() {
 #[test]
 fn registration_status_variants_use_exact_wire_spelling() {
     assert_wire(RegistrationStatus::Active, "active");
-    assert_wire(RegistrationStatus::Wrapped, "wrapped");
-    assert_wire(RegistrationStatus::Registered, "registered");
+    assert_wire(RegistrationStatus::Expired, "expired");
     assert_wire(RegistrationStatus::Released, "released");
     assert_wire(RegistrationStatus::Unregistered, "unregistered");
 }

@@ -10,7 +10,7 @@ use crate::v2::support::{
     record_unsupported_fields,
 };
 use crate::v2::{
-    Authority, RegistrationStatus, Relation, Status, V2Result,
+    Authority, Relation, Status, V2Result,
     name_record::{
         self, chain_id_from_positions, json_string_at_paths, network_from_parts, string_field,
     },
@@ -52,7 +52,7 @@ pub(super) fn build_forward_feed_record(
         expires_at: registration.expires_at,
         expires_at_reason: registration.expires_at_reason,
         grace_ends_at: registration.grace_ends_at,
-        registration_status: None,
+        status: Some(registration.status),
         lapsed_registration: None,
         resolver: None,
         unresolvable_reason: None,
@@ -76,7 +76,7 @@ pub(super) fn build_forward_feed_record(
             &record.row.declared_summary,
         )?,
         migrated_at: None,
-        status,
+        read_status: status,
         unsupported_reason,
         failure_reason: identity_record_failure_reason(&record.row.coverage, status)?,
         unsupported_fields: Vec::new(),
@@ -98,7 +98,7 @@ pub(super) fn build_reverse_feed_record(
     record: &bigname_storage::ReverseIdentityRecordRow,
 ) -> V2Result<LookupRecord> {
     let mut built = build_forward_feed_record(&record.name_record)?;
-    if built.status != Status::Unsupported {
+    if built.read_status != Status::Unsupported {
         built.is_primary = Some(reverse_identity_is_primary(record));
         built.relations = lookup_relations(&record.relation_facets);
     }
@@ -106,16 +106,22 @@ pub(super) fn build_reverse_feed_record(
 }
 
 pub(super) fn lookup_address_status(records: &[LookupRecord]) -> Status {
-    if records.iter().any(|record| record.status == Status::Failed) {
+    if records
+        .iter()
+        .any(|record| record.read_status == Status::Failed)
+    {
         return Status::Failed;
     }
-    if records.iter().any(|record| record.status == Status::Stale) {
+    if records
+        .iter()
+        .any(|record| record.read_status == Status::Stale)
+    {
         return Status::Stale;
     }
     if !records.is_empty()
         && records
             .iter()
-            .all(|record| record.status == Status::Unsupported)
+            .all(|record| record.read_status == Status::Unsupported)
     {
         return Status::Unsupported;
     }
@@ -161,11 +167,13 @@ fn build_detail_record(
         display_name: record.row.canonical_display_name.clone(),
         namespace: record.row.namespace.clone(),
         namehash: record.row.namehash.clone(),
-        registration_id: (registration.registration_status != RegistrationStatus::Unregistered)
-            .then(|| {
-                name_record::registration_id(&record.row.declared_summary, record.row.resource_id)
-            })
-            .flatten(),
+        registration_id: bigname_storage::public_name_fields::has_registration_identity(
+            &record.row.namespace,
+            &record.row.declared_summary,
+            record.row.resource_id.is_some(),
+        )
+        .then(|| name_record::registration_id(&record.row.declared_summary, record.row.resource_id))
+        .flatten(),
         token_id,
         owner: registration.owner,
         manager: registration.manager,
@@ -174,7 +182,7 @@ fn build_detail_record(
         expires_at: registration.expires_at,
         expires_at_reason: registration.expires_at_reason,
         grace_ends_at: registration.grace_ends_at,
-        registration_status: Some(registration.registration_status),
+        status: Some(registration.status),
         lapsed_registration: name_record::lapsed_registration(&record.row.declared_summary),
         resolver,
         resolution_unsupported_reason: record
@@ -212,7 +220,7 @@ fn build_detail_record(
         authority,
         ens_v1: name_record::ens_v1(authority, &record.row.declared_summary)?,
         migrated_at: None,
-        status,
+        read_status: status,
         unsupported_reason,
         failure_reason: identity_record_failure_reason(&record.row.coverage, status)?,
         unsupported_fields: unsupported_fields
@@ -244,7 +252,7 @@ fn authority_unsupported_record(
         expires_at: None,
         expires_at_reason: None,
         grace_ends_at: None,
-        registration_status: None,
+        status: None,
         lapsed_registration: None,
         resolver: None,
         unresolvable_reason: None,
@@ -262,7 +270,7 @@ fn authority_unsupported_record(
         authority: None,
         ens_v1: None,
         migrated_at: None,
-        status,
+        read_status: status,
         unsupported_reason,
         failure_reason: None,
         unsupported_fields: Vec::new(),

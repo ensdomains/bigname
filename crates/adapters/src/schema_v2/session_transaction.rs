@@ -16,6 +16,7 @@ type TransactionNodeKey = (String, String, String, String);
 /// batch holds whole blocks, so every transaction in it is complete.
 #[derive(Default)]
 pub(super) struct TransactionIndex {
+    wrapper_completions: super::wrapper::WrapperCompletions,
     registry_setups: BTreeMap<TransactionNodeKey, Vec<(i64, String)>>,
     name_unwraps: BTreeMap<TransactionNodeKey, Vec<i64>>,
 }
@@ -31,7 +32,10 @@ fn key(selected: &Selected, raw: &RawLogInput, node: String) -> TransactionNodeK
 
 impl TransactionIndex {
     pub(super) fn build(catalog: &Catalog, raw_logs: &[RawLogInput]) -> anyhow::Result<Self> {
-        let mut index = Self::default();
+        let mut index = Self {
+            wrapper_completions: super::wrapper::WrapperCompletions::build(catalog, raw_logs)?,
+            ..Self::default()
+        };
         for raw in raw_logs {
             let Some(selected) = catalog.select(raw)? else {
                 continue;
@@ -66,12 +70,14 @@ impl TransactionIndex {
         Ok(index)
     }
 
-    pub(super) fn apply(
-        &self,
+    pub(super) fn apply<'a>(
+        &'a self,
         selected: &Selected,
         raw: &RawLogInput,
-        context: &mut RegistrarContext,
+        context: &mut RegistrarContext<'a>,
     ) -> anyhow::Result<()> {
+        context.matched_wrapper_completion = self.wrapper_completions.matched(raw);
+        context.wrapper_mint_completion = self.wrapper_completions.mint_completion(raw);
         if let Some((namehash, owner)) = registrar_registration_namehash(selected, raw)? {
             context.transaction_has_registry_setup = self
                 .registry_setups

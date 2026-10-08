@@ -1,5 +1,5 @@
 use super::values::{
-    json_address_at_paths, json_timestamp_at_paths, json_value_present, object_field, string_field,
+    json_address_at_paths, json_timestamp_at_paths, json_value_present, object_field,
 };
 use super::{ExpiryTimestamp, RegistrationStatus, served_manager};
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ pub struct RegistrationFields {
     pub owner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manager: Option<String>,
-    pub registration_status: RegistrationStatus,
+    pub status: RegistrationStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registered_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -44,7 +44,7 @@ pub fn registration_fields(
             owner.as_ref(),
             declared_registry_owner(summary).as_ref(),
         ),
-        registration_status: classify_registration_status(
+        status: classify_registration_status(
             namespace,
             declared_registration(summary),
             owner.as_deref(),
@@ -68,34 +68,76 @@ pub fn classify_registration_status(
     owner: Option<&str>,
     has_binding: bool,
 ) -> RegistrationStatus {
-    // Classification is state at the indexed head. A registrar name past grace
-    // whose release block is not indexed yet still reads active with a past
-    // expires_at until reprojection observes released_at/status=released.
+    if let Some(status) = registration
+        .and_then(|value| value.get("lifecycle_status"))
+        .and_then(Value::as_str)
+    {
+        return match status {
+            "active" => RegistrationStatus::Active,
+            "expired" => RegistrationStatus::Expired,
+            "released" => RegistrationStatus::Released,
+            _ => RegistrationStatus::Unregistered,
+        };
+    }
+    control_status(namespace, registration, owner, has_binding)
+}
+
+// Preserve the former registration-identity and current-control rules independently of the
+// canonical clock. In particular a reservation must not acquire an audit handle from status.
+fn control_status(
+    namespace: &str,
+    registration: Option<&Value>,
+    owner: Option<&str>,
+    has_binding: bool,
+) -> RegistrationStatus {
     if !has_binding {
         return RegistrationStatus::Unregistered;
     }
-
-    let status = registration.and_then(|value| string_field(value.get("status")));
-    let authority_kind = registration.and_then(|value| string_field(value.get("authority_kind")));
-    let released_at = registration.and_then(|value| value.get("released_at"));
-
-    if released_at.is_some_and(json_value_present) || status.as_deref() == Some("released") {
+    if registration.is_some_and(|value| {
+        value.get("released_at").is_some_and(json_value_present)
+            || value.get("status").and_then(Value::as_str) == Some("released")
+    }) {
         return RegistrationStatus::Released;
     }
-
-    match authority_kind.as_deref() {
+    match registration
+        .and_then(|value| value.get("authority_kind"))
+        .and_then(Value::as_str)
+    {
         Some("registrar") => RegistrationStatus::Active,
-        Some("registry_only") if owner.is_some_and(|value| !value.trim().is_empty()) => {
-            RegistrationStatus::Registered
+        Some("wrapper") if namespace != crate::BASENAMES_NAMESPACE => RegistrationStatus::Active,
+        Some("registry_only" | "ens_v2_registry")
+            if owner.is_some_and(|owner| !owner.trim().is_empty()) =>
+        {
+            RegistrationStatus::Active
         }
-        Some("ens_v2_registry") if owner.is_some_and(|value| !value.trim().is_empty()) => {
-            RegistrationStatus::Registered
-        }
-        Some("wrapper") if namespace != crate::BASENAMES_NAMESPACE => RegistrationStatus::Wrapped,
-        // At this point the name is bound; an unrecognized authority_kind or
-        // missing required owner evidence cannot be classified as registered.
         _ => RegistrationStatus::Unregistered,
     }
+}
+
+pub fn has_registration_identity(namespace: &str, summary: &Value, has_binding: bool) -> bool {
+    // Explicit absence belongs to the selected canonical allocation; the control binding
+    // may still be a different registration's tombstone.
+    if let Some(identity) = summary.pointer("/registration/identity_resource_id") {
+        return identity.is_string();
+    }
+    control_status(
+        namespace,
+        declared_registration(summary),
+        declared_owner(summary).as_deref(),
+        has_binding,
+    ) != RegistrationStatus::Unregistered
+}
+
+/// Current control deliberately ignores lifecycle_status: canonical grace can continue after
+/// the ENSv2 control path ended, and a wrapper-only name's holder is cleared by the NameWrapper
+/// expiry mask during composition, only when PARENT_CANNOT_CONTROL is burned.
+pub fn has_current_control(namespace: &str, summary: &Value, has_binding: bool) -> bool {
+    control_status(
+        namespace,
+        declared_registration(summary),
+        declared_owner(summary).as_deref(),
+        has_binding,
+    ) == RegistrationStatus::Active
 }
 
 pub fn declared_registration(summary: &Value) -> Option<&Value> {

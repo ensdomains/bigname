@@ -15,6 +15,33 @@ use crate::{
     },
 };
 
+/// A registry binding after a proven wrapper callback may have no earlier named lease binding.
+/// Its normalized opener explicitly carries the surviving live registrar resource, whether the
+/// name was learned at the matched mint or first materialized at a historical completion.
+/// Attach that lease at this observation, without inventing a historical binding or changing
+/// registry control. Later transfers and renewals use the ordinary retained-lease rules.
+pub(super) fn attach_callback_lease(row: &mut Row, opening: Option<&super::BlockEvent>) {
+    let Some(event) = opening.filter(|event| {
+        event.after["authority_kind"] == "registry_only"
+            && ((event.source_family == "ens_v1_registry_l1"
+                && event.after["source_event"] == "NameWrapped"
+                && event.after["state_derived"] == true)
+                || (event.source_family == "ens_v1_registrar_l1"
+                    && event.after["source_event"] == "Transfer"))
+    }) else {
+        return;
+    };
+    let Some(resource) = event.after["callback_retained_registrar_resource_id"].as_str() else {
+        return;
+    };
+    set(row, "registry_only", true);
+    set(row, "predecessor_resource_id", resource);
+    set(row, "predecessor_position", event.position.to_json());
+    set(row, "predecessor_node", event.after["node"].clone());
+    set(row, "lease_resource_id", resource);
+    set(row, "lease_position", event.position.to_json());
+}
+
 /// A registrar grant that names `name` replaces the lease of the name's registry-only ENSv1
 /// handoffs it follows (stage.rs:47-135, the successor lateral): a RegistrationGranted of
 /// ens_v1_registrar_l1 with registrar authority, on a resource other than the handoff's

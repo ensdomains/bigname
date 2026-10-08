@@ -640,7 +640,9 @@ parent fuse changes after that bit is burned.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L553 @ ens_v1@91c966f)
 The API exposes this as `ens_v1.wrapper_state="emancipated"` only while the wrapper
 expiry is not earlier than the served block timestamp. After that boundary,
-NameWrapper reads the fuses and owner as zero, so `wrapper_state` is omitted.
+NameWrapper reads the fuses and owner as zero. A name-shaped ENSv1 object still
+serving that context reports `wrapper_state="lapsed"` without `wrapper_fuses`.
+Backed state/fuse metadata drops from permissions and wrapper restrictions.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L848 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L849 @ ens_v1@91c966f)
@@ -672,8 +674,10 @@ When wrapper expiry is earlier than the served timestamp, NameWrapper clears
 every effective fuse. It also clears the owner when `PARENT_CANNOT_CONTROL` was
 burned, which removes an expired
 [emancipated](#emancipated-namewrapper-state) or
-[locked](#locked-namewrapper-state) lifecycle value; a plain
-[wrapped](#wrapped-namewrapper-state) value remains because its owner is not
+[locked](#locked-namewrapper-state) backed label. A name-shaped ENSv1 object
+still serving that context reports `lapsed` without fuses. Independently proved
+wrapper expiry may remain. Permission/restriction backed metadata drops away.
+A plain [wrapped](#wrapped-namewrapper-state) value remains because its owner is not
 cleared. The [projection](#projection) rebuild applies this serving convention
 to current summaries at its target timestamp and does not rewrite the
 normalized value.
@@ -1873,8 +1877,10 @@ owner-controlled permissions to be revoked.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1058 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1067 @ ens_v1@91c966f)
 The API exposes this as `ens_v1.wrapper_state="locked"` only while the wrapper expiry
-is not earlier than the served block timestamp; after that boundary the
-NameWrapper reads both owner and fuses as zero and `wrapper_state` is omitted.
+is not earlier than the served block timestamp. After that boundary the
+NameWrapper reads both owner and fuses as zero. A name-shaped ENSv1 object still
+serving that context reports `wrapper_state="lapsed"` without `wrapper_fuses`.
+Backed state/fuse metadata drops from permissions and wrapper restrictions.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L848 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L849 @ ens_v1@91c966f)
@@ -2342,8 +2348,9 @@ the tombstone's resource and binding (product ruling of 2026-09-26). When a
 named path-cut release comes before it, the served release, `released_at` and
 `expiry` come from this later release. When the deciding fact is the end of a later
 reservation, the tombstone's `expiry` and `released_at` are that end's. An end by
-`unregister` is an explicit release, which serves `expires_at: null` with
-`expires_at_reason: "released"` and `grace_ends_at: null`; see
+`unregister` is an explicit release. The tombstone's `released_at` is that event's
+block time. The row keeps the reservation's scheduled `expires_at` and `grace_ends_at`
+with no `expires_at_reason`. See
 [the timestamp contract](api-v1.md#timestamp-format-and-absent-expiry).
 This follows the ENSv2 contracts, which never route a label that has been
 registered back to ENSv1: `unregister` burns the token and writes the release

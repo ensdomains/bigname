@@ -39,7 +39,7 @@ async fn v2_textless_names_are_read_in_a_lookup_batch() -> Result<()> {
             // The batch record is the name's detail.
             let detail =
                 tl_get(&database, &format!("/v1/names/{}", tl_path(&fixture.first_name))).await?;
-            for field in ["namehash", "owner", "manager", "registration_status", "resolver"] {
+            for field in ["namehash", "owner", "manager", "status", "resolver"] {
                 assert_eq!(results[1]["record"][field], detail["data"][field], "{field}: {body:#}");
             }
         }
@@ -81,21 +81,21 @@ async fn verified_lookup_of_a_textless_name_is_unsupported_without_a_provider_ca
         assert_eq!(status, StatusCode::OK, "{uri}: {detail}");
         let data = &detail["data"];
         assert_eq!(data["name"], json!(alice), "{uri}: {detail}");
-        assert_eq!(data["status"], json!("unsupported"), "{uri}: {detail}");
+        assert_eq!(data["read_status"], json!("unsupported"), "{uri}: {detail}");
         assert_eq!(
             data["unsupported_reason"],
             json!("verified_records_not_supported"),
             "{uri}: {detail}"
         );
         // Registration facts stay indexed.
-        assert_eq!(data["registration_status"], json!("active"), "{uri}: {detail}");
+        assert_eq!(data["status"], json!("active"), "{uri}: {detail}");
     }
     // The indexed read of the same name is unaffected.
     let (status, indexed) =
         sepolia_verified_get(&database, &unreachable, &format!("/v1/names/{}", tl_path(&alice)))
             .await?;
     assert_eq!(status, StatusCode::OK, "{indexed}");
-    assert_eq!(indexed["data"]["status"], json!("ok"), "{indexed}");
+    assert_eq!(indexed["data"]["read_status"], json!("ok"), "{indexed}");
 
     database.cleanup().await
 }
@@ -116,7 +116,7 @@ async fn verified_lookup_of_a_textless_name_runs_once_every_label_has_verified_b
     assert_eq!(status, StatusCode::OK, "{detail}");
     let data = &detail["data"];
     assert_eq!(data["name"], json!("alice.eth"), "{detail}");
-    assert_eq!(data["status"], json!("ok"), "{detail}");
+    assert_eq!(data["read_status"], json!("ok"), "{detail}");
     assert_eq!(data["primary_address"], json!(SEPOLIA_DETAIL_EXECUTED), "{detail}");
     assert_eq!(joined_keys(rpc_handle).await?, ["addr:60"]);
 

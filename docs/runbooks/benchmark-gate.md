@@ -517,7 +517,7 @@ side of the rotation. Smoke validates every known-good response. Smoke may still
 exercise primary-name with an address fallback when its tiny fixture has no
 successful primary-name claim, but does not mislabel that fallback as indexed
 claim evidence. A supported exact-name sample must
-return `data.status=ok`, a primary-name sample must contain an indexed `ok`
+return `data.read_status=ok`, a primary-name sample must contain an indexed `ok`
 answer, and every sampled lookup input must return the matching name or address
 kind with populated `ok` evidence. Parsing and classification therefore cannot
 inflate the budgeted latency, while a sampled `2xx not_found`, `unsupported`,

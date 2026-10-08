@@ -122,7 +122,11 @@ impl<'a> Authority<'a> {
             .lease_candidates
             .iter()
             .filter(|candidate| {
-                candidate.resource_id == resource
+                (candidate.resource_id == resource
+                    || candidate.registry_only
+                        && candidate.lease_resource_id.as_deref() == Some(resource)
+                        && candidate.predecessor_node.is_some()
+                        && candidate.predecessor_node.as_deref() == event.namehash.as_deref())
                     && candidate.surface_namehash.is_some()
                     && candidate.surface_namehash.as_deref() == event.namehash.as_deref()
             })
@@ -405,6 +409,7 @@ mod tests {
             registry_only: false,
             predecessor_resource_id: None,
             predecessor_position: None,
+            predecessor_node: None,
             lease_resource_id: None,
             wrapped_registrar_resource_id: None,
             node: None,

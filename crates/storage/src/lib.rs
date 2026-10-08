@@ -133,10 +133,10 @@ pub use lineage::{CanonicalityState, ChainLineageBlock, load_chain_lineage_block
 pub use name_current::wrapper_expiry;
 pub use name_current::{
     DEFAULT_NAME_CURRENT_LINEAGE_JOINS, MIGRATION_AUTHORITY_TRANSITION_PROOF_KIND,
-    NameCurrentAddressFilter, NameCurrentAddressRelationFilter, NameCurrentExpiringFilter,
-    NameCurrentExpiryWindow, NameCurrentListCursor, NameCurrentListCursorValue,
-    NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage, NameCurrentListRow,
-    NameCurrentListSort, NameCurrentRow, load_current_names_by_resource_ids,
+    NameCurrentAddressFilter, NameCurrentAddressRelationFilter, NameCurrentDeadline,
+    NameCurrentExpiringFilter, NameCurrentExpiryWindow, NameCurrentListCursor,
+    NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage,
+    NameCurrentListRow, NameCurrentListSort, NameCurrentRow, load_current_names_by_resource_ids,
     load_current_normalized_names, load_name_current, load_name_current_by_logical_name_ids,
     load_name_current_for_snapshot, load_name_migration_transition_timestamps,
     name_current_authority_arm, name_current_is_ownerless_registry,

@@ -2782,8 +2782,9 @@ proved adjacent legacy ETH-address pair's AddrChanged row, preserving the Addres
 row's existing identity and richer value. Eligibility includes the same readable fork and
 publication for both mates, exact physical log adjacency, equivalent values and declared
 source-generation proof; see [source coverage](upstream.md#product-history-actions-and-legacy-eth-address-pairs).
-The same predicate removes the derived NameWrapped transfer when the retained before/after
-owners do not prove a different nonzero owner. It never edits normalized events or the Project
+The same predicate removes the derived wrapping transfer when the retained before/after
+owners do not prove a different nonzero owner, including a TransferSingle mint with positively
+matched NameWrapped completion evidence. It never edits normalized events or the Project
 catalogue. Account approvals and reverse activity use direct account probes in both bounded
 and catalogue readers; they are not expanded into name memberships. Lifecycle events never
 acquire name/registration/address membership.
@@ -2937,3 +2938,13 @@ objects.
 ### Same-node source transport maintenance
 
 The phase runner owns the explicit Sepolia [source transport](glossary.md#source-transport) change described under [same-node Sepolia transport change](chain-intake.md#same-node-sepolia-transport-change). It changes only `ingest_cursors.source_kind` under all phase advisory locks after checking the old and new node interfaces against retained hashes and the next block. Source key, seed, start, progress, raw identities/canonicality, redo obligations and derived output remain unchanged. It grants no new verification independence. This documented exception does not permit arbitrary provider replacement or ordinary startup to rewrite cursor identity.
+
+## Registration lifecycle publication
+
+project_name_summary retains expires_at and grace_ends_at as exact numeric selectors. The partial indexes on (namespace, grace_ends_at, logical_name_id, chain_id) and (namespace, public_authority, grace_ends_at, logical_name_id, chain_id) serve GET /v1/names grace windows. expiry_listable is the shared finite canonical registration eligibility flag. Neither index promises current control. Explicitly terminated registrations retain scheduled dates and remain selectable.
+
+The existing internal registration_status column now stores the flat public lifecycle. Prepared search_fields carries status, without registration_status. Lookup core carries the same composed registration facts. Canonical provenance and lifecycle_recompose_at are internal composition inputs. No new durable wrapper callback state is introduced: whole-transaction mint/completion correlation is rebuilt from raw logs before interpretation.
+
+Schema migration 20261008120000_registration_lifecycle invalidates old publications under the existing marker lock and resets every Project-owned family. Adoption requires the matching interpreter content hash, a full Interpret redo and Project rebuild, then normal publication/readiness checks. The public registration-ID scheme is unchanged. Read API rollout as a contract break, not as proof that no consumers are deployed.
+
+For the callback path above, the normalized state-derived registry SurfaceBound carries `callback_retained_registrar_resource_id`. Its binding candidate uses the existing `lease_resource_id`, `predecessor_resource_id`, positions, and `predecessor_node` columns to attach the observed lease without inventing an earlier binding. Project naming and composed lifecycle reads load those candidates through `project_binding_candidate_lease_idx` and require the recorded node to match the name. The existing predecessor-node column therefore also records this explicit callback lease attachment, in addition to ordinary wrapper predecessors.

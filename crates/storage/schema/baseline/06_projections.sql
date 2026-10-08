@@ -2260,6 +2260,7 @@ CREATE TABLE IF NOT EXISTS project_name_summary (
     serving boolean NOT NULL,
     registration_status text,
     expires_at numeric,
+    grace_ends_at numeric,
     registered_at timestamptz,
     zero_owner boolean NOT NULL,
     recompose_at bigint,
@@ -2271,7 +2272,7 @@ CREATE TABLE IF NOT EXISTS project_name_summary (
     search_creation_transport_resource_id uuid,
     CONSTRAINT project_name_summary_search_check CHECK (
         (search_supported AND search_fields IS NOT NULL AND jsonb_typeof(search_fields) = 'object'
-         AND search_fields ? 'registration_status')
+         AND search_fields ? 'status')
         OR (NOT search_supported AND search_fields IS NULL AND search_creation_transport_resource_id IS NULL)),
     PRIMARY KEY (chain_id, logical_name_id)
 );
@@ -2291,6 +2292,8 @@ COMMENT ON COLUMN project_name_summary.registration_status IS
     'This value is declared_summary.registration.status; the subnames expiry fence drops a released child.';
 COMMENT ON COLUMN project_name_summary.expires_at IS
     'This value is the exact finite expiry in Unix seconds the subnames expiry sort and fence read; contextual no-expiry values are null.';
+COMMENT ON COLUMN project_name_summary.grace_ends_at IS
+    'The exact finite canonical grace deadline in Unix seconds, retained for ended registrations; null for no-expiry or absent registrations.';
 COMMENT ON COLUMN project_name_summary.registered_at IS
     'This value is the registration time the subnames registration sort reads: registration.registered_at, else registration.registration_date.';
 COMMENT ON COLUMN project_name_summary.zero_owner IS
@@ -2300,7 +2303,7 @@ COMMENT ON COLUMN project_name_summary.recompose_at IS
 COMMENT ON COLUMN project_name_summary.owner IS
     'This value is the owner the composed name row serves: declared_summary.control.owner, else control.registry_owner, lower-cased; null when the first present one is blank or the name composes no row. The registry labels'' owner and exclude_owner filters read it.';
 COMMENT ON COLUMN project_name_summary.expiry_listable IS
-    'This value is whether the expiry listing of GET /v1/names lists the name: it composes a row whose coverage is not unsupported and whose registration carries a finite expiry. For such a row expires_at is the expiry the listing serves and orders by.';
+    'Whether GET /v1/names lists the finite canonical registration by expiry or grace deadline. The supported composed row and stored expires_at/grace_ends_at agree, including ended registrations.';
 COMMENT ON COLUMN project_name_summary.public_authority IS
     'This value is the public authority the composed name row serves (ens_v0, ens_v1 or ens_v2); null when the row serves none (Basenames, an unresolved selection, an ownerless registry row) or the name composes no row. The authority filter of the expiry listing of GET /v1/names selects by it.';
 COMMENT ON COLUMN project_name_summary.search_supported IS
@@ -2320,6 +2323,13 @@ CREATE INDEX IF NOT EXISTS project_name_summary_expiry_idx
 CREATE INDEX IF NOT EXISTS project_name_summary_authority_expiry_idx
     ON project_name_summary (namespace, public_authority, expires_at, logical_name_id, chain_id)
     WHERE expiry_listable AND expires_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS project_name_summary_grace_idx
+    ON project_name_summary (namespace, grace_ends_at, logical_name_id, chain_id)
+    WHERE expiry_listable AND grace_ends_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS project_name_summary_authority_grace_idx
+    ON project_name_summary (namespace, public_authority, grace_ends_at, logical_name_id, chain_id)
+    WHERE expiry_listable AND grace_ends_at IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS project_grant_subject_resource_idx
     ON project_grant (subject COLLATE "C", resource_id, scope COLLATE "C");

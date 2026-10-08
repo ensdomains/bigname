@@ -26,7 +26,7 @@ async fn assert_unknown(database: &TestDatabase, resolver: Address, before: &Val
     for field in [
         "owner",
         "authority",
-        "registration_status",
+        "status",
         "expires_at",
         "grace_ends_at",
         "ens_v1",

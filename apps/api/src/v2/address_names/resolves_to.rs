@@ -356,7 +356,7 @@ pub(super) async fn get_address_resolves_to(
                     .map(|id| super::permission_resource_handle(name_row, id)),
                 owner: registration.owner,
                 manager: registration.manager,
-                registration_status: registration.registration_status,
+                status: registration.status,
                 registered_at: registration.registered_at,
                 created_at: registration.created_at,
                 expires_at: registration.expires_at,

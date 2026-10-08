@@ -231,6 +231,7 @@ pub struct BindingCandidate {
     pub registry_only: bool,
     pub predecessor_resource_id: Option<String>,
     pub predecessor_position: Option<Value>,
+    pub predecessor_node: Option<String>,
     pub lease_resource_id: Option<String>,
     pub wrapped_registrar_resource_id: Option<String>,
     pub node: Option<String>,
@@ -289,6 +290,7 @@ impl BindingCandidate {
                 .filter(|value| value.is_object())
                 .cloned(),
             lease_resource_id: text(row, "lease_resource_id"),
+            predecessor_node: lower(row, "predecessor_node"),
             wrapped_registrar_resource_id: text(row, "wrapped_registrar_resource_id"),
             node: lower(row, "node"),
             transaction_hash: text(row, "transaction_hash"),

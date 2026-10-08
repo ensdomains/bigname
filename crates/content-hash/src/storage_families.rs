@@ -76,6 +76,8 @@ pub(crate) const COMPOSITION_FILES: &[&str] = &[
     "crates/storage/src/families/control/wrapper.rs",
     "crates/storage/src/families/control/lifecycle/mod.rs",
     "crates/storage/src/families/control/lifecycle/admission.rs",
+    "crates/storage/src/families/control/lifecycle/canonical.rs",
+    "crates/storage/src/families/control/lifecycle/policy.rs",
     "crates/storage/src/families/control/lifecycle/control.rs",
     "crates/storage/src/families/control/lifecycle/expiry.rs",
     "crates/storage/src/families/control/lifecycle/laterals.rs",

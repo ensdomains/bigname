@@ -569,6 +569,8 @@ mod lookup_redo;
 mod read_only_lookup;
 #[path = "tests/v2_family_lookup_release.rs"]
 mod v2_family_lookup_release;
+#[path = "tests/v2_registration_lifecycle.rs"]
+mod v2_registration_lifecycle;
 #[path = "tests/v2_registry_root_restrictions.rs"]
 mod v2_registry_root_restrictions;
 #[path = "tests/v2_sepolia_redeploy.rs"]
@@ -597,3 +599,12 @@ include!("tests/v2_unix_timestamps.rs");
 
 include!("tests/v2_names_windows_measure.rs");
 include!("tests/v2_search_lean.rs");
+
+#[path = "tests/v2_wrapper_callback.rs"]
+mod v2_wrapper_callback;
+
+#[path = "tests/v2_canonical_association.rs"]
+mod v2_canonical_association;
+
+#[path = "tests/v2_continuing_lease.rs"]
+mod v2_continuing_lease;

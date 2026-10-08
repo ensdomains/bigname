@@ -316,7 +316,7 @@ async fn the_wrapper_row_stays_raw_through_expiry_unwrap_and_rewrap() -> Result<
         Value::Null,
     );
     let emancipated = json!({"wrapper_state": "emancipated", "fuses": 65536});
-    let masked = json!({"wrapper_state": null, "fuses": null});
+    let masked = json!({"wrapper_state": "lapsed", "fuses": null});
     let unwrap = at(14, 1, "SurfaceUnbound:14:1");
     let expected = vec![
         // Before the expiry and at it (expiry equal to the block time) nothing is masked.
@@ -325,10 +325,8 @@ async fn the_wrapper_row_stays_raw_through_expiry_unwrap_and_rewrap() -> Result<
         // Just after it the served name drops the emancipated state and its fuses; the row does
         // not.
         (13, wrapped, masked.clone()),
-        // The unwrap: the holder revoke is the newest lifecycle event, the unwrap's position is
-        // kept, and the served name stays masked. That mask comes from the expiry at block 12,
-        // not from the unwrap: name_current does not read the wrapper lifecycle (see
-        // `an_unwrap_before_expiry_keeps_the_served_name_wrapped_but_closes_the_restrictions`).
+        // The unwrap retains the raw modifier and position but serves the ended lifecycle
+        // explicitly, without fuse restrictions.
         (
             14,
             row(
@@ -338,7 +336,7 @@ async fn the_wrapper_row_stays_raw_through_expiry_unwrap_and_rewrap() -> Result<
                 "holder_revoke",
                 unwrap.clone(),
             ),
-            masked,
+            json!({"wrapper_state": "unwrapped", "fuses": null}),
         ),
         // The rewrap with a new expiry is served again and still remembers the unwrap.
         (
@@ -353,18 +351,13 @@ async fn the_wrapper_row_stays_raw_through_expiry_unwrap_and_rewrap() -> Result<
     fixture.cleanup().await
 }
 
-// A characterization of a known served-side defect, not of NameWrapper semantics: name_current
-// picks the latest wrapper modifier and expiry without reading the wrapper lifecycle, so an unwrap
-// before the wrapper expiry leaves the name serving the old wrapper state and fuses. The
-// lifecycle-aware permissions resource summary (resource_summary.rs, `wrapper_lifecycles`) closes
-// the wrapper restrictions on the unwrap and opens them again on a rewrap; the raw family row keeps
-// the lifecycle both readers need. The served builders are pinned as they are, not corrected.
+// An unwrap before expiry ends the served wrapper state and its fuse restrictions. The raw
+// family row keeps its modifier history, and a later rewrap supplies fresh backed state.
 // The wrap burns PARENT_CANNOT_CONTROL without CANNOT_UNWRAP, so the unwrap is allowed.
 // (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L10, L18 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1025 @ ens_v1@91c966f)
 #[tokio::test]
-async fn an_unwrap_before_expiry_keeps_the_served_name_wrapped_but_closes_the_restrictions()
--> Result<()> {
+async fn an_unwrap_before_expiry_serves_unwrapped_and_closes_the_restrictions() -> Result<()> {
     let fixture = Fixture::new("families_retention_unwrap_live", 20).await?;
     let (logical, resource) = (name(4), uuid(4));
     fixture
@@ -478,7 +471,7 @@ async fn an_unwrap_before_expiry_keeps_the_served_name_wrapped_but_closes_the_re
         (
             12,
             json!({"wrapper_state": "emancipated", "lifecycle_unwrapped": true}),
-            emancipated,
+            json!({"wrapper_state": "unwrapped", "fuses": null}),
             None,
         ),
         // The rewrap opens the restrictions again, and both readers serve the new wrapper.

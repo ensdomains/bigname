@@ -484,7 +484,7 @@ async fn v2_get_registry_labels_pages_held_labels_with_bound_cursor_and_counts()
         rows[0]["namehash"],
         json!(bigname_lookup::ens_namehash_hex("one.alpha.eth")?)
     );
-    assert_eq!(rows[0]["registration_status"], json!("registered"));
+    assert_eq!(rows[0]["status"], json!("active"));
     assert_eq!(
         rows[0]["subregistry"],
         json!({ "chain_id": 1, "address": ONE_REGISTRY })

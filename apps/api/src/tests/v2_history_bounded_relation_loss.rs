@@ -177,7 +177,7 @@ async fn lost_token_holder_from_a_grant_keeps_its_bounded_history() -> Result<()
         Some(bigname_storage::AddressNameRelation::TokenHolder),
         relation_event(
             "RegistrationGranted",
-            json!({"authority_kind": "registrar", "registrant": BOUNDED_ADDRESS}),
+            json!({"authority_kind": "registrar", "registrant": BOUNDED_ADDRESS, "expiry":1_900_000_000_i64}),
             V1_DERIVATION,
         ),
     )

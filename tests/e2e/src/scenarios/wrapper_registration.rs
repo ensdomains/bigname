@@ -184,8 +184,8 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
         (renewed_registrar_expiry as i64, wrapper_after.expiry as i64)
     );
 
-    // Both name-bearing logs retain their own observation, while the durable
-    // labelhash-to-label fact remains deduplicated.
+    // The registrar, validated completion-backed mint, and wrapper completion
+    // retain observations; the durable labelhash-to-label fact stays deduplicated.
     let bornwrapped_labelhash = format!("{:#x}", ens_v1::labelhash("bornwrapped"));
     let preimage_observations: Vec<(String, String, String, String)> = sqlx::query_as(
         "SELECT source_family, after_state->>'source_event', \
@@ -211,12 +211,18 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
             ),
             (
                 "ens_v1_wrapper_l1".to_owned(),
+                "TransferSingle".to_owned(),
+                "bornwrapped.eth".to_owned(),
+                "bornwrapped".to_owned(),
+            ),
+            (
+                "ens_v1_wrapper_l1".to_owned(),
                 "NameWrapped".to_owned(),
                 "bornwrapped.eth".to_owned(),
                 "bornwrapped".to_owned(),
             ),
         ],
-        "the registrar and wrapper name-bearing logs must both retain the same verified label preimage"
+        "the registrar, completion-backed mint, and completion must retain the same verified label preimage"
     );
     let retained_label: (Vec<u8>, Option<String>, bool) = sqlx::query_as(
         "SELECT raw_label, decoded_label, normalized_under_version \
@@ -301,8 +307,8 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
         (1, 0, 1),
         "same-transaction registry setup must remain on the registrar epoch instead of minting a spurious registry-only epoch"
     );
-    // NewOwner now names the provisional registry resource before NameWrapped.
-    // The wrap retains its closure for diagnostics, while registration reconciliation
+    // NewOwner names the provisional registry resource before the wrapper mint.
+    // The completion-backed mint closes it; registration reconciliation
     // removes the provisional binding. A closure is not a registry authority grant.
     let registry_closures: Vec<(Uuid, String, String)> = sqlx::query_as(
         "SELECT resource_id, event_kind, after_state->>'source_event' \
@@ -315,7 +321,15 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
     .await?;
     assert_eq!(registry_closures.len(), 1, "{registry_closures:?}");
     assert_eq!(registry_closures[0].1, "SurfaceUnbound");
-    assert_eq!(registry_closures[0].2, "NameWrapped");
+    assert_eq!(registry_closures[0].2, "TransferSingle");
+    support::assert_wrapper_mint_completion(
+        &run.db.pool,
+        "bornwrapped.eth",
+        "SurfaceUnbound",
+        deployment.name_wrapper.address,
+        alice,
+    )
+    .await?;
     let provisional_bindings: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM surface_bindings WHERE resource_id = $1 \
          AND canonicality_state = 'canonical'",

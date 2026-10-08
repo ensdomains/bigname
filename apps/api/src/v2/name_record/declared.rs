@@ -101,6 +101,9 @@ pub(crate) fn projected_registration_resource_id(summary: &Value) -> Option<&str
 /// (a wrapped or registry-owned subname, an ENSv2 registration, or a row projected before
 /// the field existed).
 pub(crate) fn registration_id(summary: &Value, resource_id: Option<Uuid>) -> Option<String> {
+    if let Some(identity) = summary.pointer("/registration/identity_resource_id") {
+        return identity.as_str().map(str::to_owned);
+    }
     projected_registration_resource_id(summary)
         .map(str::to_owned)
         .or_else(|| resource_id.map(|value| value.to_string()))

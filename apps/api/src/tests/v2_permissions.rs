@@ -287,7 +287,7 @@ async fn v2_get_permissions_empties_a_lapsed_handed_off_name() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let (released_resource_id, _) = seed_handed_off_lease_inputs(&database, "perms.eth", true).await?;
     let name = v2_permissions_payload_for_database(&database, "/v1/names/perms.eth").await?;
-    assert_eq!(name["data"]["registration_status"], "released", "{name}");
+    assert_eq!(name["data"]["status"], "released", "{name}");
 
     let by_name =
         v2_permissions_payload_for_database(&database, "/v1/permissions?name=Perms.eth").await?;
@@ -799,7 +799,7 @@ async fn v2_name_and_name_filtered_permissions_select_the_same_live_registration
     let expected = v2_permissions_current_resource_id().to_string();
 
     let name = v2_name_record_payload_for_database(&database, "/v1/names/Perms.eth").await?;
-    assert_eq!(name["data"]["registration_status"], json!("active"));
+    assert_eq!(name["data"]["status"], json!("active"));
     assert_eq!(name["data"]["registration_id"], json!(expected));
 
     let permissions =

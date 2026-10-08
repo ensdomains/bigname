@@ -583,7 +583,7 @@ fn v2_bound_name_presentation_preserves_dictionary_precedence_and_wrapper_flags(
     assert_eq!(record["owner"], json!(DIVERGENT_CONTROL_OWNER));
     assert_eq!(record["manager"], json!(DIVERGENT_CONTROL_OWNER));
     assert!(record.get("registrant").is_none(), "{record}");
-    assert_eq!(record["registration_status"], json!("active"));
+    assert_eq!(record["status"], json!("active"));
     assert_eq!(record["authority"], json!("ens_v1"));
     assert_eq!(
         record["ens_v1"],

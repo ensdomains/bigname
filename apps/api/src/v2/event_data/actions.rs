@@ -42,11 +42,13 @@ impl HistoryAction {
         if context.registry_handoff(row).is_some() {
             return Self::RegistryHandoff;
         }
+        if row.event_kind == "AuthorityEpochChanged" && is_wrapping(row) {
+            return Self::NameWrapped;
+        }
         match (
             row.event_kind.as_str(),
             row.after_state["source_event"].as_str(),
         ) {
-            ("AuthorityEpochChanged", Some("NameWrapped")) => return Self::NameWrapped,
             ("AuthorityEpochChanged", Some("NameUnwrapped")) => return Self::NameUnwrapped,
             ("AccountPermissionChanged", _) => return Self::OperatorApprovalChanged,
             ("RegistrationReserved", _)
@@ -81,4 +83,13 @@ impl HistoryAction {
             HistoryEventType::Contract => Self::RegistryCreated,
         }
     }
+}
+
+/// A validated completion supplies wrap fields while retaining the mint's actual position.
+pub(super) fn is_wrapping(row: &HistoryEvent) -> bool {
+    row.after_state["source_event"] == "NameWrapped"
+        || row.source_family == "ens_v1_wrapper_l1"
+            && row.after_state["source_event"] == "TransferSingle"
+            && row.after_state["wrapper_mint"] == serde_json::Value::Bool(true)
+            && row.after_state["matched_wrapper_completion"]["source_event"] == "NameWrapped"
 }

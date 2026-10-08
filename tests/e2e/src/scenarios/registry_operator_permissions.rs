@@ -536,10 +536,7 @@ async fn verify_snapshot(
             .iter()
             .find(|v| v["name"] == name)
             .context("owner/manager address membership")?;
-        assert_ne!(
-            row["registration_status"], "unregistered",
-            "address name {name}: {row}"
-        );
+        assert_ne!(row["status"], "unregistered", "address name {name}: {row}");
         assert!(
             row["role_summary"]
                 .as_array()

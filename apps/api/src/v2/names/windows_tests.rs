@@ -16,6 +16,7 @@ async fn probe(input: NamesQuery) -> V2Result<Json<Value>> {
     let params = input.params;
     let parent = params.parent.as_deref().map(normalize_parent).transpose()?;
     let binding = NamesCursorBinding {
+        deadline: input.deadline,
         namespace: params.namespace.as_deref().unwrap_or("ens"),
         expires_after: params.expires_after,
         expires_before: params.expires_before,
@@ -25,9 +26,9 @@ async fn probe(input: NamesQuery) -> V2Result<Json<Value>> {
         order: params.order.unwrap_or(SortOrder::Asc),
     };
     let cursor = names_list_cursor(&binding);
-    cursor.read(params.cursor.as_deref(), &POSITION_KEYS)?;
+    cursor.read(params.cursor.as_deref(), &position_keys(input.deadline))?;
     let position = ListPosition::new([
-        (EXPIRES_AT_CURSOR_KEY, "1".to_owned()),
+        (input.deadline.column(), "1".to_owned()),
         (NAMESPACE_FILTER_KEY, "ens".to_owned()),
         (NAME_CURSOR_KEY, "a.eth".to_owned()),
         (NAMEHASH_CURSOR_KEY, "0xa".to_owned()),
@@ -133,7 +134,7 @@ async fn windows_http_rejects_invalid_ranges_and_combinations() {
     }
     for key in NamesQueryParams::ALLOWED
         .iter()
-        .filter(|key| **key != WINDOW_KEY)
+        .filter(|key| **key != WINDOW_KEY && !key.starts_with("grace_ends_"))
     {
         let query = format!("expires_window=1..2&{key}=ens&{key}=ens");
         let (status, body) = probe_request(&query).await;
@@ -240,7 +241,7 @@ async fn windows_cursor_binds_ordered_normalized_windows_and_other_filters() {
 
 #[test]
 fn windows_dto_field_is_omitted_until_assigned() {
-    let row = json!({"name":"a.eth", "display_name":"a.eth", "namespace":"ens", "namehash":"0xa", "registration_status":"registered"});
+    let row = json!({"name":"a.eth", "display_name":"a.eth", "namespace":"ens", "namehash":"0xa", "status":"active"});
     let mut row: SearchName = serde_json::from_value(row).unwrap();
     assert!(
         serde_json::to_value(&row)
@@ -304,4 +305,71 @@ async fn windows_extractor_preserves_shared_scalar_decoding() {
         assert_eq!(new.params, old, "{query}");
         assert!(new.windows.is_none());
     }
+}
+
+#[tokio::test]
+async fn grace_family_parsing_sort_and_cursor_are_isolated() {
+    for query in [
+        "grace_ends_after=1&grace_ends_before=2&sort=grace_ends_at",
+        "grace_ends_window=2..3&grace_ends_window=0..1&sort=grace_ends_at",
+    ] {
+        let (status, body) = probe_request(query).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let cursor = body["next_cursor"].as_str().unwrap();
+        let decoded = crate::v2::decode(cursor).unwrap();
+        assert_eq!(decoded.sort, "grace_ends_at");
+        assert!(
+            decoded
+                .filters
+                .keys()
+                .any(|key| key.starts_with("grace_ends_"))
+        );
+        assert!(
+            !decoded
+                .filters
+                .keys()
+                .any(|key| key.starts_with("expires_"))
+        );
+        assert_eq!(
+            probe_request(&format!("{query}&cursor={cursor}")).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            probe_request(&format!(
+                "{}&cursor={cursor}",
+                query.replace("grace_ends", "expires")
+            ))
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    for query in [
+        "expires_after=1&grace_ends_before=2",
+        "expires_window=1..2&grace_ends_window=3..4",
+        "grace_ends_window=1..2&grace_ends_after=1",
+        "grace_ends_window=1..2&expires_before=2",
+        "grace_ends_window=1..2&sort=expires_at",
+        "expires_after=1&sort=grace_ends_at",
+        "grace_ends_window=1..3&grace_ends_window=2..4",
+        "grace_ends_window=1..2&grace_ends_window=1..2",
+        "grace_ends_window=1..",
+        "grace_ends_after=1&grace_ends_after=2",
+    ] {
+        assert_eq!(
+            probe_request(query).await.0,
+            StatusCode::BAD_REQUEST,
+            "{query}"
+        );
+    }
+    let values: Vec<_> = (0..32).rev().map(|i| format!("{i}..{}", i + 1)).collect();
+    let query = windows_query(&values.iter().map(String::as_str).collect::<Vec<_>>())
+        .replace("expires_window", "grace_ends_window");
+    assert_eq!(probe_request(&query).await.0, StatusCode::OK);
+    assert_eq!(
+        probe_request(&format!("{query}&grace_ends_window=32..33"))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
 }

@@ -89,11 +89,15 @@ normalized_events = ["ExpiryChanged"]
 # (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L303 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/deployments/sepolia/NameWrapper.json:L368 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58).
+# A complete-transaction mint uses its matched NameWrapped name/initial-data evidence
+# at TransferSingle's real position, before callback effects. Completion does not replay it.
+# (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L228-L278 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L903 @ ens_v1@91c966f)
 [[abi.events]]
 name = "TransferSingle"
 fragment = "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)"
 emitter_roles = ["name_wrapper"]
-normalized_events = ["TokenControlTransferred", "PermissionChanged"]
+normalized_events = ["TokenControlTransferred", "ExpiryChanged", "PermissionScopeChanged", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PreimageObserved"]
 
 # NameWrapper delegates token approval to ERC1155Fuse, whose _approve emits the
 # ERC-721-shaped Approval event; its owner-wide setter emits ApprovalForAll.

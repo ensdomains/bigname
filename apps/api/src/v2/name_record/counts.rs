@@ -13,7 +13,7 @@ pub(super) async fn apply(
     snapshot: Option<&mut CollectionSnapshot>,
     record: &mut NameRecord,
 ) -> V2Result<()> {
-    let Some(snapshot) = snapshot.filter(|_| record.status != Status::Unsupported) else {
+    let Some(snapshot) = snapshot.filter(|_| record.read_status != Status::Unsupported) else {
         return Ok(());
     };
     #[cfg(test)]

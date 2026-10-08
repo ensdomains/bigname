@@ -23,8 +23,11 @@ pub(super) fn validate_timed_response(
         }
     };
     match endpoint {
-        "name" => (body.pointer("/data/status").and_then(Value::as_str) != Some("ok"))
-            .then(|| "sampled supported name response did not return data.status=ok".to_owned()),
+        "name" => {
+            (body.pointer("/data/read_status").and_then(Value::as_str) != Some("ok")).then(|| {
+                "sampled supported name response did not return data.read_status=ok".to_owned()
+            })
+        }
         "primary_name" => (!indexed_primary_name_is_ok(&body)).then(|| {
             "sampled successful primary-name tuple did not return an indexed ok answer".to_owned()
         }),
@@ -82,7 +85,12 @@ fn lookup_failure(request: &RequestSpec, body: &Value) -> Option<String> {
             ));
         }
         let populated = match expected_kind {
-            "name" => result.pointer("/record/status").and_then(Value::as_str) == Some("ok"),
+            "name" => {
+                result
+                    .pointer("/record/read_status")
+                    .and_then(Value::as_str)
+                    == Some("ok")
+            }
             "address" => result
                 .get("records")
                 .and_then(Value::as_array)
@@ -133,7 +141,7 @@ mod tests {
         let base = normalized_base_url("http://127.0.0.1:3000").unwrap();
         let name = super::super::workload::get(&base, &["v1", "names", "known.eth"], &[]).unwrap();
         assert!(
-            validate_timed_response("name", &name, br#"{"data":{"status":"unsupported"}}"#,)
+            validate_timed_response("name", &name, br#"{"data":{"read_status":"unsupported"}}"#,)
                 .is_some()
         );
         assert!(
@@ -150,11 +158,22 @@ mod tests {
     fn sampled_known_good_inputs_require_populated_ok_evidence() {
         let request = lookup_request();
         let lookup = json!({"data": [
-            {"input": {"id": "forward"}, "kind": "name", "status": "ok", "record": {"status": "ok"}},
+            {"input": {"id": "forward"}, "kind": "name", "status": "ok", "record": {"status": "active", "read_status": "ok"}},
             {"input": {"id": "reverse"}, "kind": "address", "status": "ok", "records": [{"name": "known.eth"}]}
         ]});
         assert!(
             validate_timed_response("lookup", &request, lookup.to_string().as_bytes()).is_none()
+        );
+
+        let base = normalized_base_url("http://127.0.0.1:3000").unwrap();
+        let name = super::super::workload::get(&base, &["v1", "names", "known.eth"], &[]).unwrap();
+        assert!(
+            validate_timed_response(
+                "name",
+                &name,
+                br#"{"data":{"status":"active","read_status":"ok"}}"#,
+            )
+            .is_none()
         );
     }
 }

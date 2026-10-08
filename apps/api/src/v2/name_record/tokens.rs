@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use bigname_storage::SelectedSnapshot;
 use sqlx::types::Uuid;
 
-use crate::v2::{Authority, RegistrationStatus, V2Error, V2Result};
+use crate::v2::{Authority, V2Error, V2Result};
 
 #[cfg(test)]
 #[path = "token_read_test_hooks.rs"]
@@ -12,10 +12,10 @@ pub(crate) mod test_hooks;
 
 pub(crate) fn token_registration(
     authority: Option<Authority>,
-    status: Option<RegistrationStatus>,
+    current_owner: Option<&str>,
     registration_id: Option<&str>,
 ) -> Option<Uuid> {
-    (authority == Some(Authority::EnsV2) && status == Some(RegistrationStatus::Registered))
+    (authority == Some(Authority::EnsV2) && current_owner.is_some())
         .then(|| registration_id.and_then(|id| id.parse().ok()))
         .flatten()
 }
@@ -56,7 +56,7 @@ pub(crate) async fn apply_records(
         .filter_map(|record| {
             token_registration(
                 record.authority,
-                record.registration_status,
+                record.owner.as_deref(),
                 record.registration_id.as_deref(),
             )
             .map(|registration| (registration, record))

@@ -1,11 +1,11 @@
-//! `relation=former_owner` on `GET /v1/addresses/{address}/names` (TYR-63): the released
-//! names whose last owner was the address, for reminders and grace renewal.
+//! `relation=former_owner` on `GET /v1/addresses/{address}/names` (TYR-63): the names whose
+//! ended control registration the address last held, for reminders and grace renewal.
 //!
 //! A former owner is the holder a registration had when it ended, which the composed row
 //! serves as `registration.lapsed_registration.owner`: the holder of an ENSv1 lease that
 //! lapsed past its grace, or of an ENSv2 registration that expired or was unregistered
-//! (`control::lifecycle::served`). It exists only while the name is released, so a
-//! re-registration drops it. The address index (`project_address_name_index`) already lists
+//! (`control::lifecycle::served`). It exists while that registration stays ended, whatever
+//! the row's lifecycle status, so a re-registration drops it. The address index (`project_address_name_index`) already lists
 //! every address a name's retained registration events named, the last holder included, so the
 //! read composes the address's indexed names and keeps those whose lapsed owner is the address.
 //! It never feeds `owner` or `manager`.
@@ -14,9 +14,9 @@
 //! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L341-L362 @ ens_v2_sepolia_20260916@366de741)
 //! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L224-L235 @ ens_v2_sepolia_20260916@366de741)
 //!
-//! Rows sort by the served expiry, then namespace, name and namehash; a row without an expiry (an
-//! unregistered ENSv2 name) is the smallest value, before every dated row ascending and after
-//! them descending, and an expiry window leaves it out. A page is read in one snapshot.
+//! Rows sort by the served expiry, then namespace, name and namehash. A row without a served
+//! expiry is the smallest value, before every dated row ascending and after them descending,
+//! and an expiry window leaves it out. A page is read in one snapshot.
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};

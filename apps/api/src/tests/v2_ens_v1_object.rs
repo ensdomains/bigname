@@ -3,20 +3,17 @@
 
 const ALICE_LEASE_EXPIRY: u64 = 1_798_608_633;
 
-/// Alice's lease, registered with nick.eth's lease date and marked wrapped emancipated on the
-/// lease resource itself, premigrated into ENSv2 with the Universal Resolver cut over. The
-/// Sepolia testnet premigration registrar registers the BaseRegistrar lease and then reserves
-/// the label in ENSv2 at the lease expiry plus the 62-day continuity bonus
+/// A synthetic mainnet lease and wrapped position beside an ENSv2 reservation after cutover.
+/// The dates illustrate the Sepolia premigration shape: its registrar reserves a label at the
+/// lease expiry plus a 62-day continuity bonus
 /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L177-L178 @ ens_v2_sepolia_20260916@366de741)
 /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L249-L266 @ ens_v2_sepolia_20260916@366de741)
 /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L38-L42 @ ens_v2_sepolia_20260916@366de741).
-/// No manifest declares the premigration registrar's own address: it acts as a controller of
-/// the BaseRegistrar declared in `manifests/sepolia/ethereum/ens/ens_v1_registrar_l1/v1.toml`
-/// (`docs/manifests.md`, ENSv2 migration driver)
-/// (upstream: .refs/ens_v2/contracts/script/migration.ts:L1594-L1607 @ ens_v2@a971bd64).
-/// This is the response shape of a live wrapped Sepolia name such as nick.eth, whose lease
-/// date the Sepolia check in `docs/deployment.md` records. The faithful wrapped-resource and
-/// renewal paths are in `crates/project/tests/families_expiry_grace.rs`.
+/// This generic mainnet fixture does not admit a Sepolia ETHRegistry/ETHRegistrar deployment,
+/// so its canonical ENSv2 reservation has no registrar grace: G = E. The ENSv1 wrapper keeps
+/// its independently known entry expiry, which must not supply grace to that reservation.
+/// The faithful wrapped-resource and renewal paths are in
+/// `crates/project/tests/families_expiry_grace.rs`.
 async fn seed_alice_wrapped_reserved_after_cutover(database: &TestDatabase) -> Result<()> {
     const LEASE_EXPIRY: u64 = ALICE_LEASE_EXPIRY;
     const RESERVED_EXPIRY: u64 = LEASE_EXPIRY + 62 * 86_400;
@@ -117,7 +114,7 @@ async fn v2_ens_v1_object_serves_the_lease_and_wrapper_beside_the_ens_v2_reserva
     let check = |row: &Value, route: &str| {
         assert_eq!(row["authority"], json!("ens_v1"), "{route}: {row:#}");
         assert_eq!(row["expires_at"], json!("1803965433"), "{route}: {row:#}");
-        assert_eq!(row["grace_ends_at"], json!("1806384633"), "{route}: {row:#}");
+        assert_eq!(row["grace_ends_at"], json!("1803965433"), "{route}: {row:#}");
         assert_eq!(row["ens_v1"], expected, "{route}: {row:#}");
         assert!(row.get("wrapper_state").is_none(), "{route}: {row:#}");
         assert!(row.get("wrapper_fuses").is_none(), "{route}: {row:#}");
@@ -138,7 +135,7 @@ async fn v2_ens_v1_object_serves_the_lease_and_wrapper_beside_the_ens_v2_reserva
     .await?;
     let feed = &feed["data"][0]["record"];
     assert_eq!(feed["expires_at"], json!("1803965433"), "lookup feed: {feed:#}");
-    assert_eq!(feed["grace_ends_at"], json!("1806384633"), "lookup feed: {feed:#}");
+    assert_eq!(feed["grace_ends_at"], json!("1803965433"), "lookup feed: {feed:#}");
     assert_eq!(feed["ens_v1"], expected, "lookup feed: {feed:#}");
     assert!(feed.get("authority").is_none(), "lookup feed: {feed:#}");
     let owned = v2_name_record_payload_for_database(
@@ -249,8 +246,8 @@ async fn v2_ens_v1_wrapper_expiry_stays_behind_a_controller_only_renewal() -> Re
 
 /// Past its own expiry the NameWrapper drops an emancipated or locked name's owner and every
 /// name's fuses (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f).
-/// A lapsed emancipated or locked wrapper serves no state or fuses but keeps its past expiry; a
-/// plain wrapped one keeps its state, zero fuses and the past expiry.
+/// An expired emancipated or locked position serves `lapsed` without fuses and keeps its past
+/// expiry; a plain wrapped one keeps `wrapped`, zero fuses and the past expiry.
 #[tokio::test]
 async fn v2_ens_v1_wrapper_expiry_is_served_backed_and_lapsed() -> Result<()> {
     for (state, fuses, kept) in [
@@ -275,7 +272,7 @@ async fn v2_ens_v1_wrapper_expiry_is_served_backed_and_lapsed() -> Result<()> {
                 assert_eq!(ens_v1["wrapper_state"], json!("wrapped"), "{context}");
                 assert_eq!(ens_v1["wrapper_fuses"]["fuses"], json!(0), "{context}");
             } else {
-                assert!(ens_v1.get("wrapper_state").is_none(), "{context}");
+                assert_eq!(ens_v1["wrapper_state"], json!("lapsed"), "{context}");
                 assert!(ens_v1.get("wrapper_fuses").is_none(), "{context}");
             }
         }
@@ -287,9 +284,8 @@ async fn v2_ens_v1_wrapper_expiry_is_served_backed_and_lapsed() -> Result<()> {
 /// An unwrap burns the NameWrapper token, clearing its owner, while the burnt entry keeps its
 /// fuses and expiry (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1032 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269-L279 @ ens_v1@91c966f).
-/// The composed name does not read the wrapper lifecycle, so it still serves the old
-/// `wrapper_state` (the known gap `crates/project/tests/families_retention.rs` pins), but the
-/// expiry of the entry that was unwrapped is not served beside it. A rewrap serves it again.
+/// The composed name serves `unwrapped` without the retained entry's fuses or expiry. A
+/// successful rewrap makes the current entry's backed state, fuses and expiry visible again.
 #[tokio::test]
 async fn v2_ens_v1_wrapper_expiry_is_omitted_once_the_wrapper_is_unwrapped() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -307,7 +303,8 @@ async fn v2_ens_v1_wrapper_expiry_is_omitted_once_the_wrapper_is_unwrapped() -> 
     assert_eq!(retained, (Some("emancipated".to_owned()), Some(true), true));
     for (route, ens_v1) in alice_ens_v1_objects(&database).await? {
         let context = format!("{route}: {ens_v1:#}");
-        assert_eq!(ens_v1["wrapper_state"], json!("emancipated"), "{context}");
+        assert_eq!(ens_v1["wrapper_state"], json!("unwrapped"), "{context}");
+        assert!(ens_v1.get("wrapper_fuses").is_none(), "{context}");
         assert!(ens_v1.get("wrapper_expires_at").is_none(), "{context}");
         assert!(ens_v1.get("wrapper_expires_at_reason").is_none(), "{context}");
     }
@@ -317,6 +314,8 @@ async fn v2_ens_v1_wrapper_expiry_is_omitted_once_the_wrapper_is_unwrapped() -> 
                "owner":"0x00000000000000000000000000000000000000aa"})).await?;
     rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
     for (route, ens_v1) in alice_ens_v1_objects(&database).await? {
+        assert_eq!(ens_v1["wrapper_state"], json!("emancipated"), "{route}: {ens_v1:#}");
+        assert_eq!(ens_v1["wrapper_fuses"]["fuses"], json!(196_608), "{route}: {ens_v1:#}");
         assert_eq!(ens_v1["wrapper_expires_at"], json!("1806384633"), "{route}: {ens_v1:#}");
     }
     database.cleanup().await
@@ -346,7 +345,15 @@ async fn v2_ens_v1_wrapper_expiry_classifies_the_maximum_and_zero() -> Result<()
             assert!(ens_v1.get("wrapper_expires_at").is_some(), "{context}");
             assert_eq!(ens_v1["wrapper_expires_at_reason"], json!(reason), "{context}");
             let backed = state == "wrapped" || expiry == u64::MAX;
-            assert_eq!(ens_v1.get("wrapper_state").is_some(), backed, "{context}");
+            assert_eq!(
+                ens_v1["wrapper_state"],
+                json!(if backed { state } else { "lapsed" }),
+                "{context}"
+            );
+            assert_eq!(ens_v1.get("wrapper_fuses").is_some(), backed, "{context}");
+            if backed {
+                assert_eq!(ens_v1["wrapper_fuses"]["fuses"], json!(fuses), "{context}");
+            }
         }
         database.cleanup().await?;
     }
@@ -409,8 +416,8 @@ async fn v2_ens_v1_object_on_an_unwrapped_lease_and_its_absence_under_ens_v2() -
     assert_eq!(unwrapped["data"]["authority"], json!("ens_v1"), "{unwrapped:#}");
     assert_eq!(
         unwrapped["data"]["ens_v1"],
-        json!({"expires_at": "1798859045"}),
-        "a never-wrapped lease omits the wrapper fields, its expiry included: {unwrapped:#}"
+        json!({"expires_at": "1798859045", "wrapper_state": "unwrapped"}),
+        "proven registry custody serves unwrapped without wrapper expiry or fuses: {unwrapped:#}"
     );
 
     let registered =
@@ -443,7 +450,7 @@ async fn v2_ens_v1_object_serves_a_saturated_lease_expiry_as_i64_max() -> Result
     let detail = v2_name_record_payload_for_database(&database, "/v1/names/alice.eth").await?;
     assert_eq!(
         detail["data"]["ens_v1"],
-        json!({"expires_at": "9223372036854775807"}),
+        json!({"expires_at": "9223372036854775807", "wrapper_state": "unwrapped"}),
         "{detail:#}"
     );
     database.cleanup().await

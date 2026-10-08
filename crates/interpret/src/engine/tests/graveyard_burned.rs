@@ -109,10 +109,14 @@ async fn a_migrated_grant_held_by_the_graveyard_never_serves_after_an_ens_v2_unr
         "{unregistered:#}"
     );
     assert_eq!(
-        unregistered["registration"]["expiry"],
-        Value::Null,
+        unregistered["registration"]["expiry"], migrated["registration"]["expiry"],
         "{unregistered:#}"
     );
+    assert_eq!(
+        unregistered["registration"]["grace_ends_at"],
+        migrated["registration"]["grace_ends_at"]
+    );
+    assert_eq!(unregistered["registration"]["lifecycle_status"], "released");
     assert_eq!(
         unregistered["control"]["status"], "unregistered",
         "{unregistered:#}"
@@ -714,7 +718,8 @@ async fn a_parent_reassigning_a_wrapped_subname_serves_the_new_registry_owner() 
                 "{run}: {served:#}"
             );
             assert_eq!(served["control"]["owner"], CAROL, "{run}: {served:#}");
-            for wrapper_field in ["wrapper_state", "wrapper_masked"] {
+            assert_eq!(served["wrapper_state"], "unwrapped", "{run}: {served:#}");
+            for wrapper_field in ["wrapper_fuses", "wrapper_masked"] {
                 assert!(
                     !served.to_string().contains(wrapper_field),
                     "{run}: {served:#}"

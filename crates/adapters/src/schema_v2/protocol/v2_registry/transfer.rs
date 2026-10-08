@@ -127,6 +127,7 @@ pub(super) fn token_resource(
                         ),
                         "upstream_resource": resource_word,
                         "resource_pending": false,
+                        "derived_from": "registry_state",
                         "token_lineage_id": token_lineage_id.map(|id| id.to_string()),
                         "current_token_id":token_id,
                         "status":"registered",

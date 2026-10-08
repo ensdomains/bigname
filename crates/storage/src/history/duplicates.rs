@@ -61,13 +61,15 @@ pub(super) fn push_fixed_product_history_duplicate_filter(
            AND ne.resource_id IS NULL \
            AND ne.after_state @> '{\"token_state_absent\":true}'::jsonb)",
     );
-    // NameWrapped has a canonical authority row. Its derived transfer is an ownership
-    // effect only when both owners are retained, nonzero and different; ERC-1155 logs keep
-    // their existing behavior.
+    // Wrapping has a canonical authority row, including a positively matched mint. Its
+    // derived transfer is an ownership effect only when both owners are retained, nonzero
+    // and different; independent ERC-1155 transfers keep their existing behavior.
     builder.push(
         r#" AND NOT (ne.event_kind = 'TokenControlTransferred'
         AND ne.source_family = 'ens_v1_wrapper_l1'
-        AND ne.after_state @> '{"source_event":"NameWrapped"}'::jsonb
+        AND (ne.after_state @> '{"source_event":"NameWrapped"}'::jsonb
+             OR ne.after_state @> '{"source_event":"TransferSingle","wrapper_mint":true,
+                "matched_wrapper_completion":{"source_event":"NameWrapped"}}'::jsonb)
         AND NOT COALESCE(
           ne.before_state ->> 'from' ~ '^0x[0-9a-fA-F]{40}$'
           AND ne.after_state ->> 'to' ~ '^0x[0-9a-fA-F]{40}$'

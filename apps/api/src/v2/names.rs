@@ -1,4 +1,4 @@
-//! `GET /v1/names`: the namespace-wide listing of current names by registration expiry.
+//! `GET /v1/names`: the namespace-wide listing of current names by canonical registration deadlines.
 //!
 //! This is the collection parent of `GET /v1/names/{name}`, kept under `/v1/names` rather than a
 //! `/v1/registrations` route because its rows are names — the same dictionary shape search
@@ -19,7 +19,7 @@ use windows::{ExpiryWindows, WINDOW_KEY};
 use axum::{Json, extract::State};
 use bigname_storage::UnixSeconds;
 use bigname_storage::{
-    NameCurrentExpiringFilter, NameCurrentExpiryWindow, NameCurrentListCursor,
+    NameCurrentDeadline, NameCurrentExpiringFilter, NameCurrentExpiryWindow, NameCurrentListCursor,
     NameCurrentListCursorValue, NameCurrentListOrder,
 };
 
@@ -36,23 +36,23 @@ use super::{
     api_error_to_v2, validate_latest_collection_selectors,
 };
 
-const NAMES_SORT: &str = "expires_at";
 const NAMESPACE_FILTER_KEY: &str = "namespace";
 const EXPIRES_AFTER_FILTER_KEY: &str = "expires_after";
 const EXPIRES_BEFORE_FILTER_KEY: &str = "expires_before";
 const ORDER_FILTER_KEY: &str = "order";
 const AUTHORITY_FILTER_KEY: &str = "authority";
 const PARENT_FILTER_KEY: &str = "parent";
-const EXPIRES_AT_CURSOR_KEY: &str = "expires_at";
 const NAME_CURSOR_KEY: &str = "name";
 const NAMEHASH_CURSOR_KEY: &str = "namehash";
 const NONE_FILTER_VALUE: &str = "";
-const POSITION_KEYS: [&str; 4] = [
-    EXPIRES_AT_CURSOR_KEY,
-    NAMESPACE_FILTER_KEY,
-    NAME_CURSOR_KEY,
-    NAMEHASH_CURSOR_KEY,
-];
+fn position_keys(deadline: NameCurrentDeadline) -> [&'static str; 4] {
+    [
+        deadline.column(),
+        NAMESPACE_FILTER_KEY,
+        NAME_CURSOR_KEY,
+        NAMEHASH_CURSOR_KEY,
+    ]
+}
 
 pub(crate) struct NamesQueryParams;
 
@@ -62,6 +62,9 @@ impl QueryParamAllowlist for NamesQueryParams {
         "expires_after",
         "expires_before",
         "expires_window",
+        "grace_ends_after",
+        "grace_ends_before",
+        "grace_ends_window",
         "authority",
         "parent",
         "sort",
@@ -78,6 +81,7 @@ pub(crate) use query::NamesQuery;
 /// Everything a names-listing cursor binds besides its keyset position.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct NamesCursorBinding<'a> {
+    pub(crate) deadline: NameCurrentDeadline,
     pub(crate) namespace: &'a str,
     pub(crate) expires_after: Option<UnixSeconds>,
     pub(crate) expires_before: Option<UnixSeconds>,
@@ -91,12 +95,13 @@ pub(crate) async fn get_names(
     params: NamesQuery,
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<SearchName>>>> {
-    get_names_page(params.params, params.windows, state).await
+    get_names_page(params.params, params.windows, params.deadline, state).await
 }
 
 async fn get_names_page(
     params: QueryParams,
     windows: Option<ExpiryWindows>,
+    deadline: NameCurrentDeadline,
     state: AppState,
 ) -> V2Result<Json<Envelope<Vec<SearchName>>>> {
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
@@ -105,23 +110,24 @@ async fn get_names_page(
     })?;
     ensure_public_namespace(&namespace).map_err(api_error_to_v2)?;
     match params.sort_wire.as_deref() {
-        None | Some(NAMES_SORT) => {}
+        None => {}
+        Some(sort) if sort == deadline.column() => {}
         Some(_) => {
             return Err(V2Error::invalid_input(
-                "sort must be expires_at on this listing",
+                "sort must match the selected date family",
             ));
         }
     }
     if windows.is_none() && params.expires_after.is_none() && params.expires_before.is_none() {
         return Err(V2Error::invalid_input(
-            "expires_after, expires_before or expires_window is required so the listing is bounded",
+            "a scalar date bound or date window is required so the listing is bounded",
         ));
     }
     if let (Some(after), Some(before)) = (params.expires_after, params.expires_before)
         && after >= before
     {
         return Err(V2Error::invalid_input(
-            "expires_after must be earlier than expires_before",
+            "the after bound must be earlier than the before bound",
         ));
     }
 
@@ -129,6 +135,7 @@ async fn get_names_page(
 
     let order = params.order.unwrap_or(SortOrder::Asc);
     let binding = NamesCursorBinding {
+        deadline,
         namespace: &namespace,
         expires_after: params.expires_after,
         expires_before: params.expires_before,
@@ -141,14 +148,15 @@ async fn get_names_page(
     // published now (`list_cursor`).
     let list = names_list_cursor(&binding);
     let storage_cursor = list
-        .read(params.cursor.as_deref(), &POSITION_KEYS)?
-        .map(|position| names_storage_cursor(&position))
+        .read(params.cursor.as_deref(), &position_keys(deadline))?
+        .map(|position| names_storage_cursor(&position, deadline))
         .transpose()?;
 
     let mut snapshot =
         CollectionSnapshot::capture_for_namespace(&state, None, Some(&namespace)).await?;
 
     let filter = NameCurrentExpiringFilter {
+        deadline,
         namespace: namespace.clone(),
         windows: windows
             .as_ref()
@@ -186,26 +194,30 @@ async fn get_names_page(
     let next_cursor = storage_page
         .next_cursor
         .as_ref()
-        .map(|cursor| names_position(cursor).map(|position| list.next(position)))
+        .map(|cursor| names_position(cursor, deadline).map(|position| list.next(position)))
         .transpose()?;
     let has_more = next_cursor.is_some();
-    // A released row names its last holder, as name detail does (TYR-63).
     let mut data = storage_page
         .rows
         .iter()
         .map(|row| {
-            let expires_window_index = windows
+            let window_index = windows
                 .as_ref()
                 .map(|windows| {
-                    windows.index_of(row.expiry_date).ok_or_else(|| {
+                    windows.index_of(deadline.value(row)).ok_or_else(|| {
                         V2Error::internal_error(
-                            "selected expiry does not belong to a requested window",
+                            "selected deadline does not belong to a requested window",
                         )
                     })
                 })
                 .transpose()?;
             Ok(SearchName {
-                expires_window_index,
+                expires_window_index: (deadline == NameCurrentDeadline::Expiry)
+                    .then_some(window_index)
+                    .flatten(),
+                grace_ends_window_index: (deadline == NameCurrentDeadline::GraceEnds)
+                    .then_some(window_index)
+                    .flatten(),
                 lapsed_registration: super::name_record::lapsed_registration(
                     &row.row.declared_summary,
                 ),
@@ -257,6 +269,10 @@ pub(crate) fn normalize_parent(value: &str) -> V2Result<String> {
 fn cursor_filters(binding: &NamesCursorBinding<'_>) -> BTreeMap<String, String> {
     let mut filters = BTreeMap::from([
         (
+            "date_family".to_owned(),
+            binding.deadline.column().to_owned(),
+        ),
+        (
             NAMESPACE_FILTER_KEY.to_owned(),
             binding.namespace.to_owned(),
         ),
@@ -278,6 +294,17 @@ fn cursor_filters(binding: &NamesCursorBinding<'_>) -> BTreeMap<String, String> 
         filters.remove(EXPIRES_BEFORE_FILTER_KEY);
         filters.insert(WINDOW_KEY.to_owned(), windows.canonical());
     }
+    if binding.deadline == NameCurrentDeadline::GraceEnds {
+        for (expiry, grace) in [
+            (EXPIRES_AFTER_FILTER_KEY, "grace_ends_after"),
+            (EXPIRES_BEFORE_FILTER_KEY, "grace_ends_before"),
+            (WINDOW_KEY, "grace_ends_window"),
+        ] {
+            if let Some(value) = filters.remove(expiry) {
+                filters.insert(grace.to_owned(), value);
+            }
+        }
+    }
     if let Some(authority) = binding.authority {
         filters.insert(AUTHORITY_FILTER_KEY.to_owned(), authority.canonical_value());
     }
@@ -292,10 +319,13 @@ fn option_timestamp_filter(value: Option<UnixSeconds>) -> String {
 }
 
 fn names_list_cursor(binding: &NamesCursorBinding<'_>) -> ListCursor {
-    ListCursor::new(NAMES_SORT, cursor_filters(binding))
+    ListCursor::new(binding.deadline.column(), cursor_filters(binding))
 }
 
-fn names_position(cursor: &NameCurrentListCursor) -> V2Result<ListPosition> {
+fn names_position(
+    cursor: &NameCurrentListCursor,
+    deadline: NameCurrentDeadline,
+) -> V2Result<ListPosition> {
     let NameCurrentListCursorValue::Timestamp(Some(expires_at)) = cursor.sort_value else {
         return Err(V2Error::internal_error(
             "names listing cursor must carry an expiry timestamp",
@@ -303,16 +333,19 @@ fn names_position(cursor: &NameCurrentListCursor) -> V2Result<ListPosition> {
     };
 
     Ok(ListPosition::new([
-        (EXPIRES_AT_CURSOR_KEY, expires_at.internal_string()),
+        (deadline.column(), expires_at.internal_string()),
         (NAMESPACE_FILTER_KEY, cursor.namespace.clone()),
         (NAME_CURSOR_KEY, cursor.normalized_name.clone()),
         (NAMEHASH_CURSOR_KEY, cursor.namehash.clone()),
     ]))
 }
 
-fn names_storage_cursor(position: &ListPosition) -> V2Result<NameCurrentListCursor> {
+fn names_storage_cursor(
+    position: &ListPosition,
+    deadline: NameCurrentDeadline,
+) -> V2Result<NameCurrentListCursor> {
     let expires_at = position
-        .get(EXPIRES_AT_CURSOR_KEY)?
+        .get(deadline.column())?
         .parse::<UnixSeconds>()
         .map_err(|_| invalid_cursor_error())?;
 
@@ -325,160 +358,4 @@ fn names_storage_cursor(position: &ListPosition) -> V2Result<NameCurrentListCurs
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn timestamp(value: &str) -> UnixSeconds {
-        value.parse::<UnixSeconds>().expect("timestamp must parse")
-    }
-
-    fn binding<'a>() -> NamesCursorBinding<'a> {
-        NamesCursorBinding {
-            namespace: "ens",
-            expires_after: Some(timestamp("2026-09-01T00:00:00Z")),
-            expires_before: None,
-            windows: None,
-            authority: None,
-            parent: None,
-            order: SortOrder::Asc,
-        }
-    }
-
-    fn cursor() -> NameCurrentListCursor {
-        NameCurrentListCursor {
-            sort_value: NameCurrentListCursorValue::Timestamp(Some(timestamp(
-                "2026-10-01T00:00:00Z",
-            ))),
-            namespace: "ens".to_owned(),
-            normalized_name: "beta.eth".to_owned(),
-            namehash: "0xbeta".to_owned(),
-        }
-    }
-
-    fn read(binding: &NamesCursorBinding<'_>, cursor: &str) -> V2Result<NameCurrentListCursor> {
-        let position = names_list_cursor(binding)
-            .read(Some(cursor), &POSITION_KEYS)?
-            .expect("a cursor was sent");
-        names_storage_cursor(&position)
-    }
-
-    #[test]
-    fn names_cursor_round_trips_and_binds_window_and_order() {
-        let binding = binding();
-        let cursor_text = names_list_cursor(&binding)
-            .next(names_position(&cursor()).expect("position must build"));
-        let payload = crate::v2::decode(&cursor_text).expect("cursor must decode");
-        assert_eq!(payload.sort, "expires_at");
-        assert_eq!(
-            payload.filters,
-            BTreeMap::from([
-                ("namespace".to_owned(), "ens".to_owned()),
-                ("expires_after".to_owned(), "1788220800".to_owned()),
-                ("expires_before".to_owned(), String::new()),
-                ("order".to_owned(), "asc".to_owned()),
-            ])
-        );
-        assert_eq!(
-            read(&binding, &cursor_text).expect("cursor must decode"),
-            cursor()
-        );
-
-        for other in [
-            NamesCursorBinding {
-                namespace: "basenames",
-                ..binding
-            },
-            NamesCursorBinding {
-                expires_after: None,
-                ..binding
-            },
-            NamesCursorBinding {
-                expires_before: Some(timestamp("2027-01-01T00:00:00Z")),
-                ..binding
-            },
-            NamesCursorBinding {
-                order: SortOrder::Desc,
-                ..binding
-            },
-        ] {
-            assert!(
-                read(&other, &cursor_text).is_err(),
-                "{other:?} must reject a cursor bound to {binding:?}"
-            );
-        }
-
-        let mut wrong_sort = payload.clone();
-        wrong_sort.sort = "name".to_owned();
-        assert!(read(&binding, &crate::v2::encode(&wrong_sort)).is_err());
-    }
-
-    #[test]
-    fn names_cursor_binds_authority_and_parent_only_when_sent() {
-        let ens_v1 = AuthoritySet::from(super::super::vocab::Authority::EnsV1);
-        let both = AuthoritySet::from_authorities([
-            super::super::vocab::Authority::EnsV1,
-            super::super::vocab::Authority::EnsV0,
-        ])
-        .expect("non-empty set");
-        let filtered = NamesCursorBinding {
-            authority: Some(&both),
-            parent: Some("eth"),
-            ..binding()
-        };
-        let cursor_text = names_list_cursor(&filtered)
-            .next(names_position(&cursor()).expect("position must build"));
-        let filters = crate::v2::decode(&cursor_text)
-            .expect("cursor must decode")
-            .filters;
-        assert_eq!(filters["authority"], "ens_v0,ens_v1");
-        assert_eq!(filters["parent"], "eth");
-        assert_eq!(
-            read(&filtered, &cursor_text).expect("cursor must decode"),
-            cursor()
-        );
-        for other in [
-            binding(),
-            NamesCursorBinding {
-                authority: Some(&ens_v1),
-                ..filtered
-            },
-            NamesCursorBinding {
-                parent: None,
-                ..filtered
-            },
-            NamesCursorBinding {
-                parent: Some("base.eth"),
-                ..filtered
-            },
-        ] {
-            assert!(
-                read(&other, &cursor_text).is_err(),
-                "{other:?} must reject a cursor bound to {filtered:?}"
-            );
-        }
-        assert!(
-            !crate::v2::decode(
-                &names_list_cursor(&binding())
-                    .next(names_position(&cursor()).expect("position must build"))
-            )
-            .expect("cursor must decode")
-            .filters
-            .keys()
-            .any(|key| key == "authority" || key == "parent")
-        );
-    }
-
-    #[test]
-    fn names_position_refuses_a_name_or_null_sort_value() {
-        for sort_value in [
-            NameCurrentListCursorValue::Name("beta.eth".to_owned()),
-            NameCurrentListCursorValue::Timestamp(None),
-        ] {
-            let cursor = NameCurrentListCursor {
-                sort_value,
-                ..cursor()
-            };
-            assert!(names_position(&cursor).is_err());
-        }
-    }
-}
+mod tests;

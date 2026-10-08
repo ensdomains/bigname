@@ -743,3 +743,6 @@ fn same_block_wrapped_reregistration_replaces_an_earlier_registry_write() -> any
     );
     Ok(())
 }
+
+#[path = "v1_wrapper_callback.rs"]
+mod callback;

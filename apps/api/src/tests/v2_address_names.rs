@@ -103,7 +103,7 @@ async fn v2_get_address_names_returns_record_rows_with_relations_and_primary_fla
     assert_eq!(data[0]["owner"], json!(V2_ADDRESS));
     assert_eq!(data[0]["manager"], json!(V2_PERMISSION_SUBJECT));
     assert!(data[0].get("registrant").is_none());
-    assert_eq!(data[0]["registration_status"], json!("active"));
+    assert_eq!(data[0]["status"], json!("active"));
     assert_eq!(data[0]["registered_at"], json!("1704153600"));
     assert_eq!(data[0]["created_at"], json!("1672617600"));
     assert_eq!(data[0]["expires_at"], json!("1798848000"));
@@ -2197,6 +2197,67 @@ async fn v2_wrapped_subname_manager_is_the_token_holder_in_every_state() -> Resu
                 .any(|row| row["namehash"] == detail["namehash"]),
             "{state}: {managed}"
         );
+        database.cleanup().await?;
+    }
+    Ok(())
+}
+
+/// Past its wrapper expiry the NameWrapper clears the owner only of a name whose
+/// PARENT_CANNOT_CONTROL fuse is burned. A plain wrapped subname keeps its holder, so nothing is
+/// released and it stays `active`. An emancipated one is `released` and serves no holder.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
+#[tokio::test]
+async fn v2_plain_wrapped_subname_stays_active_past_its_wrapper_expiry() -> Result<()> {
+    for (state, fuses, holds) in [("wrapped", 0, true), ("emancipated", 65_536, false)] {
+        let database = TestDatabase::new_migrated().await?;
+        seed_perms_wrapped_lease(&database, WrappedLeaseShape::LinkRecorded).await?;
+        insert_family_registry_child_edge(
+            &database.pool,
+            "ens",
+            "ethereum-mainnet",
+            "perms.eth",
+            &format!("{:#x}", alloy_primitives::keccak256(b"sub")),
+            "0x00000000000000000000000000000000000000e7",
+            120,
+            "0xperms120",
+        )
+        .await?;
+        let wrapper = Uuid::from_u128(0x5a_0505);
+        seed_wrapped_subname_inputs(&database, "sub.perms.eth", wrapper).await?;
+        insert_permission_wrapper_state(&database, wrapper, state, fuses, 1_000_000, 125).await?;
+        rebuild_fixture_families(&database.pool, "ethereum-mainnet", 130, "0xperms130").await?;
+        let detail = assert_lookup_detail_matches_name_detail(&database, "sub.perms.eth").await?;
+        let holder = holds.then(|| json!(V2_PERMISSIONS_SUBJECT));
+        assert_eq!(
+            detail["status"],
+            if holds { "active" } else { "released" },
+            "{state}: {detail}"
+        );
+        assert_eq!(detail.get("owner"), holder.as_ref(), "{state}: {detail}");
+        assert_eq!(detail.get("manager"), holder.as_ref(), "{state}: {detail}");
+        assert_eq!(detail["registration_id"], wrapper.to_string(), "{state}: {detail}");
+        assert_eq!(detail["expires_at"], "1000000", "{state}: {detail}");
+        assert_eq!(detail["grace_ends_at"], "1000000", "{state}: {detail}");
+        assert_eq!(detail["ens_v1"]["wrapper_expires_at"], "1000000", "{state}: {detail}");
+        for relation in ["owner", "manager"] {
+            let (status, body) = read_family_response(
+                &database,
+                &format!(
+                    "/v1/addresses/{V2_PERMISSIONS_SUBJECT}/names?relation={relation}&namespace=ens"
+                ),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(
+                body["data"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|row| row["namehash"] == detail["namehash"]),
+                holds,
+                "{state} {relation}: {body}"
+            );
+        }
         database.cleanup().await?;
     }
     Ok(())

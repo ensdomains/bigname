@@ -994,7 +994,7 @@ async fn a_released_name_has_no_owner_or_manager() -> Result<()> {
         other_rows,
         [Vec::<String>::new(), Vec::new(), Vec::new(), Vec::new()]
     );
-    assert_eq!(released_detail["registration_status"], "released");
+    assert_eq!(released_detail["status"], "released");
     assert!(released_detail.get("owner").is_none(), "{released_detail}");
     assert!(
         released_detail.get("manager").is_none(),
@@ -1061,7 +1061,7 @@ async fn a_lapsed_name_lists_its_registrant_under_former_owner_only() -> Result<
     .await?;
     database.cleanup().await?;
 
-    assert_eq!(detail["registration_status"], "released", "{detail}");
+    assert_eq!(detail["status"], "released", "{detail}");
     // The revived registry custody stays selected; a tombstone would null its authority kind.
     assert_eq!(
         composed.declared_summary["registration"]["authority_kind"],

@@ -95,7 +95,7 @@ pub(crate) struct AddressName {
     pub(crate) owner: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) manager: Option<String>,
-    pub(crate) registration_status: RegistrationStatus,
+    pub(crate) status: RegistrationStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registered_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

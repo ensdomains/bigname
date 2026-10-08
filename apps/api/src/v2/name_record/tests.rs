@@ -27,7 +27,7 @@ fn registration_status_classifier_covers_authority_kind_domain() {
     });
     assert_eq!(
         classify_registration_status("ens", Some(&registered), Some("0xabc"), true),
-        RegistrationStatus::Registered
+        RegistrationStatus::Active
     );
 
     let ens_v2_registered = json!({
@@ -37,7 +37,7 @@ fn registration_status_classifier_covers_authority_kind_domain() {
     });
     assert_eq!(
         classify_registration_status("ens", Some(&ens_v2_registered), Some("0xabc"), true),
-        RegistrationStatus::Registered
+        RegistrationStatus::Active
     );
 
     let wrapped = json!({
@@ -47,7 +47,7 @@ fn registration_status_classifier_covers_authority_kind_domain() {
     });
     assert_eq!(
         classify_registration_status("ens", Some(&wrapped), Some("0xabc"), true),
-        RegistrationStatus::Wrapped
+        RegistrationStatus::Active
     );
     assert_eq!(
         classify_registration_status("basenames", Some(&wrapped), Some("0xabc"), true),
