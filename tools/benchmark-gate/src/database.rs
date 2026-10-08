@@ -139,9 +139,7 @@ async fn connect_disposable_copy_with_acquire_timeout(
     )
     .await?;
     let expected_database_name = expected_database_name.to_owned();
-    // This pool reaches the identity search refresh. Keep sqlx's default `max_lifetime`
-    // (docs/storage.md, "Durable search data").
-    let pool = PgPoolOptions::new()
+    let pool = PgPoolOptions::new() // Keep the default `max_lifetime`: docs/storage.md, search.
         .max_connections(maximum_connections)
         .acquire_timeout(acquire_timeout)
         .after_connect(move |connection, _metadata| {
