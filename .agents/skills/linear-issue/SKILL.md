@@ -20,11 +20,13 @@ Exactly one area label and one type label.
 - Area: `api`, `interpret`, `projections`, `storage`, `release`, `ops`, `process`. Each has a description in Linear. Read them before choosing.
 - Type: `bug`, `improvement`, `feature`.
 
-Owners in the Ownership Map of `docs/internal/workstreams.md` that have no label of their own map to an area label:
+Owners in the Ownership Map of `docs/internal/workstreams.md` map to area labels:
 
 - Intake and Adapters, Manifests and Discovery, Upstream Evidence: `interpret`.
 - Verified Lookup, Conformance and Fixtures: `api`.
 - Agent Process, Platform and DevEx: `process`.
+- Projections and API: `api` for route and response work, `projections` for projection and publication work.
+- Storage and Domain: `storage`.
 
 ## Description
 
@@ -32,7 +34,7 @@ Headings in this order. Edit the description in place when facts change. History
 
 ### `## State <date>`
 
-Status and provenance first: where this came from, which PR or ticket or review it was split from. What is known, with code references as `path:line` at a named commit. Say whether a fix would rotate the [interpreter content hash](../../../docs/glossary.md#interpreter-content-hash).
+Status and provenance first: where this came from, as the PR number or ticket id it was split from. What is known, with code references as `path:line` at a named commit. State the impact of a fix on the [interpreter content hash](../../../docs/glossary.md#interpreter-content-hash) when it is known. Otherwise say it is unknown until there is a diff. Once a diff exists, the measured result is required.
 
 ### Analysis (optional, no fixed heading)
 
