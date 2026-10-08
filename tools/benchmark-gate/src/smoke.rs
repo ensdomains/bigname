@@ -145,6 +145,8 @@ async fn smoke_writer_pool(database_url: &str) -> Result<PgPool> {
     let options = PgConnectOptions::from_str(database_url)?
         .application_name("bigname-benchmark-gate-smoke")
         .options([("search_path", "bigname_phase")]);
+    // This pool reaches the identity search refresh. Keep sqlx's default `max_lifetime`
+    // (docs/storage.md, "Durable search data").
     PgPoolOptions::new()
         .max_connections(12)
         .connect_with(options)
