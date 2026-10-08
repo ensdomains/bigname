@@ -1,6 +1,6 @@
 ---
 name: linear-issue
-description: Create or update a Linear issue in the Tyrell Corporation team (TYR) for bigname work. Fire when filing a ticket, splitting work out of a PR, or recording a decision.
+description: Create or update a Linear issue in the Tyrell Corporation team (TYR) for bigname work. Use when filing a ticket, splitting work out of a PR, or recording a decision.
 metadata:
   kind: playbook
 ---
@@ -15,7 +15,7 @@ Short, sentence case, plain. Say the behaviour or the change, not the component.
 
 ## Labels
 
-Exactly one area label and one type label.
+Exactly one area label and one type label. A ticket closed as not reproducible also carries `can't reproduce`.
 
 - Area: `api`, `interpret`, `projections`, `storage`, `release`, `ops`, `process`. Each has a description in Linear. Read them before choosing.
 - Type: `bug`, `improvement`, `feature`.
@@ -34,7 +34,12 @@ Headings in this order. Edit the description in place when facts change. History
 
 ### `## State <date>`
 
-Status and provenance first: where this came from, as the PR number or ticket id it was split from. What is known, with code references as `path:line` at a named commit. State the impact of a fix on the [interpreter content hash](../../../docs/glossary.md#interpreter-content-hash) when it is known. Otherwise say it is unknown until there is a diff. Once a diff exists, the measured result is required.
+Status and provenance first: where this came from. The PR number or ticket id when it was split from one. Then what is known.
+
+When code is involved:
+
+- Give code references as `path:line` at a named commit.
+- State the impact of a fix on the interpreter content hash when it is known (`docs/glossary.md` "Interpreter content hash"). Otherwise say it is unknown until there is a diff. Once a diff exists, the measured result is required.
 
 ### Analysis (optional, no fixed heading)
 
@@ -42,7 +47,7 @@ What is wrong or missing and why, as the reader above would understand it.
 
 ### `## Decision (<who>, <date>)`
 
-Only once someone has ruled. A decision belongs to a person, so name the person. Never attribute a decision to a review tool or an agent. Cite the PR or ticket where the decision was made. Quote or paraphrase the ruling in one or two sentences.
+Only once someone has ruled. A decision belongs to a person, so name the person. Never attribute a decision to a review tool or an agent. Cite where the decision was made when it is written down. Quote or paraphrase the ruling in one or two sentences.
 
 ### `## Do`
 

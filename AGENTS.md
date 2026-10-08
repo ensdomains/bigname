@@ -16,9 +16,13 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
 - Prefer standard ENS, Ethereum, and indexing terms over project-specific jargon. When a bigname-specific term is necessary, define it in plain language on first use and explain the behavior it represents.
 - `docs/glossary.md` is the canonical definition for each necessary bigname-specific term: link it on first use instead of re-defining or assuming the term, and add new coinages there in the same change that introduces them. Qualify the overloaded terms it flags (bare "promotion", "profile", and "migration" are ambiguous — in particular, say "schema-migration" for bigname's own database history and "ENSv1→ENSv2 migration" for the on-chain protocol move).
 - Write for an engineer who knows the ENS smart contracts and what bigname is for, but not bigname's code or the agent process. Smart-contract names need no gloss. Bigname phases and tables do, on first use.
-- Lead with what an API user or name owner would observe. State a bug as the wrong result, then the cause.
-- Keep process vocabulary out of PR bodies, issues, comments and docs: review-request numbers, agent roles, reviewer names as authority, thread-coined labels. Cite docs by path and heading.
-- CI and the test files are the evidence. Do not narrate local test counts or lint runs.
+- In PR bodies, issues, reviews and release notes, lead with what an API user or name owner would observe. State a bug as the wrong result, then the cause.
+- Keep process vocabulary out of PR bodies, issues, comments and the docs under `docs/`. Cite docs by path and heading. Process vocabulary is:
+  - Review-request numbers.
+  - Agent roles.
+  - Reviewer names as authority.
+  - Thread-coined labels.
+- CI and the test files are the evidence in a PR body or an issue. Do not narrate local test counts or lint runs there.
 - Short sentences and short paragraphs. No semicolons joining clauses, and no paragraph that packs several points into one block. Use a list for parallel items.
 - Agent messages and review briefs follow the same rules. IDs and shas are fine as addresses.
 
