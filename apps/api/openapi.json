@@ -6469,8 +6469,8 @@
         "properties": {
           "registration_id": {
             "type": "string",
-            "description": "Opaque registration lifecycle handle; permission rows use the published permission-handle mapping.\n\nPresence condition: The record is full and its status is not unregistered.",
-            "x-presence": "only when registration_held"
+            "description": "Opaque public registration identity handle, independent of lifecycle status; see [registration identity](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#registration-identity-of-wrapped-names). Permission rows use the published permission-handle mapping.\n\nPresence condition: The record is full and has an established public registration identity under the [registration identity rules](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#registration-identity-of-wrapped-names), independently of [lifecycle status](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#status-vocabulary). Preserved ended and continuous identities qualify; a new unclaimed ownerless reservation without a qualifying identity does not.",
+            "x-presence": "only when registration_identity"
           },
           "token_id": {
             "type": "string",
@@ -6869,7 +6869,7 @@
           },
           "registration_id": {
             "type": "string",
-            "description": "Opaque registration lifecycle handle; permission rows use the published permission-handle mapping."
+            "description": "Detail profile only: opaque public registration identity handle under the same [registration identity rules](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#registration-identity-of-wrapped-names) as NameRecord, independent of lifecycle status. Omitted from feed records and without a qualifying identity. Permission rows use the published permission-handle mapping."
           },
           "token_id": {
             "type": "string",

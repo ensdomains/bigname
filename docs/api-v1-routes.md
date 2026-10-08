@@ -394,21 +394,27 @@ collection route carry neither header.
   Reverse inputs accept no
   `authority` filter yet; filter client-side or use
   `GET /v1/addresses/{address}/names?authority=`.
-  A name result classified as `status=unregistered` always omits
-  `registration_id`. It also omits `resolver` and resolver-record fields unless
+  A detail name result carries `registration_id` only with an established
+  [public registration identity](api-v1.md#registration-identity-of-wrapped-names),
+  independently of lifecycle status; feed results always omit it. An ownerless
+  allocation may be `active`, `expired`, or `released` without a qualifying
+  identity or `registered_at`, while legitimate ended or continuous identities
+  retain their handle and start. Without current control, the result omits
+  `resolver` and resolver-record fields regardless of status or handle unless
   it is
   an ownerless ENSv1 or Basenames registry row whose current registry resolver
   pointer is retained (a [serving resource](glossary.md#serving-resource)), or
   an ENSv2 TLD with a current
   [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
   and no projected authority.
-  That classified row serves its resolver without acquiring registration
-  identity or control. Indexed records are served when its serving resource has
-  supported inventory. The TLD row stays `current_authority_not_projected` and
-  unregistered, and like name detail it serves `read_status=ok` with no
-  `unsupported_reason` and no `registration_id`; only the resolver and
-  resolver-record fields are added. `authority` follows the rule below for
-  rows with no selected binding.
+  That row serves its resolver without acquiring registration identity or
+  control. Indexed records are served when its serving resource has
+  supported inventory. The TLD row stays `current_authority_not_projected`; a
+  proved canonical allocation supplies lifecycle status and dates, and otherwise
+  it is unregistered. Like name detail it serves `read_status=ok` with no
+  `unsupported_reason`. The pointer adds resolver and resolver-record fields
+  without supplying an unproved `registration_id` or current control. `authority`
+  follows the rule below for rows with no selected binding.
   `profile=detail` name results and reverse rows carry the indexed
   [grouped records](#grouped-name-profile-records) object `records` with the
   same shape, presence, and meaning as indexed name detail: key lists from the
@@ -1018,15 +1024,19 @@ collection route carry neither header.
   `namehash`, `read_status`, and `unsupported_reason`; registration, control,
   lifecycle, resolver, record, relation, permission, and primary-name fields
   from both source families are omitted.
-  A row classified as `status=unregistered` always omits
-  `registration_id`. It also omits `resolver` and resolver-record fields unless
-  it is
+  A row carries `registration_id` only with an established
+  [public registration identity](api-v1.md#registration-identity-of-wrapped-names),
+  independently of lifecycle status. An ownerless allocation may be `active`,
+  `expired`, or `released` without a qualifying identity or `registered_at`,
+  while legitimate ended or continuous identities retain their handle and
+  start. Without current control, the row omits `resolver` and resolver-record
+  fields regardless of status or handle unless it is
   an ownerless ENSv1 or Basenames registry row whose current registry resolver
   pointer is retained (a [serving resource](glossary.md#serving-resource)), or
   an ENSv2 TLD with a current
   [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
   and no projected authority.
-  For that classified row, indexed name detail serves the resolver and records
+  For that row, indexed name detail serves the resolver and records
   present in its serving resource's inventory. `source=verified` executes lookup
   through the surviving resolver when the ordinary lookup capability supports
   it. Neither path acquires registration identity or control.
@@ -1055,9 +1065,11 @@ collection route carry neither header.
   resolver-pointer evidence is not presented as current authority. The one
   exception is an ENSv2 TLD whose current
   [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
-  is its serving resource: the row stays `current_authority_not_projected` and
-  unregistered, has no `registration_id`, and `resolver` and the
-  resolver-record fields are served from that pointer and its inventory.
+  is its serving resource: the row stays `current_authority_not_projected`,
+  follows any proved canonical allocation's lifecycle status and dates (or is
+  unregistered without one), and serves `resolver` and resolver-record fields
+  from that pointer and its inventory. The pointer supplies neither an unproved
+  `registration_id` nor current control.
   `authority` is omitted unless the name's history selected an arm, which a
   row with no selected binding can still carry.
   An ownerless ENSv1 or Basenames registry row with a zero [getter-visible

@@ -640,7 +640,9 @@ parent fuse changes after that bit is burned.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L553 @ ens_v1@91c966f)
 The API exposes this as `ens_v1.wrapper_state="emancipated"` only while the wrapper
 expiry is not earlier than the served block timestamp. After that boundary,
-NameWrapper reads the fuses and owner as zero, so `wrapper_state` is omitted.
+NameWrapper reads the fuses and owner as zero. A name-shaped ENSv1 object still
+serving that context reports `wrapper_state="lapsed"` without `wrapper_fuses`;
+backed state/fuse metadata drops from permissions and wrapper restrictions.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L848 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L849 @ ens_v1@91c966f)
@@ -672,8 +674,10 @@ When wrapper expiry is earlier than the served timestamp, NameWrapper clears
 every effective fuse. It also clears the owner when `PARENT_CANNOT_CONTROL` was
 burned, which removes an expired
 [emancipated](#emancipated-namewrapper-state) or
-[locked](#locked-namewrapper-state) lifecycle value; a plain
-[wrapped](#wrapped-namewrapper-state) value remains because its owner is not
+[locked](#locked-namewrapper-state) backed label. A name-shaped ENSv1 object
+still serving that context reports `lapsed` without fuses; independently proved
+wrapper expiry may remain. Permission/restriction backed metadata drops away.
+A plain [wrapped](#wrapped-namewrapper-state) value remains because its owner is not
 cleared. The [projection](#projection) rebuild applies this serving convention
 to current summaries at its target timestamp and does not rewrite the
 normalized value.
@@ -1874,7 +1878,9 @@ owner-controlled permissions to be revoked.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1067 @ ens_v1@91c966f)
 The API exposes this as `ens_v1.wrapper_state="locked"` only while the wrapper expiry
 is not earlier than the served block timestamp; after that boundary the
-NameWrapper reads both owner and fuses as zero and `wrapper_state` is omitted.
+NameWrapper reads both owner and fuses as zero. A name-shaped ENSv1 object still
+serving that context reports `wrapper_state="lapsed"` without `wrapper_fuses`;
+backed state/fuse metadata drops from permissions and wrapper restrictions.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L848 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L849 @ ens_v1@91c966f)
