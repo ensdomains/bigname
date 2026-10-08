@@ -9,13 +9,11 @@ use sqlx::types::Uuid;
 use crate::AppState;
 
 use super::super::collection_snapshot::CollectionSnapshot;
-use super::super::name_record::{name_registration_fields, registration_id, string_field};
+use super::super::name_record::{registration_id, string_field};
 use super::super::params::ContractSelector;
 use super::super::support::normalize_inferred_route_name;
 use super::super::{
-    QueryParams, V2Result,
-    permission_support::PermissionRequestScope,
-    vocab::{AuthorityContext, RegistrationStatus},
+    QueryParams, V2Result, permission_support::PermissionRequestScope, vocab::AuthorityContext,
 };
 use super::{
     ADDRESS_FILTER_KEY, INCLUDE_FILTER_KEY, NAME_FILTER_KEY, NAMESPACE_FILTER_KEY,
@@ -261,9 +259,10 @@ pub(crate) fn current_registration_row(row: &NameCurrentRow) -> bool {
 /// Retained registration identity can still select a resource audit when name coverage is
 /// unsupported; this does not make an unsupported name filter claim current authority.
 pub(crate) fn registration_row(row: &NameCurrentRow) -> bool {
-    matches!(
-        name_registration_fields(Some(row), &row.namespace).registration_status,
-        RegistrationStatus::Active | RegistrationStatus::Wrapped | RegistrationStatus::Registered
+    bigname_storage::public_name_fields::has_current_control(
+        &row.namespace,
+        &row.declared_summary,
+        row.surface_binding_id.is_some(),
     )
 }
 

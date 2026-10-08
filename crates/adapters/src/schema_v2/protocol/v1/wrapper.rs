@@ -46,9 +46,10 @@ pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
+    stale_completion: bool,
 ) -> anyhow::Result<Interpreted> {
     match selected.event.name.as_str() {
-        "NameWrapped" => name_wrapped(selected, raw, state),
+        "NameWrapped" => name_wrapped(selected, raw, state, stale_completion),
         "NameUnwrapped" => name_unwrapped(selected, raw, state),
         "ExpiryExtended" => {
             let event = decode_event_log::<ExpiryExtended>(
@@ -127,6 +128,7 @@ fn name_wrapped(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
+    stale_completion: bool,
 ) -> anyhow::Result<Interpreted> {
     let event =
         decode_event_log::<NameWrapped>(&raw.topics, &raw.data, "NameWrapped log is malformed")?;
@@ -136,6 +138,34 @@ fn name_wrapped(
         bail!("NameWrapped DNS name does not match its node");
     }
     let labels = surface_labels(&raw_labels);
+    if stale_completion {
+        // The bytes still prove the name; the callback's surviving authority remains untouched.
+        // Surface materialization later in dispatch attaches that existing authority by evidence.
+        let mut output = Interpreted::new();
+        if let Some(labels) = labels {
+            output.names.push(NameDraft {
+                labels,
+                namehash: raw_namehash.clone(),
+                resource_id: None,
+                token_lineage_id: None,
+                surface_binding_id: None,
+                bind: false,
+                binding_kind: "observed_only".into(),
+                authority_arm: "ens_v1".into(),
+                source_kind: "NameWrapped_name".into(),
+                preimage_metadata: Some(
+                    json!({"node": raw_namehash, "wrapper_completion": "superseded"}),
+                ),
+            });
+        } else {
+            output.shadow_names.push(ShadowNameDraft {
+                raw_labels,
+                namehash: raw_namehash,
+                source_kind: "NameWrapped_name".into(),
+            });
+        }
+        return Ok(output);
+    }
     let surface_known = labels.is_some();
     let authority_key = format!(
         "wrapper:{}:{}:{}:{}:{}",

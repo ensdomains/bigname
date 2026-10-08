@@ -59,7 +59,7 @@ async fn v2_resolves_to_pages_names_without_authority_or_registration() -> Resul
         };
         assert_eq!(first["data"][0]["name"], expected[0], "{first}");
         assert_eq!(
-            first["data"][0]["registration_status"], "unregistered",
+            first["data"][0]["status"], "unregistered",
             "{first}"
         );
         for field in ["owner", "registrant", "authority"] {
@@ -172,7 +172,7 @@ async fn v2_get_address_names_resolves_to_lists_names_whose_addr_record_points_h
     assert_eq!(rows[1]["is_primary"], json!(false));
     assert_eq!(rows[0]["owner"], json!(V2_ADDRESS));
     assert_eq!(rows[0]["manager"], json!(V2_PERMISSION_SUBJECT));
-    assert_eq!(rows[0]["registration_status"], json!("active"));
+    assert_eq!(rows[0]["status"], json!("active"));
     assert_eq!(rows[0]["expires_at"], json!("1798848000"));
     assert_eq!(payload["page"]["total_count"], Value::Null);
     assert_eq!(payload["page"]["has_more"], json!(false));

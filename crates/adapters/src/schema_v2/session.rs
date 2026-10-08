@@ -3,6 +3,8 @@ mod interpret;
 use interpret::interpret_loaded;
 #[path = "session_transaction.rs"]
 mod transaction;
+#[path = "session_wrapper.rs"]
+mod wrapper;
 use std::collections::{BTreeMap, BTreeSet};
 use transaction::TransactionIndex;
 
@@ -15,7 +17,9 @@ use super::{
     state_residency::StateCacheCapacity,
 };
 
-/// Opaque retained adapter state that can be moved into the next batch for the same chain.
+/// Opaque retained adapter state moved between complete block batches for the same chain.
+/// Interpret loads every canonical raw log in its block range and commits only that batch.
+/// This is not a transaction-prefix checkpoint; see [`BatchInput`].
 #[derive(Debug, Eq, PartialEq)]
 pub struct AdapterSession {
     chain_id: String,

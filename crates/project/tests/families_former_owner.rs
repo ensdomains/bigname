@@ -1,11 +1,9 @@
 //! The last holder after ENSv2 path expiry or explicit unregister (TYR-63). Those names serve
 //! `lapsed_registration` with the registry token's holder when the registration ended, held
-//! through the registry: `expired` for a registration past its expiry, which keeps that expiry
-//! and its ENSv2 grace, and `unregistered` for an explicit unregister, which keeps neither. A
-//! re-registration drops it.
-//! The registry retains expiry and latest owner in its state; its unregister burns an existing
-//! owner token. The `.eth` registrar admits grace renewal while the latest owner remains.
-//! Bigname omits the public expiry and grace fields for explicit unregisters.
+//! through the registry. Both path expiry and explicit unregister retain the scheduled dates;
+//! the terminal cause stays distinct. Re-registration drops the former-holder record.
+//! This arbitrary registry has no admitted registrar grace policy, so grace ends at expiry.
+//! The registry retains expiry and latest owner in its state; unregister burns the owner token.
 //! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L353-L362 @ ens_v2_sepolia_20260916@366de741)
 //! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L224-L235 @ ens_v2_sepolia_20260916@366de741)
 //! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L270-L292 @ ens_v2_sepolia_20260916@366de741)
@@ -155,7 +153,7 @@ async fn an_expired_ens_v2_registration_names_its_last_holder_until_it_is_regist
     );
     ensure!(
         released["expiry"] == json!(EXPIRY.to_string())
-            && released["grace_ends_at"] == json!((EXPIRY + 28 * DAY).to_string()),
+            && released["grace_ends_at"] == json!(EXPIRY.to_string()),
         "{released}"
     );
 
@@ -184,8 +182,8 @@ async fn an_expired_ens_v2_registration_names_its_last_holder_until_it_is_regist
 }
 
 #[tokio::test]
-async fn an_unregistered_ens_v2_registration_names_its_last_holder_without_an_expiry() -> Result<()>
-{
+async fn an_unregistered_ens_v2_registration_retains_its_last_holder_and_scheduled_expiry()
+-> Result<()> {
     let fixture = Fixture::new("families_former_unregistered", 12).await?;
     let (name, resource) = registered(&fixture, "gone.eth", 3).await?;
     fixture
@@ -205,8 +203,8 @@ async fn an_unregistered_ens_v2_registration_names_its_last_holder_without_an_ex
     let released = registration(&fixture, &name).await?;
     ensure!(
         released["status"] == json!("released")
-            && released["expiry"].is_null()
-            && released["grace_ends_at"].is_null(),
+            && released["expiry"] == json!(EXPIRY.to_string())
+            && released["grace_ends_at"] == json!(EXPIRY.to_string()),
         "{released}"
     );
     ensure!(

@@ -542,6 +542,10 @@ pub(super) async fn load_chain(
                 recompose_at: [
                     recompose_at(facts, clock.timestamp_seconds),
                     resolution.deadline,
+                    shadow
+                        .registration
+                        .get("lifecycle_recompose_at")
+                        .and_then(Value::as_i64),
                 ]
                 .into_iter()
                 .flatten()

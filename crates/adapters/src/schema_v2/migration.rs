@@ -31,6 +31,7 @@ const TRANSITION_KIND: &str = "authority_transition";
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct RegistrarContext {
+    pub(super) stale_wrapper_completion: bool,
     pub(super) migration_enabled: bool,
     pub(super) graveyard_cleanup: bool,
     pub(super) transaction_has_registry_setup: bool,

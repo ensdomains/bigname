@@ -78,7 +78,7 @@ pub(crate) struct Subname {
     pub(crate) owner: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) manager: Option<String>,
-    pub(crate) registration_status: RegistrationStatus,
+    pub(crate) status: RegistrationStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registered_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -373,10 +373,10 @@ pub(crate) fn build_subname(
         owner,
         manager,
         // A child with no name row whose lease was released describes that lapsed registration.
-        registration_status: if name_row.is_none() && row.released_lease {
+        status: if name_row.is_none() && row.released_lease {
             RegistrationStatus::Released
         } else {
-            registration.registration_status
+            registration.status
         },
         registered_at: registration.registered_at,
         created_at: registration.created_at,

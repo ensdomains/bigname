@@ -5,26 +5,23 @@ use crate::v2::chains::slug_to_numeric;
 use crate::v2::support::{
     direct_json_field, record_json_string_at_paths, record_network_from_chain_positions,
 };
-use crate::v2::vocab::{Authority, PARTIAL_SERVE_UNSUPPORTED_REASON, RegistrationStatus};
-
-pub(in crate::v2) fn has_current_registration(status: RegistrationStatus) -> bool {
-    !matches!(
-        status,
-        RegistrationStatus::Released | RegistrationStatus::Unregistered
-    )
-}
+use crate::v2::vocab::{Authority, PARTIAL_SERVE_UNSUPPORTED_REASON};
 
 pub(in crate::v2) fn row_has_current_registration(row: &NameCurrentRow) -> bool {
-    has_current_registration(
-        super::name_registration_fields(Some(row), &row.namespace).registration_status,
+    bigname_storage::public_name_fields::has_current_control(
+        &row.namespace,
+        &row.declared_summary,
+        has_name_binding(row),
     ) || bigname_storage::name_current_has_event_linked_registry_serving(row)
 }
 
 pub(in crate::v2) fn identity_row_has_current_registration(
     row: &bigname_storage::IdentityNameCurrentRow,
 ) -> bool {
-    has_current_registration(
-        super::identity_name_registration_fields(Some(row), &row.namespace).registration_status,
+    bigname_storage::public_name_fields::has_current_control(
+        &row.namespace,
+        &row.declared_summary,
+        row.resource_id.is_some(),
     ) || bigname_storage::identity_name_current_has_event_linked_registry_serving(row)
 }
 

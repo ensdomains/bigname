@@ -1571,7 +1571,41 @@
             "name": "expires_window",
             "in": "query",
             "required": false,
-            "description": "Repeat for 1–32 disjoint finite half-open windows, each `after..before` in decimal Unix seconds or RFC 3339. Adjacent windows are allowed; overlap, duplicates, missing bounds, and combination with either scalar expiry parameter are invalid. Input order defines each row’s expires_window_index.",
+            "description": "Repeat for 1–32 disjoint finite half-open windows, each `after..before` in decimal Unix seconds or RFC 3339. Adjacent windows are allowed; overlap, duplicates, missing bounds, scalar expiry bounds, and any grace parameter are invalid. Input order defines each row’s expires_window_index.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "maxItems": 32
+            },
+            "style": "form",
+            "explode": true
+          },
+          {
+            "name": "grace_ends_after",
+            "in": "query",
+            "required": false,
+            "description": "Inclusive finite grace-deadline lower bound, as decimal Unix seconds or RFC 3339. Cannot combine with expiry parameters.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "grace_ends_before",
+            "in": "query",
+            "required": false,
+            "description": "Exclusive finite grace-deadline upper bound, as decimal Unix seconds or RFC 3339; later than grace_ends_after when both are supplied. Cannot combine with expiry parameters.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "grace_ends_window",
+            "in": "query",
+            "required": false,
+            "description": "Repeat for disjoint half-open grace-deadline windows with the same rules as expires_window. Input order defines grace_ends_window_index. Cannot combine with scalar grace or any expiry parameter.",
             "schema": {
               "type": "array",
               "items": {
@@ -1610,13 +1644,13 @@
             "name": "sort",
             "in": "query",
             "required": false,
-            "description": "Row sort key; ties use the route's stable identity order.",
+            "description": "Defaults to the supplied date family; explicit sort must match it. Ties use the route's stable identity order.",
             "schema": {
               "type": "string",
               "enum": [
-                "expires_at"
-              ],
-              "default": "expires_at"
+                "expires_at",
+                "grace_ends_at"
+              ]
             }
           },
           {
@@ -3019,7 +3053,7 @@
             "name": "include_expired",
             "in": "query",
             "required": false,
-            "description": "Whether released and already-expired children are included. Evaluation uses the published block timestamp.",
+            "description": "Include children whose lifecycle status is expired or released. False excludes both at the publication timestamp, using the shared lifecycle equality rules; unregistered and expiry-less children keep their existing eligibility.",
             "schema": {
               "type": "boolean",
               "default": true
@@ -5869,7 +5903,7 @@
         "x-enum-descriptions": {
           "no_expiry": "A contract-specific maximum sentinel treated as having no expiry, such as the NameWrapper maximum or the declared ENSv2 root entries.",
           "not_set": "The NameWrapper entry has zero expiry: no expiry has been set.",
-          "released": "A non-expiry release ended the registration without a retained renewal deadline, including an explicit ENSv2 unregister."
+          "released": "A legacy non-expiry release has no established scheduled deadline. Explicit ENSv2 unregister retains its established deadline and omits this reason."
         }
       },
       "ErrorCode": {
@@ -5901,8 +5935,7 @@
         "type": "string",
         "enum": [
           "active",
-          "wrapped",
-          "registered",
+          "expired",
           "released",
           "unregistered"
         ]
@@ -5912,7 +5945,10 @@
         "enum": [
           "wrapped",
           "emancipated",
-          "locked"
+          "locked",
+          "lapsed",
+          "unwrapped",
+          "unknown"
         ]
       },
       "Authority": {
@@ -6394,17 +6430,17 @@
               "string",
               "null"
             ],
-            "description": "BaseRegistrar lease expiry as a decimal Unix-second string, exact up to `9223372036854775807` and served as that value above it, or null when the name has no lease, such as any subname or an ENSv1 registry child with no name row that no NameWrapper or registrar event named. The exception is a registry child with no name row that a NameWrapper or registrar event named only under a label that fails ENSIP-15 normalization: it omits this field and the wrapper fields (presence condition `ens_v1_lifecycle`), because its lease and NameWrapper state are projected without a name row. After the Universal Resolver cutover the top-level `expires_at` of a name with a live ENSv2 entry is that entry's expiry instead. Below that cap the lease's grace deadline is this value plus 90 days; a capped value does not give the deadline.\n\nPresence condition: The row is not an ENSv1 registry child with no current name row that a NameWrapper or registrar event named only under a label failing ENSIP-15 normalization. Such a child's lease and NameWrapper state are kept without a name row, so its object carries no lifecycle fields: no expires_at and no wrapper fields.",
+            "description": "BaseRegistrar lease expiry as a decimal Unix-second string, exact up to `9223372036854775807` and served as that value above it, or null when the name has no lease, such as any subname or an ENSv1 registry child with no name row that no NameWrapper or registrar event named. The exception is a registry child with no name row that a NameWrapper or registrar event named only under a label that fails ENSIP-15 normalization: it omits this field and the wrapper fields (presence condition `ens_v1_lifecycle`), because its lease and NameWrapper state are projected without a name row. After the Universal Resolver cutover the top-level `expires_at` of a name with a retained canonical ENSv2 entry is that entry's expiry instead. Below that cap the lease's grace deadline is this value plus 90 days; a capped value does not give the deadline.\n\nPresence condition: The row is not an ENSv1 registry child with no current name row that a NameWrapper or registrar event named only under a label failing ENSIP-15 normalization. Such a child's lease and NameWrapper state are kept without a name row, so its object carries no lifecycle fields: no expires_at and no wrapper fields.",
             "x-presence": "when ens_v1_lifecycle"
           },
           "wrapper_state": {
             "$ref": "#/components/schemas/WrapperState",
-            "description": "Current [NameWrapper lifecycle](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#naming-dictionary) value.\n\nPresence condition: The name has a current NameWrapper lifecycle value under the expiry-effective fuse rule; wrapper_state and wrapper_fuses appear together.",
-            "x-presence": "when wrapper_backed"
+            "description": "Current [NameWrapper lifecycle](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#naming-dictionary) value.\n\nPresence condition: The composed ENSv1 name has backed wrapper state, proven lapse/unwrap, registry custody evidence, or incomplete wrapping evidence described by unknown.",
+            "x-presence": "when wrapper_evidence"
           },
           "wrapper_fuses": {
             "$ref": "#/components/schemas/WrapperFuses",
-            "description": "Typed [expiry-effective NameWrapper fuse word](https://github.com/ensdomains/bigname/blob/main/docs/glossary.md#expiry-effective-namewrapper-fuse-word).\n\nPresence condition: The name has a current NameWrapper lifecycle value under the expiry-effective fuse rule; wrapper_state and wrapper_fuses appear together.",
+            "description": "Typed [expiry-effective NameWrapper fuse word](https://github.com/ensdomains/bigname/blob/main/docs/glossary.md#expiry-effective-namewrapper-fuse-word).\n\nPresence condition: wrapper_state is wrapped, emancipated or locked under the expiry-effective fuse rule; wrapper_fuses accompanies those backed states only.",
             "x-presence": "when wrapper_backed"
           },
           "wrapper_expires_at": {
@@ -6412,7 +6448,7 @@
               "string",
               "null"
             ],
-            "description": "The NameWrapper entry's own stored expiry as an exact decimal Unix-second string over the full uint64 range, or null for a classified absent expiry; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry). A renewal through the ENSv1 `ETHRegistrarController`, which calls only `BaseRegistrar.renew`, leaves it unchanged, so it can trail `expires_at` (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L352-L368 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L312-L337 @ ens_v1@91c966f). Present beside `wrapper_state`, and alone, in the past, once an emancipated or locked wrapper has lapsed. Omitted once the name is unwrapped, even where `wrapper_state` is still served. Known gap: an unwrap made inside the mint callback of the wrap is recorded as wrapped, so the wrapper fields, this expiry included, are served although the token is burnt; see `wrapper_expires_at` in the [naming dictionary](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#naming-dictionary). A registry child with no name row carries no wrapper fields, so absence does not by itself prove there is no NameWrapper entry.\n\nPresence condition: The row is a composed name row and the name has a current NameWrapper entry. That requires both that the latest NameWrapper lifecycle event bigname recorded for the name is not an unwrap, and that either wrapper_backed holds or an emancipated or locked wrapper has lapsed past its own expiry, so wrapper_state and wrapper_fuses are absent while the past wrapper_expires_at remains. A served wrapper_state alone does not establish wrapper_entry: a name that was unwrapped can still serve the wrapper_state and wrapper_fuses of the unwrapped entry, and it omits wrapper_expires_at. A name with no NameWrapper entry omits wrapper_expires_at. A registry child served without a name row carries no wrapper fields at all, whether or not it is wrapped (see ens_v1_lifecycle), so absence alone does not prove there is no entry.",
+            "description": "The NameWrapper entry's own stored expiry as an exact decimal Unix-second string over the full uint64 range, or null for a classified absent expiry; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry). A renewal through the ENSv1 `ETHRegistrarController`, which calls only `BaseRegistrar.renew`, leaves it unchanged, so it can trail `expires_at` (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L352-L368 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L312-L337 @ ens_v1@91c966f). Present for backed states and for `lapsed` when independently proved. `unwrapped` omits expiry and fuses; `unknown` exposes no invented expiry. Complete-transaction mint/burn matching prevents a late outer callback completion from resurrecting a burned wrapper; see `wrapper_expires_at` in the [naming dictionary](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#naming-dictionary). A registry child with no name row carries no wrapper fields, so absence does not by itself prove there is no NameWrapper entry.\n\nPresence condition: The composed name has an independently proved current wrapper entry or retained lapsed entry expiry. Backed states and lapsed can carry wrapper_expires_at; unwrapped omits it and unknown does not invent it. A registry child served without a name row carries no wrapper fields, so absence alone does not prove there is no entry.",
             "x-presence": "when wrapper_entry"
           },
           "wrapper_expires_at_reason": {
@@ -6433,7 +6469,7 @@
         "properties": {
           "registration_id": {
             "type": "string",
-            "description": "Opaque registration lifecycle handle; permission rows use the published permission-handle mapping.\n\nPresence condition: The record is full and its registration_status is not unregistered.",
+            "description": "Opaque registration lifecycle handle; permission rows use the published permission-handle mapping.\n\nPresence condition: The record is full and its status is not unregistered.",
             "x-presence": "only when registration_held"
           },
           "token_id": {
@@ -6446,7 +6482,7 @@
           },
           "manager": {
             "type": "string",
-            "description": "Account that can change the name's registry record (see Manager): the registry owner of a name with no NameWrapper state and the token holder, the owner, of a wrapped name in any wrapper state; omitted while a wrapped `.eth` second-level name is in its registrar grace period, wherever the address it copies is omitted, and on a registry child whose NameWrapper state is unknown."
+            "description": "Account that can change the name's registry record (see Manager): the registry owner of an unwrapped name and the token holder of a backed wrapped name; omitted while a wrapped `.eth` second-level name is in its registrar grace period, wherever the address it copies is omitted, and on a registry child whose NameWrapper state is unknown."
           },
           "registered_at": {
             "type": "string",
@@ -6475,9 +6511,9 @@
             ],
             "description": "Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
           },
-          "registration_status": {
+          "status": {
             "$ref": "#/components/schemas/RegistrationStatus",
-            "description": "Current registration and control lifecycle label.\n\nPresence condition: The record is not the identity-only unsupported name object. Indexed coverage downgrades produce that identity-only object; a verified lookup failure can retain the registration summary even when its result status is unsupported.",
+            "description": "Registration lifecycle at the publication timestamp, independent of current control.\n\nPresence condition: The record is not the identity-only unsupported name object. Indexed coverage downgrades produce that identity-only object; a verified lookup failure can retain the registration summary even when its result status is unsupported.",
             "x-presence": "when full_record"
           },
           "authority": {
@@ -6491,7 +6527,7 @@
           },
           "lapsed_registration": {
             "$ref": "#/components/schemas/LapsedRegistration",
-            "description": "Last holder and release cause for a supported lapsed registration; absent for other release causes and for non-released names."
+            "description": "Last holder and release cause for a supported lapsed registration; absent for other release causes; independent of canonical lifecycle status."
           },
           "migrated_at": {
             "type": "string",
@@ -6528,7 +6564,7 @@
           },
           "subregistry": {
             "$ref": "#/components/schemas/ContractRef",
-            "description": "Current subregistry pointer. Absent on every status=unsupported record, including verified unsupported records that retain registration fields.\n\nPresence condition: The name-level record has status other than unsupported. This excludes both identity-only unsupported records and verified unsupported records that retain registration fields.",
+            "description": "Current subregistry pointer. Absent on every status=unsupported record, including verified unsupported records that retain registration fields.\n\nPresence condition: The name-level record has read_status other than unsupported. This excludes both identity-only unsupported records and verified unsupported records that retain registration fields.",
             "x-presence": "only when supported_name"
           },
           "records": {
@@ -6554,15 +6590,15 @@
           },
           "subname_count": {
             "type": "integer",
-            "description": "Direct readable subname count, only with the counts expansion.\n\nPresence condition: The request to name detail carries include=counts and the record status is not unsupported. Counts are absent on every unsupported name-level record.",
+            "description": "Direct readable subname count, only with the counts expansion.\n\nPresence condition: The request to name detail carries include=counts and the record read_status is not unsupported. Counts are absent on every unsupported name-level record.",
             "x-presence": "when name_counts_requested"
           },
           "record_count": {
             "type": "integer",
-            "description": "Known record-selector count, only with counts requested and a current inventory.\n\nPresence condition: The request to name detail carries include=counts and the record status is not unsupported. Counts are absent on every unsupported name-level record.",
+            "description": "Known record-selector count, only with counts requested and a current inventory.\n\nPresence condition: The request to name detail carries include=counts and the record read_status is not unsupported. Counts are absent on every unsupported name-level record.",
             "x-presence": "only when name_counts_requested"
           },
-          "status": {
+          "read_status": {
             "$ref": "#/components/schemas/Status",
             "description": "Result status; the route defines which outcomes are possible."
           },
@@ -6590,7 +6626,7 @@
           "display_name",
           "namespace",
           "namehash",
-          "status"
+          "read_status"
         ],
         "description": "Flat name-detail object, also used by resolver bound names. An identity-only unsupported record omits registration fields. A verified unsupported record may retain registration fields, but all unsupported name-level records omit counts and subregistry."
       },
@@ -6845,7 +6881,7 @@
           },
           "manager": {
             "type": "string",
-            "description": "Account that can change the name's registry record (see Manager): the registry owner of a name with no NameWrapper state and the token holder, the owner, of a wrapped name in any wrapper state; omitted while a wrapped `.eth` second-level name is in its registrar grace period, wherever the address it copies is omitted, and on a registry child whose NameWrapper state is unknown."
+            "description": "Account that can change the name's registry record (see Manager): the registry owner of an unwrapped name and the token holder of a backed wrapped name; omitted while a wrapped `.eth` second-level name is in its registrar grace period, wherever the address it copies is omitted, and on a registry child whose NameWrapper state is unknown."
           },
           "registered_at": {
             "type": "string",
@@ -6874,13 +6910,13 @@
             ],
             "description": "Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
           },
-          "registration_status": {
+          "status": {
             "$ref": "#/components/schemas/RegistrationStatus",
-            "description": "Current registration and control lifecycle label."
+            "description": "Registration lifecycle at the publication timestamp, independent of current control."
           },
           "lapsed_registration": {
             "$ref": "#/components/schemas/LapsedRegistration",
-            "description": "Last holder and release cause for a supported lapsed registration; absent for other release causes and for non-released names."
+            "description": "Last holder and release cause for a supported lapsed registration; absent for other release causes; independent of canonical lifecycle status."
           },
           "resolver": {
             "$ref": "#/components/schemas/ContractRef",
@@ -6896,7 +6932,7 @@
           },
           "subregistry": {
             "$ref": "#/components/schemas/ContractRef",
-            "description": "Current subregistry pointer. Absent on every status=unsupported record, including verified unsupported records that retain registration fields.\n\nPresence condition: The name-level record has status other than unsupported. This excludes both identity-only unsupported records and verified unsupported records that retain registration fields.",
+            "description": "Current subregistry pointer. Absent on every status=unsupported record, including verified unsupported records that retain registration fields.\n\nPresence condition: The name-level record has read_status other than unsupported. This excludes both identity-only unsupported records and verified unsupported records that retain registration fields.",
             "x-presence": "only when supported_name"
           },
           "records": {
@@ -6947,7 +6983,7 @@
             "type": "string",
             "description": "Decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
           },
-          "status": {
+          "read_status": {
             "$ref": "#/components/schemas/Status",
             "description": "Result status; the route defines which outcomes are possible."
           },
@@ -6975,7 +7011,7 @@
           "display_name",
           "namespace",
           "namehash",
-          "status"
+          "read_status"
         ],
         "description": "Shared lookup feed/detail record. Feed records carry identity, `chain_id`, `network`, status, `subregistry` on name results, reverse `is_primary`/`relations`, `resolution` on `resolves_to` rows, `expires_at`, `expires_at_reason`, `grace_ends_at` and `ens_v1` with the detail record's values; detail adds the other registration fields and the resolver and grouped record fields; reverse records additionally carry matching relations and primary-name information. Feed records omit owner, manager and the other registration fields."
       },
@@ -7146,11 +7182,11 @@
           },
           "manager": {
             "type": "string",
-            "description": "Account that can change the name's registry record (see Manager): the registry owner of a name with no NameWrapper state and the token holder, the owner, of a wrapped name in any wrapper state; omitted while a wrapped `.eth` second-level name is in its registrar grace period, wherever the address it copies is omitted, and on a registry child whose NameWrapper state is unknown."
+            "description": "Account that can change the name's registry record (see Manager): the registry owner of an unwrapped name and the token holder of a backed wrapped name; omitted while a wrapped `.eth` second-level name is in its registrar grace period, wherever the address it copies is omitted, and on a registry child whose NameWrapper state is unknown."
           },
-          "registration_status": {
+          "status": {
             "$ref": "#/components/schemas/RegistrationStatus",
-            "description": "Current registration and control lifecycle label."
+            "description": "Registration lifecycle at the publication timestamp, independent of current control."
           },
           "registered_at": {
             "type": "string",
@@ -7172,6 +7208,12 @@
             "minimum": 0,
             "maximum": 31,
             "description": "Zero-based index of the matching expires_window in original request order; present on every repeated-window GET /v1/names row and omitted on scalar requests and search. Membership uses exact stored expiry before response formatting."
+          },
+          "grace_ends_window_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 31,
+            "description": "Original zero-based input window on repeated grace-window names requests; omitted elsewhere."
           },
           "expires_at_reason": {
             "$ref": "#/components/schemas/ExpiryReason",
@@ -7196,7 +7238,7 @@
           },
           "lapsed_registration": {
             "$ref": "#/components/schemas/LapsedRegistration",
-            "description": "Last holder and release cause for a supported lapsed registration; absent for other release causes and for non-released names."
+            "description": "Last holder and release cause for a supported lapsed registration; absent for other release causes; independent of canonical lifecycle status."
           }
         },
         "additionalProperties": false,
@@ -7205,7 +7247,7 @@
           "display_name",
           "namespace",
           "namehash",
-          "registration_status"
+          "status"
         ],
         "description": "Current name summary used by search and the namespace expiry list. The expiry list may include lapsed_registration and, for repeated-window requests, expires_window_index; search omits both."
       },
@@ -7238,11 +7280,11 @@
           },
           "manager": {
             "type": "string",
-            "description": "Account that can change the name's registry record (see Manager): the registry owner of a name with no NameWrapper state and the token holder, the owner, of a wrapped name in any wrapper state; omitted while a wrapped `.eth` second-level name is in its registrar grace period, wherever the address it copies is omitted, and on a registry child whose NameWrapper state is unknown."
+            "description": "Account that can change the name's registry record (see Manager): the registry owner of an unwrapped name and the token holder of a backed wrapped name; omitted while a wrapped `.eth` second-level name is in its registrar grace period, wherever the address it copies is omitted, and on a registry child whose NameWrapper state is unknown."
           },
-          "registration_status": {
+          "status": {
             "$ref": "#/components/schemas/RegistrationStatus",
-            "description": "Current registration and control lifecycle label."
+            "description": "Registration lifecycle at the publication timestamp, independent of current control."
           },
           "registered_at": {
             "type": "string",
@@ -7295,7 +7337,7 @@
           "display_name",
           "namespace",
           "namehash",
-          "registration_status"
+          "status"
         ]
       },
       "AddressName": {
@@ -7327,11 +7369,11 @@
           },
           "manager": {
             "type": "string",
-            "description": "Account that can change the name's registry record (see Manager): the registry owner of a name with no NameWrapper state and the token holder, the owner, of a wrapped name in any wrapper state; omitted while a wrapped `.eth` second-level name is in its registrar grace period, wherever the address it copies is omitted, and on a registry child whose NameWrapper state is unknown."
+            "description": "Account that can change the name's registry record (see Manager): the registry owner of an unwrapped name and the token holder of a backed wrapped name; omitted while a wrapped `.eth` second-level name is in its registrar grace period, wherever the address it copies is omitted, and on a registry child whose NameWrapper state is unknown."
           },
-          "registration_status": {
+          "status": {
             "$ref": "#/components/schemas/RegistrationStatus",
-            "description": "Current registration and control lifecycle label."
+            "description": "Registration lifecycle at the publication timestamp, independent of current control."
           },
           "registered_at": {
             "type": "string",
@@ -7397,7 +7439,7 @@
           },
           "lapsed_registration": {
             "$ref": "#/components/schemas/LapsedRegistration",
-            "description": "Last holder and release cause for a supported lapsed registration; absent for other release causes and for non-released names."
+            "description": "Last holder and release cause for a supported lapsed registration; absent for other release causes; independent of canonical lifecycle status."
           },
           "subname_count": {
             "type": "integer",
@@ -7432,7 +7474,7 @@
           "display_name",
           "namespace",
           "namehash",
-          "registration_status",
+          "status",
           "relations",
           "is_primary"
         ]
@@ -8106,8 +8148,13 @@
             "description": "Whether the row is current for the named registration selection or an audit by registration handle."
           },
           "wrapper_state": {
-            "$ref": "#/components/schemas/WrapperState",
-            "description": "Current [NameWrapper lifecycle](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#naming-dictionary) value."
+            "type": "string",
+            "enum": [
+              "wrapped",
+              "emancipated",
+              "locked"
+            ],
+            "description": "Backed NameWrapper entry state."
           },
           "wrapper_fuses": {
             "$ref": "#/components/schemas/WrapperFuses",
@@ -8367,11 +8414,11 @@
           },
           "manager": {
             "type": "string",
-            "description": "Account that can change the name's registry record (see Manager): the registry owner of a name with no NameWrapper state and the token holder, the owner, of a wrapped name in any wrapper state; omitted while a wrapped `.eth` second-level name is in its registrar grace period, wherever the address it copies is omitted, and on a registry child whose NameWrapper state is unknown."
+            "description": "Account that can change the name's registry record (see Manager): the registry owner of an unwrapped name and the token holder of a backed wrapped name; omitted while a wrapped `.eth` second-level name is in its registrar grace period, wherever the address it copies is omitted, and on a registry child whose NameWrapper state is unknown."
           },
-          "registration_status": {
+          "status": {
             "$ref": "#/components/schemas/RegistrationStatus",
-            "description": "Current registration and control lifecycle label."
+            "description": "Registration lifecycle at the publication timestamp, independent of current control."
           },
           "registered_at": {
             "type": "string",
@@ -8428,7 +8475,7 @@
           "display_name",
           "namespace",
           "namehash",
-          "registration_status"
+          "status"
         ]
       },
       "RecordGroups": {
@@ -8735,8 +8782,13 @@
             "description": "Opaque registration lifecycle handle; permission rows use the published permission-handle mapping."
           },
           "wrapper_state": {
-            "$ref": "#/components/schemas/WrapperState",
-            "description": "Current [NameWrapper lifecycle](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#naming-dictionary) value."
+            "type": "string",
+            "enum": [
+              "wrapped",
+              "emancipated",
+              "locked"
+            ],
+            "description": "Backed NameWrapper entry state."
           },
           "wrapper_fuses": {
             "$ref": "#/components/schemas/WrapperFuses",

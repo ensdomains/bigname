@@ -417,7 +417,7 @@ async fn produced_node_names_agree_across_ranges_restarts_redo_and_public_routes
         let labels = [b"child".as_slice(), b"unknown", b"eth"];
         let name = spelling(&labels);
         let row = detail(&database, &labels).await?;
-        assert_eq!(row["registration_status"], "registered", "{row:#}");
+        assert_eq!(row["status"], "active", "{row:#}");
         assert_eq!(row["owner"], HOLDER);
         assert_eq!(row["authority"], "ens_v1");
         assert_eq!(row["created_at"], "1700000122");
@@ -495,10 +495,7 @@ async fn produced_node_names_agree_across_ranges_restarts_redo_and_public_routes
         .await?;
         assert_eq!(response.status(), StatusCode::OK);
         let lookup: Value = read_json(response).await?;
-        assert_eq!(
-            lookup["data"][0]["record"]["registration_status"],
-            "registered"
-        );
+        assert_eq!(lookup["data"][0]["record"]["status"], "active");
         if let Some(expected) = &expected {
             assert_eq!(&views, expected, "{shape}");
         } else {
@@ -522,10 +519,7 @@ async fn produced_node_names_agree_across_ranges_restarts_redo_and_public_routes
         .await?;
         publish(&database, 125).await?;
         let cleared = detail(&database, &labels).await?;
-        assert_eq!(
-            cleared["registration_status"], "unregistered",
-            "{cleared:#}"
-        );
+        assert_eq!(cleared["status"], "unregistered", "{cleared:#}");
         assert!(cleared.get("owner").is_none());
         assert_eq!(cleared["resolver"]["address"], format!("{resolver:#x}"));
         run(
@@ -537,7 +531,7 @@ async fn produced_node_names_agree_across_ranges_restarts_redo_and_public_routes
         .await?;
         publish(&database, 126).await?;
         let moved = detail(&database, &labels).await?;
-        assert_eq!(moved["registration_status"], "registered");
+        assert_eq!(moved["status"], "active");
         assert_eq!(moved["owner"], GRANTEE);
         // Importing spellings changes presentation only, through the ordinary reader path.
         for label in labels {
@@ -550,7 +544,7 @@ async fn produced_node_names_agree_across_ranges_restarts_redo_and_public_routes
             "registration_id",
             "owner",
             "manager",
-            "registration_status",
+            "status",
         ] {
             assert_eq!(enriched[field], moved[field], "{field}");
         }
@@ -669,7 +663,10 @@ async fn produced_identity_enriches_only_at_publication_and_reanchors_after_stru
     )
     .await?;
     if status == StatusCode::OK {
-        assert_ne!(held["data"]["registration_status"], "wrapped", "{held:#}");
+        assert_eq!(
+            held["data"]["ens_v1"]["wrapper_state"], before["ens_v1"]["wrapper_state"],
+            "{held:#}"
+        );
     } else {
         assert_eq!(status, StatusCode::CONFLICT, "{held:#}");
     }
@@ -677,14 +674,14 @@ async fn produced_identity_enriches_only_at_publication_and_reanchors_after_stru
     let after = detail(&database, &labels).await?;
     assert_eq!(after["name"], "wrappedchild.eth");
     assert_eq!(after["created_at"], before["created_at"]);
-    assert_eq!(after["registration_status"], "wrapped");
+    assert_eq!(after["status"], "active");
     assert_eq!(after["owner"], HOLDER);
     assert_search_lean_pages_match(&database, &lean_filter("ens", "eth"), 1).await?;
     replace_branch(&database, 121, 122, 1, &logs[2..]).await?;
     redo(&database, 121, 122, 122).await?;
     let reanchored = detail(&database, &labels).await?;
     assert_eq!(reanchored["created_at"], "1700000122");
-    assert_eq!(reanchored["registration_status"], "wrapped");
+    assert_eq!(reanchored["status"], "active");
     replace_branch(&database, 122, 122, 2, &[]).await?;
     redo(&database, 122, 122, 122).await?;
     let retained_orphans: i64 = sqlx::query_scalar("SELECT count(*) FROM raw_logs raw JOIN chain_lineage lineage USING(chain_id,block_hash) WHERE lineage.canonicality_state='orphaned'").fetch_one(&database.pool).await?;
@@ -938,7 +935,7 @@ async fn produced_identity_names_numeric_registrar_setup_in_either_log_order() -
         .await?;
         publish(&database, 121).await?;
         let row = detail(&database, &labels).await?;
-        assert_eq!(row["registration_status"], "active", "{row:#}");
+        assert_eq!(row["status"], "active", "{row:#}");
         assert_eq!(row["owner"], HOLDER);
         assert_eq!(row["expires_at"], "1900000000");
         let id = format!("ens:{:#x}", node(&labels));
@@ -1083,10 +1080,7 @@ async fn v2_named_byte_shadow_masks_later_v1_structural_control_in_live_and_cold
         .await?;
         assert_eq!(surviving, ("active".into(), None));
         let recovered = detail(&database, &labels).await?;
-        assert_eq!(
-            recovered["registration_status"], "registered",
-            "{recovered:#}"
-        );
+        assert_eq!(recovered["status"], "active", "{recovered:#}");
         database.cleanup().await?;
     }
     Ok(())

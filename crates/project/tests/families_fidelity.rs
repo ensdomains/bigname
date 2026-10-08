@@ -246,7 +246,7 @@ async fn a_grant_without_an_authority_kind_keeps_none() -> Result<()> {
             "ens_v1_registrar_l1",
             Some(&name(3)),
             Some(&lease),
-            json!({"namehash": node(3), "registrant": OWNER_A, "authority_key": "k"}),
+            json!({"namehash": node(3), "registrant": OWNER_A, "authority_key": "k", "expiry": 1_900_000_000u64}),
             REGISTRAR,
         )
         .await?;

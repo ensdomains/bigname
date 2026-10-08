@@ -26,6 +26,17 @@ pub fn wrapper_metadata(
     if state_value.is_none() && fuses_value.is_none() {
         return Ok(None);
     }
+    if state_value
+        .and_then(Value::as_str)
+        .and_then(WrapperState::from_wire)
+        .is_some_and(|state| !state.is_backed())
+    {
+        return if fuses_value.is_none() {
+            Ok(None)
+        } else {
+            Err(invalid_wrapper_metadata())
+        };
+    }
     if state_value.is_none() || fuses_value.is_none() {
         return Err(invalid_wrapper_metadata());
     }
@@ -65,6 +76,7 @@ pub const fn wrapper_lifecycle_matches_fuses(state: WrapperState, fuses: Wrapper
         WrapperState::Wrapped => !fuses.cannot_unwrap && !fuses.parent_cannot_control,
         WrapperState::Emancipated => !fuses.cannot_unwrap && fuses.parent_cannot_control,
         WrapperState::Locked => has_locked_pair,
+        WrapperState::Lapsed | WrapperState::Unwrapped | WrapperState::Unknown => false,
     }
 }
 
@@ -83,9 +95,20 @@ pub fn served_manager(
 ) -> Option<String> {
     if declared_summary.pointer("/registration/status") == Some(&Value::from("released"))
         || declared_summary.get("wrapper_masked") == Some(&Value::Bool(true))
+        || matches!(
+            declared_summary
+                .get("wrapper_state")
+                .and_then(Value::as_str),
+            Some("lapsed" | "unknown")
+        )
     {
         None
-    } else if declared_summary.get("wrapper_state").is_none() {
+    } else if matches!(
+        declared_summary
+            .get("wrapper_state")
+            .and_then(Value::as_str),
+        None | Some("unwrapped")
+    ) {
         registry_owner.cloned()
     } else if declared_summary.get("wrapper_in_grace") == Some(&Value::Bool(true)) {
         None

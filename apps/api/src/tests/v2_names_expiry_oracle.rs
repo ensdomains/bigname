@@ -211,6 +211,7 @@ fn oracle_filter(
     parent: Option<&str>,
 ) -> Result<bigname_storage::NameCurrentExpiringFilter> {
     Ok(bigname_storage::NameCurrentExpiringFilter {
+        deadline: bigname_storage::NameCurrentDeadline::Expiry,
         namespace: "ens".to_owned(),
         windows: vec![bigname_storage::NameCurrentExpiryWindow {
             expires_after: after.map(str::parse).transpose()?,

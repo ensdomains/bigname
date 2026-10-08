@@ -16,11 +16,13 @@
 //! reads the retained events of the name through the authority admission (`admission.rs`),
 //! ordered by the canonical order.
 mod admission;
+mod canonical;
 mod control;
 mod expiry;
 mod laterals;
 mod load;
 pub mod membership;
+mod policy;
 mod select;
 mod served;
 mod tombstone;
@@ -210,6 +212,8 @@ pub struct NameFacts {
     /// Whether the chain resolves `.eth` names through ENSv2 at the publication
     /// (`families::control::cutover`), read once per batch.
     pub resolution_cutover: bool,
+    /// Admitted registry identities whose exact deployment defines registrar grace.
+    pub grace_registries: Arc<Vec<policy::GraceRegistry>>,
 }
 
 /// The shadow of one name's registration and control blocks.

@@ -76,6 +76,10 @@ async fn registration_witness_above_the_published_block_does_not_reclassify_olde
         event.source_family = "ens_v2_registry_l1".to_owned();
         event.derivation_kind = "ens_v2_registry_resource_surface".to_owned();
         event.after_state["source_event"] = json!(source_event);
+        // A real LabelReserved always carries the reservation's actual expiry.
+        if kind == "RegistrationReserved" {
+            event.after_state["expiry"] = json!(1_900_000_000_i64);
+        }
         if kind == "RegistrationGranted" {
             event.after_state["authority_kind"] = json!("ens_v2_registry");
         }

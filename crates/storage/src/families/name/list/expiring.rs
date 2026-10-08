@@ -35,6 +35,7 @@ use crate::{
 /// exactly one label below `parent`, after `cursor` in `order`.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ExpiringSelection<'a> {
+    pub(crate) deadline: crate::NameCurrentDeadline,
     pub(crate) namespace: &'a str,
     pub(crate) expires_after: Option<UnixSeconds>,
     pub(crate) expires_before: Option<UnixSeconds>,
@@ -52,6 +53,7 @@ impl<'a> ExpiringSelection<'a> {
         cursor: Option<&'a NameCurrentListCursor>,
     ) -> Self {
         Self {
+            deadline: filter.deadline,
             namespace: &filter.namespace,
             expires_after: window.expires_after,
             expires_before: window.expires_before,
@@ -160,7 +162,7 @@ fn expiring_union_query<'a>(
         )?;
         builder.push(")");
     }
-    builder.push(") selected ORDER BY expires_at ");
+    builder.push(format!(") selected ORDER BY {} ", filter.deadline.column()));
     builder.push(if order == NameCurrentListOrder::Asc {
         "ASC"
     } else {
@@ -186,9 +188,10 @@ fn push_expiring_selection<'a>(
     // The served name: the key of this arm's order, cursor and `parent` test, and the
     // `raw_name` column a union of arms merges by.
     let name = rendered_name_sql("surface");
+    let date = selection.deadline.column();
     builder.push(format!(
         "/* storage:families.name.expiring_names */
-         SELECT summary.logical_name_id, summary.expires_at, summary.namespace,
+         SELECT summary.logical_name_id, summary.{date}, summary.namespace,
                 {name} AS raw_name, surface.namehash
          FROM bigname_phase.project_name_summary summary
          JOIN bigname_phase.name_surfaces surface
@@ -197,7 +200,7 @@ fn push_expiring_selection<'a>(
          JOIN bigname_phase.chain_lineage lineage
            ON lineage.chain_id = surface.chain_id AND lineage.block_hash = surface.block_hash
          JOIN bigname_phase.project_family_marker marker ON marker.chain_id = summary.chain_id
-         WHERE summary.expiry_listable AND summary.expires_at IS NOT NULL
+         WHERE summary.expiry_listable AND summary.{date} IS NOT NULL
            AND {composed}
            AND surface.block_number <= marker.current_block_number
            AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
@@ -223,11 +226,11 @@ fn push_expiring_selection<'a>(
         push_parent_predicate(builder, &format!("({name})"), parent);
     }
     if let Some(expires_after) = selection.expires_after {
-        builder.push(" AND summary.expires_at >= ");
+        builder.push(format!(" AND summary.{date} >= "));
         builder.push_bind(expires_after);
     }
     if let Some(expires_before) = selection.expires_before {
-        builder.push(" AND summary.expires_at < ");
+        builder.push(format!(" AND summary.{date} < "));
         builder.push_bind(expires_before);
     }
     if let (Some(at), Some(cursor)) = (after, selection.cursor) {
@@ -235,15 +238,15 @@ fn push_expiring_selection<'a>(
         // an index condition: a continuation starts reading at its expiry, not at the window's
         // first one. The tie keys ascend in both directions, as the page statement's keyset
         // does.
-        builder.push(" AND summary.expires_at ");
+        builder.push(format!(" AND summary.{date} "));
         builder.push(if ascending { ">=" } else { "<=" });
         builder.push(" ");
         builder.push_bind(at);
-        builder.push(" AND (summary.expires_at ");
+        builder.push(format!(" AND (summary.{date} "));
         builder.push(if ascending { ">" } else { "<" });
         builder.push(" ");
         builder.push_bind(at);
-        builder.push(" OR (summary.expires_at = ");
+        builder.push(format!(" OR (summary.{date} = "));
         builder.push_bind(at);
         builder.push(format!(
             " AND (summary.namespace, {name}, surface.namehash) > ("
@@ -255,7 +258,7 @@ fn push_expiring_selection<'a>(
         builder.push_bind(&cursor.namehash);
         builder.push(")))");
     }
-    builder.push(" ORDER BY summary.expires_at ");
+    builder.push(format!(" ORDER BY summary.{date} "));
     builder.push(if ascending { "ASC" } else { "DESC" });
     builder.push(format!(
         ", summary.namespace ASC, {name} ASC, surface.namehash ASC LIMIT "
@@ -325,3 +328,7 @@ mod union_tests;
 #[cfg(any(test, feature = "test-support"))]
 #[path = "expiring/measure.rs"]
 pub(crate) mod measure;
+
+#[cfg(test)]
+#[path = "expiring/grace_tests.rs"]
+mod grace_tests;

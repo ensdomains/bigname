@@ -357,7 +357,7 @@ async fn v2_lookup_forward_results_are_in_order_with_head_meta() -> Result<()> {
     assert_eq!(payload["data"][0]["record"]["name"], json!("case.eth"));
     assert_eq!(payload["data"][0]["record"]["display_name"], json!("case.eth"));
     assert_eq!(payload["data"][0]["record"]["namespace"], json!("ens"));
-    assert_eq!(payload["data"][0]["record"]["status"], json!("ok"));
+    assert_eq!(payload["data"][0]["record"]["read_status"], json!("ok"));
     assert_eq!(
         payload["data"][0]["record"]["records"]["addresses"]["60"],
         json!(address)
@@ -431,9 +431,9 @@ async fn v2_lookup_withholds_resolver_without_projected_authority() -> Result<()
     .await?;
     let record = &forward["data"][0]["record"];
     // Name detail's partial serve: the row is `current_authority_not_projected`, served `ok`.
-    assert_eq!(record["status"], json!("ok"), "{record}");
+    assert_eq!(record["read_status"], json!("ok"), "{record}");
     assert!(record.get("unsupported_reason").is_none(), "{record}");
-    assert_eq!(record["registration_status"], json!("unregistered"));
+    assert_eq!(record["status"], json!("active"));
     // The record keeps the detail shape for this reason. With no selected binding there is no
     // served resolver, so neither the pointer nor the records written on it are served.
     assert_eq!(record["records"]["addresses"]["60"], Value::Null, "{record}");
@@ -484,14 +484,14 @@ async fn v2_lookup_serves_a_root_registry_pointer_without_projected_authority() 
     .await?;
     let record = &forward["data"][0]["record"];
     // As on name detail, the unprojected-authority TLD is served `ok` with its root pointer.
-    assert_eq!(record["status"], json!("ok"), "{record}");
+    assert_eq!(record["read_status"], json!("ok"), "{record}");
     assert!(record.get("unsupported_reason").is_none(), "{record}");
     assert_eq!(
         record["resolver"],
         json!({"chain_id": 1, "address": "0x0000000000000000000000000000000000000abc"}),
         "{record}"
     );
-    assert_eq!(record["registration_status"], json!("unregistered"));
+    assert_eq!(record["status"], json!("unregistered"));
     assert!(record.get("registration_id").is_none(), "{record}");
     assert!(record.get("authority").is_none_or(Value::is_null), "{record}");
     assert_eq!(
@@ -515,8 +515,8 @@ async fn v2_lookup_withholds_retained_inventory_for_released_tombstone() -> Resu
     )
     .await?;
     let record = &payload["data"][0]["record"];
-    assert_eq!(record["status"], json!("ok"));
-    assert_eq!(record["registration_status"], json!("released"));
+    assert_eq!(record["read_status"], json!("ok"));
+    assert_eq!(record["status"], json!("released"));
     assert!(record.get("resolver").is_none());
     assert!(record.get("records").is_none(), "{record}");
     assert!(record.get("primary_address").is_none());
@@ -638,7 +638,7 @@ async fn released_name_serves_its_lapsed_holder_only_in_the_lapsed_block() -> Re
         "release_kind": "expired",
     });
     let lapsed = &payload["data"][0]["record"];
-    assert_eq!(lapsed["registration_status"], json!("released"), "{lapsed:?}");
+    assert_eq!(lapsed["status"], json!("released"), "{lapsed:?}");
     assert_eq!(lapsed["registration_id"], json!(lease.to_string()));
     assert_eq!(lapsed["expires_at"], json!("1700000000"));
     assert!(lapsed.get("registrant").is_none(), "{lapsed:?}");
@@ -650,7 +650,7 @@ async fn released_name_serves_its_lapsed_holder_only_in_the_lapsed_block() -> Re
     let detail = v2_name_record_payload_for_database(&database, "/v1/names/lapsed-lease.eth")
         .await?;
     let record = &detail["data"];
-    assert_eq!(record["registration_status"], json!("released"), "{record:?}");
+    assert_eq!(record["status"], json!("released"), "{record:?}");
     assert_eq!(record["registration_id"], json!(lease.to_string()));
     assert_eq!(record["expires_at"], json!("1700000000"));
     assert!(record.get("registrant").is_none(), "{record:?}");
@@ -675,7 +675,7 @@ async fn v2_lookup_ignores_stale_audit_inventory_for_reservation() -> Result<()>
     )
     .await?;
     let record = &payload["data"][0]["record"];
-    assert_eq!(record["registration_status"], json!("unregistered"));
+    assert_eq!(record["status"], json!("active"));
     assert!(record.get("registration_id").is_none());
     assert!(record.get("resolver").is_none());
     assert!(record.get("records").is_none(), "{record}");

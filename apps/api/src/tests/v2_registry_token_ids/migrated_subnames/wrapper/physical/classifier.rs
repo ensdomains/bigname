@@ -307,7 +307,7 @@ async fn lookup_precomputation_classifier_upgrade_refreshes_retired_physical_pat
     for field in [
         "authority",
         "registration_id",
-        "registration_status",
+        "status",
         "owner",
         "manager",
         "ens_v1",

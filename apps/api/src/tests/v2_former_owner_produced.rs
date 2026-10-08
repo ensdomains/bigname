@@ -180,10 +180,27 @@ async fn v2_former_owner_real_unregister_uses_canonical_release_time() -> Result
     let database = TestDatabase::new_migrated().await?;
     publish_release(&database, true, false).await?;
     let profile = v2_names_payload(&database, "/v1/names/departed.eth").await?;
-    assert_eq!(
-        profile["data"]["registration_status"], "released",
-        "{profile}"
-    );
+    assert_eq!(profile["data"]["status"], "released", "{profile}");
+    // The real unregister ends control immediately without replacing its scheduled dates.
+    assert_eq!(profile["data"]["expires_at"], "1900000000");
+    assert_eq!(profile["data"]["grace_ends_at"], "1900000000");
+    assert!(profile["data"].get("expires_at_reason").is_none());
+    for lookup_profile in ["feed", "detail"] {
+        let lookup = v2_lookup_json(
+            &database,
+            json!({"profile":lookup_profile,"inputs":[{"name":"departed.eth"}]}),
+        )
+        .await?;
+        let record = &lookup["data"][0]["record"];
+        assert_eq!(lookup["data"][0]["status"], "ok", "{lookup}");
+        for field in ["status", "expires_at", "grace_ends_at"] {
+            assert_eq!(
+                record[field], profile["data"][field],
+                "{lookup_profile} {field}: {lookup}"
+            );
+        }
+        assert!(record.get("registration_status").is_none());
+    }
     assert_eq!(
         profile["data"]["lapsed_registration"],
         json!({
@@ -212,10 +229,7 @@ async fn v2_former_owner_real_displacement_is_not_an_unregister() -> Result<()> 
     let database = TestDatabase::new_migrated().await?;
     publish_release(&database, false, false).await?;
     let profile = v2_names_payload(&database, "/v1/names/departed.eth").await?;
-    assert_eq!(
-        profile["data"]["registration_status"], "released",
-        "{profile}"
-    );
+    assert_eq!(profile["data"]["status"], "released", "{profile}");
     assert!(
         profile["data"].get("lapsed_registration").is_none(),
         "{profile}"
@@ -236,10 +250,7 @@ async fn v2_former_owner_preserves_name_detail_migration_timestamp() -> Result<(
     publish_release(&database, true, true).await?;
     let profile = v2_names_payload(&database, "/v1/names/departed.eth").await?;
     assert_eq!(profile["data"]["authority"], "ens_v2", "{profile}");
-    assert_eq!(
-        profile["data"]["registration_status"], "released",
-        "{profile}"
-    );
+    assert_eq!(profile["data"]["status"], "released", "{profile}");
     assert_eq!(profile["data"]["migrated_at"], "1700000121", "{profile}");
     let (status, former) = read_family_response(
         &database,

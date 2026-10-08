@@ -436,7 +436,7 @@ async fn a_grant_named_later_puts_its_registrant_in_the_index() -> Result<()> {
             registrar,
             None,
             Some(&lease),
-            json!({"namehash": node(4), "registrant": CAROL}),
+            json!({"namehash": node(4), "registrant": CAROL, "expiry": 1_900_000_000u64}),
             R1,
         )
         .await?;

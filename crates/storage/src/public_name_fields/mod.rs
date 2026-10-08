@@ -14,7 +14,8 @@ pub use ens_v1::{EnsV1, ens_v1};
 pub use registration::{
     RegistrationFields, chain_positions_created_at, classify_registration_status,
     declared_created_at, declared_expires_at, declared_grace_ends_at, declared_owner,
-    declared_registered_at, declared_registration, declared_registry_owner, registration_fields,
+    declared_registered_at, declared_registration, declared_registry_owner, has_current_control,
+    has_registration_identity, registration_fields,
 };
 pub use types::{ExpiryTimestamp, RegistrationStatus};
 pub use wrapper::{

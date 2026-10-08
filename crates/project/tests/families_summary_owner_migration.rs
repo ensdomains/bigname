@@ -133,6 +133,18 @@ fn the_selector_reset_literal_names_every_family_table() {
     );
 }
 
+#[test]
+fn lifecycle_reset_literal_names_every_current_family_table() {
+    let migration = include_str!("../../../migrations/20261008120000_registration_lifecycle.sql");
+    assert_eq!(
+        reset_literal(migration),
+        families::family_tables()
+            .chain(CONTROL_TABLES)
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+    );
+}
+
 /// An ENSv2 registration of `name` on `chain` at `block`, as the adapter writes it: the pending
 /// LabelRegistered grant, then the TokenResource log's SurfaceBound, grant, AuthorityTransferred
 /// naming `owner` and ExpiryChanged, and the name's open ENSv2 binding to `resource`.

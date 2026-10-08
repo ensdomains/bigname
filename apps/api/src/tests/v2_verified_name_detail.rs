@@ -173,7 +173,7 @@ async fn verified_name_detail_executes_the_chain_neutral_inventory_keys_on_sepol
     assert_eq!(status, StatusCode::OK, "{detail}");
     assert_eq!(detail["meta"]["source"], json!("verified"));
     let data = &detail["data"];
-    assert_eq!(data["status"], json!("ok"), "{detail}");
+    assert_eq!(data["read_status"], json!("ok"), "{detail}");
     assert!(data.get("unsupported_reason").is_none(), "{detail}");
     // `records` lists exactly the keys the lookup read; the forward name is not read.
     assert_eq!(
@@ -192,7 +192,7 @@ async fn verified_name_detail_executes_the_chain_neutral_inventory_keys_on_sepol
     assert_eq!(data["primary_address"], json!(SEPOLIA_DETAIL_EXECUTED));
     assert!(data.get("unsupported_fields").is_none(), "{detail}");
     // Registration facts stay indexed.
-    assert_eq!(data["registration_status"], json!("active"));
+    assert_eq!(data["status"], json!("active"));
     assert_eq!(
         data["owner"],
         json!("0x0000000000000000000000000000000000000def")
@@ -224,7 +224,7 @@ async fn verified_name_detail_reads_the_profile_set_without_inventory_keys() -> 
         sepolia_verified_get(&database, &rpc_url, "/v1/names/alice.eth?source=verified").await?;
     assert_eq!(status, StatusCode::OK, "{detail}");
     let data = &detail["data"];
-    assert_eq!(data["status"], json!("ok"), "{detail}");
+    assert_eq!(data["read_status"], json!("ok"), "{detail}");
     assert_eq!(data["primary_address"], json!(SEPOLIA_DETAIL_EXECUTED));
     // Unset avatar, description, email and contenthash are served as cleared (`null`), not as
     // unknown. The inventory row lists no key and no ABI write.
@@ -263,14 +263,14 @@ async fn verified_name_detail_reports_a_failed_getter_as_failed() -> Result<()> 
         sepolia_verified_get(&database, &rpc_url, "/v1/names/alice.eth?source=verified").await?;
     assert_eq!(status, StatusCode::OK, "{detail}");
     let data = &detail["data"];
-    assert_eq!(data["status"], json!("failed"), "{detail}");
+    assert_eq!(data["read_status"], json!("failed"), "{detail}");
     assert_eq!(data["failure_reason"], json!("resolver_call_reverted"));
     // The failed key stays listed with no value.
     assert_eq!(data["records"]["seen_addresses"], json!(["60"]), "{detail}");
     assert_eq!(data["records"]["addresses"], json!({}), "{detail}");
     assert!(data.get("primary_address").is_none(), "{detail}");
     assert_eq!(data["unsupported_fields"], json!(["primary_address"]));
-    assert_eq!(data["registration_status"], json!("active"));
+    assert_eq!(data["status"], json!("active"));
     assert_eq!(joined_keys(rpc_handle).await?, ["addr:60"]);
     database.cleanup().await
 }
@@ -298,9 +298,9 @@ async fn verified_name_detail_dispatches_nothing_for_an_ineligible_name() -> Res
     assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
     let data = &payload["data"];
-    assert_eq!(data["status"], json!("unsupported"), "{payload}");
+    assert_eq!(data["read_status"], json!("unsupported"), "{payload}");
     assert_eq!(data["unsupported_reason"], json!("verified_records_not_supported"));
-    assert_eq!(data["registration_status"], json!("released"));
+    assert_eq!(data["status"], json!("released"));
     database.cleanup().await
 }
 
@@ -325,7 +325,7 @@ async fn verified_name_detail_takes_the_first_failed_key_in_key_order() -> Resul
         sepolia_verified_get(&database, &rpc_url, "/v1/names/alice.eth?source=verified").await?;
     assert_eq!(status, StatusCode::OK, "{detail}");
     let data = &detail["data"];
-    assert_eq!(data["status"], json!("failed"), "{detail}");
+    assert_eq!(data["read_status"], json!("failed"), "{detail}");
     assert_eq!(data["failure_reason"], json!("resolver_call_failed"), "{detail}");
     // The failed contenthash and the reverted text:url stay listed with no value.
     let records = &data["records"];
@@ -391,7 +391,7 @@ async fn verified_name_detail_discovers_a_null_resolver_without_inventory() -> R
     assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
     let data = &payload["data"];
-    assert_eq!(data["status"], json!("ok"), "{payload}");
+    assert_eq!(data["read_status"], json!("ok"), "{payload}");
     assert!(data.get("resolver").is_none(), "{payload}");
     assert_eq!(data["records"]["addresses"], json!({"60": SEPOLIA_DETAIL_EXECUTED}), "{payload}");
     assert_eq!(data["records"]["texts"]["url"], json!("https://alice.example"));

@@ -336,6 +336,6 @@ fn a_child_without_a_name_row_is_managed_by_its_owner() {
         let subname = build_subname(&row, None, None, false).expect("subname");
         assert_eq!(subname.owner.as_ref(), owner);
         assert_eq!(subname.manager.as_ref(), manager);
-        assert_eq!(subname.registration_status, status);
+        assert_eq!(subname.status, status);
     }
 }

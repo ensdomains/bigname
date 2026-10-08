@@ -31,6 +31,7 @@ fn filter(count: usize) -> Result<NameCurrentExpiringFilter> {
         }
     }
     Ok(NameCurrentExpiringFilter {
+        deadline: crate::NameCurrentDeadline::Expiry,
         namespace: "ens".to_owned(),
         windows,
         authorities: None,
@@ -127,6 +128,7 @@ fn expiring_union_rejects_unbounded_overlapping_or_excessive_storage_filters() -
         ],
     ] {
         let bad = NameCurrentExpiringFilter {
+            deadline: crate::NameCurrentDeadline::Expiry,
             windows,
             ..good.clone()
         };

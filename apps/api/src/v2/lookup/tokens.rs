@@ -19,7 +19,7 @@ pub(super) async fn apply(
         .filter_map(|record| {
             tokens::token_registration(
                 record.authority,
-                record.registration_status,
+                record.owner.as_deref(),
                 record.registration_id.as_deref(),
             )
             .map(|registration| (registration, record))

@@ -58,6 +58,19 @@ pub(in crate::schema_v2) fn materialize_wrapper_surface(
         })
         .collect::<Vec<_>>();
     for (index, namehash, label, logical_name_id, authority_arm) in surfaces {
+        let callback_lease = interpreted.names[index]
+            .preimage_metadata
+            .as_ref()
+            .filter(|metadata| metadata["wrapper_completion"] == "superseded")
+            .and_then(|_| state.v1_registrar(&selected.source.namespace, &namehash))
+            .filter(|lease| {
+                lease.authority_source_family == "ens_v1_registrar_l1"
+                    && lease.token_lineage_id.is_some()
+                    && lease
+                        .expiry
+                        .is_some_and(|expiry| expiry > raw.block_timestamp.unix_timestamp())
+            });
+        let sourced_start = interpreted.sourced_events.len();
         let materialization = state.materialize_v1_active_surface(
             &selected.source.namespace,
             &namehash,
@@ -79,6 +92,22 @@ pub(in crate::schema_v2) fn materialize_wrapper_surface(
             raw,
             &selected.event.name,
         );
+        // A callback-unwrapped name can first become readable at the obsolete completion.
+        // Its current registry binding still carries the real retained registrar lease even
+        // when registry manager and ERC721 holder differ. This changes no selected authority.
+        if let Some(lease) = callback_lease {
+            for event in interpreted.sourced_events[sourced_start..]
+                .iter_mut()
+                .flat_map(|batch| &mut batch.events)
+                .filter(|event| {
+                    event.event_kind == "SurfaceBound"
+                        && event.after_state["authority_kind"] == "registry_only"
+                })
+            {
+                event.after_state["callback_retained_registrar_resource_id"] =
+                    serde_json::json!(lease.resource_id);
+            }
+        }
     }
     Ok(())
 }
@@ -114,7 +143,12 @@ pub(super) fn interpret(
         "ens_v1_resolver_l1" | "basenames_base_resolver" => {
             resolver::interpret(selected, raw, state)
         }
-        "ens_v1_wrapper_l1" => wrapper::interpret(selected, raw, state),
+        "ens_v1_wrapper_l1" => wrapper::interpret(
+            selected,
+            raw,
+            state,
+            registrar_context.stale_wrapper_completion,
+        ),
         "ens_v1_reverse_l1" | "basenames_base_primary" => reverse::interpret(selected, raw),
         family if family.ends_with("_execution") || family == "basenames_l1_compat" => {
             Ok(Interpreted::new())

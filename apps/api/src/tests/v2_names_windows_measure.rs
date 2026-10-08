@@ -250,6 +250,7 @@ async fn v2_names_windows_measure_20k() -> Result<()> {
         }
         }
         let filter = bigname_storage::NameCurrentExpiringFilter {
+            deadline: bigname_storage::NameCurrentDeadline::Expiry,
             namespace:"ens".to_owned(),windows: windows.iter().map(|window| {
                 let (a,b)=window.split_once("..").unwrap(); Ok(bigname_storage::NameCurrentExpiryWindow {
                     expires_after:Some(a.parse()?),expires_before:Some(b.parse()?)})

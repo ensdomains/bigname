@@ -619,6 +619,18 @@ async fn an_epoch_after_the_successor_grant_takes_that_grant_as_the_lease() -> R
     let (lease, registry, successor, early) = (uuid(1), uuid(2), uuid(3), uuid(4));
     let namehash = node(1);
     fixture
+        .write(
+            10,
+            0,
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            Some(&name(1)),
+            Some(&lease),
+            json!({"namehash": namehash, "registrant": OWNER, "expiry": 1_900_000_000u64}),
+            REGISTRAR,
+        )
+        .await?;
+    fixture
         .binding(&uuid(101), &name(1), &lease, "ens_v1", 10, 1, Some(11))
         .await?;
     fixture
@@ -654,7 +666,7 @@ async fn an_epoch_after_the_successor_grant_takes_that_grant_as_the_lease() -> R
             "ens_v1_registrar_l1",
             Some(&name(1)),
             Some(&early),
-            json!({"namehash": namehash, "registrant": OWNER}),
+            json!({"namehash": namehash, "registrant": OWNER, "expiry": 1_900_000_000u64}),
             REGISTRAR,
         )
         .await?;
@@ -681,7 +693,7 @@ async fn an_epoch_after_the_successor_grant_takes_that_grant_as_the_lease() -> R
             "ens_v1_registrar_l1",
             Some(&name(1)),
             Some(&successor),
-            json!({"namehash": namehash, "registrant": OWNER}),
+            json!({"namehash": namehash, "registrant": OWNER, "expiry": 1_900_000_000u64}),
             REGISTRAR,
         )
         .await?;

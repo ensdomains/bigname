@@ -80,8 +80,18 @@ pub fn ens_v1(authority: Option<&str>, declared_summary: &Value) -> Result<Optio
     if !matches!(authority, Some("ens_v0" | "ens_v1")) {
         return Ok(None);
     }
-    let (wrapper_state, wrapper_fuses) =
-        wrapper.map_or((None, None), |(state, fuses)| (Some(state), Some(fuses)));
+    let (wrapper_state, wrapper_fuses) = wrapper.map_or_else(
+        || {
+            (
+                declared_summary
+                    .get("wrapper_state")
+                    .and_then(Value::as_str)
+                    .and_then(WrapperState::from_wire),
+                None,
+            )
+        },
+        |(state, fuses)| (Some(state), Some(fuses)),
+    );
     let (wrapper_expires_at, wrapper_expires_at_reason) = expiry
         .map_or((None, None), |(timestamp, reason)| {
             (Some(timestamp), reason)

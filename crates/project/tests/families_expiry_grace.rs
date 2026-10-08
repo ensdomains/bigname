@@ -2,8 +2,10 @@
 //! (TYR-90). A `.eth` name that ENSv1 still decides and that ENSv2 premigration reserved serves
 //! its ENSv1 lease's expiry and the 90-day ENSv1 grace until the client-facing Universal
 //! Resolver proxy's chain ends at an admitted UniversalResolverV2 implementation, and the
-//! reservation's expiry and the 28-day ENSv2 grace while it does. After the cutover a `.eth`
-//! name that ENSv1 decides without a live ENSv2 entry, and every name below it, serve no
+//! reservation's expiry while it does. These synthetic ENSv2 entries use an arbitrary registry
+//! and no admitted ETHRegistry declaration, so their canonical grace end equals expiry; the
+//! `.eth` suffix and Universal Resolver cutover do not establish registrar grace. After cutover
+//! a `.eth` name that ENSv1 decides without a live ENSv2 entry, and every name below it, serve no
 //! resolver. A block that changes a proxy recomposes the summaries of the reserved names, and
 //! undo and rebuild restore them. The registration time of such a name is its ENSv1
 //! registration's through renewals, the reservation, the cutover and the ENSv1→ENSv2 migration;
@@ -22,6 +24,7 @@ use support::{CHAIN, Event, Fixture, hash, uuid};
 
 const REGISTRAR: &str = "0x00000000000000000000000000000000000000e3";
 const REGISTRY: &str = "0x00000000000000000000000000000000000000e5";
+// A generic registry, deliberately distinct from the admitted Sepolia ETHRegistry.
 const V2_REGISTRY: &str = "0x00000000000000000000000000000000000000e6";
 const NAME_WRAPPER: &str = "0x00000000000000000000000000000000000000e7";
 const OWNER: &str = "0x00000000000000000000000000000000000000aa";
@@ -146,7 +149,8 @@ async fn resolver(fixture: &Fixture, logical_name_id: &str, block: i64) -> Resul
     Ok(())
 }
 
-/// Premigration's reservation of `logical_name_id` in the ENSv2 `eth` registry.
+/// A synthetic premigration-shaped reservation of `logical_name_id` in a generic ENSv2
+/// registry. The string identifier `eth` is not proof of admitted registrar grace.
 async fn reserved(fixture: &Fixture, logical_name_id: &str, n: u32, block: i64) -> Result<()> {
     fixture
         .write(
@@ -316,7 +320,7 @@ async fn a_reserved_eth_name_serves_the_reservation_expiry_only_while_cut_over()
     )
     .await?;
     fixture.apply(7, FamilyMode::Normal).await?;
-    let after = expect(RESERVED_EXPIRY, 28, Some(RESOLVER), None);
+    let after = expect(RESERVED_EXPIRY, 0, Some(RESOLVER), None);
     ensure!(
         served(&fixture, &alice).await? == after,
         "{}",
@@ -423,8 +427,7 @@ async fn after_the_cutover_an_eth_name_without_a_live_entry_and_its_subnames_do_
 }
 
 #[tokio::test]
-async fn an_ens_v2_registration_serves_its_expiry_and_the_ens_v2_grace_before_any_cutover()
--> Result<()> {
+async fn a_generic_ens_v2_registration_has_no_inferred_grace_before_any_cutover() -> Result<()> {
     let fixture = Fixture::new("families_expiry_grace_native", 12).await?;
     let carol = surface(&fixture, "carol.eth").await?;
     let resource = uuid(0x4000);
@@ -451,7 +454,7 @@ async fn an_ens_v2_registration_serves_its_expiry_and_the_ens_v2_grace_before_an
         row["arm"] == json!("ens_v2")
             && row["expiry"] == json!(RESERVED_EXPIRY.to_string())
             && row["ens_v1_expiry"].is_null()
-            && row["grace_ends_at"] == json!((RESERVED_EXPIRY + 28 * DAY).to_string()),
+            && row["grace_ends_at"] == json!(RESERVED_EXPIRY.to_string()),
         "{row}"
     );
     fixture.cleanup().await
@@ -994,11 +997,12 @@ async fn a_wrapped_eth_name_renewed_through_the_base_registrar_serves_the_renewe
 /// The ENSv2 owner's BatchRegistrar can extend a reservation without the BaseRegistrar
 /// (`BatchRegistrar.batchRegister` renews a RESERVED entry to a later expiry)
 /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/BatchRegistrar.sol:L66-L70 @ ens_v2_sepolia_20260916@366de741). The served expiry
-/// and grace follow the reservation, the lease date stays, and the lease's own grace deadline
-/// (lease + 90 days) no longer equals the served one.
+/// and canonical grace end follow the reservation while the lease date stays. This generic
+/// registry has no admitted registrar grace, so G = E both before and after extension,
+/// independently of the ENSv1 lease's own grace deadline (lease + 90 days).
 #[tokio::test]
-async fn extending_only_the_reservation_leaves_the_lease_date_and_splits_the_grace_deadlines()
--> Result<()> {
+async fn extending_only_the_reservation_moves_its_deadline_and_keeps_the_lease_date() -> Result<()>
+{
     const EXTENDED: u64 = RESERVED_EXPIRY + 30 * DAY;
     let fixture = Fixture::new("families_expiry_grace_batch_extension", 12).await?;
     execution_manifest(&fixture, None, 0, TOP_PROXY, 0).await?;
@@ -1014,10 +1018,12 @@ async fn extending_only_the_reservation_leaves_the_lease_date_and_splits_the_gra
     )
     .await?;
     fixture.apply(5, FamilyMode::Normal).await?;
-    let aligned = served(&fixture, &alice).await?;
+    let before = served(&fixture, &alice).await?;
     ensure!(
-        aligned["grace_ends_at"] == json!((LEASE_EXPIRY + 90 * DAY).to_string()),
-        "premigration aligns the two grace deadlines: {aligned}"
+        before["expiry"] == json!(RESERVED_EXPIRY.to_string())
+            && before["grace_ends_at"] == json!(RESERVED_EXPIRY.to_string())
+            && before["ens_v1_expiry"] == json!(LEASE_EXPIRY.to_string()),
+        "the generic reservation's deadline is independent of the ENSv1 lease: {before}"
     );
 
     fixture
@@ -1036,7 +1042,7 @@ async fn extending_only_the_reservation_leaves_the_lease_date_and_splits_the_gra
     let row = served(&fixture, &alice).await?;
     ensure!(
         row["expiry"] == json!(EXTENDED.to_string())
-            && row["grace_ends_at"] == json!((EXTENDED + 28 * DAY).to_string())
+            && row["grace_ends_at"] == json!(EXTENDED.to_string())
             && row["ens_v1_expiry"] == json!(LEASE_EXPIRY.to_string()),
         "{row}"
     );

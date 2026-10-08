@@ -117,7 +117,7 @@ pub(crate) struct LookupRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) grace_ends_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) registration_status: Option<RegistrationStatus>,
+    pub(crate) status: Option<RegistrationStatus>,
     /// The lapsed holder of a released ENSv1 lease; never current data.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) lapsed_registration: Option<LapsedRegistration>,
@@ -160,7 +160,7 @@ pub(crate) struct LookupRecord {
     pub(crate) ens_v1: Option<EnsV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) migrated_at: Option<String>,
-    pub(crate) status: Status,
+    pub(crate) read_status: Status,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unsupported_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

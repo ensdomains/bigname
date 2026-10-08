@@ -23,8 +23,8 @@ async fn v2_get_name_returns_flat_name_record_envelope() -> Result<()> {
             "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec"
         ))
     );
-    assert_eq!(data.get("registration_status"), Some(&json!("active")));
-    assert_eq!(data.get("status"), Some(&json!("ok")));
+    assert_eq!(data.get("status"), Some(&json!("active")));
+    assert_eq!(data.get("read_status"), Some(&json!("ok")));
     assert_eq!(data.get("chain_id"), Some(&json!(1)));
     assert_eq!(data.get("network"), Some(&json!("ethereum")));
     assert_eq!(
@@ -279,7 +279,7 @@ async fn v2_get_name_preserves_stored_ensip15_normalized_name_bytes() -> Result<
 async fn v2_get_name_does_not_serve_a_resolver_without_projected_authority() -> Result<()> {
     let payload = v2_alice_state_payload("/v1/names/Alice.eth", AliceInputState::Unbound).await?;
     let data = payload["data"].as_object().expect("data must be an object");
-    assert_eq!(data.get("status"), Some(&json!("ok")));
+    assert_eq!(data.get("read_status"), Some(&json!("ok")));
     assert!(data.get("resolver").is_none());
     Ok(())
 }
@@ -288,7 +288,7 @@ async fn v2_get_name_does_not_serve_a_resolver_without_projected_authority() -> 
 async fn v2_get_name_serves_a_root_registry_pointer_without_projected_authority() -> Result<()> {
     let payload = v2_root_pointer_payload("/v1/names/eth", true).await?;
     let data = payload["data"].as_object().expect("data must be an object");
-    assert_eq!(data.get("status"), Some(&json!("ok")), "{payload}");
+    assert_eq!(data.get("read_status"), Some(&json!("ok")), "{payload}");
     assert_eq!(
         data.get("resolver"),
         Some(&json!({
@@ -297,7 +297,7 @@ async fn v2_get_name_serves_a_root_registry_pointer_without_projected_authority(
         })),
         "{payload}"
     );
-    assert_eq!(data.get("registration_status"), Some(&json!("unregistered")));
+    assert_eq!(data.get("status"), Some(&json!("unregistered")));
     assert!(data.get("registration_id").is_none(), "{payload}");
     assert!(data.get("owner").is_none_or(Value::is_null), "{payload}");
     assert!(data.get("authority").is_none_or(Value::is_null), "{payload}");
@@ -309,7 +309,7 @@ async fn v2_get_name_serves_a_root_registry_pointer_without_projected_authority(
 
     // The same pointer evidence without a serving resource stays withheld.
     let payload = v2_root_pointer_payload("/v1/names/eth", false).await?;
-    assert_eq!(payload["data"]["status"], json!("ok"));
+    assert_eq!(payload["data"]["read_status"], json!("ok"));
     assert!(payload["data"].get("resolver").is_none(), "{payload}");
     Ok(())
 }
@@ -431,7 +431,7 @@ async fn v2_get_name_verified_source_reports_stale_when_lookup_state_is_unavaila
             .await?;
 
     assert_eq!(payload["meta"]["source"], json!("verified"));
-    assert_eq!(payload["data"]["status"], json!("stale"));
+    assert_eq!(payload["data"]["read_status"], json!("stale"));
     assert_eq!(
         payload["data"]["failure_reason"],
         json!("verified_answer_stale_for_snapshot")
@@ -455,7 +455,7 @@ async fn v2_get_name_verified_source_reports_unsupported_without_verified_bounda
     let payload = v2_alice_state_payload("/v1/names/Alice.eth?source=verified", AliceInputState::Unbound).await?;
 
     assert_eq!(payload["meta"]["source"], json!("verified"));
-    assert_eq!(payload["data"]["status"], json!("unsupported"));
+    assert_eq!(payload["data"]["read_status"], json!("unsupported"));
     assert_eq!(
         payload["data"]["unsupported_reason"],
         json!("verified_records_not_supported")
@@ -555,7 +555,7 @@ async fn v2_verified_reads_follow_the_declared_authority_arms_for_an_ens_v2_name
                 .await
                 .context("ens_v2-arm verified name detail request failed")?;
             let detail: Value = read_json(detail).await?;
-            assert_eq!(detail["data"]["status"], json!("unsupported"), "{detail}");
+            assert_eq!(detail["data"]["read_status"], json!("unsupported"), "{detail}");
             assert_eq!(
                 detail["data"]["unsupported_reason"],
                 json!("exact_name_authority_not_verifiable"),
@@ -617,7 +617,7 @@ async fn v2_get_name_verified_source_accepts_event_linked_ownerless_registry_ser
     let payload: Value = read_json(response).await?;
     assert_eq!(status, StatusCode::OK, "unexpected response: {payload}");
     assert_eq!(payload["meta"]["source"], json!("verified"));
-    assert_eq!(payload["data"]["status"], json!("ok"));
+    assert_eq!(payload["data"]["read_status"], json!("ok"));
     assert_eq!(payload["data"]["records"]["addresses"]["60"], json!(executed_address));
     assert_eq!(
         join_primary_name_mock_rpc_requests(rpc_handle).await?.len(),
@@ -743,7 +743,7 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["meta"]["source"], json!("verified"));
     assert_v2_name_snapshot_meta(&payload);
-    assert_eq!(payload["data"]["status"], json!("ok"));
+    assert_eq!(payload["data"]["read_status"], json!("ok"));
     assert_eq!(
         payload["data"]["records"]["addresses"],
         json!({
@@ -1177,7 +1177,7 @@ async fn v2_get_name_omits_record_maps_when_inventory_is_absent() -> Result<()> 
 async fn v2_get_name_classifies_ens_v2_registry_as_registered() -> Result<()> {
     let payload = v2_alice_state_payload("/v1/names/Alice.eth", AliceInputState::Registry).await?;
 
-    assert_eq!(payload["data"]["registration_status"], json!("registered"), "{payload:#}");
+    assert_eq!(payload["data"]["status"], json!("active"), "{payload:#}");
 
     Ok(())
 }
@@ -1219,8 +1219,8 @@ async fn v2_get_name_serves_an_untransferred_ens_v2_registration_with_its_owner(
 
     let data = &payload["data"];
     assert_eq!(
-        (&data["registration_status"], &data["owner"], &data["manager"]),
-        (&json!("registered"), &json!(owner), &json!(owner)),
+        (&data["status"], &data["owner"], &data["manager"]),
+        (&json!("active"), &json!(owner), &json!(owner)),
         "{payload:#}"
     );
 
@@ -1231,7 +1231,7 @@ async fn v2_get_name_serves_an_untransferred_ens_v2_registration_with_its_owner(
 async fn v2_get_name_classifies_released_as_released() -> Result<()> {
     let payload = v2_alice_state_payload("/v1/names/Alice.eth", AliceInputState::Released).await?;
 
-    assert_eq!(payload["data"]["registration_status"], json!("released"));
+    assert_eq!(payload["data"]["status"], json!("released"));
 
     Ok(())
 }
@@ -1289,8 +1289,8 @@ async fn v2_get_name_withholds_retained_inventory_for_released_tombstone() -> Re
     let payload = v2_alice_state_payload("/v1/names/Alice.eth", AliceInputState::Released).await?;
 
     let data = payload["data"].as_object().expect("data must be an object");
-    assert_eq!(data.get("status"), Some(&json!("ok")));
-    assert_eq!(data.get("registration_status"), Some(&json!("released")));
+    assert_eq!(data.get("read_status"), Some(&json!("ok")));
+    assert_eq!(data.get("status"), Some(&json!("released")));
     assert!(data.get("resolver").is_none());
     assert!(data.get("records").is_none());
     assert!(data.get("primary_address").is_none());
@@ -1309,8 +1309,8 @@ async fn v2_get_name_serves_a_lapsed_handed_off_lease_as_released() -> Result<()
     seed_handed_off_lease_inputs(&database, "alice.eth", true).await?;
     let payload = v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth").await?;
     let data = payload["data"].as_object().expect("data must be an object");
-    assert_eq!(data.get("status"), Some(&json!("ok")));
-    assert_eq!(data.get("registration_status"), Some(&json!("released")));
+    assert_eq!(data.get("read_status"), Some(&json!("ok")));
+    assert_eq!(data.get("status"), Some(&json!("released")));
     for field in ["owner", "manager", "registrant"] {
         assert!(
             data.get(field).is_none_or(Value::is_null),
@@ -1357,10 +1357,10 @@ async fn v2_get_name_serves_a_transferred_lease_under_the_registry_only_binding(
     rebuild_fixture_families(&database.pool, "ethereum-mainnet", 130, "0xperms130").await?;
     let payload = v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth").await?;
     let data = payload["data"].as_object().expect("data must be an object");
-    assert_eq!(data.get("status"), Some(&json!("ok")), "{payload}");
+    assert_eq!(data.get("read_status"), Some(&json!("ok")), "{payload}");
     assert_eq!(
-        data.get("registration_status"),
-        Some(&json!("registered")),
+        data.get("status"),
+        Some(&json!("active")),
         "{payload}"
     );
     assert_eq!(data.get("owner"), Some(&json!(LATER_HOLDER)), "{payload}");
@@ -1394,7 +1394,7 @@ async fn v2_get_name_withholds_old_record_observations_after_release() -> Result
     );
     let payload = v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth").await?;
     let data = payload["data"].as_object().expect("data must be an object");
-    assert_eq!(data.get("registration_status"), Some(&json!("released")));
+    assert_eq!(data.get("status"), Some(&json!("released")));
     assert!(data.get("resolver").is_none());
     assert!(data.get("records").is_none());
     assert!(data.get("primary_address").is_none());
@@ -1411,7 +1411,7 @@ async fn v2_get_name_withholds_expired_resource_identity_and_inventory_for_reser
     let payload = v2_alice_state_payload("/v1/names/Alice.eth", AliceInputState::Reserved).await?;
 
     let data = payload["data"].as_object().expect("data must be an object");
-    assert_eq!(data.get("registration_status"), Some(&json!("unregistered")));
+    assert_eq!(data.get("status"), Some(&json!("active")));
     assert!(data.get("registration_id").is_none());
     assert!(data.get("resolver").is_none());
     assert!(data.get("records").is_none());
@@ -1532,12 +1532,12 @@ async fn v2_get_name_verified_source_withholds_retained_inventory_for_released_t
     let data = retained_payload["data"]
         .as_object()
         .expect("data must be an object");
-    assert_eq!(data.get("status"), Some(&json!("unsupported")));
+    assert_eq!(data.get("read_status"), Some(&json!("unsupported")));
     assert_eq!(
         data.get("unsupported_reason"),
         Some(&json!("verified_records_not_supported"))
     );
-    assert_eq!(data.get("registration_status"), Some(&json!("released")));
+    assert_eq!(data.get("status"), Some(&json!("released")));
     assert_eq!(
         data.get("unsupported_fields"),
         Some(&json!(["primary_address"]))
@@ -1566,7 +1566,7 @@ async fn v2_get_name_verified_source_withholds_retained_inventory_for_released_t
 async fn v2_get_name_classifies_no_binding_as_unregistered() -> Result<()> {
     let payload = v2_alice_state_payload("/v1/names/Alice.eth", AliceInputState::Unbound).await?;
 
-    assert_eq!(payload["data"]["registration_status"], json!("unregistered"));
+    assert_eq!(payload["data"]["status"], json!("unregistered"));
     assert_eq!(payload["data"]["registration_id"], Value::Null);
 
     Ok(())
@@ -2168,7 +2168,7 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
             );
         } else {
             assert_eq!(
-                payload["data"]["registration_status"],
+                payload["data"]["status"],
                 json!("unregistered")
             );
             assert!(
@@ -2189,7 +2189,7 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
     )
     .await?;
     let lookup_record = &lookup["data"][0]["record"];
-    assert_eq!(lookup_record["registration_status"], json!("unregistered"));
+    assert_eq!(lookup_record["status"], json!("unregistered"));
     assert!(
         lookup_record.get("token_id").is_none(),
         "ownerless batch lookup must not imply token control: {lookup}"
@@ -2207,7 +2207,7 @@ async fn v2_unclassified_serving_resource_does_not_expose_retained_records() -> 
     let payload = v2_alice_state_payload("/v1/names/Alice.eth", AliceInputState::Unbound).await?;
 
     assert_eq!(
-        payload["data"]["registration_status"],
+        payload["data"]["status"],
         json!("unregistered")
     );
     assert!(payload["data"].get("resolver").is_none());
@@ -3228,7 +3228,7 @@ async fn v2_get_name_withholds_indexed_record_fields_from_unsupported_inventory(
 
     let payload = v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth").await?;
 
-    assert_eq!(payload["data"]["status"], json!("ok"));
+    assert_eq!(payload["data"]["read_status"], json!("ok"));
     assert_eq!(
         payload["data"]["resolver"],
         json!({
@@ -3346,12 +3346,12 @@ async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> R
         json!("0x00000000000000000000000000000000000000aa")
     );
     assert!(data[0].get("registrant").is_none());
-    assert_eq!(data[0]["registration_status"], json!("registered"));
+    assert_eq!(data[0]["status"], json!("active"));
     assert_eq!(data[0]["registered_at"], json!("1704164645"));
     assert_eq!(data[0]["created_at"], json!("1704164645"));
     assert_eq!(data[0]["expires_at"], json!("1798859045"));
-    assert_eq!(data[1]["registration_status"], json!("unregistered"));
-    assert_eq!(data[2]["registration_status"], json!("unregistered"));
+    assert_eq!(data[1]["status"], json!("unregistered"));
+    assert_eq!(data[2]["status"], json!("unregistered"));
     assert!(
         data[2].get("owner").is_none(),
         "a generic no-registration row must not inherit the children projection owner"
@@ -3440,7 +3440,7 @@ async fn v2_get_subnames_keeps_zero_owner_for_ownerless_resolver_child() -> Resu
         json!("0x0000000000000000000000000000000000000000")
     );
     assert_eq!(child["registrant"], Value::Null);
-    assert_eq!(child["registration_status"], json!("unregistered"));
+    assert_eq!(child["status"], json!("unregistered"));
 
     database.cleanup().await
 }
@@ -4067,7 +4067,7 @@ async fn v2_sepolia_verified_inventory_remains_unsupported() -> Result<()> {
         &format!("/v1/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?source=verified"),
     )
     .await?;
-    assert_eq!(name["data"]["status"], json!("unsupported"));
+    assert_eq!(name["data"]["read_status"], json!("unsupported"));
     assert_eq!(
         name["data"]["unsupported_reason"],
         json!("verified_records_not_supported")
@@ -5225,7 +5225,7 @@ async fn v2_get_subnames_include_expired_false_omits_released_registrar_child() 
     rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
     let all = v2_subnames_payload_for_database(&database, "/v1/names/eth/subnames").await?;
     assert_eq!(v2_subname_names(&all), vec!["alice.eth"]);
-    assert_eq!(all["data"][0]["registration_status"], "released");
+    assert_eq!(all["data"][0]["status"], "released");
     let live =
         v2_subnames_payload_for_database(&database, "/v1/names/eth/subnames?include_expired=false")
             .await?;
@@ -5276,8 +5276,8 @@ async fn v2_get_subnames_include_expired_false_omits_past_expiry_rows() -> Resul
     );
     assert_eq!(payload["page"]["total_count"], json!(4));
     assert_eq!(
-        payload["data"][2]["registration_status"],
-        json!("registered")
+        payload["data"][2]["status"],
+        json!("released")
     );
     assert_eq!(
         payload["data"][2]["expires_at"],

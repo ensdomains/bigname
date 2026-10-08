@@ -129,14 +129,8 @@ async fn v2_former_owner_cursor_walks_explicit_unregisters_and_mixed_expiries() 
             let base = format!("{}&order={order}", former_cursor_route());
             let baseline = v2_names_payload(&database, &base).await?;
             let mut expected = if dated {
-                // A null expiry is the smallest value.
-                vec![
-                    "unregistered-a.eth",
-                    "unregistered-b.eth",
-                    "dated-a.eth",
-                    "dated-b.eth",
-                    "dated-c.eth",
-                ]
+                // Explicit unregister retains its later scheduled expiry.
+                vec!["dated-a.eth", "dated-b.eth", "dated-c.eth", "unregistered-a.eth", "unregistered-b.eth"]
             } else {
                 vec!["unregistered-a.eth", "unregistered-b.eth"]
             };
@@ -154,7 +148,8 @@ async fn v2_former_owner_cursor_walks_explicit_unregisters_and_mixed_expiries() 
                     .context("name")?
                     .starts_with("unregistered-")
                 {
-                    assert!(row["expires_at"].is_null());
+                    assert_eq!(row["expires_at"], "1900000000");
+                    assert_eq!(row["grace_ends_at"], "1900000000");
                     assert_eq!(row["lapsed_registration"]["release_kind"], "unregistered");
                     let released_at = if row["name"] == "unregistered-a.eth" {
                         "1767225603"

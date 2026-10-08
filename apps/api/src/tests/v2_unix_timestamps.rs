@@ -72,8 +72,8 @@ fn assert_unix_expiry_record(record: &Value, name: &str, expiry: u64) {
     assert_eq!(record["registered_at"], json!("1700000201"), "{record:#}");
     assert_eq!(record["created_at"], json!("1700000201"), "{record:#}");
     assert_eq!(
-        record["registration_status"],
-        json!("registered"),
+        record["status"],
+        json!("active"),
         "{record:#}"
     );
 }

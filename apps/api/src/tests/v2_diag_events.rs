@@ -291,6 +291,8 @@ async fn seed_v2_diag_events_fixture(database: &TestDatabase) -> Result<()> {
         303,
         "0xdiag303",
     );
+    // Match the mandatory expiry carried by a real BaseRegistrar NameRegistered.
+    registration.after_state["expiry"] = json!(1_900_000_000_i64);
     registration.after_state["authority_kind"] = json!("registrar");
     registration.after_state["registrant"] = json!(DIAG_EVENTS_ADDRESS);
     registration.after_state["namehash"] = json!(bigname_lookup::ens_namehash_hex(DIAG_EVENTS_NAME)?);

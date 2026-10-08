@@ -24,19 +24,19 @@ impl ExpiryWindows {
         }
         if values.len() > MAX_WINDOWS {
             return Err(V2Error::invalid_input(
-                "expires_window accepts at most 32 windows",
+                "date window parameter accepts at most 32 windows",
             ));
         }
         let windows = values
             .iter()
             .map(|value| {
                 let (after, before) = value.split_once("..").ok_or_else(|| {
-                    V2Error::invalid_input("expires_window must contain after..before")
+                    V2Error::invalid_input("date window must contain after..before")
                 })?;
                 let parse = |bound: &str| {
                     bound.trim().parse::<UnixSeconds>().map_err(|_| {
                         V2Error::invalid_input(
-                            "expires_window bounds must be Unix seconds or RFC 3339 timestamps",
+                            "date window bounds must be Unix seconds or RFC 3339 timestamps",
                         )
                     })
                 };
@@ -46,7 +46,7 @@ impl ExpiryWindows {
                 };
                 if window.after >= window.before {
                     return Err(V2Error::invalid_input(
-                        "expires_window after must be earlier than before",
+                        "date window after must be earlier than before",
                     ));
                 }
                 Ok(window)
@@ -57,7 +57,7 @@ impl ExpiryWindows {
         sorted.sort_unstable_by_key(|window| window.after);
         if sorted.windows(2).any(|pair| pair[0].before > pair[1].after) {
             return Err(V2Error::invalid_input(
-                "expires_window ranges must not overlap or repeat",
+                "date window ranges must not overlap or repeat",
             ));
         }
         Ok(Some(Self(windows)))

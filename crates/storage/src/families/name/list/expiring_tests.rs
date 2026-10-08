@@ -385,6 +385,7 @@ async fn expiring_selection_reads_the_selector_indexes_in_the_public_order() -> 
                     expected.len()
                 );
                 let selection = ExpiringSelection {
+                    deadline: crate::NameCurrentDeadline::Expiry,
                     namespace: "ens",
                     expires_after: Some(after),
                     expires_before: Some(before),

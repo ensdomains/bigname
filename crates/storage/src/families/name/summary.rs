@@ -9,7 +9,7 @@
 //!   even when token readability withholds the name row;
 //! - `serving`: whether `provenance.read_reachability.serving_resource_id` is set, which admits
 //!   an ownerless child;
-//! - `registration_status`: `declared_summary.registration.status`, whose `released` the expiry
+//! - `registration_status`: `declared_summary.registration.lifecycle_status`, whose `expired`/`released` the expiry
 //!   fence drops;
 //! - `expires_at` and `registered_at`: the timestamp reads of the subnames sorts and fence, the
 //!   same SQL expressions (`address_names::query`) over the composed summary;
@@ -215,10 +215,10 @@ async fn compose_summaries(
                 nc.authority_arm,
                 COALESCE(nc.provenance #>> '{read_reachability,serving_resource_id}' IS NOT NULL,
                          FALSE) AS serving,
-                nc.declared_summary #>> '{registration,status}' AS registration_status, ",
+                nc.declared_summary #>> '{registration,lifecycle_status}' AS registration_status, ",
     );
     push_expires_at_timestamp_expr(&mut builder);
-    builder.push(" AS expires_at, ");
+    builder.push(" AS expires_at, (nc.declared_summary #>> '{registration,grace_ends_at}')::numeric AS grace_ends_at, ");
     push_registered_at_timestamp_expr(&mut builder);
     builder.push(format!(
         " AS registered_at, {} AS zero_owner,

@@ -490,7 +490,7 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
                 "display_name": "lapsed-listed.eth",
                 "namespace": "ens",
                 "namehash": "0x648f55586c02f13100041eeef8fa1550dc7dc35f0e5871dc7bea445cfbccce32",
-                "registration_status": "released",
+                "status": "released",
                 "registered_at": "1675296000",
                 "created_at": "1675296000",
                 "expires_at": "1700000000",
@@ -511,13 +511,13 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
                 "namehash": "0xf5d57b8ccea9df92d48c79fec7260d742812b8f135ef7bf64d5b7b87ac11ea29",
                 "owner": HOLDER,
                 "manager": HOLDER,
-                "registration_status": "active",
+                "status": "active",
                 "registered_at": "1706832000",
                 "created_at": "1706832000",
                 "expires_at": "1900000000",
                 "grace_ends_at": "1907776000",
                 "authority": "ens_v1",
-                "ens_v1": {"expires_at": "1900000000"}
+                "ens_v1": {"expires_at": "1900000000", "wrapper_state":"unwrapped"}
             }
         ]),
         "the released name keeps its place at its old expiry, with no owner or manager, and \
@@ -558,7 +558,7 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
     assert_eq!(explicit_expiry["data"], former["data"]);
     let row = &former["data"][0];
     assert_eq!(row["relations"], json!(["former_owner"]));
-    assert_eq!(row["registration_status"], json!("released"));
+    assert_eq!(row["status"], json!("released"));
     assert_eq!(row["lapsed_registration"], lapsed);
     assert_eq!(row["expires_at"], json!("1700000000"));
     assert!(row.get("owner").is_none() && row.get("manager").is_none(), "{row}");
@@ -757,11 +757,11 @@ async fn v2_get_names_rejects_unbounded_or_malformed_requests() -> Result<()> {
         ),
         (
             "/v1/names?namespace=ens",
-            "expires_after, expires_before or expires_window is required so the listing is bounded",
+            "a scalar date bound or date window is required so the listing is bounded",
         ),
         (
             "/v1/names?namespace=ens&sort=expires_at",
-            "expires_after, expires_before or expires_window is required so the listing is bounded",
+            "a scalar date bound or date window is required so the listing is bounded",
         ),
         (
             "/v1/names?namespace=ens&expires_after=2027-01-01T00:00:00Z&expires_before=2026-01-01T00:00:00Z",
@@ -773,11 +773,11 @@ async fn v2_get_names_rejects_unbounded_or_malformed_requests() -> Result<()> {
         ),
         (
             "/v1/names?namespace=ens&expires_after=2025-01-01T00:00:00Z&sort=name",
-            "sort must be expires_at",
+            "sort must match the selected date family",
         ),
         (
             "/v1/names?namespace=ens&expires_after=2025-01-01T00:00:00Z&sort=registered_at",
-            "sort must be expires_at",
+            "sort must match the selected date family",
         ),
         (
             "/v1/names?namespace=ens&expires_after=2025-01-01T00:00:00Z&order=sideways",

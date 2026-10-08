@@ -86,7 +86,7 @@ pub(crate) struct NameRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) grace_ends_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) registration_status: Option<RegistrationStatus>,
+    pub(crate) status: Option<RegistrationStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) authority: Option<Authority>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -127,7 +127,7 @@ pub(crate) struct NameRecord {
     pub(crate) subname_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) record_count: Option<u64>,
-    pub(crate) status: Status,
+    pub(crate) read_status: Status,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unsupported_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -201,7 +201,9 @@ pub(crate) async fn get_name_record(
         .then(|| {
             tokens::token_registration(
                 Authority::from_provenance(&row.provenance),
-                Some(name_registration_fields(Some(&row), &row.namespace).registration_status),
+                name_registration_fields(Some(&row), &row.namespace)
+                    .owner
+                    .as_deref(),
                 registration_id(&row.declared_summary, row.resource_id).as_deref(),
             )
         })
@@ -249,7 +251,7 @@ pub(crate) async fn get_name_record(
     }
     let as_of_block = name_chain_id(&row)
         .and_then(|chain_id| snapshot_block_for_chain(&selected_snapshot, &chain_id));
-    if record.status != Status::Unsupported {
+    if record.read_status != Status::Unsupported {
         record.subregistry = load_subregistry_refs(
             &state.pool,
             std::slice::from_ref(&row.logical_name_id),
@@ -353,9 +355,13 @@ pub(crate) fn build_name_record(
         .flatten();
 
     Ok(NameRecord {
-        registration_id: (registration.registration_status != RegistrationStatus::Unregistered)
-            .then(|| registration_id(&row.declared_summary, row.resource_id))
-            .flatten(),
+        registration_id: bigname_storage::public_name_fields::has_registration_identity(
+            &row.namespace,
+            &row.declared_summary,
+            has_name_binding(row),
+        )
+        .then(|| registration_id(&row.declared_summary, row.resource_id))
+        .flatten(),
         token_id: if has_name_binding(row) {
             declared_token_id(row)
         } else {
@@ -368,7 +374,7 @@ pub(crate) fn build_name_record(
         expires_at: registration.expires_at,
         expires_at_reason: registration.expires_at_reason,
         grace_ends_at: registration.grace_ends_at,
-        registration_status: Some(registration.registration_status),
+        status: Some(registration.status),
         authority,
         ens_v1,
         lapsed_registration: lapsed_registration(&row.declared_summary),
@@ -395,7 +401,7 @@ pub(crate) fn build_name_record(
         network: Some(network(row)),
         subname_count: None,
         record_count: None,
-        status,
+        read_status: status,
         unsupported_reason: None,
         failure_reason: None,
         // The record categories carry their own unknown values; only the flat
@@ -416,7 +422,7 @@ pub(super) struct NameRegistrationFields {
     pub(super) expires_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
     pub(super) expires_at_reason: Option<String>,
     pub(super) grace_ends_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
-    pub(super) registration_status: RegistrationStatus,
+    pub(super) status: RegistrationStatus,
 }
 
 pub(super) fn name_registration_fields(
@@ -460,7 +466,7 @@ fn empty_registration_fields(namespace: &str) -> NameRegistrationFields {
         expires_at: None,
         expires_at_reason: None,
         grace_ends_at: None,
-        registration_status: classify_registration_status(namespace, None, None, false),
+        status: classify_registration_status(namespace, None, None, false),
     }
 }
 
@@ -485,7 +491,7 @@ fn registration_fields_from_parts(
         expires_at: fields.expires_at,
         expires_at_reason: fields.expires_at_reason,
         grace_ends_at: fields.grace_ends_at,
-        registration_status: fields.registration_status,
+        status: fields.status,
     }
 }
 

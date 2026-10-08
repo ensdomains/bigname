@@ -39,8 +39,13 @@ async fn registration(
     identity: &str,
     name: &str,
     block: i64,
-    after: Value,
+    mut after: Value,
 ) -> Result<()> {
+    after
+        .as_object_mut()
+        .expect("registration facts are an object")
+        .entry("expiry")
+        .or_insert(json!(1_900_000_000u64));
     fixture
         .event(
             Event::new(

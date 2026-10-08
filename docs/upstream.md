@@ -782,3 +782,11 @@ parent. Unknown histories keep ordinary direct rows and conservative coverage.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/utils/PermissionedAddressSet.sol:L51-L61 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L311-L314 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/erc1155/ERC1155Singleton.sol:L70-L75 @ ens_v2_sepolia_20261001@07e55a05)
+
+## Registration lifecycle presentation and callback completion
+
+Bigname presents one registration lifecycle separately from ownership and resolution. Canonical schedules survive passive expiry, and explicit unregister keeps the ended instance's scheduled expiry while reporting an immediate released state and the observed terminal cause. These are public presentation rules, not an assertion that the contract preserves current ownership or permits every registrar to allocate immediately. Protocol equality and deployment-specific grace are documented in [Expiry and grace](api-v1.md#expiry-and-grace).
+
+NameWrapper `_mint` writes and emits before the receiver callback, while `_wrap` emits NameWrapped after it. A callback burn can therefore precede a stale outer completion; nested rewrapping can establish a newer inner owner/fuse word. Bigname matches mint/completion frames by admitted wrapper instance, namespace, transaction and node. A burned outer frame cannot restore current wrapper state, while ordinary and inner successful wraps remain effective. The prior documented callback-resurrection gap is closed. (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L257-L266 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L903 @ ens_v1@91c966f)
+
+The expanded wrapper_state vocabulary describes backed entry/fuse states, proven lapse/unwrap, or incomplete wrapping evidence. It does not claim equivalence to every upstream isWrapped helper. In particular, the `.eth` helper additionally checks the BaseRegistrar owner. (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L748-L783 @ ens_v1@91c966f)

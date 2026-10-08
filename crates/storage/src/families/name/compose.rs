@@ -157,17 +157,42 @@ fn created_at(parts: &Parts<'_>) -> Value {
     }
 }
 
-fn wrapper_fields(summary: &mut Map<String, Value>, row: Option<&WrapperRow>, clock: i64) {
-    let Some(effective) = row.map(|row| effective_wrapper(row, clock)) else {
-        return;
+fn wrapper_fields(
+    summary: &mut Map<String, Value>,
+    row: Option<&WrapperRow>,
+    clock: i64,
+) -> Result<()> {
+    let Some(row) = row else {
+        return Ok(());
     };
+    // Incomplete evidence is unknown, but a known contradictory state/fuse pair is corrupt.
+    if let (Some(state), Some(fuses)) = (row.wrapper_state.as_deref(), row.fuses) {
+        use crate::public_name_fields::{
+            WrapperFuses, WrapperState, wrapper_lifecycle_matches_fuses,
+        };
+        let valid = WrapperState::from_wire(state)
+            .zip(u32::try_from(fuses).ok())
+            .is_some_and(|(state, word)| {
+                wrapper_lifecycle_matches_fuses(state, WrapperFuses::from_word(word))
+            });
+        anyhow::ensure!(valid, "stored wrapper metadata is inconsistent");
+    }
+    if row.lifecycle_unwrapped == Some(true) {
+        summary.insert("wrapper_state".into(), json!("unwrapped"));
+        return Ok(());
+    }
+    let effective = effective_wrapper(row, clock);
     let Some(state) = effective.wrapper_state else {
-        // A NameWrapper whose state is unknown or lapsed: the manager is withheld, as the
-        // `manager` relation's mask withholds it.
-        if row.is_some_and(|row| row.has_modifier) {
-            summary.insert("wrapper_masked".into(), json!(true));
-        }
-        return;
+        summary.insert("wrapper_masked".into(), json!(true));
+        summary.insert(
+            "wrapper_state".into(),
+            json!(if effective.owner_lapsed {
+                "lapsed"
+            } else {
+                "unknown"
+            }),
+        );
+        return Ok(());
     };
     let fuses = effective.fuses.unwrap_or_default();
     let bit = |mask: i64| fuses & mask != 0;
@@ -189,6 +214,7 @@ fn wrapper_fields(summary: &mut Map<String, Value>, row: Option<&WrapperRow>, cl
             "can_extend_expiry": bit(262144),
         }),
     );
+    Ok(())
 }
 
 /// The declared coverage.
@@ -301,7 +327,19 @@ pub(super) fn compose(parts: &Parts<'_>, shape: CoverageShape) -> Result<NameCur
         &mut summary,
         event_resource.and_then(|resource| parts.facts.wrappers.get(resource)),
         parts.publication.timestamp_seconds(),
-    );
+    )?;
+
+    if !summary.contains_key("wrapper_state")
+        && selection.authority_arm.as_deref() == Some("ens_v1")
+        && selection.unsupported_reason.is_none()
+        && binding.is_some_and(|binding| !binding.is_wrapper())
+        && shadow
+            .control
+            .get("registry_owner")
+            .is_some_and(|owner| !owner.is_null())
+    {
+        summary.insert("wrapper_state".into(), json!("unwrapped"));
+    }
 
     let mut provenance = Map::new();
     provenance.insert("chain_id".into(), json!(parts.publication.chain_id));

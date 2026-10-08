@@ -65,10 +65,10 @@ pub(super) async fn render_name_lookup_results(
                         LookupProfile::Feed => build_forward_feed_record(row),
                         LookupProfile::Detail => build_forward_detail_record(row),
                     }?;
-                    if record.status != Status::Unsupported {
+                    if record.read_status != Status::Unsupported {
                         record.subregistry = subregistries.get(&lookup.logical_name_id).cloned();
                     }
-                    (record.status, Some(record))
+                    (record.read_status, Some(record))
                 }
                 None => (Status::NotFound, None),
             },

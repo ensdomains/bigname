@@ -70,6 +70,7 @@ async fn set_marker_state(fixture: &Fixture, chain: &str, state: &str) -> Result
 
 fn expiring_from(seconds: i64) -> Result<NameCurrentExpiringFilter> {
     Ok(NameCurrentExpiringFilter {
+        deadline: bigname_storage::NameCurrentDeadline::Expiry,
         namespace: "ens".to_owned(),
         windows: vec![bigname_storage::NameCurrentExpiryWindow {
             expires_after: Some(OffsetDateTime::from_unix_timestamp(seconds)?.into()),
@@ -215,8 +216,13 @@ async fn an_expiring_page_ignores_another_namespaces_rebuild() -> Result<()> {
     assert_eq!(alone.0, [name(1)]);
     fixture.lineage(BASE, 20).await?;
     basenames_grant(&fixture, 2, json!(2_000_000_100u64)).await?;
-    basenames_grant(&fixture, 3, json!(2_000_000_200.5)).await?;
+    basenames_grant(&fixture, 3, json!(2_000_000_200u64)).await?;
     fixture.apply_on(BASE, 12).await?;
+    // Model a legacy inexact row after valid publication. New grants reject fractional expiry.
+    sqlx::query("UPDATE project_lifecycle_event SET expiry = '2000000200.5'::jsonb, expiry_seconds = NULL WHERE chain_id = $1 AND expiry_seconds = 2000000200")
+        .bind(BASE)
+        .execute(&fixture.pool)
+        .await?;
     let (integral, inexact): (i64, i64) = sqlx::query_as(
         "SELECT count(*) FILTER (WHERE expiry_seconds IS NOT NULL),
                 count(*) FILTER (WHERE expiry_seconds IS NULL

@@ -200,7 +200,7 @@ async fn surface_less_lease(fixture: &Fixture, lease: &str) -> Result<()> {
             "ens_v1_registrar_l1",
             None,
             Some(lease),
-            json!({"namehash": node(9), "registrant": ALICE, "surface_known": false}),
+            json!({"namehash": node(9), "registrant": ALICE, "surface_known": false, "expiry": 1_900_000_000u64}),
             REGISTRY,
         )
         .await?;

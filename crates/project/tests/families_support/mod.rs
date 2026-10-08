@@ -340,6 +340,7 @@ impl Fixture {
                 let mut listed = BTreeMap::new();
                 for (after, before) in [(Some(zero), None), (None, Some(zero))] {
                     let filter = NameCurrentExpiringFilter {
+                        deadline: bigname_storage::NameCurrentDeadline::Expiry,
                         namespace: namespace.clone(),
                         windows: vec![bigname_storage::NameCurrentExpiryWindow {
                             expires_after: after,

@@ -393,8 +393,66 @@ async fn a_wrapper_minted_registration_unwrapped_in_its_mint_callback_is_no_owne
         super::graveyard_burned::owner_history(pool, NAME_WRAPPER, REGISTRATION_BLOCK).await?;
     let registrant =
         super::graveyard_burned::owner_history(pool, REGISTRANT, REGISTRATION_BLOCK).await?;
+    let resurrected: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM surface_bindings WHERE chain_id=$1 AND logical_name_id=$2
+         AND active_to IS NULL AND provenance->>'source_family'='ens_v1_wrapper_l1'",
+    )
+    .bind(CHAIN)
+    .bind(format!("ens:{namehash:#x}"))
+    .fetch_one(pool)
+    .await?;
+    let late_wrap: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events WHERE source_family='ens_v1_wrapper_l1'
+         AND event_kind=$1 AND after_state->>'source_event'='NameWrapped'",
+    )
+    .bind(bigname_adapters::schema_v2::seam::TOKEN_CONTROL_TRANSFERRED_EVENT_KIND)
+    .fetch_one(pool)
+    .await?;
+    stamp_interpreter_hash(pool, bigname_content_hash::INTERPRETER_CONTENT_HASH).await?;
+    super::registration_lifecycle::publish(
+        pool,
+        REGISTRATION_BLOCK,
+        bigname_project::families::FamilyMode::Rebuild,
+    )
+    .await?;
+    let row =
+        bigname_storage::families::name::load_family_name(pool, &format!("ens:{namehash:#x}"))
+            .await?
+            .ok_or("callback-unwrapped name")?;
+    let fields = bigname_storage::public_name_fields::registration_fields(
+        "ens",
+        &row.declared_summary,
+        row.resource_id.is_some(),
+    );
+    assert_eq!(fields.owner.as_deref(), Some(REGISTRANT));
+    assert_eq!(fields.manager.as_deref(), Some(CONTROLLER));
+    assert_eq!(
+        row.declared_summary["registration"]["expiry"],
+        REGISTRAR_EXPIRY.to_string()
+    );
+    assert_eq!(
+        row.declared_summary["registration"]["grace_ends_at"],
+        (REGISTRAR_EXPIRY + GRACE_PERIOD).to_string()
+    );
+    let ens_v1 =
+        bigname_storage::public_name_fields::ens_v1(Some("ens_v1"), &row.declared_summary)?
+            .ok_or("ENSv1 fields")?;
+    assert_eq!(
+        ens_v1.wrapper_state,
+        Some(bigname_storage::public_name_fields::WrapperState::Unwrapped)
+    );
+    assert!(ens_v1.wrapper_fuses.is_none());
+    assert!(row.declared_summary.get("wrapper_masked").is_none());
     database.cleanup().await?;
-    assert_eq!(unlinked, Some(serde_json::Value::Null));
+    assert_eq!(
+        late_wrap, 0,
+        "callback-burned mint must not resurrect wrapper control at the late NameWrapped"
+    );
+    assert_eq!(
+        resurrected, 0,
+        "callback-burned mint must not retain a live wrapper binding"
+    );
+    assert_eq!(unlinked, None);
     assert!(wrapper.is_empty(), "{wrapper:?}");
     assert!(!registrant.is_empty(), "{registrant:?}");
     Ok(())

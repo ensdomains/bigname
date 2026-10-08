@@ -43,7 +43,8 @@ pub(crate) const LEASE_CANDIDATES_SQL: &str =
      FROM bigname_phase.project_binding_candidate candidate
      WHERE candidate.chain_id = $1
        AND (candidate.resource_id = ANY($2::uuid[])
-            OR candidate.wrapped_registrar_resource_id = ANY($2::uuid[]))";
+            OR candidate.wrapped_registrar_resource_id = ANY($2::uuid[])
+            OR candidate.lease_resource_id = ANY($2::uuid[]))";
 
 /// The lifecycle key states on chain `$1` of the names `$2` or the resources `$3`: a BitmapOr of
 /// `project_lifecycle_key_state_name_idx` and the primary key.
@@ -170,6 +171,8 @@ pub async fn load_name_facts_on(
             });
         }
     }
+
+    let grace_registries = Arc::new(super::policy::load(conn, chain_id, &triples).await?);
 
     // Resources the names' events can sit on: binding candidates and what they recorded, the
     // selections, and association targets; key states that carry a name add the rest.
@@ -367,6 +370,9 @@ pub async fn load_name_facts_on(
         if let Some(lease) = candidate.wrapped_registrar_resource_id.as_deref() {
             lease_positions.entry(lease).or_default().push(index);
         }
+        if let Some(lease) = candidate.lease_resource_id.as_deref() {
+            lease_positions.entry(lease).or_default().push(index);
+        }
     }
     let mut out = Vec::new();
     for input in names {
@@ -468,6 +474,7 @@ pub async fn load_name_facts_on(
                 ))
                 .cloned(),
             resolution_cutover,
+            grace_registries: Arc::clone(&grace_registries),
         });
     }
     Ok(out)

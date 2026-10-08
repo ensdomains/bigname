@@ -12,6 +12,7 @@ use crate::{
 pub enum NameCurrentListSort {
     Name,
     ExpiryDate,
+    GraceEndsAt,
     RegistrationDate,
     CreatedAt,
 }
@@ -21,6 +22,7 @@ impl NameCurrentListSort {
         match self {
             Self::Name => "name",
             Self::ExpiryDate => "expiry_date",
+            Self::GraceEndsAt => "grace_ends_at",
             Self::RegistrationDate => "registration_date",
             Self::CreatedAt => "created_at",
         }
@@ -298,8 +300,10 @@ pub(super) fn push_filtered_name_list_cte<'a>(
             &["control", "expiry"],
         ],
     );
+    builder.push(" AS expiry_date, ");
+    crate::address_names::push_expiry_paths_expr(builder, &[&["registration", "grace_ends_at"]]);
     builder.push(
-        r#" AS expiry_date,
+        r#" AS grace_ends_at,
                 NULLIF(LOWER(nc.declared_summary #>> '{resolver,address}'), '') AS resolver_address
         "#,
     );

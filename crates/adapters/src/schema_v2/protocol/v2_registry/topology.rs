@@ -372,6 +372,7 @@ fn append_removed_name(
             after_state: json!({
                 "source_event":source_event,
                 "authority_kind":"ens_v2_registry",
+                "derived_from":"registry_state",
                 "authority_key":authority_key,
                 "registrant":registrant,
                 "expiry":expiry,
@@ -438,6 +439,7 @@ fn append_removed_name(
             after_state: json!({
                 "source_event":source_event,
                 "status":"reserved",
+                "derived_from":"registry_state",
                 "expiry":expiry,
                 "token_id":transition.token_id,
                 "current_token_id":transition.token_id,

@@ -55,7 +55,7 @@ pub(crate) fn build_address_name(
         permission_resource_id: Some(permission_resource_handle(name_row, entry.resource_id)),
         owner,
         manager,
-        registration_status: registration.registration_status,
+        status: registration.status,
         registered_at: registration.registered_at,
         created_at: registration.created_at,
         expires_at: registration.expires_at,

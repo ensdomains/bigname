@@ -52,6 +52,12 @@ fn expiry(row: &WrapperRow) -> Option<i128> {
 
 /// The wrapper masks of one F2b row at `clock_seconds`.
 pub fn effective_wrapper(row: &WrapperRow, clock_seconds: i64) -> EffectiveWrapper {
+    if row.lifecycle_unwrapped == Some(true) {
+        return EffectiveWrapper {
+            owner_lapsed: true,
+            ..EffectiveWrapper::default()
+        };
+    }
     let clock = i128::from(clock_seconds);
     let expiry = expiry(row);
     let expired = expiry.map(|expiry| expiry < clock);

@@ -1305,7 +1305,7 @@ const SHARED_LIST_RECORD_FIELDS: &[&str] = &[
     "namehash",
     "owner",
     "manager",
-    "registration_status",
+    "status",
     "registered_at",
     "created_at",
     "expires_at",

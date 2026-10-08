@@ -254,7 +254,7 @@ async fn v2_registry_children_are_listed_for_their_registry_owner() -> Result<()
             "display_name",
             "owner",
             "manager",
-            "registration_status",
+            "status",
             "authority",
         ] {
             assert_eq!(
@@ -271,7 +271,7 @@ async fn v2_registry_children_are_listed_for_their_registry_owner() -> Result<()
         );
         assert_eq!(row["relations"], json!(["owner", "manager"]), "{row:#}");
         assert_eq!(row["is_primary"], json!(false), "{row:#}");
-        assert_eq!(row["registration_status"], json!("unregistered"), "{row:#}");
+        assert_eq!(row["status"], json!("unregistered"), "{row:#}");
         assert_eq!(row["authority"], json!("ens_v1"), "{row:#}");
         for absent in [
             "registrant",
@@ -451,7 +451,7 @@ async fn v2_registry_children_serve_the_authority_of_their_registry() -> Result<
             .find(|row| row["namehash"] == json!(node))
             .unwrap_or_else(|| panic!("{node} is listed: {rows:#?}"));
         assert_eq!(row["authority"], json!(authority), "{row:#}");
-        assert_eq!(row["registration_status"], json!("unregistered"), "{row:#}");
+        assert_eq!(row["status"], json!("unregistered"), "{row:#}");
         assert_eq!(row["relations"], json!(["owner", "manager"]), "{row:#}");
         let subname = subnames
             .iter()
@@ -916,7 +916,7 @@ async fn v2_registry_child_stays_listed_until_its_new_surface_is_published() -> 
         .iter()
         .find(|subname| subname["namehash"] == json!(known))
         .expect("the child is still a subname");
-    for field in ["name", "display_name", "owner", "registration_status"] {
+    for field in ["name", "display_name", "owner", "status"] {
         assert_eq!(row[field], subname[field], "{field}: {row:#} vs {subname:#}");
     }
 
@@ -1318,12 +1318,12 @@ async fn eth_subnames(database: &TestDatabase, query: &str) -> Result<(Vec<Value
 }
 
 /// The child's registry owner and manager on both routes: listed for `address` under `owner`
-/// and `manager`, and served as both on its parent's subnames row with `registration_status`.
+/// and `manager`, and served as both on its parent's subnames row with `status`.
 async fn assert_child_served_to(
     database: &TestDatabase,
     node: &str,
     address: &str,
-    registration_status: &str,
+    status: &str,
 ) -> Result<()> {
     for (matched, rows, _) in address_rows_by_relation(database, address).await? {
         let row = served_child(&rows, node);
@@ -1336,8 +1336,8 @@ async fn assert_child_served_to(
     assert_eq!(subname["owner"], json!(address), "{subname:#}");
     assert_eq!(subname["manager"], json!(address), "{subname:#}");
     assert_eq!(
-        subname["registration_status"],
-        json!(registration_status),
+        subname["status"],
+        json!(status),
         "{subname:#}"
     );
     Ok(())
@@ -1393,20 +1393,20 @@ async fn assert_not_listed(database: &TestDatabase, node: &str, address: &str) -
     Ok(())
 }
 
-/// The `eth` subnames row of the child serves `owner`, `manager` and `registration_status`.
+/// The `eth` subnames row of the child serves `owner`, `manager` and `status`.
 async fn assert_subname_served(
     database: &TestDatabase,
     node: &str,
     (owner, manager): (&str, &str),
-    registration_status: &str,
+    status: &str,
 ) -> Result<()> {
     let (subnames, _) = eth_subnames(database, "").await?;
     let subname = served_child(&subnames, node);
     assert_eq!(subname["owner"], json!(owner), "{subname:#}");
     assert_eq!(subname["manager"], json!(manager), "{subname:#}");
     assert_eq!(
-        subname["registration_status"],
-        json!(registration_status),
+        subname["status"],
+        json!(status),
         "{subname:#}"
     );
     Ok(())
@@ -1419,12 +1419,12 @@ async fn assert_child_served_split(
     node: &str,
     holder: &str,
     registry_owner: &str,
-    registration_status: &str,
+    status: &str,
 ) -> Result<()> {
     let served = (holder, registry_owner);
     assert_listed_as(database, node, holder, "owner", served).await?;
     assert_listed_as(database, node, registry_owner, "manager", served).await?;
-    assert_subname_served(database, node, served, registration_status).await
+    assert_subname_served(database, node, served, status).await
 }
 
 /// A `.eth` name with no name surface keeps its registry record when its lease lapses: expiry
@@ -1470,7 +1470,7 @@ async fn v2_released_surface_less_child_serves_no_owner_or_manager() -> Result<(
     let (subnames, total) = eth_subnames(&database, "").await?;
     assert_eq!(total, subnames_before, "{subnames:#?}");
     let subname = served_child(&subnames, &node);
-    assert_eq!(subname["registration_status"], json!("released"), "{subname:#}");
+    assert_eq!(subname["status"], json!("released"), "{subname:#}");
     assert_eq!(subname["authority"], json!("ens_v1"), "{subname:#}");
     assert_eq!(subname["ens_v1"], json!({"expires_at": null}), "{subname:#}");
     for absent in [
@@ -1843,7 +1843,7 @@ async fn v2_transferred_then_released_surface_less_child_serves_no_one() -> Resu
     assert_not_listed(&database, &node, RC_OWNER).await?;
     let (subnames, _) = eth_subnames(&database, "").await?;
     let subname = served_child(&subnames, &node);
-    assert_eq!(subname["registration_status"], json!("released"), "{subname:#}");
+    assert_eq!(subname["status"], json!("released"), "{subname:#}");
     assert_eq!(subname.get("owner"), None, "{subname:#}");
     assert_eq!(subname.get("manager"), None, "{subname:#}");
     let (fenced, _) = eth_subnames(&database, "&include_expired=false").await?;
@@ -1985,7 +1985,7 @@ async fn v2_released_surface_less_basenames_child_serves_no_owner_or_manager() -
     publish_base_families(&database, 231).await?;
     let subnames = rows_of(&read_family_pages(&database, uri).await?);
     let subname = served_child(&subnames, &node);
-    assert_eq!(subname["registration_status"], json!("released"), "{subname:#}");
+    assert_eq!(subname["status"], json!("released"), "{subname:#}");
     assert_eq!(subname.get("owner"), None, "{subname:#}");
     assert_eq!(subname.get("manager"), None, "{subname:#}");
 

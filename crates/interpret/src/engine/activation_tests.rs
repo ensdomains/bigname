@@ -92,6 +92,9 @@ mod intermediary_migration;
 #[path = "tests/sunny_seal.rs"]
 mod sunny_seal;
 
+#[path = "tests/registration_lifecycle.rs"]
+mod registration_lifecycle;
+
 #[path = "tests/search_redo.rs"]
 mod search_redo;
 

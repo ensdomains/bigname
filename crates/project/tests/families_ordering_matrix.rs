@@ -382,6 +382,21 @@ async fn f1_a_higher_ordinal_grant_at_the_binding_log_takes_the_lease() -> Resul
     fixture
         .event(
             Event::new(
+                "grant:10",
+                10,
+                2,
+                "RegistrationGranted",
+                "ens_v1_registrar_l1",
+            )
+            .name(&named)
+            .resource(&predecessor)
+            .after(json!({"namehash": node(3), "registrant": BOB,
+                              "authority_kind": "registrar", "expiry": 1_900_000_000u64})),
+        )
+        .await?;
+    fixture
+        .event(
+            Event::new(
                 "released:11",
                 11,
                 1,
@@ -406,7 +421,7 @@ async fn f1_a_higher_ordinal_grant_at_the_binding_log_takes_the_lease() -> Resul
         fact(
             "RegistrationGranted",
             "ens_v1_registrar_l1",
-            json!({"namehash": node(3), "registrant": BOB, "authority_kind": "registrar"}),
+            json!({"namehash": node(3), "registrant": BOB, "authority_kind": "registrar", "expiry": 1_900_000_000u64}),
             REGISTRAR,
         )
         .name(&named)

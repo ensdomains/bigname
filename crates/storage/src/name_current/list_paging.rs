@@ -36,6 +36,7 @@ pub(super) fn push_name_current_list_cursor_after<'a>(
             }
         }
         NameCurrentListSort::ExpiryDate
+        | NameCurrentListSort::GraceEndsAt
         | NameCurrentListSort::RegistrationDate
         | NameCurrentListSort::CreatedAt => {
             let sort_value = match &cursor.sort_value {
@@ -152,6 +153,7 @@ pub(super) fn push_name_current_list_order(
             builder.push(", namespace ASC, normalized_name ASC, namehash ASC");
         }
         NameCurrentListSort::ExpiryDate
+        | NameCurrentListSort::GraceEndsAt
         | NameCurrentListSort::RegistrationDate
         | NameCurrentListSort::CreatedAt => {
             let column = timestamp_sort_column(sort);
@@ -173,6 +175,7 @@ fn timestamp_sort_column(sort: NameCurrentListSort) -> &'static str {
     match sort {
         NameCurrentListSort::Name => "normalized_name",
         NameCurrentListSort::ExpiryDate => "expiry_date",
+        NameCurrentListSort::GraceEndsAt => "grace_ends_at",
         NameCurrentListSort::RegistrationDate => "EXTRACT(EPOCH FROM registration_date)",
         NameCurrentListSort::CreatedAt => "EXTRACT(EPOCH FROM created_at)",
     }
@@ -232,6 +235,9 @@ pub fn name_current_list_cursor_from_row(
             NameCurrentListSort::ExpiryDate => {
                 NameCurrentListCursorValue::Timestamp(row.expiry_date)
             }
+            NameCurrentListSort::GraceEndsAt => NameCurrentListCursorValue::Timestamp(
+                super::NameCurrentDeadline::GraceEnds.value(row),
+            ),
             NameCurrentListSort::RegistrationDate => {
                 NameCurrentListCursorValue::Timestamp(row.registration_date.map(Into::into))
             }

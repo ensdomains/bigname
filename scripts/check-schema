@@ -531,7 +531,8 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=476
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=77
+# Includes registration_lifecycle applied after lookup_precomputation on the removal path.
+expected_predecessor_shape_proof_count=78
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -750,6 +751,11 @@ check_served_projection_removal() {
             fi
             emit_phase_migration "$ROOT/migrations/20261007120000_project_lookup_precomputation.sql" baseline-first
             emit_phase_migration "$ROOT/migrations/20261007120000_project_lookup_precomputation.sql" baseline-first
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261008120000_registration_lifecycle.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261008120000_registration_lifecycle.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261008120000_registration_lifecycle.sql" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -894,7 +900,8 @@ for migration_file in \
     "$ROOT/migrations/20261005210000_durable_name_search.sql" \
     "$ROOT/migrations/20261006080000_normalized_events_history_registrar_lease_index.sql" \
     "$ROOT/migrations/20261006160000_normalized_events_history_direct_account_indexes.sql" \
-    "$ROOT/migrations/20261007120000_project_lookup_precomputation.sql"
+    "$ROOT/migrations/20261007120000_project_lookup_precomputation.sql" \
+    "$ROOT/migrations/20261008120000_registration_lifecycle.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done

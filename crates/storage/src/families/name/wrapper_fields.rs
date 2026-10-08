@@ -69,7 +69,11 @@ fn wrapper_flagged(row: &NameCurrentRow) -> bool {
 }
 
 fn backed(row: &NameCurrentRow) -> bool {
-    row.declared_summary.get("wrapper_state").is_some()
+    row.declared_summary
+        .get("wrapper_state")
+        .and_then(Value::as_str)
+        .and_then(crate::public_name_fields::WrapperState::from_wire)
+        .is_some_and(crate::public_name_fields::WrapperState::is_backed)
 }
 
 /// Composition reads the wrapper of the name's binding resource, which is the row's

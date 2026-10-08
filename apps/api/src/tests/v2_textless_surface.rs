@@ -228,11 +228,11 @@ async fn v2_textless_name_detail_is_served_by_its_bracketed_route() -> Result<()
         child_labelhash("eth"),
     ])?;
     assert_eq!(data["namehash"], json!(first_node), "{detail:#}");
-    assert_eq!(data["status"], json!("ok"), "{detail:#}");
+    assert_eq!(data["read_status"], json!("ok"), "{detail:#}");
     // The registry-only binding with an owner reads as it does for a name with bytes.
-    assert_eq!(data["registration_status"], json!("registered"), "{detail:#}");
+    assert_eq!(data["status"], json!("active"), "{detail:#}");
     assert_eq!(data["authority"], json!("ens_v1"), "{detail:#}");
-    assert_eq!(data["ens_v1"], json!({"expires_at": null}), "{detail:#}");
+    assert_eq!(data["ens_v1"], json!({"expires_at": null, "wrapper_state":"unwrapped"}), "{detail:#}");
     assert_eq!(data["owner"], json!(RC_OWNER), "{detail:#}");
     assert_eq!(data["manager"], json!(RC_OWNER), "{detail:#}");
     assert_eq!(data["created_at"], json!("1700000202"), "{detail:#}");
@@ -396,7 +396,7 @@ async fn v2_textless_parent_lists_and_counts_its_subnames_once() -> Result<()> {
     for row in rows_of(&whole) {
         assert_eq!(row["display_name"], row["name"], "{row:#}");
         assert_eq!(row["owner"], json!(RC_OWNER), "{row:#}");
-        assert_eq!(row["registration_status"], json!("registered"), "{row:#}");
+        assert_eq!(row["status"], json!("active"), "{row:#}");
         assert_eq!(row["authority"], json!("ens_v1"), "{row:#}");
         assert_eq!(row["subname_count"], json!(0), "{row:#}");
         // Each row is the name its own detail route serves.
@@ -499,7 +499,7 @@ async fn v2_textless_names_are_listed_once_for_their_owner() -> Result<()> {
                 json!(["owner", "manager"])
             };
             assert_eq!(row["relations"], relations, "{uri}: {row:#}");
-            assert_eq!(row["registration_status"], json!("registered"), "{uri}: {row:#}");
+            assert_eq!(row["status"], json!("active"), "{uri}: {row:#}");
             assert!(row["created_at"].is_string(), "{uri}: {row:#}");
         }
     }

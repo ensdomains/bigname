@@ -494,7 +494,7 @@ async fn check_bounded_current_relation_plan(connection: &mut PgConnection) -> R
                'canonical'::canonicality_state, before, after
         FROM (VALUES
             ('held:grant', 'RegistrationGranted', 5, '{{}}'::jsonb,
-             jsonb_build_object('registrant', '{TARGET}')),
+             jsonb_build_object('registrant', '{TARGET}', 'expiry', 1900000000)),
             ('held:self-1', 'TokenControlTransferred', 200,
              jsonb_build_object('from', '{TARGET}'), jsonb_build_object('to', '{TARGET}')),
             ('held:self-2', 'TokenControlTransferred', {cited},
@@ -1056,7 +1056,7 @@ async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
                       'AuthorityTransferred'])[1 + n % 3],
                'ens_v2_registry_l1', 1, 'ethereum-mainnet', 'block-' || n, n, 'tx-' || n,
                0, 0, 'ens_v2_registry_resource_surface', 'canonical'::canonicality_state,
-               jsonb_build_object('registrant', holder, 'to', holder, 'owner', holder)
+               jsonb_build_object('registrant', holder, 'to', holder, 'owner', holder, 'expiry', 1900000000)
         FROM generate_series(1, {names}) n,
              LATERAL (SELECT '0x' || lpad(to_hex(n), 40, '0') AS holder) h
         UNION ALL
@@ -1080,7 +1080,7 @@ async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
                'ens_v2_registry_resource_surface', 'canonical'::canonicality_state, state
         FROM (VALUES
             ('target:grant', '{target_name}', '{target_resource}'::uuid,
-             'RegistrationGranted', {first}, jsonb_build_object('registrant', upper('{TARGET}'))),
+             'RegistrationGranted', {first}, jsonb_build_object('registrant', upper('{TARGET}'), 'expiry', 1900000000)),
             ('target:transfer', NULL, '{target_resource}'::uuid,
              'TokenControlTransferred', {second}, jsonb_build_object('to', '{TARGET}')),
             ('target:owner', '{target_name}', NULL,

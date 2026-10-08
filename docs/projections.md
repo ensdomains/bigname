@@ -465,7 +465,7 @@ facts. During registrar grace, the holder and lifecycle state remain visible,
 while owner modification, transfer, and effective-controller membership stop at
 grace start.[^v1-wrapper-grace-expiry][^v1-wrapper-grace-authority] Expired
 wrapper fuses are projected as zero, matching NameWrapper `getData`; an expired
-emancipated or locked position also contributes no lifecycle value or effective
+emancipated or locked position reports wrapper_state=lapsed and contributes no effective
 holder powers because that read clears its owner.[^v1-wrapper-expired]
 
 
@@ -2414,3 +2414,15 @@ spelling at read. Primary claims are still composed from the reverse families.
 Manifest changes use the existing phase input invalidation and full runner
 adoption; canonical repair, undo, redo and reset use the existing Project authority.
 Verified/provider behavior and final request generation revalidation are unchanged.
+
+## Canonical registration lifecycle
+
+Composition retains a registration instance independently of its live control and resolver path. A post-cutover ENSv2 reservation does not surrender its canonical schedule when the interpreter emits RegistryPathExpired. The retained lifecycle facts select its origin, actual expiry, configured grace and explicit terminal evidence; renewal/claim/replacement and name reassociation preserve their separate meanings. Public registration handles retain the existing lease/migration rules. Explicit unregister keeps the scheduled dates while terminating the instance.
+
+Topology and TokenResource registration snapshots carry `derived_from=registry_state`. They can refresh a retained schedule but do not start a new origin, even when the snapshot retains the original `source_event=LabelRegistered`. Actual label allocation starts an instance; claiming a live reservation and regenerating its token retain that instance.
+
+The publication clock evaluates active/expired/released/unregistered once for every consumer. The name summary stores numeric grace_ends_at and the next canonical lifecycle boundary: E and G for ENSv2, E and G+1 for ENSv1/Basenames, E+1 for wrapper-only finite expiry. Existing binding/wrapper boundaries remain. A time-only block refreshes summary, search and prepared lookup from the same work set. No timer is needed beyond the achievable signed chain clock, although public deadlines retain exact arithmetic.
+
+The grace policy loads referenced registry identities in one bounded batch query and recognizes only the reviewed admitted deployment. Missing required expiry remains an integrity failure; classified sentinels and registry-only allocations are the explicit no-expiry cases. See the [public policy](api-v1.md#expiry-and-grace).
+
+A suppressed NameWrapped completion still reveals its verified name bytes. If this is the first readable observation after a callback unwrap, the current registry binding records the surviving registrar resource and node. Project and composed reads follow that explicit lease attachment through the existing indexed candidate columns; they do not require an earlier named wrapper binding. The token holder remains the public owner and the registry owner remains the manager. The general registrar-disclosure rule is unchanged.

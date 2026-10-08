@@ -103,7 +103,7 @@ async fn v2_get_address_names_returns_record_rows_with_relations_and_primary_fla
     assert_eq!(data[0]["owner"], json!(V2_ADDRESS));
     assert_eq!(data[0]["manager"], json!(V2_PERMISSION_SUBJECT));
     assert!(data[0].get("registrant").is_none());
-    assert_eq!(data[0]["registration_status"], json!("active"));
+    assert_eq!(data[0]["status"], json!("active"));
     assert_eq!(data[0]["registered_at"], json!("1704153600"));
     assert_eq!(data[0]["created_at"], json!("1672617600"));
     assert_eq!(data[0]["expires_at"], json!("1798848000"));
