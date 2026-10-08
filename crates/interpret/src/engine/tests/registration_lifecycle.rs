@@ -203,6 +203,22 @@ async fn canonical_reservation_deadline_survives_engine_restart_and_passive_expi
         };
         assert_eq!(fields["lifecycle_status"], expected);
         assert_eq!(prepared["status"], expected);
+        // The ENSv1 lease is released after its own grace while the reservation's schedule
+        // runs on. Its holder stays evidence of the past, never current ownership.
+        if offset == 2 {
+            assert!(fields.get("lapsed_registration").is_none(), "{fields}");
+        } else {
+            let lapsed = &fields["lapsed_registration"];
+            assert_eq!(lapsed["owner"], OWNER, "t={timestamp}: {fields}");
+            assert_eq!(lapsed["release_kind"], "expired", "{fields}");
+            assert_eq!(lapsed["released_at"], json!(times[3]), "{fields}");
+            assert!(row.declared_summary["control"]["owner"].is_null());
+            assert!(!bigname_storage::public_name_fields::has_current_control(
+                "ens",
+                &row.declared_summary,
+                row.resource_id.is_some()
+            ));
+        }
         assert!(prepared.get("registration_status").is_none());
         assert!(
             bigname_storage::public_name_fields::has_registration_identity(

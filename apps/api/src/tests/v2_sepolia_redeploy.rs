@@ -623,7 +623,7 @@ pub(super) async fn get(database: &TestDatabase, uri: &str) -> Result<(StatusCod
     send(database, Request::builder().uri(uri).body(Body::empty())?).await
 }
 
-async fn lookup(database: &TestDatabase, body: Value) -> Result<(StatusCode, Value)> {
+pub(super) async fn lookup(database: &TestDatabase, body: Value) -> Result<(StatusCode, Value)> {
     send(
         database,
         Request::builder()

@@ -236,10 +236,6 @@ pub(super) fn apply(
                 && item.key.as_deref() == Some(instance.key.as_str())
                 && item.event.position >= instance.origin.position
         });
-        if !same_instance {
-            registration.remove("lapsed_registration");
-            registration.insert("released_at".into(), Value::Null);
-        }
         // The existing ENSv1 lease remains the public handle/start while an admitted ENSv2
         // reservation supplies post-cutover dates. An unrelated ENSv2 grant cannot continue it.
         let continuing_lease = !facts.input.selection.is_v2()
@@ -259,6 +255,12 @@ pub(super) fn apply(
             && registration
                 .get("registered_at")
                 .is_some_and(|value| !value.is_null());
+        // The continued lease is this registration, so its own release and former holder stay.
+        // Any other instance's ended-holder evidence belongs to a superseded registration.
+        if !same_instance && !(instance.grant.is_none() && continuing_lease) {
+            registration.remove("lapsed_registration");
+            registration.insert("released_at".into(), Value::Null);
+        }
         if let Some(grant) = instance.grant {
             let start = super::laterals::migrated_lease(facts, tagged, grant).unwrap_or(grant);
             registration.insert(

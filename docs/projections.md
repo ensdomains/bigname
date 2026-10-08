@@ -691,8 +691,10 @@ the token. This is not a grant of renewal powers to the former holder.
 Other ENSv2 release causes, including a displaced registration released by the
 `TokenRegenerated` decoder, remain released without a `lapsed_registration` block. Bigname
 does not classify those releases as an explicit unregister or expose them through
-`relation=former_owner`. No active row carries the block; a later registration removes
-it. The former relation reads this block only and does not restore any current authority
+`relation=former_owner`. A later registration removes the block, so a row never carries
+another registration's former holder. An ENSv1 lease that an ownerless ENSv2 reservation
+continues keeps its own block after the lease is released, while the reservation's schedule
+is still `active` or `expired`. The former relation reads this block only and does not restore any current authority
 relation or permission.
 
 
