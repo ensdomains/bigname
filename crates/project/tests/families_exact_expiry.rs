@@ -366,3 +366,107 @@ async fn prior_expiry_types_upgrade_resets_once_and_rebuilds_exactly_like_fresh_
     );
     fixture.cleanup().await
 }
+
+#[test]
+fn expiry_oracle_coverage_allocation_and_finite_date_truth_table() -> Result<()> {
+    use support::expected_registration_expiry;
+    let finite = json!({"registration":{"expiry":"100","canonical_allocation":true}});
+    let projected = json!({"status":"projected"});
+    let partial =
+        json!({"status":"unsupported","unsupported_reason":"current_authority_not_projected"});
+    for (coverage, summary, expected) in [
+        (Some(&projected), Some(&finite), Some("100")),
+        (Some(&partial), Some(&finite), Some("100")),
+        (None, Some(&finite), None),
+        (Some(&partial), None, None),
+        (None, None, None),
+    ] {
+        assert_eq!(
+            expected_registration_expiry(coverage, summary)?
+                .map(|v| v.to_string())
+                .as_deref(),
+            expected
+        );
+    }
+    for status in ["active", "expired", "released"] {
+        let row = json!({"registration":{"expiry":"100","canonical_allocation":true,"lifecycle_status":status}});
+        assert!(expected_registration_expiry(Some(&partial), Some(&row))?.is_some());
+        let unproved = json!({"registration":{"expiry":"100","lifecycle_status":status,"identity_resource_id":"resource","registered_at":"1"}});
+        assert!(expected_registration_expiry(Some(&partial), Some(&unproved))?.is_none());
+    }
+    for reason in ["no_expiry", "not_set"] {
+        let row = json!({"registration":{"canonical_allocation":true,"expires_at_reason":reason}});
+        for coverage in [&projected, &partial] {
+            assert!(expected_registration_expiry(Some(coverage), Some(&row))?.is_none());
+        }
+    }
+    for marker in [Value::Null, json!(false), json!("true"), json!(1)] {
+        let row = json!({"registration":{"expiry":"100","canonical_allocation":marker}});
+        assert!(
+            expected_registration_expiry(Some(&partial), Some(&row))?.is_none(),
+            "{row}"
+        );
+        assert!(expected_registration_expiry(Some(&projected), Some(&row))?.is_some());
+    }
+    assert!(
+        expected_registration_expiry(
+            Some(&partial),
+            Some(&json!({"registration":{"expiry":"100"}}))
+        )?
+        .is_none()
+    );
+    for reason in [
+        Value::Null,
+        json!(""),
+        json!("other"),
+        json!(true),
+        json!("current_authority_not_projected "),
+    ] {
+        let coverage = json!({"status":"unsupported","unsupported_reason":reason});
+        assert!(
+            expected_registration_expiry(Some(&coverage), Some(&finite))?.is_none(),
+            "{coverage}"
+        );
+    }
+    for expiry in [
+        Value::Null,
+        json!(true),
+        json!(""),
+        json!("NaN"),
+        json!("Infinity"),
+        json!("1e3"),
+        json!("100x"),
+        json!(".5"),
+        json!("1."),
+    ] {
+        let row = json!({"registration":{"expiry":expiry,"canonical_allocation":true}});
+        for coverage in [&projected, &partial] {
+            assert!(
+                expected_registration_expiry(Some(coverage), Some(&row))?.is_none(),
+                "{row}"
+            );
+        }
+    }
+    for expiry in [json!(100), json!("-1.25"), json!("18446744073709551615")] {
+        let row = json!({"registration":{"expiry":expiry,"canonical_allocation":true}});
+        assert!(
+            expected_registration_expiry(Some(&partial), Some(&row))?.is_some(),
+            "{row}"
+        );
+    }
+    assert!(
+        expected_registration_expiry(
+            Some(&partial),
+            Some(&json!({"registration":{"canonical_allocation":true}}))
+        )?
+        .is_none()
+    );
+    assert!(
+        expected_registration_expiry(
+            Some(&partial),
+            Some(&json!({"registration":{"expiry":"0.0000000001","canonical_allocation":true}}))
+        )
+        .is_err()
+    );
+    Ok(())
+}

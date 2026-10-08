@@ -2782,8 +2782,9 @@ proved adjacent legacy ETH-address pair's AddrChanged row, preserving the Addres
 row's existing identity and richer value. Eligibility includes the same readable fork and
 publication for both mates, exact physical log adjacency, equivalent values and declared
 source-generation proof; see [source coverage](upstream.md#product-history-actions-and-legacy-eth-address-pairs).
-The same predicate removes the derived NameWrapped transfer when the retained before/after
-owners do not prove a different nonzero owner. It never edits normalized events or the Project
+The same predicate removes the derived wrapping transfer when the retained before/after
+owners do not prove a different nonzero owner, including a TransferSingle mint with positively
+matched NameWrapped completion evidence. It never edits normalized events or the Project
 catalogue. Account approvals and reverse activity use direct account probes in both bounded
 and catalogue readers; they are not expanded into name memberships. Lifecycle events never
 acquire name/registration/address membership.

@@ -14,6 +14,9 @@ use crate::harness::{
     manifests, perturb, pipeline, repo_root,
 };
 
+mod wrapper_mint;
+pub(super) use wrapper_mint::assert_wrapper_mint_completion;
+
 pub(super) fn decimal_unix_seconds(
     value: &serde_json::Value,
 ) -> Result<bigname_storage::UnixSeconds> {

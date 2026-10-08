@@ -2236,7 +2236,7 @@ There is no action query parameter; the existing type, kind and record-key filte
 
 | Retained row | Type / action and additional fields |
 | --- | --- |
-| Explicit wrap / unwrap authority epoch | `authority` / `name_wrapped` or `name_unwrapped`: owner, node, retained fuses and expiry. Literal zero owner is preserved. The derived wrap transfer row is selected only for two different proven nonzero owners; actual token transfers remain independent rows. |
+| Explicit wrap / unwrap authority epoch | `authority` / `name_wrapped` or `name_unwrapped`: owner, node, retained fuses and expiry. Literal zero owner is preserved. A validated later completion may supply these wrap fields at the actual mint position. The derived wrap transfer row is selected only for two different proven nonzero owners; actual token transfers remain independent rows. |
 | Account-wide operator approval | `permission` / `operator_approval_changed`: owner, operator as address, approved, account grant_scope and retained powers. No token-specific powers are inferred. |
 | Reservation | `reservation` / `registration_reserved`: exact token_id, proven canonical_id, retained expiry/node. A topology restatement uses `reservation_became_reachable`, describing the triggering reachability event rather than a new reserve transaction. |
 | Resolver record link | `resolver` / `resolver_record_linked`: resolver, node, exact record_id and retained dns_encoded_name. Record ID "0" is an unlink and remains present. A link is not a record write or a resolver pointer change. |

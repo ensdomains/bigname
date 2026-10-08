@@ -212,7 +212,7 @@ async fn callback_mint_holder_has_http_and_prepared_owner_history() -> Result<()
     assert_eq!(mint[0].1["source_event"], "TransferSingle");
     assert_eq!(mint[0].1["matched_wrapper_completion"]["log_index"], 8);
     for address in [OWNER, REGISTRANT, NAME_WRAPPER] {
-        let (status,body)=get(&database,&format!("/v1/addresses/{address}/history?namespace=ens&relation=owner&order=asc&page_size=200")).await?;
+        let (status,body)=get(&database,&format!("/v1/addresses/{address}/history?namespace=ens&relation=owner&include=data,raw&order=asc&page_size=200")).await?;
         assert_eq!(status, StatusCode::OK, "{body}");
         let rows = body["data"]
             .as_array()
@@ -224,6 +224,26 @@ async fn callback_mint_holder_has_http_and_prepared_owner_history() -> Result<()
             "history for {address}: {body}"
         );
     }
+    let (status, history) = get(&database, &format!("/v1/addresses/{OWNER}/history?namespace=ens&relation=owner&include=data,raw&order=asc&page_size=200")).await?;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    let wraps = history["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["data"]["action"] == "name_wrapped")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        wraps.len(),
+        1,
+        "temporary receiver keeps the historical wrap: {history}"
+    );
+    assert_eq!(wraps[0]["log_index"], 3);
+    assert_eq!(wraps[0]["data"]["owner"], OWNER);
+    assert_eq!(wraps[0]["data"]["fuses"], DOT_ETH_FUSES);
+    assert_eq!(
+        wraps[0]["data"]["expires_at"],
+        (REGISTRAR_EXPIRY + GRACE_PERIOD).to_string()
+    );
     let (status, detail) = get(&database, "/v1/names/callbackunwrapped.eth?namespace=ens").await?;
     assert_eq!(status, StatusCode::OK, "{detail}");
     let registrar_resource: Uuid = sqlx::query_scalar("SELECT resource_id FROM normalized_events

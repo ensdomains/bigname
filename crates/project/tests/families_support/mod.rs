@@ -12,6 +12,9 @@ use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
 use sqlx::{PgPool, raw_sql};
 
+mod expiry_policy;
+pub use expiry_policy::expected_registration_expiry;
+
 pub const CHAIN: &str = "ethereum-sepolia";
 /// The interpreter hash of this build: the composed name reader serves only a marker written by
 /// it, as the publication fence does.
@@ -216,9 +219,9 @@ impl Fixture {
 
     /// Check the stored expiry selector (`project_name_summary.expiry_listable`, `expires_at`
     /// and `public_authority`) against every composed name row of the published chains, two
-    /// ways. First against the rows themselves: a row is listable when its coverage is not
-    /// unsupported and its registration carries a finite decimal expiry, at exactly that expiry
-    /// and under the public authority its provenance maps to. Then against what the expiry
+    /// ways. First against the independent test policy: finite registration expiry is listable
+    /// for supported coverage, or positive canonical allocation with exactly
+    /// current_authority_not_projected. The public authority still comes from provenance. Then against what the expiry
     /// listing serves for each namespace, unfiltered and for each authority value. Returns the
     /// listable names as (name, expiry, authority), in name order; none when no chain is
     /// published for this build.
@@ -256,25 +259,11 @@ impl Fixture {
         };
         let mut expected: BTreeMap<String, (UnixSeconds, Option<String>)> = BTreeMap::new();
         for (name, row) in &composed {
-            let expiry = match &row.declared_summary["registration"]["expiry"] {
-                Value::String(text) => Some(text.clone()),
-                Value::Number(number) => Some(number.to_string()),
-                _ => None,
-            }
-            .filter(|text| {
-                let digits = text.strip_prefix('-').unwrap_or(text);
-                let (whole, fraction) = digits.split_once('.').unwrap_or((digits, "0"));
-                [whole, fraction]
-                    .iter()
-                    .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
-            });
-            let Some(expiry) = expiry else { continue };
-            if row.coverage["status"] == "unsupported" {
+            let Some(expiry) =
+                expected_registration_expiry(Some(&row.coverage), Some(&row.declared_summary))?
+            else {
                 continue;
-            }
-            let expiry: UnixSeconds = expiry
-                .parse()
-                .map_err(|_| anyhow::anyhow!("{name}: expiry {expiry} is not exact seconds"))?;
+            };
             expected.insert(
                 name.clone(),
                 (

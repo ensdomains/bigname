@@ -1894,7 +1894,9 @@ fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
                  indexed to, uint256 id, uint256 value)"
                     .to_owned(),
                 "name_wrapper".to_owned(),
-                token_control.to_owned(),
+                "TokenControlTransferred,ExpiryChanged,PermissionScopeChanged,PermissionChanged,SurfaceUnbound,\
+                 SurfaceBound,AuthorityEpochChanged,ResolverChanged,PreimageObserved"
+                    .to_owned(),
             ),
         ]
     );

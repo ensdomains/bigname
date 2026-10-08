@@ -27,10 +27,7 @@ pub(super) fn append(
     }
     match row.event_kind.as_str() {
         "AuthorityEpochChanged"
-            if matches!(
-                after["source_event"].as_str(),
-                Some("NameWrapped" | "NameUnwrapped")
-            ) =>
+            if actions::is_wrapping(row) || after["source_event"] == "NameUnwrapped" =>
         {
             insert(data, "node", address_field(after, "node"));
             insert(data, "fuses", unsigned_field(after, "fuses"));
