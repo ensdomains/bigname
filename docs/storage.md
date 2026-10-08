@@ -1145,6 +1145,56 @@ before that connection failed, the next start reads the durable phase state
 again. An unlock or connection-close error after an acknowledged update is also
 reported.
 
+A supervisor stopped while its Live phase is polling leaves the `live` row
+`running`. It leaves the row `paused` when the stop lands during a capacity
+pause. A clean SIGTERM stop does this as well as a killed process.
+
+Two things record that row `completed`, each while holding the Live advisory
+lock:
+
+- The next supervisor start.
+- An operator redo of Ingest, Interpret, Project, flag recomputation or all
+  phases, after its range checks pass and before it starts.
+
+A Live attempt takes that lock before its row becomes `running` and keeps it
+while it works. A free lock therefore shows that no process is running Live. A
+held lock refuses the redo with `LockHeld` and leaves the row unchanged.
+
+The redo probes the Live lock only for a row that claims to be `running` or
+`paused`. It leaves the lock alone for an `idle`, `completed` or `failed` row,
+because none of those blocks a redo. A supervisor whose last Live attempt
+recorded the row `completed` or `failed` therefore does not meet the redo on
+that lock between attempts. An attempt that lost its lock connection leaves the
+row `running`, and the paragraphs below cover that case. If the row becomes
+`running` after the redo read it, the redo's own start is refused with
+`InvalidTransition`.
+
+The required Ingest case above is the exception. A `--phase ingest` redo with
+a required Ingest redo pending takes every phase lock in turn, Live included,
+whatever each row says. A supervisor that tries to take one of those locks
+during that hold stops that chain with `LockHeld`.
+
+A Live attempt probes its lock connection once per live poll interval, one
+second by default. An attempt whose lock connection is lost can keep writing
+until its next probe fails, and a statement already in flight can still commit.
+The attempt then stops with its row still `running` and retries after a
+backoff. Until the retry takes the lock again, the lock is free.
+
+A redo that starts in that gap wins. It settles the row and runs. While it
+runs, the supervisor's Live retry fails with `InvalidTransition`, which is not
+retried, so that chain's supervisor stops. Other chains keep running, and the
+process exits nonzero once every chain has stopped. Restart the supervisor
+after the redo finishes.
+
+The redo holds the Live lock only while it settles a stale row. A supervisor
+that starts at that instant and tries to take the Live lock during the hold
+stops that chain with `LockHeld`. Start it again.
+
+A Verify-only redo skips this step, because Verify may run beside a running
+Live phase. The redo settles Live alone. It does not settle an Ingest,
+Interpret, Project or Verify row left `running` outside a redo, except through
+the required Ingest case above.
+
 Project redo retains its requested invalidation in
 `redo_requested_from_block_number` and `redo_requested_to_block_number`.
 Its existing `redo_from_block_number` and `redo_to_block_number` describe the

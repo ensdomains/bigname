@@ -1451,9 +1451,20 @@ Verify (`VerificationDatabase::connect` under `phase.requires_verify()`), and up
 lock is held while the Interpret phase runs beneath it
 (`run_recompute_interpret_with_project_lock`, `apps/phase-runner/src/runner_operator_redo.rs`), and every phase run
 takes its own lock (`PhaseRunner::run_phase`, `apps/phase-runner/src/runner.rs`). The advisory locks
-let it run beside a supervised runner that holds a non-conflicting phase such as
-Live. Either stop the supervised runner before an explicit redo, or budget `7`
-more for its duration.
+let a Verify-only redo run beside a supervised runner that is running Live. A
+redo of Ingest, Interpret, Project, flag recomputation or all phases is refused
+with `LockHeld` while a runner holds the Live lock, and with
+`InvalidTransition` while another writer phase is recorded as running. Either
+stop the supervised runner before an explicit redo, or budget `7` more for its
+duration.
+
+Stopping the supervised runner first is the safe order. The Live lock refusal
+has one gap. A supervisor whose Live lock connection dropped leaves the `live`
+row `running` with the lock free until it retries. A redo started in that gap
+runs, and the Live batch already in flight can still write for up to one live
+poll interval, one second by default. The redo and that last batch can
+overlap. [Table ownership](storage.md#table-ownership) describes what the
+supervisor does next.
 
 The advisory locks do **not** serialize explicit processes against each other:
 they only prevent the same phase from running twice on the same chain. A
@@ -2380,6 +2391,38 @@ run their unattended work, so once that error is logged, stop the
 `phase-runner` service with the runbook's `docker compose --env-file
 .env.server -f docker-compose.server.yml stop phase-runner` within its grace
 period, then rerun the same Ingest redo.
+
+### Redo after a supervisor stopped during Live
+
+The build that lets an operator redo settle a Live phase left `running`
+(TYR-268, see [table ownership](storage.md#table-ownership)) edits no file the
+[interpreter content hash](glossary.md#interpreter-content-hash) covers and adds
+no schema-migration, so it needs no redo and no historical ingest fetch.
+
+Before it, a supervisor stopped while Live was polling left the `live` row
+`running`. A following `phase-runner redo` of Ingest, Interpret, Project, flag
+recomputation or all phases refused with `cannot start phase ... while phase
+live is running` until a supervisor had started again. The stop could be a
+clean `docker compose stop` or a kill. Whether it hit depended on where in the
+Live poll cycle the stop landed.
+
+With this build the redo records that row `completed` itself, after its range
+checks and while holding the Live advisory lock. Two things change for an
+operator:
+
+- A redo run while a supervisor is still running Live for the chain now fails
+  with `phase advisory lock is already held for chain <chain> phase live;
+  refusing a second runner` (`LockHeld`). It failed with `InvalidTransition`
+  before. Stop the supervisor and rerun.
+- After such a redo the `live` row reads `completed` instead of `running`,
+  as it does after a supervisor start.
+
+On an older build, do not edit `chain_phase_state` by hand. A supervisor start
+from the same image settles the row, but the stop that follows leaves it
+`completed` only when it lands between two Live attempts. A chain that has
+caught up with the chain head is inside a Live attempt nearly all the time, so
+repeating the start and stop may never leave the row `completed`. The remedy
+is to run the redo from this build.
 
 ### History record attribution indexes
 

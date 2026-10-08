@@ -96,7 +96,12 @@ impl PhaseRunner {
                 // start-up does: under each phase's advisory lock, refused while a writer holds it.
                 self.recover_stopped_phases(chain).await?;
             }
-            self.require_readable_redo_end(chain_id, range).await
+            self.require_readable_redo_end(chain_id, range).await?;
+            if phase == PhaseName::Verify {
+                // Verify may run beside a running Live, so its redo needs no settled Live.
+                return Ok(());
+            }
+            self.recover_live_left_active(chain).await
         })
         .await?;
         match prepared {
@@ -258,7 +263,8 @@ impl PhaseRunner {
             self.require_no_pending_redo_for_all(chain_id, None, None, None)
                 .await?;
             require_all_phase_range_within_verify(&self.store, chain_id, range).await?;
-            self.require_readable_redo_end(chain_id, range).await
+            self.require_readable_redo_end(chain_id, range).await?;
+            self.recover_live_left_active(chain).await
         })
         .await?;
         if prepared.is_none() {
