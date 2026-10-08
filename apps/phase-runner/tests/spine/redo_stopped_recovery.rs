@@ -26,7 +26,7 @@ const TIP: i64 = 2;
 
 /// Where the stop lands in the supervisor's Live phase.
 #[derive(Clone, Copy, Debug)]
-enum Stop {
+pub(super) enum Stop {
     /// A stop request observed between two Live batches.
     BetweenBatches,
     /// A stop request raised while a Live batch is in flight. The batch finishes first.
@@ -84,14 +84,14 @@ fn supervised_chain(chain_id: &str) -> Result<ChainConfig> {
 }
 
 /// A supervisor that has reached Live and is inside a Live batch.
-struct RunningSupervisor {
-    task: tokio::task::JoinHandle<RunnerResult<()>>,
-    cancellation: CancellationToken,
+pub(super) struct RunningSupervisor {
+    pub(super) task: tokio::task::JoinHandle<RunnerResult<()>>,
+    pub(super) cancellation: CancellationToken,
     entered: Arc<Notify>,
-    hold: Arc<Notify>,
+    pub(super) hold: Arc<Notify>,
 }
 
-async fn start_supervisor(
+pub(super) async fn start_supervisor(
     scratch: &ScratchDatabase,
     chain_id: &str,
     hold_batches: bool,
@@ -136,7 +136,7 @@ async fn start_supervisor_with(
 
 /// Give the finite phases the recorded extent a redo checks.
 /// The supervisor fixture's phases complete without reporting it.
-async fn seed_redo_extents(scratch: &ScratchDatabase, chain_id: &str) -> Result<()> {
+pub(super) async fn seed_redo_extents(scratch: &ScratchDatabase, chain_id: &str) -> Result<()> {
     for phase in [
         PhaseName::Ingest,
         PhaseName::Interpret,
@@ -149,7 +149,7 @@ async fn seed_redo_extents(scratch: &ScratchDatabase, chain_id: &str) -> Result<
 }
 
 /// Run a supervisor into Live, stop it there, and return the database it left.
-async fn stopped_during_live(chain_id: &str, stop: Stop) -> Result<ScratchDatabase> {
+pub(super) async fn stopped_during_live(chain_id: &str, stop: Stop) -> Result<ScratchDatabase> {
     let scratch = ScratchDatabase::create(chain_id).await?;
     let supervisor =
         start_supervisor(&scratch, chain_id, !matches!(stop, Stop::BetweenBatches)).await?;

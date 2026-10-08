@@ -22,9 +22,19 @@ pub(crate) fn restore_previous_lifecycle(previous: &mut PhaseStateRow) -> Runner
 pub(crate) enum CompletionCoverage {
     Exact,
     Widened(BlockRange),
+    /// A required-redo stamp landed on the redo after its last progress write.
+    Overtaken(RunnerError),
 }
 
-type ActiveMarkerRow = (bool, Option<String>, Option<i64>, Option<i64>);
+type ActiveMarkerRow = (
+    bool,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    i64,
+    Option<i64>,
+    Option<i64>,
+);
 
 pub(crate) fn replacement_hash<'a>(
     recorded_number: Option<i64>,
@@ -41,11 +51,15 @@ pub(crate) async fn lock_completion_coverage(
     chain_id: &str,
     phase: PhaseName,
     expected: BlockRange,
+    expected_generation: i64,
     recompute_flags: bool,
 ) -> RunnerResult<CompletionCoverage> {
     let marker: Option<ActiveMarkerRow> = sqlx::query_as(
         "SELECT redo_in_progress, redo_mode,
-                redo_from_block_number, redo_to_block_number
+                redo_from_block_number, redo_to_block_number,
+                redo_attempt_generation,
+                COALESCE(redo_requested_from_block_number, redo_from_block_number),
+                COALESCE(redo_requested_to_block_number, redo_to_block_number)
          FROM chain_phase_state
          WHERE chain_id = $1 AND phase_name = $2
          FOR UPDATE",
@@ -60,7 +74,16 @@ pub(crate) async fn lock_completion_coverage(
             error,
         )
     })?;
-    let Some((true, Some(mode), Some(from), Some(to))) = marker else {
+    let Some((
+        true,
+        Some(mode),
+        Some(from),
+        Some(to),
+        generation,
+        Some(requested_from),
+        Some(requested_to),
+    )) = marker
+    else {
         return Err(RunnerError::data_integrity(format!(
             "redo completion requires an active marker for chain {chain_id} phase {phase}"
         )));
@@ -72,6 +95,22 @@ pub(crate) async fn lock_completion_coverage(
         "redo"
     };
     if mode == expected_mode && persisted == expected {
+        if generation != expected_generation
+            && !(phase == PhaseName::Project
+                && interpret_repair_pending(transaction, chain_id).await?)
+        {
+            // A required-redo stamp landed on this redo after its last progress
+            // write and left the range as it was, so only the generation shows it.
+            // The stamp cleared the progress this completion would certify.
+            // The rerun names the requested range, which for Project can be
+            // narrower than the execution range compared above.
+            return Ok(CompletionCoverage::Overtaken(overtaken_error(
+                chain_id,
+                phase,
+                &mode,
+                BlockRange::new(requested_from, requested_to)?,
+            )));
+        }
         return Ok(CompletionCoverage::Exact);
     }
     if mode != expected_mode || persisted.from > expected.from || persisted.to < expected.to {
@@ -121,4 +160,55 @@ pub(crate) async fn lock_completion_coverage(
         )));
     }
     Ok(CompletionCoverage::Widened(persisted))
+}
+
+/// Whether Interpret carries a required redo, read while the Project row is locked.
+///
+/// A Project redo overtaken by a reorg may still complete when this holds: the
+/// Interpret repair ends by stamping Project, so the next supervisor start redoes
+/// Project on the new chain. Without it nothing would, so the caller refuses.
+///
+/// A plain read is enough. Only a head publication stamps a running Project redo,
+/// and it stamps Interpret before Project in one transaction. The changed Project
+/// generation was read from a committed publication, so this later statement sees
+/// that publication's Interpret stamp as well. The stamp cannot have been used up
+/// since: an Interpret redo cannot start while this Project redo is running. A
+/// publication still waiting on the Project row left the generation unchanged and
+/// does not reach this read.
+async fn interpret_repair_pending(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+) -> RunnerResult<bool> {
+    sqlx::query_scalar(
+        "SELECT redo_in_progress AND COALESCE(last_error LIKE $2, false)
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain_id)
+    .bind(crate::redo_stamp::required_redo_owner_pattern())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map(|pending: Option<bool>| pending.unwrap_or(false))
+    .map_err(|error| {
+        RunnerError::database(
+            format!("failed to read the Interpret repair for chain {chain_id}"),
+            error,
+        )
+    })
+}
+
+fn overtaken_error(chain_id: &str, phase: PhaseName, mode: &str, range: BlockRange) -> RunnerError {
+    let instruction =
+        crate::transitions::redo_rerun_instruction(chain_id, phase, Some(mode), Some(range));
+    // Verify waits for the repairs the same reorg left on Interpret and Project.
+    let after = if phase == PhaseName::Verify {
+        "once the Interpret and Project repairs have completed, "
+    } else {
+        ""
+    };
+    RunnerError::data_integrity(format!(
+        "redo for chain {chain_id} phase {phase} was overtaken before it completed: a reorg \
+         recovery or another required redo was recorded on it after its last progress write; \
+         the redo stays in progress and nothing was restored; {after}{instruction}"
+    ))
 }

@@ -1462,9 +1462,19 @@ Stopping the supervised runner first is the safe order. The Live lock refusal
 has one gap. A supervisor whose Live lock connection dropped leaves the `live`
 row `running` with the lock free until it retries. A redo started in that gap
 runs, and the Live batch already in flight can still write for up to one live
-poll interval, one second by default. The redo and that last batch can
-overlap. [Table ownership](storage.md#table-ownership) describes what the
-supervisor does next.
+poll interval, one second by default. Its head publication can commit later
+than that when its connection stalls. A publication that replaces readable
+blocks stamps a reorg repair on a running Interpret, Project or Verify redo.
+An Ingest redo is not stamped. The stamped redo then fails and stays in
+progress with the repair in place. It fails in one of two ways:
+
+- `redo attempt superseded; progress not recorded`, at a progress write. This
+  error names no command.
+- `was overtaken before it completed`, at completion. This error names the
+  command to rerun.
+
+[Table ownership](storage.md#table-ownership) says what to run after each, by
+phase, and what the supervisor does next.
 
 The advisory locks do **not** serialize explicit processes against each other:
 they only prevent the same phase from running twice on the same chain. A

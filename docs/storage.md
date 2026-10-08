@@ -1186,6 +1186,50 @@ retried, so that chain's supervisor stops. Other chains keep running, and the
 process exits nonzero once every chain has stopped. Restart the supervisor
 after the redo finishes.
 
+The lost attempt's head publication can still commit while that redo runs.
+When it replaces readable blocks, it stamps a required redo on Interpret,
+Project and Verify, as every such publication does. An Ingest redo's row is
+never stamped. A stamped redo that is already running is refused in one of two
+ways:
+
+- At its next progress write, with `redo attempt superseded; progress not
+  recorded`. This error names no command and records nothing on the row.
+- At completion, with `was overtaken before it completed`. This error names
+  the command to rerun and is recorded on the row.
+
+Either way the redo stays in progress with the repair in place. What follows
+depends on the redo:
+
+- An operator Interpret redo is rerun with the same command.
+- An operator Verify redo is rerun after the Interpret and Project repairs
+  have completed. Until then it is refused because Project is not completed.
+  The completion error says so.
+- A supervisor's own required redo refused at completion stops that chain.
+  The next supervisor start reruns the required redo. No operator action is
+  needed.
+
+Project is treated differently at completion. A Project redo that a stamp
+overtook after its last progress write still completes, provided Interpret
+carries a required redo at that moment. Completion reads Interpret's row in
+the transaction that holds the Project row lock. The reason is what follows
+each completion. An Interpret repair ends by stamping Project, so the next
+supervisor start redoes Project on the new chain, and the Project completion
+on the replaced blocks is short-lived. Nothing redoes Interpret after an
+Interpret completion on replaced blocks, so that one is refused.
+
+A publication stamps each phase by its own cursor. It stamps Interpret
+whenever it stamps Project as long as Project's cursor is not above
+Interpret's. That holds by sequencing: one supervisor runs Interpret and then
+Project against the same head. No check enforces it. When Project's cursor is
+above Interpret's and only the higher blocks are replaced, Interpret is not
+stamped, and the overtaken Project redo is refused at completion like the
+others.
+
+A Project redo refused at completion is rerun with the printed command. A
+Project redo refused at a progress write cannot be rerun at once when the
+publication stamped Interpret too. Project waits for Interpret's repair, and
+Interpret is refused while the Project redo is recorded as running.
+
 The redo holds the Live lock only while it settles a stale row. A supervisor
 that starts at that instant and tries to take the Live lock during the hold
 stops that chain with `LockHeld`. Start it again.
@@ -1854,7 +1898,14 @@ range chosen at begin time. Its pool-backed progress update, including the
 per-source boundary-marker map, succeeds only while all three values still
 match the active row. No match means another attempt has superseded the batch;
 the update records nothing and returns `redo attempt superseded; progress not
-recorded`. Completion, failure recording, and downstream redo finalization use
+recorded`. Completion reads the generation again in the transaction that locks
+the row. A stamp can land after the last progress write and leave the mode and
+range as they were. Completion then finds a changed generation and does not
+clear the redo or restore the cursor. It records the failure on the row, keeps
+the redo in progress, and returns `was overtaken before it completed` with the
+command to rerun. A Project redo completes all the same while Interpret
+carries a required redo, as [table ownership](#table-ownership) explains.
+Completion, failure recording, and downstream redo finalization use
 the connection that owns the phase advisory lock, so losing that connection
 also prevents their writes. This generation fence closes the redo-progress
 instance of [#452](https://github.com/ensdomains/bigname/issues/452); that issue
