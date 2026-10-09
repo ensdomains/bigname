@@ -1453,8 +1453,9 @@ lock is held while the Interpret phase runs beneath it
 takes its own lock (`PhaseRunner::run_phase`, `apps/phase-runner/src/runner.rs`). The advisory locks
 let a Verify-only redo run beside a supervised runner that is running Live. A
 redo of Ingest, Interpret, Project, flag recomputation or all phases is refused
-with `LockHeld` while a runner holds the Live lock, and with
-`InvalidTransition` while another writer phase is recorded as running. Either
+with `LockHeld` while a runner holds the Live lock and the `live` row reads
+`running` or `paused`. It is refused with `InvalidTransition` while another
+writer phase is recorded as running. Either
 stop the supervised runner before an explicit redo, or budget `7` more for its
 duration.
 
@@ -2419,8 +2420,9 @@ clean `docker compose stop` or a kill. Whether it hit depended on where in the
 Live poll cycle the stop landed.
 
 With this build the redo records that row `completed` itself, after its range
-checks and while holding the Live advisory lock. Two things change for an
-operator:
+checks and while holding the Live advisory lock. A `--phase ingest` redo with
+a required Ingest redo pending settles before its range check, as it did
+before this build. Two things change for an operator:
 
 - A redo run while a supervisor is still running Live for the chain now fails
   with `phase advisory lock is already held for chain <chain> phase live;

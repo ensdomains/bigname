@@ -1181,7 +1181,8 @@ lock:
 
 - The next supervisor start.
 - An operator redo of Ingest, Interpret, Project, flag recomputation or all
-  phases, after its range checks pass and before it starts.
+  phases, before it starts. It does so after its range checks pass, except in
+  the required Ingest case described below.
 
 A Live attempt takes that lock before its row becomes `running` and keeps it
 while it works. A free lock therefore shows that no process is running Live. A
@@ -1199,7 +1200,9 @@ row `running`, and the paragraphs below cover that case. If the row becomes
 The required Ingest case above is the exception. A `--phase ingest` redo with
 a required Ingest redo pending takes every phase lock in turn, Live included,
 whatever each row says. A supervisor that tries to take one of those locks
-during that hold stops that chain with `LockHeld`.
+during that hold stops that chain with `LockHeld`. This redo also settles
+before it checks its range. When it is then refused for its range, a stale
+`live` row has already been recorded `completed`.
 
 A Live attempt probes its lock connection once per live poll interval, one
 second by default. An attempt whose lock connection is lost can keep writing
@@ -1228,7 +1231,8 @@ ways:
   the command to rerun and is recorded on the row. A Project redo is the
   exception described below.
 
-A stamp that starts below the redo's range widens the marker. The next
+A stamp that reaches outside the redo's range, below it or above it, widens
+the marker. The next
 progress write is refused in the same way. A redo that reaches completion
 returns without an error, and the widened marker stays in place.
 
@@ -1270,10 +1274,10 @@ The redo holds the Live lock only while it settles a stale row. A supervisor
 that starts at that instant and tries to take the Live lock during the hold
 stops that chain with `LockHeld`. Start it again.
 
-A Verify-only redo skips this step, because Verify may run beside a running
-Live phase. The redo settles Live alone. It does not settle an Ingest,
-Interpret, Project or Verify row left `running` outside a redo, except through
-the required Ingest case above.
+A Verify-only redo skips this step and settles no row, because Verify may run
+beside a running Live phase. The other redos settle Live alone. They do not
+settle an Ingest, Interpret, Project or Verify row left `running` outside a
+redo, except through the required Ingest case above.
 
 Project redo retains its requested invalidation in
 `redo_requested_from_block_number` and `redo_requested_to_block_number`.
