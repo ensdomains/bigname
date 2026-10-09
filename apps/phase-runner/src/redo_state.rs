@@ -379,6 +379,7 @@ pub(crate) async fn finish(
         previous,
         interrupted_before_redo,
         range,
+        attempt_generation,
         recompute_flags,
         required_ingest,
         ..
@@ -424,32 +425,49 @@ pub(crate) async fn finish(
                 RunnerError::database("failed to set normalization completion isolation", error)
             })?;
     }
-    if let crate::redo_completion::CompletionCoverage::Widened(persisted) =
-        crate::redo_completion::lock_completion_coverage(
-            &mut transaction,
-            chain_id,
-            phase,
-            range,
-            recompute_flags,
-        )
-        .await?
+    match crate::redo_completion::lock_completion_coverage(
+        &mut transaction,
+        chain_id,
+        phase,
+        range,
+        attempt_generation,
+        recompute_flags,
+    )
+    .await?
     {
-        transaction.commit().await.map_err(|error| {
-            RunnerError::database(
-                format!(
-                    "failed to preserve widened redo completion for chain {chain_id} phase {phase}"
-                ),
-                error,
-            )
-        })?;
-        tracing::warn!(
-            chain_id,
-            phase = %phase,
-            from_block = persisted.from,
-            to_block = persisted.to,
-            "redo range widened while the phase was running; preserved the full marker"
-        );
-        return Ok(());
+        crate::redo_completion::CompletionCoverage::Exact => {}
+        crate::redo_completion::CompletionCoverage::Widened(persisted) => {
+            transaction.commit().await.map_err(|error| {
+                RunnerError::database(
+                    format!(
+                        "failed to preserve widened redo completion for chain {chain_id} phase {phase}"
+                    ),
+                    error,
+                )
+            })?;
+            tracing::warn!(
+                chain_id,
+                phase = %phase,
+                from_block = persisted.from,
+                to_block = persisted.to,
+                "redo range widened while the phase was running; preserved the full marker"
+            );
+            return Ok(());
+        }
+        crate::redo_completion::CompletionCoverage::Overtaken(error) => {
+            // Recorded under the row lock that read the generation, so the redo
+            // stays in progress exactly as the stamp left it.
+            crate::redo_failure::record(&mut transaction, chain_id, phase, &error).await?;
+            transaction.commit().await.map_err(|commit_error| {
+                RunnerError::database(
+                    format!(
+                        "failed to record the overtaken redo for chain {chain_id} phase {phase}"
+                    ),
+                    commit_error,
+                )
+            })?;
+            return Err(error);
+        }
     }
     let recompute_summary = if recompute_flags && phase == PhaseName::Interpret {
         Some(crate::redo_recompute::finalize_metadata(&mut transaction, chain_id, range).await?)

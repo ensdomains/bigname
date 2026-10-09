@@ -534,6 +534,9 @@ old downstream cursor, live keeps polling and fills the winning path through
 the stamped upper bound before redo starts. On process restart, the live
 advisory lock also fences recovery of a
 `running` live row left between atomic head publication and phase completion.
+An operator redo of Ingest, Interpret, Project, flag recomputation or all
+phases performs the same recovery under the same lock before it starts, as
+[table ownership](storage.md#table-ownership) describes.
 
 A successful interpret redo also stamps project for the same actual replayed
 suffix. This includes an operator-requested data repair where the canonical

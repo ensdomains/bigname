@@ -1165,6 +1165,144 @@ before that connection failed, the next start reads the durable phase state
 again. An unlock or connection-close error after an acknowledged update is also
 reported.
 
+A supervisor stopped while its Live phase is polling leaves the `live` row
+`running`. It leaves the row `paused` when the stop lands during a capacity
+pause. A clean SIGTERM stop does this as well as a killed process.
+
+Two things record that row `completed`, each while holding the Live advisory
+lock:
+
+- The next supervisor start.
+- An operator redo of Ingest, Interpret, Project, flag recomputation or all
+  phases, before it starts. It does so after its range checks pass, except in
+  the required Ingest case described below.
+
+A Live attempt takes that lock before its row becomes `running` and keeps it
+while it works. A free lock therefore shows that no process is running Live. A
+held lock refuses the redo with `LockHeld` and leaves the row unchanged.
+
+The redo probes the Live lock only for a row that claims to be `running` or
+`paused`. It leaves the lock alone for an `idle`, `completed` or `failed` row,
+because none of those blocks a redo. A supervisor whose last Live attempt
+recorded the row `completed` or `failed` therefore does not meet the redo on
+that lock between attempts. An attempt that lost its lock connection leaves the
+row `running`, and the paragraphs below cover that case. If the row becomes
+`running` after the redo read it, the redo's own start is refused with
+`InvalidTransition`.
+
+The required Ingest case above is the exception. A `--phase ingest` redo with
+a required Ingest redo pending takes every phase lock in turn, Live included,
+whatever each row says. A supervisor that tries to take one of those locks
+during that hold stops that chain with `LockHeld`. This redo also settles
+before it checks its range. When it is then refused for its range, a stale
+`live` row has already been recorded `completed`.
+
+A Live attempt probes its lock connection once per live poll interval, one
+second by default. An attempt whose lock connection is lost can keep writing
+until its next probe fails, and a statement already in flight can still commit.
+The attempt then stops with its row still `running` and retries after a
+backoff. Until the retry takes the lock again, the lock is free.
+
+A redo that starts in that gap wins. It settles the row and runs. While it
+runs, the supervisor's Live retry fails with `InvalidTransition`, which is not
+retried, so that chain's supervisor stops. Other chains keep running, and the
+process exits nonzero once every chain has stopped. Restart the supervisor
+after the redo finishes.
+
+The lost attempt's head publication can still commit while that redo runs.
+When it replaces readable blocks, it stamps a required redo on Interpret,
+Project and Verify, as every such publication does. An Ingest redo's row is
+never stamped. What happens to a redo that is already running depends on the
+stamp.
+
+A stamp that leaves the redo's range as it was refuses the redo in one of two
+ways:
+
+- At its next progress write, with `redo attempt superseded; progress not
+  recorded`. This error names no command and records nothing on the row.
+- At completion, with `was overtaken before it completed`. This error is
+  recorded on the row. It names the command to rerun, or says that no command
+  applies. A Project redo is the exception described below.
+
+A stamp that reaches outside the redo's range, below it or above it, widens
+the marker. The next
+progress write is refused in the same way. A redo that reaches completion
+returns without an error, and the widened marker stays in place.
+
+In every case but the Project exception the redo stays in progress with the
+repair in place. What follows
+depends on the redo:
+
+- An operator Interpret redo is rerun with the same command.
+- An operator Verify redo is rerun after the Interpret and Project repairs
+  have completed. Until then it is refused because Project is not completed.
+  The completion error says so.
+- A supervisor's own required redo refused at completion stops that chain.
+  The next supervisor start reruns the required redo. No operator action is
+  needed.
+
+Project is treated differently at completion. A Project redo that a stamp
+overtook after its last progress write still completes on one condition.
+Interpret must carry a required redo at that moment, and that redo's range
+must reach the top of the Project redo's execution range. Completion reads
+Interpret's row in the transaction that holds the Project row lock. The
+reason is what follows each completion. An Interpret repair ends by stamping
+Project over the repair's range up to Project's cursor. The next supervisor
+start then redoes Project on the new chain. That redo replays at least as far
+as the standing Project family marker the earlier completion left, unless the
+readable head is lower. The Project completion on the replaced blocks is
+therefore short-lived. Nothing redoes Interpret after an Interpret completion
+on replaced blocks, so that one is refused.
+
+A publication stamps each phase by its own cursor, and each stamp ends at
+that phase's cursor. Interpret's stamp therefore reaches the top of the
+Project redo's range when two things hold:
+
+- Project's cursor is not above Interpret's. That holds by sequencing: one
+  supervisor runs Interpret and then Project against the same head. No check
+  enforces it.
+- The Project redo's execution range ends at or below Interpret's cursor. The
+  range ends at the highest of the requested end, the standing Project family
+  marker and the end of a retained redo, capped at the readable head. It can
+  therefore end above the requested range.
+
+When either fails, the Interpret repair ends below the top of the Project
+redo's range, or Interpret is not stamped at all. Nothing would redo Project
+on the blocks above the repair, so the overtaken Project redo is refused at
+completion like the others. The rule errs toward refusal. A Project redo
+whose execution range ends above its requested range and above Interpret's
+cursor is refused even when the two cursors are equal. No test covers that
+case.
+
+What follows a refused Project redo depends on Interpret and on who owns the
+redo:
+
+- Interpret is completed. The redo is rerun with the printed command.
+- Interpret carries a required redo and the Project redo is an operator's.
+  Project waits for Interpret's repair, and Interpret is refused while the
+  Project redo is recorded as running. An operator Project redo in that state
+  has no command that completes Interpret. A supervisor start, an Interpret
+  redo, an all-phase redo and a flag recomputation are all refused, and a
+  rewind only stamps. The completion error says so in place of the rerun
+  command.
+- Interpret carries a required redo and the Project redo is itself a required
+  one. The failure returns it to a pending required redo, which blocks no
+  other phase. The next supervisor start runs the Interpret repair and then
+  the Project one.
+
+The second case also follows a refusal at a progress write. A later build
+with another interpreter content hash gets out of it: the Interpret redo that
+adopts the new hash supersedes the Project redo.
+
+The redo holds the Live lock only while it settles a stale row. A supervisor
+that starts at that instant and tries to take the Live lock during the hold
+stops that chain with `LockHeld`. Start it again.
+
+A Verify-only redo skips this step and settles no row, because Verify may run
+beside a running Live phase. The other redos settle Live alone. They do not
+settle an Ingest, Interpret, Project or Verify row left `running` outside a
+redo, except through the required Ingest case above.
+
 Project redo retains its requested invalidation in
 `redo_requested_from_block_number` and `redo_requested_to_block_number`.
 Its existing `redo_from_block_number` and `redo_to_block_number` describe the
@@ -1824,7 +1962,15 @@ range chosen at begin time. Its pool-backed progress update, including the
 per-source boundary-marker map, succeeds only while all three values still
 match the active row. No match means another attempt has superseded the batch;
 the update records nothing and returns `redo attempt superseded; progress not
-recorded`. Completion, failure recording, and downstream redo finalization use
+recorded`. Completion reads the generation again in the transaction that locks
+the row. A stamp can land after the last progress write and leave the mode and
+range as they were. Completion then finds a changed generation and does not
+clear the redo or restore the cursor. It records the failure on the row, keeps
+the redo in progress, and returns `was overtaken before it completed` with the
+command to rerun. A Project redo completes all the same while Interpret
+carries a required redo that reaches the top of the Project redo's range, as
+[table ownership](#table-ownership) explains.
+Completion, failure recording, and downstream redo finalization use
 the connection that owns the phase advisory lock, so losing that connection
 also prevents their writes. This generation fence closes the redo-progress
 instance of [#452](https://github.com/ensdomains/bigname/issues/452); that issue
