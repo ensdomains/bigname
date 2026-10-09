@@ -1200,6 +1200,11 @@ in the same step.
    required Ingest redo is pending, as supervisor start-up does; do not edit
    `chain_phase_state` by hand. It refuses while another process
    still holds that phase's lock.
+   A stop that landed while Live was polling leaves the `live` row `running`.
+   Every redo in steps 6 to 8 records that row `completed` before it starts,
+   while holding the Live advisory lock. It fails with a `LockHeld` error naming
+   `phase live` when a supervisor is still running Live for the chain. Stop
+   that supervisor and rerun.
    The CLI refuses an ingest redo without a source, and every redo requires the
    explicit block range. These recovery commands override redo's ephemeral
    metrics default with `0.0.0.0:9465` so the stopped supervisor's existing
@@ -1469,6 +1474,11 @@ For Project, the reported rerun command uses the requested invalidation range.
 contain actual undo, rebuild and replay progress; the request is retained in
 `redo_requested_from_block_number` and `redo_requested_to_block_number`. Do not
 substitute the expanded execution range into the recovery command.
+
+A stop that lands while the Live phase is polling leaves its
+`chain_phase_state` row `running`. The next supervisor start records it
+`completed`, and so does an operator redo of Ingest, Interpret, Project, flag
+recomputation or all phases.
 
 The TYR-114 repair (`20260930230000_project_redo_execution_extent.sql`) also
 accepts an already-reset, same-hash Project rebuild whose last batch committed
