@@ -2,7 +2,7 @@ use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManifestInput {
     pub manifest_id: i64,
     pub manifest_version: i64,
@@ -35,7 +35,7 @@ pub struct AddressAdmissionInput {
     pub active_to_block: Option<i64>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RawLogInput {
     pub chain_id: String,
     pub block_hash: String,
@@ -50,7 +50,7 @@ pub struct RawLogInput {
     pub data: Vec<u8>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RawBlockInput {
     pub chain_id: String,
     pub block_hash: String,

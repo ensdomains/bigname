@@ -3425,3 +3425,35 @@ the hash rotation above.
 Registrar grace for an ENSv2 `.eth` name is keyed to the one admitted Sepolia
 ETHRegistry deployment. A later deployment gets no registrar grace until the
 policy in `crates/storage/src/families/control/lifecycle/policy.rs` names it.
+
+## Speculative Interpret prototype
+
+Interpret can prepare several complete batches concurrently while validating
+and writing their results in chain order. Set
+`BIGNAME_INTERPRET_SPECULATIVE_WORKERS=4`, or pass
+`--interpret-speculative-workers 4` to `run` or `redo`, to opt in. The default
+of `1` keeps the existing serial path. The full-state loader remains serial.
+API responses and stored event semantics remain the same.
+
+This prototype retains candidate batches in memory and rereads their inputs
+before acceptance. Compare completed replay throughput, retry frequency,
+database load and peak memory with the one-worker baseline on a disposable
+database copy before enabling it in a deployment. Additional reads and retries
+can outweigh parallel preparation. The [development
+guide](development.md#speculative-interpret-prototype) describes the benchmark
+and its limits. Restore the setting to `1` to return to serial execution.
+
+The [interpreter content hash](glossary.md#interpreter-content-hash) rotates
+because the adapter input types gain equality implementations in a hashed
+source file. Adopting this binary requires every initialized chain to complete
+a full-history Interpret redo and the Project redo it installs at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary), even with one
+worker. Follow the [planned migration and fingerprint
+boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
+before the matching API serves. Changing only the worker setting under an
+already adopted binary requires no new redo.
+
+There is no schema-migration. The manifest-authority fingerprint and compiled
+watch plan are unchanged, so this change introduces no authority attestation
+or Ingest redo requirement. Existing obligations from other changes in the
+same release still apply.

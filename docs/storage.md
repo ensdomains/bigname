@@ -2145,6 +2145,51 @@ resume marker and current block anchors in the write transaction. A concurrent
 reorg therefore cannot publish interpretation derived from an unreadable
 branch.
 
+Interpret can prepare a bounded window of complete batches concurrently when
+`BIGNAME_INTERPRET_SPECULATIVE_WORKERS` is greater than its default of `1`.
+Only the [lookahead loader](glossary.md#lookahead-loader) uses this option.
+The full-state loader and flag recomputation keep their serial execution.
+Workers open read-only snapshots and prepare adapter output. They never write
+derived rows, clear a redo range, finalize discovery admissions, or advance a
+phase marker. The configured count bounds speculative worker preparations
+and retained candidate batches within one engine configuration. The
+coordinator accepts one batch at a time, including when several chains share
+that engine. Switching chains replaces its queued window.
+
+Each prepared batch retains the exact inputs used by its successful lookahead
+attempt. These include the raw blocks and logs, manifests and provenance,
+discovery rules and admissions, restoration timestamps, expiry query results,
+final dependency sets, and ordered prior events. At that batch's turn, after
+all preceding writes have committed, the coordinator rereads these inputs in a
+fresh repeatable-read snapshot. It queries the entire final dependency set
+from an empty fetch cache. This checks absent results and newly matching
+expiry or registry members as well as existing rows. A changed input rejects
+the candidate and runs ordinary serial interpretation for that batch.
+Speculative errors are also retried on the serial path before they can fail
+the phase.
+
+Missing stream-tail values are read only at ordered acceptance, immediately
+before the existing adapter finish step rethreads event `before_state` values.
+The lookahead session remains disposable. The ordinary writer then owns the
+same redo preparation, derived rows, completion work, and lineage checks as
+serial execution. In particular, a future redo candidate is validated only
+after the preceding redo writes, including the first write's range deletion.
+Validation assumes the runner retains its existing exclusive Interpret phase
+lock. It does not enable multiple database writers for the same chain.
+
+A changed pass, range, resume marker, or engine setting discards incompatible
+queued candidates. Cancelling an active preparation window closes its worker
+cancellation channel. Synchronous adapter work may finish before observing
+cancellation, and retains its worker permit until it exits. Its result stays
+read-only. The option increases retained input/output memory and repeats
+database reads. Global admission or topology changes can conservatively reject
+otherwise independent work. Measure total replay time and memory with the
+chosen worker count. The setting itself has no interpretation meaning. This
+revision adds equality comparisons to the adapter input types, which changes
+the [interpreter content hash](glossary.md#interpreter-content-hash) and requires
+its existing adoption procedure. The engine and loader scheduling code remain
+outside that hash.
+
 An ENSv1 surface-materializing renewal may emit an additive
 [state-derived normalized event](glossary.md#state-derived-normalized-event).
 Its `source_manifest_id` comes from the retained registry authority or registry

@@ -36,6 +36,7 @@ pub(crate) struct LoadedBatch {
     pub restored_event_count: usize,
     pub lookahead_nodes:
         Option<std::collections::BTreeSet<bigname_adapters::schema_v2::V1NodeRequest>>,
+    pub speculative_certificate: Option<lookahead::SpeculativeCertificate>,
 }
 
 type RawLogRow = (
@@ -165,6 +166,7 @@ pub(crate) async fn batch_input(
         prepared: None,
         restored_event_count,
         lookahead_nodes: None,
+        speculative_certificate: None,
     })
 }
 

@@ -47,6 +47,7 @@ pub struct Engine {
     force_full_state_loader: bool,
     loader_choices: loader_choice::LoaderChoices,
     prior_sessions: prior_sessions::PriorSessions,
+    speculation: speculation::Speculation,
 }
 
 impl Engine {
@@ -63,6 +64,7 @@ impl Engine {
             force_full_state_loader: false,
             loader_choices: loader_choice::LoaderChoices::default(),
             prior_sessions: prior_sessions::PriorSessions::default(),
+            speculation: speculation::Speculation::new(NonZeroU32::new(1).unwrap()),
         }
     }
 
@@ -70,6 +72,7 @@ impl Engine {
     /// batch and must not change stored output.
     pub fn with_blocks_per_batch(mut self, blocks: NonZeroU32) -> Self {
         self.blocks_per_batch = blocks;
+        self.speculation.clear();
         self
     }
 
@@ -77,7 +80,21 @@ impl Engine {
     /// reads. `None`, the default, sets no timeout.
     pub fn with_lookahead_statement_timeout_secs(mut self, seconds: Option<NonZeroU32>) -> Self {
         self.lookahead_statement_timeout_secs = seconds;
+        self.speculation.clear();
         self
+    }
+
+    /// Prepare up to this many complete batches in parallel. One keeps the serial path.
+    /// Publication remains ordered and every speculative batch revalidates its inputs.
+    /// Opting in serializes calls on this engine, including calls for different chains.
+    /// The worker limit and counters belong to this configuration and reset on this call.
+    pub fn with_speculative_workers(mut self, workers: NonZeroU32) -> Self {
+        self.speculation = speculation::Speculation::new(workers);
+        self
+    }
+
+    pub fn speculation_stats(&self) -> SpeculationStats {
+        self.speculation.stats()
     }
 
     /// The loader most recently chosen for a chain, as reported in the log.
@@ -89,6 +106,7 @@ impl Engine {
     /// a chain where the per-batch lookahead loader would be chosen automatically.
     pub fn with_full_state_loader_forced(mut self, forced: bool) -> Self {
         self.force_full_state_loader = forced;
+        self.speculation.clear();
         self
     }
 
@@ -96,6 +114,14 @@ impl Engine {
         let profile = std::env::var_os("BIGNAME_INTERPRET_FOLD_PROFILE").is_some();
         let batch_started = Instant::now();
         validate_request(&request)?;
+        let mut speculative_queue = if self.speculation.enabled() {
+            Some(self.speculation.queue.lock().await)
+        } else {
+            None
+        };
+        if let Some(queue) = speculative_queue.as_deref_mut() {
+            queue.begin(&request);
+        }
         let target = load::marker(&self.pool, &request.chain_id, request.to_block)
             .await?
             .map(|(number, hash)| Marker { number, hash })
@@ -111,6 +137,9 @@ impl Engine {
             .as_ref()
             .map_or(request.from_block, |marker| marker.number.saturating_add(1));
         if next_block > target.number {
+            if let Some(queue) = speculative_queue.as_deref_mut() {
+                queue.clear();
+            }
             if !matches!(request.mode, RunMode::RecomputeFlags) {
                 write::discovery_admission::finalize_empty_completion(
                     &self.pool,
@@ -126,6 +155,9 @@ impl Engine {
             });
         }
         if matches!(request.mode, RunMode::RecomputeFlags) {
+            if let Some(queue) = speculative_queue.as_deref_mut() {
+                queue.clear();
+            }
             let estimated_write_bytes = recompute::run(
                 &self.pool,
                 &request.chain_id,
@@ -174,49 +206,14 @@ impl Engine {
         )?;
         profile_phase(profile, "take_prior_session", phase_started, None);
         let phase_started = Instant::now();
-        let resume_marker = request
-            .resume_current
-            .as_ref()
-            .map(|marker| (marker.number, marker.hash.as_str()));
-        // The loader is chosen for each chain and each batch, inside the loader's own
-        // database snapshot, so the choice always matches the manifests the batch uses.
-        let lookahead = if self.force_full_state_loader {
-            load::lookahead::Attempt::FullStateRequired(StateLoader::FullState {
-                reason: FullStateReason::OperatorOverride,
-            })
-        } else {
-            load::lookahead::batch_input(
-                &self.pool,
-                &request.chain_id,
-                *batch_from,
-                *batch_to,
-                resume_marker,
-                self.state_cache_capacity,
-                self.lookahead_statement_timeout_secs,
+        let loaded = self
+            .load_current_batch(
+                &request,
+                &markers,
+                cached_prior,
+                speculative_queue.as_deref_mut(),
             )
-            .await?
-        };
-        let loaded = match lookahead {
-            load::lookahead::Attempt::Loaded(loaded) => {
-                drop(cached_prior);
-                self.loader_choices
-                    .record(&request.chain_id, StateLoader::Lookahead)?;
-                *loaded
-            }
-            load::lookahead::Attempt::FullStateRequired(choice) => {
-                self.loader_choices.record(&request.chain_id, choice)?;
-                load::batch_input(
-                    &self.pool,
-                    &request.chain_id,
-                    *batch_from,
-                    *batch_to,
-                    resume_marker,
-                    cached_prior,
-                    self.state_cache_capacity,
-                )
-                .await?
-            }
-        };
+            .await?;
         let used_lookahead = loaded.lookahead_nodes.is_some();
         let restored_event_count = loaded.restored_event_count;
         profile_phase(
@@ -326,6 +323,11 @@ impl Engine {
             number: *batch_to,
             hash: batch_hash.clone(),
         };
+        if let Some(queue) = speculative_queue.as_deref_mut() {
+            queue.advance(&current, complete);
+        }
+        self.speculation
+            .log_success(&request.chain_id, *batch_from, *batch_to);
         profile_phase(profile, "batch_total", batch_started, None);
         Ok(BatchOutcome {
             complete,
@@ -404,15 +406,24 @@ fn validate_loaded_lineage(
     Ok(())
 }
 
+#[path = "engine/input.rs"]
+mod input;
 #[path = "engine/loader_choice.rs"]
 mod loader_choice;
 #[path = "engine/prior_sessions.rs"]
 mod prior_sessions;
+#[path = "engine/speculation.rs"]
+mod speculation;
 pub use loader_choice::{FullStateReason, StateLoader};
+pub use speculation::SpeculationStats;
 
 #[cfg(test)]
 #[path = "engine/activation_tests.rs"]
 mod activation_tests;
+
+#[cfg(test)]
+#[path = "engine/speculation_tests.rs"]
+mod speculation_tests;
 
 fn validate_contiguous_markers(
     chain_id: &str,
