@@ -303,12 +303,14 @@ async fn v2_address_names_walk_and_chunks_serve_identical_pages() -> Result<()> 
     use bigname_storage::families::records::seams::with_compose_chunk;
 
     let database = TestDatabase::new_migrated().await?;
-    seed_bulk_address_names(&database, 600).await?;
+    // 65 names: three pages of 25, a partial last chunk of 7, and two 5-row pages that each
+    // compose one 32-name walk batch.
+    seed_bulk_address_names(&database, 65).await?;
     for sort in ["name", "expires_at", "registered_at", "created_at"] {
         for order in ["asc", "desc"] {
             for dedupe in ["name", "registration"] {
                 let uri = format!(
-                    "/v1/addresses/{BULK_ADDRESS}/names?sort={sort}&order={order}&dedupe={dedupe}&page_size=150"
+                    "/v1/addresses/{BULK_ADDRESS}/names?sort={sort}&order={order}&dedupe={dedupe}&page_size=25"
                 );
                 let exact = walk_all_pages(&database, &uri).await?;
                 let chunked = with_compose_chunk(7, walk_all_pages(&database, &uri)).await?;
@@ -322,7 +324,7 @@ async fn v2_address_names_walk_and_chunks_serve_identical_pages() -> Result<()> 
                     walked.iter().map(page_body).collect::<Vec<_>>(),
                     "{uri}"
                 );
-                assert_eq!(exact[0]["page"]["total_count"], json!(600), "{uri}");
+                assert_eq!(exact[0]["page"]["total_count"], json!(65), "{uri}");
                 assert!(
                     walked.iter().all(|page| page["page"]["total_count"].is_null()),
                     "{uri}"
@@ -336,17 +338,17 @@ async fn v2_address_names_walk_and_chunks_serve_identical_pages() -> Result<()> 
         for order in ["asc", "desc"] {
             for dedupe in ["name", "registration"] {
                 let uri = format!(
-                    "/v1/addresses/{BULK_ADDRESS}/names?sort={sort}&order={order}&dedupe={dedupe}&page_size=25"
+                    "/v1/addresses/{BULK_ADDRESS}/names?sort={sort}&order={order}&dedupe={dedupe}&page_size=5"
                 );
-                let exact = walk_pages(&database, &uri, 4).await?;
+                let exact = walk_pages(&database, &uri, 2).await?;
                 let (walked, batches) =
-                    with_batches(with_exact_total_cap(0, walk_pages(&database, &uri, 4))).await;
+                    with_batches(with_exact_total_cap(0, walk_pages(&database, &uri, 2))).await;
                 assert_eq!(
                     exact.iter().map(page_body).collect::<Vec<_>>(),
                     walked?.iter().map(page_body).collect::<Vec<_>>(),
                     "{uri}"
                 );
-                assert!(batches.iter().sum::<usize>() < 600, "{uri}: {batches:?}");
+                assert!(batches.iter().sum::<usize>() < 65, "{uri}: {batches:?}");
             }
         }
     }

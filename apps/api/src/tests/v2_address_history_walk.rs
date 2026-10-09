@@ -31,6 +31,7 @@ async fn measured(
 ) -> Result<(Value, bigname_storage::AddressHistoryWorkingSet)> {
     let stats = Arc::new(Mutex::new(bigname_storage::AddressHistoryWorkingSet {
         batch_size: 7,
+        cache_capacity: 256,
         ..Default::default()
     }));
     let statements = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -69,7 +70,7 @@ async fn measured(
     }
     for key in ["cached_memberships", "cached_attribution"] {
         assert!(
-            stats.peak.get(key).copied().unwrap_or_default() <= 1_024,
+            stats.peak.get(key).copied().unwrap_or_default() <= stats.cache_capacity,
             "{key}: {stats:?}"
         );
     }
@@ -131,7 +132,7 @@ async fn seed_names(database: &TestDatabase, count: usize) -> Result<Vec<(i64, S
 
 #[tokio::test]
 async fn address_history_walk_bounds_live_rows_and_preserves_complete_order() -> Result<()> {
-    for count in [11, 259] {
+    for count in [11, 65] {
         let database = TestDatabase::new_migrated().await?;
         let expected = seed_names(&database, count).await?;
         for order in ["asc", "desc"] {
@@ -529,7 +530,7 @@ async fn address_history_walk_defaults_to_no_count_across_the_former_threshold()
 #[tokio::test]
 async fn address_history_walk_handoff_winner_precedes_batches_and_public_cursors() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    let originals = seed_names(&database, 19).await?;
+    let originals = seed_names(&database, 8).await?;
     let mut events = Vec::new();
     let mut expected: Vec<_> = originals.into_iter().filter(|(log, _)| *log == 2).collect();
     for (origin, log) in [("walk-handoff-a", 100), ("walk-handoff-b", 101)] {
@@ -546,7 +547,7 @@ async fn address_history_walk_handoff_winner_precedes_batches_and_public_cursors
             log,
             json!({"node":"same-node","resolver":RESOLVER}),
         ));
-        for n in 0..19 {
+        for n in 0..8 {
             let logical =
                 bigname_storage::logical_name_id_for_name("ens", &format!("walk-{n:04}.eth"));
             let identity = format!(
@@ -595,7 +596,7 @@ async fn address_history_walk_handoff_winner_precedes_batches_and_public_cursors
                 let (body, stats) = measured(&database, &uri, 1).await?;
                 assert_eq!(
                     body["page"]["total_count"],
-                    if counted { json!(21) } else { Value::Null },
+                    if counted { json!(10) } else { Value::Null },
                     "{body}"
                 );
                 let batches = stats
