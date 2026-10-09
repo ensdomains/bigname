@@ -161,6 +161,7 @@ pub(super) struct State {
     v2_tokens_by_current_name_index: Covered<maps::Name, String, OrdSet<String>>,
     v2_entry_by_parent_label: Covered<maps::RegistryLabel, (String, Vec<u8>), String>,
     v2_parent_claims: Covered<maps::RegistryClaim, String, (String, Vec<u8>)>,
+    v2_mounts_by_subregistry: Covered<maps::RegistryMounts, String, OrdSet<String>>,
     v2_suffix_anchors: OrdMap<String, (String, Vec<String>)>,
     latest_v2_timestamp: Option<i64>,
     v2_topology_baseline: Option<topology::V2TopologyBaseline>,

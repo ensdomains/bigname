@@ -47,7 +47,8 @@ for ENSv2:
 - `normalized_events_v2_key_probe_idx` is an inverted (GIN) index over the
   [ENSv2 state keys](../../docs/glossary.md#ensv2-state-key) each ENSv2 event is
   filed under: its registry or resolver with the token, resource and label it
-  names, and the whole registry. The array must stay identical to
+  names, the whole registry, and the registry its `subregistry` value names. The
+  array must stay identical to
   `crates/interpret/src/load/lookahead/v2_keys.sql`.
 - `normalized_events_v2_due_probe_idx` selects ENSv2 registry and root registry
   events by chain and parsed expiry, with the same expiry expression as the
@@ -137,6 +138,24 @@ each schema-migration, and that the fresh baseline, the schema-migrations, and
 the script build the same definitions. Apply them through the usual SQLx
 release process when adopting this source revision. The fresh baseline also
 includes all eight indexes.
+
+`20261009120000_normalized_events_v2_key_probe_subregistry.sql` replaces
+`normalized_events_v2_key_probe_idx` with the definition here, which adds the
+`subregistry` element (TYR-277). It drops the index only when it is valid and has
+the definition the ENSv2 schema-migration installed, then builds the new one inside
+the SQLx transaction. The drop holds an `ACCESS EXCLUSIVE` lock until that
+transaction commits, so reads and writes of `normalized_events` wait for the build. It
+ends with the same check and refuses any other relation or definition under the
+name. On a large initialized database, replace the index before applying
+schema-migrations:
+
+1. Stop every runner that uses the lookahead loader.
+2. Run `DROP INDEX CONCURRENTLY bigname_phase.normalized_events_v2_key_probe_idx`.
+3. Run `install.sql`. It builds the new definition and accepts the other seven.
+
+The schema-migration then adopts the prebuilt index. A release that predates the
+new definition cannot use the replaced index, so do not restart old runners on it
+without `BIGNAME_INTERPRET_FORCE_FULL_STATE_LOADER=true`.
 
 An index with any of these names built from an earlier experimental script is kept only
 if `pg_get_indexdef` matches the definition here; otherwise drop and rebuild it

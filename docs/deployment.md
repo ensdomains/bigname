@@ -3368,3 +3368,53 @@ the hash rotation above.
 Registrar grace for an ENSv2 `.eth` name is keyed to the one admitted Sepolia
 ETHRegistry deployment. A later deployment gets no registrar grace until the
 policy in `crates/storage/src/families/control/lifecycle/policy.rs` names it.
+
+## ENSv2 name path by mount
+
+The build that names an ENSv2 registry by its mount path when its parent claim
+does not point back (TYR-277, see [ENSv2 name path](api-v1.md#ensv2-name-path))
+changes the [name suffix walk](glossary.md#ensv2-name-suffix-walk) in
+`crates/adapters/src`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
+
+What changes for names:
+
+- A name whose registry has a live mount and a claim that does not point back is
+  served under the mount path. Before, the claim move released it.
+- A registry with a valid claim and one mount is unchanged.
+- A registry with a valid claim and a second mount keeps its name while the claimed
+  token lasts. When the claimed token expires, the name moves to the other mount.
+  Before, it was released.
+- A parent token pointed away from the registry still releases its names.
+
+These rows arrive through re-derivation, not through an in-place change. Every
+chain with ENSv2 manifests needs a full-history Interpret redo, then the Project
+redo it installs, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner
+and API binaries. The change rides the next re-derivation release and shares that
+release's one Interpret and Project redo pair with its other hash-rotating
+changes. Do not mark old rows ready under the new hash.
+
+Apply `20261009120000_normalized_events_v2_key_probe_subregistry.sql` before
+starting the new runner. It replaces one lookahead index,
+`normalized_events_v2_key_probe_idx`, and changes no row. The new definition
+files an event under the registry its `subregistry` value names, so the
+[lookahead loader](glossary.md#lookahead-loader) reads the tokens that point at a
+registry. The in-migration rebuild blocks reads and writes of `normalized_events`
+until the schema-migration commits. On a large database, replace the index
+concurrently first, as
+[`ops/v1-lookahead-indexes/README.md`](../ops/v1-lookahead-indexes/README.md)
+describes. The fresh baseline already has the new definition.
+
+It adds no table, manifest or setting. The manifest-authority fingerprint and
+the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+A batch that restores an ENSv2 registry now also reads the latest state of every
+token that points at it. A registry that many tokens point at loads more.
+
+An expiry can move a name to another path, or give a path to a name that had
+none, in a block with no log. Interpret writes that change at the block boundary
+for every kind of token and path: registered, reserved and unlinked tokens, and
+paths with a label that is not normalized, which are stored as shadow names. The
+old path is released as expired and the new path is granted with
+`RegistryPathExpired` as its source.
