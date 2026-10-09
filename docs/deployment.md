@@ -2626,28 +2626,34 @@ cursor page. It then reads each name's detail and counts those serving
 `unresolvable_reason` `no_live_ens_v2_entry`. `/v1/names` needs a date bound,
 and `grace_ends_after` is it. The retries absorb the `409 stale` a read answers
 while the publication catches up with the head, and curl still prints each
-retried error. The script fails rather than undercount when a read keeps
-failing. Each name's read runs in its own shell and prints at most its name, so
-the parallel reads cannot interleave their output.
+retried error. Each response goes to a file and is parsed only after curl
+succeeds, so a failed attempt's partial body is never counted. The script fails
+rather than undercount when a read keeps failing. Each name's read runs in its
+own shell and prints at most its name, so the parallel reads cannot interleave
+their output. An empty listing counts 0 and makes no detail read.
 
 ```bash
 set -euo pipefail
 API=${API:?set API to the staging API base URL}
 retry=(--retry 10 --retry-all-errors --retry-max-time 300)
 now=$(date +%s)
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
 cursor=
 : > live.txt
 while :; do
-  page=$(curl -fsSG "${retry[@]}" "$API/v1/names" \
+  curl -fsSG "${retry[@]}" -o "$WORK/page.json" "$API/v1/names" \
     -d namespace=ens -d parent=eth -d authority=ens_v1 \
-    -d grace_ends_after="$now" -d page_size=200 ${cursor:+-d cursor="$cursor"})
-  jq -r --arg api "$API" '.data[].name | "\($api)/v1/names/\(@uri)"' <<<"$page" >> live.txt
-  cursor=$(jq -r '.page.next_cursor // empty' <<<"$page")
+    -d grace_ends_after="$now" -d page_size=200 ${cursor:+-d cursor="$cursor"}
+  jq -r --arg api "$API" '.data[].name | "\($api)/v1/names/\(@uri)"' "$WORK/page.json" >> live.txt
+  cursor=$(jq -r '.page.next_cursor // empty' "$WORK/page.json")
   [ -n "$cursor" ] || break
 done
-export UNRESOLVABLE='select(.data.unresolvable_reason == "no_live_ens_v2_entry") | .data.name'
-xargs -P 8 -n 1 bash -c 'set -o pipefail
-  curl -fsS --retry 10 --retry-all-errors --retry-max-time 300 "$1" | jq -r "$UNRESOLVABLE"' _ \
+export WORK UNRESOLVABLE='select(.data.unresolvable_reason == "no_live_ens_v2_entry") | .data.name'
+xargs -r -P 8 -n 1 bash -c 'set -euo pipefail
+  detail=$(mktemp "$WORK/detail.XXXXXX")
+  curl -fsS --retry 10 --retry-all-errors --retry-max-time 300 -o "$detail" "$1"
+  jq -r "$UNRESOLVABLE" "$detail"' _ \
   < live.txt | wc -l
 ```
 
