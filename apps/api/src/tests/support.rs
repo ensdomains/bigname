@@ -557,7 +557,8 @@ impl TestDatabase {
         let database = bigname_test_support::TestDatabase::create_from_template(
             config
                 .admin_database_from_url()
-                .pool_max_connections(1)
+                .pool_max_connections(6)
+                .pool_search_path("bigname_phase")
                 .parse_context("failed to parse database URL for API tests")
                 .admin_connect_context("failed to connect admin pool for API tests")
                 .pool_connect_context("failed to connect API test pool"),
@@ -568,16 +569,12 @@ impl TestDatabase {
         .await?;
         let pool = database.pool().clone();
         let database_name = database.database_name().to_owned();
-
-        let mut database = Self {
+        Ok(Self {
             database,
             lookup_pool: pool.clone(),
             pool,
             database_name,
-        };
-        database.lookup_pool = database.open_lookup_pool().await?;
-        database.pool = database.lookup_pool.clone();
-        Ok(database)
+        })
     }
 
     async fn initialize_lookup_schema(&self) -> Result<()> {
@@ -586,22 +583,6 @@ impl TestDatabase {
 
     async fn lookup_pool(&self) -> Result<PgPool> {
         Ok(self.lookup_pool.clone())
-    }
-
-    async fn open_lookup_pool(&self) -> Result<PgPool> {
-        let config = self.database_config(6)?;
-        let options = PgConnectOptions::from_str(
-            config
-                .database_url
-                .as_deref()
-                .context("lookup test database URL is missing")?,
-        )?
-        .options([("search_path", "bigname_phase".to_owned())]);
-        PgPoolOptions::new()
-            .max_connections(config.max_connections)
-            .connect_with(options)
-            .await
-            .context("failed to connect API lookup test pool")
     }
 
     async fn app_state_with_lookup_chain_rpc_urls(
@@ -1663,178 +1644,204 @@ fn timestamp(seconds: i64) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(seconds).expect("test timestamp must be valid")
 }
 
-async fn seed_readable_lineage_anchors<'a>(
-    pool: &PgPool,
-    anchors: impl IntoIterator<Item = (&'a str, &'a str, i64, CanonicalityState)>,
-) -> Result<()> {
-    for (chain_id, block_hash, block_number, canonicality_state) in anchors {
-        if !matches!(
-            canonicality_state,
-            CanonicalityState::Canonical
-                | CanonicalityState::Safe
-                | CanonicalityState::Finalized
-        ) {
-            continue;
-        }
+/// Rows per seeding statement.
+const SEED_CHUNK: usize = 1_000;
 
-        let block_timestamp = parse_rfc3339_utc_timestamp(&format!(
-            "2026-04-17T00:00:{:02}Z",
-            block_number.rem_euclid(60)
-        ))
-        .map_err(|error| anyhow::anyhow!(error))?;
-        sqlx::query(
-            r#"
-            INSERT INTO bigname_phase.chain_lineage (
-                chain_id,
-                block_hash,
-                block_number,
-                block_timestamp,
-                canonicality_state
-            )
-            VALUES ($1, $2, $3, $4, $5::bigname_phase.canonicality_state)
-            ON CONFLICT DO NOTHING
-            "#,
-        )
-        .bind(chain_id)
-        .bind(block_hash)
-        .bind(block_number)
-        .bind(block_timestamp)
-        .bind(canonicality_state.as_str())
-        .execute(pool)
-        .await
-        .with_context(|| {
-            format!("failed to seed readable lineage for {chain_id} block {block_hash}")
-        })?;
-    }
-
-    Ok(())
+fn is_readable(state: CanonicalityState) -> bool {
+    matches!(
+        state,
+        CanonicalityState::Canonical | CanonicalityState::Safe | CanonicalityState::Finalized
+    )
 }
 
-async fn readable_lineage_anchor(
-    pool: &PgPool,
-    chain_id: &str,
-    block_hash: &str,
-    block_number: i64,
-    canonicality_state: CanonicalityState,
-) -> Result<(String, i64)> {
-    seed_readable_lineage_anchors(
-        pool,
-        [(chain_id, block_hash, block_number, canonicality_state)],
-    )
-    .await?;
-    sqlx::query_as::<_, (String, i64)>(
-        r#"
-        SELECT block_hash, block_number
-        FROM bigname_phase.chain_lineage
-        WHERE chain_id = $1
-          AND block_number = $2
-          AND canonicality_state IN ('canonical', 'safe', 'finalized')
-        LIMIT 1
-        "#,
-    )
-    .bind(chain_id)
-    .bind(block_number)
-    .fetch_one(pool)
-    .await
-    .context("readable test lineage anchor must exist")
-}
-
-async fn identity_lineage_anchor(
-    pool: &PgPool,
-    chain_id: &str,
-    block_hash: &str,
-    block_number: i64,
-) -> Result<(String, i64)> {
-    let block_timestamp = parse_rfc3339_utc_timestamp(&format!(
+fn fixture_lineage_timestamp(block_number: i64) -> Result<OffsetDateTime> {
+    parse_rfc3339_utc_timestamp(&format!(
         "2026-04-17T00:00:{:02}Z",
         block_number.rem_euclid(60)
     ))
-    .map_err(|error| anyhow::anyhow!(error))?;
-    sqlx::query(
-        r#"
-        INSERT INTO bigname_phase.chain_lineage (
-            chain_id, block_hash, block_number, block_timestamp, canonicality_state
-        )
-        VALUES ($1, $2, $3, $4, 'observed'::bigname_phase.canonicality_state)
-        ON CONFLICT (chain_id, block_hash) DO NOTHING
-        "#,
-    )
-    .bind(chain_id)
-    .bind(block_hash)
-    .bind(block_number)
-    .bind(block_timestamp)
-    .execute(pool)
-    .await?;
-    Ok((block_hash.to_owned(), block_number))
+    .map_err(|error| anyhow::anyhow!(error))
 }
 
-async fn identity_lineage_anchor_for_state(
+/// One seeded row's lineage anchor: chain, block hash, block number and state.
+type LineageAnchor<'a> = (&'a str, &'a str, i64, CanonicalityState);
+
+trait LineageAnchored {
+    fn anchor(&self) -> LineageAnchor<'_>;
+}
+
+macro_rules! lineage_anchored {
+    ($($row:ty),*) => {$(
+        impl LineageAnchored for $row {
+            fn anchor(&self) -> LineageAnchor<'_> {
+                (&self.chain_id, &self.block_hash, self.block_number, self.canonicality_state)
+            }
+        }
+    )*};
+}
+
+lineage_anchored!(TokenLineage, Resource, NameSurface, SurfaceBinding);
+
+/// The block each row is anchored to, in row order. Every readable anchor is written first, so
+/// the first row at a height takes it. A readable row then anchors to the readable block at its
+/// height. Any other row anchors to its own block, written as observed.
+async fn resolve_lineage_anchors(
     pool: &PgPool,
-    chain_id: &str,
-    block_hash: &str,
-    block_number: i64,
-    canonicality_state: CanonicalityState,
-) -> Result<(String, i64)> {
-    if matches!(
-        canonicality_state,
-        CanonicalityState::Canonical | CanonicalityState::Safe | CanonicalityState::Finalized
-    ) {
-        readable_lineage_anchor(
-            pool,
-            chain_id,
-            block_hash,
-            block_number,
-            canonicality_state,
+    rows: &[impl LineageAnchored],
+) -> Result<Vec<(String, i64)>> {
+    let anchors = rows.iter().map(LineageAnchored::anchor).collect::<Vec<_>>();
+    let (readable, other): (Vec<&LineageAnchor>, Vec<&LineageAnchor>) =
+        anchors.iter().partition(|anchor| is_readable(anchor.3));
+    for chunk in readable.chunks(SEED_CHUNK) {
+        let timestamps = chunk
+            .iter()
+            .map(|anchor| fixture_lineage_timestamp(anchor.2))
+            .collect::<Result<Vec<_>>>()?;
+        sqlx::query(
+            "INSERT INTO bigname_phase.chain_lineage (
+                 chain_id, block_hash, block_number, block_timestamp, canonicality_state
+             )
+             SELECT chain_id, block_hash, block_number, block_timestamp,
+                    canonicality_state::bigname_phase.canonicality_state
+             FROM unnest($1::text[], $2::text[], $3::bigint[], $4::timestamptz[], $5::text[])
+                 WITH ORDINALITY AS input(chain_id, block_hash, block_number, block_timestamp,
+                                          canonicality_state, ordinal)
+             ORDER BY ordinal
+             ON CONFLICT DO NOTHING",
         )
+        .bind(chunk.iter().map(|anchor| anchor.0).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|anchor| anchor.1).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|anchor| anchor.2).collect::<Vec<_>>())
+        .bind(timestamps)
+        .bind(chunk.iter().map(|anchor| anchor.3.as_str()).collect::<Vec<_>>())
+        .execute(pool)
         .await
-    } else {
-        identity_lineage_anchor(pool, chain_id, block_hash, block_number).await
+        .context("failed to seed readable test lineage")?;
     }
+    for chunk in other.chunks(SEED_CHUNK) {
+        let timestamps = chunk
+            .iter()
+            .map(|anchor| fixture_lineage_timestamp(anchor.2))
+            .collect::<Result<Vec<_>>>()?;
+        sqlx::query(
+            "INSERT INTO bigname_phase.chain_lineage (
+                 chain_id, block_hash, block_number, block_timestamp, canonicality_state
+             )
+             SELECT chain_id, block_hash, block_number, block_timestamp,
+                    'observed'::bigname_phase.canonicality_state
+             FROM unnest($1::text[], $2::text[], $3::bigint[], $4::timestamptz[])
+                 WITH ORDINALITY AS input(chain_id, block_hash, block_number, block_timestamp,
+                                          ordinal)
+             ORDER BY ordinal
+             ON CONFLICT (chain_id, block_hash) DO NOTHING",
+        )
+        .bind(chunk.iter().map(|anchor| anchor.0).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|anchor| anchor.1).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|anchor| anchor.2).collect::<Vec<_>>())
+        .bind(timestamps)
+        .execute(pool)
+        .await
+        .context("failed to seed observed test lineage")?;
+    }
+    let mut readable_blocks = Vec::with_capacity(readable.len());
+    for chunk in readable.chunks(SEED_CHUNK) {
+        let rows: Vec<(Option<String>, Option<i64>)> = sqlx::query_as(
+            "SELECT lineage.block_hash, lineage.block_number
+             FROM unnest($1::text[], $2::bigint[]) WITH ORDINALITY
+                 AS input(chain_id, block_number, ordinal)
+             LEFT JOIN bigname_phase.chain_lineage lineage
+               ON lineage.chain_id = input.chain_id
+              AND lineage.block_number = input.block_number
+              AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+             ORDER BY input.ordinal",
+        )
+        .bind(chunk.iter().map(|anchor| anchor.0).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|anchor| anchor.2).collect::<Vec<_>>())
+        .fetch_all(pool)
+        .await?;
+        for row in rows {
+            let (Some(block_hash), Some(block_number)) = row else {
+                anyhow::bail!("readable test lineage anchor must exist");
+            };
+            readable_blocks.push((block_hash, block_number));
+        }
+    }
+    let mut readable_blocks = readable_blocks.into_iter();
+    Ok(anchors
+        .iter()
+        .map(|&(_, block_hash, block_number, state)| {
+            if is_readable(state) {
+                readable_blocks.next().expect("one readable block per readable anchor")
+            } else {
+                (block_hash.to_owned(), block_number)
+            }
+        })
+        .collect())
+}
+
+/// One row per key, for an `INSERT ... ON CONFLICT DO UPDATE`, which cannot touch a row twice.
+/// A repeated key keeps its first row and takes the conflict-updated columns from its last,
+/// which is what one statement per row leaves.
+fn merge_repeated_keys<T, K: Ord>(
+    rows: impl IntoIterator<Item = T>,
+    key: impl Fn(&T) -> K,
+    update: impl Fn(&mut T, T),
+) -> Vec<T> {
+    let mut positions = std::collections::BTreeMap::new();
+    let mut merged: Vec<T> = Vec::new();
+    for row in rows {
+        match positions.entry(key(&row)) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(merged.len());
+                merged.push(row);
+            }
+            std::collections::btree_map::Entry::Occupied(entry) => {
+                update(&mut merged[*entry.get()], row);
+            }
+        }
+    }
+    merged
+}
+
+fn json_texts<'a>(values: impl Iterator<Item = &'a Value>) -> Vec<String> {
+    values.map(Value::to_string).collect()
 }
 
 async fn upsert_test_token_lineages(
     pool: &PgPool,
     token_lineages: &[TokenLineage],
 ) -> Result<Vec<TokenLineage>> {
-    seed_readable_lineage_anchors(
-        pool,
-        token_lineages.iter().map(|row| {
-            (
-                row.chain_id.as_str(),
-                row.block_hash.as_str(),
-                row.block_number,
-                row.canonicality_state,
-            )
-        }),
-    )
-    .await?;
-    for row in token_lineages {
-        let (block_hash, block_number) = identity_lineage_anchor_for_state(
-            pool,
-            &row.chain_id,
-            &row.block_hash,
-            row.block_number,
-            row.canonicality_state,
-        )
-        .await?;
+    let anchors = resolve_lineage_anchors(pool, token_lineages).await?;
+    for (chunk, anchors) in token_lineages.chunks(SEED_CHUNK).zip(anchors.chunks(SEED_CHUNK)) {
+        let rows = merge_repeated_keys(
+            chunk.iter().zip(anchors).map(|(row, anchor)| (row.clone(), anchor.clone())),
+            |(row, _)| row.token_lineage_id,
+            |(kept, _), (later, _)| {
+                kept.provenance = later.provenance;
+                kept.canonicality_state = later.canonicality_state;
+            },
+        );
         sqlx::query(
             r#"
             INSERT INTO bigname_phase.token_lineages (
                 token_lineage_id, chain_id, block_hash, block_number, provenance,
                 canonicality_state
             )
-            VALUES ($1, $2, $3, $4, $5, $6::bigname_phase.canonicality_state)
+            SELECT token_lineage_id, chain_id, block_hash, block_number, provenance::jsonb,
+                   canonicality_state::bigname_phase.canonicality_state
+            FROM unnest($1::uuid[], $2::text[], $3::text[], $4::bigint[], $5::text[], $6::text[])
+                AS input(token_lineage_id, chain_id, block_hash, block_number, provenance,
+                         canonicality_state)
             ON CONFLICT (token_lineage_id) DO UPDATE SET
                 provenance = EXCLUDED.provenance,
                 canonicality_state = EXCLUDED.canonicality_state
             "#,
         )
-        .bind(row.token_lineage_id)
-        .bind(&row.chain_id)
-        .bind(block_hash)
-        .bind(block_number)
-        .bind(&row.provenance)
-        .bind(row.canonicality_state.as_str())
+        .bind(rows.iter().map(|(row, _)| row.token_lineage_id).collect::<Vec<_>>())
+        .bind(rows.iter().map(|(row, _)| row.chain_id.as_str()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|(_, anchor)| anchor.0.as_str()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|(_, anchor)| anchor.1).collect::<Vec<_>>())
+        .bind(json_texts(rows.iter().map(|(row, _)| &row.provenance)))
+        .bind(rows.iter().map(|(row, _)| row.canonicality_state.as_str()).collect::<Vec<_>>())
         .execute(pool)
         .await?;
     }
@@ -1845,97 +1852,108 @@ async fn upsert_test_resources(
     pool: &PgPool,
     resources: &[Resource],
 ) -> Result<Vec<Resource>> {
-    seed_readable_lineage_anchors(
-        pool,
-        resources.iter().map(|row| {
-            (
-                row.chain_id.as_str(),
-                row.block_hash.as_str(),
-                row.block_number,
-                row.canonicality_state,
-            )
-        }),
-    )
-    .await?;
-    for row in resources {
-        let (block_hash, block_number) = identity_lineage_anchor_for_state(
-            pool,
-            &row.chain_id,
-            &row.block_hash,
-            row.block_number,
-            row.canonicality_state,
-        )
-        .await?;
+    let anchors = resolve_lineage_anchors(pool, resources).await?;
+    for (chunk, anchors) in resources.chunks(SEED_CHUNK).zip(anchors.chunks(SEED_CHUNK)) {
+        let rows = merge_repeated_keys(
+            chunk.iter().zip(anchors).map(|(row, anchor)| (row.clone(), anchor.clone())),
+            |(row, _)| row.resource_id,
+            |(kept, _), (later, _)| {
+                kept.token_lineage_id = later.token_lineage_id;
+                kept.provenance = later.provenance;
+                kept.canonicality_state = later.canonicality_state;
+            },
+        );
         sqlx::query(
             r#"
             INSERT INTO bigname_phase.resources (
                 resource_id, token_lineage_id, chain_id, block_hash, block_number,
                 provenance, canonicality_state
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7::bigname_phase.canonicality_state)
+            SELECT resource_id, token_lineage_id, chain_id, block_hash, block_number,
+                   provenance::jsonb, canonicality_state::bigname_phase.canonicality_state
+            FROM unnest($1::uuid[], $2::uuid[], $3::text[], $4::text[], $5::bigint[], $6::text[],
+                        $7::text[])
+                AS input(resource_id, token_lineage_id, chain_id, block_hash, block_number,
+                         provenance, canonicality_state)
             ON CONFLICT (resource_id) DO UPDATE SET
                 token_lineage_id = EXCLUDED.token_lineage_id,
                 provenance = EXCLUDED.provenance,
                 canonicality_state = EXCLUDED.canonicality_state
             "#,
         )
-        .bind(row.resource_id)
-        .bind(row.token_lineage_id)
-        .bind(&row.chain_id)
-        .bind(block_hash)
-        .bind(block_number)
-        .bind(&row.provenance)
-        .bind(row.canonicality_state.as_str())
+        .bind(rows.iter().map(|(row, _)| row.resource_id).collect::<Vec<_>>())
+        .bind(rows.iter().map(|(row, _)| row.token_lineage_id).collect::<Vec<_>>())
+        .bind(rows.iter().map(|(row, _)| row.chain_id.as_str()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|(_, anchor)| anchor.0.as_str()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|(_, anchor)| anchor.1).collect::<Vec<_>>())
+        .bind(json_texts(rows.iter().map(|(row, _)| &row.provenance)))
+        .bind(rows.iter().map(|(row, _)| row.canonicality_state.as_str()).collect::<Vec<_>>())
         .execute(pool)
         .await?;
     }
     Ok(resources.to_vec())
 }
 
+/// A name surface row as stored: identity derived from its normalized name, labels split from it.
+struct StoredSurface<'a> {
+    row: &'a NameSurface,
+    logical_name_id: String,
+    namehash: String,
+    raw_labels: Vec<String>,
+    labelhashes: Vec<String>,
+    anchor: (String, i64),
+    raw_name: &'a str,
+    provenance: &'a Value,
+    canonicality_state: CanonicalityState,
+}
+
 async fn upsert_test_name_surfaces(
     pool: &PgPool,
     name_surfaces: &[NameSurface],
 ) -> Result<Vec<NameSurface>> {
-    seed_readable_lineage_anchors(
-        pool,
-        name_surfaces.iter().map(|row| {
-            (
-                row.chain_id.as_str(),
-                row.block_hash.as_str(),
-                row.block_number,
-                row.canonicality_state,
-            )
-        }),
-    )
-    .await?;
-    for row in name_surfaces {
-        let (block_hash, block_number) = identity_lineage_anchor_for_state(
-            pool,
-            &row.chain_id,
-            &row.block_hash,
-            row.block_number,
-            row.canonicality_state,
-        )
-        .await?;
-        let (logical_name_id, namehash) =
-            phase_logical_identity(&row.namespace, &row.normalized_name)?;
-        let raw_labels = row
-            .normalized_name
-            .split('.')
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let labelhashes = raw_labels
+    let anchors = resolve_lineage_anchors(pool, name_surfaces).await?;
+    for (chunk, anchors) in name_surfaces.chunks(SEED_CHUNK).zip(anchors.chunks(SEED_CHUNK)) {
+        let stored = chunk
             .iter()
-            .map(|label| format!("{:#x}", alloy_primitives::keccak256(label.as_bytes())))
-            .collect::<Vec<_>>();
+            .zip(anchors)
+            .map(|(row, anchor)| {
+                let (logical_name_id, namehash) =
+                    phase_logical_identity(&row.namespace, &row.normalized_name)?;
+                let raw_labels = row
+                    .normalized_name
+                    .split('.')
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                let labelhashes = raw_labels
+                    .iter()
+                    .map(|label| format!("{:#x}", alloy_primitives::keccak256(label.as_bytes())))
+                    .collect();
+                Ok(StoredSurface {
+                    row,
+                    logical_name_id,
+                    namehash,
+                    raw_labels,
+                    labelhashes,
+                    anchor: anchor.clone(),
+                    raw_name: &row.normalized_name,
+                    provenance: &row.provenance,
+                    canonicality_state: row.canonicality_state,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let paths = stored.iter().map(|row| row.labelhashes.clone()).collect::<Vec<_>>();
+        let names = stored.iter().map(|row| row.logical_name_id.clone()).collect::<Vec<_>>();
+        let rows = merge_repeated_keys(
+            stored,
+            |row| row.logical_name_id.clone(),
+            |kept, later| {
+                kept.raw_name = later.raw_name;
+                kept.provenance = later.provenance;
+                kept.canonicality_state = later.canonicality_state;
+            },
+        );
         let mut transaction = pool.begin().await?;
-        bigname_storage::identity_search::prepare(
-            &mut transaction,
-            &[],
-            std::slice::from_ref(&labelhashes),
-            std::slice::from_ref(&logical_name_id),
-        )
-        .await?;
+        bigname_storage::identity_search::prepare(&mut transaction, &[], &paths, &names).await?;
         sqlx::query(
             r#"
             INSERT INTO bigname_phase.name_surfaces (
@@ -1944,36 +1962,44 @@ async fn upsert_test_name_surfaces(
                 normalization_errors, chain_id, block_hash, block_number, provenance,
                 canonicality_state
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', $9, $10, $11, $12, $13,
-                    $14::bigname_phase.canonicality_state)
+            SELECT logical_name_id, namespace, raw_name,
+                   ARRAY(SELECT label FROM jsonb_array_elements_text(raw_labels::jsonb)
+                         WITH ORDINALITY AS labels(label, position) ORDER BY position),
+                   dns_encoded_name, namehash,
+                   ARRAY(SELECT label FROM jsonb_array_elements_text(labelhashes::jsonb)
+                         WITH ORDINALITY AS labels(label, position) ORDER BY position),
+                   normalizer_version, 'active', normalization_errors::jsonb, chain_id,
+                   block_hash, block_number, provenance::jsonb,
+                   canonicality_state::bigname_phase.canonicality_state
+            FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::bytea[], $6::text[],
+                        $7::text[], $8::text[], $9::text[], $10::text[], $11::text[],
+                        $12::bigint[], $13::text[], $14::text[])
+                AS input(logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+                         namehash, labelhashes, normalizer_version, normalization_errors,
+                         chain_id, block_hash, block_number, provenance, canonicality_state)
             ON CONFLICT (logical_name_id) DO UPDATE SET
                 raw_name = EXCLUDED.raw_name,
                 provenance = EXCLUDED.provenance,
                 canonicality_state = EXCLUDED.canonicality_state
             "#,
         )
-        .bind(&logical_name_id)
-        .bind(&row.namespace)
-        .bind(&row.normalized_name)
-        .bind(raw_labels)
-        .bind(&row.dns_encoded_name)
-        .bind(namehash)
-        .bind(labelhashes)
-        .bind(&row.normalizer_version)
-        .bind(&row.normalization_errors)
-        .bind(&row.chain_id)
-        .bind(block_hash)
-        .bind(block_number)
-        .bind(&row.provenance)
-        .bind(row.canonicality_state.as_str())
+        .bind(rows.iter().map(|row| row.logical_name_id.as_str()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.row.namespace.as_str()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.raw_name).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| json!(row.raw_labels).to_string()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.row.dns_encoded_name.as_deref()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.namehash.as_str()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| json!(row.labelhashes).to_string()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.row.normalizer_version.as_str()).collect::<Vec<_>>())
+        .bind(json_texts(rows.iter().map(|row| &row.row.normalization_errors)))
+        .bind(rows.iter().map(|row| row.row.chain_id.as_str()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.anchor.0.as_str()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.anchor.1).collect::<Vec<_>>())
+        .bind(json_texts(rows.iter().map(|row| row.provenance)))
+        .bind(rows.iter().map(|row| row.canonicality_state.as_str()).collect::<Vec<_>>())
         .execute(&mut *transaction)
         .await?;
-        bigname_storage::identity_search::refresh(
-            &mut transaction,
-            std::slice::from_ref(&logical_name_id),
-            &[],
-        )
-        .await?;
+        bigname_storage::identity_search::refresh(&mut transaction, &names, &[]).await?;
         transaction.commit().await?;
     }
     Ok(name_surfaces.to_vec())
@@ -1983,32 +2009,29 @@ async fn upsert_test_surface_bindings(
     pool: &PgPool,
     bindings: &[SurfaceBinding],
 ) -> Result<Vec<SurfaceBinding>> {
-    seed_readable_lineage_anchors(
-        pool,
-        bindings.iter().map(|row| {
-            (
-                row.chain_id.as_str(),
-                row.block_hash.as_str(),
-                row.block_number,
-                row.canonicality_state,
-            )
-        }),
-    )
-    .await?;
-    for row in bindings {
-        let (block_hash, block_number) = identity_lineage_anchor_for_state(
-            pool,
-            &row.chain_id,
-            &row.block_hash,
-            row.block_number,
-            row.canonicality_state,
-        )
-        .await?;
-        let (namespace, name) = row
-            .logical_name_id
-            .split_once(':')
-            .context("test surface binding logical_name_id must include namespace")?;
-        let (logical_name_id, _) = phase_logical_identity(namespace, name)?;
+    let anchors = resolve_lineage_anchors(pool, bindings).await?;
+    for (chunk, anchors) in bindings.chunks(SEED_CHUNK).zip(anchors.chunks(SEED_CHUNK)) {
+        let rows = chunk
+            .iter()
+            .zip(anchors)
+            .map(|(row, anchor)| {
+                let (namespace, name) = row
+                    .logical_name_id
+                    .split_once(':')
+                    .context("test surface binding logical_name_id must include namespace")?;
+                let (logical_name_id, _) = phase_logical_identity(namespace, name)?;
+                Ok((row.clone(), logical_name_id, anchor.clone()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let rows = merge_repeated_keys(
+            rows,
+            |(row, _, _)| row.surface_binding_id,
+            |(kept, _, _), (later, _, _)| {
+                kept.active_to = later.active_to;
+                kept.provenance = later.provenance;
+                kept.canonicality_state = later.canonicality_state;
+            },
+        );
         sqlx::query(
             r#"
             INSERT INTO bigname_phase.surface_bindings (
@@ -2016,26 +2039,33 @@ async fn upsert_test_surface_bindings(
                 authority_arm, active_from, active_to, chain_id, block_hash, block_number, provenance,
                 canonicality_state
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                    $12::bigname_phase.canonicality_state)
+            SELECT surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm,
+                   active_from, active_to, chain_id, block_hash, block_number, provenance::jsonb,
+                   canonicality_state::bigname_phase.canonicality_state
+            FROM unnest($1::uuid[], $2::text[], $3::uuid[], $4::text[], $5::text[],
+                        $6::timestamptz[], $7::timestamptz[], $8::text[], $9::text[],
+                        $10::bigint[], $11::text[], $12::text[])
+                AS input(surface_binding_id, logical_name_id, resource_id, binding_kind,
+                         authority_arm, active_from, active_to, chain_id, block_hash,
+                         block_number, provenance, canonicality_state)
             ON CONFLICT (surface_binding_id) DO UPDATE SET
                 active_to = EXCLUDED.active_to,
                 provenance = EXCLUDED.provenance,
                 canonicality_state = EXCLUDED.canonicality_state
             "#,
         )
-        .bind(row.surface_binding_id)
-        .bind(logical_name_id)
-        .bind(row.resource_id)
-        .bind(row.binding_kind.as_str())
-        .bind(&row.authority_arm)
-        .bind(row.active_from)
-        .bind(row.active_to)
-        .bind(&row.chain_id)
-        .bind(block_hash)
-        .bind(block_number)
-        .bind(&row.provenance)
-        .bind(row.canonicality_state.as_str())
+        .bind(rows.iter().map(|(row, _, _)| row.surface_binding_id).collect::<Vec<_>>())
+        .bind(rows.iter().map(|(_, logical, _)| logical.as_str()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|(row, _, _)| row.resource_id).collect::<Vec<_>>())
+        .bind(rows.iter().map(|(row, _, _)| row.binding_kind.as_str()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|(row, _, _)| row.authority_arm.as_str()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|(row, _, _)| row.active_from).collect::<Vec<_>>())
+        .bind(rows.iter().map(|(row, _, _)| row.active_to).collect::<Vec<_>>())
+        .bind(rows.iter().map(|(row, _, _)| row.chain_id.as_str()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|(_, _, anchor)| anchor.0.as_str()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|(_, _, anchor)| anchor.1).collect::<Vec<_>>())
+        .bind(json_texts(rows.iter().map(|(row, _, _)| &row.provenance)))
+        .bind(rows.iter().map(|(row, _, _)| row.canonicality_state.as_str()).collect::<Vec<_>>())
         .execute(pool)
         .await?;
     }
@@ -3011,42 +3041,80 @@ async fn seed_family_identity_inputs(
     binding: Uuid,
     arm: &str,
 ) -> Result<String> {
-    let normalized = bigname_domain::normalization::normalize_name(name)?;
-    let (logical, namehash) = phase_logical_identity(namespace, &normalized.normalized_name)?;
-    let at: OffsetDateTime = sqlx::query_scalar(
-        "SELECT block_timestamp FROM chain_lineage WHERE chain_id = $1 AND block_hash = $2 AND block_number = $3"
-    ).bind(chain).bind(hash).bind(block).fetch_one(pool).await?;
-    upsert_test_token_lineages(
-        pool,
-        &[TokenLineage {
-            token_lineage_id: token,
+    let identity = FamilyIdentity {
+        name,
+        block,
+        hash,
+        resource,
+        token,
+        binding,
+    };
+    let mut logical = seed_family_identities(pool, namespace, chain, arm, &[identity]).await?;
+    Ok(logical.remove(0))
+}
+
+/// One name of [`seed_family_identities`]: its block and its stable identities.
+struct FamilyIdentity<'a> {
+    name: &'a str,
+    block: i64,
+    hash: &'a str,
+    resource: Uuid,
+    token: Uuid,
+    binding: Uuid,
+}
+
+/// [`seed_family_identity_inputs`] for names that share a namespace, chain and authority arm,
+/// a chunk of names per statement. Returns each name's logical id.
+async fn seed_family_identities(
+    pool: &PgPool,
+    namespace: &str,
+    chain: &str,
+    arm: &str,
+    names: &[FamilyIdentity<'_>],
+) -> Result<Vec<String>> {
+    let times: Vec<Option<OffsetDateTime>> = sqlx::query_scalar(
+        "SELECT lineage.block_timestamp
+         FROM unnest($2::text[], $3::bigint[]) WITH ORDINALITY
+             AS input(block_hash, block_number, ordinal)
+         LEFT JOIN chain_lineage lineage
+           ON lineage.chain_id = $1 AND lineage.block_hash = input.block_hash
+          AND lineage.block_number = input.block_number
+         ORDER BY input.ordinal",
+    )
+    .bind(chain)
+    .bind(names.iter().map(|name| name.hash).collect::<Vec<_>>())
+    .bind(names.iter().map(|name| name.block).collect::<Vec<_>>())
+    .fetch_all(pool)
+    .await?;
+    let (mut logicals, mut tokens, mut resources, mut surfaces, mut bindings) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for (identity, at) in names.iter().zip(times) {
+        let at = at.with_context(|| {
+            format!("{chain} block {} {} has no lineage", identity.block, identity.hash)
+        })?;
+        let normalized = bigname_domain::normalization::normalize_name(identity.name)?;
+        let (logical, namehash) = phase_logical_identity(namespace, &normalized.normalized_name)?;
+        tokens.push(TokenLineage {
+            token_lineage_id: identity.token,
             chain_id: chain.into(),
-            block_number: block,
-            block_hash: hash.into(),
+            block_number: identity.block,
+            block_hash: identity.hash.into(),
             provenance: json!({}),
             canonicality_state: CanonicalityState::Canonical,
-        }],
-    )
-    .await?;
-    upsert_test_resources(
-        pool,
-        &[Resource {
-            resource_id: resource,
-            token_lineage_id: Some(token),
+        });
+        resources.push(Resource {
+            resource_id: identity.resource,
+            token_lineage_id: Some(identity.token),
             chain_id: chain.into(),
-            block_number: block,
-            block_hash: hash.into(),
+            block_number: identity.block,
+            block_hash: identity.hash.into(),
             provenance: json!({}),
             canonicality_state: CanonicalityState::Canonical,
-        }],
-    )
-    .await?;
-    upsert_test_name_surfaces(
-        pool,
-        &[NameSurface {
+        });
+        surfaces.push(NameSurface {
             logical_name_id: logical.clone(),
             namespace: namespace.into(),
-            input_name: name.into(),
+            input_name: identity.name.into(),
             canonical_display_name: normalized.canonical_display_name,
             normalized_name: normalized.normalized_name,
             dns_encoded_name: Some(normalized.dns_encoded_name),
@@ -3056,32 +3124,32 @@ async fn seed_family_identity_inputs(
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
             chain_id: chain.into(),
-            block_number: block,
-            block_hash: hash.into(),
+            block_number: identity.block,
+            block_hash: identity.hash.into(),
             provenance: json!({}),
             canonicality_state: CanonicalityState::Canonical,
-        }],
-    )
-    .await?;
-    upsert_test_surface_bindings(
-        pool,
-        &[SurfaceBinding {
-            surface_binding_id: binding,
-            logical_name_id: format!("{namespace}:{name}"),
-            resource_id: resource,
+        });
+        bindings.push(SurfaceBinding {
+            surface_binding_id: identity.binding,
+            logical_name_id: format!("{namespace}:{}", identity.name),
+            resource_id: identity.resource,
             binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
             authority_arm: arm.into(),
             active_from: at,
             active_to: None,
             chain_id: chain.into(),
-            block_number: block,
-            block_hash: hash.into(),
+            block_number: identity.block,
+            block_hash: identity.hash.into(),
             provenance: json!({}),
             canonicality_state: CanonicalityState::Canonical,
-        }],
-    )
-    .await?;
-    Ok(logical)
+        });
+        logicals.push(logical);
+    }
+    upsert_test_token_lineages(pool, &tokens).await?;
+    upsert_test_resources(pool, &resources).await?;
+    upsert_test_name_surfaces(pool, &surfaces).await?;
+    upsert_test_surface_bindings(pool, &bindings).await?;
+    Ok(logicals)
 }
 
 /// Extend a test's real resolver declaration and provide its manifest-sync input to Project.
@@ -3617,6 +3685,47 @@ async fn seed_family_name_at(
     chain_id: &str,
     block: i64,
 ) -> Result<(String, Uuid)> {
+    let rows = family_name_rows(name, seed, arm, namespace, chain_id, block)?;
+    let seeded = (rows.surface.logical_name_id.clone(), rows.resource.resource_id);
+    upsert_family_name_rows(database, vec![rows]).await?;
+    Ok(seeded)
+}
+
+/// [`seed_family_name`] for each `(name, seed, arm)`, a chunk of names per statement.
+async fn seed_family_names(
+    database: &TestDatabase,
+    names: &[(&str, u128, &str)],
+) -> Result<Vec<(String, Uuid)>> {
+    let rows = names
+        .iter()
+        .map(|&(name, seed, arm)| {
+            family_name_rows(name, seed, arm, "ens", FAMILY_CHAIN, FAMILY_FIRST_BLOCK)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let seeded = rows
+        .iter()
+        .map(|rows| (rows.surface.logical_name_id.clone(), rows.resource.resource_id))
+        .collect();
+    upsert_family_name_rows(database, rows).await?;
+    Ok(seeded)
+}
+
+/// The identity rows one family fixture name is seeded with.
+struct FamilyNameRows {
+    surface: NameSurface,
+    token: TokenLineage,
+    resource: Resource,
+    binding: SurfaceBinding,
+}
+
+fn family_name_rows(
+    name: &str,
+    seed: u128,
+    arm: &str,
+    namespace: &str,
+    chain_id: &str,
+    block: i64,
+) -> Result<FamilyNameRows> {
     let (logical_name_id, namehash) = phase_logical_identity(namespace, name)?;
     let (resource_id, token_lineage_id, surface_binding_id) = (
         Uuid::from_u128(seed),
@@ -3624,16 +3733,15 @@ async fn seed_family_name_at(
         Uuid::from_u128(seed + 2),
     );
     let hash = format!("0xhistory{block}");
-    upsert_test_name_surfaces(
-        &database.pool,
-        &[NameSurface {
-            logical_name_id: logical_name_id.clone(),
+    Ok(FamilyNameRows {
+        surface: NameSurface {
+            logical_name_id,
             namespace: namespace.to_owned(),
             input_name: name.to_owned(),
             canonical_display_name: name.to_owned(),
             normalized_name: name.to_owned(),
             dns_encoded_name: Some(name.as_bytes().to_vec()),
-            namehash: namehash.clone(),
+            namehash,
             labelhashes: Vec::new(),
             normalizer_version: bigname_domain::normalization::ENS_NORMALIZER_VERSION.to_owned(),
             normalization_warnings: json!([]),
@@ -3643,24 +3751,16 @@ async fn seed_family_name_at(
             block_number: block,
             provenance: json!({"seed": "family_differential"}),
             canonicality_state: CanonicalityState::Canonical,
-        }],
-    )
-    .await?;
-    upsert_test_token_lineages(
-        &database.pool,
-        &[TokenLineage {
+        },
+        token: TokenLineage {
             token_lineage_id,
             chain_id: chain_id.to_owned(),
             block_hash: hash.clone(),
             block_number: block,
             provenance: json!({"seed": "family_differential"}),
             canonicality_state: CanonicalityState::Canonical,
-        }],
-    )
-    .await?;
-    upsert_test_resources(
-        &database.pool,
-        &[Resource {
+        },
+        resource: Resource {
             resource_id,
             token_lineage_id: Some(token_lineage_id),
             chain_id: chain_id.to_owned(),
@@ -3668,12 +3768,8 @@ async fn seed_family_name_at(
             block_number: block,
             provenance: json!({"seed": "family_differential"}),
             canonicality_state: CanonicalityState::Canonical,
-        }],
-    )
-    .await?;
-    upsert_test_surface_bindings(
-        &database.pool,
-        &[SurfaceBinding {
+        },
+        binding: SurfaceBinding {
             surface_binding_id,
             // The helper derives the name id from `namespace:name`.
             logical_name_id: format!("{namespace}:{name}"),
@@ -3688,10 +3784,24 @@ async fn seed_family_name_at(
             provenance: json!({"seed": "family_differential", "transaction_index": 0,
                                "log_index": 0}),
             canonicality_state: CanonicalityState::Canonical,
-        }],
-    )
-    .await?;
-    Ok((logical_name_id, resource_id))
+        },
+    })
+}
+
+async fn upsert_family_name_rows(database: &TestDatabase, rows: Vec<FamilyNameRows>) -> Result<()> {
+    let (mut surfaces, mut tokens, mut resources, mut bindings) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for rows in rows {
+        surfaces.push(rows.surface);
+        tokens.push(rows.token);
+        resources.push(rows.resource);
+        bindings.push(rows.binding);
+    }
+    upsert_test_name_surfaces(&database.pool, &surfaces).await?;
+    upsert_test_token_lineages(&database.pool, &tokens).await?;
+    upsert_test_resources(&database.pool, &resources).await?;
+    upsert_test_surface_bindings(&database.pool, &bindings).await?;
+    Ok(())
 }
 
 /// The node of a label-hash path, leaf first.
@@ -3895,45 +4005,63 @@ async fn read_family_pages_in(database: &TestDatabase, uri: &str, holder: &str) 
 /// Retain the label bytes which Interpret actually observed. An edge can be seeded without
 /// this helper when its label preimage has not been observed.
 async fn insert_family_label_preimage(pool: &PgPool, raw_label: &[u8]) -> Result<String> {
-    let hash = format!("{:#x}", alloy_primitives::keccak256(raw_label));
-    let decoded = std::str::from_utf8(raw_label)
-        .ok()
-        .filter(|label| !label.contains('\0'));
-    let normalization_error = match decoded {
-        Some(label) => {
-            match bigname_domain::normalization::normalize_label_under_suffix(label, &[]) {
-                Ok(name) if name.normalized_name == label => None,
-                Ok(_) => Some("raw label is not byte-identical to its normalized form".to_owned()),
-                Err(error) => Some(error.to_string()),
-            }
-        }
-        None => Some("raw label has no PostgreSQL-safe UTF-8 decoding".to_owned()),
+    let mut hashes = insert_family_label_preimages(pool, &[raw_label]).await?;
+    Ok(hashes.remove(0))
+}
+
+/// Why a label is stored as not normalized, or `None` when its bytes are its normalized form.
+fn label_preimage_error(decoded: Option<&str>) -> Option<String> {
+    let Some(label) = decoded else {
+        return Some("raw label has no PostgreSQL-safe UTF-8 decoding".to_owned());
     };
-    let mut transaction = pool.begin().await?;
-    bigname_storage::identity_search::prepare(
-        &mut transaction,
-        std::slice::from_ref(&hash),
-        &[],
-        &[],
-    )
-    .await?;
-    sqlx::query(
-        "INSERT INTO label_preimages (labelhash, raw_label, decoded_label, normalizer_version,
-        normalized_under_version, normalization_error, source_kind, source_priority)
-        VALUES ($1, $2, $3, $4, $5, $6, 'fixture', 0) ON CONFLICT DO NOTHING",
-    )
-    .bind(&hash)
-    .bind(raw_label)
-    .bind(decoded)
-    .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
-    .bind(normalization_error.is_none())
-    .bind(normalization_error)
-    .execute(&mut *transaction)
-    .await?;
-    bigname_storage::identity_search::refresh(&mut transaction, &[], std::slice::from_ref(&hash))
+    match bigname_domain::normalization::normalize_label_under_suffix(label, &[]) {
+        Ok(name) if name.normalized_name == label => None,
+        Ok(_) => Some("raw label is not byte-identical to its normalized form".to_owned()),
+        Err(error) => Some(error.to_string()),
+    }
+}
+
+/// [`insert_family_label_preimage`] for each label, a chunk of labels per transaction.
+async fn insert_family_label_preimages(pool: &PgPool, raw_labels: &[&[u8]]) -> Result<Vec<String>> {
+    let mut hashes = Vec::with_capacity(raw_labels.len());
+    for chunk in raw_labels.chunks(SEED_CHUNK) {
+        let (mut decoded_labels, mut errors) = (Vec::new(), Vec::new());
+        let chunk_hashes = chunk
+            .iter()
+            .map(|raw_label| format!("{:#x}", alloy_primitives::keccak256(raw_label)))
+            .collect::<Vec<_>>();
+        for raw_label in chunk {
+            let decoded = std::str::from_utf8(raw_label)
+                .ok()
+                .filter(|label| !label.contains('\0'));
+            errors.push(label_preimage_error(decoded));
+            decoded_labels.push(decoded);
+        }
+        let mut transaction = pool.begin().await?;
+        bigname_storage::identity_search::prepare(&mut transaction, &chunk_hashes, &[], &[])
+            .await?;
+        sqlx::query(
+            "INSERT INTO label_preimages (labelhash, raw_label, decoded_label, normalizer_version,
+            normalized_under_version, normalization_error, source_kind, source_priority)
+            SELECT labelhash, raw_label, decoded_label, $4, normalization_error IS NULL,
+                   normalization_error, 'fixture', 0
+            FROM unnest($1::text[], $2::bytea[], $3::text[], $5::text[]) WITH ORDINALITY
+                AS input(labelhash, raw_label, decoded_label, normalization_error, ordinal)
+            ORDER BY ordinal
+            ON CONFLICT DO NOTHING",
+        )
+        .bind(&chunk_hashes)
+        .bind(chunk)
+        .bind(decoded_labels)
+        .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
+        .bind(errors)
+        .execute(&mut *transaction)
         .await?;
-    transaction.commit().await?;
-    Ok(hash)
+        bigname_storage::identity_search::refresh(&mut transaction, &[], &chunk_hashes).await?;
+        transaction.commit().await?;
+        hashes.extend(chunk_hashes);
+    }
+    Ok(hashes)
 }
 
 /// A normalized registry NewOwner observation. It creates the retained edge only;

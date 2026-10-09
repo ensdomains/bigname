@@ -1,7 +1,10 @@
 //! Validate real responses at the common test router boundary, including optional variants
 //! exercised by the existing feature fixtures. No schema work enters the production router.
 
-use std::{collections::BTreeMap, sync::OnceLock};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 use axum::{
     body::{Body, to_bytes},
@@ -26,24 +29,62 @@ fn validator(schema: &Value) -> Result<Validator, jsonschema::error::ValidationE
         .build(&root)
 }
 
-fn validators() -> &'static BTreeMap<String, Validator> {
-    static VALIDATORS: OnceLock<BTreeMap<String, Validator>> = OnceLock::new();
-    VALIDATORS.get_or_init(|| {
-        let mut validators = BTreeMap::new();
+/// Response validators keyed by `METHOD path status`, each compiled on its first use. A test
+/// process serves one to three of the documented JSON responses, and compiling all of them
+/// costs about a quarter of a second.
+#[derive(Default)]
+struct Validators(Mutex<BTreeMap<String, Arc<Validator>>>);
+
+impl Validators {
+    fn get(&self, method: &str, path: &str, status: u16) -> Option<Arc<Validator>> {
+        let key = format!("{method} {path} {status}");
+        if let Some(validator) = self.lock().get(&key) {
+            return Some(validator.clone());
+        }
+        let schema = document()["paths"][path][method.to_lowercase()]["responses"]
+            [status.to_string()]
+        .pointer("/content/application~1json/schema")?;
+        let compiled = validator(schema).unwrap_or_else(|error| panic!("{key}: {error}"));
+        Some(self.lock().entry(key).or_insert(Arc::new(compiled)).clone())
+    }
+
+    /// Compile the validator of every documented JSON response, returning how many there are.
+    fn compile_all(&self) -> usize {
+        let mut documented = 0;
         for (path, methods) in document()["paths"].as_object().unwrap() {
             for (method, operation) in methods.as_object().unwrap() {
                 for (status, response) in operation["responses"].as_object().unwrap() {
-                    if let Some(schema) = response.pointer("/content/application~1json/schema") {
-                        let key = format!("{} {path} {status}", method.to_uppercase());
-                        let compiled =
-                            validator(schema).unwrap_or_else(|error| panic!("{key}: {error}"));
-                        validators.insert(key, compiled);
+                    if response
+                        .pointer("/content/application~1json/schema")
+                        .is_some()
+                    {
+                        let status = status.parse().unwrap_or_else(|error| {
+                            panic!("{method} {path} status {status}: {error}")
+                        });
+                        self.get(&method.to_uppercase(), path, status)
+                            .expect("a documented JSON response has a validator");
+                        documented += 1;
                     }
                 }
             }
         }
-        validators
-    })
+        documented
+    }
+
+    fn len(&self) -> usize {
+        self.lock().len()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Arc<Validator>>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+fn validators() -> &'static Validators {
+    static VALIDATORS: OnceLock<Validators> = OnceLock::new();
+    VALIDATORS.get_or_init(Validators::default)
 }
 
 pub(crate) fn operation_path(method: &str, request_path: &str) -> Option<&'static str> {
@@ -66,7 +107,7 @@ pub(crate) fn operation_path(method: &str, request_path: &str) -> Option<&'stati
 pub(crate) fn assert_payload(method: &str, path: &str, status: u16, payload: &Value) {
     let key = format!("{method} {path} {status}");
     let validator = validators()
-        .get(&key)
+        .get(method, path, status)
         .unwrap_or_else(|| panic!("undocumented JSON response: {key}"));
     let errors = validator
         .iter_errors(payload)
@@ -162,7 +203,11 @@ fn openapi_document_and_every_payload_schema_validate_offline() {
             .unwrap_or_else(|error| panic!("component {name}: {error}"));
     }
     validate_inline_schemas(document(), "#");
-    assert!(!validators().is_empty());
+    // Served responses compile their validators lazily, so this is where every one compiles.
+    let every = Validators::default();
+    let documented = every.compile_all();
+    assert!(documented > 0);
+    assert_eq!(every.len(), documented);
     let mut malformed_document = document().clone();
     malformed_document["openapi"] = json!("2.0");
     assert!(!standard.is_valid(&malformed_document));
@@ -180,6 +225,19 @@ fn openapi_document_and_every_payload_schema_validate_offline() {
     assert!(
         error.is_valid(&json!({"error":{"code":"invalid_input","message":"bad","details":{}}}))
     );
+}
+
+#[test]
+fn openapi_response_validators_compile_once_per_operation_on_first_use() {
+    let cache = Validators::default();
+    let first = cache.get("GET", "/v1/names/{name}", 200).unwrap();
+    assert_eq!(cache.len(), 1);
+    let again = cache.get("GET", "/v1/names/{name}", 200).unwrap();
+    assert!(Arc::ptr_eq(&first, &again));
+    assert!(cache.get("GET", "/v1/names/{name}", 299).is_none());
+    assert_eq!(cache.len(), 1);
+    cache.get("GET", "/v1/names/{name}/history", 200).unwrap();
+    assert_eq!(cache.len(), 2);
 }
 
 #[test]
