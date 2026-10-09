@@ -59,9 +59,9 @@ async fn deadline(database: &TestDatabase) -> Result<Option<i64>> {
         .await?,
     )
 }
-#[tokio::test]
-async fn migrated_subname_nested_rebound_physical_mutation_updates_only_affected_path() -> Result<()>
-{
+/// Blocks 120-123: `DEEP` is reachable only through two physical mounts, registry `w` under
+/// `child` and registry `x` under `branch`, with `deep` registered in `x`.
+async fn rebound() -> Result<(TestDatabase, Address, Address, Address, i64)> {
     let (database, logs, resolver) = setup().await?;
     seed_and_run(&database, &logs, 120, 122).await?;
     let owner = HOLDER.parse()?;
@@ -224,9 +224,12 @@ async fn migrated_subname_nested_rebound_physical_mutation_updates_only_affected
     let record = path_get(&database, &format!("/v1/names/{DEEP}")).await?;
     assert_eq!(record["data"]["primary_address"], HOLDER, "{record:#}");
     assert_eq!(deadline(&database).await?, Some(expiry));
-    // Only the deeply nested physical entry changes. Its canonical logical name differs from
-    // this requested path at two mounts, and neither requested name receives a new event.
-    let renew = transaction(
+    Ok((database, resolver, x, owner, expiry))
+}
+
+/// The physical renewal of block 124 below.
+fn renewal(x: Address, owner: Address, expiry: i64) -> Vec<RawLogInput> {
+    transaction(
         124,
         0,
         vec![(
@@ -238,8 +241,47 @@ async fn migrated_subname_nested_rebound_physical_mutation_updates_only_affected
             }
             .encode_log_data(),
         )],
+    )
+}
+
+/// R24. The catalog's root registry moves after the run captured its manifest set. The catalog
+/// row points elsewhere, while the captured set, read from the manifest events, still admits
+/// the deployed root, as for a run that captured before a sync. Block 124 changes only the
+/// physical entry under the captured root, so only the walk from the captured root reaches
+/// `DEEP`, and its recomposition deadline moves as it does with no sync.
+#[tokio::test]
+async fn the_physical_walk_starts_at_the_captured_root_when_the_catalog_moves() -> Result<()> {
+    let (database, _resolver, x, owner, expiry) = rebound().await?;
+    let moved = sqlx::query(
+        "UPDATE manifest_versions
+         SET manifest_payload = regexp_replace(manifest_payload::text,
+             '0xb458d6a3a77919449d03e7a6903c26827c1ec43f',
+             '0x00000000000000000000000000000000000000b5', 'gi')::jsonb
+         WHERE chain_id = $1 AND namespace = 'ens' AND source_family = 'ens_v2_root_l1'
+           AND rollout_status = 'active'",
+    )
+    .bind(PATH_CHAIN)
+    .execute(&database.pool)
+    .await?;
+    assert_eq!(moved.rows_affected(), 1, "the catalog's active root row");
+    seed_and_run(&database, &renewal(x, owner, expiry), 124, 124).await?;
+    assert_eq!(
+        deadline(&database).await?,
+        Some(expiry + 100),
+        "the walk from the captured root reaches the renewed entry"
     );
-    seed_and_run(&database, &renew, 124, 124).await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn migrated_subname_nested_rebound_physical_mutation_updates_only_affected_path() -> Result<()>
+{
+    let (database, resolver, x, owner, expiry) = rebound().await?;
+    let (eth, w): (Address, Address) = (ETH.parse()?, W.parse()?);
+    let deep: B256 = bigname_lookup::ens_namehash_hex(DEEP)?.parse()?;
+    // Only the deeply nested physical entry changes. Its canonical logical name differs from
+    // this requested path at two mounts, and neither requested name receives a new event.
+    seed_and_run(&database, &renewal(x, owner, expiry), 124, 124).await?;
     assert_eq!(
         deadline(&database).await?,
         Some(expiry + 100),

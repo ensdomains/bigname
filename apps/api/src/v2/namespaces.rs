@@ -12,7 +12,9 @@ use bigname_manifests::{
     load_namespace_manifest_snapshot,
 };
 use bigname_storage::{
-    Protocol, begin_read_snapshot, load_resolution_state_on, load_served_project_generation,
+    begin_read_snapshot,
+    families::name::{ensure_family_publications, is_publication_unavailable},
+    load_served_project_generation,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -161,8 +163,9 @@ pub(crate) async fn get_namespace(
 }
 
 /// Per chain with an ENS execution entrypoint and a servable family publication, keyed by chain
-/// slug. A chain with no client-facing proxy row has observed no `Upgraded`, so ENSv1 governs
-/// with no known start.
+/// slug. A chain is `ens_v2` while its publication was composed with an admitted ENSv2 root
+/// registry, dated by that registry's declared start block. The Universal Resolver proxies are
+/// not an input.
 async fn load_resolutions(
     pool: &PgPool,
     execution_manifests: &[ExecutionManifestVersion],
@@ -178,8 +181,8 @@ async fn load_resolutions(
     }
     let mut snapshot = begin_read_snapshot(pool).await?;
     for chain in chains {
-        // The publication fence name reads apply: a bootstrapping, lagging, redoing or orphaned
-        // publication holds proxy rows name reads would refuse to serve.
+        // The publication fence name reads apply: name reads refuse a bootstrapping, lagging,
+        // redoing or orphaned publication, so its composition is not reported either.
         let servable = load_served_project_generation(
             &mut *snapshot,
             chain,
@@ -193,13 +196,18 @@ async fn load_resolutions(
         if servable.is_none() {
             continue;
         }
-        let resolution = match load_resolution_state_on(&mut snapshot, chain).await? {
-            Some(state) => NamespaceResolution {
-                protocol: match state.protocol {
-                    Protocol::EnsV1 => ResolutionProtocol::EnsV1,
-                    Protocol::EnsV2 => ResolutionProtocol::EnsV2,
-                },
-                since_block: Some(state.since_block),
+        // The admission the publication was composed with, not the manifest catalog's, so a
+        // manifest sync shows here only once the redo republishes.
+        let publication =
+            match ensure_family_publications(&mut *snapshot, &[chain.to_owned()]).await {
+                Ok(mut publications) => publications.remove(0),
+                Err(error) if is_publication_unavailable(&error) => continue,
+                Err(error) => return Err(error),
+            };
+        let resolution = match publication.admission {
+            Some(admission) => NamespaceResolution {
+                protocol: ResolutionProtocol::EnsV2,
+                since_block: admission.since_block,
             },
             None => NamespaceResolution {
                 protocol: ResolutionProtocol::EnsV1,

@@ -360,7 +360,7 @@ async fn read_only_namespace_reports_resolution_on_one_connection() -> Result<()
     assert_eq!(
         payload["data"]["networks"],
         sepolia_network(Some(
-            json!({ "protocol": "ens_v2", "since_block": 11821680 })
+            json!({ "protocol": "ens_v2", "since_block": 11820291 })
         ))
     );
     cleanup_role(&database, pool, role).await?;

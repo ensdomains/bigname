@@ -78,6 +78,9 @@ impl Declaration {
 }
 
 impl Declarations {
+    /// The ENSv2 declarations of the manifest set the publication was composed with
+    /// ([`FamilyPublication::admission_manifests`]). A manifest update written after it
+    /// applies from the redo that republishes.
     pub(crate) async fn load(
         conn: &mut PgConnection,
         publication: &FamilyPublication,
@@ -91,11 +94,11 @@ impl Declarations {
                AND source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_migration_l1')
                AND source_manifest_id IS NOT NULL AND consumer_visibility = 'activated'
                AND canonicality_state IN ('canonical', 'safe', 'finalized')
-               AND (block_number IS NULL OR block_number <= $2)
+               AND normalized_event_id = ANY($2)
              ORDER BY source_manifest_id, normalized_event_id DESC",
         )
         .bind(&publication.chain_id)
-        .bind(publication.block_number)
+        .bind(publication.manifest_event_ids()?)
         .fetch_all(conn)
         .await
         .context("failed to read published registry declarations")?;
@@ -118,10 +121,11 @@ impl Declarations {
         // from the current Project entry fact; the retained manifest proves the exact code.
         // (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/RootRegistry.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
         // (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ETHRegistry.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
+        // The root is whichever address the active root manifest declares. `declares` below
+        // matches the address, so no other registry passes as the root.
         let (family, role) = match registry {
-            "0xb458d6a3a77919449d03e7a6903c26827c1ec43f" => ("ens_v2_root_l1", "root_registry"),
             "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4" => ("ens_v2_registry_l1", "registry"),
-            _ => return None,
+            _ => ("ens_v2_root_l1", "root_registry"),
         };
         let matching: Vec<_> = self
             .0

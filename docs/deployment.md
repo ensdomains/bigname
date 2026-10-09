@@ -2236,9 +2236,10 @@ run the Sepolia check in [Default reverse names](#default-reverse-names).
 
 ### Universal Resolver cutover gauges and alert
 
-The build that reports the
-[Universal Resolver cutover](glossary.md#universal-resolver-cutover) per chain
-edits no file the [interpreter content hash](glossary.md#interpreter-content-hash)
+The build that reports whether each chain is past the
+[Universal Resolver cutover](glossary.md#universal-resolver-cutover), and
+whether its client-facing Universal Resolver forwards to an implementation the
+`ens_execution` manifest admits, edits no file the [interpreter content hash](glossary.md#interpreter-content-hash)
 covers and adds no schema-migration, so it needs no redo and no historical
 ingest fetch. The runner exports `phase_runner_universal_resolver_cut_over` and
 `phase_runner_universal_resolver_unadmitted` and logs a warning when a chain's
@@ -2289,10 +2290,18 @@ The build that admits the 2026-10-01 Sepolia ENSv2 redeploy (TYR-183, see the
 families (root, registry, registrar, resolver, migration and `ens_execution`)
 with version 2 under `deployment_epoch = "ens_v2_sepolia_20261001"` and deletes
 version 1. The 2026-09-15 deployment's contracts are dropped, not kept as
-retired history. Both Universal Resolver proxies keep their addresses and start blocks;
-`ens_execution` lists only the redeploy's UniversalResolverV2 `0x24e1d8e0…`,
-which the managed proxy moved to at block `11821680`, so that block is the
-Sepolia [Universal Resolver cutover](glossary.md#universal-resolver-cutover).
+retired history. Both Universal Resolver proxies keep their addresses and start blocks.
+`ens_execution` lists only the redeploy's UniversalResolverV2 `0x24e1d8e0…`.
+The managed proxy moved to it at block `11821680`. That block is the Universal
+Resolver proxy upgrade. It is not the Sepolia
+[Universal Resolver cutover](glossary.md#universal-resolver-cutover), and the
+monitoring does not report it. The
+[cutover gauges](#universal-resolver-cutover-gauges-and-alert) export no block.
+The proxy warning names a block only when the proxy leaves the listed
+implementation.
+Sepolia is cut over by the admission of the redeploy's root registry, which its
+declared start block `11820291` dates
+([Cutover at ENSv2 admission](#cutover-at-ensv2-admission)).
 The redeploy ships as a new version file because synchronization upserts a
 manifest on its namespace, family, chain, epoch and version while the stored
 file path must stay unique, so a new epoch written into the same `v1.toml`
@@ -2322,11 +2331,10 @@ Project redo it installs, before the matching API serves. A release that also
 rotates the hash for another change, such as "Read-only family queries outside
 the content hash", runs that Interpret and Project pair once for both.
 
-After the redo, Sepolia's ENSv2 history starts with the redeploy. The replayed
-proxy history classifies every block before `11821680` as not cut over,
-including `11710193` to `11821679`, when the dropped deployment answered
-resolution, so Project derives that range with ENSv1 expiry, grace and
-resolvers for every `.eth` name. Name reads still serve only the current
+After the redo, Sepolia's ENSv2 history starts with the redeploy. Since
+[Cutover at ENSv2 admission](#cutover-at-ensv2-admission), the whole retained
+range reads as cut over, including the blocks before `11821680`. Name reads
+still serve only the current
 family publication: an `at=` below it answers `stale`, as before. The dropped registries
 announced themselves with `RegistryCreated`, so like any self-announced registry
 they stay on the registry routes, but nothing admitted reaches them and their
@@ -2518,12 +2526,13 @@ names the latest `Upgraded` on the client-facing proxy's path rather than the
 block of the row the path ends at. After deploy, with the
 [Sepolia ENSv2 redeploy of 2026-10-01](#sepolia-ensv2-redeploy-of-2026-10-01)
 in place, `GET /v1/namespaces/ens` on Sepolia serves `resolution` with
-`protocol` `ens_v2` and `since_block` equal to the Sepolia
-[Universal Resolver cutover](glossary.md#universal-resolver-cutover) block,
-when the managed proxy moved to the listed UniversalResolverV2
-(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UniversalResolverV2.json:L2 @ ens_v2_sepolia_20261001@07e55a05).
-On Mainnet the `ens_execution` manifest declares no `Upgraded` event, so no
-proxy row exists and the network serves `{"protocol": "ens_v1", "since_block": null}`.
+`protocol` `ens_v2`. Since
+[Cutover at ENSv2 admission](#cutover-at-ensv2-admission), `since_block` is
+the admitted root registry's declared start block, `11820291` on Sepolia, and
+no longer the block of a proxy upgrade
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/RootRegistry.json:L2995 @ ens_v2_sepolia_20261001@07e55a05).
+Mainnet's profile admits no ENSv2 root registry, so the network serves
+`{"protocol": "ens_v1", "since_block": null}`.
 
 ### Parent filter on names by address
 
@@ -2539,6 +2548,116 @@ are read-only queries outside the
 does not rotate. It adds no schema-migration and needs no redo or historical
 ingest fetch. Cursors issued before it continue unchanged, and a cursor issued
 with `parent` must be continued with the same `parent`.
+
+### Cutover at ENSv2 admission
+
+The build that decides the
+[Universal Resolver cutover](glossary.md#universal-resolver-cutover) from the
+admitted ENSv2 deployment, instead of the Universal Resolver proxies'
+`Upgraded` events (TYR-282), changes
+`crates/storage/src/families/control/cutover.rs` and
+`crates/project/src/families`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain.
+
+- It changes no manifest payload, only comments. The comment edit to
+  `manifests/sepolia/ethereum/ens/ens_execution/v2.toml` moves the Sepolia
+  manifest-profile hash from
+  `keccak256:96c0def9f08f5a0dea2eee93fb1e060bddc6d9aaa6212f835035276660507b80`
+  to `keccak256:0d50281c63dad6e9b3fbafea50d82fbfa678f0b5bff70c0813c1d8f1456f7a73`,
+  and the Mainnet manifest-profile hash and the manifest-authority
+  fingerprint are unchanged. No
+  [manifest-authority marker](glossary.md#manifest-authority-marker) is
+  recorded and no Ingest redo is stamped.
+- It adds the schema-migration
+  `20261009130000_project_family_marker_admission.sql`. It adds the nullable
+  `root_registry` and `since_block` columns to `project_family_marker`, which
+  record the admission each publication was composed with. It also rewrites
+  the `project_universal_resolver_proxy` table comment. No row or index
+  changes, and the redo rewrites every marker.
+- Five manifest reads come from the manifest set the publication recorded,
+  not from the current manifests. Between a manifest sync and the redo that
+  adopts it, they serve the previous publication. Stored lookup answers
+  `409 stale` while the input hashes are the old epoch's. Verified lookup and
+  namespace admission answer `409` if the manifests change during a read.
+  Seven reads still use the current manifests (TYR-299). The
+  [API reference](api-v1.md#manifest-reads-and-the-publication) lists them.
+  The drained rollout stays the rule.
+- An existing deployment finishes the full-history Interpret redo and the
+  Project redo it installs before the matching API serves. The next
+  re-derivation release's shared redo pair discharges it with the other
+  rotations.
+- The ENSv2 path walk for names below a `.eth` name starts at the admitted
+  root registry's declared address. It no longer assumes the Sepolia address.
+- A Universal Resolver upgrade now writes one proxy row and nothing else. The
+  one-time recompute of every `.eth` name that an upgrade used to trigger
+  while following the chain head is gone. Its cost moves into the redo pair,
+  which composes every name anyway. It does not vanish.
+
+After the redo, Sepolia reads as cut over for its whole retained history,
+including the blocks before `11821680`. At the head nothing a name serves
+changes.
+
+- `GET /v1/namespaces/ens` serves `resolution.protocol` `ens_v2` with
+  `since_block` `11820291`, the root registry's declared start block. Before
+  this build it served `11821680`.
+- `phase_runner_universal_resolver_cut_over` stays `1`.
+  `phase_runner_universal_resolver_unadmitted` keeps reporting the proxies
+  ([Universal Resolver cutover gauges and alert](#universal-resolver-cutover-gauges-and-alert)).
+- A rollback of the proxy to an unlisted implementation still pages through
+  `BignameUniversalResolverUnadmitted`, but it moves no name any more. Reload
+  the rule file for the reworded annotation.
+- Check that `GET /v1/names/nick.eth` still serves `expires_at` `1803965433`,
+  and that an ENSv1-only `.eth` name serves `unresolvable_reason`
+  `no_live_ens_v2_entry`.
+
+Mainnet precondition. Mainnet has no ENSv2 manifests yet and keeps reading
+ENSv1. Admitting its ENSv2 manifests is the cutover. A `.eth` name loses
+resolution when it has no live ENSv2 entry at admission, meaning no reservation
+or registration on the admitted ETHRegistry. From that redo it serves no
+resolver and no records, and neither does any name below it. Admit the
+manifests once premigration has reserved every live `.eth` name, or accept that
+window knowingly.
+
+Before promoting the staging seed, count those names on the staging API, which
+admits the manifests. A live name is one whose grace has not ended. The script
+lists the live second-level `.eth` names that ENSv1 decides, following every
+cursor page. It then reads each name's detail and counts those serving
+`unresolvable_reason` `no_live_ens_v2_entry`. `/v1/names` needs a date bound,
+and `grace_ends_after` is it. The retries absorb the `409 stale` a read answers
+while the publication catches up with the head, and curl still prints each
+retried error. Each response goes to a file and is parsed only after curl
+succeeds, so a failed attempt's partial body is never counted. The script fails
+rather than undercount when a read keeps failing. Each name's read runs in its
+own shell and prints at most its name, so the parallel reads cannot interleave
+their output. An empty listing counts 0 and makes no detail read.
+
+```bash
+set -euo pipefail
+API=${API:?set API to the staging API base URL}
+retry=(--retry 10 --retry-all-errors --retry-max-time 300)
+now=$(date +%s)
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+cursor=
+: > live.txt
+while :; do
+  curl -fsSG "${retry[@]}" -o "$WORK/page.json" "$API/v1/names" \
+    -d namespace=ens -d parent=eth -d authority=ens_v1 \
+    -d grace_ends_after="$now" -d page_size=200 ${cursor:+-d cursor="$cursor"}
+  jq -r --arg api "$API" '.data[].name | "\($api)/v1/names/\(@uri)"' "$WORK/page.json" >> live.txt
+  cursor=$(jq -r '.page.next_cursor // empty' "$WORK/page.json")
+  [ -n "$cursor" ] || break
+done
+export WORK UNRESOLVABLE='select(.data.unresolvable_reason == "no_live_ens_v2_entry") | .data.name'
+xargs -r -P 8 -n 1 bash -c 'set -euo pipefail
+  detail=$(mktemp "$WORK/detail.XXXXXX")
+  curl -fsS --retry 10 --retry-all-errors --retry-max-time 300 -o "$detail" "$1"
+  jq -r "$UNRESOLVABLE" "$detail"' _ \
+  < live.txt | wc -l
+```
+
+That number is the window.
 
 ### Released registrar children
 

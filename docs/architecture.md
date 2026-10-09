@@ -472,8 +472,8 @@ When ENSv1 decides a `.eth` label that never had an ENSv2 registration, that is
 the one difference: the Universal Resolver finds no resolver for it; see
 [`upstream.md`](upstream.md#ensv1-authority-without-an-ensv2-entry). From the
 [Universal Resolver cutover](glossary.md#universal-resolver-cutover), which
-Project reads from the admitted proxies' `Upgraded` events
-(`project_universal_resolver_proxy`), the composed row follows the Universal
+the deployment profile's ENSv2 root registry admission sets, the composed row
+follows the Universal
 Resolver for resolution: such a name, and every name below it, serves no
 resolver or records, while its owner and registration stay as selection decides
 them. From the cutover a name with a live ENSv2 entry also serves that entry's

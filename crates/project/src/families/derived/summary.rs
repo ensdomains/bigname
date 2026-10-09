@@ -28,7 +28,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
-use sqlx::{Postgres, Transaction, types::time::OffsetDateTime};
+use sqlx::{Postgres, Transaction};
 
 use crate::{
     ProjectError, Result,
@@ -50,12 +50,14 @@ pub(crate) struct Refreshed {
 
 /// Compose again, journal and write the summaries of the names block `number` touched. `after`
 /// is the family marker's block the block follows, -1 with none: a rebuild range composes once,
-/// at its last block, for every block after it.
+/// at its last block, for every block after it. `composition` is the block's manifest set and
+/// the admission it declares.
 pub(super) async fn refresh(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     number: i64,
     after: i64,
+    composition: &super::super::marker::Composition,
 ) -> Result<Refreshed> {
     let block = input::read_block(transaction, chain_id, number)
         .await?
@@ -64,7 +66,7 @@ pub(super) async fn refresh(
                 "family block {number} of chain {chain_id} is not readable for its name summaries"
             ))
         })?;
-    let mut names: Vec<String> = sqlx::query_scalar(WORK_LIST)
+    let names: Vec<String> = sqlx::query_scalar(WORK_LIST)
         .bind(chain_id)
         .bind(number)
         .bind(block.timestamp_seconds)
@@ -74,26 +76,10 @@ pub(super) async fn refresh(
         .map_err(|error| {
             ProjectError::database("failed to read the names a family block touched", error)
         })?;
-    // Proxy changes and later parent releases can retire direct disagreements.
-    let affected =
-        super::super::universal_resolver::cutover_names(transaction, chain_id, number).await?;
-    if !affected.is_empty() {
-        names.extend(affected);
-        names.sort_unstable();
-        names.dedup();
-    }
     if names.is_empty() {
         return Ok(Refreshed::default());
     }
-    let publication = bigname_storage::families::name::FamilyPublication {
-        chain_id: chain_id.to_owned(),
-        block_number: number,
-        block_hash: block.hash.clone(),
-        block_timestamp: OffsetDateTime::from_unix_timestamp(block.timestamp_seconds).map_err(
-            |error| ProjectError::data_integrity(format!("block {number} time: {error}")),
-        )?,
-        block_timestamp_json: block.timestamp.clone(),
-    };
+    let publication = super::super::marker::publication(chain_id, &block, composition)?;
     let mut current_relations = Vec::new();
     let mut result = Refreshed::default();
     for chunk in names.chunks(CHUNK) {
@@ -145,8 +131,8 @@ pub(crate) async fn retire_null_resolver_divergences(
     Ok(())
 }
 
-/// Replace at most one composition chunk, retaining the first image if ordinary and cutover
-/// work name the same key in this publication.
+/// Replace at most one composition chunk, retaining the first image if the ordinary and the
+/// resolution-path refresh name the same key in this publication.
 pub(crate) async fn replace_chunk(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,

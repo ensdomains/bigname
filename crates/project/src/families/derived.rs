@@ -6,9 +6,7 @@
 //!
 //! After a block's write the name summaries of the names it touched are composed again
 //! (`summary.rs`); those are journalled, so an undo restores them with the other families.
-mod search_cutover;
 mod summary;
-pub(crate) use search_cutover::refresh as refresh_search_cutover;
 pub(crate) use summary::{
     WORK_LIST as SUMMARY_WORK_LIST, replace_chunk as replace_summary_chunk,
     retire_null_resolver_divergences,
@@ -136,11 +134,13 @@ pub(crate) async fn touched(
 
 /// Delete and derive again the index rows of the touched keys, then, after a block's write,
 /// compose again the name summaries of the names it touched. Returns what the summary refresh
-/// wrote (nothing on an undo, which restores the summaries from the journal).
+/// wrote (nothing on an undo, which restores the summaries from the journal). `composition` is
+/// the manifest set and admission the summaries compose with.
 pub(crate) async fn refresh(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     touched: &Touched,
+    composition: &super::marker::Composition,
 ) -> Result<summary::Refreshed> {
     if !touched.names.is_empty() {
         run(transaction, NAME_DELETE, chain_id, &touched.names, None).await?;
@@ -159,7 +159,7 @@ pub(crate) async fn refresh(
     let Some(after) = touched.summaries_after else {
         return Ok(summary::Refreshed::default());
     };
-    summary::refresh(transaction, chain_id, touched.number, after).await
+    summary::refresh(transaction, chain_id, touched.number, after, composition).await
 }
 
 async fn run(

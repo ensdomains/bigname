@@ -99,9 +99,15 @@ pub(crate) async fn undo_block(
             prior["current_block_number"].as_i64().unwrap_or(-1),
         )
         .await?;
-    derived::refresh(&mut transaction, chain_id, &touched).await?;
-
     let restored = FamilyMarker::from_journal_image(&prior, locked.sequence + 1);
+    derived::refresh(
+        &mut transaction,
+        chain_id,
+        &touched,
+        &marker::Composition::recorded(&restored),
+    )
+    .await?;
+
     super::history_catalogue::restored(&mut transaction, chain_id, &restored).await?;
     marker::advance(&mut transaction, chain_id, &restored).await?;
     sqlx::query(

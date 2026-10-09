@@ -303,6 +303,11 @@ reservation still defers ownership to ENSv1, but from the cutover the name
 serves the reservation's expiry and the ENSv2 grace period
 (`docs/api-v1.md` § Expiry and grace).
 
+Amendment (2026-10-09, TYR-282): the cutover is no longer read from the
+client-facing proxy. A chain is cut over while its deployment profile admits
+an ENSv2 root registry, for its whole retained history. The
+[glossary entry](../glossary.md#universal-resolver-cutover) carries the rule.
+
 ## Consequences
 
 - Under the 2026-09-25 amendment, a name live on ENSv1 whose ENSv2

@@ -7,24 +7,17 @@ mod work;
 pub(super) use work::prepare;
 
 use super::{block::BlockStats, input::BlockHeader};
-use crate::{ProjectError, Result};
-use bigname_storage::families::name::FamilyPublication;
-use sqlx::{Postgres, Transaction, types::time::OffsetDateTime};
+use crate::Result;
+use sqlx::{Postgres, Transaction};
 
 pub(super) async fn refresh(
     transaction: &mut Transaction<'_, Postgres>,
     chain: &str,
     block: &BlockHeader,
+    composition: &super::marker::Composition,
     stats: &mut BlockStats,
 ) -> Result<()> {
-    let publication = FamilyPublication {
-        chain_id: chain.into(),
-        block_number: block.number,
-        block_hash: block.hash.clone(),
-        block_timestamp: OffsetDateTime::from_unix_timestamp(block.timestamp_seconds)
-            .map_err(|e| ProjectError::data_integrity(format!("lookup publication time: {e}")))?,
-        block_timestamp_json: block.timestamp.clone(),
-    };
+    let publication = super::marker::publication(chain, block, composition)?;
     names::refresh(transaction, &publication, block, stats).await?;
     inventories::refresh(transaction, &publication, block, stats).await
 }

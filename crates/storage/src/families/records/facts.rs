@@ -7,6 +7,8 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::{PgConnection, Row};
 
+use crate::families::name::FamilyPublication;
+
 /// Attribution columns of one event, read from `normalized_events` by its event identity, which
 /// is unique there. The family rows keep only a secondary position (block, transaction, log and
 /// event identity) for the events they do not own, so the normalized event id, the logical name
@@ -110,12 +112,13 @@ pub(crate) fn chain_position(
 
 /// A resolver's classification as the served record inventory reads it: the classification
 /// object, its support status and reason, and the namespace of its declaration manifest when that
-/// manifest is admitted (latest `SourceManifestUpdated` active with a payload, at or before the
-/// block the families stand at).
+/// manifest is admitted (its `SourceManifestUpdated` event in the publication's manifest set is
+/// active with a payload).
 ///
 /// Read from the owned key family F3 (`project_resolver_classification`). The declaration
-/// manifest's namespace is read from the latest readable manifest event at or below the family
-/// publication; F3's own `admission_namespace` is the resolver edge's admission, not the
+/// manifest's namespace is read from the manifest's event in the family publication's manifest
+/// set ([`FamilyPublication::admission_manifests`]), so a manifest sync reaches it only through
+/// the redo. F3's own `admission_namespace` is the resolver edge's admission, not the
 /// declaration's.
 #[derive(Clone, Debug, Default)]
 pub struct ResolverClassification {
@@ -190,12 +193,17 @@ pub(crate) async fn load_classifications_on(
     load_classifications_at(conn, chain_id, resolver_addresses, None).await
 }
 
+/// [`load_classifications_on`] for `publication`. With none, the declarations are read from the
+/// manifest set of the chain's current family marker.
 pub(crate) async fn load_classifications_at(
     conn: &mut PgConnection,
     chain_id: &str,
     resolver_addresses: &[String],
-    publication_block: Option<i64>,
+    publication: Option<&FamilyPublication>,
 ) -> Result<HashMap<String, ResolverClassification>> {
+    let manifest_events = publication
+        .map(FamilyPublication::manifest_event_ids)
+        .transpose()?;
     let addresses: Vec<String> = resolver_addresses
         .iter()
         .map(|address| address.to_ascii_lowercase())
@@ -222,7 +230,11 @@ pub(crate) async fn load_classifications_at(
                 declaration.namespace AS declaration_namespace
          FROM source
          LEFT JOIN (
-             SELECT current_block_number AS block FROM bigname_phase.project_family_marker
+             SELECT ARRAY(
+                        SELECT split_part(entry, ':', 2)::bigint
+                        FROM unnest(string_to_array(admission_manifests, ',')) entry
+                    ) AS events
+             FROM bigname_phase.project_family_marker
              WHERE chain_id = $1
          ) marker ON TRUE
          LEFT JOIN LATERAL (
@@ -243,15 +255,14 @@ pub(crate) async fn load_classifications_at(
                AND manifest.canonicality_state IN ('canonical', 'safe', 'finalized')
                AND (manifest.block_hash IS NULL
                     OR lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
-               AND (manifest.block_number IS NULL OR COALESCE($3, marker.block) IS NULL
-                    OR manifest.block_number <= COALESCE($3, marker.block))
+               AND manifest.normalized_event_id = ANY(COALESCE($3::bigint[], marker.events))
              ORDER BY manifest.normalized_event_id DESC
              LIMIT 1
          ) declaration ON declaration.active",
     )
     .bind(chain_id)
     .bind(&addresses)
-    .bind(publication_block)
+    .bind(manifest_events)
     .fetch_all(&mut *conn)
     .await
     .context("failed to load resolver classifications")?;

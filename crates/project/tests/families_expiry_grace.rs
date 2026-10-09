@@ -1,15 +1,15 @@
 //! The `.eth` expiry and grace a composed name serves around the Universal Resolver cutover
-//! (TYR-90). A `.eth` name that ENSv1 still decides and that ENSv2 premigration reserved serves
-//! its ENSv1 lease's expiry and the 90-day ENSv1 grace until the client-facing Universal
-//! Resolver proxy's chain ends at an admitted UniversalResolverV2 implementation, and the
-//! reservation's expiry while it does. These synthetic ENSv2 entries use an arbitrary registry
-//! and no admitted ETHRegistry declaration, so their canonical grace end equals expiry; the
-//! `.eth` suffix and Universal Resolver cutover do not establish registrar grace. After cutover
-//! a `.eth` name that ENSv1 decides without a live ENSv2 entry, and every name below it, serve no
-//! resolver. A block that changes a proxy recomposes the summaries of the reserved names, and
-//! undo and rebuild restore them. The registration time of such a name is its ENSv1
-//! registration's through renewals, the reservation, the cutover and the ENSv1→ENSv2 migration;
-//! only a new registration after a release starts a new one (TYR-131).
+//! (TYR-90, TYR-282). A chain is cut over while its deployment profile admits an ENSv2 root
+//! registry. On such a chain a `.eth` name that ENSv1 still decides and that ENSv2 premigration
+//! reserved serves the reservation's expiry, and a `.eth` name that ENSv1 decides without a live
+//! ENSv2 entry, and every name below it, serve no resolver. On a chain with no admitted root
+//! registry the ENSv1 lease's expiry and the 90-day ENSv1 grace apply. The client-facing
+//! Universal Resolver proxy's `Upgraded` events are kept for monitoring and move no name. These
+//! synthetic ENSv2 entries use an arbitrary registry and no admitted ETHRegistry declaration, so
+//! their canonical grace end equals expiry. The `.eth` suffix and the cutover do not establish
+//! registrar grace. The registration time of such a name is its ENSv1 registration's through
+//! renewals, the reservation and the ENSv1→ENSv2 migration. Only a new registration after a
+//! release starts a new one (TYR-131).
 #[path = "families_expiry_grace/declared_path.rs"]
 mod declared_path;
 #[path = "families_support/mod.rs"]
@@ -280,23 +280,90 @@ fn expect(expiry: u64, grace_days: u64, resolver: Option<&str>, reason: Option<&
     })
 }
 
+/// The declared Universal Resolver proxies' rows, as monitoring reads them: address, role and
+/// the classification of the implementation.
+async fn proxy_rows(fixture: &Fixture) -> Result<Vec<(String, Option<String>, String)>> {
+    Ok(sqlx::query_as(
+        "SELECT proxy_address, proxy_role, implementation_kind
+         FROM project_universal_resolver_proxy WHERE chain_id = $1 ORDER BY proxy_address",
+    )
+    .bind(CHAIN)
+    .fetch_all(&fixture.pool)
+    .await?)
+}
+
 #[tokio::test]
-async fn a_reserved_eth_name_serves_the_reservation_expiry_only_while_cut_over() -> Result<()> {
-    let fixture = Fixture::new("families_expiry_grace_reserved", 12).await?;
-    execution_manifest(&fixture, None, 0, TOP_PROXY, 0).await?;
+async fn an_admitted_ens_v2_root_registry_cuts_the_chain_over_with_no_proxy_event() -> Result<()> {
+    let fixture = Fixture::new("families_expiry_grace_admitted", 12).await?;
+    declared_path::root_eth_entry(&fixture).await?;
     let alice = leased(&fixture, "alice.eth", 1, 1).await?;
     reserved(&fixture, &alice, 1, 4).await?;
     fixture.apply(5, FamilyMode::Normal).await?;
-    let before = expect(LEASE_EXPIRY, 90, Some(RESOLVER), None);
+    ensure!(proxy_rows(&fixture).await?.is_empty());
+    // The reservation keeps resolving through the ENSv1 resolver.
+    let after = expect(RESERVED_EXPIRY, 0, Some(RESOLVER), None);
     ensure!(
-        served(&fixture, &alice).await? == before,
+        served(&fixture, &alice).await? == after,
         "{}",
         served(&fixture, &alice).await?
     );
-    ensure!(summary_expiry(&fixture, &alice).await? == Some(LEASE_EXPIRY as i64));
+    ensure!(summary_expiry(&fixture, &alice).await? == Some(RESERVED_EXPIRY as i64));
+    let selected = [(
+        alice.clone(),
+        RESERVED_EXPIRY.to_string(),
+        Some("ens_v1".to_owned()),
+    )];
+    ensure!(fixture.assert_expiry_selector().await? == selected);
 
-    // The client-facing proxy points at the managed proxy, which has no Upgraded yet: its
-    // constructor's implementation is not admitted, so the chain is not cut over.
+    fixture.assert_undo_restores(5).await?;
+    fixture.assert_rebuild_equal(5).await?;
+    ensure!(fixture.assert_expiry_selector().await? == selected);
+    fixture.cleanup().await
+}
+
+/// A chain whose profile admits no ENSv2 root registry keeps the ENSv1 schedule and resolver,
+/// even when its client-facing proxy forwards to a listed UniversalResolverV2.
+#[tokio::test]
+async fn a_universal_resolver_upgrade_without_an_ens_v2_root_registry_cuts_nothing_over()
+-> Result<()> {
+    let fixture = Fixture::new("families_expiry_grace_proxy_only", 12).await?;
+    execution_manifest(&fixture, None, 0, TOP_PROXY, 0).await?;
+    let alice = leased(&fixture, "alice.eth", 1, 1).await?;
+    reserved(&fixture, &alice, 1, 4).await?;
+    let bob = leased(&fixture, "bob.eth", 2, 2).await?;
+    upgraded(
+        &fixture,
+        5,
+        TOP_PROXY,
+        "universal_resolver",
+        ADMITTED,
+        "admitted_universal_resolver",
+    )
+    .await?;
+    fixture.apply(5, FamilyMode::Normal).await?;
+    ensure!(proxy_rows(&fixture).await?.len() == 1);
+    let lease = expect(LEASE_EXPIRY, 90, Some(RESOLVER), None);
+    for name in [&alice, &bob] {
+        ensure!(
+            served(&fixture, name).await? == lease,
+            "{}",
+            served(&fixture, name).await?
+        );
+    }
+    ensure!(summary_expiry(&fixture, &alice).await? == Some(LEASE_EXPIRY as i64));
+    fixture.assert_rebuild_equal(5).await?;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn a_rollback_to_an_unlisted_implementation_keeps_the_chain_cut_over() -> Result<()> {
+    let fixture = Fixture::new("families_expiry_grace_rollback", 12).await?;
+    declared_path::root_eth_entry(&fixture).await?;
+    execution_manifest(&fixture, None, 0, TOP_PROXY, 0).await?;
+    let alice = leased(&fixture, "alice.eth", 1, 1).await?;
+    reserved(&fixture, &alice, 1, 4).await?;
+
+    // The client-facing proxy points at the managed proxy, which has no `Upgraded` yet.
     upgraded(
         &fixture,
         6,
@@ -307,9 +374,8 @@ async fn a_reserved_eth_name_serves_the_reservation_expiry_only_while_cut_over()
     )
     .await?;
     fixture.apply(6, FamilyMode::Normal).await?;
-    ensure!(served(&fixture, &alice).await? == before);
+    let hop_only = served(&fixture, &alice).await?;
 
-    // The managed proxy moves to the admitted UniversalResolverV2: cut over.
     upgraded(
         &fixture,
         7,
@@ -320,21 +386,13 @@ async fn a_reserved_eth_name_serves_the_reservation_expiry_only_while_cut_over()
     )
     .await?;
     fixture.apply(7, FamilyMode::Normal).await?;
-    let after = expect(RESERVED_EXPIRY, 0, Some(RESOLVER), None);
+    let reservation = expect(RESERVED_EXPIRY, 0, Some(RESOLVER), None);
     ensure!(
-        served(&fixture, &alice).await? == after,
+        served(&fixture, &alice).await? == reservation,
         "{}",
         served(&fixture, &alice).await?
     );
-    ensure!(
-        summary_expiry(&fixture, &alice).await? == Some(RESERVED_EXPIRY as i64),
-        "the cutover block did not recompose the reserved name's summary"
-    );
-    // No event names alice.eth at the cutover block, yet its expiry selector moves with it.
-    let selected = |expiry: u64| [(alice.clone(), expiry.to_string(), Some("ens_v1".to_owned()))];
-    ensure!(fixture.assert_expiry_selector().await? == selected(RESERVED_EXPIRY));
 
-    // A rollback to an unadmitted implementation ends the cutover.
     upgraded(
         &fixture,
         8,
@@ -345,21 +403,36 @@ async fn a_reserved_eth_name_serves_the_reservation_expiry_only_while_cut_over()
     )
     .await?;
     fixture.apply(8, FamilyMode::Normal).await?;
-    ensure!(served(&fixture, &alice).await? == before);
-    ensure!(summary_expiry(&fixture, &alice).await? == Some(LEASE_EXPIRY as i64));
-    ensure!(fixture.assert_expiry_selector().await? == selected(LEASE_EXPIRY));
+    ensure!(
+        proxy_rows(&fixture).await?[0]
+            == (
+                MANAGED_PROXY.into(),
+                Some("universal_resolver_managed".into()),
+                "other".into()
+            ),
+        "{:?}",
+        proxy_rows(&fixture).await?
+    );
+    ensure!(
+        served(&fixture, &alice).await? == reservation,
+        "a rollback moved the name: {}",
+        served(&fixture, &alice).await?
+    );
+    ensure!(summary_expiry(&fixture, &alice).await? == Some(RESERVED_EXPIRY as i64));
+    ensure!(
+        hop_only == reservation,
+        "a managed proxy with no Upgraded moved the name: {hop_only}"
+    );
 
     fixture.assert_undo_restores(8).await?;
     fixture.assert_rebuild_equal(8).await?;
-    ensure!(fixture.assert_expiry_selector().await? == selected(LEASE_EXPIRY));
     fixture.cleanup().await
 }
 
 #[tokio::test]
-async fn after_the_cutover_an_eth_name_without_a_live_entry_and_its_subnames_do_not_resolve()
+async fn on_an_admitted_chain_an_eth_name_without_a_live_entry_and_its_subnames_do_not_resolve()
 -> Result<()> {
     let fixture = Fixture::new("families_expiry_grace_unresolvable", 12).await?;
-    execution_manifest(&fixture, None, 0, TOP_PROXY, 0).await?;
     declared_path::root_eth_entry(&fixture).await?;
     let bob = leased(&fixture, "bob.eth", 2, 1).await?;
     let sub = surface(&fixture, "sub.bob.eth").await?;
@@ -383,51 +456,30 @@ async fn after_the_cutover_an_eth_name_without_a_live_entry_and_its_subnames_do_
     resolver(&fixture, &sub, 3).await?;
     fixture.apply(4, FamilyMode::Normal).await?;
     declared_path::assert_deployed_path(&fixture).await?;
-    ensure!(
-        served(&fixture, &bob).await? == expect(LEASE_EXPIRY, 90, Some(RESOLVER), None),
-        "{}",
-        served(&fixture, &bob).await?
-    );
-    let sub_before = served(&fixture, &sub).await?;
-    ensure!(
-        sub_before["resolver"] == json!(RESOLVER)
-            && sub_before["unresolvable_reason"].is_null()
-            && sub_before["resolution_unsupported_reason"].is_null(),
-        "{sub_before}"
-    );
-
-    upgraded(
-        &fixture,
-        5,
-        TOP_PROXY,
-        "universal_resolver",
-        ADMITTED,
-        "admitted_universal_resolver",
-    )
-    .await?;
-    fixture.apply(5, FamilyMode::Normal).await?;
-    // ENSv1 still decides the name and its lease stands, but resolution no longer reaches it.
+    // ENSv1 still decides the name and its lease stands, but resolution never reaches it: no
+    // proxy `Upgraded` is needed.
     ensure!(
         served(&fixture, &bob).await?
             == expect(LEASE_EXPIRY, 90, None, Some("no_live_ens_v2_entry")),
         "{}",
         served(&fixture, &bob).await?
     );
-    let sub_after = served(&fixture, &sub).await?;
+    let sub_row = served(&fixture, &sub).await?;
     ensure!(
-        sub_after["resolver"].is_null()
-            && sub_after["unresolvable_reason"] == json!("no_live_ens_v2_entry")
-            && sub_after["resolution_unsupported_reason"].is_null(),
-        "{sub_after}"
+        sub_row["resolver"].is_null()
+            && sub_row["unresolvable_reason"] == json!("no_live_ens_v2_entry")
+            && sub_row["resolution_unsupported_reason"].is_null(),
+        "{sub_row}"
     );
+    ensure!(proxy_rows(&fixture).await?.is_empty());
 
-    fixture.assert_undo_restores(5).await?;
-    fixture.assert_rebuild_equal(5).await?;
+    fixture.assert_undo_restores(4).await?;
+    fixture.assert_rebuild_equal(4).await?;
     fixture.cleanup().await
 }
 
 #[tokio::test]
-async fn a_generic_ens_v2_registration_has_no_inferred_grace_before_any_cutover() -> Result<()> {
+async fn a_generic_ens_v2_registration_has_no_inferred_grace() -> Result<()> {
     let fixture = Fixture::new("families_expiry_grace_native", 12).await?;
     let carol = surface(&fixture, "carol.eth").await?;
     let resource = uuid(0x4000);
@@ -460,10 +512,14 @@ async fn a_generic_ens_v2_registration_has_no_inferred_grace_before_any_cutover(
     fixture.cleanup().await
 }
 
+/// The proxy family still follows the declarations for monitoring. Rotating the declared
+/// client-facing proxy moves `proxy_role` and `implementation_kind` on the retained rows at the
+/// block that publishes it, and moves no name.
 #[tokio::test]
-async fn rotating_the_declared_proxy_reclassifies_retained_upgrades_at_publication() -> Result<()> {
+async fn rotating_the_declared_proxy_reclassifies_retained_upgrades_for_monitoring() -> Result<()> {
     const SUCCESSOR: &str = "0x00000000000000000000000000000000000000f1";
     let fixture = Fixture::new("families_expiry_grace_rotation", 12).await?;
+    declared_path::root_eth_entry(&fixture).await?;
     let manifest = execution_manifest(&fixture, None, 0, TOP_PROXY, 0).await?;
     let alice = leased(&fixture, "alice.eth", 1, 1).await?;
     reserved(&fixture, &alice, 1, 4).await?;
@@ -477,8 +533,22 @@ async fn rotating_the_declared_proxy_reclassifies_retained_upgrades_at_publicati
     )
     .await?;
     fixture.apply(6, FamilyMode::Normal).await?;
-    ensure!(served(&fixture, &alice).await?["expiry"] == json!(RESERVED_EXPIRY.to_string()));
-    ensure!(summary_expiry(&fixture, &alice).await? == Some(RESERVED_EXPIRY as i64));
+    let client_facing = Some("universal_resolver".to_owned());
+    let admitted = "admitted_universal_resolver".to_owned();
+    ensure!(
+        proxy_rows(&fixture).await?
+            == [(TOP_PROXY.into(), client_facing.clone(), admitted.clone())]
+    );
+    let summaries = fixture.rows("project_name_summary").await?;
+    let unmoved = || async {
+        ensure!(served(&fixture, &alice).await?["expiry"] == json!(RESERVED_EXPIRY.to_string()));
+        ensure!(
+            fixture.rows("project_name_summary").await? == summaries,
+            "a declaration rotation rewrote a name summary"
+        );
+        Ok(())
+    };
+    unmoved().await?;
 
     execution_manifest(&fixture, Some(manifest), 7, SUCCESSOR, 7).await?;
     // Rotation retains the retired proxy's replayable upgrade alongside the successor's.
@@ -491,25 +561,44 @@ async fn rotating_the_declared_proxy_reclassifies_retained_upgrades_at_publicati
         "other",
     )
     .await?;
-    // Sync cannot change the previously published result before Project consumes its input.
-    ensure!(served(&fixture, &alice).await?["expiry"] == json!(RESERVED_EXPIRY.to_string()));
     fixture.apply(7, FamilyMode::Normal).await?;
     ensure!(
-        served(&fixture, &alice).await?["expiry"] == json!(LEASE_EXPIRY.to_string()),
-        "a retired proxy still determines the expiry after declaration rotation"
+        proxy_rows(&fixture).await?
+            == [
+                (SUCCESSOR.into(), client_facing.clone(), "other".into()),
+                (TOP_PROXY.into(), None, admitted.clone()),
+            ],
+        "the retired proxy kept its role: {:?}",
+        proxy_rows(&fixture).await?
     );
-    ensure!(summary_expiry(&fixture, &alice).await? == Some(LEASE_EXPIRY as i64));
+    unmoved().await?;
     fixture.assert_undo_restores(7).await?;
     fixture.assert_rebuild_equal(7).await?;
 
-    // A declaration change with no new upgrade reuses retained implementation evidence only
-    // once that declaration starts. The start block itself must publish the changed expiry.
+    // A declaration change with no new upgrade reclassifies the retained rows only once that
+    // declaration starts.
     execution_manifest(&fixture, Some(manifest), 8, TOP_PROXY, 9).await?;
     fixture.apply(8, FamilyMode::Normal).await?;
-    ensure!(served(&fixture, &alice).await?["expiry"] == json!(LEASE_EXPIRY.to_string()));
+    ensure!(
+        proxy_rows(&fixture).await?
+            == [
+                (SUCCESSOR.into(), None, "other".into()),
+                (TOP_PROXY.into(), None, admitted.clone()),
+            ],
+        "{:?}",
+        proxy_rows(&fixture).await?
+    );
     fixture.apply(9, FamilyMode::Normal).await?;
-    ensure!(served(&fixture, &alice).await?["expiry"] == json!(RESERVED_EXPIRY.to_string()));
-    ensure!(summary_expiry(&fixture, &alice).await? == Some(RESERVED_EXPIRY as i64));
+    ensure!(
+        proxy_rows(&fixture).await?
+            == [
+                (SUCCESSOR.into(), None, "other".into()),
+                (TOP_PROXY.into(), client_facing, admitted),
+            ],
+        "{:?}",
+        proxy_rows(&fixture).await?
+    );
+    unmoved().await?;
     fixture.assert_undo_restores(9).await?;
     fixture.assert_rebuild_equal(9).await?;
     fixture.cleanup().await
@@ -636,10 +725,9 @@ async fn migrated(fixture: &Fixture, name: &str, n: u32, block: i64) -> Result<(
 }
 
 #[tokio::test]
-async fn renewals_the_reservation_the_cutover_and_the_migration_keep_the_registration_time()
--> Result<()> {
+async fn renewals_the_reservation_and_the_migration_keep_the_registration_time() -> Result<()> {
     let fixture = Fixture::new("families_expiry_grace_registered_at", 12).await?;
-    execution_manifest(&fixture, None, 0, TOP_PROXY, 0).await?;
+    declared_path::root_eth_entry(&fixture).await?;
     let alice = leased(&fixture, "alice.eth", 1, 1).await?;
     let granted = Some(block_time(2));
     lease_event(
@@ -651,24 +739,15 @@ async fn renewals_the_reservation_the_cutover_and_the_migration_keep_the_registr
         LEASE_EXPIRY + 365 * DAY,
     )
     .await?;
-    reserved(&fixture, &alice, 1, 4).await?;
-    fixture.apply(4, FamilyMode::Normal).await?;
+    fixture.apply(3, FamilyMode::Normal).await?;
     ensure!(times(&fixture, &alice).await? == (granted, None));
 
-    upgraded(
-        &fixture,
-        5,
-        TOP_PROXY,
-        "universal_resolver",
-        ADMITTED,
-        "admitted_universal_resolver",
-    )
-    .await?;
+    reserved(&fixture, &alice, 1, 4).await?;
     fixture.apply(5, FamilyMode::Normal).await?;
-    let reserved_after_cutover = served(&fixture, &alice).await?;
+    let reserved_row = served(&fixture, &alice).await?;
     ensure!(
-        reserved_after_cutover["expiry"] == json!(RESERVED_EXPIRY.to_string()),
-        "{reserved_after_cutover}"
+        reserved_row["expiry"] == json!(RESERVED_EXPIRY.to_string()),
+        "{reserved_row}"
     );
     ensure!(times(&fixture, &alice).await? == (granted, None));
 
@@ -834,7 +913,7 @@ async fn a_wrapped_eth_name_renewed_through_the_base_registrar_serves_the_renewe
     const RENEWED: u64 = LEASE_EXPIRY + 365 * DAY;
     const RENEWED_AGAIN: u64 = RENEWED + 365 * DAY;
     let fixture = Fixture::new("families_expiry_grace_wrapped_renewal", 12).await?;
-    execution_manifest(&fixture, None, 0, TOP_PROXY, 0).await?;
+    declared_path::root_eth_entry(&fixture).await?;
     let nick = surface(&fixture, "nick.eth").await?;
     let (lease, wrapper) = (uuid(0x5001), uuid(0x5002));
     fixture
@@ -924,15 +1003,6 @@ async fn a_wrapped_eth_name_renewed_through_the_base_registrar_serves_the_renewe
         .await?;
     resolver(&fixture, &nick, 2).await?;
     reserved(&fixture, &nick, 5, 3).await?;
-    upgraded(
-        &fixture,
-        4,
-        TOP_PROXY,
-        "universal_resolver",
-        ADMITTED,
-        "admitted_universal_resolver",
-    )
-    .await?;
     fixture.apply(4, FamilyMode::Normal).await?;
     let row = served(&fixture, &nick).await?;
     ensure!(
@@ -1005,18 +1075,9 @@ async fn extending_only_the_reservation_moves_its_deadline_and_keeps_the_lease_d
 {
     const EXTENDED: u64 = RESERVED_EXPIRY + 30 * DAY;
     let fixture = Fixture::new("families_expiry_grace_batch_extension", 12).await?;
-    execution_manifest(&fixture, None, 0, TOP_PROXY, 0).await?;
+    declared_path::root_eth_entry(&fixture).await?;
     let alice = leased(&fixture, "alice.eth", 1, 1).await?;
     reserved(&fixture, &alice, 1, 4).await?;
-    upgraded(
-        &fixture,
-        5,
-        TOP_PROXY,
-        "universal_resolver",
-        ADMITTED,
-        "admitted_universal_resolver",
-    )
-    .await?;
     fixture.apply(5, FamilyMode::Normal).await?;
     let before = served(&fixture, &alice).await?;
     ensure!(
@@ -1055,139 +1116,79 @@ async fn extending_only_the_reservation_moves_its_deadline_and_keeps_the_lease_d
     fixture.cleanup().await
 }
 
-/// More than one composition chunk, with a same-block renewal overlapping the proxy change.
-/// This enters through normalized events and ordinary Project publication, without writing
-/// search summaries or their journal directly.
+/// The families block `block` journalled with their row counts, leaving out the two markers
+/// every block journals.
+async fn journalled(fixture: &Fixture, block: i64) -> Result<Vec<(String, i64)>> {
+    Ok(sqlx::query_as(
+        "SELECT family, count(*) FROM project_family_undo
+         WHERE chain_id = $1 AND block_number = $2
+           AND family NOT IN ('marker', 'project_history_catalogue_marker')
+         GROUP BY family ORDER BY family",
+    )
+    .bind(CHAIN)
+    .bind(block)
+    .fetch_all(&fixture.pool)
+    .await?)
+}
+
+/// A Universal Resolver upgrade on an admitted chain writes its own proxy row and nothing else:
+/// no name summary is composed again and none is journalled, whichever implementation the
+/// proxy moves to.
 #[tokio::test]
-async fn cutover_search_fields_cross_chunks_keep_first_images_and_undo_exactly() -> Result<()> {
-    let fixture = Fixture::new("families_search_cutover_chunks", 6).await?;
+async fn a_universal_resolver_upgrade_after_admission_writes_no_summary_row() -> Result<()> {
+    let fixture = Fixture::new("families_expiry_grace_upgrade_only", 8).await?;
+    declared_path::root_eth_entry(&fixture).await?;
     execution_manifest(&fixture, None, 0, TOP_PROXY, 0).await?;
-    let mut names = Vec::new();
-    for n in 0..1001_u32 {
-        let name = surface(&fixture, &format!("cutover-{n:04}.eth")).await?;
-        let resource = uuid(30_000 + n);
-        fixture
-            .binding(
-                &uuid(20_000 + n),
-                &name,
-                &resource,
-                "ens_v1",
-                1,
-                i64::from(n),
-                None,
-            )
-            .await?;
-        fixture
-            .write(
-                1,
-                i64::from(n),
-                "SurfaceBound",
-                "ens_v1_registrar_l1",
-                Some(&name),
-                Some(&resource),
-                json!({"authority_kind":"registrar", "state_derived":false,
-            "registry_contract":REGISTRY,"owner_getter":OWNER}),
-                REGISTRAR,
-            )
-            .await?;
-        fixture
-            .write(
-                2,
-                i64::from(n),
-                "RegistrationGranted",
-                "ens_v1_registrar_l1",
-                Some(&name),
-                Some(&resource),
-                json!({"authority_kind":"registrar","status":"registered",
-            "registrant":OWNER,"expiry":LEASE_EXPIRY}),
-                REGISTRAR,
-            )
-            .await?;
-        fixture
-            .write(
-                3,
-                i64::from(n),
-                "RegistrationReserved",
-                "ens_v2_registry_l1",
-                Some(&name),
-                Some(&uuid(40_000 + n)),
-                json!({"registry_contract_instance_id":"eth",
-            "token_id":n.to_string(),"status":"reserved","expiry":RESERVED_EXPIRY}),
-                V2_REGISTRY,
-            )
-            .await?;
-        names.push(name);
-    }
+    let alice = leased(&fixture, "alice.eth", 1, 1).await?;
+    reserved(&fixture, &alice, 1, 4).await?;
+    let bob = leased(&fixture, "bob.eth", 2, 2).await?;
     fixture.apply(4, FamilyMode::Normal).await?;
     let before = fixture.rows("project_name_summary").await?;
-    ensure!(before.len() == 1001);
-    ensure!(
-        before
-            .iter()
-            .all(|row| row["search_fields"]["expires_at"] == json!(LEASE_EXPIRY.to_string()))
-    );
-    upgraded(
-        &fixture,
-        5,
-        TOP_PROXY,
-        "universal_resolver",
-        ADMITTED,
-        "admitted_universal_resolver",
-    )
-    .await?;
-    fixture
-        .write(
-            5,
-            2,
-            "RegistrationRenewed",
-            "ens_v1_registrar_l1",
-            Some(&names[0]),
-            Some(&uuid(30_000)),
-            json!({"authority_kind":"registrar",
-        "status":"registered", "registrant":OWNER, "expiry":LEASE_EXPIRY+DAY}),
-            REGISTRAR,
+    ensure!(before.len() == 2, "{}", before.len());
+
+    for (block, implementation, kind) in [
+        (5, ADMITTED, "admitted_universal_resolver"),
+        (6, OLD_IMPLEMENTATION, "other"),
+    ] {
+        upgraded(
+            &fixture,
+            block,
+            TOP_PROXY,
+            "universal_resolver",
+            implementation,
+            kind,
         )
         .await?;
-    fixture.apply(5, FamilyMode::Normal).await?;
-    let after = fixture.rows("project_name_summary").await?;
-    ensure!(after.len() == 1001);
+        fixture.apply(block, FamilyMode::Normal).await?;
+        ensure!(
+            proxy_rows(&fixture).await?
+                == [(
+                    TOP_PROXY.into(),
+                    Some("universal_resolver".into()),
+                    kind.into()
+                )],
+            "block {block}: {:?}",
+            proxy_rows(&fixture).await?
+        );
+        ensure!(
+            journalled(&fixture, block).await? == [("project_universal_resolver_proxy".into(), 1)],
+            "block {block}: a proxy upgrade journalled {:?}",
+            journalled(&fixture, block).await?
+        );
+        ensure!(
+            fixture.rows("project_name_summary").await? == before,
+            "block {block}: a proxy upgrade rewrote a name summary"
+        );
+    }
+    ensure!(served(&fixture, &alice).await?["expiry"] == json!(RESERVED_EXPIRY.to_string()));
+    ensure!(served(&fixture, &bob).await?["unresolvable_reason"] == json!("no_live_ens_v2_entry"));
+    fixture.apply(7, FamilyMode::Normal).await?;
     ensure!(
-        after
-            .iter()
-            .all(|row| row["search_fields"]["expires_at"] == json!(RESERVED_EXPIRY.to_string()))
+        journalled(&fixture, 7).await?.is_empty(),
+        "an empty block journals only what `journalled` leaves out"
     );
-    let images: Vec<Value> = sqlx::query_scalar(
-        "SELECT before_image-'chain_id'
-        FROM project_family_undo WHERE family='project_name_summary' AND block_number=5
-        ORDER BY (before_image-'chain_id')::text",
-    )
-    .fetch_all(&fixture.pool)
-    .await?;
-    let mut expected = before.clone();
-    expected.sort_by_key(Value::to_string);
-    // Compare as a set; PostgreSQL JSONB's text key order differs from serde_json's.
-    let mut images = images.iter().map(Value::to_string).collect::<Vec<_>>();
-    images.sort();
-    ensure!(
-        images == expected.iter().map(Value::to_string).collect::<Vec<_>>(),
-        "the cutover must journal each original summary once"
-    );
-    fixture.apply(6, FamilyMode::Normal).await?;
-    ensure!(
-        fixture.rows("project_name_summary").await? == after,
-        "empty block rewrote static fields"
-    );
-    let empty_undo: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM project_family_undo
-        WHERE family='project_name_summary' AND block_number=6",
-    )
-    .fetch_one(&fixture.pool)
-    .await?;
-    ensure!(empty_undo == 0);
-    ensure!(bigname_project::families::undo_to(&fixture.pool, CHAIN, 4).await? == 2);
-    ensure!(fixture.rows("project_name_summary").await? == before);
-    fixture.apply(5, FamilyMode::Normal).await?;
-    ensure!(fixture.rows("project_name_summary").await? == after);
-    fixture.assert_rebuild_equal(5).await?;
+
+    fixture.assert_undo_restores(7).await?;
+    fixture.assert_rebuild_equal(7).await?;
     fixture.cleanup().await
 }

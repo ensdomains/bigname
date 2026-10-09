@@ -20,6 +20,8 @@ mod lookup_lifecycle;
 mod lookup_links;
 #[path = "migrated_subnames/lookup_publication.rs"]
 mod lookup_publication;
+#[path = "migrated_subnames/manifest_sync.rs"]
+mod manifest_sync;
 #[path = "migrated_subnames/mirror.rs"]
 mod mirror;
 #[path = "migrated_subnames/missing_parent.rs"]
@@ -70,10 +72,46 @@ async fn publish(database: &TestDatabase, block: i64) -> Result<()> {
     database.seed_snapshot_selector_chain_positions(&json!({PATH_CHAIN:{"chain_id":PATH_CHAIN,"block_number":block,"block_hash":format!("0xhistory{block}"),"timestamp":bigname_storage::UnixSeconds::from(timestamp(1_700_000_000+block)).internal_string()}})).await
 }
 async fn setup() -> Result<(TestDatabase, Vec<RawLogInput>, Address)> {
+    setup_at(None).await
+}
+
+/// `setup`, with the Sepolia profile's root registry declared at `root` instead of its
+/// deployed address when one is given. Every root log follows the declaration.
+async fn setup_at(root: Option<&str>) -> Result<(TestDatabase, Vec<RawLogInput>, Address)> {
+    const DEPLOYED_ROOT: &str = "0xb458d6a3a77919449d03e7a6903c26827c1ec43f";
     let database = TestDatabase::new_migrated().await?;
-    let repository = bigname_manifests::load_repository(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests/sepolia"),
-    )?;
+    let checked_in =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests/sepolia");
+    let moved = match root {
+        Some(root) => {
+            let copy = std::env::temp_dir().join(format!(
+                "bigname-moved-root-{}-{}",
+                std::process::id(),
+                NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut pending = vec![(checked_in.clone(), copy.clone())];
+            while let Some((from, to)) = pending.pop() {
+                std::fs::create_dir_all(&to)?;
+                for entry in std::fs::read_dir(&from)? {
+                    let entry = entry?;
+                    let target = to.join(entry.file_name());
+                    if entry.file_type()?.is_dir() {
+                        pending.push((entry.path(), target));
+                    } else {
+                        let text = std::fs::read_to_string(entry.path())?;
+                        std::fs::write(target, text.replace(DEPLOYED_ROOT, root))?;
+                    }
+                }
+            }
+            Some(copy)
+        }
+        None => None,
+    };
+    let repository = bigname_manifests::load_repository(moved.clone().unwrap_or(checked_in));
+    if let Some(copy) = moved {
+        std::fs::remove_dir_all(copy)?;
+    }
+    let repository = repository?;
     bigname_manifests::sync_schema_v2_repository(&database.lookup_pool, &repository).await?;
     let declarations: std::collections::BTreeMap<&str, Value> = repository
         .manifests()
@@ -688,6 +726,31 @@ async fn assert_name_consumers(
         );
     }
     Ok(())
+}
+
+/// The ENSv2 path walk starts at the root registry the profile admits, whatever its address.
+/// A retained ENSv1 descendant therefore still resolves when the root is deployed elsewhere.
+#[tokio::test]
+async fn migrated_subname_descendant_is_retained_under_a_root_registry_at_another_address()
+-> Result<()> {
+    let (database, logs, resolver) =
+        setup_at(Some("0x00000000000000000000000000000000000000b4")).await?;
+    let initial: Vec<_> = logs
+        .iter()
+        .filter(|log| log.block_number <= BASE + 121)
+        .cloned()
+        .collect();
+    seed_and_run(&database, &initial, 120, 121).await?;
+    let roots: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT entry.registry FROM project_ens_v2_entry_owner entry
+         JOIN normalized_events event ON event.event_identity = entry.event_identity
+         WHERE event.source_family = 'ens_v2_root_l1'",
+    )
+    .fetch_all(&database.pool)
+    .await?;
+    assert_eq!(roots, ["0x00000000000000000000000000000000000000b4"]);
+    assert_consumers(&database, true, resolver, None).await?;
+    database.cleanup().await
 }
 
 #[tokio::test]

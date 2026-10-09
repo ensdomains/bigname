@@ -23,6 +23,7 @@ use crate::families::{
 };
 use uuid::Uuid;
 
+use super::ManifestSets;
 use super::sql::{
     CLEARED, ENS_V1_POINTER_FAMILIES, ENS_V2_POINTER_FAMILIES, position, push_declaration_manifest,
     push_pointer_ctes, push_readable_event, push_readable_surface,
@@ -46,9 +47,10 @@ pub(super) async fn load_mirror_attribution(
     connection: &mut PgConnection,
     resource_ids: &[Uuid],
     published: Option<&BTreeMap<String, i64>>,
+    manifests: Option<&ManifestSets>,
     requested: Option<&super::RequestedPairs>,
 ) -> Result<BTreeMap<Uuid, Option<BTreeSet<i64>>>> {
-    let mirrors = load_mirror_pointers(connection, resource_ids, published).await?;
+    let mirrors = load_mirror_pointers(connection, resource_ids, published, manifests).await?;
     let _pointers_live = requested
         .map(|_| super::super::address_walk::seams::Live::new("mirror_pointers", mirrors.len()));
     let mut attribution = mirrors
@@ -76,7 +78,7 @@ pub(super) async fn load_mirror_attribution(
         super::super::address_walk::seams::Live::new("mirror_suffixes", walk.resource_ids.len())
     });
     let mut builder = QueryBuilder::<Postgres>::new("");
-    push_mirror_writes(&mut builder, &walk, published, requested);
+    push_mirror_writes(&mut builder, &walk, published, manifests, requested);
     let rows = builder
         .build()
         .fetch_all(&mut *connection)
@@ -113,6 +115,7 @@ async fn load_mirror_pointers(
     connection: &mut PgConnection,
     resource_ids: &[Uuid],
     published: Option<&BTreeMap<String, i64>>,
+    manifests: Option<&ManifestSets>,
 ) -> Result<Vec<MirrorPointer>> {
     let mut builder = QueryBuilder::<Postgres>::new("");
     push_pointer_ctes(&mut builder, resource_ids, published);
@@ -139,6 +142,7 @@ async fn load_mirror_pointers(
         "(resolver.provenance ->> 'manifest_id')::bigint",
         "latest.chain_id",
         published,
+        manifests,
     );
     builder.push(format!(
         " ON TRUE
@@ -212,7 +216,7 @@ pub(super) fn push_empty_mirror_writes_for_test(
     published: Option<&BTreeMap<String, i64>>,
 ) {
     let walk: &'static MirrorWalk = Box::leak(Box::default());
-    push_mirror_writes(builder, walk, published, None);
+    push_mirror_writes(builder, walk, published, None, None);
 }
 
 /// The mirror substitution statement over one consulted node, the queried name itself, for plan
@@ -235,7 +239,7 @@ pub(super) fn push_exact_node_mirror_writes_for_test(
         hashes: vec![Value::Array(Vec::new())],
         queried_nodes: vec![node.to_owned()],
     }));
-    push_mirror_writes(builder, walk, published, None);
+    push_mirror_writes(builder, walk, published, None, None);
 }
 
 /// `SELECT resource_id, normalized_event_id`: one row with a null id for every followed mirror,
@@ -244,6 +248,7 @@ fn push_mirror_writes<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     walk: &'a MirrorWalk,
     published: Option<&BTreeMap<String, i64>>,
+    manifests: Option<&ManifestSets>,
     requested: Option<&super::RequestedPairs>,
 ) {
     let record_source = if requested.is_some() {
@@ -338,6 +343,7 @@ fn push_mirror_writes<'a>(
         "(resolver.provenance ->> 'manifest_id')::bigint",
         "nearest.chain_id",
         published,
+        manifests,
     );
     // The mirror keeps a resolver found on an ancestor only when it is an ENSIP-10 extended
     // resolver, and calls an extended resolver's `resolve(name, data)`, so an ancestor's answer

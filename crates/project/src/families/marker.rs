@@ -1,11 +1,80 @@
 //! Permanent publication marker for the owned key families. Each family block, rebuild range
 //! and undo advances its generation. It records the input token and active manifest set used
 //! by the publication; the API and verified lookup serve only an admitted live marker.
+use bigname_storage::families::{
+    control::cutover::{self, Admission},
+    name::FamilyPublication,
+};
 use serde_json::{Value, json};
-use sqlx::{Postgres, Transaction};
+use sqlx::{Postgres, Transaction, types::time::OffsetDateTime};
 
 use super::input::{BlockHeader, InputToken, Revision};
+use super::manifests::ActiveSet;
 use crate::{Marker, ProjectError, Result};
+
+/// The manifest set a block composes and publishes with: the key of the set the run captured
+/// for the block, and the ENSv2 root registry admission that set's rows declare. Every
+/// `publication()` of the block and its marker take both from here, so the recorded root always
+/// describes the set key beside it. A manifest sync during the run reaches neither.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Composition {
+    pub(crate) manifests: Option<String>,
+    pub(crate) admission: Option<Admission>,
+}
+
+impl Composition {
+    /// The composition of the captured set `set`: its key, and the admission its active `ens`
+    /// `ens_v2_root_l1` rows declare. No statement reads the current manifests.
+    pub(crate) fn of(chain_id: &str, set: &ActiveSet) -> Result<Self> {
+        let payloads: Vec<Value> = set
+            .rows
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|row| row["namespace"] == "ens" && row["source_family"] == "ens_v2_root_l1")
+            .map(|row| row["manifest_payload"].clone())
+            .collect();
+        let admission = cutover::admission(&payloads).map_err(|error| {
+            ProjectError::transient(format!(
+                "chain {chain_id} manifest set {}: {error:#}",
+                set.key
+            ))
+        })?;
+        Ok(Self {
+            manifests: Some(set.key.clone()),
+            admission,
+        })
+    }
+
+    /// The composition a marker recorded, which an undo restores.
+    pub(crate) fn recorded(marker: &FamilyMarker) -> Self {
+        Self {
+            manifests: marker.admission_manifests.clone(),
+            admission: marker.admission.clone(),
+        }
+    }
+}
+
+/// The publication a family transaction composes at `block` with `composition`. The marker
+/// records the same composition, and readers take it from the marker, so a manifest change
+/// reaches them only through a republish.
+pub(crate) fn publication(
+    chain_id: &str,
+    block: &BlockHeader,
+    composition: &Composition,
+) -> Result<FamilyPublication> {
+    Ok(FamilyPublication {
+        chain_id: chain_id.to_owned(),
+        block_number: block.number,
+        block_hash: block.hash.clone(),
+        block_timestamp: OffsetDateTime::from_unix_timestamp(block.timestamp_seconds).map_err(
+            |error| ProjectError::data_integrity(format!("block {} time: {error}", block.number)),
+        )?,
+        block_timestamp_json: block.timestamp.clone(),
+        admission: composition.admission.clone(),
+        admission_manifests: composition.manifests.clone(),
+    })
+}
 
 /// The input token as a block recorded it.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -53,6 +122,8 @@ pub(crate) struct FamilyMarker {
     pub(crate) input_content_hash: Option<String>,
     pub(crate) token: RecordedToken,
     pub(crate) admission_manifests: Option<String>,
+    /// The ENSv2 root registry admission the publication was composed with.
+    pub(crate) admission: Option<Admission>,
     /// Whether a rebuild is still populating the families.
     pub(crate) bootstrap: bool,
 }
@@ -74,6 +145,8 @@ impl FamilyMarker {
             "project_redo_from": token.project_redo_from,
             "project_redo_to": token.project_redo_to,
             "admission_manifests": self.admission_manifests,
+            "root_registry": self.admission.as_ref().map(|admission| &admission.root_registry),
+            "since_block": self.admission.as_ref().and_then(|admission| admission.since_block),
             "bootstrap": self.bootstrap,
         })
     }
@@ -101,6 +174,10 @@ impl FamilyMarker {
                 project_redo_to: int("project_redo_to"),
             },
             admission_manifests: text(image, "admission_manifests"),
+            admission: text(image, "root_registry").map(|root_registry| Admission {
+                root_registry,
+                since_block: int("since_block"),
+            }),
             bootstrap: image
                 .get("bootstrap")
                 .and_then(Value::as_bool)
@@ -128,6 +205,8 @@ struct MarkerRow {
     project_redo_from: Option<i64>,
     project_redo_to: Option<i64>,
     admission_manifests: Option<String>,
+    root_registry: Option<String>,
+    since_block: Option<i64>,
     state: String,
 }
 
@@ -151,6 +230,10 @@ impl From<MarkerRow> for FamilyMarker {
                 project_redo_to: row.project_redo_to,
             },
             admission_manifests: row.admission_manifests,
+            admission: row.root_registry.map(|root_registry| Admission {
+                root_registry,
+                since_block: row.since_block,
+            }),
             bootstrap: row.state == "bootstrap_pending",
         }
     }
@@ -160,7 +243,7 @@ const MARKER_COLUMNS: &str = "current_block_number, current_block_hash,
         extract(epoch FROM block_timestamp)::bigint AS timestamp_seconds, input_content_hash,
         sequence, interpret_input_content_hash, interpret_redo_attempt,
         interpret_redo_in_progress, project_redo_attempt, project_redo_mode, project_redo_from,
-        project_redo_to, admission_manifests, state";
+        project_redo_to, admission_manifests, root_registry, since_block, state";
 
 /// Read the chain's marker without locking it.
 pub(crate) async fn read(pool: &sqlx::PgPool, chain_id: &str) -> Result<FamilyMarker> {
@@ -248,6 +331,7 @@ pub(crate) async fn advance(
     next: &FamilyMarker,
 ) -> Result<()> {
     let token = &next.token;
+    let admission = next.admission.as_ref();
     sqlx::query(
         "/* project:families.marker.advance */ UPDATE project_family_marker
          SET current_block_number = $2, current_block_hash = $3,
@@ -255,7 +339,7 @@ pub(crate) async fn advance(
              interpret_input_content_hash = $7, interpret_redo_attempt = $8,
              interpret_redo_in_progress = $9, project_redo_attempt = $10,
              project_redo_mode = $11, project_redo_from = $12, project_redo_to = $13,
-             admission_manifests = $14,
+             admission_manifests = $14, root_registry = $16, since_block = $17,
              state = CASE WHEN $15 THEN 'bootstrap_pending' ELSE 'live' END
          WHERE chain_id = $1",
     )
@@ -274,6 +358,8 @@ pub(crate) async fn advance(
     .bind(token.project_redo_to)
     .bind(next.admission_manifests.as_deref())
     .bind(next.bootstrap)
+    .bind(admission.map(|admission| &admission.root_registry))
+    .bind(admission.and_then(|admission| admission.since_block))
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to advance the family marker", error))?;

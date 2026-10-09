@@ -2,7 +2,10 @@
 use super::*;
 use alloy_primitives::B256;
 
-const COMPANION: &str = "companion.envoy1084.eth";
+/// ENSv2 `.eth` registrations whose registry entries name the linked resolver.
+const SUBJECT: &str = "linked105.eth";
+const COMPANION: &str = "companion105.eth";
+const ETH: &str = "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4";
 const LINKED: &str = "0x0000000000000000000000000000000000025910";
 const IMPLEMENTATION: &str = "0x115eb53f0c60696633855f90b138178fb40b2b2c";
 const FACTORY: &str = "0xda70306c98e97ece36f997a21368e53298572991";
@@ -79,7 +82,7 @@ async fn update(
         None,
     ))
     .await?;
-    lookup_publication::assert_name_prepared_parity(database, CHILD).await
+    lookup_publication::assert_name_prepared_parity(database, SUBJECT).await
 }
 
 async fn dependency(database: &TestDatabase, kind: &str, key2: &str) -> Result<bool> {
@@ -87,7 +90,7 @@ async fn dependency(database: &TestDatabase, kind: &str, key2: &str) -> Result<b
         JOIN project_lookup_name name ON name.chain_id=dependency.chain_id
           AND name.record_serving_resource_id=dependency.resource_id
         WHERE name.logical_name_id=$1 AND dependency.kind=$2 AND dependency.key1=$3 AND dependency.key2=$4)")
-        .bind(format!("ens:{}", bigname_lookup::ens_namehash_hex(CHILD)?))
+        .bind(format!("ens:{}", bigname_lookup::ens_namehash_hex(SUBJECT)?))
         .bind(kind).bind(LINKED).bind(key2).fetch_one(&database.pool).await?)
 }
 
@@ -95,7 +98,10 @@ async fn child_inventory(database: &TestDatabase) -> Result<Value> {
     let resource: Uuid = sqlx::query_scalar(
         "SELECT record_serving_resource_id FROM project_lookup_name WHERE logical_name_id=$1",
     )
-    .bind(format!("ens:{}", bigname_lookup::ens_namehash_hex(CHILD)?))
+    .bind(format!(
+        "ens:{}",
+        bigname_lookup::ens_namehash_hex(SUBJECT)?
+    ))
     .fetch_one(&database.pool)
     .await?;
     let mut out = serde_json::Map::new();
@@ -115,12 +121,7 @@ async fn child_inventory(database: &TestDatabase) -> Result<Value> {
 async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_updates()
 -> Result<()> {
     let (database, mut logs, _) = Box::pin(setup()).await?;
-    // Keep ENSv1 as the active resolution path for this independently admitted resolver.
-    // Other actual producer cases cover the later Universal Resolver cutover and mirror path.
-    logs.retain(|log| {
-        log.block_number <= BASE + 121
-            && !(log.block_number == BASE + 120 && log.transaction_index == 0)
-    });
+    logs.retain(|log| log.block_number <= BASE + 121);
     Box::pin(seed_and_run(&database, &logs, 120, 121)).await?;
     let resolver: Address = LINKED.parse()?;
     let owner: Address = GRANTEE.parse()?;
@@ -158,41 +159,25 @@ async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_u
             ),
         ],
     );
-    creation.extend(transaction(
-        122,
-        1,
-        vec![(
-            "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".parse()?,
-            NewResolver {
-                node: bigname_lookup::ens_namehash_hex(CHILD)?.parse()?,
+    // Each name is registered in the ETH registry with the linked resolver on its own entry,
+    // so the ENSv2 path reaches that resolver directly.
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/UniversalResolverV2.sol:L55-L63 @ ens_v2_sepolia_20261001@07e55a05)
+    let expiry = (1_700_000_000 + BASE + 100_000) as u64;
+    for (tx, name) in [(1, SUBJECT), (2, COMPANION)] {
+        let label = name.trim_end_matches(".eth");
+        creation.extend(transaction(
+            122,
+            tx,
+            register(
+                ETH.parse()?,
+                label,
                 resolver,
-            }
-            .encode_log_data(),
-        )],
-    ));
-    creation.extend(transaction(
-        122,
-        2,
-        vec![
-            (
-                "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".parse()?,
-                NewOwner {
-                    node: bigname_lookup::ens_namehash_hex(NAME)?.parse()?,
-                    label: keccak256("companion"),
-                    owner,
-                }
-                .encode_log_data(),
-            ),
-            (
-                "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".parse()?,
-                NewResolver {
-                    node: bigname_lookup::ens_namehash_hex(COMPANION)?.parse()?,
-                    resolver,
-                }
-                .encode_log_data(),
-            ),
-        ],
-    ));
+                Address::ZERO,
+                expiry,
+                DEPLOYER.parse()?,
+            )?,
+        ));
+    }
     creation.extend(transaction(122, 3, vec![link(COMPANION, 0)?]));
     for (index, log) in creation.iter_mut().enumerate() {
         log.log_index = index as i64;
@@ -204,22 +189,29 @@ async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_u
         122,
         &[
             (122, 0, GRANTEE),
-            (122, 1, GRANTEE),
-            (122, 2, HOLDER),
+            (122, 1, DEPLOYER),
+            (122, 2, DEPLOYER),
             (122, 3, GRANTEE),
         ],
         &[(122, 0, FACTORY)],
         None,
     ))
     .await?;
-    let empty = lookup_publication::assert_name_prepared_parity(&database, CHILD).await?;
+    let empty = lookup_publication::assert_name_prepared_parity(&database, SUBJECT).await?;
     assert_eq!(empty["resolver"]["address"], LINKED, "{empty:#}");
     assert!(empty["primary_address"].is_null());
     assert!(
         dependency(&database, "link", &format!("{:#x}", B256::ZERO)).await?,
         "the missing default must already be tracked"
     );
-    assert!(dependency(&database, "link", &bigname_lookup::ens_namehash_hex(CHILD)?).await?);
+    assert!(
+        dependency(
+            &database,
+            "link",
+            &bigname_lookup::ens_namehash_hex(SUBJECT)?
+        )
+        .await?
+    );
 
     // The first setter for a name allocates its record and emits Linked; the empty DNS name
     // is the resolver-wide default. Later setters retain that same record id.
@@ -244,7 +236,7 @@ async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_u
     let exact = update(
         &database,
         124,
-        vec![link(CHILD, 2)?, text(2, "exact", "kept")?],
+        vec![link(SUBJECT, 2)?, text(2, "exact", "kept")?],
     )
     .await?;
     assert!(
@@ -263,7 +255,7 @@ async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_u
     // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/PermissionedResolver.sol:L242-L251 @ ens_v2_sepolia_20261001@07e55a05)
     update(&database, 126, vec![link("", 2)?]).await?;
     assert_eq!(child_inventory(&database).await?, components);
-    let cleared = update(&database, 127, vec![link(CHILD, 0)?]).await?;
+    let cleared = update(&database, 127, vec![link(SUBJECT, 0)?]).await?;
     assert_eq!(
         cleared["primary_address"], GRANTEE,
         "exact zero falls back to the current default"
@@ -299,7 +291,7 @@ async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_u
     eprintln!("incremental_f7_work={}", json!(work));
     let companion = lookup_publication::assert_name_prepared_parity(&database, COMPANION).await?;
     assert_eq!(companion["records"]["texts"]["display name,a"], "changed");
-    let edited = lookup_publication::assert_name_prepared_parity(&database, CHILD).await?;
+    let edited = lookup_publication::assert_name_prepared_parity(&database, SUBJECT).await?;
     assert_eq!(edited["records"]["texts"]["display name,a"], "changed");
     assert_eq!(edited["primary_address"], HOLDER);
     assert!(
@@ -313,7 +305,7 @@ async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_u
         restored_components
     );
     publish(&database, 130).await?;
-    lookup_publication::assert_name_prepared_parity(&database, CHILD).await?;
+    lookup_publication::assert_name_prepared_parity(&database, SUBJECT).await?;
     // Empty exact EVM bytes select the default at read time; these remain separate keys.
     // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/AbstractRecordResolver.sol:L170-L177 @ ens_v2_sepolia_20261001@07e55a05)
     let fallback = update(
@@ -351,11 +343,11 @@ async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_u
             .as_array()
             .context("resolves-to names")?
             .iter()
-            .any(|record| record["name"] == CHILD),
+            .any(|record| record["name"] == SUBJECT),
         "{names:#}"
     );
     Box::pin(replay::assert_rebuild(&database, 134)).await?;
-    lookup_publication::assert_name_prepared_parity(&database, CHILD).await?;
+    lookup_publication::assert_name_prepared_parity(&database, SUBJECT).await?;
     lookup_publication::assert_name_prepared_parity(&database, COMPANION).await?;
     database.cleanup().await
 }

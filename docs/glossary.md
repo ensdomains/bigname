@@ -2578,20 +2578,42 @@ and has no live/indexed comparison.
 
 ## Universal Resolver cutover
 
-the point from which a chain resolves `.eth` names through ENSv2: while the
-client-facing Universal Resolver proxy's chain of implementations ends at a
-UniversalResolverV2 implementation the `ens_execution` manifest lists in
-`universal_resolver_implementations`, read from the proxies' admitted
-`Upgraded` events at each block
-([`docs/manifests.md`](manifests.md#universal_resolver_implementations)). A
-rollback to an unlisted implementation ends it. Past the cutover a `.eth` name
-with a live ENSv2 entry serves that entry's expiry and the ENSv2 grace, and a
-`.eth` name ENSv1 decides without one resolves to nothing
-([Expiry and grace](api-v1.md#expiry-and-grace)). Sepolia cut over at block
-`11821680`, when the managed proxy moved to the 2026-10-01 redeploy's
-implementation; Mainnet has not. `GET /v1/namespaces/{namespace}` reports the
-state per network as `resolution`
-([namespace route](api-v1-routes.md#get-v1namespacesnamespace)).
+the point from which bigname composes a chain's `.eth` names as the ENSv2
+Universal Resolver reads them. A chain is cut over while its
+[deployment profile](#deployment-profile) admits an ENSv2 root registry: an
+active `ens_v2_root_l1` manifest that declares a contract with the role
+`root_registry` ([`docs/manifests.md`](manifests.md#universal_resolver_implementations)).
+UniversalResolverV2 resolves from its immutable root registry, so that
+declaration is the deployment the cutover follows. The ENSv2 path walk for
+names below a `.eth` name starts at the same declared address
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/UniversalResolverV2.sol:L20 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/UniversalResolverV2.sol:L55-L63 @ ens_v2_sepolia_20261001@07e55a05).
+
+The client-facing Universal Resolver proxy and its `Upgraded` events are not an
+input. They are reported for monitoring only
+([deployment](deployment.md#universal-resolver-cutover-gauges-and-alert)).
+
+On a cut-over chain a `.eth` name with a live ENSv2 entry serves that entry's
+expiry and the ENSv2 grace. A `.eth` name ENSv1 decides without one resolves to
+nothing ([Expiry and grace](api-v1.md#expiry-and-grace)).
+
+The cutover has no block of its own. It changes only with the manifest set,
+and a manifest change is adopted by a full redo, never while following the
+chain head. Each family publication records on `project_family_marker` the
+manifest set it read and the admission that set declares. Reads take the
+admission from there, not from the current manifests. Between a manifest sync
+and the redo they keep serving the previous publication's admission. The API
+reference lists the other
+[manifest reads](api-v1.md#manifest-reads-and-the-publication) the set bounds.
+An admitted chain therefore reads as cut over for its whole retained history. On Sepolia that includes the blocks before the managed
+proxy moved to UniversalResolverV2 at `11821680`
+([known divergence](upstream.md#known-divergences)). Mainnet is not cut over
+until its ENSv2 manifests are admitted
+([deployment](deployment.md#cutover-at-ensv2-admission)).
+
+`GET /v1/namespaces/{namespace}` reports the state per network as
+`resolution` ([namespace route](api-v1-routes.md#get-v1namespacesnamespace)).
+Its `since_block` is the admitted root registry's declared start block.
 
 ## Verified lookup
 

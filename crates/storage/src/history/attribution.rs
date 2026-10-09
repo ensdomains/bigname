@@ -25,6 +25,10 @@ use uuid::Uuid;
 
 use super::selectors::HistorySelector;
 
+/// The `SourceManifestUpdated` event ids of the manifest set each bounded chain's publication
+/// recorded (`FamilyPublication::admission_manifests`), by chain.
+pub(crate) type ManifestSets = BTreeMap<String, Vec<i64>>;
+
 /// The attribution statement for `resource_ids`, for plan tests.
 #[cfg(test)]
 pub(in crate::history) fn push_pointer_window_attribution_for_test<'a>(
@@ -32,7 +36,7 @@ pub(in crate::history) fn push_pointer_window_attribution_for_test<'a>(
     resource_ids: &'a [Uuid],
     published: Option<&BTreeMap<String, i64>>,
 ) {
-    sql::push_pointer_window_attribution(builder, resource_ids, published, None);
+    sql::push_pointer_window_attribution(builder, resource_ids, published, None, None);
 }
 
 /// The mirror substitution statement with an empty walk, for plan tests.
@@ -143,7 +147,54 @@ pub(crate) async fn load_attribution_map(
     resource_ids: &[Uuid],
     published: Option<&BTreeMap<String, i64>>,
 ) -> Result<BTreeMap<Uuid, BTreeSet<i64>>> {
-    load_attribution_map_restricted(connection, resource_ids, published, None).await
+    load_attribution_map_restricted(connection, resource_ids, published, None, None).await
+}
+
+/// [`load_attribution_map`] at `published` with the manifest sets of the publications the caller
+/// composes, which a family block publishes before its marker records them. Without them, a
+/// bounded read takes each reached chain's family marker set.
+pub(crate) async fn load_attribution_map_at(
+    connection: &mut PgConnection,
+    resource_ids: &[Uuid],
+    published: &BTreeMap<String, i64>,
+    manifests: &ManifestSets,
+) -> Result<BTreeMap<Uuid, BTreeSet<i64>>> {
+    load_attribution_map_restricted(
+        connection,
+        resource_ids,
+        Some(published),
+        Some(manifests),
+        None,
+    )
+    .await
+}
+
+/// The manifest set of the family marker of each of `chains`. A bounded read serves the current
+/// publications, the ones whose classifications it reads.
+async fn marker_manifest_sets(
+    connection: &mut PgConnection,
+    chains: &[String],
+) -> Result<ManifestSets> {
+    if chains.is_empty() {
+        return Ok(ManifestSets::new());
+    }
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "/* storage:history.attribution.manifest_sets */
+         SELECT chain_id, admission_manifests FROM bigname_phase.project_family_marker
+         WHERE chain_id = ANY($1)",
+    )
+    .bind(chains)
+    .fetch_all(&mut *connection)
+    .await
+    .context("failed to load the publications' manifest sets")?;
+    rows.into_iter()
+        .map(|(chain_id, key)| {
+            Ok((
+                chain_id,
+                crate::families::name::manifest_set_event_ids(key.as_deref())?,
+            ))
+        })
+        .collect()
 }
 
 /// The parallel arrays are a set of requested resource/event pairs, not their Cartesian
@@ -188,7 +239,7 @@ pub(in crate::history) fn push_paired_attribution_for_test<'a>(
         resources: resource_ids.to_vec(),
         events: event_ids.to_vec(),
     };
-    sql::push_pointer_window_attribution(builder, resource_ids, published, Some(&requested));
+    sql::push_pointer_window_attribution(builder, resource_ids, published, None, Some(&requested));
 }
 
 /// Validate a bounded set of resource/event pairs with the full historical attribution rules.
@@ -209,7 +260,7 @@ pub(in crate::history) async fn matching_attribution_pairs(
         events: pairs.iter().map(|(_, event)| *event).collect(),
     };
     Ok(
-        load_attribution_map_restricted(connection, &resources, published, Some(&requested))
+        load_attribution_map_restricted(connection, &resources, published, None, Some(&requested))
             .await?
             .into_iter()
             .flat_map(|(resource, events)| events.into_iter().map(move |event| (resource, event)))
@@ -221,6 +272,7 @@ async fn load_attribution_map_restricted(
     connection: &mut PgConnection,
     resource_ids: &[Uuid],
     published: Option<&BTreeMap<String, i64>>,
+    manifests: Option<&ManifestSets>,
     requested: Option<&RequestedPairs>,
 ) -> Result<BTreeMap<Uuid, BTreeSet<i64>>> {
     let mut attributed = BTreeMap::<Uuid, BTreeSet<i64>>::new();
@@ -228,10 +280,24 @@ async fn load_attribution_map_restricted(
         return Ok(attributed);
     }
 
-    ensure_classification_publications(connection, resource_ids, published).await?;
+    let chains = ensure_classification_publications(connection, resource_ids, published).await?;
+    let marker_sets;
+    let manifests = match (published, manifests) {
+        (Some(_), None) => {
+            marker_sets = marker_manifest_sets(connection, &chains).await?;
+            Some(&marker_sets)
+        }
+        (_, manifests) => manifests,
+    };
 
     let mut builder = QueryBuilder::<Postgres>::new("");
-    sql::push_pointer_window_attribution(&mut builder, resource_ids, published, requested);
+    sql::push_pointer_window_attribution(
+        &mut builder,
+        resource_ids,
+        published,
+        manifests,
+        requested,
+    );
     let rows = builder
         .build()
         .fetch_all(&mut *connection)
@@ -263,7 +329,8 @@ async fn load_attribution_map_restricted(
     // the ENSv1 resolver the mirror would call. When the mirror cannot be followed, the resource
     // has no attributed writes at all, superseded pointers included.
     let mirrored =
-        mirror::load_mirror_attribution(connection, resource_ids, published, requested).await?;
+        mirror::load_mirror_attribution(connection, resource_ids, published, manifests, requested)
+            .await?;
     let _mirrored_pairs = requested.map(|_| {
         super::address_walk::seams::Live::new(
             "mirror_substitution_pairs",
@@ -293,14 +360,15 @@ async fn load_attribution_map_restricted(
 }
 
 /// Classification is published current state even when the pointer walk is bounded history.
-/// Admit only the chains that walk actually reaches, on the same snapshot as its F3 reads.
+/// Admit only the chains that walk actually reaches, on the same snapshot as its F3 reads, and
+/// return them.
 /// Raw audit reads keep working during Interpret redo: this checks classification publication,
 /// not mutable composed-name identity, and therefore uses the marker rule without its redo guard.
 async fn ensure_classification_publications(
     connection: &mut PgConnection,
     resource_ids: &[Uuid],
     published: Option<&BTreeMap<String, i64>>,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let mut builder = QueryBuilder::<Postgres>::new("");
     sql::push_pointer_ctes(&mut builder, resource_ids, published);
     builder.push(" SELECT DISTINCT chain_id FROM pointers");
@@ -308,19 +376,22 @@ async fn ensure_classification_publications(
         .build_query_scalar()
         .fetch_all(&mut *connection)
         .await?;
-    for chain_id in chains {
+    for chain_id in &chains {
         let available: bool = sqlx::query_scalar(concat!(
             "SELECT EXISTS (SELECT 1 ",
             crate::snapshot_selection::servable_family_marker!(),
             ")"
         ))
-        .bind(&chain_id)
+        .bind(chain_id)
         .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
         .fetch_one(&mut *connection)
         .await?;
         if !available {
-            return Err(crate::families::name::FamilyPublicationUnavailable { chain_id }.into());
+            return Err(crate::families::name::FamilyPublicationUnavailable {
+                chain_id: chain_id.clone(),
+            }
+            .into());
         }
     }
-    Ok(())
+    Ok(chains)
 }

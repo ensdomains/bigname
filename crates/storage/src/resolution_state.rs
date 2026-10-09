@@ -1,25 +1,17 @@
-//! Per-chain resolution protocol in force, for reporting. Serving decides the Universal Resolver
-//! cutover with `families::control::cutover::cut_over`; this reads the same Project rows, takes
-//! the decision from that function, and also names the row where the client-facing proxy chain
-//! ends, so a reader can tell an implementation the manifest does not admit from a proxy with no
-//! `Upgraded` yet. It sits outside `families`, so it is not part of the interpreter content hash.
+//! Where each chain's client-facing Universal Resolver proxy forwards, for monitoring. The
+//! proxies decide nothing bigname serves: the cutover is the ENSv2 root registry's admission
+//! (`families::control::cutover`). This reads Project's proxy rows and names the row where the
+//! client-facing proxy chain ends, so a reader can tell an implementation the manifest does not
+//! admit from a proxy with no `Upgraded` yet. It sits outside `families`, so it is not part of
+//! the interpreter content hash.
 use anyhow::{Context, Result};
 use sqlx::{FromRow, PgConnection};
 
-use crate::families::control::cutover::{ProxyRow, cut_over};
-
+/// The manifest role of the client-facing proxy (`bigname_manifests::UNIVERSAL_RESOLVER_ROLE`).
 const CLIENT_FACING_ROLE: &str = "universal_resolver";
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Protocol {
-    EnsV1,
-    EnsV2,
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolutionState {
-    /// `EnsV2` while the client-facing chain ends at an admitted UniversalResolverV2.
-    pub protocol: Protocol,
     /// The latest `Upgraded` block among the rows the walk passed: the chain has ended where it
     /// ends now since this block.
     pub since_block: i64,
@@ -29,6 +21,15 @@ pub struct ResolutionState {
     /// The walk ended at an implementation the manifest neither admits nor declares as a proxy.
     /// False for a hop to a proxy with no `Upgraded` yet.
     pub unadmitted: bool,
+}
+
+/// One declared proxy's latest `Upgraded` (`project_universal_resolver_proxy`).
+#[derive(Clone, Debug, Eq, PartialEq, FromRow)]
+struct ProxyRow {
+    proxy_address: String,
+    proxy_role: Option<String>,
+    implementation: String,
+    implementation_kind: String,
 }
 
 #[derive(FromRow)]
@@ -77,13 +78,7 @@ fn state(rows: &[StateRow]) -> Option<ResolutionState> {
         since_block = since_block.max(next.block_number);
         at = next;
     }
-    let proxies: Vec<ProxyRow> = rows.iter().map(|row| row.proxy.clone()).collect();
     Some(ResolutionState {
-        protocol: if cut_over(&proxies) {
-            Protocol::EnsV2
-        } else {
-            Protocol::EnsV1
-        },
         since_block,
         proxy: at.proxy.proxy_address.clone(),
         implementation: at.proxy.implementation.clone(),
@@ -128,14 +123,12 @@ mod tests {
     }
 
     fn expect(
-        protocol: Protocol,
         since: i64,
         proxy: &str,
         implementation: &str,
         unadmitted: bool,
     ) -> Option<ResolutionState> {
         Some(ResolutionState {
-            protocol,
             since_block: since,
             proxy: proxy.into(),
             implementation: implementation.into(),
@@ -147,15 +140,15 @@ mod tests {
     fn the_walk_names_the_row_that_ends_the_client_facing_chain() {
         assert_eq!(
             state(&[top(), managed("0xv2", "admitted_universal_resolver")]),
-            expect(Protocol::EnsV2, 20, "0xmanaged", "0xv2", false)
+            expect(20, "0xmanaged", "0xv2", false)
         );
         assert_eq!(
             state(&[top(), managed("0xnew", "other")]),
-            expect(Protocol::EnsV1, 20, "0xmanaged", "0xnew", true)
+            expect(20, "0xmanaged", "0xnew", true)
         );
         assert_eq!(
             state(&[top()]),
-            expect(Protocol::EnsV1, 10, "0xtop", "0xmanaged", false),
+            expect(10, "0xtop", "0xmanaged", false),
             "a hop to a proxy with no row yet is not unadmitted"
         );
         assert_eq!(state(&[]), None);
@@ -166,12 +159,12 @@ mod tests {
         );
         assert_eq!(
             state(&[top(), managed("0xtop", "universal_resolver_proxy")]),
-            expect(Protocol::EnsV1, 20, "0xmanaged", "0xtop", false),
+            expect(20, "0xmanaged", "0xtop", false),
             "a cycle ends at its last hop"
         );
         assert_eq!(
             state(&[row("0xtop", "universal_resolver", "0xnew", "other", 30)]),
-            expect(Protocol::EnsV1, 30, "0xtop", "0xnew", true),
+            expect(30, "0xtop", "0xnew", true),
             "the client-facing proxy itself can point at an unadmitted implementation"
         );
         // A retired declaration keeps its row with no role; Project classifies a hop to it as
@@ -181,7 +174,7 @@ mod tests {
         let top_to_retired = row("0xtop", "universal_resolver", "0xmanaged", "other", 10);
         assert_eq!(
             state(&[top_to_retired, retired]),
-            expect(Protocol::EnsV1, 10, "0xtop", "0xmanaged", true)
+            expect(10, "0xtop", "0xmanaged", true)
         );
         let mut retired = managed("0xv2", "admitted_universal_resolver");
         retired.proxy.proxy_role = None;
@@ -190,7 +183,7 @@ mod tests {
         repointed.block_number = 40;
         assert_eq!(
             state(&[repointed, managed("0xv2", "admitted_universal_resolver")]),
-            expect(Protocol::EnsV2, 40, "0xmanaged", "0xv2", false),
+            expect(40, "0xmanaged", "0xv2", false),
             "a later hop on the chain dates the state, not the row the walk ends at"
         );
         assert_eq!(
@@ -201,7 +194,7 @@ mod tests {
                 "admitted_universal_resolver",
                 30
             )]),
-            expect(Protocol::EnsV2, 30, "0xtop", "0xv2", false)
+            expect(30, "0xtop", "0xv2", false)
         );
         assert_eq!(
             state(&[row(
@@ -211,7 +204,7 @@ mod tests {
                 "universal_resolver_proxy",
                 30
             )]),
-            expect(Protocol::EnsV1, 30, "0xtop", "0xtop", false),
+            expect(30, "0xtop", "0xtop", false),
             "a proxy pointing at itself ends the walk"
         );
     }

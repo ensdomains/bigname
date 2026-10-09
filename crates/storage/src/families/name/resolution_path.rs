@@ -19,9 +19,7 @@ use crate::families::{
 };
 use anyhow::Result;
 use sqlx::PgConnection;
-use std::collections::BTreeMap;
-
-const ROOT: &str = "0xb458d6a3a77919449d03e7a6903c26827c1ec43f";
+use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum Decision {
@@ -58,6 +56,8 @@ pub(super) struct Outcome {
 }
 
 pub(super) struct Walk {
+    /// The admitted root registry (`families::control::cutover`), where every walk starts.
+    root: Arc<str>,
     declarations: Declarations,
     models: BTreeMap<String, Option<SupportedRegistry>>,
     entries: BTreeMap<(String, String), facts::Entry>,
@@ -68,8 +68,10 @@ impl Walk {
     pub(super) async fn new(
         conn: &mut PgConnection,
         publication: &FamilyPublication,
+        root: Arc<str>,
     ) -> Result<Self> {
         Ok(Self {
+            root,
             declarations: Declarations::load(conn, publication).await?,
             models: BTreeMap::new(),
             entries: BTreeMap::new(),
@@ -88,7 +90,7 @@ impl Walk {
                 conn,
                 &publication.chain_id,
                 &[address.to_owned()],
-                Some(publication.block_number),
+                Some(publication),
             )
             .await?
             .remove(address);
@@ -103,7 +105,7 @@ impl Walk {
         surface: &Surface,
         retained_resolver: Option<&str>,
     ) -> Result<Outcome> {
-        let mut registry = ROOT.to_owned();
+        let mut registry = self.root.to_string();
         let mut nearest: Option<(String, usize)> = None;
         let mut outcome = Outcome::default();
         for depth in (0..surface.labelhashes.len()).rev() {
@@ -248,14 +250,9 @@ impl Walk {
             pointer_event_id: None,
             block_number: publication.block_number,
         };
-        let mirror = evaluate_family_mirror_at(
-            conn,
-            &publication.chain_id,
-            &pointer,
-            class,
-            Some(publication.block_number),
-        )
-        .await?;
+        let mirror =
+            evaluate_family_mirror_at(conn, &publication.chain_id, &pointer, class, publication)
+                .await?;
         outcome.decision = if mirror
             .nearest
             .as_ref()

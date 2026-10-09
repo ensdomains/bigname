@@ -8089,14 +8089,14 @@
         "properties": {
           "protocol": {
             "$ref": "#/components/schemas/ResolutionProtocol",
-            "description": "`ens_v2` past the Universal Resolver cutover, otherwise `ens_v1`."
+            "description": "`ens_v2` on a chain with an admitted root registry, otherwise `ens_v1`."
           },
           "since_block": {
             "type": [
               "integer",
               "null"
             ],
-            "description": "Block of the latest Universal Resolver `Upgraded` that set the current state; null before any upgrade is observed."
+            "description": "Declared start block of the admitted ENSv2 root registry, which dates the admission and not a Universal Resolver proxy upgrade. Null with `ens_v1`, and also when the admitted root registry declares no start block."
           }
         },
         "additionalProperties": false,

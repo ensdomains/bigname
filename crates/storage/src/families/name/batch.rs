@@ -27,6 +27,7 @@ use super::{
 use crate::{
     NameCurrentRow, ReadDb,
     families::control::{
+        cutover::Admission,
         lifecycle::{
             AuthoritySelection, Clock, NameFacts, NameInput, NamePlace, evaluate,
             load_name_facts_on,
@@ -147,7 +148,8 @@ pub(crate) async fn publication(
     let row = sqlx::query(concat!(
         "/* storage:families.name.publication */
          SELECT marker.chain_id, marker.current_block_number, marker.current_block_hash,
-                marker.block_timestamp, to_jsonb(marker.block_timestamp) AS block_timestamp_json",
+                marker.block_timestamp, to_jsonb(marker.block_timestamp) AS block_timestamp_json,
+                marker.root_registry, marker.since_block, marker.admission_manifests",
         crate::snapshot_selection::servable_family_marker!(),
         crate::snapshot_selection::family_inputs_not_in_redo!()
     ))
@@ -163,6 +165,16 @@ pub(crate) async fn publication(
             block_hash: row.try_get("current_block_hash")?,
             block_timestamp: row.try_get::<OffsetDateTime, _>("block_timestamp")?,
             block_timestamp_json: row.try_get("block_timestamp_json")?,
+            admission: row
+                .try_get::<Option<String>, _>("root_registry")?
+                .map(|root_registry| -> Result<Admission> {
+                    Ok(Admission {
+                        root_registry,
+                        since_block: row.try_get("since_block")?,
+                    })
+                })
+                .transpose()?,
+            admission_manifests: row.try_get("admission_manifests")?,
         })
     })
     .transpose()
@@ -348,14 +360,16 @@ pub(super) async fn load_chain(
             place: NamePlace::of(&surface.namespace, &surface.labelhashes),
         })
         .collect();
-    let mut facts = load_name_facts_on(conn, chain_id, &inputs).await?;
-    let resolvability = Resolvability::load(conn, chain_id, &facts).await?;
-    let mut path = if facts.iter().any(|facts| {
-        facts.resolution_cutover && matches!(facts.input.place, NamePlace::BelowEthSecondLevel(_))
-    }) {
-        Some(super::resolution_path::Walk::new(conn, publication).await?)
-    } else {
-        None
+    let admission = publication.admission.as_ref();
+    let mut facts = load_name_facts_on(conn, chain_id, admission, &inputs).await?;
+    let resolvability = Resolvability::load(conn, chain_id, admission, &facts).await?;
+    let root = facts
+        .iter()
+        .filter(|facts| matches!(facts.input.place, NamePlace::BelowEthSecondLevel(_)))
+        .find_map(|facts| facts.ens_v2_root.clone());
+    let mut path = match root {
+        Some(root) => Some(super::resolution_path::Walk::new(conn, publication, root).await?),
+        None => None,
     };
     let histories = histories(conn, chain_id, &ids).await?;
     let mut migrations = migrations(conn, chain_id, &ids).await?;

@@ -35,7 +35,7 @@ groups:
           severity: page
         annotations:
           threshold: "The client-facing Universal Resolver proxy chain ends at an implementation the ens_execution manifest does not admit for 5 minutes, while the family publication is within 30 blocks of the observed head and no Project redo is running."
-          meaning: "The named chain's Universal Resolver ends at an implementation bigname does not admit, so the chain reads as not cut over and names ENSv1 decides are served with the pre-cutover expiry, grace and resolvability rules again. Either upstream repointed it or a manifest change dropped the implementation; the runner's warning names the implementation and the block of its Upgraded."
+          meaning: "The named chain's client-facing Universal Resolver ends at an implementation bigname does not admit. No name moves: the chain stays cut over and bigname keeps serving the ENSv2 expiry, grace and resolvability rules. Clients on chain no longer resolve through the deployment bigname models. Either upstream repointed the proxy or a manifest change dropped the implementation. The runner's warning names the implementation and the block of its Upgraded."
 
       - alert: BignamePhaseRunnerDown
         expr: |

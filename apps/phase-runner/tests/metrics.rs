@@ -687,17 +687,39 @@ async fn endpoint_exports_committed_family_publication_metrics() -> Result<()> {
     scratch.cleanup().await
 }
 
-/// Proxy rows as Project leaves them: one chain cut over through the managed proxy, one whose
-/// managed proxy was repointed to an implementation the manifest does not list, and one with no
-/// `Upgraded` at all.
+/// Two chains whose deployment profile admits an ENSv2 root registry, one of them with its
+/// managed proxy repointed to an implementation the manifest does not list. Then a chain whose
+/// proxy forwards to a listed implementation with no admitted root registry, and a chain with
+/// neither. Only the admission sets `cut_over`, and only the proxy rows set `unadmitted`.
 #[tokio::test]
 async fn endpoint_exports_the_universal_resolver_cutover_per_chain() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_metrics_universal_resolver").await?;
     let pool = scratch.pool();
     let store = PhaseStore::new(pool.clone());
-    let chains = ["admitted", "unadmitted", "no-events"];
+    let chains = ["admitted", "unadmitted", "proxy-only", "no-events"];
     for chain in chains {
         store.initialize_chain(chain).await?;
+    }
+    for (chain, family, status, role) in [
+        ("admitted", "ens_v2_root_l1", "active", "root_registry"),
+        ("unadmitted", "ens_v2_root_l1", "active", "root_registry"),
+        ("proxy-only", "ens_v2_root_l1", "shadow", "root_registry"),
+        ("proxy-only", "ens_v2_registry_l1", "active", "registry"),
+    ] {
+        sqlx::query(
+            "INSERT INTO bigname_phase.manifest_versions (manifest_version, namespace,
+                 source_family, chain_id, deployment_label, rollout_status, normalizer_version,
+                 file_path, manifest_payload)
+             VALUES (1, 'ens', $2, $1, 'fixture', $3, 'fixture', $1 || '/' || $2,
+                 jsonb_build_object('contracts', jsonb_build_array(
+                     jsonb_build_object('role', $4::text, 'address', '0xr00t', 'start_block', 5))))",
+        )
+        .bind(chain)
+        .bind(family)
+        .bind(status)
+        .bind(role)
+        .execute(pool)
+        .await?;
     }
     for (chain, proxy, role, implementation, kind, block) in [
         (
@@ -731,6 +753,14 @@ async fn endpoint_exports_the_universal_resolver_cutover_per_chain() -> Result<(
             "0xnew",
             "other",
             11_821_680,
+        ),
+        (
+            "proxy-only",
+            "0xtop",
+            "universal_resolver",
+            "0xv2",
+            "admitted_universal_resolver",
+            30,
         ),
     ] {
         sqlx::query(
@@ -779,6 +809,10 @@ async fn endpoint_exports_the_universal_resolver_cutover_per_chain() -> Result<(
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    assert_eq!(gauges, vec![(1.0, 0.0), (0.0, 1.0), (0.0, 0.0)]);
+    assert_eq!(
+        gauges,
+        vec![(1.0, 0.0), (1.0, 1.0), (0.0, 0.0), (0.0, 0.0)],
+        "per chain: (cut_over, unadmitted)"
+    );
     scratch.cleanup().await
 }

@@ -13,9 +13,9 @@ pub(super) fn statement(normal_work: &str) -> String {
     WITH RECURSIVE journal AS MATERIALIZED (
         SELECT family, key::jsonb AS key, before_image FROM project_family_undo
         WHERE chain_id=$1 AND block_number=$2
-          AND family IN ('project_universal_resolver_proxy', 'project_parent_subregistry',
-            'project_ens_v2_entry_owner', 'project_wrapper_state', 'project_registry_node_state',
-            'project_registry_pointer', 'project_resource_pointer', 'project_resolver_classification',
+          AND family IN ('project_parent_subregistry', 'project_ens_v2_entry_owner',
+            'project_wrapper_state', 'project_registry_node_state', 'project_registry_pointer',
+            'project_resource_pointer', 'project_resolver_classification',
             'project_lifecycle_event', 'project_binding_candidate', 'project_name_state')
     ), path_change AS MATERIALIZED (
         SELECT 1 FROM journal WHERE family NOT IN ('project_resource_pointer', 'project_resolver_classification')
@@ -41,8 +41,6 @@ pub(super) fn statement(normal_work: &str) -> String {
            OR current.unsupported_reason IS DISTINCT FROM journal.before_image->>'unsupported_reason'
            OR to_jsonb(current.manifest_id) IS DISTINCT FROM journal.before_image->'manifest_id'
     ), global_change AS MATERIALIZED (
-        SELECT 1 FROM journal WHERE family='project_universal_resolver_proxy'
-        UNION ALL
         SELECT 1 FROM changed_resolvers WHERE resolver='0x322b7581ca210a69c6d0e0d7c88a7688d2789cb0'
     ), source_names AS MATERIALIZED (
         SELECT logical_name_id FROM normal WHERE EXISTS (SELECT 1 FROM path_change)
@@ -145,8 +143,10 @@ pub(super) fn statement(normal_work: &str) -> String {
         SELECT DISTINCT candidate.labelhashes[depth:] AS labelhashes
         FROM candidates candidate CROSS JOIN LATERAL generate_series(1,cardinality(candidate.labelhashes)) depth
     ), reached(labelhashes, registry) AS (
-        SELECT ARRAY[]::text[], '0xb458d6a3a77919449d03e7a6903c26827c1ec43f'::text
-        WHERE EXISTS (SELECT 1 FROM wanted)
+        -- The walk starts at the root registry the publication's captured manifest set admits
+        -- ($5, project families/marker.rs `Composition`). With no admission it reaches nothing.
+        SELECT ARRAY[]::text[], $5::text
+        WHERE EXISTS (SELECT 1 FROM wanted) AND $5::text IS NOT NULL
         UNION
         SELECT next.labelhashes, pointer.subregistry
         FROM reached current JOIN wanted next ON cardinality(next.labelhashes)=cardinality(current.labelhashes)+1

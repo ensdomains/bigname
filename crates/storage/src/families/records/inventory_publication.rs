@@ -4,7 +4,7 @@ use super::{
     inventory_selection::{self, Plan, Prepared, RequestedKeys, Selected},
     inventory_types::{FamilyAttribution, FamilyRecordInventory},
 };
-use crate::{families::lookup::LookupRecordEntry, history::load_attribution_map};
+use crate::{families::lookup::LookupRecordEntry, history::load_attribution_map_at};
 use anyhow::Result;
 use sqlx::PgConnection;
 use std::collections::{BTreeMap, BTreeSet};
@@ -49,7 +49,9 @@ pub(super) async fn compose_inventories_at(
         }
         FamilyAttribution::Load => {
             let bound = BTreeMap::from([(chain_id.to_owned(), publication.block_number)]);
-            Some(load_attribution_map(conn, &served_ids, Some(&bound)).await?)
+            let manifests =
+                BTreeMap::from([(chain_id.to_owned(), publication.manifest_event_ids()?)]);
+            Some(load_attribution_map_at(conn, &served_ids, &bound, &manifests).await?)
         }
     };
     // Each plan's served records and boundary, then one read of every block stamp and collation

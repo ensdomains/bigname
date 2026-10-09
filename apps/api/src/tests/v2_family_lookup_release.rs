@@ -10,7 +10,6 @@ use bigname_adapters::schema_v2::{
 };
 
 const PROXY: &str = "0xeeeeeeee14d718c2b47d9923deab1335e144eeee";
-const IMPLEMENTATION: &str = "0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3";
 const ROOT: &str = "0xb458d6a3a77919449d03e7a6903c26827c1ec43f";
 const REGISTRY: &str = "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4";
 const MIRROR: &str = "0x322b7581ca210a69c6d0e0d7c88a7688d2789cb0";
@@ -374,7 +373,6 @@ async fn parent_release_retires_only_affected_descendant_evidence() -> Result<()
             )
             .await?;
             let (manifest, mut payload): (i64, Value) = sqlx::query_as("SELECT manifest_id, manifest_payload FROM manifest_versions WHERE source_family='ens_execution' AND chain_id=$1").bind(chain).fetch_one(&database.pool).await?;
-            payload["universal_resolver_implementations"] = json!([IMPLEMENTATION]);
             payload["capability_flags"]["verified_resolution"]["status"] = json!("shadow");
             sqlx::query("UPDATE manifest_versions SET manifest_payload=$2 WHERE manifest_id=$1")
                 .bind(manifest)
@@ -425,21 +423,6 @@ async fn parent_release_retires_only_affected_descendant_evidence() -> Result<()
             )
             .await?;
             let live = child(&database, chain, "sub.live.eth", 988300, resolver_manifest).await?;
-            let mut upgrade = history_event(
-                "release-cutover",
-                None,
-                None,
-                Some(chain),
-                Some(200),
-                Some(&at(200)),
-                Some("0xupgrade"),
-                Some(20),
-                CanonicalityState::Canonical,
-            );
-            upgrade.event_kind = "Upgraded".into();
-            upgrade.source_family = "ens_execution".into();
-            upgrade.after_state = json!({"proxy_address":PROXY,"implementation":IMPLEMENTATION});
-            bigname_storage::insert_normalized_event_fixtures(&database.pool, &[upgrade]).await?;
             publish_test_families_on(&database.pool, chain, 200).await?;
             for id in [&target, &live] {
                 let row = bigname_storage::families::name::load_family_name(&database.pool, id)

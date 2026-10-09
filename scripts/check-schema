@@ -762,6 +762,7 @@ check_served_projection_removal() {
                 emit_phase_migration "$ROOT/migrations/20261009120000_normalized_events_v2_key_probe_subregistry.sql" preceding-shape
             fi
             emit_phase_migration "$ROOT/migrations/20261009120000_normalized_events_v2_key_probe_subregistry.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261009130000_project_family_marker_admission.sql" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -908,7 +909,8 @@ for migration_file in \
     "$ROOT/migrations/20261006160000_normalized_events_history_direct_account_indexes.sql" \
     "$ROOT/migrations/20261007120000_project_lookup_precomputation.sql" \
     "$ROOT/migrations/20261008120000_registration_lifecycle.sql" \
-    "$ROOT/migrations/20261009120000_normalized_events_v2_key_probe_subregistry.sql"
+    "$ROOT/migrations/20261009120000_normalized_events_v2_key_probe_subregistry.sql" \
+    "$ROOT/migrations/20261009130000_project_family_marker_admission.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1258,7 +1260,9 @@ for migration_file in \
     "$ROOT/migrations/20261005140000_project_ens_v2_registry_entries.sql" \
     "$ROOT/migrations/20261005140000_project_ens_v2_registry_entries.sql" \
     "$ROOT/migrations/20261005190000_name_surfaces_byte_shadow_path.sql" \
-    "$ROOT/migrations/20261005190000_name_surfaces_byte_shadow_path.sql"
+    "$ROOT/migrations/20261005190000_name_surfaces_byte_shadow_path.sql" \
+    "$ROOT/migrations/20261009130000_project_family_marker_admission.sql" \
+    "$ROOT/migrations/20261009130000_project_family_marker_admission.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done

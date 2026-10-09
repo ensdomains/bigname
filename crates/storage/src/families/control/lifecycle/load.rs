@@ -12,7 +12,7 @@ use sqlx::{PgConnection, PgPool};
 
 use super::{NameFacts, NameInput, TripleFacts, admission::REGISTRAR};
 use crate::families::control::{
-    cutover::load_cut_over_on,
+    cutover::{Admission, load_admission_on},
     position::Position,
     registry::load_registry_nodes_on,
     rows::{BindingCandidate, LifecycleEvent, Maxima, text},
@@ -70,7 +70,9 @@ pub fn namespace_of(name: &str) -> &str {
         .map_or("ens", |(namespace, _)| namespace)
 }
 
-/// Load every fact the lifecycle read of `names` reads.
+/// Load every fact the lifecycle read of `names` reads, under the chain's current manifest
+/// admission. It is for callers outside a family publication. A reader of a publication takes
+/// the admission the publication records ([`load_name_facts_on`]).
 pub async fn load_name_facts(
     pool: &PgPool,
     chain_id: &str,
@@ -80,14 +82,16 @@ pub async fn load_name_facts(
         .acquire()
         .await
         .context("failed to acquire a connection for the lifecycle facts")?;
-    load_name_facts_on(&mut conn, chain_id, names).await
+    let admission = load_admission_on(&mut conn, chain_id).await?;
+    load_name_facts_on(&mut conn, chain_id, admission.as_ref(), names).await
 }
 
 /// [`load_name_facts`] on one connection, so a caller's transaction reads every statement in
-/// its snapshot (the composed name reader, `families::name`).
+/// its snapshot (the composed name reader, `families::name`), under `admission`.
 pub async fn load_name_facts_on(
     conn: &mut PgConnection,
     chain_id: &str,
+    admission: Option<&Admission>,
     names: &[NameInput],
 ) -> Result<Vec<NameFacts>> {
     let ids: Vec<String> = names
@@ -314,7 +318,8 @@ pub async fn load_name_facts_on(
         })
         .collect();
     let nodes = load_registry_nodes_on(&mut *conn, chain_id, &node_keys).await?;
-    let resolution_cutover = load_cut_over_on(&mut *conn, chain_id).await?;
+    let ens_v2_root: Option<Arc<str>> =
+        admission.map(|admission| admission.root_registry.as_str().into());
 
     let wrappers: BTreeMap<String, _> = wrappers
         .into_iter()
@@ -473,7 +478,8 @@ pub async fn load_name_facts_on(
                     input.namehash.to_ascii_lowercase(),
                 ))
                 .cloned(),
-            resolution_cutover,
+            resolution_cutover: ens_v2_root.is_some(),
+            ens_v2_root: ens_v2_root.clone(),
             grace_registries: Arc::clone(&grace_registries),
         });
     }

@@ -108,6 +108,8 @@ CREATE TABLE IF NOT EXISTS project_family_marker (
     project_redo_from bigint,
     project_redo_to bigint,
     admission_manifests text,
+    root_registry text,
+    since_block bigint,
     PRIMARY KEY (chain_id),
     CHECK ((current_block_number IS NULL) = (current_block_hash IS NULL)),
     CHECK (state IN ('live', 'bootstrap_pending')),
@@ -145,6 +147,10 @@ COMMENT ON COLUMN project_family_marker.project_redo_to IS
     'This value is the Project row''s redo_to_block_number the last block read.';
 COMMENT ON COLUMN project_family_marker.admission_manifests IS
     'This value is the key of the active manifest set the last block classified under: manifest_id:event_id of the latest SourceManifestUpdated event of every manifest the chain reads, at or below the block or with no block. A family run reads the manifest updates once, so an update written during a run applies from the next run; a block that sees another key classifies every stored resolver again. An update with no block applies to every block, so it is not tied to the block it was written at.';
+COMMENT ON COLUMN project_family_marker.root_registry IS
+    'This value is the lower-cased address of the ENSv2 root registry the active ens_v2_root_l1 manifest declared when the publication was composed, the Universal Resolver cutover; null when the chain was not cut over. Readers take the cutover from here, never from manifest_versions.';
+COMMENT ON COLUMN project_family_marker.since_block IS
+    'This value is that root registry''s declared start_block, which dates the admission; null when the chain was not cut over or the declaration has no start block.';
 
 CREATE TABLE IF NOT EXISTS project_family_undo (
     chain_id text NOT NULL,
@@ -1221,7 +1227,7 @@ CREATE TABLE IF NOT EXISTS project_universal_resolver_proxy (
     CHECK (implementation_kind IN ('admitted_universal_resolver', 'universal_resolver_proxy', 'other'))
 );
 COMMENT ON TABLE project_universal_resolver_proxy IS
-    'Project-owned Universal Resolver proxy state: per declared ens_execution proxy, the implementation its latest Upgraded event installed, in canonical event order. A block resolves through ENSv2 (the Universal Resolver cutover) while the chain of implementations from the client-facing universal_resolver proxy, through declared proxies, ends at an admitted UniversalResolverV2 implementation; a proxy with no row has no known implementation, since its constructor sets the first one without an event. The composed name reader reads every row of the chain at the family publication.';
+    'Project-owned Universal Resolver proxy state, kept for monitoring: per declared ens_execution proxy, the implementation its latest Upgraded event installed, in canonical event order. The phase runner reports whether the chain of implementations from the client-facing universal_resolver proxy, through declared proxies, ends at an implementation the manifest lists. A proxy with no row has no known implementation, since its constructor sets the first one without an event. No name read uses these rows: the Universal Resolver cutover is the admission of the chain''s ENSv2 root registry.';
 COMMENT ON COLUMN project_universal_resolver_proxy.chain_id IS
     'This value is the chain whose events wrote the row.';
 COMMENT ON COLUMN project_universal_resolver_proxy.proxy_address IS
