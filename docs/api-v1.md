@@ -2312,8 +2312,10 @@ as it does for every name.
 node, and the Universal Resolver computes the node from the name it is given. So a
 verified read of an alias can answer records the served path does not hold. The Universal
 Resolver also finds the path's resolver, so the read is never routed by the served path's
-resolver. A path with no resolver answers each record `not_found`. An alias with
-a [bracketed label](#name-inputs) has no verified read.
+resolver. A path with no resolver answers each record `not_found`. The served path's
+`unresolvable_reason` and `resolution_unsupported_reason` describe that path, so a verified
+read of an alias leaves them out. An indexed read keeps them. An alias with a
+[bracketed label](#name-inputs) has no verified read.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/PermissionedResolver.sol:L96-L97 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L58-L85 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L84 @ ens_v2_sepolia_20261001@07e55a05)

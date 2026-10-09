@@ -153,6 +153,7 @@ async fn build_verified_name_record(
         .flatten();
     record.records =
         serves_record_groups(row, has_current_registration, alias.is_some()).then_some(groups);
+    drop_canonical_path_classification(&mut record, alias.is_some());
     record.read_status = status;
     record.unsupported_reason = verified_profile_unsupported_reason(answers, status);
     record.failure_reason = verified_profile_failure_reason(answers, status);
@@ -294,6 +295,16 @@ fn serves_record_groups(row: &NameCurrentRow, has_current_registration: bool, al
     has_current_registration && (alias || row.unresolvable_reason().is_none())
 }
 
+/// Under an alias, drops the canonical path's classification. `unresolvable_reason` and
+/// `resolution_unsupported_reason` describe the canonical path. A verified alias read is for
+/// the requested path, whose classification is the verified lookup's answer for each record.
+fn drop_canonical_path_classification(record: &mut NameRecord, alias: bool) {
+    if alias {
+        record.unresolvable_reason = None;
+        record.resolution_unsupported_reason = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bigname_storage::RecordInventoryCurrentRow;
@@ -307,7 +318,44 @@ mod tests {
     /// unresolvable. Without an alias the canonical path's reason withholds them.
     #[test]
     fn an_alias_keeps_record_groups_the_canonical_reason_withholds() {
-        let row = NameCurrentRow {
+        let row = classified_row(json!({"unresolvable_reason": "ens_v2_path_no_resolver"}));
+        assert!(serves_record_groups(&row, true, true));
+        assert!(!serves_record_groups(&row, true, false));
+        assert!(!serves_record_groups(&row, false, true));
+    }
+
+    /// A verified alias read drops the canonical path's classification. Without an alias the
+    /// canonical row's reasons stand.
+    #[test]
+    fn an_alias_drops_the_canonical_paths_classification() {
+        let row = classified_row(json!({
+            "unresolvable_reason": "ens_v2_path_no_resolver",
+            "resolution_unsupported_reason": "ens_v2_path_target_not_projected",
+        }));
+        let canonical = build_name_record(&row, None, None, Status::Ok).expect("a record");
+        assert_eq!(
+            canonical.unresolvable_reason.as_deref(),
+            Some("ens_v2_path_no_resolver")
+        );
+        assert_eq!(
+            canonical.resolution_unsupported_reason.as_deref(),
+            Some("ens_v2_path_target_not_projected")
+        );
+        let mut kept = canonical.clone();
+        drop_canonical_path_classification(&mut kept, false);
+        assert_eq!(kept.unresolvable_reason, canonical.unresolvable_reason);
+        assert_eq!(
+            kept.resolution_unsupported_reason,
+            canonical.resolution_unsupported_reason
+        );
+        let mut alias = canonical;
+        drop_canonical_path_classification(&mut alias, true);
+        assert_eq!(alias.unresolvable_reason, None);
+        assert_eq!(alias.resolution_unsupported_reason, None);
+    }
+
+    fn classified_row(declared_summary: serde_json::Value) -> NameCurrentRow {
+        NameCurrentRow {
             logical_name_id: "ens:child.m.eth".to_owned(),
             namespace: "ens".to_owned(),
             canonical_display_name: "child.m.eth".to_owned(),
@@ -318,7 +366,7 @@ mod tests {
             serving_resource_id: None,
             token_lineage_id: None,
             binding_kind: None,
-            declared_summary: json!({"unresolvable_reason": "ens_v2_path_no_resolver"}),
+            declared_summary,
             provenance: json!({}),
             coverage: json!({}),
             chain_positions: json!({}),
@@ -326,10 +374,7 @@ mod tests {
             manifest_version: 1,
             last_recomputed_at: OffsetDateTime::from_unix_timestamp(1_717_171_719)
                 .expect("test timestamp"),
-        };
-        assert!(serves_record_groups(&row, true, true));
-        assert!(!serves_record_groups(&row, true, false));
-        assert!(!serves_record_groups(&row, false, true));
+        }
     }
 
     #[test]
