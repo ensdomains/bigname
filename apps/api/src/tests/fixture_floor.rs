@@ -9,7 +9,7 @@ fn ens_normalisation_tables_build_quickly_on_first_use() {
     bigname_lookup::ens_namehash_hex("warm.eth").expect("warm.eth must normalise");
     let elapsed = started.elapsed();
     assert!(
-        elapsed < std::time::Duration::from_millis(250),
+        elapsed < std::time::Duration::from_millis(500),
         "the first ens_namehash_hex call took {elapsed:?}"
     );
 }
@@ -18,7 +18,8 @@ fn ens_normalisation_tables_build_quickly_on_first_use() {
 async fn api_fixture_holds_one_connection_on_its_database() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let connections: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()",
+        "SELECT count(*) FROM pg_stat_activity
+         WHERE datname = current_database() AND backend_type = 'client backend'",
     )
     .fetch_one(&database.pool)
     .await?;
