@@ -145,25 +145,27 @@ async fn v2_address_names_list_a_name_whose_registry_role_the_address_holds() ->
 
 #[tokio::test]
 async fn v2_address_names_list_any_registry_role_but_not_the_reservation_marker() -> Result<()> {
-    for powers in [
+    let cases = [
         json!(["renew"]),
         json!(["unregister"]),
         json!(["admin_set_resolver"]),
         json!(["can_transfer_admin"]),
         json!(["was_reserved", "renew"]),
-    ] {
-        let database = TestDatabase::new_migrated().await?;
-        seed_role_holder(&database, powers.clone()).await?;
+    ];
+    let database = TestDatabase::new_migrated().await?;
+    let resource = seed_role_holder(&database, cases[0].clone()).await?;
+    for (index, powers) in cases.into_iter().enumerate() {
+        if index > 0 {
+            set_role_holder_powers(&database, resource, powers.clone()).await?;
+        }
         assert_eq!(
             row_names_and_relations(&role_holder_names(&database, "role_holder").await?),
             vec![("beta.eth".to_owned(), json!(["role_holder"]))],
             "{powers}"
         );
-        database.cleanup().await?;
     }
     // `was_reserved` marks a registration made from a reservation; it is not a role.
-    let database = TestDatabase::new_migrated().await?;
-    seed_role_holder(&database, json!(["was_reserved"])).await?;
+    set_role_holder_powers(&database, resource, json!(["was_reserved"])).await?;
     assert_eq!(
         role_holder_names(&database, "any").await?["data"],
         json!([])
