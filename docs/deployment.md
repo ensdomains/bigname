@@ -3354,6 +3354,29 @@ A refresh over N names writes N rows of temporary table and index on the
 database host until its transaction ends. Budget about 300 bytes of disk per
 affected name for a full-history redo.
 
+### ENSv2 state key reads probe once per key
+
+The [lookahead loader](glossary.md#lookahead-loader) reads the events filed
+under each requested [ENSv2 state key](glossary.md#ensv2-state-key). That read used to test all
+requested keys at once with one array overlap. The planner does not use the
+statistics of a partial expression index such as
+`normalized_events_v2_key_probe_idx`, so it costed the overlap by the number of
+keys alone. Above a few hundred keys, a custom plan read every earlier ENSv2
+event of the chain and filtered them, and batches at a dense ENSv1→ENSv2
+migration range on Sepolia spent most of their time there. The read now probes
+the index once per requested key.
+
+The loaded events are the same, row for row. No schema-migration, index,
+manifest or watch-plan change is included. The only product-code change is to
+`crates/interpret/src/load/lookahead/events.sql`, which is not an input of the
+[interpreter content hash](glossary.md#interpreter-content-hash), so the hash
+does not rotate and no redo is needed. Without a valid
+`normalized_events_v2_key_probe_idx` each requested key now scans
+`normalized_events`. Keep `BIGNAME_INTERPRET_FORCE_FULL_STATE_LOADER=true`
+while the index is missing, as
+[ops/v1-lookahead-indexes/README.md](../ops/v1-lookahead-indexes/README.md)
+describes.
+
 ## Published lookup state
 
 Apply `20261007120000_project_lookup_precomputation.sql` before deploying the

@@ -4,7 +4,7 @@ use bigname_adapters::schema_v2::seam::{
 };
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
-use sqlx::{PgPool, types::Uuid};
+use sqlx::{PgConnection, PgPool, types::Uuid};
 use time::OffsetDateTime;
 
 type Result<T = ()> = anyhow::Result<T>;
@@ -634,13 +634,7 @@ async fn lookahead_sql_uses_baseline_indexes() -> Result {
     sqlx::raw_sql("ANALYZE normalized_events; ANALYZE chain_lineage;")
         .execute(&mut *connection)
         .await?;
-    let events_sql = super::EVENTS
-        .replace("{v2_keys}", super::V2_KEYS.trim_end())
-        .replace("{state_key}", INTERPRETER_STATE_KEY)
-        .replace("{state_scope}", super::STATE_SCOPE_KEY)
-        .replace("{clear_marker}", SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY)
-        .replace("{transaction_index}", super::TRANSACTION_INDEX_KEY)
-        .replace("{log_index}", super::LOG_INDEX_KEY);
+    let events_sql = statement(super::EVENTS);
     let v2_due_keys_sql = super::V2_DUE_KEYS.replace("{state_scope}", super::STATE_SCOPE_KEY);
     for (name, statement, signature, arguments, indexes) in [
         (
@@ -766,6 +760,579 @@ async fn events_sql_files_an_event_under_the_same_name_as_restore() -> Result {
             .await?
             .is_empty()
     );
+    drop(connection);
+    db.cleanup().await?;
+    Ok(())
+}
+
+/// `events.sql` as `ordered_events` binds it.
+fn statement(events: &str) -> String {
+    events
+        .replace("{v2_keys}", super::V2_KEYS.trim_end())
+        .replace("{state_key}", INTERPRETER_STATE_KEY)
+        .replace("{state_scope}", super::STATE_SCOPE_KEY)
+        .replace("{clear_marker}", SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY)
+        .replace("{transaction_index}", super::TRANSACTION_INDEX_KEY)
+        .replace("{log_index}", super::LOG_INDEX_KEY)
+}
+
+const KEY_PROBE_INDEX: &str = "normalized_events_v2_key_probe_idx";
+
+/// The ENSv2 key arm of `candidates` as one read for all keys, with the array overlap as a
+/// filter. The tests below splice it back into `events.sql` as the oracle for the per-key
+/// probes. Both forms expand the same `v2_keys.sql`, whatever its length.
+const OVERLAP_ARM: &str = r"    UNION ALL
+    -- ENSv2 events filed under a requested ENSv2 state key. The array must stay identical to
+    -- normalized_events_v2_key_probe_idx and to `v2_event_keys` in the adapter crate.
+    SELECT event.normalized_event_id,
+           event.raw_fact_ref ? '{state_key}',
+           COALESCE(event.raw_fact_ref ->> '{state_key}', event.event_identity),
+           event.after_state ? '{clear_marker}'
+    FROM normalized_events event
+    JOIN LATERAL (
+        SELECT 1 FROM chain_lineage lineage
+        WHERE lineage.chain_id = event.chain_id
+          AND lineage.block_number = event.block_number AND lineage.block_hash = event.block_hash
+          AND lineage.canonicality_state IN ('canonical','safe','finalized')
+        LIMIT 1
+    ) readable ON TRUE
+    WHERE {v2_keys} && $5::text[]
+      AND event.chain_id = $1 AND event.block_number < $2
+      AND event.source_family LIKE 'ens\_v2\_%'
+      AND event.canonicality_state IN ('canonical','safe','finalized')
+";
+
+/// `events.sql` with its ENSv2 key arm replaced by `OVERLAP_ARM`.
+fn overlap_form() -> String {
+    let events = super::EVENTS;
+    let start = events
+        .find("    UNION ALL\n    -- ENSv2 events filed under a requested ENSv2 state key")
+        .expect("events.sql has an ENSv2 key arm");
+    let end = start
+        + events[start..]
+            .find("), keys AS MATERIALIZED (")
+            .expect("the ENSv2 key arm ends the candidates");
+    statement(&format!(
+        "{}{OVERLAP_ARM}{}",
+        &events[..start],
+        &events[end..]
+    ))
+}
+
+type EventRow = (Value, Option<OffsetDateTime>);
+
+async fn key_rows(
+    connection: &mut PgConnection,
+    sql: &str,
+    before: i64,
+    keys: &[String],
+) -> Result<Vec<EventRow>> {
+    Ok(sqlx::query_as(sql)
+        .bind(CHAIN)
+        .bind(before)
+        .bind(Vec::<String>::new())
+        .bind(Vec::<Uuid>::new())
+        .bind(keys)
+        .fetch_all(connection)
+        .await?)
+}
+
+fn row_identities(rows: &[EventRow]) -> Vec<&str> {
+    let mut identities: Vec<_> = rows
+        .iter()
+        .map(|(body, _)| body["event_identity"].as_str().unwrap())
+        .collect();
+    identities.sort_unstable();
+    identities
+}
+
+/// A token id whose low 32 bits are `low`. ENSv2 state keys zero them.
+fn token(high: u64, low: u32) -> String {
+    format!("0x{high:056x}{low:08x}")
+}
+
+fn v2_key(emitter: &str, id: &str) -> String {
+    format!(
+        "{}:{}00000000",
+        emitter.to_lowercase(),
+        id[..58].to_lowercase()
+    )
+}
+
+fn text_array(keys: &[String]) -> String {
+    format!("'{{{}}}'::text[]", keys.join(","))
+}
+
+/// The child of the `candidates` union that reads ENSv2 state keys: the one holding the
+/// `v2_keys.sql` array.
+fn key_arm(plan: &Value) -> Option<&Value> {
+    let mut children = plan["Plans"].as_array().into_iter().flatten();
+    if plan["Node Type"] == "Append"
+        && let Some(arm) = children
+            .clone()
+            .find(|child| child.to_string().contains("array_remove("))
+    {
+        return Some(arm);
+    }
+    children.find_map(key_arm)
+}
+
+/// The key arm tests the array only in the inverted index, and reads `normalized_events`
+/// through no other index and no sequential scan.
+fn assert_probes_per_key(plan: &Value, table_indexes: &[String], context: &str) {
+    let arm = key_arm(plan).unwrap_or_else(|| panic!("{context}: no ENSv2 key arm in {plan}"));
+    let mut probed = false;
+    let mut pending = vec![arm];
+    while let Some(node) = pending.pop() {
+        let index = node["Index Name"].as_str().unwrap_or("");
+        assert!(
+            index == KEY_PROBE_INDEX || !table_indexes.iter().any(|name| name == index),
+            "{context}: the ENSv2 key arm reads {index}: {arm}"
+        );
+        assert!(
+            !(node["Node Type"] == "Seq Scan" && node["Relation Name"] == "normalized_events"),
+            "{context}: the ENSv2 key arm scans normalized_events: {arm}"
+        );
+        assert!(
+            !node["Filter"]
+                .as_str()
+                .unwrap_or("")
+                .contains("array_remove("),
+            "{context}: the ENSv2 key arm filters rows by the key array: {arm}"
+        );
+        probed |= index == KEY_PROBE_INDEX
+            && node["Index Cond"]
+                .as_str()
+                .unwrap_or("")
+                .contains("array_remove(");
+        pending.extend(node["Plans"].as_array().into_iter().flatten());
+    }
+    assert!(
+        probed,
+        "{context}: the key array is not an index condition on {KEY_PROBE_INDEX}: {arm}"
+    );
+}
+
+/// `Actual Loops` of the lineage probe in the key arm: the inner side of the nested loop that
+/// joins the arm's events to `chain_lineage`.
+fn lineage_loops(plan: &Value) -> Option<i64> {
+    let mut children = plan["Plans"].as_array().into_iter().flatten();
+    if plan["Node Type"] == "Nested Loop"
+        && let Some(inner) = children.clone().find(|child| {
+            child["Parent Relationship"] == "Inner" && relation_scans(child, "chain_lineage") > 0
+        })
+    {
+        return inner["Actual Loops"].as_i64();
+    }
+    children.find_map(lineage_loops)
+}
+
+/// The per-key probes return what the single overlap read returns, for every shape of key set
+/// and with the inverted index unusable.
+#[tokio::test]
+async fn ensv2_key_arm_matches_the_overlap_form() -> Result {
+    const OTHER_CHAIN: &str = "lookahead-other";
+    const REGISTRY: &str = "0x00000000000000000000000000000000000000aa";
+    const SECOND: &str = "0x00000000000000000000000000000000000000bb";
+    const MIXED: &str = "0x00000000000000000000000000000000000000CC";
+    const SUBREGISTRY: &str = "0x00000000000000000000000000000000000000DD";
+    let db = database().await?;
+    sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,'block-1',1,to_timestamp(1),'canonical')")
+        .bind(OTHER_CHAIN).execute(db.pool()).await?;
+    let mixed_token = format!("0x{}", "AB".repeat(32));
+    for (identity, block, emitter, id, after) in [
+        (
+            "reg-1",
+            1,
+            REGISTRY,
+            token(1, 7),
+            json!({"labelhash": token(101, 0)}),
+        ),
+        (
+            "link-1",
+            2,
+            REGISTRY,
+            token(1, 7),
+            json!({"resource": token(201, 0)}),
+        ),
+        (
+            "reg-2",
+            2,
+            REGISTRY,
+            token(2, 0),
+            json!({"labelhash": token(102, 0), "new_token_id": token(3, 0)}),
+        ),
+        (
+            "upstream",
+            3,
+            REGISTRY,
+            token(4, 0),
+            json!({"upstream_resource": token(202, 0)}),
+        ),
+        (
+            "second-emitter",
+            3,
+            SECOND,
+            token(1, 7),
+            json!({"labelhash": token(101, 0)}),
+        ),
+        (
+            "other-chain",
+            1,
+            REGISTRY,
+            token(1, 7),
+            json!({"labelhash": token(101, 0)}),
+        ),
+        (
+            "orphaned-block",
+            4,
+            REGISTRY,
+            token(5, 0),
+            json!({"labelhash": token(105, 0)}),
+        ),
+        ("orphaned-row", 2, REGISTRY, token(6, 0), json!({})),
+        ("late", 6, REGISTRY, token(1, 7), json!({})),
+        (
+            "mixed-case",
+            3,
+            MIXED,
+            mixed_token.clone(),
+            json!({"labelhash": token(103, 0)}),
+        ),
+        (
+            "subregistry",
+            3,
+            REGISTRY,
+            token(7, 0),
+            json!({"subregistry": SUBREGISTRY}),
+        ),
+        (
+            "cleared",
+            3,
+            REGISTRY,
+            token(8, 0),
+            json!({(SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY): []}),
+        ),
+        ("v1-family", 1, REGISTRY, token(1, 7), json!({})),
+    ] {
+        let chain = if identity == "other-chain" {
+            OTHER_CHAIN
+        } else {
+            CHAIN
+        };
+        let family = if identity == "v1-family" {
+            "ens_v1_registrar_l1"
+        } else {
+            "ens_v2_registry_l1"
+        };
+        sqlx::query("INSERT INTO normalized_events (event_identity,namespace,event_kind,source_family,manifest_version,chain_id,block_number,block_hash,transaction_hash,raw_fact_ref,derivation_kind,canonicality_state,after_state) VALUES ($1,'ens','RegistrationGranted',$2,1,$3,$4,'block-'||$4::text,'tx',jsonb_build_object($5::text,'v2:'||$1,$6::text,$7||':-:'||$8||':-:LabelRegistered'),'ens_v2_registrar','canonical',$9)")
+            .bind(identity).bind(family).bind(chain).bind(block).bind(INTERPRETER_STATE_KEY)
+            .bind(super::STATE_SCOPE_KEY).bind(emitter).bind(&id).bind(after)
+            .execute(db.pool()).await?;
+    }
+    sqlx::query("UPDATE normalized_events SET canonicality_state='orphaned' WHERE event_identity='orphaned-row'")
+        .execute(db.pool()).await?;
+    sqlx::query("UPDATE chain_lineage SET canonicality_state='orphaned' WHERE chain_id=$1 AND block_hash='block-4'")
+        .bind(CHAIN).execute(db.pool()).await?;
+    sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,'replacement-4',4,to_timestamp(4),'safe')")
+        .bind(CHAIN).execute(db.pool()).await?;
+    let mut connection = db.pool().acquire().await?;
+    let mut universe: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT DISTINCT key FROM normalized_events event, unnest({}) key ORDER BY key",
+        super::V2_KEYS
+            .trim_end()
+            .replace("{state_scope}", super::STATE_SCOPE_KEY)
+    ))
+    .fetch_all(&mut *connection)
+    .await?;
+    let absent: Vec<String> = (0..1200)
+        .map(|n| v2_key(SECOND, &token(1_000 + n, 0)))
+        .collect();
+    universe.extend(absent.iter().take(10).cloned());
+    // The registry-level key of the subregistry an event points at.
+    let subregistry_key = format!("{}:00000000", SUBREGISTRY.to_lowercase());
+    let readable = [
+        "cleared",
+        "link-1",
+        "mixed-case",
+        "reg-1",
+        "reg-2",
+        "second-emitter",
+        "subregistry",
+        "upstream",
+    ];
+    let registry = format!("{REGISTRY}:*");
+    let cases: Vec<(&str, i64, Vec<String>, Vec<&str>)> = vec![
+        ("no keys", 5, vec![], vec![]),
+        (
+            "one key",
+            5,
+            vec![v2_key(REGISTRY, &token(2, 9))],
+            vec!["reg-2"],
+        ),
+        ("keys matching nothing", 5, absent.clone(), vec![]),
+        (
+            "one event under two keys, one key over two events",
+            5,
+            vec![
+                v2_key(REGISTRY, &token(1, 0)),
+                v2_key(REGISTRY, &token(101, 0)),
+            ],
+            vec!["link-1", "reg-1"],
+        ),
+        (
+            "new token id",
+            5,
+            vec![v2_key(REGISTRY, &token(3, 0))],
+            vec!["reg-2"],
+        ),
+        (
+            "upstream resource",
+            5,
+            vec![v2_key(REGISTRY, &token(202, 0))],
+            vec!["upstream"],
+        ),
+        (
+            "second emitter",
+            5,
+            vec![v2_key(SECOND, &token(1, 0))],
+            vec!["second-emitter"],
+        ),
+        (
+            "whole registry",
+            5,
+            vec![registry.clone()],
+            vec![
+                "cleared",
+                "link-1",
+                "reg-1",
+                "reg-2",
+                "subregistry",
+                "upstream",
+            ],
+        ),
+        (
+            "whole registry before most of it",
+            3,
+            vec![registry],
+            vec!["link-1", "reg-1", "reg-2"],
+        ),
+        (
+            "orphaned block and orphaned event",
+            5,
+            vec![
+                v2_key(REGISTRY, &token(5, 0)),
+                v2_key(REGISTRY, &token(6, 0)),
+            ],
+            vec![],
+        ),
+        (
+            "uppercase spelling",
+            5,
+            vec![v2_key(REGISTRY, &token(2, 0)).to_uppercase()],
+            vec![],
+        ),
+        (
+            "uppercase source",
+            5,
+            vec![v2_key(MIXED, &mixed_token)],
+            vec!["mixed-case"],
+        ),
+        (
+            "clear marker",
+            5,
+            vec![v2_key(REGISTRY, &token(8, 0))],
+            vec!["cleared"],
+        ),
+        ("subregistry", 5, vec![subregistry_key], vec!["subregistry"]),
+        ("every key", 5, universe.clone(), readable.to_vec()),
+        ("every key, later batch", 7, universe.clone(), {
+            let mut later = readable.to_vec();
+            later.push("late");
+            later.sort_unstable();
+            later
+        }),
+    ];
+    let (overlap, per_key) = (overlap_form(), statement(super::EVENTS));
+    let mut results = Vec::new();
+    for (case, before, keys, expected) in &cases {
+        let old = key_rows(&mut connection, &overlap, *before, keys).await?;
+        let new = key_rows(&mut connection, &per_key, *before, keys).await?;
+        assert_eq!(new, old, "{case}");
+        assert_eq!(row_identities(&new), *expected, "{case}");
+        results.push(new);
+    }
+    // An invalid inverted index (a failed concurrent build) leaves the same rows.
+    let mut transaction = db.pool().begin().await?;
+    sqlx::query("UPDATE pg_index SET indisvalid = false WHERE indexrelid = $1::regclass")
+        .bind(KEY_PROBE_INDEX)
+        .execute(&mut *transaction)
+        .await?;
+    let plan: Value = sqlx::query_scalar(&format!("EXPLAIN (FORMAT JSON) {per_key}"))
+        .bind(CHAIN)
+        .bind(5_i64)
+        .bind(Vec::<String>::new())
+        .bind(Vec::<Uuid>::new())
+        .bind(&universe)
+        .fetch_one(&mut *transaction)
+        .await?;
+    let mut used = Vec::new();
+    index_names(&plan[0]["Plan"], &mut used);
+    assert!(!used.iter().any(|name| name == KEY_PROBE_INDEX), "{used:?}");
+    for ((case, before, keys, _), valid) in cases.iter().zip(&results) {
+        let new = key_rows(&mut transaction, &per_key, *before, keys).await?;
+        assert_eq!(&new, valid, "{case} with an invalid index");
+    }
+    transaction.rollback().await?;
+    drop(connection);
+    db.cleanup().await?;
+    assert_ne!(overlap, per_key, "events.sql still reads keys by overlap");
+    Ok(())
+}
+
+async fn seed_key_population(pool: &PgPool, events: std::ops::Range<i64>) -> Result {
+    sqlx::query(
+        "INSERT INTO normalized_events
+         (event_identity,namespace,event_kind,source_family,manifest_version,chain_id,
+          block_number,block_hash,transaction_hash,raw_fact_ref,derivation_kind,
+          canonicality_state,after_state)
+         SELECT 'dense-'||n,'ens','RegistrationGranted','ens_v2_registry_l1',1,$1,
+                (n % 3000) / 3,'block-'||((n % 3000) / 3),'tx',
+                jsonb_build_object($2::text,'v2:dense-'||n,$3::text,
+                    '0x'||lpad(to_hex(1 + n % 30),40,'0')||':-:0x'
+                    ||encode(sha256(n::text::bytea),'hex')||':-:LabelRegistered'),
+                'ens_v2_registrar','canonical','{}'
+         FROM generate_series($4::bigint,$5::bigint - 1) n",
+    )
+    .bind(CHAIN)
+    .bind(INTERPRETER_STATE_KEY)
+    .bind(super::STATE_SCOPE_KEY)
+    .bind(events.start)
+    .bind(events.end)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Around a dense ENSv1→ENSv2 migration range a batch requests over a thousand ENSv2 state
+/// keys. The planner does not use the statistics of a partial expression index, so it
+/// estimates an array overlap from the number of requested keys alone, and a single read for
+/// all keys turns into a read of the chain's ENSv2 history by block. The key arm must stay
+/// one inverted-index probe per key at any key count, in both plan modes, with fresh or stale
+/// column statistics.
+#[tokio::test]
+async fn ensv2_key_arm_probes_the_inverted_index_per_key() -> Result {
+    let db = database().await?;
+    sqlx::raw_sql(
+        "ALTER TABLE normalized_events SET (autovacuum_enabled = false);
+         INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state)
+         SELECT 'lookahead-test','block-'||n,n,to_timestamp(n),'canonical'
+         FROM generate_series(0,1000) n ON CONFLICT DO NOTHING",
+    )
+    .execute(db.pool())
+    .await?;
+    seed_key_population(db.pool(), 0..3_000).await?;
+    let mut connection = db.pool().acquire().await?;
+    // Without column statistics the planner misjudges the family predicate itself, in every
+    // arm. Operators run ANALYZE once the indexes are built.
+    sqlx::raw_sql("ANALYZE normalized_events; ANALYZE chain_lineage;")
+        .execute(&mut *connection)
+        .await?;
+    let requested: Vec<String> = sqlx::query_scalar(
+        "SELECT lower(split_part(raw_fact_ref ->> $1, ':', 1)) || ':'
+             || left(split_part(raw_fact_ref ->> $1, ':', 3), 58) || '00000000'
+         FROM normalized_events WHERE block_number < 500
+         ORDER BY md5(event_identity) LIMIT 1200",
+    )
+    .bind(super::STATE_SCOPE_KEY)
+    .fetch_all(&mut *connection)
+    .await?;
+    assert_eq!(requested.len(), 1200);
+    let mut most = requested.clone();
+    most.extend((0..48_800).map(|n| v2_key("0xff", &token(n, 0))));
+    let table_indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT indexname::text FROM pg_indexes WHERE tablename = 'normalized_events'",
+    )
+    .fetch_all(&mut *connection)
+    .await?;
+    let per_key = statement(super::EVENTS);
+    for pass in ["fresh", "stale"] {
+        if pass == "stale" {
+            seed_key_population(db.pool(), 3_000..33_000).await?;
+        }
+        for mode in ["force_custom_plan", "force_generic_plan"] {
+            let prepared = format!("key_arm_{pass}_{mode}");
+            sqlx::raw_sql(&format!(
+                "SET plan_cache_mode={mode}; PREPARE {prepared}(text,bigint,text[],uuid[],text[]) AS {per_key}"
+            ))
+            .execute(&mut *connection)
+            .await?;
+            for keys in [&requested, &most] {
+                let plan: Value = sqlx::query_scalar(&format!(
+                    "EXPLAIN (FORMAT JSON) EXECUTE {prepared}('{CHAIN}',500,'{{}}'::text[],'{{}}'::uuid[],{})",
+                    text_array(keys)
+                ))
+                .fetch_one(&mut *connection)
+                .await?;
+                assert_probes_per_key(
+                    &plan[0]["Plan"],
+                    &table_indexes,
+                    &format!("{pass} statistics, {mode}, {} keys", keys.len()),
+                );
+            }
+        }
+    }
+    drop(connection);
+    db.cleanup().await?;
+    Ok(())
+}
+
+/// An event filed under several requested keys has its lineage checked once.
+#[tokio::test]
+async fn ensv2_key_arm_probes_lineage_once_per_event() -> Result {
+    const REGISTRY: &str = "0x00000000000000000000000000000000000000aa";
+    let db = database().await?;
+    let mut requested = Vec::new();
+    for n in 1..=3_u64 {
+        sqlx::query("INSERT INTO normalized_events (event_identity,namespace,event_kind,source_family,manifest_version,chain_id,block_number,block_hash,transaction_hash,raw_fact_ref,derivation_kind,canonicality_state,after_state) VALUES ($1,'ens','RegistrationGranted','ens_v2_registry_l1',1,$2,$3,'block-'||$3::text,'tx',jsonb_build_object($4::text,'v2:'||$1,$5::text,$6||':-:'||$7||':-:LabelRegistered'),'ens_v2_registrar','canonical',jsonb_build_object('labelhash',$8::text))")
+            .bind(format!("event-{n}")).bind(CHAIN).bind(i64::try_from(n)?).bind(INTERPRETER_STATE_KEY)
+            .bind(super::STATE_SCOPE_KEY).bind(REGISTRY).bind(token(n, 0)).bind(token(100 + n, 0))
+            .execute(db.pool()).await?;
+        requested.extend([
+            v2_key(REGISTRY, &token(n, 0)),
+            v2_key(REGISTRY, &token(100 + n, 0)),
+        ]);
+    }
+    let absent: Vec<String> = (0..1200)
+        .map(|n| v2_key(REGISTRY, &token(1_000 + n, 0)))
+        .collect();
+    let mut connection = db.pool().acquire().await?;
+    sqlx::raw_sql("ANALYZE normalized_events; ANALYZE chain_lineage;")
+        .execute(&mut *connection)
+        .await?;
+    let per_key = statement(super::EVENTS);
+    for mode in ["force_custom_plan", "force_generic_plan"] {
+        sqlx::raw_sql(&format!(
+            "SET plan_cache_mode={mode}; PREPARE lineage_{mode}(text,bigint,text[],uuid[],text[]) AS {per_key}"
+        ))
+        .execute(&mut *connection)
+        .await?;
+        for (keys, loops) in [(&requested, 3), (&absent, 0)] {
+            let plan: Value = sqlx::query_scalar(&format!(
+                "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE lineage_{mode}('{CHAIN}',5,'{{}}'::text[],'{{}}'::uuid[],{})",
+                text_array(keys)
+            ))
+            .fetch_one(&mut *connection)
+            .await?;
+            let arm = key_arm(&plan[0]["Plan"]).expect("an ENSv2 key arm");
+            assert_eq!(
+                lineage_loops(arm),
+                Some(loops),
+                "{mode}, {} keys: {arm}",
+                keys.len()
+            );
+        }
+    }
     drop(connection);
     db.cleanup().await?;
     Ok(())

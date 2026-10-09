@@ -49,7 +49,11 @@ for ENSv2:
   filed under: its registry or resolver with the token, resource and label it
   names, the whole registry, and the registry its `subregistry` value names. The
   array must stay identical to
-  `crates/interpret/src/load/lookahead/v2_keys.sql`.
+  `crates/interpret/src/load/lookahead/v2_keys.sql`. The loader probes it once
+  per requested key. The planner does not use the statistics of a partial
+  expression index, so a single test for all keys would be costed by the key
+  count alone.
+  Without this index, each requested key scans `normalized_events`.
 - `normalized_events_v2_due_probe_idx` selects ENSv2 registry and root registry
   events by chain and parsed expiry, with the same expiry expression as the
   due-name probes, so Interpret can load the tokens whose expiry falls inside a
@@ -116,10 +120,10 @@ and never drop one while a runner that uses the lookahead loader is processing
 batches.
 
 After the builds finish, run `ANALYZE bigname_phase.normalized_events` (or
-confirm autovacuum has analyzed the table since). Expression indexes have no
-statistics until the table is analyzed, and the loader's queries depend on them:
-in a test database without statistics, reading the history of 100,000 names did
-not finish in several minutes, and took under four seconds after `ANALYZE`.
+confirm autovacuum has analyzed the table since). The loader's queries depend on
+the table's column statistics, which exist only once the table is analyzed: in a
+test database without them, reading the history of 100,000 names did not finish
+in several minutes, and took under four seconds after `ANALYZE`.
 
 The matching versioned schema-migrations
 `20260917150000_normalized_events_v1_lookahead_indexes.sql` (ENSv1),
