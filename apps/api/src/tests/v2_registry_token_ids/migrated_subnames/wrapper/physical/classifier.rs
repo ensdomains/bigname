@@ -1,12 +1,12 @@
-//! A canonical retirement must not hide a still-used physical resolver from classifier work.
-//! These admitted ABI logs exercise Interpret, Project and actual HTTP readers, not an EVM.
+//! A resolver classification change must reach a name whose registry moved to another mount.
+//! W's claimed entry expires, so W's `leaf` token is named `leaf.native105.eth` with its
+//! pointer at P. These admitted ABI logs exercise Interpret, Project and actual HTTP readers,
+//! not an EVM.
 use super::*;
 const PROXY: &str = "0x0000000000000000000000000000000000025920";
 const IMPLEMENTATION: &str = "0x115eb53f0c60696633855f90b138178fb40b2b2c";
 const UNKNOWN: &str = "0x0000000000000000000000000000000000025921";
 const CLEARED: &str = "cleared.native105.eth";
-const DIFFERENT: &str = "ens_v2_path_target_not_projected";
-const UNKNOWN_PATH: &str = "ens_v2_path_not_projected";
 sol! { event ResolverCreated(); }
 
 fn deployment() -> Result<Vec<(Address, alloy_primitives::LogData)>> {
@@ -65,7 +65,9 @@ async fn invariant(database: &TestDatabase) -> Result<Value> {
         'pointers',(SELECT jsonb_agg(to_jsonb(r) ORDER BY resource_id) FROM project_resource_pointer r))")
         .fetch_one(&database.pool).await?)
 }
-async fn observe(database: &TestDatabase, expected: &str) -> Result<Value> {
+/// The moved name serves W's `leaf` token with P as its resolver. P holds no record for the
+/// node. While P's implementation is undeclared, the primary address is unsupported.
+async fn observe(database: &TestDatabase, resource: Uuid, declared: bool) -> Result<Value> {
     let detail = path_get(database, &format!("/v1/names/{LEAF}")).await?;
     let lookup = path_lookup(
         database,
@@ -75,21 +77,30 @@ async fn observe(database: &TestDatabase, expected: &str) -> Result<Value> {
     let stored:Value=sqlx::query_scalar("SELECT to_jsonb(row) FROM project_lookup_name row WHERE chain_id=$1 AND logical_name_id=$2")
         .bind(PATH_CHAIN).bind(format!("ens:{}",bigname_lookup::ens_namehash_hex(LEAF)?)).fetch_one(&database.pool).await?;
     let evidence = json!({"compiled_hash":bigname_content_hash::INTERPRETER_CONTENT_HASH,"detail":detail,"lookup":lookup,"stored_core":stored});
-    eprintln!("TYR259 physical classifier public and stored evidence: {evidence}");
+    eprintln!("TYR259 moved-path classifier public and stored evidence: {evidence}");
+    let data = &detail["data"];
+    assert_eq!(data["authority"], "ens_v2", "{evidence:#}");
     assert_eq!(
-        detail["data"]["resolution_unsupported_reason"], expected,
-        "fresh detail: {evidence:#}"
+        data["registration_id"],
+        resource.to_string(),
+        "{evidence:#}"
     );
-    assert!(detail["data"]["resolver"].is_null() && detail["data"]["primary_address"].is_null());
-    assert!(stored["record_serving_resource_id"].is_null());
+    assert_eq!(data["resolver"]["address"], PROXY, "{evidence:#}");
+    assert!(data["primary_address"].is_null(), "{evidence:#}");
     assert!(
-        lookup["data"][0]["record"]["resolver"].is_null()
-            && lookup["data"][0]["record"]["primary_address"].is_null()
+        data.get("resolution_unsupported_reason").is_none(),
+        "{evidence:#}"
     );
-    assert!(
-        stored["core"]["declared_summary"]["resolution_unsupported_reason"] == expected
-            && lookup["data"][0]["record"] == detail["data"],
-        "physical resolver classifier must refresh the persisted reason and actual lookup: {evidence:#}"
+    let unsupported = if declared {
+        Value::Null
+    } else {
+        json!(["primary_address"])
+    };
+    assert_eq!(data["unsupported_fields"], unsupported, "{evidence:#}");
+    assert_eq!(stored["record_serving_resource_id"], resource.to_string());
+    assert_eq!(
+        lookup["data"][0]["record"], detail["data"],
+        "the classification must refresh the actual lookup: {evidence:#}"
     );
     lookup_publication::assert_name_prepared_parity(database, LEAF).await?;
     Ok(evidence)
@@ -132,7 +143,7 @@ async fn upgrade(
 }
 
 #[tokio::test]
-async fn lookup_precomputation_classifier_upgrade_refreshes_retired_physical_path() -> Result<()> {
+async fn lookup_precomputation_classifier_upgrade_refreshes_a_moved_mount_path() -> Result<()> {
     let (database, resolver, resources) = setup_native().await?;
     let owner = HOLDER.parse()?;
     let proxy = PROXY.parse()?;
@@ -215,25 +226,38 @@ async fn lookup_precomputation_classifier_upgrade_refreshes_retired_physical_pat
     for resource in [resources["leaf"], cleared_resource] {
         let pointer:Value=sqlx::query_scalar("SELECT to_jsonb(row) FROM project_resource_pointer row WHERE chain_id=$1 AND resource_id=$2")
             .bind(PATH_CHAIN).bind(resource).fetch_one(&database.pool).await?;
-        assert!(pointer["resolver_address"].is_null(), "{pointer:#}");
         assert_eq!(pointer["nonzero_resolver_address"], PROXY);
-        let retirement: Value =
-            sqlx::query_scalar("SELECT after_state FROM normalized_events WHERE event_identity=$1")
-                .bind(
-                    pointer["pointer_position"]["event_identity"]
-                        .as_str()
-                        .unwrap(),
-                )
-                .fetch_one(&database.pool)
-                .await?;
+        let selected: Value = sqlx::query_scalar(
+            "SELECT to_jsonb(event) FROM normalized_events event WHERE event_identity=$1",
+        )
+        .bind(
+            pointer["pointer_position"]["event_identity"]
+                .as_str()
+                .unwrap(),
+        )
+        .fetch_one(&database.pool)
+        .await?;
+        let retirement = &selected["after_state"];
         if resource == resources["leaf"] {
-            assert_eq!(retirement["source_event"], "RegistryPathExpired");
-            assert_eq!(retirement["derived_from"], "interpreter_state");
+            // The boundary restates P under the mount path. The old path's clear is not the
+            // current pointer.
+            assert_eq!(pointer["resolver_address"], PROXY, "{pointer:#}");
             assert_eq!(
-                retirement["terminal_reason"],
-                "registry_name_binding_expired"
+                pointer["namehash"],
+                bigname_lookup::ens_namehash_hex(LEAF)?,
+                "{pointer:#}"
             );
+            assert_eq!(
+                selected["logical_name_id"],
+                format!("ens:{}", bigname_lookup::ens_namehash_hex(LEAF)?)
+            );
+            assert!(selected["transaction_index"].is_null(), "{selected:#}");
+            assert_eq!(retirement["source_event"], "RegistryPathExpired");
+            assert_eq!(retirement["resolver"], PROXY);
+            assert!(retirement["derived_from"].is_null(), "{selected:#}");
+            assert!(retirement["terminal_reason"].is_null(), "{selected:#}");
         } else {
+            assert!(pointer["resolver_address"].is_null(), "{pointer:#}");
             // Expiry does not replace an already-null pointer with a synthetic clear.
             assert_eq!(retirement["source_event"], "ResolverUpdated");
             assert!(retirement["derived_from"].is_null());
@@ -258,18 +282,19 @@ async fn lookup_precomputation_classifier_upgrade_refreshes_retired_physical_pat
     .fetch_one(&database.pool)
     .await?;
     assert_eq!(expiry.parse::<u64>()?, T + 10);
-    let only_physical: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM project_resource_pointer WHERE chain_id=$1 AND resolver_address=$2",
+    let at_proxy: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT resource_id FROM project_resource_pointer WHERE chain_id=$1 AND resolver_address=$2",
     )
     .bind(PATH_CHAIN)
     .bind(PROXY)
-    .fetch_one(&database.pool)
+    .fetch_all(&database.pool)
     .await?;
     assert_eq!(
-        only_physical, 0,
-        "no current pointer may accidentally select P"
+        at_proxy,
+        [resources["leaf"]],
+        "the moved leaf is the only current pointer at P"
     );
-    let before = observe(&database, DIFFERENT).await?;
+    let before = observe(&database, resources["leaf"], true).await?;
     let unchanged = invariant(&database).await?;
     let family_before = replay::families(&database).await?;
     let controls_before = vec![
@@ -303,7 +328,7 @@ async fn lookup_precomputation_classifier_upgrade_refreshes_retired_physical_pat
         physical(&database, resources["leaf"]).await?["after_state"]["resolver"],
         PROXY
     );
-    let after = observe(&database, UNKNOWN_PATH).await?;
+    let after = observe(&database, resources["leaf"], false).await?;
     for field in [
         "authority",
         "registration_id",
@@ -330,14 +355,14 @@ async fn lookup_precomputation_classifier_upgrade_refreshes_retired_physical_pat
         1
     );
     assert_eq!(replay::families(&database).await?, family_before);
-    observe(&database, DIFFERENT).await?;
+    observe(&database, resources["leaf"], true).await?;
     publish(&database, 126).await?;
     assert_eq!(replay::families(&database).await?, family_after);
-    observe(&database, UNKNOWN_PATH).await?;
+    observe(&database, resources["leaf"], false).await?;
     replay::assert_rebuild(&database, 126).await?;
-    observe(&database, UNKNOWN_PATH).await?;
+    observe(&database, resources["leaf"], false).await?;
     upgrade(&database, 127, IMPLEMENTATION, T + 2).await?;
-    observe(&database, DIFFERENT).await?;
+    observe(&database, resources["leaf"], true).await?;
     let before_record = lookup_publication::components(&database).await?;
     let record = transaction(
         128,
@@ -353,7 +378,7 @@ async fn lookup_precomputation_classifier_upgrade_refreshes_retired_physical_pat
         )],
     );
     seed_and_run_with(&database, &record, 128, 128, &[], Some((T + 3) as i64)).await?;
-    observe(&database, DIFFERENT).await?;
+    observe(&database, resources["leaf"], true).await?;
     assert_eq!(
         lookup_publication::components(&database).await?,
         before_record,

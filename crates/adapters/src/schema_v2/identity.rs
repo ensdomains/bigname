@@ -7,20 +7,16 @@ use serde_json::{Value, json};
 
 mod boundary;
 mod node;
-pub(super) use boundary::materialize_v2_boundary;
+pub(super) use boundary::{Origin, materialize_v2_boundary};
 pub(super) use node::NodeIdentityDraft;
 
 use super::{
     catalog::Selected,
-    common::{
-        decoded_label, dns_encode, event_time, hash_hex, normalization_flag, provenance,
-        stable_uuid,
-    },
+    common::{decoded_label, dns_encode, event_time, hash_hex, normalization_flag, stable_uuid},
     model::{
         BatchOutput, BindingClosure, LabelPreimage, NameSurface, RawLogInput, RawNameEvidence,
         Resource, SurfaceBinding, TokenLineage,
     },
-    normalized::preimage_event,
     protocol::Interpreted,
     state::State,
 };
@@ -88,10 +84,23 @@ pub(super) fn materialize(
     state: &mut State,
     output: &mut BatchOutput,
 ) -> anyhow::Result<()> {
-    let raw_provenance = provenance(raw, &selected.event.name, selected.source.manifest_id);
+    materialize_from(&Origin::Log(selected), raw, interpreted, state, output)
+}
+
+/// Writes the identity rows of `interpreted`. At a block boundary `raw` is the stand-in log
+/// that carries the block and no transaction.
+pub(super) fn materialize_from(
+    origin: &Origin<'_>,
+    raw: &RawLogInput,
+    interpreted: &Interpreted,
+    state: &mut State,
+    output: &mut BatchOutput,
+) -> anyhow::Result<()> {
+    let (source, source_event) = (origin.source(), origin.source_event());
+    let raw_provenance = origin.provenance(raw);
     let transition_time = event_time(raw);
-    let v1_surface = selected.source.source_family.starts_with("ens_v1_")
-        || selected.source.source_family.starts_with("basenames_");
+    let v1_surface = source.source_family.starts_with("ens_v1_")
+        || source.source_family.starts_with("basenames_");
     let mut shadow_names = interpreted
         .names
         .iter()
@@ -100,13 +109,13 @@ pub(super) fn materialize(
                 .iter()
                 .any(|label| !normalization_flag(Some(label)).normalized)
         })
-        .map(|name| format!("{}:{}", selected.source.namespace, name.namehash))
+        .map(|name| format!("{}:{}", source.namespace, name.namehash))
         .collect::<BTreeSet<_>>();
     shadow_names.extend(
         interpreted
             .shadow_names
             .iter()
-            .map(|name| format!("{}:{}", selected.source.namespace, name.namehash)),
+            .map(|name| format!("{}:{}", source.namespace, name.namehash)),
     );
     let mut labels = BTreeMap::new();
     for label in &interpreted.labels {
@@ -242,17 +251,13 @@ pub(super) fn materialize(
             canonicality_state: raw.canonicality_state.clone(),
         });
     }
-    node::materialize(
-        selected,
-        raw,
-        &interpreted.node_identities,
-        &raw_provenance,
-        state,
-        output,
-    )?;
+    if let Origin::Log(selected) = origin {
+        let nodes = &interpreted.node_identities;
+        node::materialize(selected, raw, nodes, &raw_provenance, state, output)?;
+    }
     let mut represented = BTreeSet::<Vec<u8>>::new();
     for name in &interpreted.names {
-        let logical_name_id = format!("{}:{}", selected.source.namespace, name.namehash);
+        let logical_name_id = format!("{}:{}", source.namespace, name.namehash);
         let flags = name
             .labels
             .iter()
@@ -268,15 +273,10 @@ pub(super) fn materialize(
             .collect::<Vec<_>>();
         let active = errors.is_empty();
         if v1_surface {
-            state.materialize_v1_surface(
-                &selected.source.namespace,
-                &name.namehash,
-                active,
-                name.bind,
-            );
+            state.materialize_v1_surface(&source.namespace, &name.namehash, active, name.bind);
         }
         if !active && !v1_surface {
-            state.observe_v1_surface(&selected.source.namespace, &name.namehash);
+            state.observe_v1_surface(&source.namespace, &name.namehash);
         }
         let labelhashes = name
             .labels
@@ -284,11 +284,11 @@ pub(super) fn materialize(
             .map(|label| hash_hex(label.as_bytes()))
             .collect::<Vec<_>>();
         if !labelhashes.is_empty() {
-            state.remember_v1_path(&selected.source.namespace, &name.namehash, &labelhashes)?;
+            state.remember_v1_path(&source.namespace, &name.namehash, &labelhashes)?;
         }
         represented.extend(name.labels.iter().map(|label| label.as_bytes().to_vec()));
         let mut after_state = json!({
-            "source_event": selected.event.name,
+            "source_event": source_event,
             "raw_name": name.labels.join("."),
             "raw_labels": name.labels,
             "namehash": name.namehash,
@@ -300,8 +300,7 @@ pub(super) fn materialize(
         {
             after.extend(metadata.clone());
         }
-        let preimage = preimage_event(
-            selected,
+        let preimage = origin.preimage(
             raw,
             Some(logical_name_id.clone()),
             &name.namehash,
@@ -309,7 +308,7 @@ pub(super) fn materialize(
         );
         output.name_surfaces.push(NameSurface {
             logical_name_id: logical_name_id.clone(),
-            namespace: selected.source.namespace.clone(),
+            namespace: source.namespace.clone(),
             raw: Some(RawNameEvidence {
                 raw_name: name.labels.join("."),
                 raw_labels: name.labels.clone(),
@@ -388,8 +387,8 @@ pub(super) fn materialize(
             "shadow raw-label path does not hash to its observed node"
         );
         represented.extend(name.raw_labels.iter().cloned());
-        let logical_name_id = format!("{}:{}", selected.source.namespace, name.namehash);
-        state.observe_v1_surface(&selected.source.namespace, &name.namehash);
+        let logical_name_id = format!("{}:{}", source.namespace, name.namehash);
+        state.observe_v1_surface(&source.namespace, &name.namehash);
         let decoded_labels = name
             .raw_labels
             .iter()
@@ -403,7 +402,7 @@ pub(super) fn materialize(
             .map(|label| hash_hex(label))
             .collect::<Vec<_>>();
         if !labelhashes.is_empty() {
-            state.remember_v1_path(&selected.source.namespace, &name.namehash, &labelhashes)?;
+            state.remember_v1_path(&source.namespace, &name.namehash, &labelhashes)?;
         }
         let (raw_name, raw_labels) = postgres_text_labels
             .map(|labels| {
@@ -426,13 +425,12 @@ pub(super) fn materialize(
                 })
             })
             .collect::<Vec<_>>();
-        let preimage = preimage_event(
-            selected,
+        let preimage = origin.preimage(
             raw,
             Some(logical_name_id.clone()),
             &name.namehash,
             json!({
-                "source_event": selected.event.name,
+                "source_event": source_event,
                 "logical_name_id": logical_name_id,
                 "namehash": name.namehash,
                 "visibility_state": "shadow",
@@ -443,7 +441,7 @@ pub(super) fn materialize(
         );
         output.name_surfaces.push(NameSurface {
             logical_name_id: logical_name_id.clone(),
-            namespace: selected.source.namespace.clone(),
+            namespace: source.namespace.clone(),
             raw: Some(RawNameEvidence {
                 raw_name,
                 raw_labels,
@@ -470,13 +468,12 @@ pub(super) fn materialize(
             continue;
         }
         let labelhash = hash_hex(&label.raw_label);
-        output.normalized_events.push(preimage_event(
-            selected,
+        output.normalized_events.push(origin.preimage(
             raw,
             None,
             &labelhash,
             json!({
-                "source_event": selected.event.name,
+                "source_event": source_event,
                 "raw_label_hex": hex::encode(&label.raw_label),
                 "decoded_label": decoded_label(&label.raw_label),
                 "labelhash": labelhash,

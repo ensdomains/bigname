@@ -195,40 +195,6 @@ pub(super) fn boundary_expiration(
     append_removed_name(&mut output, &transition, released_at)?;
     Ok(output)
 }
-pub(in crate::schema_v2) fn boundary_reassertion(
-    transition: &V2NameTransition,
-    block: &crate::schema_v2::RawBlockInput,
-) -> Option<Interpreted> {
-    if transition.current.is_none()
-        || transition.previous != transition.current
-        || transition.previous_shadow != transition.current_shadow
-    {
-        return None;
-    }
-    let raw = crate::schema_v2::RawLogInput {
-        chain_id: block.chain_id.clone(),
-        block_hash: block.block_hash.clone(),
-        block_number: block.block_number,
-        block_timestamp: block.block_timestamp,
-        canonicality_state: block.canonicality_state.clone(),
-        transaction_hash: format!("block-boundary:{}", block.block_hash),
-        transaction_index: -1,
-        log_index: -1,
-        emitting_address: transition.registry.clone(),
-        topics: Vec::new(),
-        data: Vec::new(),
-    };
-    let mut output = Interpreted::new();
-    append_v2_name_transitions(
-        &mut output,
-        vec![transition.clone()],
-        &raw,
-        "RegistryPathExpired",
-        None,
-    );
-    Some(output)
-}
-
 #[rustfmt::skip]
 fn append_removed_name(
     output: &mut Interpreted,
