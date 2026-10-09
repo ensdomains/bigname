@@ -38,7 +38,13 @@ fn v2_instance<'a>(tagged: &[Tagged<'a>]) -> Option<Instance<'a>> {
         for item in events {
             let event = item.event;
             if item.staged == StagedName::Other {
-                if let Some(instance) = &mut current {
+                // A path expiry ends the other name's path on this key and never detaches this
+                // one. When the registry moves at a block boundary, the grant that moved the key
+                // is what detaches the old name. The two boundary events have no transaction or
+                // log index, so their identities order them and the grant can come first.
+                if let Some(instance) = &mut current
+                    && !event.is_path_expiry()
+                {
                     instance.attached = false;
                 }
                 continue;
@@ -472,3 +478,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "canonical_move_tests.rs"]
+mod move_tests;

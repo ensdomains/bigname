@@ -3431,7 +3431,8 @@ policy in `crates/storage/src/families/control/lifecycle/policy.rs` names it.
 The build that names an ENSv2 registry by its mount path when its parent claim
 does not point back (TYR-277, see [ENSv2 name path](api-v1.md#ensv2-name-path))
 changes the [name suffix walk](glossary.md#ensv2-name-suffix-walk) in
-`crates/adapters/src`. It rotates the
+`crates/adapters/src` and the ENSv2 registration history reader in
+`crates/storage/src/families`. It rotates the
 [interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
 
 What changes for names:
@@ -3441,7 +3442,8 @@ What changes for names:
 - A registry with a valid claim and one mount is unchanged.
 - A registry with a valid claim and a second mount keeps its name while the claimed
   token lasts. When the claimed token expires, the name moves to the other mount.
-  Before, it was released.
+  Before, it was released. Later renewals and unregistration of the token apply to
+  the name under its new path.
 - A parent token pointed away from the registry still releases its names.
 
 These rows arrive through re-derivation, not through an in-place change. Every
@@ -3462,6 +3464,17 @@ until the schema-migration commits. On a large database, replace the index
 concurrently first, as
 [`ops/v1-lookahead-indexes/README.md`](../ops/v1-lookahead-indexes/README.md)
 describes. The fresh baseline already has the new definition.
+
+A database where `20261001130000_normalized_events_v2_lookahead_indexes.sql` is
+still pending applies the schema-migrations through it first, with that
+schema-migration's own procedure in
+[Lookahead loader on Sepolia](#lookahead-loader-on-sepolia). Use the
+`install.sql` of v0.2.0, or of any later release that predates this change, then
+apply the schema-migrations with `--target-version 20261001130000`. Then replace
+the index as above. The current `install.sql` builds the new definition, which
+`20261001130000` refuses, so running it first stops the upgrade at that
+schema-migration. Dropping the index and rerunning the current script does not
+get past that check.
 
 It adds no table, manifest or setting. The manifest-authority fingerprint and
 the compiled watch plan are unchanged, so stamp no Ingest redo.

@@ -147,7 +147,13 @@ the SQLx transaction. The drop holds an `ACCESS EXCLUSIVE` lock until that
 transaction commits, so reads and writes of `normalized_events` wait for the build. It
 ends with the same check and refuses any other relation or definition under the
 name. On a large initialized database, replace the index before applying
-schema-migrations:
+schema-migrations. These steps need `20261001130000` applied. Where it is still
+pending, first apply the schema-migrations through it with its own procedure:
+run the `install.sql` of v0.2.0, or of any later release that predates the new
+definition, then apply the schema-migrations with
+`--target-version 20261001130000`. The current script builds the new definition,
+which `20261001130000` refuses, so running it first stops the upgrade at that
+schema-migration, and the recovery above does not get past that check. Then:
 
 1. Stop every runner that uses the lookahead loader.
 2. Run `DROP INDEX CONCURRENTLY bigname_phase.normalized_events_v2_key_probe_idx`.
