@@ -13,6 +13,7 @@ pub(super) async fn prepare(
     chain: &str,
     block: &BlockHeader,
     after: i64,
+    root_registry: Option<&str>,
 ) -> Result<()> {
     sqlx::query(
         "/* project:families.resolution_paths.work_table */ CREATE TEMP TABLE IF NOT EXISTS bigname_resolution_path_work (
@@ -22,13 +23,16 @@ pub(super) async fn prepare(
     .await
     .map_err(|e| ProjectError::database("failed to prepare resolution path work", e))?;
     // Repeated preparation in one publication preserves work already captured before clocks
-    // were consumed. The table is discarded with the publication transaction.
+    // were consumed. The table is discarded with the publication transaction. The ENSv2 walk
+    // starts at `root_registry`, the admission the block composes with, never the current
+    // manifests.
     let statement = selection::statement(super::derived::SUMMARY_WORK_LIST);
     sqlx::query(&statement)
         .bind(chain)
         .bind(block.number)
         .bind(block.timestamp_seconds)
         .bind(after)
+        .bind(root_registry)
         .execute(&mut **transaction)
         .await
         .map_err(|e| ProjectError::database("failed to select affected resolution paths", e))?;
@@ -39,10 +43,9 @@ pub(super) async fn refresh(
     transaction: &mut Transaction<'_, Postgres>,
     chain: &str,
     block: &BlockHeader,
-    manifests: &str,
+    composition: &super::marker::Composition,
 ) -> Result<(u64, u64)> {
-    let publication =
-        super::marker::publication(transaction, chain, block, Some(manifests)).await?;
+    let publication = super::marker::publication(chain, block, composition)?;
     let mut after = String::new();
     let mut written = (0, 0);
     loop {

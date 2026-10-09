@@ -134,6 +134,119 @@ async fn an_update_after_the_work_list_is_invisible_to_the_blocks_populated_unde
     Ok(())
 }
 
+/// Manifest `id`'s update to `status`: its catalog row, and a blockless SourceManifestUpdated
+/// event carrying `payload` while it is active, as manifest sync writes them.
+async fn root_update(
+    pool: &sqlx::PgPool,
+    id: Option<i64>,
+    status: &str,
+    payload: serde_json::Value,
+) -> Result<i64> {
+    let id: i64 = match id {
+        Some(id) => {
+            sqlx::query("UPDATE manifest_versions SET rollout_status = $2 WHERE manifest_id = $1")
+                .bind(id)
+                .bind(status)
+                .execute(pool)
+                .await?;
+            id
+        }
+        None => {
+            sqlx::query_scalar(
+                "INSERT INTO manifest_versions (manifest_version, namespace, source_family,
+                     chain_id, deployment_label, rollout_status, normalizer_version, file_path,
+                     manifest_payload)
+                 VALUES (1, 'ens', 'ens_v2_root_l1', $1, 'fixture-' || $3::text, $2, 'fixture',
+                         'fixture/root-' || $3::text || '.toml', $3)
+                 RETURNING manifest_id",
+            )
+            .bind(CHAIN)
+            .bind(status)
+            .bind(&payload)
+            .fetch_one(pool)
+            .await?
+        }
+    };
+    let active = status == "active";
+    sqlx::query(
+        "INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+             manifest_version, source_manifest_id, chain_id, derivation_kind,
+             canonicality_state, before_state, after_state, raw_fact_ref)
+         VALUES ('root-manifest:' || $1 || ':' || $3, 'ens', 'SourceManifestUpdated',
+                 'ens_v2_root_l1', 1, $1, $2, 'manifest_sync', 'canonical', '{}'::jsonb,
+                 jsonb_build_object('rollout_status', $3::text,
+                                    'manifest_payload', CASE WHEN $4 THEN $5::jsonb END),
+                 '{}'::jsonb)",
+    )
+    .bind(id)
+    .bind(CHAIN)
+    .bind(status)
+    .bind(active)
+    .bind(&payload)
+    .execute(pool)
+    .await?;
+    Ok(id)
+}
+
+fn root(address: &str, start_block: i64) -> serde_json::Value {
+    json!({"contracts": [{"role": "root_registry", "address": address,
+                          "start_block": start_block}]})
+}
+
+// The run captures a set admitting root A. A manifest sync then deprecates A and admits root B
+// before the block publishes. The block composes and stamps the captured admission: its marker
+// records A and A's start block beside the captured set key. A block applied under a history
+// read after the sync records B.
+#[tokio::test]
+async fn a_manifest_sync_after_capture_leaves_the_block_on_the_captured_admission() -> Result<()> {
+    let (database, pool) = database().await?;
+    let first = root_update(&pool, None, "active", root("0xAAAA", 3)).await?;
+    let captured = manifests::History::read(&pool, CHAIN, 11).await?;
+    root_update(&pool, Some(first), "deprecated", root("0xAAAA", 3)).await?;
+    root_update(&pool, None, "active", root("0xBBBB", 5)).await?;
+    let options = FamilyOptions::new("admission");
+    let apply = |number: i64, history: manifests::History| {
+        let (pool, options) = (&pool, &options);
+        async move {
+            let family = marker::read(pool, CHAIN).await?;
+            let plan = block::Plan {
+                predecessor: family.current.as_ref(),
+                sequence: family.sequence,
+                contiguous: false,
+                bootstrap: false,
+                revision: &NO_INTERPRET,
+                role: block::Role::Follow,
+                manifests: &history,
+                head: None,
+            };
+            block::apply(pool, CHAIN, number, &plan, options, &mut Default::default()).await?;
+            let family = marker::read(pool, CHAIN).await?;
+            anyhow::Ok((family.admission, family.admission_manifests))
+        }
+    };
+    let (admission, key) = apply(11, captured.clone()).await?;
+    assert_eq!(
+        admission
+            .as_ref()
+            .map(|a| (a.root_registry.as_str(), a.since_block)),
+        Some(("0xaaaa", Some(3))),
+        "block 11 stamps the captured root and start block"
+    );
+    assert_eq!(key.as_deref(), Some(captured.at(11).key.as_str()));
+    let later = manifests::History::read(&pool, CHAIN, 12).await?;
+    let (admission, key) = apply(12, later.clone()).await?;
+    assert_eq!(
+        admission
+            .as_ref()
+            .map(|a| (a.root_registry.as_str(), a.since_block)),
+        Some(("0xbbbb", Some(5))),
+        "a block applied under a fresh history stamps the synced root"
+    );
+    assert_eq!(key.as_deref(), Some(later.at(12).key.as_str()));
+    database.cleanup().await?;
+    Ok(())
+}
+
 // A run reads only the next chunk of its budget: the lowest `limit` work blocks.
 #[tokio::test]
 async fn the_work_list_returns_the_lowest_blocks_up_to_its_limit() -> Result<()> {

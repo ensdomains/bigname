@@ -2600,7 +2600,7 @@ nothing ([Expiry and grace](api-v1.md#expiry-and-grace)).
 The cutover has no block of its own. It changes only with the manifest set,
 and a manifest change is adopted by a full redo, never while following the
 chain head. Each family publication records on `project_family_marker` the
-admission it was composed with and the manifest set it read. Reads take the
+manifest set it read and the admission that set declares. Reads take the
 admission from there, not from the current manifests. Between a manifest sync
 and the redo they keep serving the previous publication's admission. The API
 reference lists the other

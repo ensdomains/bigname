@@ -104,7 +104,7 @@ pub(crate) async fn undo_block(
         &mut transaction,
         chain_id,
         &touched,
-        restored.admission_manifests.as_deref(),
+        &marker::Composition::recorded(&restored),
     )
     .await?;
 

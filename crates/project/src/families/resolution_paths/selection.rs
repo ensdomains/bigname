@@ -143,14 +143,10 @@ pub(super) fn statement(normal_work: &str) -> String {
         SELECT DISTINCT candidate.labelhashes[depth:] AS labelhashes
         FROM candidates candidate CROSS JOIN LATERAL generate_series(1,cardinality(candidate.labelhashes)) depth
     ), reached(labelhashes, registry) AS (
-        -- The walk starts at the admitted root registry, the declaration that cuts the chain
-        -- over (storage families/control/cutover.rs).
-        SELECT ARRAY[]::text[], lower(contract->>'address')
-        FROM manifest_versions manifest
-        CROSS JOIN LATERAL jsonb_array_elements(manifest.manifest_payload->'contracts') contract
-        WHERE EXISTS (SELECT 1 FROM wanted) AND manifest.chain_id=$1
-          AND manifest.namespace='ens' AND manifest.source_family='ens_v2_root_l1'
-          AND manifest.rollout_status='active' AND contract->>'role'='root_registry'
+        -- The walk starts at the root registry the publication's captured manifest set admits
+        -- ($5, project families/marker.rs `Composition`). With no admission it reaches nothing.
+        SELECT ARRAY[]::text[], $5::text
+        WHERE EXISTS (SELECT 1 FROM wanted) AND $5::text IS NOT NULL
         UNION
         SELECT next.labelhashes, pointer.subregistry
         FROM reached current JOIN wanted next ON cardinality(next.labelhashes)=cardinality(current.labelhashes)+1

@@ -2,24 +2,66 @@
 //! and undo advances its generation. It records the input token and active manifest set used
 //! by the publication; the API and verified lookup serve only an admitted live marker.
 use bigname_storage::families::{
-    control::cutover::{Admission, load_admission_on},
+    control::cutover::{self, Admission},
     name::FamilyPublication,
 };
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction, types::time::OffsetDateTime};
 
 use super::input::{BlockHeader, InputToken, Revision};
+use super::manifests::ActiveSet;
 use crate::{Marker, ProjectError, Result};
 
-/// The publication a family transaction composes at `block`, with the ENSv2 root registry
-/// admission of the active manifests and the key `manifests` of the block's manifest set. The
-/// marker records both, and readers take them from the marker, so a manifest change reaches
-/// them only through a republish.
-pub(crate) async fn publication(
-    transaction: &mut Transaction<'_, Postgres>,
+/// The manifest set a block composes and publishes with: the key of the set the run captured
+/// for the block, and the ENSv2 root registry admission that set's rows declare. Every
+/// `publication()` of the block and its marker take both from here, so the recorded root always
+/// describes the set key beside it. A manifest sync during the run reaches neither.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Composition {
+    pub(crate) manifests: Option<String>,
+    pub(crate) admission: Option<Admission>,
+}
+
+impl Composition {
+    /// The composition of the captured set `set`: its key, and the admission its active `ens`
+    /// `ens_v2_root_l1` rows declare. No statement reads the current manifests.
+    pub(crate) fn of(chain_id: &str, set: &ActiveSet) -> Result<Self> {
+        let payloads: Vec<Value> = set
+            .rows
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|row| row["namespace"] == "ens" && row["source_family"] == "ens_v2_root_l1")
+            .map(|row| row["manifest_payload"].clone())
+            .collect();
+        let admission = cutover::admission(&payloads).map_err(|error| {
+            ProjectError::transient(format!(
+                "chain {chain_id} manifest set {}: {error:#}",
+                set.key
+            ))
+        })?;
+        Ok(Self {
+            manifests: Some(set.key.clone()),
+            admission,
+        })
+    }
+
+    /// The composition a marker recorded, which an undo restores.
+    pub(crate) fn recorded(marker: &FamilyMarker) -> Self {
+        Self {
+            manifests: marker.admission_manifests.clone(),
+            admission: marker.admission.clone(),
+        }
+    }
+}
+
+/// The publication a family transaction composes at `block` with `composition`. The marker
+/// records the same composition, and readers take it from the marker, so a manifest change
+/// reaches them only through a republish.
+pub(crate) fn publication(
     chain_id: &str,
     block: &BlockHeader,
-    manifests: Option<&str>,
+    composition: &Composition,
 ) -> Result<FamilyPublication> {
     Ok(FamilyPublication {
         chain_id: chain_id.to_owned(),
@@ -29,19 +71,9 @@ pub(crate) async fn publication(
             |error| ProjectError::data_integrity(format!("block {} time: {error}", block.number)),
         )?,
         block_timestamp_json: block.timestamp.clone(),
-        admission: admission(transaction, chain_id).await?,
-        admission_manifests: manifests.map(str::to_owned),
+        admission: composition.admission.clone(),
+        admission_manifests: composition.manifests.clone(),
     })
-}
-
-/// The ENSv2 root registry admission of chain `chain_id`'s active manifests.
-pub(crate) async fn admission(
-    transaction: &mut Transaction<'_, Postgres>,
-    chain_id: &str,
-) -> Result<Option<Admission>> {
-    load_admission_on(transaction, chain_id)
-        .await
-        .map_err(|error| ProjectError::transient(format!("{error:#}")))
 }
 
 /// The input token as a block recorded it.

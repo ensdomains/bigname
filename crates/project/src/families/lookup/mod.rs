@@ -14,11 +14,10 @@ pub(super) async fn refresh(
     transaction: &mut Transaction<'_, Postgres>,
     chain: &str,
     block: &BlockHeader,
-    manifests: &str,
+    composition: &super::marker::Composition,
     stats: &mut BlockStats,
 ) -> Result<()> {
-    let publication =
-        super::marker::publication(transaction, chain, block, Some(manifests)).await?;
+    let publication = super::marker::publication(chain, block, composition)?;
     names::refresh(transaction, &publication, block, stats).await?;
     inventories::refresh(transaction, &publication, block, stats).await
 }

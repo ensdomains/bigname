@@ -247,13 +247,14 @@ pub(crate) async fn publish(
         manifests,
     } = opened;
     let after = prior.current.as_ref().map_or(-1, |marker| marker.number);
+    let composition = marker::Composition::of(chain_id, &manifests)?;
     let mut stats = write(
         &mut transaction,
         chain_id,
         &block,
         after,
         rows,
-        &manifests.key,
+        &composition,
     )
     .await?;
     journal_marker(&mut transaction, chain_id, &block, &prior).await?;
@@ -267,8 +268,8 @@ pub(crate) async fn publish(
         timestamp_seconds: Some(block.timestamp_seconds),
         input_content_hash: Some(options.input_content_hash.clone()),
         token: RecordedToken::of(&token),
-        admission_manifests: Some(manifests.key),
-        admission: marker::admission(&mut transaction, chain_id).await?,
+        admission_manifests: composition.manifests,
+        admission: composition.admission,
         bootstrap: plan.bootstrap,
     };
     super::history_catalogue::stamp(&mut transaction, chain_id, &block, &next, &mut stats).await?;
@@ -309,21 +310,21 @@ pub(crate) async fn publish(
 }
 
 /// Journal every changed row's pre-block image, then write the changes table by table. `after`
-/// is the block of the family marker the write follows, -1 with none. `manifests` is the key of
-/// the manifest set the block publishes.
+/// is the block of the family marker the write follows, -1 with none. `composition` is the
+/// manifest set and admission the block publishes.
 async fn write(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     block: &input::BlockHeader,
     after: i64,
     rows: &store::RowSet,
-    manifests: &str,
+    composition: &marker::Composition,
 ) -> Result<BlockStats> {
     let changes = rows.written();
     let mut stats = BlockStats::default();
     if changes.is_empty() {
         // The name summaries follow the block clock too, which moves with no row changing.
-        refresh_derived(transaction, chain_id, block, after, manifests, &mut stats).await?;
+        refresh_derived(transaction, chain_id, block, after, composition, &mut stats).await?;
         return Ok(stats);
     }
     let journal = changes
@@ -356,7 +357,7 @@ async fn write(
     hydration
         .refresh(transaction, chain_id, block.number)
         .await?;
-    refresh_derived(transaction, chain_id, block, after, manifests, &mut stats).await?;
+    refresh_derived(transaction, chain_id, block, after, composition, &mut stats).await?;
     Ok(stats)
 }
 
@@ -367,13 +368,15 @@ async fn refresh_derived(
     chain_id: &str,
     block: &input::BlockHeader,
     after: i64,
-    manifests: &str,
+    composition: &marker::Composition,
     stats: &mut BlockStats,
 ) -> Result<()> {
-    super::resolution_paths::prepare(transaction, chain_id, block, after).await?;
+    let root = composition.admission.as_ref();
+    let root = root.map(|admission| admission.root_registry.as_str());
+    super::resolution_paths::prepare(transaction, chain_id, block, after, root).await?;
     super::lookup::prepare(transaction, chain_id, block, after).await?;
     let touched = super::derived::touched(transaction, chain_id, block.number, Some(after)).await?;
-    let summary = super::derived::refresh(transaction, chain_id, &touched, Some(manifests)).await?;
+    let summary = super::derived::refresh(transaction, chain_id, &touched, composition).await?;
     if summary.rows > 0 {
         stats.rows.insert(NAME_SUMMARY.name, summary.rows);
     }
@@ -389,10 +392,10 @@ async fn refresh_derived(
     )
     .await?;
     let (rows, undo_rows) =
-        super::resolution_paths::refresh(transaction, chain_id, block, manifests).await?;
+        super::resolution_paths::refresh(transaction, chain_id, block, composition).await?;
     *stats.rows.entry(NAME_SUMMARY.name).or_default() += rows;
     stats.undo_rows += undo_rows;
-    super::lookup::refresh(transaction, chain_id, block, manifests, stats).await?;
+    super::lookup::refresh(transaction, chain_id, block, composition, stats).await?;
     Ok(())
 }
 

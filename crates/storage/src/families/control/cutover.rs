@@ -16,8 +16,9 @@ use sqlx::PgConnection;
 
 const ROOT_REGISTRY_ROLE: &str = "root_registry";
 
-/// The root registry declaration that cuts a chain over. Every reader takes the flag and the
-/// root address from this one read, so the ENSv2 path walk starts at the admitted root.
+/// The root registry declaration that cuts a chain over. Project derives it from the manifest
+/// set a publication composes with and records it on the marker. Every reader takes the flag and
+/// the root address from the publication, so the ENSv2 path walk starts at the admitted root.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Admission {
     /// The admitted root registry's lower-cased address.
@@ -26,9 +27,10 @@ pub struct Admission {
     pub since_block: Option<i64>,
 }
 
-/// A chain has at most one active manifest per source family and a manifest's roles are
-/// unique, so more than one declared root is a broken manifest set, not a choice to make.
-fn admission(payloads: &[Value]) -> Result<Option<Admission>> {
+/// The admission the payloads of a chain's active `ens_v2_root_l1` manifests declare. A chain
+/// has at most one active manifest per source family and a manifest's roles are unique, so more
+/// than one declared root is a broken manifest set, not a choice to make.
+pub fn admission(payloads: &[Value]) -> Result<Option<Admission>> {
     let roots: Vec<Admission> = payloads
         .iter()
         .flat_map(|payload| payload["contracts"].as_array().into_iter().flatten())

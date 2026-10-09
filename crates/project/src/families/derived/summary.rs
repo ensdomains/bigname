@@ -50,14 +50,14 @@ pub(crate) struct Refreshed {
 
 /// Compose again, journal and write the summaries of the names block `number` touched. `after`
 /// is the family marker's block the block follows, -1 with none: a rebuild range composes once,
-/// at its last block, for every block after it. `manifests` is the key of the block's manifest
-/// set.
+/// at its last block, for every block after it. `composition` is the block's manifest set and
+/// the admission it declares.
 pub(super) async fn refresh(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     number: i64,
     after: i64,
-    manifests: Option<&str>,
+    composition: &super::super::marker::Composition,
 ) -> Result<Refreshed> {
     let block = input::read_block(transaction, chain_id, number)
         .await?
@@ -79,8 +79,7 @@ pub(super) async fn refresh(
     if names.is_empty() {
         return Ok(Refreshed::default());
     }
-    let publication =
-        super::super::marker::publication(transaction, chain_id, &block, manifests).await?;
+    let publication = super::super::marker::publication(chain_id, &block, composition)?;
     let mut current_relations = Vec::new();
     let mut result = Refreshed::default();
     for chunk in names.chunks(CHUNK) {
