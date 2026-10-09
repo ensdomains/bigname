@@ -2680,6 +2680,61 @@ input. The rest of RPC transport — client construction, timeouts, and endpoint
 configuration — is outside because it can only abort a request, never reshape
 an answer. So a serving-only change does not force a re-derivation.
 
+Test-only code is outside the hash. The hash finds it by walking the module tree
+of each crate that holds hashed sources, from the roots of its library and
+binary targets, resolving module files as rustc does. A file leaves the hash
+only when the walk proves that every route to it passes a declaration gated by
+exactly `#[cfg(test)]`. Routes are module declarations at any depth, including
+`#[path]`, inline and block-scoped modules, and literal `include!` paths. A
+`#[cfg_attr(test, path = "…")]` path is a test-only route, and a `cfg_attr`
+path under any other condition is a production route. A path in a nested
+`cfg_attr` is test-only when any predicate on its chain is `test`. A file that
+production code reads with `include_str!` or `include_bytes!` is never
+test-only. When it is read from a hashed file, it is hashed too, whatever its
+extension or directory and whatever else reaches it. That holds for a call in
+code, including one nested in another macro's arguments. The walk does not scan
+attribute token streams, so a call such as `#![doc = include_str!("shared.rs")]`
+keeps nothing in the hash. The files hashed by name are scanned for the same
+include macros, and an `include!` target from one of them is scanned in turn.
+Each out-of-line module these files declare resolves to one file, as rustc
+resolves it, which must be a hashed source and is scanned in turn. Every other
+file under these crates' sources is hashed, including a file the walk never
+reaches, such as an undeclared file in a test module's directory. A wider
+condition, such as `#[cfg(any(test, feature = "test-activation"))]`, stays
+hashed too. The build fails instead of guessing when it meets:
+
+- A file reached from both test-only and production code.
+- A module or `include!` whose file is missing, unless a non-test cfg or a
+  `cfg_attr` path makes it optional. A file hashed by name gets no such
+  exception for its modules.
+- A walked or scanned file that does not parse.
+- A `cfg_attr` path on an inline module.
+- An `include!`, `include_str!` or `include_bytes!` whose path is not one
+  string literal, with an optional trailing comma.
+- An `include!` whose text declares a module, each time the file is included.
+- A macro definition or invocation whose tokens hold `mod` anywhere, or name
+  `include`, `include_str` or `include_bytes` other than as a direct call the
+  walk follows. A `macro_rules!` body may not call them either.
+- A `use` that imports `include!`, `include_str!` or `include_bytes!`, renamed
+  or not.
+- A production `#[path]` module in a hashed file, a production module declared
+  inside an inline module that has a `#[path]`, or an out-of-line module in a
+  file hashed by name, whose file is not a hashed source.
+- A production file outside the walked source roots that is not a hashed
+  source, such as a `[lib]` or `[[bin]]` path or a `#[path]` module outside
+  `src/`.
+- An `include!` in a hashed file whose target is not a hashed source, such as a
+  file that is not Rust or sits outside the hashed roots.
+- An `include_str!` or `include_bytes!` in a hashed file that reads a file
+  outside the workspace.
+
+One shape is outside what the walk can see. A macro defined outside the walked
+crate can expand to `mod x;` with no `mod` token at the call site, and only
+macro expansion would reveal it. The walk does not see a module declared that
+way, so a test-only route to its file would still take the file out of the hash.
+Nor does the walk see an include macro that an unwalked crate re-exports under
+another name.
+
 Several semantic surfaces are outside the hash today and are guarded by review
 rather than by a rotation:
 

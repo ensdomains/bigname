@@ -16,6 +16,7 @@ use crate::lockfile::{semantic_crate_fingerprints, semantic_crate_lists};
 
 mod project_sql;
 mod storage_families;
+mod transitive_gating;
 
 const SAMPLE_DECODE_PACKAGES: &[(&str, &str, &str)] = &[
     ("alloy-dyn-abi", "1.5.7", "aa"),
@@ -330,7 +331,7 @@ fn every_hash_input_is_watched_for_rebuilds() {
     let mut inputs = crate::compute::hashed_source_paths(&workspace_root)
         .expect("checked-in sources must enumerate");
     inputs.extend(
-        crate::compute::cfg_test_scan_roots()
+        crate::compute::crate_source_roots()
             .iter()
             .map(|scan_root| (*scan_root).to_owned()),
     );
@@ -523,6 +524,7 @@ fn a_test_module_declared_in_the_write_parent_stays_out_of_the_hash() {
     // `write.rs` is the hashed root's parent module but lives outside it, so its `#[cfg(test)]`
     // declaration has to be seen or the test file lands inside the fence as production input.
     let tree = SampleTree::new();
+    tree.write("crates/interpret/src/lib.rs", "mod write;\n");
     tree.write(
         "crates/interpret/src/write.rs",
         "#[cfg(test)]\nmod tests;\nmod identity_names;\n",
@@ -629,6 +631,7 @@ fn storage_semantic_sources_change_the_hash_and_other_storage_sources_do_not() {
 #[test]
 fn a_test_module_declared_in_the_storage_families_stays_out_of_the_hash() {
     let tree = SampleTree::new();
+    tree.write("crates/storage/src/lib.rs", "mod families;\n");
     tree.write(
         "crates/storage/src/families/mod.rs",
         "#[cfg(test)]\nmod tests;\npub mod name;\n",
@@ -868,7 +871,7 @@ fn conventionally_named_source_is_hashed_without_a_cfg_test_gate() {
 #[test]
 fn descendants_of_a_cfg_test_module_are_excluded() {
     let tree = SampleTree::new();
-    tree.write("crates/project/src/tests/mod.rs", "mod support;\n");
+    tree.write("crates/project/src/tests.rs", "mod support;\n");
     tree.write(
         "crates/project/src/tests/support.rs",
         "pub fn fixture() -> bool { false }\n",
@@ -895,6 +898,8 @@ fn every_project_source_on_disk_is_hash_covered() {
         &workspace_root.join("crates/project/src"),
         &mut disk_sources,
     );
+    let cfg_test_sources = crate::compute::cfg_test_source_set(&workspace_root)
+        .expect("checked-in module trees must walk");
 
     for source in disk_sources {
         let relative_path = workspace_relative(&workspace_root, &source);
@@ -902,7 +907,7 @@ fn every_project_source_on_disk_is_hash_covered() {
             .extension()
             .is_some_and(|extension| extension == "rs")
         {
-            excluded_source_reason(&workspace_root, &source)
+            crate::compute::source_exclusion(&workspace_root, &source, &cfg_test_sources)
                 .expect("source exclusion must be inspectable")
         } else {
             None

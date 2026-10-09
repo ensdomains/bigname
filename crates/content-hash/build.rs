@@ -33,6 +33,18 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        manifest_dir.join("src/source_paths/paths.rs").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("src/source_paths/syntax.rs").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("src/source_paths/walked.rs").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         manifest_dir.join("src/storage_families.rs").display()
     );
     for path in compute::watched_paths(workspace_root) {
