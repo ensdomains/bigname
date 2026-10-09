@@ -292,8 +292,9 @@ sources:
 
 - `phase_runner_universal_resolver_cut_over{chain}` is `1` while the chain's
   deployment profile admits an ENSv2 root registry. This is the cutover the
-  name reads apply. No proxy upgrade moves it. It changes only with the
-  manifest set.
+  name reads apply once the redo republishes. Between a manifest sync and that
+  redo, name reads serve the previous publication's admission. No proxy
+  upgrade moves the gauge. It changes only with the manifest set.
 - `phase_runner_universal_resolver_unadmitted{chain}` is `1` while the
   client-facing proxy, followed through the declared proxies it points at,
   ends at an implementation the `ens_execution` manifest neither lists nor

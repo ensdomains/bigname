@@ -28,7 +28,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
-use sqlx::{Postgres, Transaction, types::time::OffsetDateTime};
+use sqlx::{Postgres, Transaction};
 
 use crate::{
     ProjectError, Result,
@@ -50,12 +50,14 @@ pub(crate) struct Refreshed {
 
 /// Compose again, journal and write the summaries of the names block `number` touched. `after`
 /// is the family marker's block the block follows, -1 with none: a rebuild range composes once,
-/// at its last block, for every block after it.
+/// at its last block, for every block after it. `manifests` is the key of the block's manifest
+/// set.
 pub(super) async fn refresh(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     number: i64,
     after: i64,
+    manifests: Option<&str>,
 ) -> Result<Refreshed> {
     let block = input::read_block(transaction, chain_id, number)
         .await?
@@ -77,15 +79,8 @@ pub(super) async fn refresh(
     if names.is_empty() {
         return Ok(Refreshed::default());
     }
-    let publication = bigname_storage::families::name::FamilyPublication {
-        chain_id: chain_id.to_owned(),
-        block_number: number,
-        block_hash: block.hash.clone(),
-        block_timestamp: OffsetDateTime::from_unix_timestamp(block.timestamp_seconds).map_err(
-            |error| ProjectError::data_integrity(format!("block {number} time: {error}")),
-        )?,
-        block_timestamp_json: block.timestamp.clone(),
-    };
+    let publication =
+        super::super::marker::publication(transaction, chain_id, &block, manifests).await?;
     let mut current_relations = Vec::new();
     let mut result = Refreshed::default();
     for chunk in names.chunks(CHUNK) {

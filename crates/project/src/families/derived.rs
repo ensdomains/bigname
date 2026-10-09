@@ -134,11 +134,13 @@ pub(crate) async fn touched(
 
 /// Delete and derive again the index rows of the touched keys, then, after a block's write,
 /// compose again the name summaries of the names it touched. Returns what the summary refresh
-/// wrote (nothing on an undo, which restores the summaries from the journal).
+/// wrote (nothing on an undo, which restores the summaries from the journal). `manifests` is the
+/// key of the manifest set the summaries compose with.
 pub(crate) async fn refresh(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     touched: &Touched,
+    manifests: Option<&str>,
 ) -> Result<summary::Refreshed> {
     if !touched.names.is_empty() {
         run(transaction, NAME_DELETE, chain_id, &touched.names, None).await?;
@@ -157,7 +159,7 @@ pub(crate) async fn refresh(
     let Some(after) = touched.summaries_after else {
         return Ok(summary::Refreshed::default());
     };
-    summary::refresh(transaction, chain_id, touched.number, after).await
+    summary::refresh(transaction, chain_id, touched.number, after, manifests).await
 }
 
 async fn run(

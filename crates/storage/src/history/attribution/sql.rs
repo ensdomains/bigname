@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use sqlx::{Postgres, QueryBuilder};
 use uuid::Uuid;
 
+use super::ManifestSets;
 use crate::history::filters::push_publication_bound;
 
 const READABLE: &str = "('canonical', 'safe', 'finalized')";
@@ -55,14 +56,17 @@ pub(in crate::history) fn push_readable_surface(
     push_publication_bound(builder, alias, published);
 }
 
-/// `LATERAL (...) declaration`: the latest readable `SourceManifestUpdated` row of the manifest
-/// `manifest_id` names. The caller requires `declaration.active` and compares
+/// `LATERAL (...) declaration`: the readable `SourceManifestUpdated` row of the manifest
+/// `manifest_id` names. A bounded read takes the update the manifest set of the chain's
+/// publication holds (`manifests`), so a manifest sync reaches it only through the redo. An
+/// unbounded read takes the latest. The caller requires `declaration.active` and compares
 /// `declaration.namespace`.
 pub(super) fn push_declaration_manifest(
     builder: &mut QueryBuilder<'_, Postgres>,
     manifest_id: &str,
     chain_id: &str,
     published: Option<&BTreeMap<String, i64>>,
+    manifests: Option<&ManifestSets>,
 ) {
     builder.push(format!(
         " LATERAL (
@@ -84,12 +88,22 @@ pub(super) fn push_declaration_manifest(
                   WHERE manifest_lineage.chain_id = manifest.chain_id
                     AND manifest_lineage.block_hash = manifest.block_hash
                     AND manifest_lineage.block_number = manifest.block_number
-                    AND manifest_lineage.canonicality_state IN {READABLE}))
-              AND (manifest.block_number IS NULL OR (TRUE"
+                    AND manifest_lineage.canonicality_state IN {READABLE}))"
     ));
-    push_publication_bound(builder, "manifest", published);
+    match manifests {
+        Some(sets) => {
+            builder.push(" AND manifest.normalized_event_id IN (SELECT jsonb_array_elements_text(");
+            builder.push_bind(serde_json::json!(sets));
+            builder.push(format!("::jsonb -> {chain_id})::bigint)"));
+        }
+        None => {
+            builder.push(" AND (manifest.block_number IS NULL OR (TRUE");
+            push_publication_bound(builder, "manifest", published);
+            builder.push("))");
+        }
+    }
     builder.push(
-        "))
+        "
             ORDER BY manifest.normalized_event_id DESC
             LIMIT 1
         ) declaration",
@@ -184,11 +198,13 @@ fn node_keyed_on(pointer: &str) -> String {
 }
 
 /// `SELECT resource_id, normalized_event_id` for every write a pointer or record link at or below
-/// the bound attributes to one of `resource_ids`.
+/// the bound attributes to one of `resource_ids`. `manifests` holds the manifest set of each
+/// bounded chain's publication.
 pub(super) fn push_pointer_window_attribution<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     resource_ids: &'a [Uuid],
     published: Option<&BTreeMap<String, i64>>,
+    manifests: Option<&ManifestSets>,
     requested: Option<&super::RequestedPairs>,
 ) {
     push_pointer_ctes(builder, resource_ids, published);
@@ -234,7 +250,7 @@ pub(super) fn push_pointer_window_attribution<'a>(
         }
         builder.push("\n        UNION");
     }
-    push_declared_resolver_arm(builder, published, requested);
+    push_declared_resolver_arm(builder, published, manifests, requested);
     builder.push("\n        UNION");
     push_record_link_arm(builder, published, requested);
 }
@@ -247,6 +263,7 @@ pub(super) fn push_pointer_window_attribution<'a>(
 fn push_declared_resolver_arm(
     builder: &mut QueryBuilder<'_, Postgres>,
     published: Option<&BTreeMap<String, i64>>,
+    manifests: Option<&ManifestSets>,
     requested: Option<&super::RequestedPairs>,
 ) {
     let record_source = if requested.is_some() {
@@ -281,6 +298,7 @@ fn push_declared_resolver_arm(
         "(resolver.provenance ->> 'manifest_id')::bigint",
         "pointer.chain_id",
         published,
+        manifests,
     );
     builder.push(format!(
         "

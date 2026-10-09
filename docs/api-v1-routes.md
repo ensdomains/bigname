@@ -5247,8 +5247,10 @@ For a registrar lease first identified by a later readable observation, registra
   and resolvability ([Expiry and grace](api-v1.md#expiry-and-grace)).
   `since_block` is the admitted root registry's declared start block. It dates
   the admission, not a proxy upgrade, and no Universal Resolver `Upgraded`
-  moves it. It is `null`, with `protocol` `ens_v1`, on a network whose profile
-  admits no ENSv2 root registry, as on Mainnet today. It is also `null`, with
+  moves it. Both come from the admission the publication was composed with,
+  so a manifest sync shows here only once the redo republishes. It is `null`,
+  with `protocol` `ens_v1`, on a network whose profile admits no ENSv2 root
+  registry, as on Mainnet today. It is also `null`, with
   `protocol` `ens_v2`, when the admitted root registry declares no start
   block. The fence check and the admission read share one snapshot, and the
   answer carries no `meta.as_of`.

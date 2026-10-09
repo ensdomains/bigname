@@ -2588,8 +2588,13 @@ nothing ([Expiry and grace](api-v1.md#expiry-and-grace)).
 
 The cutover has no block of its own. It changes only with the manifest set,
 and a manifest change is adopted by a full redo, never while following the
-chain head. An admitted chain therefore reads as cut over for its
-whole retained history. On Sepolia that includes the blocks before the managed
+chain head. Each family publication records on `project_family_marker` the
+admission it was composed with and the manifest set it read. Reads take the
+admission from there, not from the current manifests. Between a manifest sync
+and the redo they keep serving the previous publication's admission. The API
+reference lists the other
+[manifest reads](api-v1.md#manifest-reads-and-the-publication) the set bounds.
+An admitted chain therefore reads as cut over for its whole retained history. On Sepolia that includes the blocks before the managed
 proxy moved to UniversalResolverV2 at `11821680`
 ([known divergence](upstream.md#known-divergences)). Mainnet is not cut over
 until its ENSv2 manifests are admitted

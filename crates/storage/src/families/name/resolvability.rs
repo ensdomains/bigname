@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use sqlx::PgConnection;
 
+use crate::families::control::cutover::Admission;
 use crate::families::control::lifecycle::{
     AuthoritySelection, NameFacts, NameInput, NamePlace, has_live_ens_v2_entry, load_name_facts_on,
 };
@@ -37,6 +38,7 @@ impl Resolvability {
     pub(super) async fn load(
         conn: &mut PgConnection,
         chain_id: &str,
+        admission: Option<&Admission>,
         facts: &[NameFacts],
     ) -> Result<Self> {
         let cutover = facts.iter().any(|facts| facts.resolution_cutover);
@@ -72,7 +74,7 @@ impl Resolvability {
                 })
             })
             .collect();
-        for parent in load_name_facts_on(conn, chain_id, &missing).await? {
+        for parent in load_name_facts_on(conn, chain_id, admission, &missing).await? {
             live.insert(
                 parent.input.logical_name_id.clone(),
                 has_live_ens_v2_entry(&parent)?,

@@ -89,7 +89,7 @@ pub(super) async fn select(
         .map(|serving| serving.resolver_address.clone())
         .collect();
     let mut classifications =
-        load_classifications_at(conn, chain_id, &resolvers, Some(publication.block_number)).await?;
+        load_classifications_at(conn, chain_id, &resolvers, Some(publication)).await?;
     let classification_of = |classifications: &HashMap<String, ResolverClassification>,
                              address: &str| {
         classifications.get(&address.to_ascii_lowercase()).cloned()
@@ -123,7 +123,7 @@ pub(super) async fn select(
             chain_id,
             &serving,
             classification.unwrap_or_default(),
-            Some(publication.block_number),
+            publication,
         )
         .await?;
         dependencies.extend(mirror.consulted_nodes.iter().map(|(namespace, node)| {
@@ -156,9 +156,8 @@ pub(super) async fn select(
                 .any(|read| read.eq_ignore_ascii_case(address))
         })
         .collect();
-    classifications.extend(
-        load_classifications_at(conn, chain_id, &unread, Some(publication.block_number)).await?,
-    );
+    classifications
+        .extend(load_classifications_at(conn, chain_id, &unread, Some(publication)).await?);
 
     // The admitted partitions, the link selections and the linked record ids of every plan.
     let classified: Vec<(Plan, Option<ResolverClassification>)> = plans

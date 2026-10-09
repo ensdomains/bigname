@@ -160,7 +160,13 @@ pub(super) async fn eligible(
         selection: AuthoritySelection::default(),
         place: NamePlace::Other,
     };
-    let facts = load_name_facts_on(conn, &publication.chain_id, &[input]).await?;
+    let facts = load_name_facts_on(
+        conn,
+        &publication.chain_id,
+        publication.admission.as_ref(),
+        &[input],
+    )
+    .await?;
     let Some(facts) = facts.first() else {
         return Ok(Eligibility {
             eligible: None,

@@ -90,7 +90,7 @@ impl Walk {
                 conn,
                 &publication.chain_id,
                 &[address.to_owned()],
-                Some(publication.block_number),
+                Some(publication),
             )
             .await?
             .remove(address);
@@ -250,14 +250,9 @@ impl Walk {
             pointer_event_id: None,
             block_number: publication.block_number,
         };
-        let mirror = evaluate_family_mirror_at(
-            conn,
-            &publication.chain_id,
-            &pointer,
-            class,
-            Some(publication.block_number),
-        )
-        .await?;
+        let mirror =
+            evaluate_family_mirror_at(conn, &publication.chain_id, &pointer, class, publication)
+                .await?;
         outcome.decision = if mirror
             .nearest
             .as_ref()

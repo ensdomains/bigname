@@ -70,10 +70,10 @@ async fn manifest(
 }
 
 // The resolver's classification and declaration namespace have different sources: the latter
-// comes from its manifest at the family marker, not the edge's admission namespace. R2's latest
-// manifest there is inactive, so its classification has no active declaration. R3's later
-// inactive declaration is beyond the marker and must not replace the active one. An absent F3
-// row and a resolver_manifest_not_active row both remain unclassified.
+// comes from its manifest's update in the manifest set the family marker recorded, not the edge's
+// admission namespace. R2's update there is inactive, so its classification has no active
+// declaration. R3's later inactive update is outside the set and must not replace the active
+// one. An absent F3 row and a resolver_manifest_not_active row both remain unclassified.
 #[tokio::test]
 async fn resolver_classification_admission_is_bounded_by_the_family_marker() -> Result<()> {
     let fixture = Fixture::new("family_reads_classification", 10).await?;
@@ -131,6 +131,22 @@ async fn resolver_classification_admission_is_bounded_by_the_family_marker() -> 
     manifest(pool, m2, 5, "ens", "deprecated").await?;
     manifest(pool, m3, 3, "ens", "active").await?;
     manifest(pool, m3, 9, "ens", "deprecated").await?;
+    // The set a publication at block 6 records: each manifest's latest update at or below it.
+    let mut set = Vec::new();
+    for (manifest_id, block) in [(m0, 2), (m2, 5), (m3, 3)] {
+        let event: i64 = sqlx::query_scalar(
+            "SELECT normalized_event_id FROM normalized_events WHERE event_identity = $1",
+        )
+        .bind(format!("manifest:{manifest_id}:{block}"))
+        .fetch_one(pool)
+        .await?;
+        set.push(format!("{manifest_id}:{event}"));
+    }
+    sqlx::query("UPDATE project_family_marker SET admission_manifests = $2 WHERE chain_id = $1")
+        .bind(CHAIN)
+        .bind(set.join(","))
+        .execute(pool)
+        .await?;
 
     let r1 = load_family_resolver_classification(pool, CHAIN, R1)
         .await?

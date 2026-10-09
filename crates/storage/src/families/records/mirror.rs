@@ -14,7 +14,10 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 use sqlx::{PgConnection, Row};
 
-use crate::families::{name::rendered::rendered_name_sql, position::emission_ordinal_sql};
+use crate::families::{
+    name::{FamilyPublication, rendered::rendered_name_sql},
+    position::emission_ordinal_sql,
+};
 
 use super::{facts::ResolverClassification, is_cleared, serving::ServingPointer};
 
@@ -157,7 +160,7 @@ pub(crate) async fn evaluate_family_mirror_at(
     chain_id: &str,
     pointer: &ServingPointer,
     mirror: ResolverClassification,
-    publication_block: Option<i64>,
+    publication: &FamilyPublication,
 ) -> Result<MirrorSelection> {
     let mirror_namespace_matches = mirror.declared_in(&pointer.namespace);
     let (nearest, consulted_nodes) = nearest(conn, chain_id, pointer).await?;
@@ -167,7 +170,7 @@ pub(crate) async fn evaluate_family_mirror_at(
                 conn,
                 chain_id,
                 std::slice::from_ref(&nearest.mirrored_resolver_address),
-                publication_block,
+                Some(publication),
             )
             .await?
             .remove(&nearest.mirrored_resolver_address);

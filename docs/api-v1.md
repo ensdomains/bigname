@@ -1196,6 +1196,31 @@ overviews (including the registry's `counts.labels`) and name detail's
 that generation before the first read. History routes retain their documented
 event windows and audit semantics.
 
+#### Manifest reads and the publication
+
+Five manifest reads come from the manifest set the family publication recorded,
+not from the current manifests:
+
+- the ENSv2 root registry admission
+  ([Universal Resolver cutover](glossary.md#universal-resolver-cutover))
+- the registry declarations the ENSv2 path walk follows
+- the resolver declarations a name's resolution and records use
+- the Basenames L1 transport admission
+- the resolver declarations history uses to attribute record writes
+
+Between a manifest sync and the redo that adopts it, these keep serving the
+previous publication. Stored lookup answers `409 stale` in that window.
+
+Two reads use the current manifests behind a fence. Verified lookup and the
+namespace admission of a request answer `409` when the manifests change during
+the read, so neither mixes two manifest sets.
+
+Seven reads still use the current manifests (TYR-299): the registrar grace
+policy, the `manifest_declared` flag of permissions (two reads), a registry's
+declared basis, payment values in history, the address-pair history filter, and
+subname topology. For the length of a rebuild after a manifest change, they can
+disagree with the rest of the publication.
+
 ### Tier 3: Diagnostics
 
 Diagnostics are the only public routes that may carry pipeline vocabulary.

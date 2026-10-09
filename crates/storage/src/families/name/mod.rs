@@ -107,6 +107,21 @@ pub fn is_publication_unavailable(error: &anyhow::Error) -> bool {
         .any(|cause| cause.is::<FamilyPublicationUnavailable>())
 }
 
+/// The `SourceManifestUpdated` event ids of a manifest set key (`manifest_id:event_id`, comma
+/// separated), none for no key.
+pub(crate) fn manifest_set_event_ids(key: Option<&str>) -> anyhow::Result<Vec<i64>> {
+    key.unwrap_or_default()
+        .split(',')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            entry
+                .split_once(':')
+                .and_then(|(_, event)| event.parse().ok())
+                .ok_or_else(|| anyhow::anyhow!("malformed manifest set entry {entry:?}"))
+        })
+        .collect()
+}
+
 /// The publication the composed rows describe: a chain's family marker.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FamilyPublication {
@@ -116,11 +131,27 @@ pub struct FamilyPublication {
     pub block_timestamp: OffsetDateTime,
     /// The block timestamp as `to_jsonb` renders it, the form the served row stores.
     pub block_timestamp_json: serde_json::Value,
+    /// The ENSv2 root registry admission the publication was composed with
+    /// (`families::control::cutover`), `None` when the chain was not cut over. Readers take it
+    /// from here, never from the manifest catalog, so a manifest sync cannot reach a read
+    /// before the redo republishes.
+    pub admission: Option<crate::families::control::cutover::Admission>,
+    /// The key of the manifest set the publication was composed with: `manifest_id:event_id` of
+    /// the latest `SourceManifestUpdated` event of every manifest the chain reads, at or below
+    /// the block. The path walk's registry and resolver declarations and the Basenames L1
+    /// transport admission are read from these events only, so a manifest sync reaches them
+    /// only through the redo. `None` records no set, and those reads then find no declaration.
+    pub admission_manifests: Option<String>,
 }
 
 impl FamilyPublication {
     pub fn timestamp_seconds(&self) -> i64 {
         self.block_timestamp.unix_timestamp()
+    }
+
+    /// The `SourceManifestUpdated` event ids of [`Self::admission_manifests`].
+    pub fn manifest_event_ids(&self) -> anyhow::Result<Vec<i64>> {
+        manifest_set_event_ids(self.admission_manifests.as_deref())
     }
 }
 

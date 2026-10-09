@@ -20,6 +20,8 @@ mod lookup_lifecycle;
 mod lookup_links;
 #[path = "migrated_subnames/lookup_publication.rs"]
 mod lookup_publication;
+#[path = "migrated_subnames/manifest_sync.rs"]
+mod manifest_sync;
 #[path = "migrated_subnames/mirror.rs"]
 mod mirror;
 #[path = "migrated_subnames/missing_parent.rs"]

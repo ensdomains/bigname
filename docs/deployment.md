@@ -2290,10 +2290,18 @@ The build that admits the 2026-10-01 Sepolia ENSv2 redeploy (TYR-183, see the
 families (root, registry, registrar, resolver, migration and `ens_execution`)
 with version 2 under `deployment_epoch = "ens_v2_sepolia_20261001"` and deletes
 version 1. The 2026-09-15 deployment's contracts are dropped, not kept as
-retired history. Both Universal Resolver proxies keep their addresses and start blocks;
-`ens_execution` lists only the redeploy's UniversalResolverV2 `0x24e1d8e0…`,
-which the managed proxy moved to at block `11821680`, so that block is the
-Sepolia [Universal Resolver cutover](glossary.md#universal-resolver-cutover).
+retired history. Both Universal Resolver proxies keep their addresses and start blocks.
+`ens_execution` lists only the redeploy's UniversalResolverV2 `0x24e1d8e0…`.
+The managed proxy moved to it at block `11821680`. That block is the Universal
+Resolver proxy upgrade. It is not the Sepolia
+[Universal Resolver cutover](glossary.md#universal-resolver-cutover), and the
+monitoring does not report it. The
+[cutover gauges](#universal-resolver-cutover-gauges-and-alert) export no block.
+The proxy warning names a block only when the proxy leaves the listed
+implementation.
+Sepolia is cut over by the admission of the redeploy's root registry, which its
+declared start block `11820291` dates
+([Cutover at ENSv2 admission](#cutover-at-ensv2-admission)).
 The redeploy ships as a new version file because synchronization upserts a
 manifest on its namespace, family, chain, epoch and version while the stored
 file path must stay unique, so a new epoch written into the same `v1.toml`
@@ -2556,9 +2564,20 @@ chain.
   fingerprint is unchanged, no
   [manifest-authority marker](glossary.md#manifest-authority-marker) is
   recorded and no Ingest redo is stamped.
-- It adds the comment-only schema-migration
-  `20261009130000_project_universal_resolver_proxy_comment.sql`. No row,
-  column or index changes.
+- It adds the schema-migration
+  `20261009130000_project_family_marker_admission.sql`. It adds the nullable
+  `root_registry` and `since_block` columns to `project_family_marker`, which
+  record the admission each publication was composed with. It also rewrites
+  the `project_universal_resolver_proxy` table comment. No row or index
+  changes, and the redo rewrites every marker.
+- Five manifest reads come from the manifest set the publication recorded,
+  not from the current manifests. Between a manifest sync and the redo that
+  adopts it, they serve the previous publication. Stored lookup answers
+  `409 stale` while the input hashes are the old epoch's. Verified lookup and
+  namespace admission answer `409` if the manifests change during a read.
+  Seven reads still use the current manifests (TYR-299). The
+  [API reference](api-v1.md#manifest-reads-and-the-publication) lists them.
+  The drained rollout stays the rule.
 - An existing deployment finishes the full-history Interpret redo and the
   Project redo it installs before the matching API serves. The next
   re-derivation release's shared redo pair discharges it with the other
@@ -2588,13 +2607,46 @@ changes.
   `no_live_ens_v2_entry`.
 
 Mainnet precondition. Mainnet has no ENSv2 manifests yet and keeps reading
-ENSv1. Admitting its ENSv2 manifests is the cutover. From that redo, every
-live `.eth` name without a reservation or registration on the admitted
-ETHRegistry serves no resolver and no records, and neither does any name below
-it. Admit the manifests once premigration has reserved every live `.eth` name,
-or accept that window knowingly. Before promoting the staging seed, count the
-rows of `GET /v1/names?namespace=ens&parent=eth&authority=ens_v1` whose detail
-carries `unresolvable_reason`. That number is the window.
+ENSv1. Admitting its ENSv2 manifests is the cutover. A `.eth` name loses
+resolution when it has no live ENSv2 entry at admission, meaning no reservation
+or registration on the admitted ETHRegistry. From that redo it serves no
+resolver and no records, and neither does any name below it. Admit the
+manifests once premigration has reserved every live `.eth` name, or accept that
+window knowingly.
+
+Before promoting the staging seed, count those names on the staging API, which
+admits the manifests. A live name is one whose grace has not ended. The script
+lists the live second-level `.eth` names that ENSv1 decides, following every
+cursor page. It then reads each name's detail and counts those serving
+`unresolvable_reason` `no_live_ens_v2_entry`. `/v1/names` needs a date bound,
+and `grace_ends_after` is it. The retries absorb the `409 stale` a read answers
+while the publication catches up with the head, and curl still prints each
+retried error. The script fails rather than undercount when a read keeps
+failing. Each name's read runs in its own shell and prints at most its name, so
+the parallel reads cannot interleave their output.
+
+```bash
+set -euo pipefail
+API=${API:?set API to the staging API base URL}
+retry=(--retry 10 --retry-all-errors --retry-max-time 300)
+now=$(date +%s)
+cursor=
+: > live.txt
+while :; do
+  page=$(curl -fsSG "${retry[@]}" "$API/v1/names" \
+    -d namespace=ens -d parent=eth -d authority=ens_v1 \
+    -d grace_ends_after="$now" -d page_size=200 ${cursor:+-d cursor="$cursor"})
+  jq -r --arg api "$API" '.data[].name | "\($api)/v1/names/\(@uri)"' <<<"$page" >> live.txt
+  cursor=$(jq -r '.page.next_cursor // empty' <<<"$page")
+  [ -n "$cursor" ] || break
+done
+export UNRESOLVABLE='select(.data.unresolvable_reason == "no_live_ens_v2_entry") | .data.name'
+xargs -P 8 -n 1 bash -c 'set -o pipefail
+  curl -fsS --retry 10 --retry-all-errors --retry-max-time 300 "$1" | jq -r "$UNRESOLVABLE"' _ \
+  < live.txt | wc -l
+```
+
+That number is the window.
 
 ### Released registrar children
 

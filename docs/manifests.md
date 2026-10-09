@@ -524,8 +524,10 @@ receipt, so both start blocks come from chain evidence (`docs/upstream.md`,
 "Sepolia Universal Resolver proxies admitted from chain evidence"). Sepolia
 is cut over from the admission of the `ens_v2_root_l1` root registry, for its
 whole retained history. The managed proxy moved to the listed implementation
-at block `11821680`, which the monitoring reports. The 2026-09-15
-deployment's implementation, installed at block `11710193`, is not listed.
+at block `11821680`. The monitoring does not report that block. Its proxy
+warning names a block only when the proxy leaves the listed implementation.
+The 2026-09-15 deployment's implementation, installed at block `11710193`, is
+not listed.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ManagedUniversalResolverProxy.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UniversalResolverV2.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
 

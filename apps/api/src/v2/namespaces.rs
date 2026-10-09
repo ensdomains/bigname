@@ -12,7 +12,8 @@ use bigname_manifests::{
     load_namespace_manifest_snapshot,
 };
 use bigname_storage::{
-    begin_read_snapshot, families::control::cutover::load_admission_on,
+    begin_read_snapshot,
+    families::name::{ensure_family_publications, is_publication_unavailable},
     load_served_project_generation,
 };
 use serde::{Deserialize, Serialize};
@@ -162,8 +163,9 @@ pub(crate) async fn get_namespace(
 }
 
 /// Per chain with an ENS execution entrypoint and a servable family publication, keyed by chain
-/// slug. A chain is `ens_v2` while its deployment profile admits an ENSv2 root registry, dated by
-/// that registry's declared start block. The Universal Resolver proxies are not an input.
+/// slug. A chain is `ens_v2` while its publication was composed with an admitted ENSv2 root
+/// registry, dated by that registry's declared start block. The Universal Resolver proxies are
+/// not an input.
 async fn load_resolutions(
     pool: &PgPool,
     execution_manifests: &[ExecutionManifestVersion],
@@ -194,7 +196,15 @@ async fn load_resolutions(
         if servable.is_none() {
             continue;
         }
-        let resolution = match load_admission_on(&mut snapshot, chain).await? {
+        // The admission the publication was composed with, not the manifest catalog's, so a
+        // manifest sync shows here only once the redo republishes.
+        let publication =
+            match ensure_family_publications(&mut *snapshot, &[chain.to_owned()]).await {
+                Ok(mut publications) => publications.remove(0),
+                Err(error) if is_publication_unavailable(&error) => continue,
+                Err(error) => return Err(error),
+            };
+        let resolution = match publication.admission {
             Some(admission) => NamespaceResolution {
                 protocol: ResolutionProtocol::EnsV2,
                 since_block: admission.since_block,

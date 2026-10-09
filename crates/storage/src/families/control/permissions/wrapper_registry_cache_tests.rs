@@ -46,12 +46,25 @@ async fn registry_support_cache_keeps_both_instance_inputs_in_either_order() -> 
         .bind(ETH)
         .fetch_one(database.pool())
         .await?;
+        // The set a publication of the synced manifests records: each manifest's latest update.
+        let admission_manifests: Option<String> = sqlx::query_scalar(
+            "SELECT string_agg(source_manifest_id || ':' || event_id, ',')
+             FROM (SELECT source_manifest_id, max(normalized_event_id) AS event_id
+                   FROM normalized_events
+                   WHERE chain_id = $1 AND event_kind = 'SourceManifestUpdated'
+                   GROUP BY source_manifest_id) latest",
+        )
+        .bind(CHAIN)
+        .fetch_one(database.pool())
+        .await?;
         let publication = FamilyPublication {
             chain_id: CHAIN.into(),
             block_number: 11_820_505,
             block_hash: "fixture".into(),
             block_timestamp: OffsetDateTime::from_unix_timestamp(1_800_000_005)?,
             block_timestamp_json: json!("2027-01-15T08:00:05Z"),
+            admission: None,
+            admission_manifests,
         };
         let mut conn = database.pool().acquire().await?;
         let declarations = registry_support::Declarations::load(&mut conn, &publication).await?;

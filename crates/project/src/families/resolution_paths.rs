@@ -5,8 +5,8 @@ mod selection;
 
 use super::input::BlockHeader;
 use crate::{ProjectError, Result};
-use bigname_storage::families::name::{FamilyPublication, compose_name_resolution_summaries};
-use sqlx::{Postgres, Transaction, types::time::OffsetDateTime};
+use bigname_storage::families::name::compose_name_resolution_summaries;
+use sqlx::{Postgres, Transaction};
 
 pub(super) async fn prepare(
     transaction: &mut Transaction<'_, Postgres>,
@@ -39,16 +39,10 @@ pub(super) async fn refresh(
     transaction: &mut Transaction<'_, Postgres>,
     chain: &str,
     block: &BlockHeader,
+    manifests: &str,
 ) -> Result<(u64, u64)> {
-    let publication = FamilyPublication {
-        chain_id: chain.into(),
-        block_number: block.number,
-        block_hash: block.hash.clone(),
-        block_timestamp: OffsetDateTime::from_unix_timestamp(block.timestamp_seconds).map_err(
-            |e| ProjectError::data_integrity(format!("resolution publication time: {e}")),
-        )?,
-        block_timestamp_json: block.timestamp.clone(),
-    };
+    let publication =
+        super::marker::publication(transaction, chain, block, Some(manifests)).await?;
     let mut after = String::new();
     let mut written = (0, 0);
     loop {
