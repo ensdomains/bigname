@@ -74,7 +74,9 @@ async fn history_actions_detached_reservation_becomes_reachable_without_a_new_re
     assert_eq!(reachable.len(), 1, "{body:#}");
     assert_eq!(direct[0]["block_number"], 122);
     assert!(direct[0]["name"].is_null(), "{body:#}");
-    assert_eq!(reachable[0]["block_number"], 124);
+    // The mount at block 123 already gives the child registry its name. The parent claim
+    // one block later restates nothing.
+    assert_eq!(reachable[0]["block_number"], 123);
     assert_eq!(reachable[0]["name"], format!("{label}.{NAME}"));
     assert_ne!(direct[0]["id"], reachable[0]["id"]);
     for row in direct.iter().chain(reachable.iter()) {

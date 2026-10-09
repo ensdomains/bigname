@@ -18,6 +18,9 @@ use crate::{BatchRequest, Engine, Marker, RunMode, StateLoader};
 
 type TestResult<T = ()> = anyhow::Result<T>;
 
+#[path = "lookahead_ensv2_mount_tests.rs"]
+mod mount_tests;
+
 pub(super) const CHAIN: &str = "ethereum-sepolia";
 const ENS_REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
 const BASE_REGISTRAR: &str = "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85";
@@ -31,6 +34,8 @@ const VERIFIABLE_FACTORY: &str = "0xda70306c98e97ece36f997a21368e53298572991";
 const WRAPPER_REGISTRY_IMPLEMENTATION: &str = "0xbe768b63e5fbbfbb0ae97e9064e0002df8001880";
 const ROOT_REGISTRY: &str = "0xb458d6a3a77919449d03e7a6903c26827c1ec43f";
 const MIGRATION_REGISTRY: &str = "0x0000000000000000000000000000000000000771";
+/// A user registry the ETH registry's `mount` token points at from block 6.
+const MOUNTED_REGISTRY: &str = "0x0000000000000000000000000000000000000773";
 /// The role bitmap the unlocked controller grants a migrated name's owner.
 const MIGRATED_ROLES: &str = "97409655027181761882228017414928043062435250176";
 /// `MIGRATED_ROLES` plus `ROLE_UNREGISTER`
@@ -87,9 +92,9 @@ pub(super) const OFFSETS: [i64; 9] = [
     1_000 + GRACE - 5, // 3: erin unregistered; sub registered in the migration registry
     1_000 + GRACE + 1, // 4: alice renewed in ENSv1 after her move; carol's ENSv1 registration lapses
     1_000 + GRACE + 100, // 5: quiet; dave's ENSv2 registration has lapsed
-    1_000 + GRACE + 200, // 6: alice gets a resolver, a text record, a new token id and a subregistry
-    1_000 + GRACE + 300, // 7: bob transferred; a text record; alice's subregistry cleared
-    1_000 + GRACE + 400, // 8: the ETH registry's parent set again
+    1_000 + GRACE + 200, // 6: alice gets a resolver, a text record, a new token id and a subregistry; a user registry is mounted at mount.eth
+    1_000 + GRACE + 300, // 7: bob transferred; a text record; alice's subregistry cleared; the mounted registry claims a label with no token
+    1_000 + GRACE + 400, // 8: the ETH registry's parent set again; a registration in the mounted registry
 ];
 
 /// ENSv2 token ids carry a version in their low four bytes
@@ -453,6 +458,32 @@ pub(super) async fn seed_history(pool: &PgPool, lineage: &[i64]) -> TestResult {
     };
     seed.log(ETH_REGISTRY, subregistry.encode_log_data())
         .await?;
+    // A user registry mounted at mount.eth, with a parent claim that points back.
+    seed.register_v2("mount", START + 10 * GRACE, OWNER, MIGRATED_ROLES)
+        .await?;
+    let mounted = v2::SubregistryUpdated {
+        tokenId: v2_token("mount"),
+        subregistry: MOUNTED_REGISTRY.parse()?,
+        sender: owner,
+    };
+    seed.log(ETH_REGISTRY, mounted.encode_log_data()).await?;
+    seed.log(MOUNTED_REGISTRY, v2::RegistryCreated {}.encode_log_data())
+        .await?;
+    let claimed = v2::ParentUpdated {
+        parent: ETH_REGISTRY.parse()?,
+        label: "mount".to_owned(),
+        sender: owner,
+    };
+    seed.log(MOUNTED_REGISTRY, claimed.encode_log_data())
+        .await?;
+    seed.register_v2_in(
+        MOUNTED_REGISTRY,
+        "kid",
+        START + 10 * GRACE,
+        OWNER,
+        MIGRATED_ROLES,
+    )
+    .await?;
 
     seed_last_block(&mut seed, &block_hash(FIRST_BLOCK + 7), "0x07").await?;
     if lineage.len() > 8 {
@@ -462,7 +493,8 @@ pub(super) async fn seed_history(pool: &PgPool, lineage: &[i64]) -> TestResult {
 }
 
 /// Block 8: the ETH registry's parent set again. The registry is a manifest-declared suffix
-/// anchor, so its walk ends at itself: this renames nothing and must not read it whole.
+/// anchor, so its walk ends at itself: this renames nothing and must not read it whole. The
+/// mounted registry then registers a label under the claim block 7 left pointing nowhere.
 async fn seed_reparent(seed: &mut Seeder<'_>) -> TestResult {
     seed.block(FIRST_BLOCK + 8).await?;
     let parent = v2::ParentUpdated {
@@ -470,7 +502,55 @@ async fn seed_reparent(seed: &mut Seeder<'_>) -> TestResult {
         label: "eth".to_owned(),
         sender: OWNER.parse()?,
     };
-    seed.log(ETH_REGISTRY, parent.encode_log_data()).await
+    seed.log(ETH_REGISTRY, parent.encode_log_data()).await?;
+    seed.register_v2_in(
+        MOUNTED_REGISTRY,
+        "late",
+        START + 10 * GRACE,
+        OWNER,
+        MIGRATED_ROLES,
+    )
+    .await
+}
+
+/// Block 7's claim move in the mounted registry. `setParent` checks only the caller's role,
+/// so the claimed label needs no token
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L175-L182 @ ens_v2_sepolia_20261001@07e55a05).
+async fn seed_unattached_claim(seed: &mut Seeder<'_>) -> TestResult {
+    let claimed = v2::ParentUpdated {
+        parent: ETH_REGISTRY.parse()?,
+        label: "unattached-claim".to_owned(),
+        sender: OWNER.parse()?,
+    };
+    seed.log(MOUNTED_REGISTRY, claimed.encode_log_data()).await
+}
+
+/// The mounted registry's names stay under mount.eth through the claim move at block 7:
+/// `kid` is never released, and `late`, registered at block 8 when `with_late`, is granted
+/// under the same path.
+fn assert_mount_path_survives_the_claim(rows: &[serde_json::Value], with_late: bool) {
+    let under_mount = |label: &str| format!("ens:{:#x}", child(child(eth_node(), "mount"), label));
+    let kid = under_mount("kid");
+    let count = |name: &str, kind: &str| {
+        rows.iter()
+            .filter(|row| row["event_kind"] == kind && row["logical_name_id"] == name)
+            .count()
+    };
+    assert!(
+        count(&kid, "RegistrationGranted") > 0,
+        "kid.mount.eth is granted"
+    );
+    assert_eq!(
+        count(&kid, "RegistrationReleased"),
+        0,
+        "the claim move at block 7 does not release kid.mount.eth"
+    );
+    if with_late {
+        assert!(
+            count(&under_mount("late"), "RegistrationGranted") > 0,
+            "late.mount.eth is granted after the claim move"
+        );
+    }
 }
 
 /// Block 7. A reorg replaces it with a block of the same shape but another text value.
@@ -523,7 +603,8 @@ async fn seed_last_block(seed: &mut Seeder<'_>, hash: &str, text: &str) -> TestR
     seed.log(ETH_REGISTRY, regenerated.encode_log_data())
         .await?;
     seed.transfer_v2(v2_token_version("alice", 2), Address::ZERO, owner)
-        .await
+        .await?;
+    seed_unattached_claim(seed).await
 }
 
 fn name(label: &str) -> String {
@@ -565,11 +646,14 @@ async fn ensv2_lookahead_matches_full_state_for_every_batch() -> TestResult {
         let span = i64::from(blocks_per_batch);
         let batch_of = |block: i64| FIRST_BLOCK + (block - FIRST_BLOCK) / span * span;
         let migration = format!("{MIGRATION_REGISTRY}:*");
+        // The mounted registry is read whole when the mount names it at block 6. Its claim
+        // move at block 7 leaves its walk on the mount path, so nothing is read again.
         assert_eq!(
             super::WHOLE_REGISTRY_BATCHES.take(),
             BTreeSet::from([
                 (FIRST_BLOCK, format!("{ETH_REGISTRY}:*")),
                 (batch_of(FIRST_BLOCK + 6), migration.clone()),
+                (batch_of(FIRST_BLOCK + 6), format!("{MOUNTED_REGISTRY}:*")),
                 (batch_of(FIRST_BLOCK + 7), migration),
             ]),
             "batches that loaded a whole ENSv2 registry at {blocks_per_batch} blocks per batch"
@@ -655,6 +739,7 @@ async fn ensv2_lookahead_matches_full_state_for_every_batch() -> TestResult {
             && renamed(FIRST_BLOCK + 7, "RegistrationReleased"),
         "the migration registry's suffix moves name sub.alice.eth and take it away"
     );
+    assert_mount_path_survives_the_claim(&rows, true);
     for (blocks_per_batch, stored) in grids {
         assert_eq!(
             stored, full_state,
@@ -894,6 +979,11 @@ async fn ensv2_reorg_and_restart_match_full_state() -> TestResult {
     );
     let (full_state, _) = reorg_and_restart(true).await?;
     assert_eq!(lookahead, full_state);
+    let rows: Vec<serde_json::Value> = lookahead
+        .iter()
+        .map(|row| serde_json::from_str(row))
+        .collect::<Result<_, _>>()?;
+    assert_mount_path_survives_the_claim(&rows, true);
     let texts: BTreeSet<_> = lookahead
         .iter()
         .filter(|row| row.contains("\"url\"") && row.contains(&name("bob")[4..]))

@@ -3,12 +3,12 @@ set -uo pipefail
 
 # Keep the inventory counts and assignments together. Test-list changes should
 # require edits only in this block; the checks below reject every other drift.
-expected_total=102
-expected_runnable=99
+expected_total=103
+expected_runnable=100
 expected_ignored=3
 shard_count=6
 # Per shard, in shard order.
-expected_shard_runnable=(16 16 16 17 17 17)
+expected_shard_runnable=(17 16 16 17 17 17)
 expected_shard_ignored=(1 1 1 0 0 0)
 
 expected_ignored_tests=(
@@ -26,6 +26,7 @@ shard_1_tests=(
     "scenarios::ens_v2_lifecycle::a_replaced_subregistry_stops_serving_its_old_child"
     "scenarios::ens_v2_lifecycle::renewal_preserves_promoted_coverage_and_registry_edges_follow"
     "scenarios::ens_v2_live_poll::ens_v2_registry_lifecycle_survives_successive_fixture_replays"
+    "scenarios::ens_v2_registry_claims::a_claim_that_points_nowhere_keeps_the_mount_path"
     "scenarios::perturbations::registry_child_records_converge_fresh_incremental_and_restored"
     "scenarios::perturbations::rich_chain_rpc_ingest_normalized_events_match_upfront_facts"
     "scenarios::provider_faults::pruned_get_code_fails_closed_then_uses_configured_fallback"

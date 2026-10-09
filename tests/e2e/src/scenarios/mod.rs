@@ -5,6 +5,7 @@ mod catchup_equivalence;
 mod cross_protocol;
 mod ens_v2_lifecycle;
 mod ens_v2_live_poll;
+mod ens_v2_registry_claims;
 mod lifecycle;
 mod lifecycle_divergence;
 mod perturbations;

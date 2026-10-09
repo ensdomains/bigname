@@ -160,6 +160,11 @@ pub enum Perturbation {
     Reregistration,
     RegistryAnnouncement,
     ProxyUpgrade,
+    /// ENSv2 only: the registry a name's subregistry pointer names announces itself, registers
+    /// a child and sets a parent claim that names a label its parent holds no token for. The
+    /// child is then named only by the mount path. It is not in `PERTURBATIONS`. A draw enables
+    /// it together with `RegistryAnnouncement`, so the draw sequence is unchanged.
+    UnattachedParentClaim,
 }
 
 pub const PERTURBATIONS: &[Perturbation] = &[
@@ -171,6 +176,14 @@ pub const PERTURBATIONS: &[Perturbation] = &[
     Perturbation::RegistryAnnouncement,
     Perturbation::ProxyUpgrade,
 ];
+
+/// Adds the perturbations that are enabled with another one and never drawn by themselves.
+fn with_implied(mut perturbations: Vec<Perturbation>) -> Vec<Perturbation> {
+    if perturbations.contains(&Perturbation::RegistryAnnouncement) {
+        perturbations.push(Perturbation::UnattachedParentClaim);
+    }
+    perturbations
+}
 
 #[derive(Clone, Debug)]
 pub struct Dimensions {
@@ -239,7 +252,7 @@ impl Dimensions {
                                 expiry_window: ExpiryWindow::JustExpired,
                                 authority_shape,
                                 registration_path,
-                                perturbations: PERTURBATIONS.to_vec(),
+                                perturbations: with_implied(PERTURBATIONS.to_vec()),
                                 name_count: 1,
                                 dense_transactions: false,
                                 pre_registration_burst: true,
@@ -258,6 +271,7 @@ impl Dimensions {
         rng.shuffle(&mut perturbations);
         perturbations.truncate(rng.between(0, PERTURBATIONS.len()));
         perturbations.sort_by_key(|value| format!("{value:?}"));
+        let perturbations = with_implied(perturbations);
         Self {
             wrap_state: *rng.pick(&[
                 WrapState::Unwrapped,

@@ -42,6 +42,7 @@ impl State {
         self.v2_token_by_name_index.clear();
         self.v2_tokens_by_current_name_index.clear();
         self.v2_subregistry_tokens_by_observation.clear();
+        self.v2_mounts_by_subregistry.clear();
         let tokens = self
             .v2_tokens
             .loaded()
@@ -105,6 +106,23 @@ impl State {
     ) {
         if previous == current {
             return;
+        }
+        let mounted = |token: Option<&V2TokenState>| {
+            token
+                .and_then(|token| token.subregistry.as_deref())
+                .map(str::to_ascii_lowercase)
+        };
+        let (unmounted, mounted) = (mounted(previous), mounted(current));
+        if unmounted != mounted {
+            if let Some(registry) = unmounted {
+                remove_index_key(&mut self.v2_mounts_by_subregistry, &registry, token_key);
+            }
+            if let Some(registry) = mounted {
+                self.v2_mounts_by_subregistry
+                    .entry(registry)
+                    .or_default()
+                    .insert(token_key.to_owned());
+            }
         }
         if let Some(previous) = previous {
             replace_subregistry_index(

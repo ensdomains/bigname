@@ -129,7 +129,7 @@ impl State {
     }
 
     /// Dirties every token of each dirty registry whose suffix walk changed since names were
-    /// last refreshed, and of the registries their tokens give a parent. A registry whose walk
+    /// last refreshed, and of the registries their tokens point at. A registry whose walk
     /// is unchanged holds no token whose name changed, so its tokens are not read: a
     /// lookahead batch then needs only the registry-level rows the walk reads.
     fn expand_dirty_v2_registries(&mut self, at_unix_timestamp: i64) {
@@ -145,18 +145,12 @@ impl State {
             }
             for key in self.v2_tokens.registry_keys(&registry) {
                 self.v2_dirty_tokens.insert(key.clone());
-                let Some(token) = self.v2_tokens.get(&key) else {
-                    continue;
-                };
-                let (Some(raw_label), Some(subregistry)) =
-                    (token.raw_label.as_ref(), token.subregistry.as_ref())
-                else {
-                    continue;
-                };
-                if self.v2_parent_claims.get(subregistry)
-                    == Some(&(registry.clone(), raw_label.clone()))
+                if let Some(subregistry) = self
+                    .v2_tokens
+                    .get(&key)
+                    .and_then(|token| token.subregistry.as_ref())
                 {
-                    pending.push(subregistry.clone());
+                    pending.push(subregistry.to_ascii_lowercase());
                 }
             }
         }
