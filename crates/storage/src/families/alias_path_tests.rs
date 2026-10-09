@@ -284,6 +284,33 @@ async fn a_path_through_a_cycle_is_served_in_label_count_steps() -> Result<()> {
     .await
 }
 
+/// A walk reads at most `MAX_ALIAS_LABELS` labels. A cycle path of exactly that many labels is
+/// served, and a name with one label more runs no statement.
+#[tokio::test]
+async fn a_name_over_the_label_cap_is_not_walked() -> Result<()> {
+    with_database("alias_path_label_cap", async |pool| {
+        mounted(pool).await?;
+        entry(pool, R, "self", "registered", LIVE, resource(3)).await?;
+        pointer(pool, resource(3), R, 2).await?;
+        // `child`, the `self` hops, `m` and `eth`.
+        let path = |labels: usize| {
+            let hops = vec!["self"; labels - 3].join(".");
+            format!("child.{hops}.m.eth")
+        };
+        let at_cap = walk(pool, &path(MAX_ALIAS_LABELS)).await?;
+        assert_eq!(
+            at_cap.target.map(|target| target.canonical_logical_name_id),
+            id("child.m.eth")
+        );
+        assert_eq!(at_cap.statements, 2 * MAX_ALIAS_LABELS + 1);
+        let over = walk(pool, &path(MAX_ALIAS_LABELS + 1)).await?;
+        assert_eq!(over.target, None);
+        assert_eq!(over.statements, 0);
+        Ok(())
+    })
+    .await
+}
+
 /// T3. A hop whose expiry is the publication timestamp is expired, as `_isExpired` reads it.
 /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L671-L673 @ ens_v2_sepolia_20261001@07e55a05)
 #[tokio::test]

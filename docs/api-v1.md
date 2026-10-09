@@ -2276,6 +2276,9 @@ A path that reaches a token whose served path is another one is an
 - `canonical_name` names the served path. It is present only on an alias read.
 - A path below an alias, and a path through a registry mounted under itself, are walked the
   same way. The walk never reads more entries than the request has labels.
+- A name with more than 32 labels is not walked. It answers as it did before alias paths:
+  the name's own row when it has one, else `404 not_found`. A path through a cycle within
+  32 labels still serves. So one read runs at most 65 walk statements.
 - A served path released by a mount change while it still resolves serves as an alias of
   the new served path. An example is the path a smaller mount replaced
   (`registry_name_binding_changed`).

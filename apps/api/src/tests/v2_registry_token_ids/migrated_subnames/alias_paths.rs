@@ -6,6 +6,8 @@
 //! is a row of the ordering table in the TYR-280 scope.
 use std::cell::Cell;
 
+use bigname_storage::families::alias_path::MAX_ALIAS_LABELS;
+
 use super::nested::deploy;
 use super::*;
 use crate::v2::support::ALIAS_WALK_STATEMENTS;
@@ -567,6 +569,38 @@ async fn nested_and_cyclic_paths_are_served() -> Result<()> {
     let (_, _, statements) = get_counting(&database, "/v1/names/child.self.self.z.eth").await?;
     // The publication, four hops of two statements, the leaf and the association.
     assert_eq!(statements, 11);
+    database.cleanup().await
+}
+
+/// A cycle path of `MAX_ALIAS_LABELS` labels is served. A name with one label more is not
+/// walked: it runs no statement and answers as it did before alias paths.
+#[tokio::test]
+async fn a_name_over_the_label_cap_is_not_walked() -> Result<()> {
+    let (database, _) = base(u64::MAX, u64::MAX).await?;
+    let owner = HOLDER.parse()?;
+    step(
+        &database,
+        124,
+        vec![register(
+            address(R),
+            "self",
+            Address::ZERO,
+            address(R),
+            u64::MAX,
+            owner,
+        )?],
+    )
+    .await?;
+    // `child`, the `self` hops, `m` and `eth`.
+    let path = |labels: usize| format!("child.{}.m.eth", vec!["self"; labels - 3].join("."));
+    let at_cap = path(MAX_ALIAS_LABELS);
+    assert_alias(&database, &at_cap, "child.m.eth").await?;
+    let (_, _, statements) = get_counting(&database, &format!("/v1/names/{at_cap}")).await?;
+    assert_eq!(statements, 2 * MAX_ALIAS_LABELS + 1);
+    let over = path(MAX_ALIAS_LABELS + 1);
+    let (status, body, statements) = get_counting(&database, &format!("/v1/names/{over}")).await?;
+    assert_eq!((status, statements), (StatusCode::NOT_FOUND, 0), "{body:#}");
+    not_found(&database, &format!("/v1/names/{over}/records")).await?;
     database.cleanup().await
 }
 

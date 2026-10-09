@@ -9,6 +9,8 @@
 //! (`FamilyPublication::admission`), as UniversalResolverV2 starts at its root, so a manifest
 //! sync reaches the walk only through the redo that republishes. A publication with no admission
 //! walks nothing. It costs one statement for the publication, two per hop and two at the leaf.
+//! A registry mounted under itself is walked once per label, so a name longer than
+//! [`MAX_ALIAS_LABELS`] is not walked at all.
 //! (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/UniversalResolverV2.sol:L55-L63 @ ens_v2_sepolia_20261001@07e55a05) The entry and pointer statements are twins of the composed name
 //! reader's (`name/resolution_path/facts.rs`), which this reader cannot call without changing a
 //! hashed file. `alias_path_tests.rs` pins the twins to each other.
@@ -26,6 +28,11 @@ use crate::{
 };
 
 const ENS_L1_CHAINS: [&str; 2] = ["ethereum-mainnet", "ethereum-sepolia"];
+
+/// The most labels an alias walk reads. A name with more labels is not walked and runs no
+/// statement, so it answers as a name with no alias path. This bounds a walk at
+/// `2 * MAX_ALIAS_LABELS + 1` statements, including a path through a cycle.
+pub const MAX_ALIAS_LABELS: usize = 32;
 
 pub(crate) const ENTRY_SQL: &str = "/* storage:families.alias_path.entry */
         SELECT registry_contract_instance_id, token_id, resource_id, status, expiry::text
@@ -108,7 +115,7 @@ pub async fn resolve_alias_path(
     logical_name_id: &str,
     selected: &ChainPositions,
 ) -> std::result::Result<AliasWalk, SnapshotSelectionError> {
-    if namespace != "ens" {
+    if namespace != "ens" || name.split('.').count() > MAX_ALIAS_LABELS {
         return Ok(AliasWalk::default());
     }
     let Some(position) = selected
