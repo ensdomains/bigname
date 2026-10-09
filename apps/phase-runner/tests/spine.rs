@@ -1805,6 +1805,7 @@ async fn capacity_breach_pauses_and_then_resumes_the_phase() -> Result<()> {
         CapacityConfig {
             ingest: bigname_ingest::IngestConfig::default(),
             interpret_blocks_per_batch: bigname_interpret::DEFAULT_INTERPRET_BLOCKS_PER_BATCH,
+            interpret_speculative_workers: std::num::NonZeroU32::MIN,
             interpret_force_full_state_loader: false,
             interpret_lookahead_statement_timeout_secs: None,
             database_max_bytes: None,

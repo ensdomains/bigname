@@ -38,6 +38,14 @@ pub(super) struct CapacityArgs {
         default_value_t = bigname_interpret::DEFAULT_INTERPRET_BLOCKS_PER_BATCH
     )]
     interpret_blocks_per_batch: NonZeroU32,
+    /// Concurrent speculative Interpret preparations; 1 keeps serial execution.
+    /// Results are validated and written in chain order. Requires the lookahead loader.
+    #[arg(
+        long,
+        env = "BIGNAME_INTERPRET_SPECULATIVE_WORKERS",
+        default_value_t = NonZeroU32::MIN
+    )]
+    interpret_speculative_workers: NonZeroU32,
     /// PostgreSQL statement timeout, in seconds, for the Interpret lookahead loader's reads.
     /// 0, the default, sets no timeout.
     #[arg(
@@ -86,6 +94,7 @@ pub(super) fn resolve_capacity(args: CapacityArgs) -> RunnerResult<CapacityConfi
     Ok(CapacityConfig {
         ingest,
         interpret_blocks_per_batch: args.interpret_blocks_per_batch,
+        interpret_speculative_workers: args.interpret_speculative_workers,
         interpret_force_full_state_loader: args.interpret_force_full_state_loader,
         interpret_lookahead_statement_timeout_secs: NonZeroU32::new(
             args.interpret_lookahead_statement_timeout_secs,

@@ -272,6 +272,7 @@ impl ChainConfig {
 pub struct CapacityConfig {
     pub ingest: bigname_ingest::IngestConfig,
     pub interpret_blocks_per_batch: std::num::NonZeroU32,
+    pub interpret_speculative_workers: std::num::NonZeroU32,
     pub interpret_force_full_state_loader: bool,
     pub interpret_lookahead_statement_timeout_secs: Option<std::num::NonZeroU32>,
     pub database_max_bytes: Option<u64>,
@@ -286,6 +287,7 @@ impl Default for CapacityConfig {
         Self {
             ingest: bigname_ingest::IngestConfig::default(),
             interpret_blocks_per_batch: bigname_interpret::DEFAULT_INTERPRET_BLOCKS_PER_BATCH,
+            interpret_speculative_workers: std::num::NonZeroU32::MIN,
             interpret_force_full_state_loader: false,
             interpret_lookahead_statement_timeout_secs: None,
             database_max_bytes: None,

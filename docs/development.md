@@ -106,6 +106,73 @@ phase-runner verification integration tests also create one shared, unprivileged
 test login role; that server user therefore needs `CREATEROLE` for the full
 phase-runner suite.
 
+## Speculative Interpret prototype
+
+Interpret defaults to one worker and its existing serial path. To prepare
+several complete batches concurrently, add
+`--interpret-speculative-workers 4` to an existing `run` or `redo` command, or
+set `BIGNAME_INTERPRET_SPECULATIVE_WORKERS=4`. The server Compose file forwards
+the same environment setting. `--interpret-blocks-per-batch` still controls
+the number of canonical blocks in each batch, and remains `500` by default.
+
+The coordinator validates each result against freshly read inputs, retries
+changed inputs serially, and writes in chain order. It uses the existing phase
+lock and database pool. The full-state loader remains serial, including when
+`--interpret-force-full-state-loader` is set. See
+[storage](storage.md#interpretation-replay) for the validation and cancellation
+contract. Each engine currently keeps one chain's preparation window.
+Interleaving chains serializes their calls and replaces queued work. Use a
+single-chain replay on a disposable database copy for the first comparison.
+A replay under a new interpreter content hash still requires the normal
+adoption procedure.
+
+Run the equivalence cases through the database harness:
+
+```sh
+./scripts/test-db -- cargo test -p bigname-interpret speculation_tests
+```
+
+The explicit benchmark creates isolated test databases with ABI-encoded
+resolver updates. It compares serial and speculative output for independent
+names and repeatedly updated names. Setup and final equality checks are
+outside the timer. Timed work includes input loading, preparation, validation,
+retries, stream-tail loading, and database writes:
+
+```sh
+./scripts/test-db -- cargo test -p bigname-interpret --release \
+  speculative_interpret_benchmark -- --ignored --nocapture
+```
+
+`BIGNAME_SPECULATION_BENCH_BLOCKS`, `BIGNAME_SPECULATION_BENCH_NAMES`,
+`BIGNAME_SPECULATION_BENCH_BATCH_BLOCKS`, and
+`BIGNAME_SPECULATION_BENCH_WORKERS` control the fixture and worker count.
+The benchmark reports elapsed time, raw logs per second, process resident
+memory at completion, and preparation/acceptance/retry counters. The memory
+sample is not a peak-memory measurement. This synthetic workload does not
+establish a production replay speedup. Extra validation reads or frequent
+dependency changes can make speculative execution slower.
+
+### Initial measurement
+
+An optimized Rust 1.98 build processed 24 blocks with 25 names per block and
+two blocks per batch. Each run consumed 1,800 raw logs and left 3,011
+normalized events. PostgreSQL 16.14 ran in a QEMU TCG guest with one CPU and
+1 GiB RAM. The Rust application ran natively, with no concurrent builds.
+
+| Workload | One worker | Four workers | Accepted / retried | Relative throughput |
+| --- | ---: | ---: | ---: | ---: |
+| Independent names | 21.398 s | 29.359 s | 12 / 0 | 0.729× |
+| Repeated names | 19.019 s | 26.021 s | 3 / 9 | 0.731× |
+
+Both speculative runs matched their serial semantic database snapshots and
+reached four active workers. Validation took 4.117 s and 5.506 s respectively.
+Host application CPU time was 0.38–0.59 s per run, excluding the separate
+database emulator. Database and round-trip costs dominated this experiment.
+The prototype was slower here even when every prediction was accepted.
+Performance on a native database or an adapter CPU-heavy replay remains
+unmeasured. Reproduce this fixture with `BIGNAME_SPECULATION_BENCH_NAMES=25`
+and the other benchmark settings at their defaults.
+
 ## Bootstrap migration hygiene
 
 During bootstrap, bigname has no active deployments or shared production

@@ -829,6 +829,13 @@ fn run_cli_carries_the_interpret_batch_length_and_loader_override() {
         resolve_capacity(args.capacity).expect("capacity must resolve")
     };
     assert_eq!(run(&[]).interpret_blocks_per_batch.get(), 500);
+    assert_eq!(run(&[]).interpret_speculative_workers.get(), 1);
+    assert_eq!(
+        run(&["--interpret-speculative-workers", "4"])
+            .interpret_speculative_workers
+            .get(),
+        4
+    );
     assert_eq!(
         run(&["--interpret-blocks-per-batch", "50"])
             .interpret_blocks_per_batch
@@ -862,6 +869,28 @@ fn run_cli_rejects_an_interpret_batch_of_zero_blocks() {
     ])
     .expect_err("a batch must hold at least one block");
     assert!(error.to_string().contains("--interpret-blocks-per-batch"));
+}
+
+#[test]
+fn run_cli_rejects_zero_interpret_speculative_workers() {
+    let error = Cli::try_parse_from([
+        "phase-runner",
+        "run",
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+        "--verification-database-url",
+        "postgres://phase-runner.invalid/verification",
+        "--chain",
+        "ethereum-mainnet",
+        "--interpret-speculative-workers",
+        "0",
+    ])
+    .expect_err("speculative worker count must be positive");
+    assert!(
+        error
+            .to_string()
+            .contains("--interpret-speculative-workers")
+    );
 }
 
 fn ingest_options(command: &str, extra: &[&str]) -> RunnerResult<bigname_ingest::IngestConfig> {

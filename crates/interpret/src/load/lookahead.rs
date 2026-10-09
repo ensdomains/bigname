@@ -14,13 +14,19 @@ use sqlx::{PgPool, types::Uuid};
 use super::{LoadedBatch, cache, lookahead_query, manifests, migration, resume};
 use crate::{FullStateReason, InterpretError, Result, StateLoader};
 
+mod speculation;
+pub(crate) use speculation::{
+    SpeculativeCertificate, batch_input, speculative_batch_input, validate_speculative,
+};
+
 /// Either the batch restored by lookahead, or the reason this chain needs the full-state loader.
 pub(crate) enum Attempt {
     Loaded(Box<LoadedBatch>),
     FullStateRequired(StateLoader),
 }
 
-pub(crate) async fn batch_input(
+#[allow(clippy::too_many_arguments)]
+async fn batch_input_inner(
     pool: &PgPool,
     chain_id: &str,
     from_block: i64,
@@ -28,6 +34,7 @@ pub(crate) async fn batch_input(
     resume_marker: Option<(i64, &str)>,
     state_cache_capacity: StateCacheCapacity,
     statement_timeout: Option<std::num::NonZeroU32>,
+    capture_speculation: bool,
 ) -> Result<Attempt> {
     let mut tx = pool.begin().await.map_err(|error| {
         InterpretError::database("failed to begin lookahead input snapshot", error)
@@ -94,10 +101,10 @@ pub(crate) async fn batch_input(
     let mut dependencies = collect_v1_batch_dependencies(&input, &provenance)
         .map_err(|error| invalid_dependencies("decode", error))?;
     validate_dependencies(&dependencies)?;
-    for name in
+    let due_names =
         lookahead_query::due_names(&mut tx, chain_id, from_block, predecessor, last_timestamp)
-            .await?
-    {
+            .await?;
+    for name in &due_names {
         let (namespace, node) = name.split_once(':').ok_or_else(|| {
             InterpretError::data_integrity("lookahead expiry candidate has no namespace")
         })?;
@@ -106,6 +113,7 @@ pub(crate) async fn batch_input(
             node: node.to_owned(),
         });
     }
+    let captured_due_names = capture_speculation.then_some(due_names);
     // Every event is written under one of the chain's manifests, so a chain with no ENSv2
     // manifest row has no ENSv2 history to read.
     let has_v2_manifest = provenance
@@ -127,11 +135,13 @@ pub(crate) async fn batch_input(
         _ => i64::MIN,
     };
     let window = (window_start, last_timestamp.unix_timestamp());
-    if has_v2_manifest {
-        dependencies
-            .v2_keys
-            .extend(lookahead_query::v2_due_keys(&mut tx, chain_id, from_block, window).await?);
-    }
+    let due_v2_keys = if has_v2_manifest {
+        lookahead_query::v2_due_keys(&mut tx, chain_id, from_block, window).await?
+    } else {
+        Vec::new()
+    };
+    let captured_due_v2_keys = capture_speculation.then(|| due_v2_keys.iter().cloned().collect());
+    dependencies.v2_keys.extend(due_v2_keys);
     dependencies.v2_due_window = Some(window);
     // Shared by every attempt: a retry reads only the keys it adds and what they link to.
     let mut fetched = Fetched::default();
@@ -244,6 +254,18 @@ pub(crate) async fn batch_input(
             "interpret loaded every token of an ENSv2 registry to re-derive their names"
         );
     }
+    let speculative_certificate = capture_speculation.then(|| SpeculativeCertificate {
+        from_block,
+        to_block,
+        other_families,
+        predecessor,
+        has_v2_manifest,
+        latest_v2_topology,
+        due_names: captured_due_names.expect("speculative query capture enabled"),
+        due_v2_keys: captured_due_v2_keys.expect("speculative query capture enabled"),
+        dependencies: dependencies.clone(),
+        prior_events: fetched.events.into_values().collect(),
+    });
     Ok(Attempt::Loaded(Box::new(LoadedBatch {
         input,
         provenance_manifests: provenance,
@@ -252,6 +274,7 @@ pub(crate) async fn batch_input(
         prepared: Some(Box::new(prepared)),
         restored_event_count,
         lookahead_nodes: Some(dependencies.nodes),
+        speculative_certificate,
     })))
 }
 
