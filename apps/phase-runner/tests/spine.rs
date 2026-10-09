@@ -1,6 +1,11 @@
 #[allow(dead_code)]
 mod support;
 
+#[path = "spine/redo_overtaken_by_reorg.rs"]
+mod redo_overtaken_by_reorg;
+#[path = "spine/redo_stopped_recovery.rs"]
+mod redo_stopped_recovery;
+
 use std::{
     sync::{
         Arc, Mutex,

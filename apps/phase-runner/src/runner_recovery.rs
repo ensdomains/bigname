@@ -5,11 +5,16 @@ use crate::{
     error::{RunnerError, RunnerResult},
     phase::PhaseName,
     phase_lock::PhaseLock,
+    state::PhaseStatus,
 };
 
 use super::PhaseRunner;
 
 impl PhaseRunner {
+    /// Record a Live phase left `running` or `paused` by a stopped supervisor as
+    /// `completed`. Live holds its advisory lock from before it is marked running
+    /// until it is completed or the process ends, so acquiring that lock here
+    /// shows no process is running Live. A held lock refuses with `LockHeld`.
     pub(super) async fn recover_stopped_live(&self, chain: &ChainConfig) -> RunnerResult<()> {
         let mut live_lock = PhaseLock::acquire(
             self.database.connect_options(),
@@ -28,6 +33,21 @@ impl PhaseRunner {
             (Err(error), Err(release_error)) => {
                 Err(error.with_secondary("release stopped live lock before redo", release_error))
             }
+        }
+    }
+
+    /// An operator redo's form of `recover_stopped_live`. It takes the Live lock
+    /// only for a row that claims to be running or paused. No other status blocks
+    /// a redo or is changed by the settlement. A supervisor whose last Live attempt
+    /// recorded the row completed or failed therefore does not meet this path on
+    /// that lock between attempts. An attempt that lost its lock connection leaves
+    /// the row running, and this path takes the lock then. A `--phase ingest` redo
+    /// with a required Ingest redo pending is the other exception: it first runs
+    /// `recover_stopped_phases`, which takes every phase lock whatever the row says.
+    pub(super) async fn recover_live_left_active(&self, chain: &ChainConfig) -> RunnerResult<()> {
+        match self.store.status(&chain.chain_id, PhaseName::Live).await? {
+            PhaseStatus::Running | PhaseStatus::Paused => self.recover_stopped_live(chain).await,
+            PhaseStatus::Idle | PhaseStatus::Completed | PhaseStatus::Failed => Ok(()),
         }
     }
 
