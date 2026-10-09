@@ -6898,6 +6898,10 @@
             "type": "string",
             "description": "Display form of the name."
           },
+          "canonical_name": {
+            "type": "string",
+            "description": "The served path of the ENSv2 token an alias path reaches. Present only when the request named an [alias path](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#alias-paths)."
+          },
           "namespace": {
             "type": "string",
             "description": "Resolved public namespace slug."
@@ -7887,6 +7891,10 @@
           "namespace": {
             "type": "string",
             "description": "Resolved public namespace slug."
+          },
+          "canonical_name": {
+            "type": "string",
+            "description": "The served path of the ENSv2 token an alias path reaches. Present only when the request named an [alias path](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#alias-paths)."
           },
           "resolver": {
             "anyOf": [

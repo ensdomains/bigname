@@ -86,6 +86,15 @@ pub(crate) struct EnsPrimaryNameAuthority {
 }
 
 impl LookupSnapshot {
+    /// Execute at `path` instead of the indexed name. The indexed records are the indexed
+    /// name's, so they are not compared with the answers for another node.
+    pub fn execute_at(&mut self, path: &crate::LookupPath) {
+        self.name = path.name.clone();
+        self.dns_name = path.dns_name.clone();
+        self.node = path.node;
+        self.comparison = None;
+    }
+
     pub fn indexed_answer(&self, selector: &RecordSelector) -> Option<Value> {
         self.comparison.as_ref().map(|comparison| {
             indexed::answer(

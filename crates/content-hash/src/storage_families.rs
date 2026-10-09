@@ -91,6 +91,8 @@ pub(crate) const COMPOSITION_FILES: &[&str] = &[
 
 /// Serving reads and module wiring the composition does not call.
 const READER_FILES: &[&str] = &[
+    // The direct read's alias path walk (`alias_path_tests.rs` pins its twin statements).
+    "crates/storage/src/families/alias_path.rs",
     "crates/storage/src/families/lookup/read.rs",
     "crates/storage/src/families/lookup/read_inventory.rs",
     "crates/storage/src/families/lookup/reverse.rs",

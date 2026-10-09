@@ -6,17 +6,16 @@ use axum::{
 };
 use bigname_domain::resolver_read::ResolverReadFeature;
 use bigname_storage::{
-    BASENAMES_NAMESPACE, NameCurrentRow, RecordInventoryCurrentRow, SelectedSnapshot,
-    SnapshotSelectionErrorKind,
+    BASENAMES_NAMESPACE, RecordInventoryCurrentRow, SelectedSnapshot, SnapshotSelectionErrorKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::AppState;
 use crate::v2::support::{
-    ResolutionLookupError, ResolutionRecordKey, load_name_current_for_selected_snapshot,
-    load_records_route_inventory, map_internal_api_error, normalize_inferred_route_name,
-    snapshot_selection_api_error,
+    AliasPath, ResolutionLookupError, ResolutionRecordKey, ServedName,
+    load_records_route_inventory, load_served_name_for_selected_snapshot, map_internal_api_error,
+    normalize_inferred_route_name, snapshot_selection_api_error,
 };
 
 use super::support::{ResolutionLookupOutcome, execute_resolution_lookup};
@@ -125,6 +124,10 @@ pub(crate) type NameRecordsQuery = StrictQueryParams<NameRecordsQueryParams>;
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct NameRecords {
     pub(crate) namespace: String,
+    /// The canonical name of the ENSv2 token an alias path reaches; present only when the
+    /// request named an alias path (docs/api-v1.md, "ENSv2 name path").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) canonical_name: Option<String>,
     pub(crate) resolver: Option<Resolver>,
     pub(crate) records: BTreeMap<String, RecordAnswer>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -179,15 +182,16 @@ pub(crate) async fn get_name_records(
 
     let include_resolution_auxiliary =
         namespace == BASENAMES_NAMESPACE && params.source == RequestSource::Verified;
-    let (mut selected_snapshot, mut row, mut record_inventory) = load_name_records_snapshot_state(
-        &state,
-        &namespace,
-        &normalized.normalized_name,
-        params.at.as_ref(),
-        params.finality,
-        include_resolution_auxiliary,
-    )
-    .await?;
+    let (mut selected_snapshot, ServedName { mut row, mut alias }, mut record_inventory) =
+        load_name_records_snapshot_state(
+            &state,
+            &namespace,
+            &normalized.normalized_name,
+            params.at.as_ref(),
+            params.finality,
+            include_resolution_auxiliary,
+        )
+        .await?;
 
     // Without `keys`, every source answers the inventory-derived default set. Inventory is loaded
     // only for a row the name may serve, so reservation and audit-only rows derive no keys. The
@@ -237,6 +241,7 @@ pub(crate) async fn get_name_records(
                     &row,
                     requested_records,
                     &mut selected_snapshot,
+                    alias.as_ref(),
                 )
                 .await?;
                 ensure_verified_route_matches_admission(
@@ -284,7 +289,8 @@ pub(crate) async fn get_name_records(
                         auto_fallback_test_hooks::run(&state.pool).await?;
                     }
                     if namespace == BASENAMES_NAMESPACE && !fallback_records.is_empty() {
-                        (selected_snapshot, row, record_inventory) =
+                        let served;
+                        (selected_snapshot, served, record_inventory) =
                             load_name_records_snapshot_state(
                                 &state,
                                 &namespace,
@@ -294,6 +300,7 @@ pub(crate) async fn get_name_records(
                                 true,
                             )
                             .await?;
+                        (row, alias) = (served.row, served.alias);
                         let refreshed_fallback_records =
                             indexed_records_requiring_verified_fallback(
                                 &row,
@@ -321,6 +328,7 @@ pub(crate) async fn get_name_records(
                         &row,
                         &fallback_records,
                         &mut selected_snapshot,
+                        alias.as_ref(),
                     )
                     .await?;
                     ensure_verified_route_matches_admission(
@@ -346,6 +354,7 @@ pub(crate) async fn get_name_records(
         record_inventory.as_ref(),
     )
     .await?;
+    data.canonical_name = alias.map(|alias| alias.canonical_name);
     let mut meta = snapshot_meta(&selected_snapshot)?;
     meta.source = Some(route_source);
 
@@ -391,7 +400,7 @@ async fn load_name_records_snapshot_state(
     include_resolution_auxiliary: bool,
 ) -> V2Result<(
     SelectedSnapshot,
-    NameCurrentRow,
+    ServedName,
     Option<RecordInventoryCurrentRow>,
 )> {
     let scope = v2_exact_name_snapshot_scope_with_resolution_auxiliary(
@@ -409,8 +418,11 @@ async fn load_name_records_snapshot_state(
         SnapshotReadResource::NameRecords,
     )
     .await?;
-    let row = load_name_current_for_selected_snapshot(
-        &state.pool,
+    let mut reads = bigname_storage::begin_read_snapshot(&state.pool)
+        .await
+        .map_err(|_| V2Error::internal_error("failed to open name records read snapshot"))?;
+    let served = load_served_name_for_selected_snapshot(
+        &mut reads,
         namespace,
         normalized_name,
         &selected_snapshot,
@@ -428,9 +440,14 @@ async fn load_name_records_snapshot_state(
             SnapshotReadResource::NameRecords,
         )
     })?;
+    reads
+        .commit()
+        .await
+        .map_err(|_| V2Error::internal_error("failed to close name records read snapshot"))?;
+    let row = &served.row;
 
-    let record_inventory = if super::name_record::row_has_current_registration(&row) {
-        load_records_route_inventory(&state.pool, &row, &selected_snapshot)
+    let record_inventory = if super::name_record::row_has_current_registration(row) {
+        load_records_route_inventory(&state.pool, row, &selected_snapshot)
             .await
             .map_err(|error| {
                 api_error_to_v2_for_resource(
@@ -441,7 +458,7 @@ async fn load_name_records_snapshot_state(
     } else {
         None
     };
-    Ok((selected_snapshot, row, record_inventory))
+    Ok((selected_snapshot, served, record_inventory))
 }
 
 /// Refuse an inventory-derived key set above the record-key limit. The set is never truncated;
@@ -460,6 +477,7 @@ pub(crate) async fn load_verified_record_lookup(
     row: &bigname_storage::NameCurrentRow,
     records: &[ResolutionRecordKey],
     selected_snapshot: &mut SelectedSnapshot,
+    alias: Option<&AliasPath>,
 ) -> V2Result<Option<VerifiedRecordLookup>> {
     load_verified_record_lookup_for_resource(
         state,
@@ -467,6 +485,7 @@ pub(crate) async fn load_verified_record_lookup(
         records,
         selected_snapshot,
         SnapshotReadResource::NameRecords,
+        alias,
     )
     .await
 }
@@ -477,11 +496,19 @@ pub(crate) async fn load_verified_record_lookup_for_resource(
     records: &[ResolutionRecordKey],
     selected_snapshot: &mut SelectedSnapshot,
     resource: SnapshotReadResource,
+    alias: Option<&AliasPath>,
 ) -> V2Result<Option<VerifiedRecordLookup>> {
     if !super::name_record::row_has_current_registration(row) {
         return Ok(Some(VerifiedRecordLookup::NotSupported));
     }
-    execute_verified_record_lookup(state, row, records, selected_snapshot, resource).await
+    let path = match alias {
+        None => None,
+        Some(alias) => match alias.lookup_path() {
+            Some(path) => Some(path),
+            None => return Ok(Some(VerifiedRecordLookup::NotSupported)),
+        },
+    };
+    execute_verified_record_lookup(state, row, records, selected_snapshot, resource, path).await
 }
 
 pub(crate) async fn load_ephemeral_verified_record_lookup(
@@ -496,6 +523,7 @@ pub(crate) async fn load_ephemeral_verified_record_lookup(
         records,
         selected_snapshot,
         SnapshotReadResource::NameRecords,
+        None,
     )
     .await
 }
@@ -506,12 +534,13 @@ async fn execute_verified_record_lookup(
     records: &[ResolutionRecordKey],
     selected_snapshot: &mut SelectedSnapshot,
     resource: SnapshotReadResource,
+    path: Option<&bigname_lookup::LookupPath>,
 ) -> V2Result<Option<VerifiedRecordLookup>> {
     if records.is_empty() {
         return Ok(None);
     }
 
-    match execute_resolution_lookup(state, row, records, selected_snapshot).await {
+    match execute_resolution_lookup(state, row, records, selected_snapshot, path).await {
         Ok(ResolutionLookupOutcome::Executed(response)) => {
             Ok(Some(VerifiedRecordLookup::Found { response }))
         }

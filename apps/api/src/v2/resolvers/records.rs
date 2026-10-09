@@ -175,6 +175,7 @@ pub(crate) async fn get_resolver_records(
         .collect::<V2Result<BTreeMap<String, RecordAnswer>>>()?;
     let mut data = NameRecords {
         namespace,
+        canonical_name: None,
         resolver: Some(Resolver {
             chain_id: numeric_chain_id,
             address,

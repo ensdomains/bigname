@@ -1807,6 +1807,17 @@ with the one from the previous name refresh; only a changed walk renames every
 token in the registry and in the registries beneath it. See
 [Interpret process memory](storage.md#interpret-process-memory).
 
+## Alias path
+
+a path that resolves to an ENSv2 token but is not the path the
+[ENSv2 name suffix walk](#ensv2-name-suffix-walk) names the token by. A registry mounted
+under a second parent token, a path below such a mount and a path through a registry
+mounted under itself are alias paths of the tokens they reach. The direct read and the
+records route serve the token's row under an alias path and add `canonical_name`. Lists,
+lookups, search and history never show an alias path. bigname stores nothing for it: the
+path is walked at read time, see
+[`api-v1.md` § Alias paths](api-v1.md#alias-paths).
+
 ## Interpreter state key
 
 the opaque string an adapter derives for one

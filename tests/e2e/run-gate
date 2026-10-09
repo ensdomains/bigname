@@ -3,12 +3,12 @@ set -uo pipefail
 
 # Keep the inventory counts and assignments together. Test-list changes should
 # require edits only in this block; the checks below reject every other drift.
-expected_total=103
-expected_runnable=100
+expected_total=104
+expected_runnable=101
 expected_ignored=3
 shard_count=6
 # Per shard, in shard order.
-expected_shard_runnable=(17 16 16 17 17 17)
+expected_shard_runnable=(17 17 16 17 17 17)
 expected_shard_ignored=(1 1 1 0 0 0)
 
 expected_ignored_tests=(
@@ -46,6 +46,7 @@ shard_2_tests=(
     "scenarios::ens_v2_lifecycle::expiry_passes_then_reregistration_advances_lineage"
     "scenarios::ens_v2_lifecycle::reserved_labels_foreign_registrar_and_token_sale"
     "scenarios::ens_v2_lifecycle::root_apex_attach_and_root_scope_roles"
+    "scenarios::ens_v2_registry_claims::every_live_mount_path_serves_the_token"
     "scenarios::lifecycle::expire_without_reregistration_releases_and_unlists_registration"
     "scenarios::lifecycle::expiry_grace_and_reregistration_rotate_identity"
     "scenarios::lifecycle_divergence::transfer_without_reclaim_keeps_registry_owner_divergent"

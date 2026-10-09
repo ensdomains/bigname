@@ -3630,3 +3630,22 @@ for every kind of token and path: registered, reserved and unlinked tokens, and
 paths with a label that is not normalized, which are stored as shadow names. The
 old path is released as expired and the new path is granted with
 `RegistryPathExpired` as its source.
+
+## ENSv2 alias paths on the direct read
+
+The build that serves every resolving path of an ENSv2 name on the direct read (TYR-280,
+see [Alias paths](api-v1.md#alias-paths)) changes serving only. It walks the requested
+path over Project rows at request time. It adds no row, table, index, schema-migration,
+manifest or setting.
+
+- The [interpreter content hash](glossary.md#interpreter-content-hash) does not rotate.
+  No Interpret or Project redo is stamped.
+- The manifest-authority fingerprint and the compiled watch plan are unchanged, so no
+  Ingest redo is stamped.
+- It deploys on the running derivation. Replace the API binary.
+
+`GET /v1/names/{name}` and `GET /v1/names/{name}/records` add the optional
+`canonical_name` field. A name whose own row holds a current registration reads as
+before. Any other read walks once, which costs one statement, then two indexed reads per
+label from the admitted root registry, `eth` included. On a chain that is not cut over it
+costs one.

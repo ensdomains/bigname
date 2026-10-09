@@ -4,7 +4,7 @@ use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow, SelectedSnapsho
 
 use crate::AppState;
 use crate::v2::support::{
-    PROFILE_FALLBACK_RECORD_KEYS, ResolutionRecordKey, parse_resolution_record_key,
+    AliasPath, PROFILE_FALLBACK_RECORD_KEYS, ResolutionRecordKey, parse_resolution_record_key,
 };
 use crate::v2::vocab::{
     MISSING_UNSUPPORTED_REASON, downgrades_unsupported_name, projected_row_product_reason,
@@ -27,6 +27,7 @@ pub(super) async fn build_name_record_for_source(
     chain_id: Option<u64>,
     selected_snapshot: &mut SelectedSnapshot,
     source: Source,
+    alias: Option<&AliasPath>,
 ) -> V2Result<NameRecord> {
     if let Some(record) = unsupported_name_record(row)? {
         return Ok(record);
@@ -34,8 +35,15 @@ pub(super) async fn build_name_record_for_source(
     match source {
         Source::Indexed => build_name_record(row, record_inventory, chain_id, Status::Ok),
         Source::Verified => {
-            build_verified_name_record(state, row, record_inventory, chain_id, selected_snapshot)
-                .await
+            build_verified_name_record(
+                state,
+                row,
+                record_inventory,
+                chain_id,
+                selected_snapshot,
+                alias,
+            )
+            .await
         }
     }
 }
@@ -73,6 +81,7 @@ pub(super) fn unsupported_name_record(row: &NameCurrentRow) -> V2Result<Option<N
         migrated_at: None,
         name: row.normalized_name.clone(),
         display_name: row.canonical_display_name.clone(),
+        canonical_name: None,
         namespace: row.namespace.clone(),
         namehash: row.namehash.clone(),
         resolver: None,
@@ -98,6 +107,7 @@ async fn build_verified_name_record(
     record_inventory: Option<&RecordInventoryCurrentRow>,
     chain_id: Option<u64>,
     selected_snapshot: &mut SelectedSnapshot,
+    alias: Option<&AliasPath>,
 ) -> V2Result<NameRecord> {
     // Mirror build_name_record's serving guard before deriving requested records: only a
     // current registration or classified ownerless registry read path may steer lookup.
@@ -116,6 +126,7 @@ async fn build_verified_name_record(
         &requested_records,
         selected_snapshot,
         SnapshotReadResource::Name,
+        alias,
     )
     .await?;
     let verified_records = build_verified_name_records(

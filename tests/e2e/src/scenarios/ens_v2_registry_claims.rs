@@ -29,13 +29,15 @@ const ASIDE: &str = "child.aside.eth";
 ///
 /// A last stage gives the registry a second mount, `aside.eth`, with a shorter term and a
 /// claim that points back at it. The child is served under `aside.eth` until that token
-/// expires, then under `management.eth` again.
+/// expires, then under `management.eth` again. While `aside.eth` serves it,
+/// `management.eth` still resolves it, as an alias path.
 #[tokio::test]
 async fn a_claim_that_points_nowhere_keeps_the_mount_path() -> Result<()> {
     let anvil = Anvil::spawn_ethereum_sepolia().await?;
     let rpc = anvil.client();
     let root = repo_root();
     let deployment = ens_v2::deploy_ens_v2(&rpc, &root).await?;
+    mount_eth_under_root(&rpc, &deployment).await?;
     let accounts = rpc.accounts().await?;
     let (alice, bob) = (accounts[1], accounts[2]);
     let eth_registry = deployment.eth_registry.address;
@@ -261,21 +263,28 @@ async fn a_claim_that_points_nowhere_keeps_the_mount_path() -> Result<()> {
             "expired {expired}: {body}"
         );
 
-        // The path the name left is a released registration with no owner or resolver.
         let (status, body) = api.get_indexed(&format!("/v1/names/{ended}")).await?;
         assert_eq!(status, 200, "expired {expired}: {body}");
         let data = &body["data"];
-        assert!(data.get("owner").is_none(), "expired {expired}: {body}");
-        assert!(data.get("resolver").is_none(), "expired {expired}: {body}");
         if expired {
-            // A path expiry leaves the token's own term as the status of the old path.
+            // The expired path no longer resolves. Its row keeps the token's own term as its
+            // status, with no owner or resolver.
+            assert!(data.get("owner").is_none(), "{body}");
+            assert!(data.get("resolver").is_none(), "{body}");
+            assert!(data.get("canonical_name").is_none(), "{body}");
             assert_eq!(data["status"], "active", "{body}");
             assert_eq!(
                 data["lapsed_registration"]["release_kind"], "expired",
                 "{body}"
             );
         } else {
-            assert_eq!(data["status"], "released", "{body}");
+            // The claim move released the old path, but `management.eth` still points at
+            // the registry. The path still resolves, so the direct read serves it as an alias
+            // of the served path.
+            assert_eq!(data["status"], "active", "{body}");
+            assert_eq!(data["owner"], format!("{bob:#x}"), "{body}");
+            assert_eq!(data["registration_id"], registration, "{body}");
+            assert_eq!(data["canonical_name"], served, "{body}");
         }
 
         // The owner holds the served path. A claim move lists no former owner, because the
@@ -297,4 +306,281 @@ async fn a_claim_that_points_nowhere_keeps_the_mount_path() -> Result<()> {
         api.stop().await?;
     }
     normal.cleanup().await
+}
+
+/// Every live mount path of a registry serves its token on the direct read, as the Universal
+/// Resolver walks it
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L58-L85 @ ens_v2_sepolia_20261001@07e55a05).
+/// Lists keep the one served path. Four stages on one database, each resumed from the last:
+///
+/// - `middle.eth` mounts the registry, which claims no parent, so `child.middle.eth` is
+///   served, and `zulu.eth` mounts it too, so `child.zulu.eth` is an alias path;
+/// - `alpha.eth`, a label with smaller bytes, moves the served path, and both other paths
+///   are aliases;
+/// - `zulu.eth` is pointed at an empty registry, so `child.zulu.eth` stops resolving, and the
+///   registry claims `middle.eth`, which then serves the child again;
+/// - `alpha.eth` expires, so `child.alpha.eth` serves its released row, and a nested registry
+///   under the child registry serves `leaf.c.yankee.eth` through a new mount `yankee.eth`.
+///
+/// Anyone may register a second-level name with a subregistry, and the registry's deployer
+/// holds `ROLE_SET_PARENT` on it.
+#[tokio::test]
+async fn every_live_mount_path_serves_the_token() -> Result<()> {
+    let anvil = Anvil::spawn_ethereum_sepolia().await?;
+    let rpc = anvil.client();
+    let root = repo_root();
+    let deployment = ens_v2::deploy_ens_v2(&rpc, &root).await?;
+    mount_eth_under_root(&rpc, &deployment).await?;
+    let accounts = rpc.accounts().await?;
+    let (alice, bob) = (accounts[1], accounts[2]);
+    let eth_registry = deployment.eth_registry.address;
+    let registry = ens_v2::deploy_child_registry(&rpc, &root, &deployment).await?;
+    let mount = async |label: &str, duration_secs: u64| {
+        ens_v2::register_eth_name(
+            &rpc,
+            &deployment,
+            ens_v2::RegisterEthName {
+                from: alice,
+                label,
+                owner: alice,
+                duration_secs,
+                subregistry: registry.address,
+                resolver: Address::ZERO,
+            },
+        )
+        .await
+    };
+    mount("middle", YEAR).await?;
+    let expiry = u64::try_from(rpc.block_timestamp().await?)? + YEAR;
+    let token = ens_v2::register_in_registry(
+        &rpc,
+        registry.address,
+        deployment.deployer,
+        "child",
+        bob,
+        expiry,
+    )
+    .await?;
+    let resolver = ens_v2::deploy_permissioned_resolver(&rpc, &root, &deployment, bob).await?;
+    ens_v2::set_resolver_in_registry(&rpc, registry.address, bob, token, resolver.address).await?;
+    let mut normal = support::IncrementalEnsV2Http::start(&deployment).await?;
+    let owner = format!("{bob:#x}");
+
+    let prove = async |normal: &mut support::IncrementalEnsV2Http| {
+        normal
+            .prove_through_head(&anvil, &[("middle.eth", format!("{alice:#x}"))])
+            .await
+    };
+
+    // A second mount with a larger label. The served path is unchanged.
+    mount("zulu", YEAR).await?;
+    prove(&mut normal).await?;
+    let api = pipeline::ProductionApi::start(&root, &mut normal.db, &anvil.url).await?;
+    let served = served_record(&api, "child.middle.eth", &owner).await?;
+    alias(&api, "child.zulu.eth", "child.middle.eth", &served).await?;
+    assert_lists(&api, &bob, "child.middle.eth", &["child.zulu.eth"]).await?;
+    let (status, lookup) = api
+        .post(
+            "/v1/lookup",
+            &json!({"namespace": "ens", "inputs": [{"name": "child.zulu.eth"}]}),
+        )
+        .await?;
+    assert_eq!(status, 200, "{lookup}");
+    assert_eq!(lookup["data"][0]["status"], "not_found", "{lookup}");
+    api.stop().await?;
+
+    // A label with smaller bytes moves the served path. The old path still resolves.
+    mount("alpha", ens_v2::MIN_REGISTER_DURATION).await?;
+    prove(&mut normal).await?;
+    let api = pipeline::ProductionApi::start(&root, &mut normal.db, &anvil.url).await?;
+    let moved = served_record(&api, "child.alpha.eth", &owner).await?;
+    assert_eq!(moved["registration_id"], served["registration_id"]);
+    alias(&api, "child.middle.eth", "child.alpha.eth", &moved).await?;
+    alias(&api, "child.zulu.eth", "child.alpha.eth", &moved).await?;
+    assert_lists(&api, &bob, "child.alpha.eth", &["child.zulu.eth"]).await?;
+    api.stop().await?;
+
+    // `zulu.eth` points at a registry with no `child`, and the claim points back at
+    // `middle.eth`.
+    let empty = ens_v2::deploy_child_registry(&rpc, &root, &deployment).await?;
+    ens_v2::attach_subregistry(
+        &rpc,
+        eth_registry,
+        alice,
+        ens_v2::label_id("zulu"),
+        empty.address,
+    )
+    .await?;
+    ens_v2::set_parent(
+        &rpc,
+        registry.address,
+        deployment.deployer,
+        eth_registry,
+        "middle",
+    )
+    .await?;
+    prove(&mut normal).await?;
+    let api = pipeline::ProductionApi::start(&root, &mut normal.db, &anvil.url).await?;
+    let (status, body) = api.get_indexed("/v1/names/child.zulu.eth").await?;
+    assert_eq!(status, 404, "{body}");
+    let claimed = served_record(&api, "child.middle.eth", &owner).await?;
+    alias(&api, "child.alpha.eth", "child.middle.eth", &claimed).await?;
+    assert_lists(&api, &bob, "child.middle.eth", &["child.zulu.eth"]).await?;
+    api.stop().await?;
+
+    // `alpha.eth` expires, and a registry nested under `c` is reached through a new mount
+    // `yankee.eth`.
+    rpc.increase_time(ens_v2::MIN_REGISTER_DURATION + 1).await?;
+    let nested = ens_v2::deploy_child_registry(&rpc, &root, &deployment).await?;
+    let c = ens_v2::register_in_registry(
+        &rpc,
+        registry.address,
+        deployment.deployer,
+        "c",
+        bob,
+        expiry,
+    )
+    .await?;
+    ens_v2::attach_subregistry(&rpc, registry.address, bob, c, nested.address).await?;
+    ens_v2::set_parent(
+        &rpc,
+        nested.address,
+        deployment.deployer,
+        registry.address,
+        "c",
+    )
+    .await?;
+    ens_v2::register_in_registry(
+        &rpc,
+        nested.address,
+        deployment.deployer,
+        "leaf",
+        bob,
+        expiry,
+    )
+    .await?;
+    mount("yankee", YEAR).await?;
+    prove(&mut normal).await?;
+    let api = pipeline::ProductionApi::start(&root, &mut normal.db, &anvil.url).await?;
+    // The expired path no longer resolves and serves its released row.
+    let (status, body) = api.get_indexed("/v1/names/child.alpha.eth").await?;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["data"]["status"], "released", "{body}");
+    assert!(body["data"].get("canonical_name").is_none(), "{body}");
+    assert!(body["data"].get("owner").is_none(), "{body}");
+    served_record(&api, "child.middle.eth", &owner).await?;
+    let leaf = served_record(&api, "leaf.c.middle.eth", &owner).await?;
+    alias(&api, "leaf.c.yankee.eth", "leaf.c.middle.eth", &leaf).await?;
+    api.stop().await?;
+    normal.cleanup().await
+}
+
+/// Mounts the ETHRegistry at the root registry's `eth`, as the deployment does, so the
+/// Universal Resolver's walk from the root reaches `.eth` names and their alias paths.
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ETHRegistry.ts:L39-L49 @ ens_v2_sepolia_20261001@07e55a05)
+async fn mount_eth_under_root(
+    rpc: &crate::harness::rpc::RpcClient,
+    deployment: &ens_v2::EnsV2Deployment,
+) -> Result<()> {
+    let root = deployment.root_registry.address;
+    ens_v2::register_in_registry(
+        rpc,
+        root,
+        deployment.deployer,
+        "eth",
+        deployment.deployer,
+        u64::MAX,
+    )
+    .await?;
+    ens_v2::attach_subregistry(
+        rpc,
+        root,
+        deployment.deployer,
+        ens_v2::label_id("eth"),
+        deployment.eth_registry.address,
+    )
+    .await
+}
+
+/// The direct read of a served path: active, owned, and with no `canonical_name`.
+async fn served_record(api: &pipeline::ProductionApi, name: &str, owner: &str) -> Result<Value> {
+    let (status, body) = api.get_indexed(&format!("/v1/names/{name}")).await?;
+    assert_eq!(status, 200, "{name}: {body}");
+    let data = body["data"].clone();
+    assert_eq!(data["status"], "active", "{name}: {body}");
+    assert_eq!(data["owner"], owner, "{name}: {body}");
+    assert!(data.get("canonical_name").is_none(), "{name}: {body}");
+    Ok(data)
+}
+
+/// `alias` serves `canonical`'s record `expected` under its own name, with `canonical_name`,
+/// on the direct read and the records route.
+async fn alias(
+    api: &pipeline::ProductionApi,
+    alias: &str,
+    canonical: &str,
+    expected: &Value,
+) -> Result<()> {
+    let (status, body) = api.get_indexed(&format!("/v1/names/{alias}")).await?;
+    assert_eq!(status, 200, "{alias}: {body}");
+    let mut want = expected.clone();
+    want["name"] = json!(alias);
+    want["display_name"] = json!(alias);
+    want["namehash"] = json!(format!("{:#x}", crate::harness::ens_v1::namehash(alias)));
+    want["canonical_name"] = json!(canonical);
+    assert_eq!(body["data"], want, "{alias} under {canonical}");
+    let (status, records) = api
+        .get_indexed(&format!("/v1/names/{alias}/records"))
+        .await?;
+    assert_eq!(status, 200, "{alias}: {records}");
+    assert_eq!(records["data"]["canonical_name"], canonical, "{records}");
+    assert_eq!(
+        records["data"]["resolver"], expected["resolver"],
+        "{alias}: {records}"
+    );
+    Ok(())
+}
+
+/// The owner's names, search and the parent listing show `served` once. No list shows a path
+/// that has no row of its own, and no listed row carries `canonical_name`.
+async fn assert_lists(
+    api: &pipeline::ProductionApi,
+    owner: &Address,
+    served: &str,
+    never_stored: &[&str],
+) -> Result<()> {
+    let parent = |name: &str| name.split_once('.').map(|(_, parent)| parent.to_owned());
+    let mut paths = vec![
+        format!("/v1/addresses/{owner:#x}/names?namespace=ens&relation=owner"),
+        "/v1/search?q=child&namespace=ens".to_owned(),
+    ];
+    for name in std::iter::once(served).chain(never_stored.iter().copied()) {
+        let parent = parent(name).expect("a subname");
+        paths.push(format!(
+            "/v1/names/{parent}/subnames?namespace=ens&include_expired=true"
+        ));
+    }
+    for path in paths {
+        let (status, body) = api.get(&path).await?;
+        assert_eq!(status, 200, "{path}: {body}");
+        let rows = body["data"].as_array().cloned().unwrap_or_default();
+        let count = |name: &str| rows.iter().filter(|row| row["name"] == name).count();
+        if path.contains("relation=owner") {
+            let names: Vec<&Value> = rows.iter().map(|row| &row["name"]).collect();
+            assert_eq!(names, vec![&json!(served)], "{path}: {body}");
+        }
+        if !path.ends_with("/subnames?namespace=ens&include_expired=true")
+            || parent(served).is_some_and(|parent| path.contains(&format!("/{parent}/")))
+        {
+            assert_eq!(count(served), 1, "{path}: {body}");
+        }
+        for name in never_stored {
+            assert_eq!(count(name), 0, "{path}: {body}");
+        }
+        assert!(
+            rows.iter().all(|row| row.get("canonical_name").is_none()),
+            "{path}: {body}"
+        );
+    }
+    Ok(())
 }

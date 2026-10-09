@@ -51,6 +51,7 @@ pub(crate) fn build_authority_unsupported_name_records(
         .map(|record| Ok((record.record_key.clone(), unsupported_answer(&reason)?)))
         .collect::<V2Result<BTreeMap<_, _>>>()?;
     Ok(Some(NameRecords {
+        canonical_name: None,
         namespace: row.namespace.clone(),
         resolver: None,
         records,
@@ -111,6 +112,7 @@ pub(crate) fn build_indexed_name_records(
         .collect::<V2Result<BTreeMap<_, _>>>()?;
 
     Ok(NameRecords {
+        canonical_name: None,
         namespace: row.namespace.clone(),
         resolver: has_current_registration
             .then(|| resolver(&row.declared_summary))
@@ -192,6 +194,7 @@ pub(crate) fn build_auto_name_records(
     Ok((
         source,
         NameRecords {
+            canonical_name: None,
             namespace: row.namespace.clone(),
             resolver: has_current_registration
                 .then(|| resolver(&row.declared_summary))
@@ -221,6 +224,7 @@ pub(crate) fn build_verified_name_records(
     )?;
 
     Ok(NameRecords {
+        canonical_name: None,
         namespace: row.namespace.clone(),
         resolver: has_current_registration
             .then(|| resolver(&row.declared_summary))

@@ -52,7 +52,7 @@ run without the count assertion:
 scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml --locked -- --test-threads=8
 ```
 
-The default gate requires the exact library-test summary `100 passed; 0 failed;
+The default gate requires the exact library-test summary `101 passed; 0 failed;
 3 ignored; 0 filtered out`. Each of the six CI shards requires the runnable and
 ignored counts listed for it at the top of `run-gate`, with every other test
 filtered out. The gate checks both Cargo's exit status and every

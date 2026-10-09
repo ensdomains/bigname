@@ -594,6 +594,40 @@ async fn agreeing_resolution_without_active_divergence_writes_nothing() -> AnyRe
     Ok(())
 }
 
+/// An alias path is executed as requested: the Universal Resolver call carries the requested
+/// name and node, and its answer is never compared with the indexed name's records.
+#[tokio::test]
+async fn a_requested_path_executes_that_name_and_compares_nothing() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let alias = bigname_domain::normalization::normalize_name("child.alias.eth")?;
+    let node = crate::abi::parse_node(&crate::ens_namehash_hex("child.alias.eth")?)?;
+    let request = lookup_request(&fixture.logical_name_id)?.at_path(crate::LookupPath {
+        name: alias.normalized_name.clone(),
+        dns_name: alias.dns_encoded_name.clone(),
+        node,
+    });
+    let result = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(request)
+        .await;
+    let count = ledger_count(fixture.pool()).await?;
+    fixture.cleanup().await?;
+    let response = result?;
+    assert_eq!(response.records[0].value, Some(json!(LIVE_VALUE)));
+    assert_eq!(response.records[0].ledger_action, LedgerAction::None);
+    assert_eq!(count, 0, "an alias answer is not a divergence");
+    let requests = join_rpc(rpc_handle).await?;
+    let selector = RecordSelector::parse("text:url")?;
+    let expected = crate::abi::universal_resolver_call(
+        &alias.dns_encoded_name,
+        crate::abi::resolver_record_call(&selector, node)?.calldata(),
+    )
+    .calldata_hex();
+    assert_eq!(requests[0]["params"][0]["data"], json!(expected));
+    Ok(())
+}
+
 #[tokio::test]
 async fn restored_agreement_clears_the_matching_active_divergence() -> AnyResult<()> {
     let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![

@@ -87,6 +87,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `chain_id` | numeric EVM chain id (`1`, `8453`); string-keyed in maps | string chain ids (`"ethereum-mainnet"`), position slot keys |
 | `network` | display slug (`ethereum`, `base`) | `network` (unchanged, display-only) |
 | `id` (event row) | opaque 64-character identity of one event row, identical for the same event on `/v1/events`, name history, and address history and across pages; a merge key for consumers combining feeds, not a durable reference (it may change at a re-derivation boundary) | `event_identity`, `normalized_event_id` |
+| `canonical_name` | on a read of an ENSv2 [alias path](#alias-paths), the served path of the token the alias reaches | new in v2 |
 | `registration_id` | the one opaque stable handle for a registration lifecycle; for an ENSv1 `.eth` second-level name it is always the BaseRegistrar lease, wrapped or not (see [registration identity of wrapped names](#registration-identity-of-wrapped-names)) | `resource_id`, `resource_hex`, `resource`, `token_lineage_id`, `surface_binding_id` |
 | `input` | caller-supplied lookup input echoed in a result | `input` (unchanged; now specified as result echo, not a parallel DTO family) |
 | `normalization` | name-normalization result for an input | `corrected_input_normalization`, `unnormalizable_input` status detail |
@@ -2226,7 +2227,8 @@ claim has one served path:
 - Lists and the direct read serve the path with the fewest labels.
 - Among paths of equal length, the labels are compared from `eth` downward by the bytes
   of each label. The smaller path is served.
-- The other mount paths are not yet served and answer `404 not_found` (TYR-280).
+- The other mount paths resolve too. The direct read serves them as
+  [alias paths](#alias-paths).
 
 A caller with `ROLE_SET_SUBREGISTRY` on an unexpired entry can point that entry at any
 registry
@@ -2250,6 +2252,69 @@ The name is released without a successor when its last mount path goes:
 
 This departs from the ENSv2 canonical-name helper, see
 [`upstream.md` § Known divergences](upstream.md#known-divergences).
+
+#### Alias paths
+
+`GET /v1/names/{name}` and `GET /v1/names/{name}/records` answer on every path that
+resolves. The requested path is walked as the Universal Resolver walks it. Each label's
+registry answers the next registry from its own unexpired entry, and no parent claim is
+read.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L58-L85 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L280-L283 @ ens_v2_sepolia_20261001@07e55a05)
+The walk starts at the root registry the family publication recorded for the
+[Universal Resolver cutover](glossary.md#universal-resolver-cutover), as UniversalResolverV2
+starts at its root. A manifest sync reaches the walk only through the redo that republishes.
+A chain that is not cut over walks nothing.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/UniversalResolverV2.sol:L55-L63 @ ens_v2_sepolia_20261001@07e55a05)
+
+A path that reaches a token whose served path is another one is an
+[alias path](glossary.md#alias-path):
+
+- It serves the served path's record: registration, `status`, `owner`, resolver, indexed
+  records and counts.
+- `name`, `display_name` and `namehash` are the requested path's.
+- `canonical_name` names the served path. It is present only on an alias read.
+- A path below an alias, and a path through a registry mounted under itself, are walked the
+  same way. The walk never reads more entries than the request has labels.
+- A served path released by a mount change while it still resolves serves as an alias of
+  the new served path. An example is the path a smaller mount replaced
+  (`registry_name_binding_changed`).
+- A path that reaches no token answers as it did before. That is the name's own row when
+  it has one, else `404 not_found`. A token whose served row is not composed yet answers
+  `404 not_found` too.
+- Only a token with a served path is served. A path can resolve on chain to a token whose
+  registry has no served path, such as a registry whose parent claim points at a parent
+  with no name. That path answers `404 not_found` until the claim is corrected.
+- When a mount change or a lapsed mount releases the served path without naming another,
+  the registry has no served path. An alias that still resolves then answers
+  `404 not_found`, not the released row, since the token is live on chain. A token's own
+  expiry or unregistration is different: the alias serves the row with the token's own
+  status.
+- An alias through a migrated `WrapperRegistry` serves the labels registered in it. A label
+  it leaves to its ENSv1 fallback has no registry entry. That label answers `404 not_found`
+  under the alias (TYR-300) and serves on its served path as before.
+- Alias paths follow every live mount, including mounts the token's owner did not make.
+  The served path is the one the owner controls with a parent claim. Lists stay on the
+  served path.
+
+`at` walks the path at the selected publication. A position below it answers `409 stale`,
+as it does for every name.
+
+`source=verified` reads the chain for the path requested. An ENSv2 resolver keys records by
+node, and the Universal Resolver computes the node from the name it is given. So a
+verified read of an alias can answer records the served path does not hold. An alias with
+a [bracketed label](#name-inputs) has no verified read.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/PermissionedResolver.sol:L96-L97 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L84 @ ens_v2_sepolia_20261001@07e55a05)
+
+Only the direct read serves aliases. Lists, `POST /v1/lookup`, address names, search,
+`/history` and `/subnames` serve the served path only. Lookup answers an alias in-band
+`not_found`. `/history` and `/subnames` under an alias answer as they do for a name with no
+row of its own.
+
+A name whose own row holds a current registration is never walked. Any other read walks
+once. It costs one statement, then two indexed reads per label from the root, `eth`
+included. On a chain that is not cut over it costs one.
 
 ### Lapsed registration
 
@@ -2918,6 +2983,7 @@ Flat name-detail object, also used by resolver bound names. An identity-only uns
 | `migrated_at` | string | when migration_proven | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `name` | string | always | ENSIP-15 normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash. |
 | `display_name` | string | always | Display form of the name. |
+| `canonical_name` | string | optional | The served path of the ENSv2 token an alias path reaches. Present only when the request named an [alias path](#alias-paths). |
 | `namespace` | string | always | Resolved public namespace slug. |
 | `namehash` | string | always | Hexadecimal ENS namehash. |
 | `resolver` | object ContractRef | optional | Resolver contract for this answer. |
@@ -3186,6 +3252,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
 | `namespace` | string | always | Resolved public namespace slug. |
+| `canonical_name` | string | optional | The served path of the ENSv2 token an alias path reaches. Present only when the request named an [alias path](#alias-paths). |
 | `resolver` | nullable object ContractRef | always | Resolver contract for this answer. On `GET /v1/resolvers/{chain_id}/{address}/records` it is always the path resolver. |
 | `records` | map of string to object RecordAnswer | always | Resolver records or reverse result rows in the route-specific shape. |
 | `inventory` | object RecordInventory | optional | Optional record inventory requested with `include=inventory`. |
