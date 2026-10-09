@@ -1049,14 +1049,8 @@ async fn ensv2_key_arm_matches_the_overlap_form() -> Result {
         .map(|n| v2_key(SECOND, &token(1_000 + n, 0)))
         .collect();
     universe.extend(absent.iter().take(10).cloned());
+    // The registry-level key of the subregistry an event points at.
     let subregistry_key = format!("{}:00000000", SUBREGISTRY.to_lowercase());
-    // The subregistry an event points at files the event under this key only once
-    // `v2_keys.sql` lists it. Both forms read the same file.
-    let subregistry_expected = if super::V2_KEYS.contains("'subregistry'") {
-        vec!["subregistry"]
-    } else {
-        vec![]
-    };
     let readable = [
         "cleared",
         "link-1",
@@ -1150,12 +1144,7 @@ async fn ensv2_key_arm_matches_the_overlap_form() -> Result {
             vec![v2_key(REGISTRY, &token(8, 0))],
             vec!["cleared"],
         ),
-        (
-            "subregistry",
-            5,
-            vec![subregistry_key],
-            subregistry_expected,
-        ),
+        ("subregistry", 5, vec![subregistry_key], vec!["subregistry"]),
         ("every key", 5, universe.clone(), readable.to_vec()),
         ("every key, later batch", 7, universe.clone(), {
             let mut later = readable.to_vec();
