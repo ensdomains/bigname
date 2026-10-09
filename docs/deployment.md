@@ -2560,8 +2560,13 @@ admitted ENSv2 deployment, instead of the Universal Resolver proxies'
 [interpreter content hash](glossary.md#interpreter-content-hash) for every
 chain.
 
-- It changes no manifest payload, only comments. The manifest-authority
-  fingerprint is unchanged, no
+- It changes no manifest payload, only comments. The comment edit to
+  `manifests/sepolia/ethereum/ens/ens_execution/v2.toml` moves the Sepolia
+  manifest-profile hash from
+  `keccak256:96c0def9f08f5a0dea2eee93fb1e060bddc6d9aaa6212f835035276660507b80`
+  to `keccak256:0d50281c63dad6e9b3fbafea50d82fbfa678f0b5bff70c0813c1d8f1456f7a73`,
+  and the Mainnet manifest-profile hash and the manifest-authority
+  fingerprint are unchanged. No
   [manifest-authority marker](glossary.md#manifest-authority-marker) is
   recorded and no Ingest redo is stamped.
 - It adds the schema-migration
