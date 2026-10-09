@@ -2315,7 +2315,8 @@ same expressions, `normalized_events_basenames_direct_node_probe_idx` and
 families. For ENSv2, `normalized_events_v2_direct_node_probe_idx` has the
 same name expression, `normalized_events_v2_key_probe_idx` is an inverted
 (GIN) index over the [ENSv2 state keys](glossary.md#ensv2-state-key) each event
-is filed under, `normalized_events_v2_due_probe_idx` finds registry tokens whose
+is filed under, which the loader probes once per requested key,
+`normalized_events_v2_due_probe_idx` finds registry tokens whose
 expiry falls in a batch, and `normalized_events_v2_lookahead_probe_idx`, keyed
 by chain and block, finds the latest ENSv2 registry event before it. An ENSv2
 read of an unloaded state key is retried like an unloaded name. The loader is an access path, not a semantic: it must produce the same
