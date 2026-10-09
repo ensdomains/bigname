@@ -57,6 +57,7 @@ pub struct TestDatabaseConfig {
     admin_database: Option<String>,
     admin_max_connections: u32,
     pool_max_connections: u32,
+    pool_search_path: Option<String>,
     parse_context: String,
     admin_connect_context: String,
     pool_connect_context: String,
@@ -70,6 +71,7 @@ impl TestDatabaseConfig {
             admin_database: Some("postgres".to_owned()),
             admin_max_connections: 1,
             pool_max_connections: 5,
+            pool_search_path: None,
             parse_context: "failed to parse database URL for tests".to_owned(),
             admin_connect_context: "failed to connect admin pool for tests".to_owned(),
             pool_connect_context: "failed to connect test pool".to_owned(),
@@ -101,6 +103,12 @@ impl TestDatabaseConfig {
 
     pub fn pool_max_connections(mut self, max_connections: u32) -> Self {
         self.pool_max_connections = max_connections;
+        self
+    }
+
+    /// Set `search_path` on every connection of the test database's pool.
+    pub fn pool_search_path(mut self, search_path: impl Into<String>) -> Self {
+        self.pool_search_path = Some(search_path.into());
         self
     }
 
@@ -160,16 +168,32 @@ impl TestDatabase {
             build,
         )
         .await;
-        admin_pool.close().await;
-        Self::create_copy(config, Some(&template?)).await
+        match template {
+            Ok(template) => {
+                Self::create_with(admin_pool, &base_options, config, Some(&template)).await
+            }
+            Err(error) => {
+                admin_pool.close().await;
+                Err(error)
+            }
+        }
     }
 
     async fn create_copy(config: TestDatabaseConfig, template: Option<&str>) -> Result<Self> {
         let base_options = PgConnectOptions::from_str(&database_url_from_env())
             .context(config.parse_context.clone())?;
-        let database_name = unique_database_name(&config.name_prefix)?;
         let admin_pool = connect_admin_pool(&config, &base_options).await?;
+        Self::create_with(admin_pool, &base_options, config, template).await
+    }
 
+    /// Create the database through `admin_pool`, which the result keeps for its cleanup.
+    async fn create_with(
+        admin_pool: PgPool,
+        base_options: &PgConnectOptions,
+        config: TestDatabaseConfig,
+        template: Option<&str>,
+    ) -> Result<Self> {
+        let database_name = unique_database_name(&config.name_prefix)?;
         let template_clause = template
             .map(|template| format!(" TEMPLATE {}", quote_identifier(template)))
             .unwrap_or_default();
@@ -181,7 +205,10 @@ impl TestDatabase {
         .await
         .with_context(|| format!("failed to create test database {database_name}"))?;
 
-        let database_options = base_options.database(&database_name);
+        let mut database_options = base_options.clone().database(&database_name);
+        if let Some(search_path) = config.pool_search_path {
+            database_options = database_options.options([("search_path", search_path)]);
+        }
         let pool = PgPoolOptions::new()
             .max_connections(config.pool_max_connections)
             .connect_with(database_options)

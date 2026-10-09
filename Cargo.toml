@@ -62,3 +62,22 @@ bigname-manifests = { path = "crates/manifests" }
 bigname-metrics = { path = "crates/metrics" }
 bigname-storage = { path = "crates/storage" }
 bigname-test-support = { path = "crates/test-support" }
+
+# Debug builds of the crates behind each test process's start-up: the ENS normalisation tables
+# built on first use, SCRAM authentication of every database connection, and the OpenAPI
+# response checks. Each api test runs in its own process under nextest, so this cost is paid
+# once per test. Workspace crates stay unoptimised.
+[profile.dev.package.ens-normalize]
+opt-level = 2
+
+[profile.dev.package.sha2]
+opt-level = 2
+
+[profile.dev.package.hmac]
+opt-level = 2
+
+[profile.dev.package.jsonschema]
+opt-level = 2
+
+[profile.dev.package.serde_json]
+opt-level = 2
