@@ -303,8 +303,8 @@ async fn v2_address_names_walk_and_chunks_serve_identical_pages() -> Result<()> 
     use bigname_storage::families::records::seams::with_compose_chunk;
 
     let database = TestDatabase::new_migrated().await?;
-    // 65 names: three pages of 25, a partial last chunk of 7, and two 5-row pages that each
-    // compose one 32-name walk batch.
+    // 65 names: three pages of 25, a partial last chunk of 2 at chunk size 7, and two 5-row
+    // pages that each compose one 32-name walk batch.
     seed_bulk_address_names(&database, 65).await?;
     for sort in ["name", "expires_at", "registered_at", "created_at"] {
         for order in ["asc", "desc"] {
