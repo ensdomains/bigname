@@ -132,7 +132,9 @@ async fn seed_names(database: &TestDatabase, count: usize) -> Result<Vec<(i64, S
 
 #[tokio::test]
 async fn address_history_walk_bounds_live_rows_and_preserves_complete_order() -> Result<()> {
-    for count in [11, 65] {
+    // The walk caches one attribution answer per name, so 257 names pass the 256-entry cache,
+    // the smallest capacity the working set accepts.
+    for count in [11, 257] {
         let database = TestDatabase::new_migrated().await?;
         let expected = seed_names(&database, count).await?;
         for order in ["asc", "desc"] {
