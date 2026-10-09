@@ -2461,7 +2461,7 @@ same expressions, `normalized_events_basenames_direct_node_probe_idx` and
 families. For ENSv2, `normalized_events_v2_direct_node_probe_idx` has the
 same name expression, `normalized_events_v2_key_probe_idx` is an inverted
 (GIN) index over the [ENSv2 state keys](glossary.md#ensv2-state-key) each event
-is filed under. Its array includes the registry-level key of the registry an event's
+is filed under, which the loader probes once per requested key. Its array includes the registry-level key of the registry an event's
 `subregistry` value names, so a registry's read reaches the tokens that point at it.
 `normalized_events_v2_due_probe_idx` finds registry tokens whose
 expiry falls in a batch, and `normalized_events_v2_lookahead_probe_idx`, keyed
