@@ -155,11 +155,8 @@ impl LookupEngine {
         F: FnOnce() -> Fut,
         Fut: Future<Output = ()>,
     {
-        let mut snapshot =
+        let snapshot =
             load_snapshot(&self.pool, &request, self.publication_lag_tolerance_blocks).await?;
-        if let Some(path) = &request.requested_path {
-            snapshot.execute_at(path);
-        }
         if let Some(admitted_positions) = admitted_positions {
             ensure_snapshot_positions_are_admitted(&snapshot, admitted_positions)?;
         }

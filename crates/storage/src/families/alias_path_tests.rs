@@ -250,6 +250,7 @@ async fn a_second_mount_reaches_the_canonical_token() -> Result<()> {
             Some(AliasTarget {
                 canonical_logical_name_id: logical_name_id_for_name("ens", "child.m.eth"),
                 resource_id: resource(9),
+                reservation_expiry: None,
             })
         );
         // The publication, the `eth` and `z` hops' entries and pointers, the leaf, the
@@ -328,7 +329,8 @@ async fn hops_follow_the_composed_readers_entry_rules() -> Result<()> {
 }
 
 /// T11, T12 and T15. The leaf is taken as it is: expired, unregistered or reserved, it still
-/// names its canonical row. A leaf with no entry, or an unknown one, names nothing.
+/// names its canonical row, and a reservation also names its expiry. A leaf with no entry, or
+/// an unknown one, names nothing.
 #[tokio::test]
 async fn the_leaf_is_taken_as_it_is() -> Result<()> {
     with_database("alias_path_leaf", async |pool| {
@@ -337,9 +339,18 @@ async fn the_leaf_is_taken_as_it_is() -> Result<()> {
         pointer(pool, resource(2), R, 2).await?;
         for status in ["reserved", "unregistered", "registered"] {
             entry(pool, R, "child", status, CLOCK - 10, resource(9)).await?;
+            let target = walk(pool, "child.z.eth").await?.target;
             assert_eq!(
-                canonical(pool, "child.z.eth").await?,
-                id("child.m.eth"),
+                target
+                    .as_ref()
+                    .map(|target| &target.canonical_logical_name_id),
+                id("child.m.eth").as_ref(),
+                "{status}"
+            );
+            // Only a reservation carries the expiry its row is matched by.
+            assert_eq!(
+                target.and_then(|target| target.reservation_expiry),
+                (status == "reserved").then(|| (CLOCK - 10).to_string()),
                 "{status}"
             );
         }

@@ -14,7 +14,7 @@ use super::super::{
     SnapshotReadResource, Source, Status, V2Result, default_requested_records,
     name_records::{
         RecordAnswer, RecordSelection, VERIFIED_NOT_SUPPORTED_REASON, build_verified_name_records,
-        ensure_default_record_limit, load_verified_record_lookup_for_resource,
+        ensure_default_record_limit, load_verified_record_lookup_for_resource, verified_discovery,
     },
 };
 use super::{NameRecord, build_name_record, row_has_current_registration, string_field};
@@ -134,6 +134,7 @@ async fn build_verified_name_record(
         record_inventory,
         RecordSelection::requested(&requested_records),
         verified_lookup,
+        verified_discovery(row, alias),
         false,
         false,
     )?;

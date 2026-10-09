@@ -71,6 +71,17 @@ fn claim(registry: &str, parent: &str, label: &str) -> Vec<(Address, alloy_primi
     )]
 }
 
+fn unregister(registry: &str, label: &str) -> Result<Vec<(Address, alloy_primitives::LogData)>> {
+    Ok(vec![(
+        address(registry),
+        LabelUnregistered {
+            tokenId: label_token(label),
+            sender: HOLDER.parse()?,
+        }
+        .encode_log_data(),
+    )])
+}
+
 fn mount(
     label: &str,
     registry: &str,
@@ -181,6 +192,21 @@ pub(super) async fn assert_alias(
         "{alias} records under {canonical}"
     );
     Ok(served)
+}
+
+/// A read whose verified lookups go to the mock RPC at `url`.
+async fn verified_get(database: &TestDatabase, url: &str, uri: &str) -> Result<Value> {
+    let state = AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("{PATH_CHAIN}={url}")])?,
+    );
+    let response = app_router(state)
+        .oneshot(Request::builder().uri(uri).body(Body::empty())?)
+        .await?;
+    let status = response.status();
+    let body: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{uri}: {body:#}");
+    Ok(body)
 }
 
 async fn names(database: &TestDatabase, uri: &str) -> Result<Vec<String>> {
@@ -599,6 +625,57 @@ async fn an_alias_serves_a_reserved_token() -> Result<()> {
     database.cleanup().await
 }
 
+/// T26. A reservation's row is bound to no token, so the alias matches it by expiry. R's
+/// `held` reservation lapses, then `m` moves to `S`, which reserves its own `held` with another
+/// expiry. `held.m.eth` serves S's reservation. The alias through `z` still reaches R's lapsed
+/// reservation, whose last canonical name is `held.m.eth`, and answers `404 not_found`, not
+/// S's reservation. T15 is the same reservation reached through both paths, which serves.
+#[tokio::test]
+async fn an_alias_of_a_reservation_whose_canonical_path_holds_another_is_not_found() -> Result<()> {
+    let (database, _) = base(u64::MAX, u64::MAX).await?;
+    let owner = HOLDER.parse()?;
+    let reserve = |registry: &str, expiry: u64| -> Result<_> {
+        Ok(vec![(
+            address(registry),
+            LabelReserved {
+                tokenId: label_token("held"),
+                labelHash: keccak256("held"),
+                label: "held".into(),
+                expiry,
+                sender: HOLDER.parse()?,
+            }
+            .encode_log_data(),
+        )])
+    };
+    step(
+        &database,
+        124,
+        vec![mount("z", R, u64::MAX)?, reserve(R, clock(126))?],
+    )
+    .await?;
+    assert_alias(&database, "held.z.eth", "held.m.eth").await?;
+    step(&database, 125, vec![]).await?;
+    step(&database, 126, vec![]).await?;
+    step(
+        &database,
+        127,
+        vec![
+            deploy(address(S), 2802, owner)?,
+            reserve(S, u64::MAX)?,
+            repoint(E, "m", S),
+        ],
+    )
+    .await?;
+    let canonical = ok(&database, "/v1/names/held.m.eth").await?;
+    assert_eq!(
+        canonical["data"]["expires_at"], "18446744073709551615",
+        "S's reservation: {canonical:#}"
+    );
+    not_found(&database, "/v1/names/held.z.eth").await?;
+    not_found(&database, "/v1/names/held.z.eth/records").await?;
+    database.cleanup().await
+}
+
 /// T13, T14, T20. A canonical read with a current registration never walks. A miss walks at
 /// most its labels, and a canonical path never serves as its own alias.
 #[tokio::test]
@@ -715,5 +792,79 @@ async fn a_verified_alias_read_resolves_the_requested_path() -> Result<()> {
     );
     assert!(calldata.contains(&node("child.z.eth")?), "{calldata}");
     assert!(!calldata.contains(&node("child.m.eth")?), "{calldata}");
+    database.cleanup().await
+}
+
+/// T25. The served row must be the walked token's own. R's `child` is unregistered, then `m`
+/// moves to `S`, where `child` is registered again and passed to GRANTEE. `child.m.eth` serves
+/// S's token. The alias through `z` still reaches R's unregistered token, whose last canonical
+/// name is `child.m.eth`, and answers `404 not_found`, not S's registration.
+#[tokio::test]
+async fn an_alias_whose_canonical_path_holds_another_token_is_not_found() -> Result<()> {
+    let (database, resolver) = base(u64::MAX, u64::MAX).await?;
+    let owner = HOLDER.parse()?;
+    step(&database, 124, vec![mount("z", R, u64::MAX)?]).await?;
+    step(&database, 125, vec![unregister(R, "child")?]).await?;
+    let unregistered = assert_alias(&database, "child.z.eth", "child.m.eth").await?;
+    step(
+        &database,
+        126,
+        vec![
+            deploy(address(S), 2802, owner)?,
+            register(
+                address(S),
+                "child",
+                resolver,
+                Address::ZERO,
+                u64::MAX,
+                owner,
+            )?,
+            vec![(
+                address(S),
+                TransferSingle {
+                    operator: owner,
+                    from: owner,
+                    to: GRANTEE.parse()?,
+                    id: label_token("child"),
+                    value: U256::from(1),
+                }
+                .encode_log_data(),
+            )],
+            repoint(E, "m", S),
+        ],
+    )
+    .await?;
+    let canonical = ok(&database, "/v1/names/child.m.eth").await?;
+    assert_eq!(canonical["data"]["status"], "active", "{canonical:#}");
+    assert_eq!(canonical["data"]["owner"], GRANTEE, "{canonical:#}");
+    assert_ne!(
+        canonical["data"]["registration_id"], unregistered["data"]["registration_id"],
+        "S's token, not R's"
+    );
+    not_found(&database, "/v1/names/child.z.eth").await?;
+    not_found(&database, "/v1/names/child.z.eth/records").await?;
+    database.cleanup().await
+}
+
+/// A7, OQ-5. A verified alias read routes for the requested path, never by the canonical row's
+/// projected resolver. `child.m.eth` projects `child`'s own resolver, so its own verified read
+/// treats a `ResolverNotFound` as a failed call. The alias's read runs Universal Resolver
+/// discovery for `child.z.eth`, so the chain's `ResolverNotFound` for that path is `not_found`.
+#[tokio::test]
+async fn a_verified_alias_read_without_a_resolver_is_not_found() -> Result<()> {
+    let (database, _) = base(u64::MAX, u64::MAX).await?;
+    step(&database, 124, vec![mount("z", R, u64::MAX)?]).await?;
+    let records = "/records?source=verified&keys=addr:60";
+    for (name, status) in [("child.m.eth", "failed"), ("child.z.eth", "not_found")] {
+        let dns = bigname_domain::normalization::normalize_name(name)?.dns_encoded_name;
+        let (url, handle) =
+            spawn_primary_name_mock_rpc(vec![resolution_resolver_not_found_error(&dns)]).await?;
+        let body = verified_get(&database, &url, &format!("/v1/names/{name}{records}")).await?;
+        assert_eq!(
+            body["data"]["records"]["addr:60"]["status"], status,
+            "{name}: {body:#}"
+        );
+        assert_eq!(join_primary_name_mock_rpc_requests(handle).await?.len(), 1);
+    }
     database.cleanup().await
 }

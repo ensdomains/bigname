@@ -86,15 +86,6 @@ pub(crate) struct EnsPrimaryNameAuthority {
 }
 
 impl LookupSnapshot {
-    /// Execute at `path` instead of the indexed name. The indexed records are the indexed
-    /// name's, so they are not compared with the answers for another node.
-    pub fn execute_at(&mut self, path: &crate::LookupPath) {
-        self.name = path.name.clone();
-        self.dns_name = path.dns_name.clone();
-        self.node = path.node;
-        self.comparison = None;
-    }
-
     pub fn indexed_answer(&self, selector: &RecordSelector) -> Option<Value> {
         self.comparison.as_ref().map(|comparison| {
             indexed::answer(
@@ -165,54 +156,63 @@ pub(crate) async fn load_snapshot(
                 && resolver.get("address").is_some_and(Value::is_null)
                 && resolver.get("status").and_then(Value::as_str) != Some("unsupported")
         });
-    let (topology, route) = match name.declared_summary.get("topology") {
-        Some(topology_value) if topology_value.is_object() => {
-            let topology = serde_json::from_value::<ResolutionTopology>(topology_value.clone())
-                .map_err(|error| {
-                    LookupError::unsupported(format!(
-                        "projected topology does not match ResolutionTopology: {error}"
-                    ))
-                })?;
-            let preflight_path = topology
-                .classify(
+    // A requested path is another path to the indexed token (an alias path). The Universal
+    // Resolver finds that path's resolver, so the indexed name's topology neither routes nor
+    // bounds it, and its records are not compared.
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L58-L85 @ ens_v2_sepolia_20261001@07e55a05)
+    let (topology, route) = if request.requested_path.is_some() {
+        (None, LookupRoute::EnsUniversalResolverDiscovery)
+    } else {
+        let (topology, route) = match name.declared_summary.get("topology") {
+            Some(topology_value) if topology_value.is_object() => {
+                let topology = serde_json::from_value::<ResolutionTopology>(topology_value.clone())
+                    .map_err(|error| {
+                        LookupError::unsupported(format!(
+                            "projected topology does not match ResolutionTopology: {error}"
+                        ))
+                    })?;
+                let preflight_path = topology
+                    .classify(
+                        &name.logical_name_id,
+                        routes::preflight_route_policy(namespace, &topology)?,
+                    )
+                    .map_err(|error| LookupError::unsupported(error.to_string()))?;
+                let route = routes::classify_lookup_route(routes::DiscoveryRouteCandidate {
+                    namespace,
+                    resource_chain_id: &name.resource_chain_id,
+                    logical_name_id: &name.logical_name_id,
+                    namehash: &name.namehash,
+                    dns_name: &name.dns_encoded_name,
+                    exact_resolver_is_null,
+                    topology: &topology,
+                    path: preflight_path,
+                });
+                (topology, route)
+            }
+            None => {
+                let topology = routes::classify_absent_topology_route(
+                    namespace,
+                    &name.resource_chain_id,
                     &name.logical_name_id,
-                    routes::preflight_route_policy(namespace, &topology)?,
+                    &name.namehash,
+                    &name.dns_encoded_name,
+                    exact_resolver_is_null,
                 )
-                .map_err(|error| LookupError::unsupported(error.to_string()))?;
-            let route = routes::classify_lookup_route(routes::DiscoveryRouteCandidate {
-                namespace,
-                resource_chain_id: &name.resource_chain_id,
-                logical_name_id: &name.logical_name_id,
-                namehash: &name.namehash,
-                dns_name: &name.dns_encoded_name,
-                exact_resolver_is_null,
-                topology: &topology,
-                path: preflight_path,
-            });
-            (topology, route)
-        }
-        None => {
-            let topology = routes::classify_absent_topology_route(
-                namespace,
-                &name.resource_chain_id,
-                &name.logical_name_id,
-                &name.namehash,
-                &name.dns_encoded_name,
-                exact_resolver_is_null,
-            )
-            .ok_or_else(|| {
-                LookupError::unsupported("verified lookup requires projected topology")
-            })?;
-            (topology, LookupRoute::EnsUniversalResolverDiscovery)
-        }
-        Some(_) => {
-            return Err(LookupError::unsupported(
-                "verified lookup requires projected topology",
-            ));
-        }
+                .ok_or_else(|| {
+                    LookupError::unsupported("verified lookup requires projected topology")
+                })?;
+                (topology, LookupRoute::EnsUniversalResolverDiscovery)
+            }
+            Some(_) => {
+                return Err(LookupError::unsupported(
+                    "verified lookup requires projected topology",
+                ));
+            }
+        };
+        (Some(topology), route)
     };
     let (resolver_chain_id, resolver_address) =
-        routes::selected_resolver(route, &topology, &name.resource_chain_id)?;
+        routes::selected_resolver(route, topology.as_ref(), &name.resource_chain_id)?;
     if resolver_chain_id.as_str() != name.resource_chain_id {
         return Err(LookupError::unsupported(
             "projected resolver and indexed authority object are on different chains",
@@ -282,13 +282,21 @@ pub(crate) async fn load_snapshot(
     )
     .await?;
     ensure_authority_arm_admitted(namespace, &name, &entrypoint_manifest)?;
-    let route_policy = routes::route_policy(namespace, &entrypoint_manifest)?;
-    let path_class = topology
-        .classify(&name.logical_name_id, route_policy)
-        .map_err(|error| LookupError::unsupported(error.to_string()))?;
-    if route == LookupRoute::EnsUniversalResolverDiscovery
+    let path_class = match &topology {
+        Some(topology) => Some(
+            topology
+                .classify(
+                    &name.logical_name_id,
+                    routes::route_policy(namespace, &entrypoint_manifest)?,
+                )
+                .map_err(|error| LookupError::unsupported(error.to_string()))?,
+        ),
+        None => None,
+    };
+    if let (Some(topology), Some(path_class)) = (&topology, path_class)
+        && route == LookupRoute::EnsUniversalResolverDiscovery
         && !routes::is_ens_universal_resolver_discovery_topology(
-            &topology,
+            topology,
             path_class,
             &name.logical_name_id,
             resolver_chain_id,
@@ -299,7 +307,7 @@ pub(crate) async fn load_snapshot(
         ));
     }
     let inventory = if route == LookupRoute::EnsUniversalResolverDiscovery
-        || path_class == ResolutionRoute::WildcardDerived
+        || path_class == Some(ResolutionRoute::WildcardDerived)
     {
         None
     } else {
@@ -353,13 +361,21 @@ pub(crate) async fn load_snapshot(
             "coverage": inventory.coverage,
         });
     }
+    let (executed_name, dns_name, node) = match &request.requested_path {
+        Some(path) => (path.name.clone(), path.dns_name.clone(), path.node),
+        None => (
+            name.raw_name,
+            name.dns_encoded_name,
+            crate::abi::parse_node(&name.namehash).map_err(|error| {
+                LookupError::unsupported(format!("indexed namehash is malformed: {error:#}"))
+            })?,
+        ),
+    };
     Ok(LookupSnapshot {
         logical_name_id: name.logical_name_id,
-        name: name.raw_name,
-        dns_name: name.dns_encoded_name,
-        node: crate::abi::parse_node(&name.namehash).map_err(|error| {
-            LookupError::unsupported(format!("indexed namehash is malformed: {error:#}"))
-        })?,
+        name: executed_name,
+        dns_name,
+        node,
         resolver_chain_id: resolver_chain_id.to_string(),
         resolver_address: resolver_address.to_string(),
         entrypoint_chain_id: entrypoint.chain_id.to_string(),

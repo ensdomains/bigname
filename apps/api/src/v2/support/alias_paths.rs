@@ -63,8 +63,9 @@ pub(crate) struct ServedName {
 
 /// The requested name's row when it holds a current registration. Otherwise the requested
 /// path is walked: when it reaches a token whose canonical name is another, that name's row is
-/// served under the requested path. A path that reaches nothing serves what it served before,
-/// the row or `404 not_found`. Every read runs on `conn`'s one snapshot.
+/// served under the requested path, if it is still the token's own row. A path that reaches
+/// nothing serves what it served before, the row or `404 not_found`. Every read runs on
+/// `conn`'s one snapshot.
 pub(crate) async fn load_served_name_for_selected_snapshot(
     conn: &mut PgConnection,
     namespace: &str,
@@ -103,9 +104,10 @@ pub(crate) async fn load_served_name_for_selected_snapshot(
     .await
     .map_err(snapshot_selection_api_error)?
     {
-        SnapshotProjectionRead::Found(row) => row,
-        // The canonical row is not composed yet: the alias waits for it.
-        SnapshotProjectionRead::NotFound => {
+        SnapshotProjectionRead::Found(row) if is_the_targets_row(&row, &target) => row,
+        // The canonical row is not composed yet, so the alias waits for it, or the canonical
+        // path now holds another token, whose row is not this path's.
+        SnapshotProjectionRead::Found(_) | SnapshotProjectionRead::NotFound => {
             return Err(ApiError {
                 status: StatusCode::NOT_FOUND,
                 code: "not_found",
@@ -118,4 +120,27 @@ pub(crate) async fn load_served_name_for_selected_snapshot(
         row,
         alias: Some(AliasPath::new(name, canonical_name)),
     })
+}
+
+/// Whether `row` is the reached token's own row. A token's row is bound to its resource. A
+/// reservation's row is bound to none, so it must be a reservation with no registrant, as a
+/// reserved entry has no owner, and with the reached reservation's expiry.
+fn is_the_targets_row(
+    row: &NameCurrentRow,
+    target: &bigname_storage::families::alias_path::AliasTarget,
+) -> bool {
+    match (row.resource_id, &target.reservation_expiry) {
+        (Some(resource), _) => resource == target.resource_id,
+        (None, Some(expiry)) => {
+            let registration = &row.declared_summary["registration"];
+            let number = |value: &str| value.parse::<u128>().ok();
+            registration["status"] == "reserved"
+                && registration["registrant"].is_null()
+                && registration["expiry"]
+                    .as_str()
+                    .and_then(number)
+                    .is_some_and(|row_expiry| number(expiry) == Some(row_expiry))
+        }
+        (None, None) => false,
+    }
 }

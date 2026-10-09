@@ -83,6 +83,10 @@ const ASSOCIATION_SQL: &str = r#"/* storage:families.alias_path.association */
 pub struct AliasTarget {
     pub canonical_logical_name_id: String,
     pub resource_id: Uuid,
+    /// The leaf entry's expiry when the leaf is a reservation. A reservation's row is bound to
+    /// no resource, so its expiry is what ties the row to this reservation. A reserved entry
+    /// has no owner (`project_ens_v2_entry_owner` allows an owner only on a registered entry).
+    pub reservation_expiry: Option<String>,
 }
 
 /// One walk's answer and the statements it ran, which bound the cost a miss adds.
@@ -141,6 +145,8 @@ struct Walker<'a> {
 struct Entry {
     status: String,
     expiry: Option<i64>,
+    /// The expiry as stored, which a reservation's row is compared with.
+    stored_expiry: Option<String>,
     resource: Option<Uuid>,
 }
 
@@ -230,6 +236,9 @@ impl Walker<'_> {
             .map(|canonical_logical_name_id| AliasTarget {
                 canonical_logical_name_id,
                 resource_id: resource,
+                reservation_expiry: (entry.status == "reserved")
+                    .then_some(entry.stored_expiry)
+                    .flatten(),
             }))
     }
 
@@ -256,8 +265,9 @@ impl Walker<'_> {
         let instance: Option<Uuid> = row
             .try_get::<Option<String>, _>("registry_contract_instance_id")?
             .and_then(|id| id.parse().ok());
-        let expiry = row
-            .try_get::<Option<String>, _>("expiry")?
+        let stored_expiry = row.try_get::<Option<String>, _>("expiry")?;
+        let expiry = stored_expiry
+            .as_deref()
             .and_then(|expiry| expiry.parse::<u64>().ok())
             .map(|expiry| i64::try_from(expiry).unwrap_or(i64::MAX));
         let status: String = row.try_get("status")?;
@@ -274,6 +284,7 @@ impl Walker<'_> {
         Ok(Some(Entry {
             status,
             expiry,
+            stored_expiry,
             resource,
         }))
     }

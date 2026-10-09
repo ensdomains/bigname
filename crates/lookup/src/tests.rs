@@ -628,6 +628,45 @@ async fn a_requested_path_executes_that_name_and_compares_nothing() -> AnyResult
     Ok(())
 }
 
+/// A requested path is routed for itself: the Universal Resolver discovers that path's
+/// resolver, so its `ResolverNotFound` is `not_found` although the indexed name has a concrete
+/// resolver (`projected_route_does_not_reclassify_resolver_not_found`).
+#[tokio::test]
+async fn a_requested_path_is_routed_by_universal_resolver_discovery() -> AnyResult<()> {
+    let alias = bigname_domain::normalization::normalize_name("child.alias.eth")?;
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Error {
+        code: 3,
+        message: "execution reverted".to_owned(),
+        data: Value::String(resolver_not_found_revert(&alias.dns_encoded_name)),
+    }])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let request = lookup_request(&fixture.logical_name_id)?.at_path(crate::LookupPath {
+        name: alias.normalized_name.clone(),
+        dns_name: alias.dns_encoded_name.clone(),
+        node: crate::abi::parse_node(&crate::ens_namehash_hex("child.alias.eth")?)?,
+    });
+    let result = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(request)
+        .await;
+    fixture.cleanup().await?;
+    let response = result?;
+    assert_eq!(
+        response.records[0].status,
+        crate::LookupRecordStatus::NotFound
+    );
+    assert_eq!(
+        response.records[0].failure_reason.as_deref(),
+        Some("resolver_not_found")
+    );
+    assert_eq!(
+        response.resolver_address,
+        "0x0000000000000000000000000000000000000000"
+    );
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn restored_agreement_clears_the_matching_active_divergence() -> AnyResult<()> {
     let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![

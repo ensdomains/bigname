@@ -9,7 +9,8 @@ pub struct LookupRequest {
     pub records: Vec<RecordSelector>,
     /// The name to execute in place of the indexed name's own: another path that reaches the
     /// same ENSv2 token (an alias path, docs/glossary.md#alias-path). The calls go through the
-    /// Universal Resolver with this name, so the chain resolves the path requested, and no
+    /// Universal Resolver with this name, which discovers the path's resolver, so the chain
+    /// resolves the path requested. The indexed name's topology does not route them, and no
     /// indexed answer is compared with them.
     pub requested_path: Option<LookupPath>,
 }

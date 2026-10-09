@@ -24,8 +24,8 @@ use super::super::{
 use super::{NameRecords, RecordAnswer, RecordAnswerMeta, RecordSelection, VerifiedRecordLookup};
 
 mod discovery;
-pub(crate) use discovery::ens_universal_resolver_discovery_candidate;
 use discovery::terminal_no_declared_resolver;
+pub(crate) use discovery::{ens_universal_resolver_discovery_candidate, verified_discovery};
 
 const INDEXED_INVENTORY_UNAVAILABLE_REASON: &str = "inventory_not_available";
 pub(crate) const VERIFIED_NOT_SUPPORTED_REASON: &str = "verified_records_not_supported";
@@ -206,11 +206,14 @@ pub(crate) fn build_auto_name_records(
     ))
 }
 
+/// `ens_universal_resolver_discovery` says the lookup ran Universal Resolver discovery
+/// ([`verified_discovery`]), which decides the keys a stale answer covers.
 pub(crate) fn build_verified_name_records(
     row: &NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
     selection: RecordSelection<'_>,
     verified_lookup: Option<VerifiedRecordLookup>,
+    ens_universal_resolver_discovery: bool,
     include_inventory: bool,
     retain_audit_state: bool,
 ) -> V2Result<NameRecords> {
@@ -220,7 +223,7 @@ pub(crate) fn build_verified_name_records(
         row,
         selection.records,
         verified_lookup,
-        ens_universal_resolver_discovery_candidate(row),
+        ens_universal_resolver_discovery,
     )?;
 
     Ok(NameRecords {

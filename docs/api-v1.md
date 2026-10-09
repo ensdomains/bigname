@@ -2281,7 +2281,12 @@ A path that reaches a token whose served path is another one is an
   (`registry_name_binding_changed`).
 - A path that reaches no token answers as it did before. That is the name's own row when
   it has one, else `404 not_found`. A token whose served row is not composed yet answers
-  `404 not_found` too.
+  `404 not_found` too. So does a token whose served path now holds another token, since
+  that row is not this token's. A reservation's row is bound to no token, so a reserved
+  token is served only by a reservation row with the same expiry and no registrant. A
+  lapsed reservation has a short window, until the next registry event after its expiry is
+  processed. In that window its alias can show another registry's reservation of the same
+  label with the same expiry, with that reservation's created and registered dates.
 - Only a token with a served path is served. A path can resolve on chain to a token whose
   registry has no served path, such as a registry whose parent claim points at a parent
   with no name. That path answers `404 not_found` until the claim is corrected.
@@ -2302,9 +2307,12 @@ as it does for every name.
 
 `source=verified` reads the chain for the path requested. An ENSv2 resolver keys records by
 node, and the Universal Resolver computes the node from the name it is given. So a
-verified read of an alias can answer records the served path does not hold. An alias with
+verified read of an alias can answer records the served path does not hold. The Universal
+Resolver also finds the path's resolver, so the read is never routed by the served path's
+resolver. A path with no resolver answers each record `not_found`. An alias with
 a [bracketed label](#name-inputs) has no verified read.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/PermissionedResolver.sol:L96-L97 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L58-L85 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L84 @ ens_v2_sepolia_20261001@07e55a05)
 
 Only the direct read serves aliases. Lists, `POST /v1/lookup`, address names, search,

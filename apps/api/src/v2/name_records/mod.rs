@@ -34,7 +34,7 @@ pub(crate) use build::{
     EXACT_NAME_AUTHORITY_NOT_VERIFIABLE, VERIFIED_NOT_SUPPORTED_REASON,
     build_authority_unsupported_name_records, build_auto_name_records, build_indexed_name_records,
     build_verified_name_records, ens_universal_resolver_discovery_candidate, indexed_record_answer,
-    indexed_records_requiring_verified_fallback,
+    indexed_records_requiring_verified_fallback, verified_discovery,
 };
 pub(crate) use keys::{RecordSelection, parse_record_keys};
 
@@ -232,8 +232,7 @@ pub(crate) async fn get_name_records(
                 )?,
             ),
             RequestSource::Verified => {
-                let admit_null_resolver_discovery =
-                    ens_universal_resolver_discovery_candidate(&row);
+                let admit_null_resolver_discovery = verified_discovery(&row, alias.as_ref());
                 #[cfg(test)]
                 auto_fallback_test_hooks::run(&state.pool).await?;
                 let verified_lookup = load_verified_record_lookup(
@@ -255,6 +254,7 @@ pub(crate) async fn get_name_records(
                         record_inventory.as_ref(),
                         selection,
                         verified_lookup,
+                        admit_null_resolver_discovery,
                         include_inventory,
                         false,
                     )?,
@@ -276,8 +276,7 @@ pub(crate) async fn get_name_records(
                         )?,
                     )
                 } else {
-                    let admit_null_resolver_discovery =
-                        ens_universal_resolver_discovery_candidate(&row);
+                    let admit_null_resolver_discovery = verified_discovery(&row, alias.as_ref());
                     let mut fallback_records = indexed_records_requiring_verified_fallback(
                         &row,
                         record_inventory.as_ref(),
