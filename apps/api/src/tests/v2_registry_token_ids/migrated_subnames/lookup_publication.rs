@@ -138,8 +138,13 @@ pub(super) async fn assert_name_prepared_parity(
                 resource,
                 FamilyAttribution::Omit,
             )
-            .await?
-            .context("composed inventory")?;
+            .await?;
+            // A released ENSv2 row keeps its serving resource with no inventory in either
+            // store, as on main (crates/storage/src/name_current/row.rs:35-40, TYR-291).
+            let Some(expected) = expected else {
+                assert!(stored.record_inventory_current.is_none(), "{name}");
+                return Ok(detail["data"].clone());
+            };
             let actual = stored
                 .record_inventory_current
                 .context("stored inventory")?;
