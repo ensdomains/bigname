@@ -90,16 +90,33 @@ async fn seed_label_owner_fixture(database: &TestDatabase, labels: &[FixtureLabe
             json!({"source_event": "RegistryCreated", "registry": CHILD_ALPHA_REGISTRY}),
         ),
     ];
-    for (index, label) in labels.iter().enumerate() {
-        let seed = 0x7c0_0000 + 16 * u128::try_from(index)?;
-        let (name, resource) = seed_family_name(
-            database,
-            &format!("{}.alpha.eth", label.label),
-            seed,
-            "ens_v2",
-        )
-        .await?;
-        insert_family_label_preimage(&database.pool, label.label.as_bytes()).await?;
+    let label_names = labels
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            Ok((
+                format!("{}.alpha.eth", label.label),
+                0x7c0_0000 + 16 * u128::try_from(index)?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let seeded = seed_family_names(
+        database,
+        &label_names
+            .iter()
+            .map(|(name, seed)| (name.as_str(), *seed, "ens_v2"))
+            .collect::<Vec<_>>(),
+    )
+    .await?;
+    insert_family_label_preimages(
+        &database.pool,
+        &labels
+            .iter()
+            .map(|label| label.label.as_bytes())
+            .collect::<Vec<_>>(),
+    )
+    .await?;
+    for (index, (label, (name, resource))) in labels.iter().zip(seeded).enumerate() {
         let log = 2 * i64::try_from(index)?;
         if let Some(owner) = label.owner {
             let mut transfer = child_registry_event(
