@@ -80,7 +80,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `coin_type` | ENS/SLIP-44 coin type number. As a request parameter of `GET /v1/addresses/{address}/names?relation=resolves_to` it also accepts the literal `evm`, which selects every EVM coin type | `coin_type` (unchanged; now used consistently for reverse and record lookups) |
 | `texts` | inside grouped `records`: text-key-to-value map | `text_records` |
 | `contenthash` | inside grouped `records`: contenthash value | `content_hash` |
-| `resolver` | `{chain_id, address}` | `resolver_address`, `current_resolver`, declared resolver summaries |
+| `resolver` | `{chain_id, address}`. On the resolver-anchored records route it is the path resolver. | `resolver_address`, `current_resolver`, declared resolver summaries |
 | `subregistry` | `{chain_id, address}` of the ENSv2 registry a name's current subregistry pointer targets; omitted when there is none | `SubregistryChanged` after-state `subregistry` |
 | `parent_registry` | `{chain_id, address}` of the registry that emitted the pointer to a registry; `null` for the root registry | `SubregistryChanged` emitter |
 | `contract_address` | event filter for the contract that emitted an event's source log | `emitting_address` |
@@ -2116,6 +2116,11 @@ name:
   lookup.
 - does not match `relation=resolves_to`.
 
+The resolver keeps the records it holds for the name's node. Because the name
+routes withhold them, read them with
+[`GET /v1/resolvers/{chain_id}/{address}/records`](api-v1-routes.md#get-v1resolverschain_idaddressrecords),
+which reads by resolver and node and is not a resolution claim.
+
 Verified name detail applies the same withholding. A live reservation still
 resolves, through `ENSV1Resolver`, which reads the ENSv1 registry.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/UniversalResolverV2.sol:L55-L63 @ ens_v2_sepolia_20261001@07e55a05)
@@ -3181,7 +3186,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
 | `namespace` | string | always | Resolved public namespace slug. |
-| `resolver` | nullable object ContractRef | always | Resolver contract for this answer. |
+| `resolver` | nullable object ContractRef | always | Resolver contract for this answer. On `GET /v1/resolvers/{chain_id}/{address}/records` it is always the path resolver. |
 | `records` | map of string to object RecordAnswer | always | Resolver records or reverse result rows in the route-specific shape. |
 | `inventory` | object RecordInventory | optional | Optional record inventory requested with `include=inventory`. |
 

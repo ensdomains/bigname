@@ -274,7 +274,8 @@ Field ownership:
 ### Caching headers on indexed single-resource reads
 
 `GET /v1/names/{name}`, `GET /v1/names/{name}/records`,
-`GET /v1/resolvers/{chain_id}/{address}`, and
+`GET /v1/resolvers/{chain_id}/{address}`,
+`GET /v1/resolvers/{chain_id}/{address}/records`, and
 `GET /v1/addresses/{address}/primary-name` answer an indexed read with two
 HTTP caching headers derived from the response itself:
 
@@ -303,7 +304,7 @@ collection route carry neither header.
 <!-- openapi:headers -->
 | Header | Type | Description |
 | --- | --- | --- |
-| `ETag` | string | Weak validator of the complete indexed response body. Only the four documented cacheable indexed reads carry it. |
+| `ETag` | string | Weak validator of the complete indexed response body. Only the five documented cacheable indexed reads carry it. |
 | `Cache-Control` | string | public, max-age=12, stale-while-revalidate=48 on the same cacheable indexed responses and their 304 replies. |
 
 ## Tier 1: Lookup Primitives
@@ -1199,6 +1200,11 @@ its value map:
 - Method/path: `GET /v1/names/{name}/records`
 - Tier: product read.
 - Purpose: resolver records.
+- Records this route withholds, for a released name, a lapsed reservation or
+  a name whose resolution is withheld, can still be read by resolver:
+  [`GET /v1/resolvers/{chain_id}/{address}/records`](#get-v1resolverschain_idaddressrecords)
+  reports what a given resolver holds for the name's node, without a
+  resolution claim.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`,
   `source=indexed|verified|auto`, `keys`, `include=inventory`.
 - Response shape: `data` returns `namespace`, `resolver`, and route-local
@@ -4936,6 +4942,101 @@ For a registrar lease first identified by a later readable observation, registra
   projections using their existing canonical-lineage predicates. Resolver classification
   and enumeration support remain the authority for whether either collection
   can make an indexed completeness claim. No manifest coverage is widened.
+
+### `GET /v1/resolvers/{chain_id}/{address}/records`
+
+<!-- openapi:parameters GET /v1/resolvers/{chain_id}/{address}/records -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `chain_id` | path | integer | yes | none | Supported numeric EVM chain ID. |
+| `address` | path | string | yes | none | EVM address in hexadecimal form. |
+| `name` | query | string | yes | none | ENS name whose node the resolver is read for, normalized before reading. A label may be spelled as its bracketed labelhash `[<64 lowercase hex digits>]` (see Name inputs in api-v1.md). |
+| `namespace` | query | string | no | none | Public namespace of the name. Inferred from the name when omitted. It must be the namespace of the resolver's chain. |
+| `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
+| `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
+| `source` | query | enum `indexed` | no | `indexed` | Answer origin. Only indexed answers are served. |
+| `keys` | query | array [0, 200] of string | no | none | Comma-separated record selectors: addr:<decimal>, text:<key>, contenthash or avatar; omitted/blank uses the inventory-derived default keys. At most 200 keys. |
+| `include` | query | array of enum `inventory` | no | none | Comma-separated expansion names; unlisted values are invalid. |
+| `If-None-Match` | header | string | no | none | ETag validator from an earlier response, a comma-separated validator list, or *; evaluated only for a cacheable indexed read. |
+
+<!-- openapi:responses GET /v1/resolvers/{chain_id}/{address}/records -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object RecordsResponse | none | `ETag`, `Cache-Control` | The requested answer, including the empty or in-band outcomes documented below. Caching headers appear only on indexed responses that carry meta.as_of_token; primary-name additionally requires explicit source=indexed. |
+| 304 | none | none | `ETag`, `Cache-Control` | A cacheable indexed representation matches If-None-Match. The response has no body. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 404 | object ErrorEnvelope | `not_found` | none | The selected resource or namespace does not exist. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 409 | object ErrorEnvelope | `conflict` | none | The explicit snapshot selector cannot form a canonical snapshot or, for lookup, its selected positions cannot be combined. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 422 | object ErrorEnvelope | `unsupported` | none | The inventory-derived default record-key set exceeds the 200-key limit. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling is exhausted. |
+
+- Method/path: `GET /v1/resolvers/{chain_id}/{address}/records`
+- Tier: product read.
+- Purpose: the records a resolver holds for one name's node, read by the
+  resolver instead of by the name's current resolver.
+- This route is not a resolution claim. It reports the record inventory bigname
+  holds for the given resolver at the name's node, whatever the registry points
+  at today. That includes released names, lapsed reservations and names whose
+  resolution [`GET /v1/names/{name}/records`](#get-v1namesnamerecords)
+  withholds. It reads neither the name's own registry pointer, nor its
+  registration or serving resource. A declared ENSv1 mirror resolver is the one
+  exception, below: its registry walk reads ENSv1 registry pointers. A caller
+  that wants to know where a name resolves reads name detail.
+  For example, when an ENSv1 registry pointer names an ENSv2 resolver
+  (TYR-288), the name records route withholds the records and this route
+  still answers what that resolver holds for the node.
+- Request parameters: path `chain_id`, `address`; query `name`, `namespace`,
+  `at`, `finality`, `source`, `keys`, `include`. Other query parameters return
+  `400 invalid_input`.
+  - `name` is required. A missing or blank `name` returns `400 invalid_input`
+    with `name is required`. It is normalized as on the name routes, bracketed
+    labelhash labels included ([name inputs](api-v1.md#name-inputs)), and the
+    route reads its namehash. bigname need not hold a name row for it.
+  - `namespace` is inferred from `name` as on the name routes. The resolver's
+    chain fixes it: `ens` on Ethereum Mainnet and Sepolia, `basenames` on Base.
+    Any other value, given or inferred, returns `400 invalid_input`.
+  - The route serves `source=indexed` only. `verified` and `auto` are rejected
+    with `400 invalid_input` and `source must be indexed` until a later change
+    adds a direct resolver read.
+  - `keys` and `include=inventory` follow the name records route.
+- Response shape: `RecordsResponse`, as on the name records route. `data` is
+  `{namespace, resolver, records, inventory?}`. `data.resolver` is always the
+  path resolver as `{chain_id, address}`. `records` answers each requested key,
+  or each key of the inventory-derived default set when `keys` is omitted, with
+  the same per-key answers as `source=indexed` on the name records route:
+  `ok`, `not_found`, the derived ENSIP-19 answers, and `unsupported` with the
+  inventory's reason when the resolver is not an admitted profile.
+  `include=inventory` returns the same container.
+- Which records are read: the writes the resolver emitted for the name's node,
+  under the record-version and link rules of the name records route. For a
+  declared [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
+  the route answers what the mirror's registry walk selects for the node, as
+  the name records route does, and `data.resolver` stays the mirror.
+- Empty versus not found: a node with no inventory at the resolver returns
+  `200` with `records: {}` when `keys` is omitted, and `not_found` for each
+  requested key. `{}` proves nothing about the resolver, as on the name records
+  route. A name bigname has never seen is answered the same way.
+  A declared ENSv1 mirror resolver is the exception. When no node its registry
+  walk consults has a projected ENSv1 resolver, as for a name bigname has never
+  seen, each requested key answers `unsupported` with
+  `mirrored_resolver_not_projected`, as on the name records route. `records` is
+  `{}` when `keys` is omitted.
+- A resolver that no admitted source family ever named has no
+  [resolver overview](#get-v1resolverschain_idaddress) row and answers `404
+  not_found`, even when it emitted record events. A custom resolver that only
+  emitted record events is that case. A custom resolver a name pointed at has
+  an overview row, and each requested key answers `unsupported` with the row's
+  reason.
+- Snapshot behavior: as the resolver overview. The overview row and the
+  inventory are read on one database snapshot of the captured publication.
+  Record data is served only at the current family publication, so an `at`
+  that selects another position returns `409 stale`. `at`, `safe` or
+  `finalized` with no servable position also return `409 stale`.
+- Caching: indexed responses carry `ETag` and `Cache-Control` (see
+  [caching headers](#caching-headers-on-indexed-single-resource-reads)).
 
 ### `GET /v1/registries/{chain_id}/{address}`
 

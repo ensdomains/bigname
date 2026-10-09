@@ -826,7 +826,7 @@ const ROUTES = [
   notes: [
     { h: 'Reading at an older position', html: `<p><code>bound_names</code> always reads the current projections, even with <code>at</code>, so a name that was bound at that time but has since been unbound is absent. The <a href="#resolver-links">links</a> and <a href="#resolver-roles">roles</a> collections page the supported indexed tables; the overview carries no counts or samples of them. They do not reconstruct historical bindings or permissions. A read at latest also checks for an Interpret redo; a historical read keeps only the generation check.</p>` },
   ],
-  related: ['resolver-links', 'resolver-roles', 'records', 'name', 'permissions'],
+  related: ['resolver-links', 'resolver-records', 'resolver-roles', 'records', 'name', 'permissions'],
 },
 {
   id: 'resolver-links', method: 'GET', path: '/v1/resolvers/{chain_id}/{address}/links', title: 'Resolver record links',
@@ -855,6 +855,22 @@ const ROUTES = [
   outcomes: [['200', 'The page, including an explicitly unsupported empty page when enumeration is unsupported.'], ['400 invalid_input', 'The chain, address, parameter, or cursor is invalid, or a cursor belongs to another route or snapshot.'], ['404 not_found', 'The resolver is unknown.'], ['409 stale', 'The selected projection is unavailable or the publication changed during the read; retry with the same cursor. An explicit <code>at</code> still requires that selected position to be readable.']],
   notes: [{ h: 'Ordering and snapshots', html: '<p>Rows sort by address and registration ID. Cursors bind the chain, resolver, collection and last sort position. An explicit <code>at</code> must be repeated; otherwise each page selects the current publication. A completed rebuild, including at the same block, does not invalidate the position. These reads use current permissions and do not reconstruct historical permission tables.</p>' }],
   related: ['resolver', 'resolver-links', 'permissions'],
+},
+{
+  id: 'resolver-records', method: 'GET', path: '/v1/resolvers/{chain_id}/{address}/records', title: 'Records by resolver',
+  summary: 'Returns the records one resolver holds for a name\'s node, read by resolver and node rather than through the name\'s current resolver pointer. It answers for released names and lapsed reservations that the name records route withholds. It is not a resolution claim.',
+  keywords: ['keys', 'inventory', 'known_keys', 'node', 'released', 'lapsed', 'mirror', 'not a resolution claim'],
+  sample: s => ({ ...(s.resolver || {}), name: s.name || 'name.eth', keys: 'addr:60,text:avatar' }),
+  params: [{ name: 'chain_id', in: 'path', type: 'integer', required: true, desc: 'The chain the resolver is deployed on.' }, { name: 'address', in: 'path', required: true, desc: 'The resolver contract address.' }, { name: 'name', in: 'query', required: true, desc: 'The name whose node to read. It is normalized as on the name routes, and a bracketed labelhash is accepted.' }, { name: 'namespace', in: 'query', desc: 'Must be the namespace of the resolver\'s chain when given.' }, { name: 'source', in: 'query', type: 'enum', values: ['indexed'], default: 'indexed', desc: 'Only <code>indexed</code>. Verified answers are a later widening.' }, { name: 'keys', in: 'query', desc: 'As on <a href="#records">records</a>. When omitted, the default set is every record key found in this resolver\'s inventory for the node. A default set over 200 keys answers <code>422 unsupported</code>.' }, { name: 'include', in: 'query', type: 'enum', values: ['inventory'], desc: 'Adds the same <code>inventory</code> object as <a href="#records">records</a>.' }, P.at, P.finality],
+  response: {
+    fields: [['records.{key}', 'The answer shape of <a href="#records">records</a>, from the index.'], ['resolver', 'Always the path resolver.'], ['meta.source', 'Always <code>indexed</code>.']],
+    sample: { data: { namespace: 'ens', resolver: { chain_id: 1, address: '0x231b…f4d2' }, records: { 'addr:60': { status: 'ok', value: '0x8e8db5ccef88cca9d624701db544989c996e3216' }, 'text:avatar': { status: 'ok', value: 'eip155:1/erc721:…' } } }, meta: { ...AS_OF, source: 'indexed' } },
+  },
+  outcomes: [['200', 'One answer per key, with an empty <code>records</code> when the resolver holds nothing for the node.'], ['400 invalid_input', 'The chain, address, name or a selector is invalid, <code>name</code> is missing, the namespace is not the chain\'s, <code>source</code> is not <code>indexed</code>, or a parameter is unknown.'], ['404 not_found', 'There is no overview for this resolver.'], ['422 unsupported', 'With <code>keys</code> omitted, the default set is over 200 keys.'], ['409 stale, 409 conflict', 'The snapshot cannot be served. See <a href="#errors">errors(7)</a>.']],
+  notes: [
+    { h: 'Not a resolution claim', html: '<p>The answer says what the resolver holds for the node at the current publication. It does not say the name resolves through this resolver, or that the name is registered. A declared ENSv1 mirror resolver follows the same registry walk as the name records route. Responses carry the indexed read cache headers.</p>' },
+  ],
+  related: ['records', 'resolver', 'resolver-links'],
 },
 {
   id: 'registry', method: 'GET', path: '/v1/registries/{chain_id}/{address}', title: 'Registry overview',
@@ -1038,7 +1054,7 @@ const ROUTES = [
     ['names', ['names', 'name', 'records', 'subnames', 'history', 'permissions']],
     ['addresses', ['address-names', 'primary-name', 'address-history']],
     ['index', ['lookup', 'search', 'events', 'namespace']],
-    ['resolvers', ['resolver', 'resolver-links', 'resolver-roles']],
+    ['resolvers', ['resolver', 'resolver-records', 'resolver-links', 'resolver-roles']],
     ['registries', ['registry', 'registry-labels']],
     ['health', ['status', 'healthz', 'diag-coverage', 'diag-binding', 'diag-authority', 'diag-records', 'diag-manifests', 'diag-events']],
   ];

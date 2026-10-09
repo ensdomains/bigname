@@ -351,3 +351,108 @@ async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_u
     lookup_publication::assert_name_prepared_parity(&database, COMPANION).await?;
     database.cleanup().await
 }
+
+/// An ENSv1 registry pointer that names an admitted ENSv2 resolver. The retained child's owner
+/// deploys a PermissionedResolver proxy, points the child's ENSv1 registry entry at it, and links
+/// a record to the child. The name records route withholds the child's resolver and records,
+/// and the resolver records route answers what the resolver holds for the node.
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L86-L95 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/PermissionedResolver.sol:L352-L370 @ ens_v2_sepolia_20261001@07e55a05)
+#[tokio::test]
+async fn resolver_route_answers_an_ens_v2_resolver_named_by_an_ens_v1_pointer() -> Result<()> {
+    let (database, mut logs, _) = Box::pin(setup()).await?;
+    logs.retain(|log| log.block_number <= BASE + 121);
+    Box::pin(seed_and_run(&database, &logs, 120, 121)).await?;
+    let resolver: Address = LINKED.parse()?;
+    let owner: Address = GRANTEE.parse()?;
+    let implementation: Address = IMPLEMENTATION.parse()?;
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/PermissionedResolver.sol:L119-L132 @ ens_v2_sepolia_20261001@07e55a05)
+    let mut creation = transaction(
+        122,
+        0,
+        vec![
+            (resolver, Upgraded { implementation }.encode_log_data()),
+            (resolver, ResolverCreated {}.encode_log_data()),
+            (
+                resolver,
+                EACRolesChanged {
+                    resource: U256::ZERO,
+                    account: owner,
+                    oldRoleBitmap: U256::ZERO,
+                    newRoleBitmap: [0, 4, 28, 128, 132, 156]
+                        .into_iter()
+                        .fold(U256::ZERO, |roles, bit| roles | (U256::from(1) << bit)),
+                }
+                .encode_log_data(),
+            ),
+            (
+                FACTORY.parse()?,
+                ProxyDeployed {
+                    sender: owner,
+                    proxyAddress: resolver,
+                    salt: U256::from(25910),
+                    implementation,
+                }
+                .encode_log_data(),
+            ),
+        ],
+    );
+    creation.extend(transaction(
+        122,
+        1,
+        vec![(
+            "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".parse()?,
+            NewResolver {
+                node: bigname_lookup::ens_namehash_hex(CHILD)?.parse()?,
+                resolver,
+            }
+            .encode_log_data(),
+        )],
+    ));
+    creation.extend(transaction(
+        122,
+        2,
+        vec![link(CHILD, 1)?, text(1, "exact", "kept")?],
+    ));
+    for (index, log) in creation.iter_mut().enumerate() {
+        log.log_index = index as i64;
+    }
+    Box::pin(seed_and_run_with_targets(
+        &database,
+        &creation,
+        122,
+        122,
+        &[(122, 0, GRANTEE), (122, 1, GRANTEE), (122, 2, GRANTEE)],
+        &[(122, 0, FACTORY)],
+        None,
+    ))
+    .await?;
+    publish(&database, 122).await?;
+    let withheld = path_get(
+        &database,
+        &format!("/v1/names/{CHILD}/records?keys=text:exact"),
+    )
+    .await?;
+    assert!(withheld["data"]["resolver"].is_null(), "{withheld:#}");
+    assert_ne!(
+        withheld["data"]["records"]["text:exact"]["status"],
+        json!("ok"),
+        "{withheld:#}"
+    );
+    let body = path_get(
+        &database,
+        &format!("/v1/resolvers/11155111/{LINKED}/records?name={CHILD}&keys=text:exact"),
+    )
+    .await?;
+    assert_eq!(
+        body["data"]["resolver"],
+        json!({"chain_id": 11_155_111, "address": LINKED}),
+        "{body:#}"
+    );
+    assert_eq!(
+        body["data"]["records"],
+        json!({"text:exact": {"status": "ok", "value": "kept"}}),
+        "{body:#}"
+    );
+    database.cleanup().await
+}

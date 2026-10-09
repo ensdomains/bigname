@@ -1438,6 +1438,16 @@ implementation outside the active manifest's `resolver_implementations`; and
 `resolver_binding_enumeration_not_projected` on the binding summary of a
 supported resolver whose family does not project binding enumeration.
 
+The resolver-anchored records route
+([`api-v1-routes.md`](api-v1-routes.md), `GET /v1/resolvers/{chain_id}/{address}/records`)
+reads the same record families by resolver and node, without a resource's
+resolver pointer. The families keep every admitted write of a resolver for a
+node, whatever the registry points at. The read builds a stand-in pointer from
+the requested resolver and node. It then selects records as the resource-keyed
+read does for one pointer: the same partitions, record links, record version
+boundary, winner per key and assembled row. A declared ENSv1 mirror resolver
+takes the same ENSv1 registry walk. The read adds no family and no stored row.
+
 
 The composed record inventory records the selectors observed under a resource's
 latest retained linked resolver event whose name has a readable canonical

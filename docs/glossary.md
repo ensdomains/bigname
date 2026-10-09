@@ -2459,7 +2459,9 @@ when a name has no current control binding. It preserves event-derived read reac
 does not establish a registration, authority, address-to-name relation, or permission grant.
 Two event-linked bases select one: the retained registry resolver pointer of an ownerless ENSv1
 or Basenames registry name, and the [root-registry resolver
-pointer](#root-registry-resolver-pointer) of an ENSv2 TLD.
+pointer](#root-registry-resolver-pointer) of an ENSv2 TLD. The resolver-anchored records route
+(`GET /v1/resolvers/{chain_id}/{address}/records`) uses none: it reads by
+resolver and node.
 
 <a id="root-registry-resolver-pointer"></a>
 **Root-registry resolver pointer** — the resolver an ENSv2 root registry stores for a TLD token
