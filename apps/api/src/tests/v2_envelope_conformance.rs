@@ -346,15 +346,38 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
     },
 ];
 
+// Each route's success payload is built once, then checked for the family envelope and for banned
+// v1 dictionary fields. Every route is checked for both before the test reports.
 #[tokio::test]
-async fn v2_success_envelopes_conform_family_wide() -> Result<()> {
+async fn v2_success_envelopes_conform_and_omit_banned_v1_dictionary_fields_family_wide(
+) -> Result<()> {
     assert_v2_conformance_route_tables_match();
 
+    let mut envelope_violations = Vec::new();
+    let mut dictionary_violations = Vec::new();
     for route in V2_CONFORMANCE_ROUTES {
         let payload = v2_conformance_success_payload(route).await?;
-        assert_v2_success_envelope(route, &payload);
+        if let Err(panic) =
+            std::panic::catch_unwind(|| assert_v2_success_envelope(route, &payload))
+        {
+            let message = panic
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| panic.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+                .unwrap_or_default();
+            envelope_violations.push(format!("{}: {message}", route.label));
+        }
+        collect_banned_dictionary_fields(route, &payload, &mut dictionary_violations);
     }
 
+    let mut violations = Vec::new();
+    for (property, found) in [
+        ("v2 success envelope conformance", envelope_violations),
+        ("v2 dictionary conformance", dictionary_violations),
+    ] {
+        violations.extend(found.into_iter().map(|violation| format!("{property}: {violation}")));
+    }
+    assert_no_conformance_violations("v2 success-response conformance", &violations);
     Ok(())
 }
 
@@ -466,20 +489,6 @@ async fn v2_product_error_bodies_hide_pipeline_vocabulary_for_not_found_stale_co
     collect_v2_internal_error_violations(&mut violations).await?;
 
     assert_no_conformance_violations("v2 product error-body conformance", &violations);
-    Ok(())
-}
-
-#[tokio::test]
-async fn v2_success_responses_omit_banned_v1_dictionary_fields_family_wide() -> Result<()> {
-    assert_v2_conformance_route_tables_match();
-
-    let mut violations = Vec::new();
-    for route in V2_CONFORMANCE_ROUTES {
-        let payload = v2_conformance_success_payload(route).await?;
-        collect_banned_dictionary_fields(route, &payload, &mut violations);
-    }
-
-    assert_no_conformance_violations("v2 dictionary conformance", &violations);
     Ok(())
 }
 

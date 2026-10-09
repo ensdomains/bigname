@@ -481,12 +481,11 @@ async fn v2_address_names_grant_budget_maximum_page_operators() -> Result<()> {
         });
     }
     seed_v2_address_name_identities(&database, &specs).await?;
-    publish_v2_address_name_inputs(&database, &specs).await?;
-    assert_v2_address_name_relations(&database, &specs).await?;
-    // Five approved operators of the owner plus 1,100 revoked ones. Eligibility must precede
-    // both branch limits, and each approved operator applies to all 200 names.
+    // Five approved operators of the owner plus a revoked one. Eligibility must precede
+    // both branch limits: counted as live, the revoked operator adds 200 rows past the budget.
+    // Each approved operator applies to all 200 names. The names' rebuild publishes them.
     let (block, hash) = address_fixture_head(&database).await?;
-    let approvals = (1..=1105_usize)
+    let approvals = (1..=6_usize)
         .map(|index| {
             address_operator_approval(
                 &address_budget_subject(index),
@@ -498,7 +497,8 @@ async fn v2_address_names_grant_budget_maximum_page_operators() -> Result<()> {
         })
         .collect::<Vec<_>>();
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &approvals).await?;
-    rebuild_address_fixture(&database).await?;
+    publish_v2_address_name_inputs(&database, &specs).await?;
+    assert_v2_address_name_relations(&database, &specs).await?;
     let uri = format!("/v1/addresses/{V2_ADDRESS}/names?page_size=200");
     let plain = v2_address_names_payload_for_database(&database, &uri).await?;
     let at_budget =
@@ -566,8 +566,34 @@ async fn v2_address_names_grant_budget_filters_ineligible_direct_rows_before_lim
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
     let id = Uuid::from_u128(0xa100);
-    seed_address_name_budget_grants(&database, id, 2100).await?;
-    seed_address_name_budget_grants(&database, id, 1000).await?;
+    // 1,001 grant rows with the fixture's own, the last then revoked, in one publication.
+    // Counted as live, the revoked row alone exceeds the budget.
+    let others = bigname_storage::load_bounded_effective_permissions_by_resource_ids(
+        &database.pool,
+        &[id],
+        None,
+        100_000,
+    )
+    .await?
+    .len();
+    let manifest = address_budget_resolver_manifest(&database).await?;
+    let (block, hash) = address_fixture_head(&database).await?;
+    let mut events = (1..=1001 - others)
+        .map(|index| {
+            let subject = address_budget_subject(index);
+            address_budget_role_event(id, &subject, true, manifest, block, &hash)
+        })
+        .collect::<Vec<_>>();
+    events.push(address_budget_role_event(
+        id,
+        &address_budget_subject(1001 - others),
+        false,
+        manifest,
+        block,
+        &hash,
+    ));
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    rebuild_address_fixture(&database).await?;
     let payload = v2_address_names_payload_for_database(
         &database,
         &format!("/v1/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary&namespace=ens"),
