@@ -1,29 +1,33 @@
 //! Page shapes of the search refresh. Each test replays the previous one-statement page query
 //! on the same rows as its oracle, then checks what the refresh really sent to PostgreSQL.
 //!
-//! | Row | Shape | Test |
-//! | --- | --- | --- |
-//! | a | no labels, names over more than two pages | `names_over_two_pages_page_by_cursor_only` |
-//! | b | labels only, no names | `labels_without_names_stage_their_matches_once` |
-//! | c | a row matched by a name and by a label | `row_matched_by_name_and_label_is_refreshed_once` |
-//! | d | fewer names than one page | `fewer_names_than_one_page_send_one_page_statement` |
-//! | e | exactly one page | `exactly_one_page_ends_on_an_empty_page` |
-//! | f | no names and no labels | `no_names_and_no_labels_send_nothing` |
-//! | g | names without a `name_surfaces` row | `names_without_surfaces_neither_end_nor_skip_pages` |
-//! | h | two transactions on one connection | `later_transactions_on_one_connection_stage_again` |
-//! | i | prepare, source write, then refresh | `prepare_then_refresh_reads_the_uncommitted_write` |
-//! | j | mixed fixture against the previous query | `mixed_fixture_matches_the_previous_query` |
-//! | k | two refreshes in one transaction | `second_refresh_forgets_the_first_name_set` |
-//! | l | more names than one staging statement | `names_beyond_one_staging_statement_are_bound_once` |
-//! | m | staging rolled back to a savepoint | `refresh_after_a_savepoint_rollback_stages_again` |
-//! | n | no open transaction | `refresh_outside_a_transaction_is_refused` |
-//! | o | wrong isolation level | `repeatable_read_is_refused_before_staging` |
-//! | p | role may not create temporary tables | `role_without_temporary_tables_is_refused` |
-//! | q | table created in a transaction that rolls back | `table_created_in_a_rolled_back_transaction_is_created_again` |
-//! | r | rows staged by an earlier commit or rollback | `later_refresh_never_reads_rows_staged_before` |
-//! | s | 1,000 small transactions on one connection | `small_refreshes_after_the_first_write_no_catalog_row` |
-//! | t | staged set at and over the statistics threshold | `names_beyond_one_staging_statement_are_bound_once` |
-//! | u | the page statement is not kept prepared | `page_statement_is_not_kept_prepared` |
+//! The last column names a full-scale variant that is `#[ignore]`d. Run those with
+//! `cargo test -p bigname-storage --features bigname-storage/test-support --lib
+//! identity_search::tests -- --ignored`.
+//!
+//! | Row | Shape | Test | Ignored full-scale test |
+//! | --- | --- | --- | --- |
+//! | a | no labels, names over more than two pages | `names_over_two_pages_page_by_cursor_only` | |
+//! | b | labels only, no names | `labels_without_names_stage_their_matches_once` | |
+//! | c | a row matched by a name and by a label | `row_matched_by_name_and_label_is_refreshed_once` | |
+//! | d | fewer names than one page | `fewer_names_than_one_page_send_one_page_statement` | |
+//! | e | exactly one page | `exactly_one_page_ends_on_an_empty_page` | |
+//! | f | no names and no labels | `no_names_and_no_labels_send_nothing` | |
+//! | g | names without a `name_surfaces` row | `names_without_surfaces_neither_end_nor_skip_pages` | |
+//! | h | two transactions on one connection | `later_transactions_on_one_connection_stage_again` | |
+//! | i | prepare, source write, then refresh | `prepare_then_refresh_reads_the_uncommitted_write` | |
+//! | j | mixed fixture against the previous query | `mixed_fixture_matches_the_previous_query` | |
+//! | k | two refreshes in one transaction | `second_refresh_forgets_the_first_name_set` | |
+//! | l | more names than one staging statement | `names_beyond_one_staging_statement_are_bound_once` | |
+//! | m | staging rolled back to a savepoint | `refresh_after_a_savepoint_rollback_stages_again` | |
+//! | n | no open transaction | `refresh_outside_a_transaction_is_refused` | |
+//! | o | wrong isolation level | `repeatable_read_is_refused_before_staging` | |
+//! | p | role may not create temporary tables | `role_without_temporary_tables_is_refused` | |
+//! | q | table created in a transaction that rolls back | `table_created_in_a_rolled_back_transaction_is_created_again` | |
+//! | r | rows staged by an earlier commit or rollback | `later_refresh_never_reads_rows_staged_before` | |
+//! | s | small transactions on one connection write no catalog row after the first | `small_refreshes_after_the_first_write_no_catalog_row` (5 transactions) | `thousand_small_refreshes_after_the_first_write_no_catalog_row` |
+//! | t | staged set at and over the statistics threshold | none: the threshold is 50,000 names | `statistics_are_gathered_only_above_the_threshold` |
+//! | u | the page statement is not kept prepared | `page_statement_is_not_kept_prepared` | |
 mod wire;
 
 use super::{documents, prepare, refresh};
@@ -616,9 +620,63 @@ async fn second_refresh_forgets_the_first_name_set() -> Result<()> {
     fixture.db.cleanup().await
 }
 
+/// Names one staging statement binds: `STAGED_PER_STATEMENT` in `documents.rs`, which is
+/// private. The test below requires the second staging statement to bind exactly the names
+/// after this many, so it fails when the production value differs from this one.
+const STAGED_PER_STATEMENT: u64 = 20_000;
+/// Bytes of a one-dimensional array parameter before its elements, and before each element.
+const ARRAY_HEADER_BYTES: usize = 20;
+const ARRAY_ELEMENT_BYTES: usize = 4;
+
 #[tokio::test]
 async fn names_beyond_one_staging_statement_are_bound_once() -> Result<()> {
     let fixture = Fixture::create("search_pages_chunks").await?;
+    let last = STAGED_PER_STATEMENT + 1;
+    fixture.structural([1, STAGED_PER_STATEMENT, last]).await?;
+    // One name more than one statement holds, with names repeated within and across statements.
+    let mut names = ids(1..=last);
+    names.extend(ids([1, STAGED_PER_STATEMENT, last, last]));
+    let mut conn = fixture.connect().await?;
+    let mut tx = conn.begin().await?;
+    let trace = refresh_like_previous(&fixture.wire, &mut tx, &names, &[]).await?;
+    tx.commit().await?;
+    ensure!(fixture.documents().await? == 3);
+    let mut expected = staging(false, false);
+    expected.extend(["stage_names"; 2]);
+    ensure!(
+        trace.staging_tags() == expected,
+        "{:?}",
+        trace.staging_tags()
+    );
+    let bound = trace.staged_bytes("stage_names");
+    ensure!(
+        bound >= payload(&names) && bound < payload(&names) * 2,
+        "bound {bound}"
+    );
+    // The second statement binds the names after the first statement's share, and no others.
+    let rest = &names[STAGED_PER_STATEMENT as usize..];
+    let second = trace
+        .staging
+        .iter()
+        .filter(|statement| statement.tag() == "stage_names")
+        .nth(1)
+        .context("a second staging statement")?;
+    ensure!(
+        second.parameters
+            == [ARRAY_HEADER_BYTES + ARRAY_ELEMENT_BYTES * rest.len() + payload(rest)],
+        "the second staging statement bound {:?} bytes for {} names",
+        second.parameters,
+        rest.len()
+    );
+    // 20,001 distinct names are 200 full pages and one short page.
+    ensure!(trace.pages.len() == 201, "{} pages", trace.pages.len());
+    fixture.db.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "Stages 50,000 and 50,001 names in about 1,000 page statements. Run on demand."]
+async fn statistics_are_gathered_only_above_the_threshold() -> Result<()> {
+    let fixture = Fixture::create("search_pages_statistics").await?;
     let most = documents::ANALYZE_ABOVE;
     fixture.structural([1, 20_500, most + 1]).await?;
     let mut conn = fixture.connect().await?;
@@ -851,9 +909,19 @@ async fn catalog_writes(conn: &mut PgConnection) -> Result<Vec<(String, i64)>> {
 
 #[tokio::test]
 async fn small_refreshes_after_the_first_write_no_catalog_row() -> Result<()> {
+    catalog_rows_stay_flat_with_cleanup(5).await
+}
+
+#[tokio::test]
+#[ignore = "Runs 1,000 transactions in about 15,000 statements. Run on demand."]
+async fn thousand_small_refreshes_after_the_first_write_no_catalog_row() -> Result<()> {
+    catalog_rows_stay_flat_with_cleanup(1_000).await
+}
+
+async fn catalog_rows_stay_flat_with_cleanup(transactions: usize) -> Result<()> {
     let fixture = Fixture::create("search_pages_catalogs").await?;
     // The database is dropped on every way out of the measurement: success, error or panic.
-    let outcome = AssertUnwindSafe(catalog_rows_stay_flat(&fixture))
+    let outcome = AssertUnwindSafe(catalog_rows_stay_flat(&fixture, transactions))
         .catch_unwind()
         .await;
     // The measurement's own failure is reported before any failure to clean up.
@@ -862,7 +930,8 @@ async fn small_refreshes_after_the_first_write_no_catalog_row() -> Result<()> {
     cleaned
 }
 
-async fn catalog_rows_stay_flat(fixture: &Fixture) -> Result<()> {
+/// The first transaction creates the connection's table. No later one may write a catalog row.
+async fn catalog_rows_stay_flat(fixture: &Fixture, transactions: usize) -> Result<()> {
     fixture.structural(1..=3).await?;
     // A backend reports its counters when it exits. End the fixture's own backends so that
     // their catalog writes are counted before the first reading. The pool reconnects later.
@@ -889,7 +958,7 @@ async fn catalog_rows_stay_flat(fixture: &Fixture) -> Result<()> {
     }
     let start = catalog_writes(&mut conn).await?;
     let mut first = Vec::new();
-    for round in 0..1_000 {
+    for round in 0..transactions {
         let mut tx = conn.begin().await?;
         refresh(&mut tx, &ids(1..=3), &[]).await?;
         // A second refresh in the same transaction clears the first one's names.
