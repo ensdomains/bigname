@@ -1227,9 +1227,9 @@ ways:
 
 - At its next progress write, with `redo attempt superseded; progress not
   recorded`. This error names no command and records nothing on the row.
-- At completion, with `was overtaken before it completed`. This error names
-  the command to rerun and is recorded on the row. A Project redo is the
-  exception described below.
+- At completion, with `was overtaken before it completed`. This error is
+  recorded on the row. It names the command to rerun, or says that no command
+  applies. A Project redo is the exception described below.
 
 A stamp that reaches outside the redo's range, below it or above it, widens
 the marker. The next
@@ -1249,26 +1249,57 @@ depends on the redo:
   needed.
 
 Project is treated differently at completion. A Project redo that a stamp
-overtook after its last progress write still completes, provided Interpret
-carries a required redo at that moment. Completion reads Interpret's row in
-the transaction that holds the Project row lock. The reason is what follows
-each completion. An Interpret repair ends by stamping Project, so the next
-supervisor start redoes Project on the new chain, and the Project completion
-on the replaced blocks is short-lived. Nothing redoes Interpret after an
-Interpret completion on replaced blocks, so that one is refused.
+overtook after its last progress write still completes on one condition.
+Interpret must carry a required redo at that moment, and that redo's range
+must reach the top of the Project redo's execution range. Completion reads
+Interpret's row in the transaction that holds the Project row lock. The
+reason is what follows each completion. An Interpret repair ends by stamping
+Project over the repair's range up to Project's cursor. The next supervisor
+start then redoes Project on the new chain. That redo replays at least as far
+as the standing Project family marker the earlier completion left, unless the
+readable head is lower. The Project completion on the replaced blocks is
+therefore short-lived. Nothing redoes Interpret after an Interpret completion
+on replaced blocks, so that one is refused.
 
-A publication stamps each phase by its own cursor. It stamps Interpret
-whenever it stamps Project as long as Project's cursor is not above
-Interpret's. That holds by sequencing: one supervisor runs Interpret and then
-Project against the same head. No check enforces it. When Project's cursor is
-above Interpret's and only the higher blocks are replaced, Interpret is not
-stamped, and the overtaken Project redo is refused at completion like the
-others.
+A publication stamps each phase by its own cursor, and each stamp ends at
+that phase's cursor. Interpret's stamp therefore reaches the top of the
+Project redo's range when two things hold:
 
-A Project redo refused at completion is rerun with the printed command. A
-Project redo refused at a progress write cannot be rerun at once when the
-publication stamped Interpret too. Project waits for Interpret's repair, and
-Interpret is refused while the Project redo is recorded as running.
+- Project's cursor is not above Interpret's. That holds by sequencing: one
+  supervisor runs Interpret and then Project against the same head. No check
+  enforces it.
+- The Project redo's execution range ends at or below Interpret's cursor. The
+  range ends at the highest of the requested end, the standing Project family
+  marker and the end of a retained redo, capped at the readable head. It can
+  therefore end above the requested range.
+
+When either fails, the Interpret repair ends below the top of the Project
+redo's range, or Interpret is not stamped at all. Nothing would redo Project
+on the blocks above the repair, so the overtaken Project redo is refused at
+completion like the others. The rule errs toward refusal. A Project redo
+whose execution range ends above its requested range and above Interpret's
+cursor is refused even when the two cursors are equal. No test covers that
+case.
+
+What follows a refused Project redo depends on Interpret and on who owns the
+redo:
+
+- Interpret is completed. The redo is rerun with the printed command.
+- Interpret carries a required redo and the Project redo is an operator's.
+  Project waits for Interpret's repair, and Interpret is refused while the
+  Project redo is recorded as running. An operator Project redo in that state
+  has no command that completes Interpret. A supervisor start, an Interpret
+  redo, an all-phase redo and a flag recomputation are all refused, and a
+  rewind only stamps. The completion error says so in place of the rerun
+  command.
+- Interpret carries a required redo and the Project redo is itself a required
+  one. The failure returns it to a pending required redo, which blocks no
+  other phase. The next supervisor start runs the Interpret repair and then
+  the Project one.
+
+The second case also follows a refusal at a progress write. A later build
+with another interpreter content hash gets out of it: the Interpret redo that
+adopts the new hash supersedes the Project redo.
 
 The redo holds the Live lock only while it settles a stale row. A supervisor
 that starts at that instant and tries to take the Live lock during the hold
@@ -1944,7 +1975,8 @@ range as they were. Completion then finds a changed generation and does not
 clear the redo or restore the cursor. It records the failure on the row, keeps
 the redo in progress, and returns `was overtaken before it completed` with the
 command to rerun. A Project redo completes all the same while Interpret
-carries a required redo, as [table ownership](#table-ownership) explains.
+carries a required redo that reaches the top of the Project redo's range, as
+[table ownership](#table-ownership) explains.
 Completion, failure recording, and downstream redo finalization use
 the connection that owns the phase advisory lock, so losing that connection
 also prevents their writes. This generation fence closes the redo-progress

@@ -34,6 +34,7 @@ type ActiveMarkerRow = (
     i64,
     Option<i64>,
     Option<i64>,
+    bool,
 );
 
 pub(crate) fn replacement_hash<'a>(
@@ -59,13 +60,15 @@ pub(crate) async fn lock_completion_coverage(
                 redo_from_block_number, redo_to_block_number,
                 redo_attempt_generation,
                 COALESCE(redo_requested_from_block_number, redo_from_block_number),
-                COALESCE(redo_requested_to_block_number, redo_to_block_number)
+                COALESCE(redo_requested_to_block_number, redo_to_block_number),
+                COALESCE(last_error LIKE $3, false)
          FROM chain_phase_state
          WHERE chain_id = $1 AND phase_name = $2
          FOR UPDATE",
     )
     .bind(chain_id)
     .bind(phase.as_str())
+    .bind(crate::redo_stamp::required_redo_owner_pattern())
     .fetch_optional(&mut **transaction)
     .await
     .map_err(|error| {
@@ -82,6 +85,7 @@ pub(crate) async fn lock_completion_coverage(
         generation,
         Some(requested_from),
         Some(requested_to),
+        required,
     )) = marker
     else {
         return Err(RunnerError::data_integrity(format!(
@@ -95,21 +99,29 @@ pub(crate) async fn lock_completion_coverage(
         "redo"
     };
     if mode == expected_mode && persisted == expected {
-        if generation != expected_generation
-            && !(phase == PhaseName::Project
-                && interpret_repair_pending(transaction, chain_id).await?)
-        {
+        if generation != expected_generation {
             // A required-redo stamp landed on this redo after its last progress
             // write and left the range as it was, so only the generation shows it.
             // The stamp cleared the progress this completion would certify.
-            // The rerun names the requested range, which for Project can be
-            // narrower than the execution range compared above.
-            return Ok(CompletionCoverage::Overtaken(overtaken_error(
-                chain_id,
-                phase,
-                &mode,
-                BlockRange::new(requested_from, requested_to)?,
-            )));
+            let interpret_repair = if phase == PhaseName::Project {
+                interpret_repair_end(transaction, chain_id).await?
+            } else {
+                InterpretRepair::None
+            };
+            if !interpret_repair.reaches(persisted.to) {
+                // The rerun names the requested range, which for Project can be
+                // narrower than the execution range compared above.
+                return Ok(CompletionCoverage::Overtaken(overtaken_error(
+                    chain_id,
+                    phase,
+                    &mode,
+                    BlockRange::new(requested_from, requested_to)?,
+                    // A required Project redo returns to pending when it fails, and
+                    // the next supervisor start runs both repairs. An operator's
+                    // Project redo stays recorded as running and blocks Interpret.
+                    interpret_repair.is_pending() && !required,
+                )));
+            }
         }
         return Ok(CompletionCoverage::Exact);
     }
@@ -162,11 +174,36 @@ pub(crate) async fn lock_completion_coverage(
     Ok(CompletionCoverage::Widened(persisted))
 }
 
-/// Whether Interpret carries a required redo, read while the Project row is locked.
+/// Interpret's required redo, if it carries one, read while the Project row is
+/// locked.
+enum InterpretRepair {
+    None,
+    /// The last block of the repair's range.
+    Through(Option<i64>),
+}
+
+impl InterpretRepair {
+    fn is_pending(&self) -> bool {
+        matches!(self, Self::Through(_))
+    }
+
+    /// Whether the repair reaches `project_to`, the top of the range a Project
+    /// completion certifies.
+    fn reaches(&self, project_to: i64) -> bool {
+        matches!(self, Self::Through(Some(to)) if *to >= project_to)
+    }
+}
+
+/// A Project redo overtaken by a reorg may still complete when Interpret's
+/// required redo reaches the top of the Project range: the Interpret repair ends
+/// by stamping Project over the repair's range up to Project's cursor, so the
+/// next supervisor start redoes Project on the new chain. A repair that ends
+/// lower leaves the blocks above it to nobody, so the caller refuses. That
+/// happens when Project stands above Interpret: a stamp on Interpret stops at
+/// Interpret's cursor, and a fork above that cursor stamps Project alone.
 ///
-/// A Project redo overtaken by a reorg may still complete when this holds: the
-/// Interpret repair ends by stamping Project, so the next supervisor start redoes
-/// Project on the new chain. Without it nothing would, so the caller refuses.
+/// The range read is Interpret's execution range. Only Project records a separate
+/// requested range.
 ///
 /// A plain read is enough. A head publication stamps a running Project redo, and
 /// it stamps Interpret before Project in one transaction. The completion of an
@@ -178,20 +215,23 @@ pub(crate) async fn lock_completion_coverage(
 /// since: an Interpret redo cannot start while this Project redo is running. A
 /// publication still waiting on the Project row left the generation unchanged and
 /// does not reach this read.
-async fn interpret_repair_pending(
+async fn interpret_repair_end(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
-) -> RunnerResult<bool> {
+) -> RunnerResult<InterpretRepair> {
     sqlx::query_scalar(
-        "SELECT redo_in_progress AND COALESCE(last_error LIKE $2, false)
+        "SELECT redo_to_block_number
          FROM chain_phase_state
-         WHERE chain_id = $1 AND phase_name = 'interpret'",
+         WHERE chain_id = $1 AND phase_name = 'interpret'
+           AND redo_in_progress AND last_error LIKE $2",
     )
     .bind(chain_id)
     .bind(crate::redo_stamp::required_redo_owner_pattern())
     .fetch_optional(&mut **transaction)
     .await
-    .map(|pending: Option<bool>| pending.unwrap_or(false))
+    .map(|repair: Option<Option<i64>>| {
+        repair.map_or(InterpretRepair::None, InterpretRepair::Through)
+    })
     .map_err(|error| {
         RunnerError::database(
             format!("failed to read the Interpret repair for chain {chain_id}"),
@@ -200,7 +240,25 @@ async fn interpret_repair_pending(
     })
 }
 
-fn overtaken_error(chain_id: &str, phase: PhaseName, mode: &str, range: BlockRange) -> RunnerError {
+fn overtaken_error(
+    chain_id: &str,
+    phase: PhaseName,
+    mode: &str,
+    range: BlockRange,
+    blocked_behind_interpret: bool,
+) -> RunnerError {
+    const OVERTAKEN: &str = "a reorg recovery or another required redo was recorded on it after \
+                             its last progress write; the redo stays in progress and nothing was \
+                             restored";
+    if blocked_behind_interpret {
+        return RunnerError::data_integrity(format!(
+            "redo for chain {chain_id} phase {phase} was overtaken before it completed: \
+             {OVERTAKEN}; interpret has a required redo pending, so this {phase} redo {}..={} \
+             cannot be rerun until interpret completes, and no phase-runner command reaches \
+             that from this state (docs/storage.md#table-ownership)",
+            range.from, range.to
+        ));
+    }
     let instruction =
         crate::transitions::redo_rerun_instruction(chain_id, phase, Some(mode), Some(range));
     // Verify waits for the repairs the same reorg left on Interpret and Project.
@@ -210,8 +268,7 @@ fn overtaken_error(chain_id: &str, phase: PhaseName, mode: &str, range: BlockRan
         ""
     };
     RunnerError::data_integrity(format!(
-        "redo for chain {chain_id} phase {phase} was overtaken before it completed: a reorg \
-         recovery or another required redo was recorded on it after its last progress write; \
-         the redo stays in progress and nothing was restored; {after}{instruction}"
+        "redo for chain {chain_id} phase {phase} was overtaken before it completed: \
+         {OVERTAKEN}; {after}{instruction}"
     ))
 }

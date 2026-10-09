@@ -1473,7 +1473,7 @@ redo at completion can be an exception. The redo fails in one of two ways:
 - `redo attempt superseded; progress not recorded`, at a progress write. This
   error names no command.
 - `was overtaken before it completed`, at completion. This error names the
-  command to rerun.
+  command to rerun, or says that no command applies.
 
 [Table ownership](storage.md#table-ownership) says what to run after each, by
 phase, and what the supervisor does next. It also covers the Project rule and

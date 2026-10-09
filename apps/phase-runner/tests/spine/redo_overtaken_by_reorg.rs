@@ -10,9 +10,12 @@
 //! | 2 | Fork published after the redo's last progress write, Live settled by supervisor start-up | Completion refused, repair kept, rerun completes on the new fork | `a_fork_published_after_the_last_progress_write_keeps_the_repair` |
 //! | 3 | Fork published during the redo's batch, Live settled by supervisor start-up | Progress write refused, repair kept | `a_fork_published_during_the_batch_keeps_the_repair` |
 //! | 4 | Row 2 with Live settled by the redo itself after a killed supervisor | Completion refused, repair kept | `a_fork_published_after_a_redo_settled_live_keeps_the_repair` |
-//! | 5 | Project redo, fork published after its last progress write, Interpret stamped by the same publication | Redo completes, the next supervisor start redoes every phase on the new fork | `a_project_redo_overtaken_at_completion_completes_when_interpret_is_stamped` |
+//! | 5 | Project redo, fork published after its last progress write, Interpret stamped by the same publication up to the top of the Project redo's range | Redo completes, the next supervisor start redoes every phase on the new fork | `a_project_redo_overtaken_at_completion_completes_when_interpret_is_stamped` |
 //! | 5b | Row 5 with Project's cursor above Interpret's, so Interpret is not stamped | Completion refused, repair kept, command names the requested range | `a_project_redo_overtaken_at_completion_is_refused_when_interpret_is_not_stamped` |
 //! | 5c | Project redo, fork published during its batch | Unchanged: progress write refused, then neither Project nor Interpret can start | `a_project_redo_overtaken_during_its_batch_is_left_blocked` |
+//! | 5d | Row 5 with Project's cursor one block above Interpret's, so Interpret's stamp ends one block below the top of the Project redo's range | Completion refused, repair kept, error says no command applies. Unchanged after that: the Project rerun waits for the Interpret repair and a supervisor start is refused | `a_project_redo_overtaken_one_block_above_the_interpret_repair_is_refused` |
+//! | 5e | Row 5d, then a second fork that replaces only the block above Interpret's cursor and stamps Project alone | Completion refused, repair kept, error says no command applies | `a_project_redo_stamped_above_an_older_interpret_repair_keeps_the_repair` |
+//! | 5f | Row 5d with the Project redo a required one, run by the operator | Completion refused with the rerun command, the redo returns to a pending required redo, the next supervisor start redoes every phase on the new fork | `a_required_project_redo_overtaken_above_the_interpret_repair_heals_on_supervisor_start` |
 //! | 6 | Verify-only redo beside a supervisor running Live, fork published after its last progress write | Completion refused, repair kept, rerun completes after the Interpret and Project repairs | `a_verify_redo_beside_live_overtaken_at_completion_keeps_the_repair` |
 //! | 7 | All-phase redo overtaken in Interpret | Refused, one first command in both instructions | `an_all_phase_redo_overtaken_in_interpret_names_one_first_command` |
 //! | 8 | Supervisor's own required redo overtaken at completion | That chain stops, the next supervisor start reruns the redo | `a_supervised_required_redo_overtaken_at_completion_stops_the_chain_and_heals_on_restart` |
@@ -39,24 +42,27 @@ struct ForkPublishingPhase {
     pool: sqlx::PgPool,
     chain_id: String,
     publish: Publish,
-    /// The tip hash to publish.
-    tip_hash: String,
+    /// The tip hashes to publish, one publication each, in order.
+    tips: Vec<String>,
     published: AtomicBool,
 }
 
 impl ForkPublishingPhase {
     async fn publish_fork(&self) -> RunnerResult<()> {
         self.published.store(true, Ordering::SeqCst);
-        publish_heads(
-            &self.pool,
-            &self.chain_id,
-            &HeadMarkers {
-                latest: BlockMarker::new(TIP, self.tip_hash.clone())?,
-                safe: None,
-                finalized: None,
-            },
-        )
-        .await
+        for tip in &self.tips {
+            publish_heads(
+                &self.pool,
+                &self.chain_id,
+                &HeadMarkers {
+                    latest: BlockMarker::new(TIP, tip.clone())?,
+                    safe: None,
+                    finalized: None,
+                },
+            )
+            .await?;
+        }
+        Ok(())
     }
 }
 
@@ -172,14 +178,14 @@ fn publishing_phases(
     chain_id: &str,
     publisher: PhaseName,
     publish: Publish,
-    tip_hash: String,
+    tips: Vec<String>,
 ) -> Result<PhaseSet> {
     let publishing = Arc::new(ForkPublishingPhase {
         name: publisher,
         pool: scratch.pool().clone(),
         chain_id: chain_id.to_owned(),
         publish,
-        tip_hash,
+        tips,
         published: AtomicBool::new(false),
     });
     Ok(PhaseSet::new(PhaseName::ALL.map(|name| {
@@ -205,21 +211,21 @@ async fn redo_publishing(
         selection,
         publisher,
         publish,
-        fork_hash(chain_id, TIP),
+        vec![fork_hash(chain_id, TIP)],
     )
     .await
 }
 
-/// As `redo_publishing`, publishing `tip_hash` as the new tip.
+/// As `redo_publishing`, publishing each of `tips` as the new tip in turn.
 async fn redo_publishing_tip(
     scratch: &ScratchDatabase,
     chain_id: &str,
     selection: RedoPhase,
     publisher: PhaseName,
     publish: Publish,
-    tip_hash: String,
+    tips: Vec<String>,
 ) -> Result<RunnerResult<()>> {
-    let phases = publishing_phases(scratch, chain_id, publisher, publish, tip_hash)?;
+    let phases = publishing_phases(scratch, chain_id, publisher, publish, tips)?;
     Ok(runner(
         scratch.runner(),
         phases,
@@ -386,6 +392,36 @@ async fn assert_overtaken(
         )),
         "{message}"
     );
+    assert_repair_kept(scratch, chain_id, phase).await
+}
+
+/// As `assert_overtaken`, for an operator Project redo that no command can rerun
+/// because Interpret carries a required redo.
+async fn assert_overtaken_behind_interpret(
+    scratch: &ScratchDatabase,
+    chain_id: &str,
+    error: &RunnerError,
+) -> Result<()> {
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity, "{error}");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "redo for chain {chain_id} phase project was overtaken before it completed: a reorg \
+             recovery or another required redo was recorded on it after its last progress write; \
+             the redo stays in progress and nothing was restored; interpret has a required redo \
+             pending, so this project redo 0..={TIP} cannot be rerun until interpret completes, \
+             and no phase-runner command reaches that from this state \
+             (docs/storage.md#table-ownership)"
+        )
+    );
+    assert_repair_kept(scratch, chain_id, PhaseName::Project).await
+}
+
+async fn assert_repair_kept(
+    scratch: &ScratchDatabase,
+    chain_id: &str,
+    phase: PhaseName,
+) -> Result<()> {
     type Marker = (bool, Option<i64>, Option<i64>, Option<i64>, Option<i64>);
     let marker: Marker = sqlx::query_as(
         "SELECT redo_in_progress, redo_from_block_number, redo_to_block_number,
@@ -454,6 +490,11 @@ async fn a_project_redo_overtaken_at_completion_completes_when_interpret_is_stam
     .fetch_all(scratch.pool())
     .await?;
     assert!(stamped.contains(&"interpret".to_owned()), "{stamped:?}");
+    // The repair ends exactly at the top of the Project redo's range.
+    assert_eq!(
+        interpret_repair(&scratch, chain_id).await?,
+        (true, Some(1), Some(TIP))
+    );
 
     run_supervisor_once(&scratch, chain_id).await?;
     let rows: Vec<(String, String, bool, Option<String>)> = sqlx::query_as(
@@ -509,7 +550,7 @@ async fn a_project_redo_overtaken_at_completion_is_refused_when_interpret_is_not
         RedoPhase::Phase(PhaseName::Project),
         PhaseName::Project,
         Publish::AfterProgress,
-        tip_only,
+        vec![tip_only],
     )
     .await?
     .expect_err("nothing would redo Project after this completion, so it is refused");
@@ -536,6 +577,199 @@ async fn a_project_redo_overtaken_at_completion_is_refused_when_interpret_is_not
     assert_eq!(
         current_hash(&scratch, chain_id, PhaseName::Project).await?,
         Some(format!("{chain_id}-tip-only-fork"))
+    );
+    scratch.cleanup().await
+}
+
+/// Interpret's redo marker: in progress, first block, last block.
+async fn interpret_repair(
+    scratch: &ScratchDatabase,
+    chain_id: &str,
+) -> Result<(bool, Option<i64>, Option<i64>)> {
+    Ok(sqlx::query_as(
+        "SELECT redo_in_progress, redo_from_block_number, redo_to_block_number
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?)
+}
+
+#[tokio::test]
+async fn a_project_redo_overtaken_one_block_above_the_interpret_repair_is_refused() -> Result<()> {
+    let chain_id = "redo-overtaken-project-above-repair";
+    let scratch = chain_settled_by_supervisor_start(chain_id).await?;
+    // Project stands one block above Interpret. The fork replaces blocks 1 and 2
+    // and stamps both phases, but Interpret's stamp stops at its own cursor.
+    set_phase_extent(scratch.pool(), chain_id, PhaseName::Interpret, TIP - 1).await?;
+    let error = redo_publishing(
+        &scratch,
+        chain_id,
+        RedoPhase::Phase(PhaseName::Project),
+        PhaseName::Project,
+        Publish::AfterProgress,
+    )
+    .await?
+    .expect_err("Interpret's repair ends one block below the top of the Project redo");
+    assert_eq!(
+        interpret_repair(&scratch, chain_id).await?,
+        (true, Some(1), Some(TIP - 1))
+    );
+    assert_overtaken_behind_interpret(&scratch, chain_id, &error).await?;
+
+    // Unchanged for a refused Project redo: it waits for the Interpret repair, and
+    // a supervisor start is refused while the Project redo is recorded as running.
+    let rerun = redo_publishing(
+        &scratch,
+        chain_id,
+        RedoPhase::Phase(PhaseName::Project),
+        PhaseName::Project,
+        Publish::Never,
+    )
+    .await?
+    .expect_err("Project waits for the Interpret repair");
+    assert!(
+        rerun
+            .to_string()
+            .contains("prerequisite interpret is not completed"),
+        "{rerun}"
+    );
+    let start = run_supervisor_once(&scratch, chain_id)
+        .await
+        .expect_err("the supervisor start is refused beside the recorded Project redo");
+    assert!(
+        start.to_string().contains("while phase project is running"),
+        "{start}"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn a_project_redo_stamped_above_an_older_interpret_repair_keeps_the_repair() -> Result<()> {
+    let chain_id = "redo-overtaken-project-twice";
+    let scratch = chain_settled_by_supervisor_start(chain_id).await?;
+    // Project stands one block above Interpret. The first fork replaces blocks 1
+    // and 2 and stamps both phases. The second replaces block 2 alone, above
+    // Interpret's cursor, and stamps Project only.
+    set_phase_extent(scratch.pool(), chain_id, PhaseName::Interpret, TIP - 1).await?;
+    let second_tip = format!("{chain_id}-fork-c-{TIP}");
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state
+         )
+         VALUES ($1, $2, $3, $4, to_timestamp($4), 'observed')",
+    )
+    .bind(chain_id)
+    .bind(&second_tip)
+    .bind(fork_hash(chain_id, TIP - 1))
+    .bind(TIP)
+    .execute(scratch.pool())
+    .await?;
+
+    let outcome = redo_publishing_tip(
+        &scratch,
+        chain_id,
+        RedoPhase::Phase(PhaseName::Project),
+        PhaseName::Project,
+        Publish::AfterProgress,
+        vec![fork_hash(chain_id, TIP), second_tip],
+    )
+    .await?;
+    // Interpret's repair stops at its own cursor, below the block replaced twice.
+    assert_eq!(
+        interpret_repair(&scratch, chain_id).await?,
+        (true, Some(1), Some(TIP - 1))
+    );
+    let error =
+        outcome.expect_err("Interpret's repair does not cover the block replaced above its cursor");
+    assert_overtaken_behind_interpret(&scratch, chain_id, &error).await?;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn a_required_project_redo_overtaken_above_the_interpret_repair_heals_on_supervisor_start()
+-> Result<()> {
+    let chain_id = "redo-overtaken-project-required";
+    let scratch = chain_settled_by_supervisor_start(chain_id).await?;
+    // Project stands one block above Interpret. A fork of that block alone leaves
+    // a required redo on Project and none on Interpret.
+    set_phase_extent(scratch.pool(), chain_id, PhaseName::Interpret, TIP - 1).await?;
+    let tip_only = format!("{chain_id}-tip-only-fork");
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state
+         )
+         VALUES ($1, $2, $3, $4, to_timestamp($4), 'observed')",
+    )
+    .bind(chain_id)
+    .bind(&tip_only)
+    .bind(format!("{chain_id}-block-{}", TIP - 1))
+    .bind(TIP)
+    .execute(scratch.pool())
+    .await?;
+    publish_heads(
+        scratch.pool(),
+        chain_id,
+        &HeadMarkers {
+            latest: BlockMarker::new(TIP, tip_only)?,
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?;
+
+    // The operator runs that required redo. A second fork, of blocks 1 and 2,
+    // lands after its last progress write and stamps Interpret up to its cursor.
+    let error = redo_publishing(
+        &scratch,
+        chain_id,
+        RedoPhase::Phase(PhaseName::Project),
+        PhaseName::Project,
+        Publish::AfterProgress,
+    )
+    .await?
+    .expect_err("Interpret's repair ends one block below the top of the Project redo");
+    assert_eq!(
+        interpret_repair(&scratch, chain_id).await?,
+        (true, Some(1), Some(TIP - 1))
+    );
+    assert_overtaken(&scratch, chain_id, PhaseName::Project, &error).await?;
+    let recorded: Option<String> = sqlx::query_scalar(
+        "SELECT last_error FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    let recorded = recorded.expect("the refusal is recorded on the row");
+    // The redo is a required one again, so it does not block the other phases.
+    assert!(
+        recorded.starts_with("required downstream redo: "),
+        "{recorded}"
+    );
+
+    run_supervisor_once(&scratch, chain_id).await?;
+    let rows: Vec<(String, String, bool, Option<String>)> = sqlx::query_as(
+        "SELECT phase_name, phase_status, redo_in_progress, current_block_hash
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project', 'verify')
+         ORDER BY phase_name",
+    )
+    .bind(chain_id)
+    .fetch_all(scratch.pool())
+    .await?;
+    let healed = |phase: &str| {
+        (
+            phase.to_owned(),
+            "completed".to_owned(),
+            false,
+            Some(fork_hash(chain_id, TIP)),
+        )
+    };
+    assert_eq!(
+        rows,
+        [healed("interpret"), healed("project"), healed("verify")]
     );
     scratch.cleanup().await
 }
@@ -712,7 +946,7 @@ async fn a_supervised_required_redo_overtaken_at_completion_stops_the_chain_and_
         chain_id,
         PhaseName::Interpret,
         Publish::AfterProgress,
-        format!("{chain_id}-block-{TIP}"),
+        vec![format!("{chain_id}-block-{TIP}")],
     )?;
     let error = runner(
         scratch.runner(),
