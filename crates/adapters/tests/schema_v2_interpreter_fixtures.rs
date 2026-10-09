@@ -28,6 +28,9 @@ const V1_RECORD_CLEARS: &str = include_str!("fixtures/interpreters/v1-record-cle
 const V2_REGISTRY_SELF_SUBREGISTRY: &str =
     include_str!("fixtures/interpreters/v2-registry-self-subregistry.json");
 
+#[path = "fixtures/interpreters/v2_parent_claim_unattached.rs"]
+mod v2_parent_claim_unattached;
+
 sol! {
     event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
     event AddrChanged(bytes32 indexed node, address a);

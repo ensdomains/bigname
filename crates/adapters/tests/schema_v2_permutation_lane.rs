@@ -848,6 +848,69 @@ fn v2_nested_subregistry_restatement_preserves_authoritative_sibling_invalidatio
     )
 }
 
+/// The `UnattachedParentClaim` perturbation gives a name's subregistry its own logs: it
+/// registers `kid` and claims a label its parent holds no token for. Over the default seeds
+/// every such sequence must converge with one batch per block and the claim must never release
+/// `kid`. Where the parent token is still live when `kid` is registered, `kid` is granted under
+/// the parent token that points at its registry. The floor of four such sequences keeps the
+/// perturbation from going dark.
+#[test]
+fn v2_unattached_parent_claim_keeps_the_mount_path_in_every_replay_shape() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let kid = format!("{:#x}", labelhash("kid"));
+    let (mut sequences, mut named) = (0_usize, 0_usize);
+    for case in 0..DEFAULT_CASES {
+        let seed = DEFAULT_SEED.wrapping_add(case.wrapping_mul(CASE_STRIDE));
+        let scenario = scenario::generate(&ENS_V2_SEPOLIA, &wiring, seed);
+        let dimensions = &scenario.dimensions;
+        if !dimensions.has(scenario::Perturbation::UnattachedParentClaim)
+            || !matches!(
+                dimensions.subname_shape,
+                scenario::SubnameShape::RegistrySubnode | scenario::SubnameShape::DeepSubnode
+            )
+        {
+            continue;
+        }
+        sequences += 1;
+        let context = scenario.describe();
+        let input = wiring.batch_input(&scenario.blocks, &scenario.logs)?;
+        let blocks = input.blocks.len();
+        let fresh = interpret_schema_v2_batch(input.clone())?;
+        converge(
+            &context,
+            input,
+            (0..blocks).map(|index| index..index + 1).collect(),
+        )?;
+        let mount_paths = ["alpha", "bravo", "charlie"]
+            .map(|label| format!("ens:{:#x}", namehash(&["kid", label, "eth"])));
+        let mut granted = false;
+        for event in &fresh.normalized_events {
+            if event.after_state["labelhash"] != kid.as_str()
+                && event.after_state["source_event"] != "ParentUpdated"
+            {
+                continue;
+            }
+            assert!(
+                !(event.event_kind == "RegistrationReleased"
+                    && event.after_state["source_event"] == "ParentUpdated"),
+                "{context}: a parent claim released {event:?}"
+            );
+            granted |= event.event_kind == "RegistrationGranted"
+                && event
+                    .logical_name_id
+                    .as_ref()
+                    .is_some_and(|id| mount_paths.contains(id));
+        }
+        named += usize::from(granted);
+    }
+    assert!(
+        sequences >= 4 && named >= 4,
+        "{sequences} sequences carried the perturbation and {named} named kid by its mount"
+    );
+    Ok(())
+}
+
 fn converge_without_artifacts(context: &str, input: BatchInput, blocks: usize) -> Result<()> {
     let splits = (0..blocks).map(|index| index..index + 1).collect();
     assert!(

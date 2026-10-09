@@ -354,33 +354,44 @@ fn settle_block_boundary(
                 )
             })?
             .clone();
-        if let Some(interpreted) = protocol::v2_registry::boundary_reassertion(&transition, block) {
+        if let Some(interpreted) =
+            protocol::v2_registry::boundary::boundary_reassertion(&transition, block)
+        {
             identity::materialize_v2_boundary(&source, block, interpreted, state, output)?;
             continue;
         }
-        let mut interpreted =
-            protocol::v2_boundary_expiration(transition, block.block_timestamp.unix_timestamp())?;
-        if !interpreted.labels.is_empty()
-            || !interpreted.names.is_empty()
-            || !interpreted.resources.is_empty()
-            || !interpreted.bindings.is_empty()
-            || !interpreted.discovery.is_empty()
-        {
-            bail!("ENSv2 expiration boundary produced an unsupported materialization");
+        let moved = protocol::v2_registry::boundary::split_boundary_move(transition, block);
+        if let Some(released) = moved.released {
+            let at = block.block_timestamp.unix_timestamp();
+            let mut interpreted = protocol::v2_boundary_expiration(released, at)?;
+            if !interpreted.labels.is_empty()
+                || !interpreted.names.is_empty()
+                || !interpreted.resources.is_empty()
+                || !interpreted.bindings.is_empty()
+                || !interpreted.discovery.is_empty()
+            {
+                bail!("ENSv2 expiration boundary produced an unsupported materialization");
+            }
+            for closure in interpreted.binding_closures.drain(..) {
+                output.binding_closures.push(BindingClosure {
+                    logical_name_id: closure.logical_name_id,
+                    authority_arm: closure.authority_arm,
+                    chain_id: block.chain_id.clone(),
+                    except_surface_binding_id: None,
+                    active_to: block.block_timestamp,
+                    block_number: block.block_number,
+                    transaction_index: -1,
+                    log_index: -1,
+                });
+            }
+            normalized::materialize_boundary(&source, block, interpreted.events, state, output);
         }
-        for closure in interpreted.binding_closures.drain(..) {
-            output.binding_closures.push(BindingClosure {
-                logical_name_id: closure.logical_name_id,
-                authority_arm: closure.authority_arm,
-                chain_id: block.chain_id.clone(),
-                except_surface_binding_id: None,
-                active_to: block.block_timestamp,
-                block_number: block.block_number,
-                transaction_index: -1,
-                log_index: -1,
-            });
+        if let Some((mut granted, raw)) = moved.granted {
+            let events = std::mem::take(&mut granted.events);
+            let origin = identity::Origin::Boundary(&source, block);
+            identity::materialize_from(&origin, &raw, &granted, state, output)?;
+            normalized::materialize_boundary(&source, block, events, state, output);
         }
-        normalized::materialize_boundary(&source, block, interpreted.events, state, output);
     }
     Ok(())
 }

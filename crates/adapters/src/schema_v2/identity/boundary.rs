@@ -3,17 +3,81 @@ use bigname_domain::normalization::ENS_NORMALIZER_VERSION;
 use serde_json::{Value, json};
 
 use crate::schema_v2::{
-    common::{dns_encode, hash_hex, normalization_flag},
+    catalog::Selected,
+    common::{dns_encode, hash_hex, normalization_flag, provenance},
     manifest::ManifestSource,
     model::{
-        BatchOutput, BindingClosure, LabelPreimage, NameSurface, RawBlockInput, RawNameEvidence,
-        Resource, SurfaceBinding, TokenLineage,
+        BatchOutput, BindingClosure, LabelPreimage, NameSurface, NormalizedEvent, RawBlockInput,
+        RawLogInput, RawNameEvidence, Resource, SurfaceBinding, TokenLineage,
     },
-    normalized::boundary_preimage_event,
+    normalized::{boundary_preimage_event, preimage_event},
     protocol::Interpreted,
     seam::{ARM_WIDE_BINDING_CLOSE_KEY, CLOSED_AUTHORITY_ARM_KEY, SURFACE_BINDING_ID_KEY},
     state::State,
 };
+
+/// What identity rows are derived from: a log, or a block boundary, which has no log.
+pub(in crate::schema_v2) enum Origin<'a> {
+    Log(&'a Selected),
+    Boundary(&'a ManifestSource, &'a RawBlockInput),
+}
+
+impl Origin<'_> {
+    pub(super) fn source(&self) -> &ManifestSource {
+        match self {
+            Self::Log(selected) => &selected.source,
+            Self::Boundary(source, _) => source,
+        }
+    }
+
+    pub(super) fn source_event(&self) -> &str {
+        match self {
+            Self::Log(selected) => &selected.event.name,
+            Self::Boundary(..) => "RegistryPathExpired",
+        }
+    }
+
+    pub(super) fn provenance(&self, raw: &RawLogInput) -> Value {
+        match self {
+            Self::Log(selected) => {
+                provenance(raw, &selected.event.name, selected.source.manifest_id)
+            }
+            Self::Boundary(source, block) => block_provenance(source, block),
+        }
+    }
+
+    pub(super) fn preimage(
+        &self,
+        raw: &RawLogInput,
+        logical_name_id: Option<String>,
+        identity_suffix: &str,
+        after_state: Value,
+    ) -> NormalizedEvent {
+        match self {
+            Self::Log(selected) => {
+                preimage_event(selected, raw, logical_name_id, identity_suffix, after_state)
+            }
+            Self::Boundary(source, block) => boundary_preimage_event(
+                source,
+                block,
+                logical_name_id,
+                identity_suffix,
+                after_state,
+            ),
+        }
+    }
+}
+
+fn block_provenance(source: &ManifestSource, block: &RawBlockInput) -> Value {
+    json!({
+        "kind":"raw_block",
+        "chain_id":block.chain_id,
+        "block_hash":block.block_hash,
+        "block_number":block.block_number,
+        "block_timestamp":block.block_timestamp.unix_timestamp(),
+        "source_manifest_id":source.manifest_id,
+    })
+}
 
 pub(in crate::schema_v2) fn materialize_v2_boundary(
     source: &ManifestSource,
@@ -45,14 +109,7 @@ pub(in crate::schema_v2) fn materialize_v2_boundary(
         .context("ENSv2 boundary reassertion has no binding identity")?;
     ensure!(name.bind, "ENSv2 boundary reassertion is not binding");
     let logical_name_id = format!("{}:{}", source.namespace, name.namehash);
-    let provenance = json!({
-        "kind":"raw_block",
-        "chain_id":block.chain_id,
-        "block_hash":block.block_hash,
-        "block_number":block.block_number,
-        "block_timestamp":block.block_timestamp.unix_timestamp(),
-        "source_manifest_id":source.manifest_id,
-    });
+    let provenance = block_provenance(source, block);
     let flags = name
         .labels
         .iter()

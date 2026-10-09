@@ -815,6 +815,7 @@ CREATE INDEX IF NOT EXISTS normalized_events_v2_direct_node_probe_idx
 -- Every ENSv2 event filed under one of a set of ENSv2 state keys (the key arm of events.sql,
 -- whose array is v2_keys.sql). An event is filed under several keys, so the index is an
 -- inverted index over the array; `v2_event_keys` in the adapter crate computes the same keys.
+-- The last element files an event under the registry its `subregistry` value names.
 CREATE INDEX IF NOT EXISTS normalized_events_v2_key_probe_idx
     ON normalized_events USING gin ((
         array_remove(ARRAY[
@@ -822,7 +823,8 @@ CREATE INDEX IF NOT EXISTS normalized_events_v2_key_probe_idx
             lower(split_part(raw_fact_ref ->> 'state_scope', ':', 1)) || ':*',
             lower(split_part(raw_fact_ref ->> 'state_scope', ':', 1)) || ':' || lower(left(after_state ->> 'new_token_id', greatest(length(after_state ->> 'new_token_id') - 8, 0))) || '00000000',
             lower(split_part(raw_fact_ref ->> 'state_scope', ':', 1)) || ':' || lower(left(COALESCE(after_state ->> 'resource', after_state ->> 'upstream_resource'), greatest(length(COALESCE(after_state ->> 'resource', after_state ->> 'upstream_resource')) - 8, 0))) || '00000000',
-            lower(split_part(raw_fact_ref ->> 'state_scope', ':', 1)) || ':' || lower(left(after_state ->> 'labelhash', greatest(length(after_state ->> 'labelhash') - 8, 0))) || '00000000'
+            lower(split_part(raw_fact_ref ->> 'state_scope', ':', 1)) || ':' || lower(left(after_state ->> 'labelhash', greatest(length(after_state ->> 'labelhash') - 8, 0))) || '00000000',
+            lower(after_state ->> 'subregistry') || ':00000000'
         ]::text[], NULL)
     ))
     WHERE canonicality_state IN ('canonical','safe','finalized')

@@ -1,3 +1,4 @@
+pub(in crate::schema_v2) mod boundary;
 mod expiry;
 mod registrar;
 mod topology;
@@ -22,7 +23,6 @@ use alloy_primitives::{Address, U256, hex, keccak256};
 use alloy_sol_types::sol;
 use anyhow::{Context, bail};
 use serde_json::{Value, json};
-pub(in crate::schema_v2) use topology::boundary_reassertion;
 use topology::{
     append_resolver_discovery_closures, append_terminal_boundaries,
     append_token_discovery_closures, append_v2_name_transitions, discovery_observation_key,

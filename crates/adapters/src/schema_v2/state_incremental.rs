@@ -82,6 +82,7 @@ impl State {
             v2_tokens_by_current_name_index: Default::default(),
             v2_entry_by_parent_label: Default::default(),
             v2_parent_claims: Default::default(),
+            v2_mounts_by_subregistry: Default::default(),
             v2_resolver_hints: Default::default(),
             v2_resolver_arguments: Default::default(),
             materialized_token_lineages: OrdSet::new(),

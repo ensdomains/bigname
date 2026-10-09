@@ -2,6 +2,9 @@ use super::*;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+#[path = "v2_mount_path.rs"]
+mod v2_mount_path;
+
 fn block(number: i64) -> RawBlockInput {
     RawBlockInput {
         chain_id: CHAIN.to_owned(),
@@ -252,7 +255,12 @@ fn scope(
     }
 }
 
-pub(super) fn assert_scoped_matches(mut input: BatchInput) -> anyhow::Result<AdapterSession> {
+pub(super) fn assert_scoped_matches(input: BatchInput) -> anyhow::Result<AdapterSession> {
+    Ok(scoped_match(input)?.0)
+}
+
+/// Runs the scoped comparison and also returns the keys the last attempt had loaded.
+fn scoped_match(mut input: BatchInput) -> anyhow::Result<(AdapterSession, V1BatchDependencies)> {
     if input.blocks.is_empty() {
         input.blocks = input
             .raw_logs
@@ -318,7 +326,7 @@ pub(super) fn assert_scoped_matches(mut input: BatchInput) -> anyhow::Result<Ada
     }
     // Mirrors the Interpret loader: an attempt that reads a key outside the loaded set is
     // discarded, and the next attempt loads that key too.
-    let prepared = loop {
+    let (prepared, loaded) = loop {
         let (scoped, rows) = scope(dependencies.clone(), &prior)?;
         assert!(scoped.unsupported.is_empty());
         let attempt = restore_schema_v2_lookahead_session(
@@ -344,7 +352,7 @@ pub(super) fn assert_scoped_matches(mut input: BatchInput) -> anyhow::Result<Ada
             )
         });
         match attempt {
-            Ok(prepared) => break prepared,
+            Ok(prepared) => break (prepared, scoped),
             Err(error) => {
                 let Some(unloaded) = error.downcast_ref::<UnloadedKeys>() else {
                     return Err(error);
@@ -367,7 +375,7 @@ pub(super) fn assert_scoped_matches(mut input: BatchInput) -> anyhow::Result<Ada
     let (actual, session) = complete(prepared, &prior)?;
     assert_eq!(actual, expected, "complete scoped suffix output differs");
     SCOPED_COMPARISONS.set(SCOPED_COMPARISONS.get() + 1);
-    Ok(session)
+    Ok((session, loaded))
 }
 
 /// The certificate for history with no ENSv2 token: no expiry can be crossed.

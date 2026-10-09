@@ -1,5 +1,6 @@
-//! One public invariant across overlapping mounts: canonical expiry retires that name while
-//! an independently live physical route keeps serving the requested node's own records.
+//! Overlapping mounts of a migrated wrapper registry. When the claimed entry expires, the
+//! registry moves to its other live mount, `native105.eth`, where an ENSv1-held name has the
+//! same namehash. An independently live physical route keeps serving the deeper ENSv1 names.
 //! These are constructed admitted ABI logs through Interpret/Project, not EVM execution.
 use super::*;
 use std::collections::BTreeMap;
@@ -293,7 +294,7 @@ async fn setup_native() -> Result<(TestDatabase, Address, BTreeMap<&'static str,
     ));
     // X has its own live canonical mount outside W. A later X pointer change therefore
     // cannot select the alternate descendants merely by invalidating W's original name;
-    // Project must traverse the physical W[branch] edge after its canonical-name clear.
+    // Project must traverse the physical W[branch] edge after W leaves its canonical name.
     // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/BatchRegistrar.sol:L48-L71 @ ens_v2_sepolia_20261001@07e55a05)
     logs.extend(transaction(
         123,
@@ -337,22 +338,34 @@ async fn setup_native() -> Result<(TestDatabase, Address, BTreeMap<&'static str,
     Ok((database, resolver, resources))
 }
 
-async fn assert_canonical_retirement(
+/// The claimed entry's expiry moves W's tokens from `NAME` to `native105.eth`. The old path is
+/// released as expired and the new path is granted, both at the block boundary.
+async fn assert_canonical_move(
     database: &TestDatabase,
     resources: &BTreeMap<&str, Uuid>,
+    resolver: Address,
     immediate_state: bool,
 ) -> Result<()> {
     for (label, field) in [("leaf", "resolver"), ("branch", "subregistry")] {
+        let kind = if field == "resolver" {
+            "ResolverChanged"
+        } else {
+            "SubregistryChanged"
+        };
         let retirement: Value = sqlx::query_scalar(
             "SELECT to_jsonb(event) FROM normalized_events event WHERE chain_id=$1 AND resource_id=$2
              AND block_number=$3 AND event_kind=$4 AND consumer_visibility='activated'
              AND after_state->>'source_event'='RegistryPathExpired'
              AND after_state->>'derived_from'='interpreter_state'
              AND after_state->>'terminal_reason'='registry_name_binding_expired'",
-        ).bind(PATH_CHAIN).bind(resources[label]).bind(BASE+124)
-            .bind(if field=="resolver" {"ResolverChanged"} else {"SubregistryChanged"})
+        ).bind(PATH_CHAIN).bind(resources[label]).bind(BASE+124).bind(kind)
             .fetch_one(&database.pool).await?;
         assert!(retirement["after_state"][field].is_null(), "{retirement:#}");
+        let old = format!(
+            "ens:{}",
+            bigname_lookup::ens_namehash_hex(&format!("{label}.{NAME}"))?
+        );
+        assert_eq!(retirement["logical_name_id"], old, "{retirement:#}");
         if immediate_state {
             let expiry:String=sqlx::query_scalar("SELECT expiry::text FROM project_ens_v2_entry_owner WHERE chain_id=$1 AND resource_id=$2 AND status='registered'")
             .bind(PATH_CHAIN).bind(resources[label]).fetch_one(&database.pool).await?;
@@ -367,12 +380,47 @@ async fn assert_canonical_retirement(
              AND after_state->>'terminal_reason'='registry_name_binding_expired' AND consumer_visibility='activated')",
         ).bind(resources[label]).bind(BASE+124).fetch_one(&database.pool).await?;
         assert!(released, "canonical {label} registration must retire");
+        // The same boundary grants the token under the mount and restates its pointer there.
+        let moved = format!(
+            "ens:{}",
+            bigname_lookup::ens_namehash_hex(&format!("{label}.native105.eth"))?
+        );
+        let restated: Value = sqlx::query_scalar(
+            "SELECT to_jsonb(event) FROM normalized_events event WHERE chain_id=$1 AND resource_id=$2
+             AND block_number=$3 AND event_kind=$4 AND consumer_visibility='activated'
+             AND logical_name_id=$5 AND transaction_index IS NULL",
+        ).bind(PATH_CHAIN).bind(resources[label]).bind(BASE+124).bind(kind).bind(&moved)
+            .fetch_one(&database.pool).await?;
+        assert_eq!(
+            restated["after_state"]["source_event"], "RegistryPathExpired",
+            "{restated:#}"
+        );
+        assert!(
+            restated["after_state"]["terminal_reason"].is_null(),
+            "{restated:#}"
+        );
+        let granted: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM normalized_events WHERE resource_id=$1 AND block_number=$2
+             AND event_kind='RegistrationGranted' AND logical_name_id=$3
+             AND after_state->>'source_event'='RegistryPathExpired' AND consumer_visibility='activated')",
+        ).bind(resources[label]).bind(BASE+124).bind(&moved).fetch_one(&database.pool).await?;
+        assert!(granted, "{label} must be granted under its mount path");
         if immediate_state && field == "resolver" {
-            let pointer:Option<String>=sqlx::query_scalar("SELECT resolver_address FROM project_resource_pointer WHERE chain_id=$1 AND resource_id=$2")
+            let pointer: Value = sqlx::query_scalar("SELECT to_jsonb(row) FROM project_resource_pointer row WHERE chain_id=$1 AND resource_id=$2")
                 .bind(PATH_CHAIN).bind(resources[label]).fetch_one(&database.pool).await?;
-            assert!(
-                pointer.is_none(),
-                "canonical pointer clear remains projected"
+            assert_eq!(
+                pointer["resolver_address"],
+                format!("{resolver:#x}"),
+                "{pointer:#}"
+            );
+            assert_eq!(
+                pointer["namehash"],
+                bigname_lookup::ens_namehash_hex(LEAF)?,
+                "{pointer:#}"
+            );
+            assert_eq!(
+                pointer["event_identity"], restated["event_identity"],
+                "{pointer:#}"
             );
         }
     }
@@ -381,6 +429,81 @@ async fn assert_canonical_retirement(
         canonical["data"]["resolver"].is_null(),
         "canonical name still retired: {canonical:#}"
     );
+    Ok(())
+}
+
+/// `leaf.native105.eth` after the move. The namehash also has an ENSv1 arm, the name the
+/// ENSv1 registry holds. A name with an open ENSv2 binding selects the ENSv2 arm
+/// (crates/storage/src/families/name/selection.rs:253-254), so the row serves W's `leaf` token.
+/// The ENSv1 arm is carried as for a migrated name: no `ens_v1` object. No ENSv1→ENSv2
+/// migration proved this name, so it has no `migrated_at`.
+fn assert_moved_leaf(leaf: &Value, resolver: Address, resource: Uuid) {
+    let data = &leaf["data"];
+    assert_eq!(data["authority"], "ens_v2", "{leaf:#}");
+    assert_eq!(data["status"], "active", "{leaf:#}");
+    assert_eq!(data["owner"], HOLDER, "{leaf:#}");
+    assert_eq!(data["registration_id"], resource.to_string(), "{leaf:#}");
+    assert_eq!(
+        data["resolver"]["address"],
+        format!("{resolver:#x}"),
+        "{leaf:#}"
+    );
+    assert_eq!(data["expires_at"], (T + 10).to_string(), "{leaf:#}");
+    assert!(data.get("ens_v1").is_none(), "{leaf:#}");
+    assert!(data.get("migrated_at").is_none(), "{leaf:#}");
+}
+
+/// `leaf.native105.eth` once W's `leaf` entry has expired. The row is a released ENSv2
+/// registration with no resolver. Like any released ENSv2 row on main it keeps its serving
+/// resource, with no record inventory, so the records route answers `inventory_not_available`
+/// rather than `not_found` (crates/storage/src/name_current/row.rs:35-40, TYR-291).
+async fn assert_released_leaf(
+    database: &TestDatabase,
+    address: &str,
+    resource: Uuid,
+) -> Result<()> {
+    let detail = lookup_publication::assert_name_prepared_parity(database, LEAF).await?;
+    assert_eq!(detail["authority"], "ens_v2", "{detail:#}");
+    assert_eq!(detail["read_status"], "ok", "{detail:#}");
+    assert_eq!(detail["status"], "released", "{detail:#}");
+    assert_eq!(
+        detail["registration_id"],
+        resource.to_string(),
+        "{detail:#}"
+    );
+    assert_eq!(
+        detail["lapsed_registration"]["release_kind"], "expired",
+        "{detail:#}"
+    );
+    assert_eq!(detail["lapsed_registration"]["owner"], HOLDER, "{detail:#}");
+    assert!(detail.get("resolver").is_none(), "{detail:#}");
+    assert!(detail.get("primary_address").is_none(), "{detail:#}");
+    assert_eq!(
+        detail["unsupported_fields"],
+        json!(["primary_address"]),
+        "{detail:#}"
+    );
+    let lookup = path_lookup(database, json!({"profile":"detail","inputs":[{"name":LEAF},{"address":address,"relation":"resolves_to"}]})).await?;
+    assert_eq!(lookup["data"][0]["record"], detail, "{lookup:#}");
+    let inverse = lookup["data"][1]["records"]
+        .as_array()
+        .context("inverse lookup records")?;
+    assert!(!inverse.iter().any(|row| row["name"] == LEAF), "{lookup:#}");
+    let records = path_get(
+        database,
+        &format!("/v1/names/{LEAF}/records?source=indexed&keys=addr:60"),
+    )
+    .await?;
+    assert_eq!(
+        records["data"]["records"]["addr:60"],
+        json!({"status": "unsupported", "unsupported_reason": "inventory_not_available"}),
+        "{records:#}"
+    );
+    let logical = format!("ens:{}", bigname_lookup::ens_namehash_hex(LEAF)?);
+    let row = bigname_storage::families::name::load_family_name(&database.pool, &logical)
+        .await?
+        .context("leaf row")?;
+    assert_eq!(row.record_serving_resource_id(), Some(resource));
     Ok(())
 }
 
@@ -406,7 +529,7 @@ async fn empty_clock(database: &TestDatabase, block: i64, clock: u64) -> Result<
 }
 
 #[tokio::test]
-async fn migrated_subname_pro_canonical_expiry_keeps_alternate_physical_path() -> Result<()> {
+async fn migrated_subname_canonical_expiry_moves_the_registry_to_its_live_mount() -> Result<()> {
     eprintln!(
         "TYR105 physical fingerprint {}",
         bigname_content_hash::INTERPRETER_CONTENT_HASH
@@ -415,12 +538,13 @@ async fn migrated_subname_pro_canonical_expiry_keeps_alternate_physical_path() -
     let (database, resolver, resources) = setup_native().await?;
     let before = replay::families(&database).await?;
     empty_clock(&database, 124, T).await?;
-    assert_canonical_retirement(&database, &resources, true).await?;
+    assert_canonical_move(&database, &resources, resolver, true).await?;
     let leaf = path_get(&database, &format!("/v1/names/{LEAF}")).await?;
     assert_eq!(
         leaf["data"]["primary_address"], HOLDER,
         "Canonical parent expiry incorrectly withdrew the live alternate requested-node record: {leaf:#}"
     );
+    assert_moved_leaf(&leaf, resolver, resources["leaf"]);
     for name in [LEAF, DEEP, RESET] {
         assert_name_consumers(&database, name, HOLDER, true, resolver, None).await?;
     }
@@ -444,7 +568,7 @@ async fn migrated_subname_pro_canonical_expiry_keeps_alternate_physical_path() -
         after,
         "canonical expiry reapply"
     );
-    assert_canonical_retirement(&database, &resources, true).await?;
+    assert_canonical_move(&database, &resources, resolver, true).await?;
     for name in [LEAF, DEEP, RESET] {
         assert_name_consumers(&database, name, HOLDER, true, resolver, None).await?;
     }
@@ -521,7 +645,7 @@ async fn migrated_subname_pro_canonical_expiry_keeps_alternate_physical_path() -
     assert_name_consumers(&database, RESET, HOLDER, false, resolver, None).await?;
     assert_name_consumers(&database, DEEP, HOLDER, true, resolver, None).await?;
     empty_clock(&database, 128, T + 10).await?;
-    assert_name_consumers(&database, LEAF, HOLDER, false, resolver, None).await?;
+    assert_released_leaf(&database, HOLDER, resources["leaf"]).await?;
     assert_name_consumers(&database, DEEP, HOLDER, true, resolver, None).await?;
     empty_clock(&database, 129, T + 20).await?;
     assert_name_consumers(&database, DEEP, HOLDER, false, resolver, None).await?;
@@ -548,11 +672,12 @@ async fn migrated_subname_pro_canonical_expiry_keeps_alternate_physical_path() -
         )],
     );
     seed_and_run_with(&database, &record, 131, 131, &[], Some((T + 22) as i64)).await?;
-    assert_name_consumers(&database, LEAF, GRANTEE, false, resolver, None).await?;
+    assert_released_leaf(&database, GRANTEE, resources["leaf"]).await?;
     replay::assert_rebuild(&database, 131).await?;
-    assert_canonical_retirement(&database, &resources, false).await?;
-    for (name, address) in [(LEAF, GRANTEE), (DEEP, HOLDER), (RESET, HOLDER)] {
-        assert_name_consumers(&database, name, address, false, resolver, None).await?;
+    assert_canonical_move(&database, &resources, resolver, false).await?;
+    assert_released_leaf(&database, GRANTEE, resources["leaf"]).await?;
+    for name in [DEEP, RESET] {
+        assert_name_consumers(&database, name, HOLDER, false, resolver, None).await?;
     }
     let evidence = json!({"database":database.database_name,"fingerprint":bigname_content_hash::INTERPRETER_CONTENT_HASH,
         "total_ms":started.elapsed().as_millis(),"canonical_expiry":T,"resources":resources,"new_deep_resource":next_resource,

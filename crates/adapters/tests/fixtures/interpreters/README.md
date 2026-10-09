@@ -52,6 +52,30 @@ ens_v2@a971bd64) The registry accepts a later expiry update for the same token.
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L227 @
 ens_v2@a971bd64)
 
+`v2-parent-claim-unattached.json` is hand-built (TYR-277). Each case mounts a user
+registry under the `eth` registry and gives it a parent claim that does not point
+back, or no claim. The first cases cover:
+
+- A claim moved to a label with no token and then cleared.
+- The mount and the claim in either order inside one block.
+- A claim set before the mount exists, and a claim made valid by a second mount.
+- An unmount and remount, and a mount renewed after its expiry.
+
+The remaining cases change a name at a block boundary, where an expiry has no log:
+
+- A mount expires while a second mount remains, with and without a valid claim.
+- A claimed token under a registry with no suffix expires and reveals a mount path.
+- The old or the new path has a label that is not normalized, in every combination.
+- The moved token is reserved with or without a resource, or registered with no
+  resource.
+- A third party's short mount under a label that is not normalized expires back to the
+  owner's mount.
+
+`v2_parent_claim_unattached.rs` runs every case through the lanes
+`interpret_physical_batches` compares and as one whole batch. It pins the grants,
+reservations and releases of the registry's token and the name surfaces the boundary
+writes.
+
 `v2-registry-self-subregistry.json` holds the production log runs of two `.eth`
 registrations on the Sepolia `ETHRegistry`: block 11,840,453 (transaction
 `0xea03502e4a0eaa4a65c2021bb5d9f77bfb531c4568805e09054454c34607454e`, logs

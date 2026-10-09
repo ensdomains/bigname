@@ -12,6 +12,8 @@ const NEST: &str = "0x0000000000000000000000000000000000000051";
 const NAMESPACE: &str = "ens";
 #[path = "state_v2_expiry_tests.rs"]
 mod expiry_tests;
+#[path = "state_v2_mount_tests.rs"]
+mod mount_tests;
 #[path = "state_v2_pointer_tests.rs"]
 mod pointer_tests;
 #[test]
@@ -123,10 +125,10 @@ fn v2_contested_surface_release_keeps_the_max_key_holder_resource() {
 fn v2_changed_away_winner_hands_the_surface_to_the_surviving_holder() {
     // A registry anchored at "eth" holds "alpha" via one resource, contested by a claim-path
     // registry (anchored at the namespace root, its "eth" token claimed as the nested registry's
-    // parent) whose greater-key "alpha" holder owns the election. Dropping the parent claim
-    // changes the winner's computed name away from the surface; the refresh that visits only the
-    // departing holder must re-elect the survivor's resource rather than leave the surface with
-    // no active resource.
+    // parent) whose greater-key "alpha" holder owns the election. Clearing the "eth" token's
+    // pointer changes the winner's computed name away from the surface. The refresh that visits
+    // only the departing holder must re-elect the survivor's resource rather than leave the
+    // surface with no active resource.
     let mut state = claim_path_contested_state();
     state.refresh_dirty_v2_names(1);
     let name = state
@@ -137,7 +139,7 @@ fn v2_changed_away_winner_hands_the_surface_to_the_surviving_holder() {
         state.name_link_by_namehash(NAMESPACE, &name.namehash),
         Some((name.logical_name_id.clone(), Some(Uuid::from_u128(2))))
     );
-    state.set_v2_parent_claim(NEST, None, b"eth");
+    state.set_v2_subregistry(NEST_ROOT, "0x01", None);
     let transitions = state.refresh_dirty_v2_names(2);
     assert!(transitions.iter().any(|transition| {
         transition.registry == ROOT
@@ -682,6 +684,7 @@ fn assert_v2_indexes_are_derived(state: &State) {
     let mut resolver_tokens = OrdMap::<(String, String), OrdSet<String>>::new();
     let mut resolver_aliases = OrdMap::<(String, String), OrdSet<(String, String)>>::new();
     let mut subregistry_tokens = OrdMap::<(String, String), OrdSet<String>>::new();
+    let mut mounts = OrdMap::<String, OrdSet<String>>::new();
     for (token_key, token) in state.v2_tokens.loaded() {
         let (emitter, token_id) = token_key
             .rsplit_once(':')
@@ -716,6 +719,12 @@ fn assert_v2_indexes_are_derived(state: &State) {
                 .or_default()
                 .insert(token_id.to_owned());
         }
+        if let Some(subregistry) = token.subregistry.as_ref() {
+            mounts
+                .entry(subregistry.to_ascii_lowercase())
+                .or_default()
+                .insert(token_key.clone());
+        }
         if token.subregistry.is_some() {
             subregistry_tokens
                 .entry((
@@ -739,6 +748,7 @@ fn assert_v2_indexes_are_derived(state: &State) {
         *state.v2_token_by_upstream_resource_index.as_map(),
         upstream
     );
+    assert_eq!(*state.v2_mounts_by_subregistry.as_map(), mounts);
     assert_eq!(*state.v2_token_by_name_index.as_map(), names);
     assert_eq!(
         *state.v2_tokens_by_current_name_index.as_map(),

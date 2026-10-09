@@ -85,10 +85,10 @@ impl V1BatchDependencies {
         Ok(())
     }
 
-    /// The ENSv2 state a restored event needs beside its own: for a registry event, its token
-    /// under every id it carries, the registry's parent claim, the parent token a claim names,
-    /// and the claim of a subregistry it points at; for a resolver hint or argument, every
-    /// version of it.
+    /// The ENSv2 state a restored event needs beside its own. For a registry event that is its
+    /// token under every id it carries, the registry's parent claim, the parent token a claim
+    /// names, and the claim and mounts of a subregistry it points at. For a resolver hint or
+    /// argument it is every version of it.
     fn prior_v2_links(&mut self, event: &PriorEventInput) {
         let Some(address) = event
             .state_scope
@@ -210,7 +210,9 @@ impl V1BatchDependencies {
 /// - the emitter and the upstream resource (`resource`, else `upstream_resource`), so a
 ///   resource reaches its token and a resolver's hint for it;
 /// - the emitter and `labelhash`, so a registry's label reaches its token;
-/// - the emitter's whole-registry key.
+/// - the emitter's whole-registry key;
+/// - the registry-level key of the `subregistry` the event names, so a registry reaches every
+///   token that points at it, in any registry.
 pub fn v2_event_keys(event: &PriorEventInput) -> Vec<String> {
     let Some(scope) = event
         .state_scope
@@ -235,6 +237,9 @@ pub fn v2_event_keys(event: &PriorEventInput) -> Vec<String> {
     }
     if let Some(labelhash) = event.after_state.get("labelhash").and_then(Value::as_str) {
         keys.push(v2_key(address, labelhash));
+    }
+    if let Some(subregistry) = event.after_state.get("subregistry").and_then(Value::as_str) {
+        keys.push(v2_key(subregistry, "-"));
     }
     keys
 }
