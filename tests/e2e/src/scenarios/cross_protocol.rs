@@ -165,6 +165,30 @@ async fn plain_unwrapped_eleven_log_migration_publishes_only_v2_authority() -> R
 #[tokio::test]
 async fn unlocked_parent_hides_retained_ens_v1_children() -> Result<()> {
     let harness = support::deploy_connected_migration_harness().await?;
+    // An ENSv1 `.eth` name that ENSv2 neither reserves nor registers. The profile admits the
+    // ENSv2 root registry, so the chain is cut over and this name must resolve to nothing.
+    let rpc = harness.anvil.client();
+    let unreserved_owner = rpc.accounts().await?[1];
+    ens_v1::register_eth_name(
+        &rpc,
+        &harness.ens_v1,
+        "unreserved-lease",
+        unreserved_owner,
+        YEAR,
+        harness.ens_v1.public_resolver.address,
+    )
+    .await?;
+    // Wrapping publishes the name's spelling, so the name has a readable surface.
+    ens_v1::wrap_eth_2ld(
+        &rpc,
+        &harness.ens_v1,
+        unreserved_owner,
+        "unreserved-lease",
+        unreserved_owner,
+        0,
+        harness.ens_v1.public_resolver.address,
+    )
+    .await?;
     let path = support::create_unlocked_migration_path(&harness).await?;
     assert_eq!(
         path.child_owner_after_clear,
@@ -222,6 +246,26 @@ async fn unlocked_parent_hides_retained_ens_v1_children() -> Result<()> {
                     != format!("ens:{:#x}", ens_v1::namehash("child.unlock-migration.eth"))
         }),
         "unlocked migration retained the ENSv1 child: {children_body}"
+    );
+    let (status, unreserved) = body(&run, "/v1/names/ens/unreserved-lease.eth").await?;
+    assert_eq!(status, 200, "unreserved name detail failed: {unreserved}");
+    assert_eq!(
+        pointer(&unreserved, "/declared_state/unresolvable_reason"),
+        "no_live_ens_v2_entry",
+        "an ENSv1-only .eth name resolved on a cut-over chain: {unreserved}"
+    );
+    assert!(
+        pointer(&unreserved, "/declared_state/resolver/address").is_null(),
+        "a resolver was served for an unresolvable name: {unreserved}"
+    );
+    assert_eq!(
+        pointer(&unreserved, "/provenance/authority_selection/authority_arm"),
+        "ens_v1",
+        "{unreserved}"
+    );
+    assert!(
+        pointer(&unreserved, "/declared_state/registration/expiry").is_string(),
+        "the ENSv1 lease must keep its expiry: {unreserved}"
     );
     println!(
         "unlocked reachability: graveyard={:#x} children_status={} child_listed=false",

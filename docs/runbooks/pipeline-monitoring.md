@@ -286,35 +286,35 @@ running binary.
 ## Universal Resolver cutover
 
 Two gauges report, per chain, the
-[Universal Resolver cutover](../glossary.md#universal-resolver-cutover) that the
-names read through: whether the chain resolves `.eth` names through ENSv2.
-Project derives it from the `Upgraded` events of the `ens_execution` proxies,
-and the name reads take it from the same rows, so the gauges show the state at
-the family publication, which is what the API serves while that publication is
-eligible (no overlapping redo, within the publication lag tolerance).
+[Universal Resolver cutover](../glossary.md#universal-resolver-cutover) and
+where the client-facing Universal Resolver proxy forwards. They have different
+sources:
 
-- `phase_runner_universal_resolver_cut_over{chain}` is `1` while the
-  client-facing Universal Resolver proxy, followed through the declared proxies
-  it points at, ends at an implementation listed in the `ens_execution`
-  manifest's `universal_resolver_implementations`.
-- `phase_runner_universal_resolver_unadmitted{chain}` is `1` while that chain of
-  proxies ends at an implementation the manifest neither lists nor declares as
-  a proxy. The chain then reads as not cut over: names ENSv1 decides are served
-  with the pre-cutover expiry, grace and resolvability rules
-  ([Expiry and grace](../api-v1.md#expiry-and-grace)).
+- `phase_runner_universal_resolver_cut_over{chain}` is `1` while the chain's
+  deployment profile admits an ENSv2 root registry. This is the cutover the
+  name reads apply. No proxy upgrade moves it. It changes only with the
+  manifest set.
+- `phase_runner_universal_resolver_unadmitted{chain}` is `1` while the
+  client-facing proxy, followed through the declared proxies it points at,
+  ends at an implementation the `ens_execution` manifest neither lists nor
+  declares as a proxy. Project derives this from the proxies' `Upgraded`
+  events. It moves no name: the chain stays cut over, and names keep the
+  expiry, grace and resolvability they had
+  ([Expiry and grace](../api-v1.md#expiry-and-grace)). It means clients on
+  chain no longer resolve through the deployment bigname models.
 
-A chain with no proxy `Upgraded` at all reads `0` on both and
-is not an alert. A proxy whose implementation is another declared proxy with no
-`Upgraded` yet is not cut over and not unadmitted either. Each refresh exports
-both gauges for every chain with phase rows.
+A chain with no admitted root registry and no proxy `Upgraded` reads `0` on
+both and is not an alert. A proxy whose implementation is another declared
+proxy with no `Upgraded` yet is not unadmitted. Each refresh exports both
+gauges for every chain with phase rows.
 
 The runner logs one warning each time a chain's proxies come to end at a new
 unadmitted implementation, naming the chain, the proxy, the implementation and
 the block of its `Upgraded`, and one info line when that clears.
 
-The gauges follow the family publication, so during a Project rebuild, redo or
-catch-up they describe the block being replayed, and history can hold
-implementations the manifest no longer lists. The paging rule therefore waits
+The `unadmitted` gauge follows the family publication, so during a Project
+rebuild, redo or catch-up it describes the block being replayed, and history
+can hold implementations the manifest no longer lists. The paging rule therefore waits
 for the publication to be current (`phase_runner_served_lag_blocks` between 0
 and 30) and for no Project redo to be running
 (`phase_runner_redo_in_progress{phase="project"}` at `0`): a redo undoes block

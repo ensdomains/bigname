@@ -125,7 +125,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `role_summary` | grouped permission powers for dashboard-style name rows | `role_summary` (unchanged; rewritten to dictionary field names inside) |
 | `authority_context` | required permission-row marker from the [per-name ownership rule](consumer-capabilities.md#ensv1ensv2-mixed-history-ownership); [`current_for_name`](glossary.md#current-for-name-authority-context) means a `name` filter selected the current registration, while [`resource_audit`](glossary.md#resource-audit-context) makes no current-name claim | new in v2 |
 | `capabilities` | product-facing summary of supported namespace capabilities; `verified_records` and `verified_primary_name` carry a `chains` object keyed by numeric chain id with per-chain `{completeness, unsupported_reason?}` | capability flag summaries when exposed to product routes |
-| `resolution` | on a namespace network, the ENS protocol generation `.eth` resolution follows there: `protocol` is `ens_v2` past the [Universal Resolver cutover](glossary.md#universal-resolver-cutover) and `ens_v1` otherwise, with `since_block` the latest Universal Resolver `Upgraded` on the client-facing proxy's path, which dates the current implementation rather than the start of the current `protocol` | new in v2 |
+| `resolution` | on a namespace network, the ENS protocol generation bigname models for `.eth` resolution there. `protocol` is `ens_v2` on a chain with an admitted root registry (the [Universal Resolver cutover](glossary.md#universal-resolver-cutover)), and `ens_v1` otherwise. It describes how bigname composes the names it serves, not which implementation the client-facing Universal Resolver proxy forwards to. `since_block` is the admitted root registry's declared start block. It dates the admission, not a proxy upgrade. It is `null` with `ens_v1`, and also when the admitted root registry declares no start block | new in v2 |
 | `type` | product event category label; as a history filter, one label or a comma-separated set | `event_kind`, compact event `type` aliases |
 | `by_type` | map of product event `type` values to counts | event summary `by_kind` maps keyed by raw event kind |
 | `block_number` | EVM block number | block-number fields inside chain-position objects |
@@ -2042,7 +2042,8 @@ and `grace_ends_at` keep the wrapper expiry even when that date has passed.
 
 Before the Universal Resolver cutover, an ENSv1-controlled name uses its lease
 schedule. After cutover, its admitted ENSv2 reservation/registration supplies E/G
-through expiry and release. Passage of time never falls back to the older lease.
+through expiry and release. The cutover is the admission of the chain's ENSv2
+root registry, so on Sepolia it holds for the whole retained history. Passage of time never falls back to the older lease.
 `ens_v1.expires_at` remains the lease's own date. Renewal or extension changes the
 schedule from actual events. Claim alone preserves it. Re-registration or
 re-reservation establishes a new instance. The emitted premigration bonus and
@@ -2074,23 +2075,43 @@ association can supersede it. A detached predecessor's later renewal or lapse
 cannot. This October 8 presentation rule supersedes ADR 0007's September 26
 registration-metadata rule while preserving its current-control selection.
 
-From the cutover the Universal Resolver reads only ENSv2 registries, so a `.eth`
-name that ENSv1 decides with no live ENSv2 entry, and every name below it,
-resolve to nothing: the deployment registers `eth` without a resolver. Such a
-name keeps its owner, registration and expiry, serves no `resolver` or
-`records`, reports `unresolvable_reason: "no_live_ens_v2_entry"` on name detail
-and lookup, and does not match `relation=resolves_to`. Verified name detail
-applies the same withholding. A live reservation still resolves, through `ENSV1Resolver`, which reads the
-ENSv1 registry. Before the cutover, and on Mainnet, which has none, this rule
-does not apply ([known divergence](upstream.md#ensv1-authority-without-an-ensv2-entry)).
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UniversalResolverV2.sol:L55-L63 @ ens_v2_sepolia_20260916@366de741)
+From the [Universal Resolver cutover](glossary.md#universal-resolver-cutover),
+the chain's names are composed as the ENSv2 Universal Resolver reads them.
+bigname cuts a chain over when its deployment profile admits an ENSv2 root
+registry, not when the client-facing proxy is upgraded.
+
+The ENSv2 Universal Resolver reads only ENSv2 registries, and the deployment
+registers `eth` without a resolver. So a `.eth` name that ENSv1 decides with no
+live ENSv2 entry resolves to nothing, and so does every name below it. Such a
+name:
+
+- keeps its owner, registration and expiry.
+- serves no `resolver` or `records`.
+- reports `unresolvable_reason: "no_live_ens_v2_entry"` on name detail and
+  lookup.
+- does not match `relation=resolves_to`.
+
+Verified name detail applies the same withholding. A live reservation still
+resolves, through `ENSV1Resolver`, which reads the ENSv1 registry.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/UniversalResolverV2.sol:L55-L63 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L58-L85 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ETHRegistry.ts:L39-L51 @ ens_v2_sepolia_20261001@07e55a05)
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20261001@07e55a05)
+
+On a chain whose profile admits no ENSv2 root registry, such as Mainnet today,
+this rule does not apply
+([known divergence](upstream.md#ensv1-authority-without-an-ensv2-entry)). On a
+chain admitted before premigration has reserved every live `.eth` name, the
+unreserved names read unresolvable until they are reserved or registered on
+ENSv2. That window is a deployment decision
+([deployment notes](deployment.md#cutover-at-ensv2-admission)).
 
 After cutover, an ENSv1-selected descendant also follows the current ENSv2 registry
 path at the published block. A live parent alone does not establish that the
-child can resolve. The reader recognizes the admitted October 1 root and ETH
-registries and factory-proven UserRegistry/WrapperRegistry implementations,
+child can resolve. The walk starts at the root registry the deployment profile
+admits, the same declaration that defines the cutover. The reader recognizes
+that root, the admitted October 1 ETH registry and factory-proven
+UserRegistry/WrapperRegistry implementations,
 checks current entry expiry and pointer clears, and retains the nearest resolver
 until a deeper resolver replaces it. Ancestor resolvers must support ENSIP-10.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L22-L85 @ ens_v2_sepolia_20261001@07e55a05)
@@ -3252,8 +3273,8 @@ Current name summary used by search and the namespace expiry list. The expiry li
 <!-- openapi:object NamespaceResolution -->
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
-| `protocol` | enum ResolutionProtocol | always | `ens_v2` past the Universal Resolver cutover, otherwise `ens_v1`. |
-| `since_block` | nullable integer | always | Block of the latest Universal Resolver `Upgraded` that set the current state; null before any upgrade is observed. |
+| `protocol` | enum ResolutionProtocol | always | `ens_v2` on a chain with an admitted root registry, otherwise `ens_v1`. |
+| `since_block` | nullable integer | always | Declared start block of the admitted ENSv2 root registry, which dates the admission and not a Universal Resolver proxy upgrade. Null with `ens_v1`, and also when the admitted root registry declares no start block. |
 
 ### PermissionRow
 

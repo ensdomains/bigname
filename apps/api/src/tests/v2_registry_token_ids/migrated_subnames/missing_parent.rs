@@ -1,4 +1,5 @@
-//! An admitted missing parent after cutover, without a reservation or synthetic state deletion.
+//! A missing parent on a chain whose profile admits an ENSv2 root registry, without a
+//! reservation or synthetic state deletion.
 use super::*;
 
 #[tokio::test]
@@ -9,16 +10,18 @@ async fn migrated_subname_actual_producer_missing_parent_has_no_live_entry() -> 
     );
     let (database, mut logs, resolver) = setup().await?;
     // Keep the root eth deployment and ENSv1 parent/child logs. Omit the whole parent
-    // reservation transaction (LabelReserved + mirror ResolverUpdated), then cut over later.
+    // reservation transaction (LabelReserved + mirror ResolverUpdated). The Sepolia profile
+    // admits the root registry, so the chain is cut over before the Universal Resolver proxy
+    // upgrades. That upgrade is replayed last and must move nothing.
     // (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ETHRegistry.ts:L39-L51 @ ens_v2_sepolia_20261001@07e55a05)
-    let mut cutover = logs
+    let mut upgrade = logs
         .iter()
         .find(|log| log.block_number == BASE + 120 && log.transaction_index == 0)
         .context("Universal Resolver upgrade")?
         .clone();
-    cutover.block_number = BASE + 122;
-    cutover.block_hash = format!("0xhistory{}", BASE + 122);
-    cutover.transaction_hash = format!("0x{:064x}", (BASE + 122) * 100);
+    upgrade.block_number = BASE + 122;
+    upgrade.block_hash = format!("0xhistory{}", BASE + 122);
+    upgrade.transaction_hash = format!("0x{:064x}", (BASE + 122) * 100);
     logs.retain(|log| {
         log.block_number <= BASE + 121
             && !(log.block_number == BASE + 120 && matches!(log.transaction_index, 0 | 4))
@@ -36,16 +39,29 @@ async fn migrated_subname_actual_producer_missing_parent_has_no_live_entry() -> 
         )],
     ));
     seed_and_run(&database, &logs, 120, 121).await?;
-    assert_consumers(&database, true, resolver, None).await?;
+    assert_consumers(&database, false, resolver, None).await?;
     let parent_before = path_get(&database, &format!("/v1/names/{NAME}")).await?;
     let child_before = path_get(&database, &format!("/v1/names/{CHILD}")).await?;
     assert_eq!(parent_before["data"]["authority"], "ens_v1");
-    assert_eq!(
-        parent_before["data"]["resolver"]["address"],
-        format!("{resolver:#x}")
-    );
     assert_eq!(child_before["data"]["authority"], "ens_v1");
     assert_eq!(child_before["data"]["owner"], GRANTEE);
+    for before in [&parent_before, &child_before] {
+        assert_eq!(
+            before["data"]["unresolvable_reason"], "no_live_ens_v2_entry",
+            "{before:#}"
+        );
+        assert!(
+            before["data"]["resolution_unsupported_reason"].is_null(),
+            "{before:#}"
+        );
+        for field in ["resolver", "records", "primary_address"] {
+            assert!(before["data"][field].is_null(), "{field}: {before:#}");
+        }
+        for field in ["owner", "registration_id"] {
+            assert!(before["data"][field].is_string(), "{field}: {before:#}");
+        }
+    }
+    assert!(parent_before["data"]["expires_at"].is_string());
 
     let entries: Vec<(String, String)> = sqlx::query_as(
         "SELECT registry, status FROM project_ens_v2_entry_owner ORDER BY registry, entry_key",
@@ -73,33 +89,14 @@ async fn migrated_subname_actual_producer_missing_parent_has_no_live_entry() -> 
         "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4"
     );
 
-    seed_and_run(&database, &[cutover], 122, 122).await?;
+    seed_and_run(&database, &[upgrade], 122, 122).await?;
     assert_consumers(&database, false, resolver, None).await?;
     for (name, before) in [(NAME, parent_before), (CHILD, child_before)] {
         let after = path_get(&database, &format!("/v1/names/{name}")).await?;
         assert_eq!(
-            after["data"]["unresolvable_reason"], "no_live_ens_v2_entry",
-            "{after:#}"
+            after["data"], before["data"],
+            "a Universal Resolver upgrade moved {name}"
         );
-        assert!(
-            after["data"]["resolution_unsupported_reason"].is_null(),
-            "{after:#}"
-        );
-        for field in ["resolver", "records", "primary_address"] {
-            assert!(after["data"][field].is_null(), "{field}: {after:#}");
-        }
-        for field in [
-            "owner",
-            "authority",
-            "registration_id",
-            "expires_at",
-            "registered_at",
-        ] {
-            assert_eq!(
-                after["data"][field], before["data"][field],
-                "{field}: {after:#}"
-            );
-        }
     }
     database.cleanup().await
 }

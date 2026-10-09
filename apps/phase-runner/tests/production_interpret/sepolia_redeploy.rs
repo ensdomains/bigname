@@ -17,8 +17,8 @@ const OLD_UNIVERSAL_RESOLVER: &str = "0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3
 const NEW_UNIVERSAL_RESOLVER: &str = "0x24e1d8e068620b647ca097f961a61055f4f42d72";
 const OLD_RESERVATION: i64 = 11_709_797;
 const NEW_RESERVATION: i64 = 11_821_474;
-const OLD_WRITE_AFTER_CUTOVER: i64 = 11_821_690;
-const CUTOVER: i64 = 11_821_680;
+const OLD_WRITE_AFTER_REPOINT: i64 = 11_821_690;
+const REPOINT: i64 = 11_821_680;
 
 /// (2026-10-01 address, 2026-09-15 address, 2026-10-01 start, 2026-09-15 start).
 const REDEPLOYED: [(&str, &str, Option<u64>, Option<u64>); 15] = [
@@ -265,9 +265,9 @@ async fn seed_both_generations(pool: &PgPool) -> Result<()> {
             NEW_REGISTRY,
             reservation("nick", 1_803_965_433)?,
         ),
-        (CUTOVER, MANAGED_PROXY, upgraded(NEW_UNIVERSAL_RESOLVER)?),
+        (REPOINT, MANAGED_PROXY, upgraded(NEW_UNIVERSAL_RESOLVER)?),
         (
-            OLD_WRITE_AFTER_CUTOVER,
+            OLD_WRITE_AFTER_REPOINT,
             OLD_REGISTRY,
             reservation("later", 1_900_000_000)?,
         ),
@@ -394,17 +394,18 @@ async fn the_sepolia_redeploy_replaces_the_dropped_set_through_the_attested_redo
     run_project(pool, CHAIN, HEAD, 0, HEAD).await?;
 
     // Under the 2026-09-15 profile the old registry names nick.eth and the redeploy's
-    // implementation is unlisted, so the chain stopped being cut over at the repoint.
+    // implementation is unlisted. That profile admits its own ENSv2 root registry, so the
+    // chain is cut over whatever the proxy forwards to.
     assert_eq!(named_nick_reservations(pool).await?, [OLD_RESERVATION]);
     assert_eq!(
         managed_proxy_row(pool).await?,
         (
             NEW_UNIVERSAL_RESOLVER.to_owned(),
             "other".to_owned(),
-            CUTOVER
+            REPOINT
         )
     );
-    assert!(!cut_over(pool).await?);
+    assert!(cut_over(pool).await?);
 
     // The checked-in profile syncs over that state: the old declarations retire at the head,
     // derived phases need the attested redo, and the new registry's announcement rule stamps
@@ -460,15 +461,15 @@ async fn the_sepolia_redeploy_replaces_the_dropped_set_through_the_attested_redo
     interpret_through_head(pool, FIRST, InterpretRunMode::Redo).await?;
     run_project(pool, CHAIN, HEAD, 0, HEAD).await?;
 
-    // Only the redeploy's reservation names nick.eth, and the chain is cut over from the
-    // redeploy's implementation.
+    // Only the redeploy's reservation names nick.eth. The proxy row now classifies the
+    // redeploy's implementation as listed, and the chain stays cut over.
     assert_eq!(named_nick_reservations(pool).await?, [NEW_RESERVATION]);
     assert_eq!(
         managed_proxy_row(pool).await?,
         (
             NEW_UNIVERSAL_RESOLVER.to_owned(),
             "admitted_universal_resolver".to_owned(),
-            CUTOVER
+            REPOINT
         )
     );
     assert!(cut_over(pool).await?);
@@ -503,7 +504,7 @@ async fn the_sepolia_redeploy_replaces_the_dropped_set_through_the_attested_redo
         old_reservations,
         [
             (OLD_RESERVATION, None, "active".to_owned()),
-            (OLD_WRITE_AFTER_CUTOVER, None, "active".to_owned()),
+            (OLD_WRITE_AFTER_REPOINT, None, "active".to_owned()),
         ]
     );
 

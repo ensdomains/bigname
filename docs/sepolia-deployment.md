@@ -37,7 +37,7 @@ scope; this change does not add DNS, payment-token, smart-account, or pricing AP
 | `HCAUpgradeSet` | `0xcde956d6e2949bc25a4273f93e0db6f68a1a6f34` | Smart-account upgrade policy; no indexed session or upgrade-policy inventory. (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/HCAUpgradeSet.json:L2 @ ens_v2_sepolia_20261001@07e55a05) |
 | `LabelStore` | `0xed8246ff02203a4d4cb262bd78beaa7408a57cae` | Label storage helper; standalone Label announcements are not indexed as name registrations. (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/LabelStore.json:L2 @ ens_v2_sepolia_20261001@07e55a05) |
 | `LockedMigrationController` | `0x6029a063d69b09d23c52a754a90e4fe43adac3a8` | ens_v2_migration_l1 / locked_migration_controller (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/LockedMigrationController.json:L2 @ ens_v2_sepolia_20261001@07e55a05) |
-| `ManagedUniversalResolverProxy` | `0x6d80F2172CFdEc5730fE683860C33d26fC42e6F1` | ens_execution / universal_resolver_managed: intermediate execution proxy, `Upgraded` admitted from block `10922008` for the cutover; no independent indexed authority. (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ManagedUniversalResolverProxy.json:L2 @ ens_v2_sepolia_20261001@07e55a05) |
+| `ManagedUniversalResolverProxy` | `0x6d80F2172CFdEc5730fE683860C33d26fC42e6F1` | ens_execution / universal_resolver_managed: intermediate execution proxy, `Upgraded` admitted from block `10922008` for monitoring. It has no independent indexed authority. (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ManagedUniversalResolverProxy.json:L2 @ ens_v2_sepolia_20261001@07e55a05) |
 | `MigrationHelper` | `0xa8f86ee5cdd28703bd876f3a8c10b1de70f36899` | ens_v2_migration_l1 / migration_helper (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/MigrationHelper.json:L2 @ ens_v2_sepolia_20261001@07e55a05) |
 | `MockDAI` | `0xf6fac8a58a0be13b9197f27c41b73162fe32572b` | Test payment token; token transfers are outside naming intake. (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/MockDAI.json:L2 @ ens_v2_sepolia_20261001@07e55a05) |
 | `MockUSDC` | `0x240b0316df57887dbbe58b586508b19e633a14aa` | Test payment token; token transfers are outside naming intake. (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/MockUSDC.json:L2 @ ens_v2_sepolia_20261001@07e55a05) |
@@ -52,7 +52,7 @@ scope; this change does not add DNS, payment-token, smart-account, or pricing AP
 | `StandaloneHCAImplementation` | `0xc940e5c5bf263c0e097054aecf73826769a72cee` | Smart-account implementation; module/session state is outside indexed naming permissions. (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/StandaloneHCAImplementation.json:L2 @ ens_v2_sepolia_20261001@07e55a05) |
 | `StandardRentPriceOracle` | `0x8196665d4ca7488b6474a9ec8e7d2719fb42263a` | Registration pricing dependency; no indexed pricing API. (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/StandardRentPriceOracle.json:L2 @ ens_v2_sepolia_20261001@07e55a05) |
 | `UniversalHelper` | `0xd453e5bdb62cc3bea84341b1e306319c8ffd7dfe` | Read helper; no independently indexed state. (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UniversalHelper.json:L2 @ ens_v2_sepolia_20261001@07e55a05) |
-| `UniversalResolverV2` | `0x24e1d8e068620b647ca097f961a61055f4f42d72` | Execution implementation behind the declared entrypoint; listed in `ens_execution`'s `universal_resolver_implementations`, so its installation behind the proxies marks the [Universal Resolver cutover](glossary.md#universal-resolver-cutover) (block `11821680`). (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UniversalResolverV2.json:L2 @ ens_v2_sepolia_20261001@07e55a05) |
+| `UniversalResolverV2` | `0x24e1d8e068620b647ca097f961a61055f4f42d72` | Execution implementation behind the declared entrypoint. It is listed in `ens_execution`'s `universal_resolver_implementations`, so the monitoring reports the proxies against it. The managed proxy moved to it at block `11821680`. It does not decide the [Universal Resolver cutover](glossary.md#universal-resolver-cutover). (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UniversalResolverV2.json:L2 @ ens_v2_sepolia_20261001@07e55a05) |
 | `UnlockedMigrationController` | `0x2a35b94df22cc7354570be2284655e2cdc0e64a2` | ens_v2_migration_l1 / unlocked_migration_controller (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UnlockedMigrationController.json:L2 @ ens_v2_sepolia_20261001@07e55a05) |
 | `UpgradableUniversalResolverProxy` | `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` | ens_execution / universal_resolver, `Upgraded` admitted from block `8928790` (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UpgradableUniversalResolverProxy.json:L2 @ ens_v2_sepolia_20261001@07e55a05) |
 | `UserRegistryImpl` | `0x9bd8a88719068d09ecee662f36c0e3856708366a` | Registry implementation; instances enter through RegistryCreated, not direct implementation ownership. (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UserRegistryImpl.json:L2 @ ens_v2_sepolia_20261001@07e55a05) |
@@ -130,20 +130,21 @@ proxy's admin can re-point it. Bigname does not yet check the root binding at re
 it lands, repeat the `ROOT_REGISTRY()` call during rollout and after any announced Universal
 Resolver upgrade, and treat a different result as a reason to stop serving ENSv2 verified reads.
 
-The indexed side now reads the route from chain data: `ens_execution` admits both proxies'
-`Upgraded` events and lists `UniversalResolverV2` as the implementation that marks the
-[Universal Resolver cutover](glossary.md#universal-resolver-cutover). On chain the long-lived
+The indexed side reads the route from chain data for monitoring: `ens_execution` admits both
+proxies' `Upgraded` events and lists `UniversalResolverV2` as the implementation the proxies
+are reported against. On chain the long-lived
 proxy moved to the managed proxy at block `10928435`, and the managed proxy reached the new
 `UniversalResolverV2` at block `11821680` after earlier implementations, one rollback and the
 2026-09-15 deployment's `0x5d25c1d6…` (installed at `11710193`, now unlisted); the transactions
 are in `docs/upstream.md` ("Sepolia Universal Resolver proxies admitted from chain evidence").
-Because only the new implementation is listed, every block before `11821680` reads as not cut
-over, including the `11710193`–`11821679` window in which the dropped deployment answered
-resolution: with that deployment dropped, no admitted ENSv2 registry existed there
-before the redeploy's ETHRegistry at `11820399`, and from then until `11821680` the
-new registry is admitted while resolution stays on the pre-cutover path. A later
-upgrade to an unlisted implementation ends the cutover for the names it affects
-(`docs/api-v1.md` § Expiry and grace) until the manifest lists it. This does not replace
+
+The route does not decide the
+[Universal Resolver cutover](glossary.md#universal-resolver-cutover). Sepolia is cut over because
+its profile admits the redeploy's root registry, and it reads as cut over for its whole retained
+history. That includes the blocks before `11821680`, when clients still resolved through an
+earlier implementation ([known divergence](upstream.md#known-divergences)). A later upgrade to
+an unlisted implementation moves no name. The phase runner reports it
+([deployment](deployment.md#universal-resolver-cutover-gauges-and-alert)). This does not replace
 the request-time root check above.
 
 Registry instances retain announcement-based admission. Resolver proxies require

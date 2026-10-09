@@ -2104,7 +2104,7 @@ async fn v2_wrapper_expiries_are_read_once_per_chain_per_request() -> Result<()>
 #[tokio::test]
 async fn v2_search_serves_wrapper_expiries_on_a_one_connection_pool() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_alice_wrapped_reserved_after_cutover(&database).await?;
+    seed_alice_wrapped_reserved_on_an_admitted_chain(&database).await?;
     let config = database.database_config(1)?;
     let options = PgConnectOptions::from_str(config.database_url.as_deref().context("test URL")?)?
         .options([("search_path", "bigname_phase".to_owned())]);

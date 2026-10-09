@@ -3,7 +3,28 @@
 
 const ALICE_LEASE_EXPIRY: u64 = 1_798_608_633;
 
-/// A synthetic mainnet lease and wrapped position beside an ENSv2 reservation after cutover.
+/// Admit an ENSv2 root registry on `chain`, which cuts the chain over
+/// (`docs/glossary.md` § Universal Resolver cutover). The manifest row is what the composed
+/// name reader reads, and the manifest-sync event is what Project captures. No Universal
+/// Resolver proxy event is involved.
+async fn admit_ens_v2_root_registry(database: &TestDatabase, chain: &str) -> Result<()> {
+    let payload = json!({"contracts": [{"role": "root_registry",
+        "address": "0x00000000000000000000000000000000000000b4", "proxy_kind": "none",
+        "start_block": 0}]});
+    let manifest = database
+        .insert_manifest("ens", "ens_v2_root_l1", chain, "admission-fixture", 1, "active", "test")
+        .await?;
+    sqlx::query("UPDATE manifest_versions SET manifest_payload = $2 WHERE manifest_id = $1")
+        .bind(manifest)
+        .bind(&payload)
+        .execute(&database.pool)
+        .await?;
+    seed_fixture_manifest_update(&database.pool, manifest, chain, "ens", "ens_v2_root_l1", &payload)
+        .await
+}
+
+/// A synthetic mainnet lease and wrapped position beside an ENSv2 reservation on a chain whose
+/// profile admits an ENSv2 root registry.
 /// The dates illustrate the Sepolia premigration shape: its registrar reserves a label at the
 /// lease expiry plus a 62-day continuity bonus
 /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L177-L178 @ ens_v2_sepolia_20260916@366de741)
@@ -14,7 +35,7 @@ const ALICE_LEASE_EXPIRY: u64 = 1_798_608_633;
 /// its independently known entry expiry, which must not supply grace to that reservation.
 /// The faithful wrapped-resource and renewal paths are in
 /// `crates/project/tests/families_expiry_grace.rs`.
-async fn seed_alice_wrapped_reserved_after_cutover(database: &TestDatabase) -> Result<()> {
+async fn seed_alice_wrapped_reserved_on_an_admitted_chain(database: &TestDatabase) -> Result<()> {
     const LEASE_EXPIRY: u64 = ALICE_LEASE_EXPIRY;
     const RESERVED_EXPIRY: u64 = LEASE_EXPIRY + 62 * 86_400;
     seed_alice_name_inputs(database).await?;
@@ -62,36 +83,8 @@ async fn seed_alice_wrapped_reserved_after_cutover(database: &TestDatabase) -> R
         "expiry":RESERVED_EXPIRY, "token_id":"4294967297", "current_token_id":"4294967297",
         "registry_contract_instance_id":Uuid::from_u128(0x4400).to_string()});
 
-    let execution_manifest = database
-        .insert_manifest("ens", "ens_execution", "ethereum-mainnet", "cutover-fixture", 1, "active", "test")
-        .await?;
-    seed_fixture_manifest_update(
-        &database.pool, execution_manifest, "ethereum-mainnet", "ens", "ens_execution",
-        &json!({"contracts": [{"role": "universal_resolver",
-            "address": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee", "start_block": 0}],
-            "universal_resolver_implementations": ["0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3"]}),
-    ).await?;
-    let mut upgraded = history_event(
-        "alice-ens-v1-cutover-upgraded",
-        None,
-        None,
-        Some("ethereum-mainnet"),
-        Some(21_000_003),
-        Some("0xbinding"),
-        Some("0xcutover"),
-        Some(900),
-        CanonicalityState::Canonical,
-    );
-    upgraded.event_kind = "Upgraded".into();
-    upgraded.source_family = "ens_execution".into();
-    upgraded.before_state = json!({});
-    upgraded.after_state = json!({"source_event": "Upgraded",
-        "proxy_address": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
-        "proxy_role": "universal_resolver",
-        "implementation": "0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3",
-        "implementation_kind": "admitted_universal_resolver"});
-    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[reservation, upgraded])
-        .await?;
+    admit_ens_v2_root_registry(database, "ethereum-mainnet").await?;
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[reservation]).await?;
     rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await
 }
 
@@ -99,7 +92,7 @@ async fn seed_alice_wrapped_reserved_after_cutover(database: &TestDatabase) -> R
 async fn v2_ens_v1_object_serves_the_lease_and_wrapper_beside_the_ens_v2_reservation_expiry()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_alice_wrapped_reserved_after_cutover(&database).await?;
+    seed_alice_wrapped_reserved_on_an_admitted_chain(&database).await?;
     let expected = json!({
         "expires_at": "1798608633",
         "wrapper_state": "emancipated",
@@ -224,7 +217,7 @@ async fn alice_ens_v1_objects(database: &TestDatabase) -> Result<Vec<(&'static s
 async fn v2_ens_v1_wrapper_expiry_stays_behind_a_controller_only_renewal() -> Result<()> {
     const RENEWED: u64 = ALICE_LEASE_EXPIRY + 365 * 86_400;
     let database = TestDatabase::new_migrated().await?;
-    seed_alice_wrapped_reserved_after_cutover(&database).await?;
+    seed_alice_wrapped_reserved_on_an_admitted_chain(&database).await?;
     append_alice_name_input(&database, "RegistrationRenewed", "ens_v1_registrar_l1",
         json!({"source_event":"NameRenewed", "expiry":RENEWED})).await?;
     rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
@@ -256,7 +249,7 @@ async fn v2_ens_v1_wrapper_expiry_is_served_backed_and_lapsed() -> Result<()> {
         ("wrapped", 0, true),
     ] {
         let database = TestDatabase::new_migrated().await?;
-        seed_alice_wrapped_reserved_after_cutover(&database).await?;
+        seed_alice_wrapped_reserved_on_an_admitted_chain(&database).await?;
         append_alice_name_input(&database, "PermissionScopeChanged", "ens_v1_wrapper_l1",
             json!({"source_event":"NameWrapped", "wrapper_state":state, "fuses":fuses})).await?;
         append_alice_name_input(&database, "ExpiryChanged", "ens_v1_wrapper_l1",
@@ -289,7 +282,7 @@ async fn v2_ens_v1_wrapper_expiry_is_served_backed_and_lapsed() -> Result<()> {
 #[tokio::test]
 async fn v2_ens_v1_wrapper_expiry_is_omitted_once_the_wrapper_is_unwrapped() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_alice_wrapped_reserved_after_cutover(&database).await?;
+    seed_alice_wrapped_reserved_on_an_admitted_chain(&database).await?;
     append_alice_name_input(&database, "AuthorityEpochChanged", "ens_v1_wrapper_l1",
         json!({"source_event":"NameUnwrapped", "authority_kind":"wrapper"})).await?;
     rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
@@ -332,7 +325,7 @@ async fn v2_ens_v1_wrapper_expiry_classifies_the_maximum_and_zero() -> Result<()
         ("emancipated", 196_608, 0, "not_set"),
     ] {
         let database = TestDatabase::new_migrated().await?;
-        seed_alice_wrapped_reserved_after_cutover(&database).await?;
+        seed_alice_wrapped_reserved_on_an_admitted_chain(&database).await?;
         append_alice_name_input(&database, "PermissionScopeChanged", "ens_v1_wrapper_l1",
             json!({"source_event":"NameWrapped", "wrapper_state":state, "fuses":fuses})).await?;
         append_alice_name_input(&database, "ExpiryChanged", "ens_v1_wrapper_l1",
@@ -367,7 +360,7 @@ async fn v2_ens_v1_wrapper_expiry_classifies_the_maximum_and_zero() -> Result<()
 async fn v2_lookup_answers_stale_when_the_wrapper_is_undone_before_its_expiry_is_read() -> Result<()>
 {
     let database = TestDatabase::new_migrated().await?;
-    seed_alice_wrapped_reserved_after_cutover(&database).await?;
+    seed_alice_wrapped_reserved_on_an_admitted_chain(&database).await?;
     let (_guard, control) =
         crate::v2::lookup_served_head_revalidation_test_hooks::install(&database.lookup_pool)
             .await?;

@@ -350,12 +350,13 @@ pub(super) async fn load_chain(
         .collect();
     let mut facts = load_name_facts_on(conn, chain_id, &inputs).await?;
     let resolvability = Resolvability::load(conn, chain_id, &facts).await?;
-    let mut path = if facts.iter().any(|facts| {
-        facts.resolution_cutover && matches!(facts.input.place, NamePlace::BelowEthSecondLevel(_))
-    }) {
-        Some(super::resolution_path::Walk::new(conn, publication).await?)
-    } else {
-        None
+    let root = facts
+        .iter()
+        .filter(|facts| matches!(facts.input.place, NamePlace::BelowEthSecondLevel(_)))
+        .find_map(|facts| facts.ens_v2_root.clone());
+    let mut path = match root {
+        Some(root) => Some(super::resolution_path::Walk::new(conn, publication, root).await?),
+        None => None,
     };
     let histories = histories(conn, chain_id, &ids).await?;
     let mut migrations = migrations(conn, chain_id, &ids).await?;

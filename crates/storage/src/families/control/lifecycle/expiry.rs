@@ -7,10 +7,10 @@
 //! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L38-L42 @ ens_v2_sepolia_20260916@366de741)
 //! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L246-L256 @ ens_v2_sepolia_20260916@366de741)
 //! Authority still follows the chain (ADR 0007): a reservation defers ownership to ENSv1. The
-//! expiry does not: once the chain resolves through ENSv2 (the Universal Resolver cutover,
-//! `families::control::cutover`), a name with a live ENSv2 entry serves that entry's expiry and
-//! the ENSv2 grace period whichever arm holds authority. Before the cutover resolution starts at
-//! ENSv1, so the lease's expiry and the ENSv1 grace apply, reservation or not.
+//! expiry does not. On a chain whose deployment profile admits an ENSv2 root registry (the
+//! Universal Resolver cutover, `families::control::cutover`), a name with a live ENSv2 entry
+//! serves that entry's expiry and the ENSv2 grace period whichever arm holds authority. On a
+//! chain that is not cut over, the lease's expiry and the ENSv1 grace apply, reservation or not.
 use alloy_primitives::{B256, keccak256};
 use anyhow::Result;
 use serde_json::{Map, Value, json};

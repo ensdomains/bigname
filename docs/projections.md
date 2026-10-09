@@ -388,7 +388,8 @@ After the [Universal Resolver cutover](glossary.md#universal-resolver-cutover),
 ENSv1-selected descendants below `.eth` share one publication-scoped ENSv2 path
 decision. It reads current physical entries and pointer clears, proves the exact
 registry implementation from admitted declarations or factory/announcement
-history, and walks the requested label hashes from the root. The nearest
+history, and walks the requested label hashes from the admitted root registry,
+the declaration that defines the cutover. The nearest
 nonzero resolver wins before ENSIP-10 validation; a deeper non-extended resolver
 can hide an ancestor wildcard.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L22-L85 @ ens_v2_sepolia_20261001@07e55a05)
@@ -1936,16 +1937,16 @@ when deciding whether the grant remains effective.
 
 The Universal Resolver proxy family (`project_universal_resolver_proxy`) keeps,
 per declared `ens_execution` proxy, the implementation its latest `Upgraded`
-installed and how Interpret classified it against the manifest. The composed
-name reader follows the client-facing proxy's chain through these rows once per
-batch to decide whether the publication is past the
-[Universal Resolver cutover](glossary.md#universal-resolver-cutover), which
-moves the served expiry of reserved `.eth` names and withholds resolution from
-`.eth` names ENSv1 decides without a live ENSv2 entry (`docs/api-v1.md` §
-Expiry and grace). Schema-migration
-`20260929200000_project_universal_resolver_proxy.sql` adds the table; an empty
-table reads as not cut over, and the content-hash rotation that ships with it
-rebuilds the families.
+installed and how Interpret classified it against the manifest. The phase
+runner's monitoring reads these rows. No name read does. The composed name
+reader decides the
+[Universal Resolver cutover](glossary.md#universal-resolver-cutover) from the
+admitted ENSv2 root registry, once per batch. The cutover moves the served
+expiry of reserved `.eth` names and withholds resolution from `.eth` names
+ENSv1 decides without a live ENSv2 entry (`docs/api-v1.md` § Expiry and
+grace). Schema-migration `20260929200000_project_universal_resolver_proxy.sql`
+adds the table. An upgrade of a declared proxy writes its row and no other
+family row.
 
 Because the cutover can replace the served expiry, the composed registration
 also keeps `registration.ens_v1_expiry`: the expiry of the latest admitted
@@ -2040,9 +2041,7 @@ resource that a registry event of a block since the family marker's carries
 (such an event can move the resource's unnamed Transfers to another name, and a
 rebuild range composes once for all its blocks), every name whose surface
 appeared since the family marker's block, and every name whose stored
-`recompose_at` the block's time has reached. A block that changes a Universal
-Resolver proxy row also recomposes every name with an ENSv2 reservation, since
-the cutover moves the expiry those names serve. Finite lifecycle expiry and
+`recompose_at` the block's time has reached. Finite lifecycle expiry and
 the summary expiry used for ordering are exact numeric Unix seconds, including
 the full finite ENSv2 `uint64` range. Family readers, expiry indexes, retained
 keys and undo journals preserve the integer without calendar conversion or
@@ -2083,17 +2082,15 @@ and the reason for null survive a JSONB round trip. Search reads existing owner
 and public authority columns. Creation stores only declared evidence and an
 optional Basenames resource recipe; its publication-clock fallback remains live.
 
-A Universal Resolver proxy or declaration change additionally refreshes every
-readable ENS second-level `.eth` identity, selected by its two-label hash path.
-After the ordinary summary and address-history refresh, this rare pass walks
-1,000 names at a time and writes each chunk within the same transaction. It
-computes only summaries and accumulates no address-history relations. Overlap
-with ordinary work is a no-op when the complete summary is equal. A repeated
-write in the same block preserves the first before-image, so undo restores the
-state before publication. The marker advances only after every chunk succeeds.
+A Universal Resolver proxy upgrade refreshes no summary. The
+[Universal Resolver cutover](glossary.md#universal-resolver-cutover) changes
+only with the manifest set, and the full redo that adopts a manifest change
+composes every summary again. When the resolution-path refresh writes a
+summary the ordinary refresh already wrote in the same block, the first
+before-image is kept, so undo restores the state before publication.
 
-A stored summary is therefore refreshed when a block touches the name, its
-scheduled boundary passes, or the explicitly bounded cutover pass requires it.
+A stored summary is therefore refreshed when a block touches the name or its
+scheduled boundary passes.
 Inputs that change in place without either, such as a normalizer recompute of
 a surface's visibility or a lineage readability flip, are covered because a
 recompute only happens with a code change that rotates the interpreter

@@ -64,7 +64,7 @@ pub(super) async fn refresh(
                 "family block {number} of chain {chain_id} is not readable for its name summaries"
             ))
         })?;
-    let mut names: Vec<String> = sqlx::query_scalar(WORK_LIST)
+    let names: Vec<String> = sqlx::query_scalar(WORK_LIST)
         .bind(chain_id)
         .bind(number)
         .bind(block.timestamp_seconds)
@@ -74,14 +74,6 @@ pub(super) async fn refresh(
         .map_err(|error| {
             ProjectError::database("failed to read the names a family block touched", error)
         })?;
-    // Proxy changes and later parent releases can retire direct disagreements.
-    let affected =
-        super::super::universal_resolver::cutover_names(transaction, chain_id, number).await?;
-    if !affected.is_empty() {
-        names.extend(affected);
-        names.sort_unstable();
-        names.dedup();
-    }
     if names.is_empty() {
         return Ok(Refreshed::default());
     }
@@ -145,8 +137,8 @@ pub(crate) async fn retire_null_resolver_divergences(
     Ok(())
 }
 
-/// Replace at most one composition chunk, retaining the first image if ordinary and cutover
-/// work name the same key in this publication.
+/// Replace at most one composition chunk, retaining the first image if the ordinary and the
+/// resolution-path refresh name the same key in this publication.
 pub(crate) async fn replace_chunk(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,

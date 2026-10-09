@@ -209,9 +209,12 @@ pub struct NameFacts {
     pub migration: Option<Position>,
     /// The name's ENSv1 or Basenames registry node (F2c), for the control block.
     pub registry_node: Option<RegistryNode>,
-    /// Whether the chain resolves `.eth` names through ENSv2 at the publication
+    /// Whether the chain is cut over: its deployment profile admits an ENSv2 root registry
     /// (`families::control::cutover`), read once per batch.
     pub resolution_cutover: bool,
+    /// The admitted ENSv2 root registry's address, from the same read as the flag. The ENSv2
+    /// path walk starts there.
+    pub ens_v2_root: Option<Arc<str>>,
     /// Admitted registry identities whose exact deployment defines registrar grace.
     pub grace_registries: Arc<Vec<policy::GraceRegistry>>,
 }

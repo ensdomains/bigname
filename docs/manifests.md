@@ -59,8 +59,8 @@ Each manifest contains:
   Universal Resolver may verify; absent means `["ens_v1"]` (see
   [`verified_authority_arms`](#verified_authority_arms))
 - `universal_resolver_implementations` — optional, `ens_execution` only: the
-  UniversalResolverV2 implementations whose installation behind the declared
-  Universal Resolver proxy marks the
+  UniversalResolverV2 implementations the declared Universal Resolver proxies
+  are reported against for monitoring. The list does not decide the
   [Universal Resolver cutover](glossary.md#universal-resolver-cutover) (see
   [`universal_resolver_implementations`](#universal_resolver_implementations))
 
@@ -302,20 +302,22 @@ set captured for that publication. When a declaration rotates, the retired
 address's upgrades remain replayable, but only the currently declared
 `universal_resolver` selects the client-facing entrypoint. Manifest changes and
 declaration start blocks reclassify retained upgrades without moving their event
-positions; undo restores the previous declaration choice. A block is past the
-[Universal Resolver cutover](glossary.md#universal-resolver-cutover) while the
-client-facing proxy's chain of implementations, following declared proxies, ends
-at a listed implementation. A proxy with no `Upgraded` yet reads as not cut over,
-because the proxy constructor sets its first implementation without the event;
-so do a rollback to an unlisted implementation and a chain with no listed
-implementation, such as Mainnet today.
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L71-L75 @ ens_v2_sepolia_20260916@366de741)
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L111-L115 @ ens_v2_sepolia_20260916@366de741)
+positions. Undo restores the previous declaration choice.
 
-The cutover changes two composed-name facts, both in `docs/api-v1.md` §
-Expiry and grace: which expiry a `.eth` name with a live ENSv2 entry serves, and
-whether a `.eth` name that ENSv1 decides still resolves. A change of the list is a
-manifest-payload change and rotates the content hash. The loader rejects the
+These rows are for monitoring only. The phase runner reports whether the
+client-facing proxy's chain of implementations, following declared proxies,
+ends at a listed implementation
+([deployment](deployment.md#universal-resolver-cutover-gauges-and-alert)). A
+proxy with no `Upgraded` yet has no row, because the proxy constructor sets its
+first implementation without the event.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L71-L75 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L111-L115 @ ens_v2_sepolia_20261001@07e55a05)
+
+Neither the list nor the proxies' upgrades decide the
+[Universal Resolver cutover](glossary.md#universal-resolver-cutover). A chain
+is cut over while its deployment profile admits an ENSv2 root registry: an
+active `ens_v2_root_l1` manifest that declares a `root_registry` contract. A
+change of the list is a manifest-payload change and rotates the content hash. The loader rejects the
 field on any other source family, without a `universal_resolver` contract, an
 invalid address, duplicate entries, and any implementation address that is also
 a declared client-facing or managed proxy. A proxy hop must follow that proxy's
@@ -519,10 +521,11 @@ declares the managed proxy `0x6d80F2172CFdEc5730fE683860C33d26fC42e6F1` as
 the deployment's UniversalResolverV2 `0x24e1d8e068620b647ca097f961a61055f4f42d72`
 in `universal_resolver_implementations`. Neither proxy artifact carries a
 receipt, so both start blocks come from chain evidence (`docs/upstream.md`,
-"Sepolia Universal Resolver proxies admitted from chain evidence"). The
-Sepolia cutover is block `11821680`, where the managed proxy moved to that
-implementation. The 2026-09-15 deployment's implementation, installed at block
-`11710193`, is not listed, so earlier blocks read as not cut over.
+"Sepolia Universal Resolver proxies admitted from chain evidence"). Sepolia
+is cut over from the admission of the `ens_v2_root_l1` root registry, for its
+whole retained history. The managed proxy moved to the listed implementation
+at block `11821680`, which the monitoring reports. The 2026-09-15
+deployment's implementation, installed at block `11710193`, is not listed.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ManagedUniversalResolverProxy.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UniversalResolverV2.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
 

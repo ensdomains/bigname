@@ -585,18 +585,11 @@ Family indexes serve these concrete readers:
 - Name-summary recomposition uses `project_name_summary_recompose_idx`,
   `project_binding_candidate_predecessor_idx`, `project_binding_candidate_lease_idx`,
   `project_lifecycle_association_target_idx` and `project_registry_owner_event_resource_idx`;
-  zero-owner attribution uses `project_registry_owner_event_name_idx`. The reserved names a
-  Universal Resolver proxy change recomposes (`project:families.derived.cutover_names`) are
-  read without an index: the statement first checks the block's journal by its primary key
-  and scans `project_lifecycle_event` only on a block that changed a proxy row, a handful of
-  blocks per chain. Project also reclassifies retained proxy rows when its captured
-  manifest set changes or a current proxy declaration starts. These changes use the
-  same undo journal and summary recomposition; retired addresses keep their latest
-  upgrade without retaining the current client-facing role. The same statement also
-  checks the release journal by primary key, then matches only the chain's active
-  divergence names to affected second-level parents from the normal summary work
-  list. It uses the existing active-ledger and surface identity indexes; ordinary
-  blocks with neither change do not scan reservation or active-evidence candidates.
+  zero-owner attribution uses `project_registry_owner_event_name_idx`. A Universal Resolver
+  proxy upgrade recomposes no name summary. Project reclassifies retained proxy rows when
+  its captured manifest set changes or a current proxy declaration starts. These changes
+  use the same undo journal. Retired addresses keep their latest upgrade without retaining
+  the current client-facing role.
 - Child pages and counts check that an ENSv1 or Basenames edge is its child's latest across
   parents through `project_child_edge_candidate_child_idx`, by chain, namespace and child
   node, and find a registry instance's ENSv2 registrations through
@@ -2901,15 +2894,14 @@ while removing their former serving-table inputs.
 Ledger rows are durable operational observations, not authority for served
 values or a response cache. When a family publication changes an ENS Mainnet or Sepolia exact resolver
 to null, Project retires active direct observations for that name on the
-publication's chain in the same transaction. A Universal Resolver proxy change
-adds names with active disagreements on that chain to the reserved-name summary
-refresh candidates, so cutover also retires observations for names without a live
-ENSv2 entry and their descendants. Candidates are bounded by active evidence rather
-than every name. When a later ENSv2 entry release removes the path below a
-second-level name, the same publication refreshes its descendants with active
-evidence. The release journal gates this work; the normal summary work list
-supplies affected parent names, including resource-only releases, and label hashes
-match their descendants. Previously retired observations, other parents with live
+publication's chain in the same transaction. The
+[Universal Resolver cutover](glossary.md#universal-resolver-cutover) is adopted
+by a full redo, which composes every name again. That redo retires the
+observations for names without a live ENSv2 entry and for their descendants. A
+Universal Resolver proxy upgrade retires nothing. When a later ENSv2 entry
+release removes the path below a second-level name, the resolution-path
+refresh of the same publication recomposes its descendants and retires their
+active observations. Previously retired observations, other parents with live
 entries and other chains are unchanged.
 [Universal Resolver ancestor discovery](glossary.md#universal-resolver-ancestor-discovery)
 revalidates the exact composed name, Ethereum head, family publication, canonical

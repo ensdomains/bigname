@@ -86,7 +86,7 @@ async fn v2_get_name_returns_flat_name_record_envelope() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_get_name_after_the_universal_resolver_cutover_withholds_resolution_without_an_ens_v2_entry()
+async fn v2_get_name_on_an_admitted_chain_withholds_resolution_without_an_ens_v2_entry()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_alice_name_inputs(&database).await?;
@@ -98,37 +98,10 @@ async fn v2_get_name_after_the_universal_resolver_cutover_withholds_resolution_w
         "an ENSv1 lease's grace ends 90 days after its expiry"
     );
 
-    // The client-facing proxy now forwards to an admitted UniversalResolverV2; alice.eth has
-    // no ENSv2 entry, so it resolves to nothing while ENSv1 keeps deciding its owner.
-    let mut upgraded = history_event(
-        "alice-cutover-upgraded",
-        None,
-        None,
-        Some("ethereum-mainnet"),
-        Some(21_000_003),
-        Some("0xbinding"),
-        Some("0xcutover"),
-        Some(900),
-        CanonicalityState::Canonical,
-    );
-    let execution_manifest = database.insert_manifest(
-        "ens", "ens_execution", "ethereum-mainnet", "cutover-fixture", 1, "active", "test",
-    ).await?;
-    seed_fixture_manifest_update(
-        &database.pool, execution_manifest, "ethereum-mainnet", "ens", "ens_execution",
-        &json!({"contracts": [{"role": "universal_resolver",
-            "address": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee", "start_block": 0}],
-            "universal_resolver_implementations": ["0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3"]}),
-    ).await?;
-    upgraded.event_kind = "Upgraded".into();
-    upgraded.source_family = "ens_execution".into();
-    upgraded.before_state = json!({});
-    upgraded.after_state = json!({"source_event": "Upgraded",
-        "proxy_address": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
-        "proxy_role": "universal_resolver",
-        "implementation": "0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3",
-        "implementation_kind": "admitted_universal_resolver"});
-    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[upgraded]).await?;
+    // The deployment profile now admits an ENSv2 root registry, with no proxy `Upgraded`.
+    // alice.eth has no ENSv2 entry, so it resolves to nothing while ENSv1 keeps deciding its
+    // owner.
+    admit_ens_v2_root_registry(&database, "ethereum-mainnet").await?;
     rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
 
     let after = v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth").await?;

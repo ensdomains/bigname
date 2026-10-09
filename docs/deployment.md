@@ -2212,9 +2212,10 @@ run the Sepolia check in [Default reverse names](#default-reverse-names).
 
 ### Universal Resolver cutover gauges and alert
 
-The build that reports the
-[Universal Resolver cutover](glossary.md#universal-resolver-cutover) per chain
-edits no file the [interpreter content hash](glossary.md#interpreter-content-hash)
+The build that reports whether each chain is past the
+[Universal Resolver cutover](glossary.md#universal-resolver-cutover), and
+whether its client-facing Universal Resolver forwards to an implementation the
+`ens_execution` manifest admits, edits no file the [interpreter content hash](glossary.md#interpreter-content-hash)
 covers and adds no schema-migration, so it needs no redo and no historical
 ingest fetch. The runner exports `phase_runner_universal_resolver_cut_over` and
 `phase_runner_universal_resolver_unadmitted` and logs a warning when a chain's
@@ -2298,11 +2299,10 @@ Project redo it installs, before the matching API serves. A release that also
 rotates the hash for another change, such as "Read-only family queries outside
 the content hash", runs that Interpret and Project pair once for both.
 
-After the redo, Sepolia's ENSv2 history starts with the redeploy. The replayed
-proxy history classifies every block before `11821680` as not cut over,
-including `11710193` to `11821679`, when the dropped deployment answered
-resolution, so Project derives that range with ENSv1 expiry, grace and
-resolvers for every `.eth` name. Name reads still serve only the current
+After the redo, Sepolia's ENSv2 history starts with the redeploy. Since
+[Cutover at ENSv2 admission](#cutover-at-ensv2-admission), the whole retained
+range reads as cut over, including the blocks before `11821680`. Name reads
+still serve only the current
 family publication: an `at=` below it answers `stale`, as before. The dropped registries
 announced themselves with `RegistryCreated`, so like any self-announced registry
 they stay on the registry routes, but nothing admitted reaches them and their
@@ -2461,12 +2461,13 @@ names the latest `Upgraded` on the client-facing proxy's path rather than the
 block of the row the path ends at. After deploy, with the
 [Sepolia ENSv2 redeploy of 2026-10-01](#sepolia-ensv2-redeploy-of-2026-10-01)
 in place, `GET /v1/namespaces/ens` on Sepolia serves `resolution` with
-`protocol` `ens_v2` and `since_block` equal to the Sepolia
-[Universal Resolver cutover](glossary.md#universal-resolver-cutover) block,
-when the managed proxy moved to the listed UniversalResolverV2
-(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UniversalResolverV2.json:L2 @ ens_v2_sepolia_20261001@07e55a05).
-On Mainnet the `ens_execution` manifest declares no `Upgraded` event, so no
-proxy row exists and the network serves `{"protocol": "ens_v1", "since_block": null}`.
+`protocol` `ens_v2`. Since
+[Cutover at ENSv2 admission](#cutover-at-ensv2-admission), `since_block` is
+the admitted root registry's declared start block, `11820291` on Sepolia, and
+no longer the block of a proxy upgrade
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/RootRegistry.json:L2995 @ ens_v2_sepolia_20261001@07e55a05).
+Mainnet's profile admits no ENSv2 root registry, so the network serves
+`{"protocol": "ens_v1", "since_block": null}`.
 
 ### Parent filter on names by address
 
@@ -2482,6 +2483,61 @@ are read-only queries outside the
 does not rotate. It adds no schema-migration and needs no redo or historical
 ingest fetch. Cursors issued before it continue unchanged, and a cursor issued
 with `parent` must be continued with the same `parent`.
+
+### Cutover at ENSv2 admission
+
+The build that decides the
+[Universal Resolver cutover](glossary.md#universal-resolver-cutover) from the
+admitted ENSv2 deployment, instead of the Universal Resolver proxies'
+`Upgraded` events (TYR-282), changes
+`crates/storage/src/families/control/cutover.rs` and
+`crates/project/src/families`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain.
+
+- It changes no manifest payload, only comments. The manifest-authority
+  fingerprint is unchanged, no
+  [manifest-authority marker](glossary.md#manifest-authority-marker) is
+  recorded and no Ingest redo is stamped.
+- It adds the comment-only schema-migration
+  `20261009130000_project_universal_resolver_proxy_comment.sql`. No row,
+  column or index changes.
+- An existing deployment finishes the full-history Interpret redo and the
+  Project redo it installs before the matching API serves. The next
+  re-derivation release's shared redo pair discharges it with the other
+  rotations.
+- The ENSv2 path walk for names below a `.eth` name starts at the admitted
+  root registry's declared address. It no longer assumes the Sepolia address.
+- A Universal Resolver upgrade now writes one proxy row and nothing else. The
+  one-time recompute of every `.eth` name that an upgrade used to trigger
+  while following the chain head is gone. Its cost moves into the redo pair,
+  which composes every name anyway. It does not vanish.
+
+After the redo, Sepolia reads as cut over for its whole retained history,
+including the blocks before `11821680`. At the head nothing a name serves
+changes.
+
+- `GET /v1/namespaces/ens` serves `resolution.protocol` `ens_v2` with
+  `since_block` `11820291`, the root registry's declared start block. Before
+  this build it served `11821680`.
+- `phase_runner_universal_resolver_cut_over` stays `1`.
+  `phase_runner_universal_resolver_unadmitted` keeps reporting the proxies
+  ([Universal Resolver cutover gauges and alert](#universal-resolver-cutover-gauges-and-alert)).
+- A rollback of the proxy to an unlisted implementation still pages through
+  `BignameUniversalResolverUnadmitted`, but it moves no name any more. Reload
+  the rule file for the reworded annotation.
+- Check that `GET /v1/names/nick.eth` still serves `expires_at` `1803965433`,
+  and that an ENSv1-only `.eth` name serves `unresolvable_reason`
+  `no_live_ens_v2_entry`.
+
+Mainnet precondition. Mainnet has no ENSv2 manifests yet and keeps reading
+ENSv1. Admitting its ENSv2 manifests is the cutover. From that redo, every
+live `.eth` name without a reservation or registration on the admitted
+ETHRegistry serves no resolver and no records, and neither does any name below
+it. Admit the manifests once premigration has reserved every live `.eth` name,
+or accept that window knowingly. Before promoting the staging seed, count the
+rows of `GET /v1/names?namespace=ens&parent=eth&authority=ens_v1` whose detail
+carries `unresolvable_reason`. That number is the window.
 
 ### Released registrar children
 

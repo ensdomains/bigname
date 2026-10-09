@@ -97,7 +97,9 @@ fn registered(previous: Option<&str>, owner: &str, lease: u64) -> Result<Logs> {
     Ok(logs)
 }
 
-fn cutover() -> Result<Logs> {
+/// A Universal Resolver proxy upgrade. The Sepolia profile's admitted root registry already
+/// cuts the chain over, so this block must change nothing a scenario serves.
+fn upgrade() -> Result<Logs> {
     Ok(vec![(
         PROXY,
         Upgraded {
@@ -190,7 +192,7 @@ async fn released_continuing_lease_keeps_its_former_holder_on_public_routes() ->
     let database = TestDatabase::new_migrated().await?;
     // The last block carries no log: the lease passes its 90-day grace by the clock alone,
     // one second before the extended reservation expires.
-    let times = [LEASE - 100, LEASE - 90, LEASE - 80, EXTENDED - 1];
+    let times = [LEASE - 100, LEASE - 80, EXTENDED - 1];
     let token = U256::from_be_bytes(keccak256(label().as_bytes()).0) >> 32 << 32;
     let extended = vec![(
         NEW_REGISTRY,
@@ -205,9 +207,8 @@ async fn released_continuing_lease_keeps_its_former_holder_on_public_routes() ->
         &database,
         vec![
             (times[0], registered(None, OWNER, LEASE)?),
-            (times[1], cutover()?),
-            (times[2], extended),
-            (times[3], vec![]),
+            (times[1], extended),
+            (times[2], vec![]),
         ],
     )
     .await?;
@@ -234,7 +235,7 @@ async fn released_continuing_lease_keeps_its_former_holder_on_public_routes() ->
         assert_eq!(lapsed["owner"], OWNER, "{record}");
         assert_eq!(lapsed["held_through"], "registrar", "{record}");
         assert_eq!(lapsed["release_kind"], "expired", "{record}");
-        assert_eq!(lapsed["released_at"], times[3].to_string(), "{record}");
+        assert_eq!(lapsed["released_at"], times[2].to_string(), "{record}");
     }
     let listed = |body: &Value| {
         body["data"]
@@ -272,7 +273,7 @@ async fn a_lease_registered_after_an_ended_reservation_keeps_its_own_identity() 
         &database,
         vec![
             (LEASE - 100, registered(None, OWNER, LEASE)?),
-            (LEASE - 90, cutover()?),
+            (LEASE - 90, upgrade()?),
             (ended + 10, vec![]),
             (again, registered(Some(OWNER), SECOND_OWNER, fresh)?),
         ],
@@ -336,10 +337,7 @@ async fn an_unregistered_reservation_keeps_the_lease_release_on_the_former_holde
     let lapsed = LEASE + 90 * 86_400 + 10;
     for unregister_first in [true, false] {
         let database = TestDatabase::new_migrated().await?;
-        let mut blocks = vec![
-            (LEASE - 100, registered(None, OWNER, LEASE)?),
-            (LEASE - 90, cutover()?),
-        ];
+        let mut blocks = vec![(LEASE - 100, registered(None, OWNER, LEASE)?)];
         if unregister_first {
             blocks.push((LEASE + 86_400, unregistered()));
             blocks.push((lapsed, vec![]));

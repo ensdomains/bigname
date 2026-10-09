@@ -1,9 +1,10 @@
 //! The Universal Resolver proxy family: per declared `ens_execution` proxy, the implementation its
 //! latest `Upgraded` installed. Its role and implementation classification follow the active
 //! manifest snapshot captured by the family run, so a retired declaration remains replayable
-//! without remaining the client-facing entrypoint. The composed name reader follows the
-//! client-facing proxy's chain through these rows to decide whether a block resolves through
-//! ENSv2 (storage families/control/cutover.rs).
+//! without remaining the client-facing entrypoint. The rows are for monitoring only: the
+//! phase-runner reports where the client-facing proxy forwards (storage resolution_state.rs).
+//! No name reads them, and the cutover is the ENSv2 root registry's admission (storage
+//! families/control/cutover.rs).
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
@@ -173,45 +174,3 @@ pub(super) async fn apply(
     }
     Ok(())
 }
-
-/// A proxy change can move reserved names' served expiry and null other names' resolver.
-/// Refresh reservations plus names with active disagreements on this chain, so publication
-/// retires newly outdated evidence without scanning every name. A later ENSv2 entry release
-/// adds active-evidence descendants of the normal work list's affected parent names. The
-/// journal guards admit the candidate scans only for a proxy change or an ENSv2 release.
-pub(super) async fn cutover_names(
-    transaction: &mut Transaction<'_, Postgres>,
-    chain_id: &str,
-    number: i64,
-) -> Result<Vec<String>> {
-    sqlx::query_scalar(CUTOVER_NAMES)
-        .bind(chain_id)
-        .bind(number)
-        .fetch_all(&mut **transaction)
-        .await
-        .map_err(|error| {
-            ProjectError::database(
-                "failed to read the names a Universal Resolver change moves",
-                error,
-            )
-        })
-}
-
-const CUTOVER_NAMES: &str = r#"/* project:families.derived.cutover_names */
-    SELECT DISTINCT logical_name_id FROM (
-        SELECT COALESCE(event.decoded_logical_name_id, event.original_logical_name_id)
-               AS logical_name_id
-        FROM project_lifecycle_event event
-        WHERE event.chain_id = $1
-          AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1')
-          AND event.event_kind = 'RegistrationReserved'
-        UNION ALL
-        SELECT logical_name_id FROM resolution_divergences
-        WHERE resolver_chain_id = $1 AND cleared_at IS NULL
-    ) candidates
-    WHERE logical_name_id IS NOT NULL AND EXISTS (
-        SELECT 1 FROM project_family_undo undo
-        WHERE undo.chain_id = $1 AND undo.block_number = $2
-          AND undo.family = 'project_universal_resolver_proxy'
-    )
-"#;

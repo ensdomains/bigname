@@ -5237,26 +5237,22 @@ For a registrar lease first identified by a later readable observation, registra
   build, while the publication trails the head by more than the configured lag
   tolerance, while Interpret is redoing, while a Project redo overlaps it, or
   after a reorg orphans its block. The rest of the answer is still served.
-  `protocol` is `ens_v2` past the
-  [Universal Resolver cutover](glossary.md#universal-resolver-cutover): the
-  path from the client-facing Universal Resolver proxy, through the declared
-  proxies it points at, ends at an implementation `ens_execution` lists in
-  `universal_resolver_implementations`. It is `ens_v1` otherwise: before the
-  cutover, after an upgrade to an implementation the manifest does not list,
-  and while a proxy on that path has no `Upgraded` yet. This is the decision name reads apply to `.eth`
-  expiry, grace and resolvability ([Expiry and grace](api-v1.md#expiry-and-grace)).
-  `since_block` is the latest `Upgraded` block among the proxies on the
-  client-facing proxy's path, the block from which clients have resolved
-  through the current implementation. Upgrades of declared proxies off that
-  path do not move it; every upgrade on it does, including one from one
-  listed implementation to another, so it dates the current implementation,
-  not an unbroken run of the same `protocol`; earlier states are not reported.
-  It is `null`, with `protocol` `ens_v1`, when no `Upgraded` of the
-  client-facing proxy has been observed, as on Mainnet today. The fence check
-  and the proxy read share one snapshot of the projected proxy state name reads
-  also use, and the answer carries no `meta.as_of`. Example shape under the Sepolia
-  profile, with an illustrative block; there `since_block` is the Sepolia
-  cutover block:
+  `protocol` is the ENS protocol generation bigname models for `.eth`
+  resolution on that network. It is `ens_v2` on a chain with an admitted root
+  registry (the
+  [Universal Resolver cutover](glossary.md#universal-resolver-cutover)), and
+  `ens_v1` otherwise. It describes how bigname composes the names it serves, not which
+  implementation the client-facing Universal Resolver proxy forwards to at
+  that block. This is the decision name reads apply to `.eth` expiry, grace
+  and resolvability ([Expiry and grace](api-v1.md#expiry-and-grace)).
+  `since_block` is the admitted root registry's declared start block. It dates
+  the admission, not a proxy upgrade, and no Universal Resolver `Upgraded`
+  moves it. It is `null`, with `protocol` `ens_v1`, on a network whose profile
+  admits no ENSv2 root registry, as on Mainnet today. It is also `null`, with
+  `protocol` `ens_v2`, when the admitted root registry declares no start
+  block. The fence check and the admission read share one snapshot, and the
+  answer carries no `meta.as_of`.
+  Example shape under the Sepolia profile, with an illustrative block:
 
   ```json
   "networks": [

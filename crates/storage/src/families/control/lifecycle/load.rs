@@ -12,7 +12,7 @@ use sqlx::{PgConnection, PgPool};
 
 use super::{NameFacts, NameInput, TripleFacts, admission::REGISTRAR};
 use crate::families::control::{
-    cutover::load_cut_over_on,
+    cutover::load_admission_on,
     position::Position,
     registry::load_registry_nodes_on,
     rows::{BindingCandidate, LifecycleEvent, Maxima, text},
@@ -314,7 +314,9 @@ pub async fn load_name_facts_on(
         })
         .collect();
     let nodes = load_registry_nodes_on(&mut *conn, chain_id, &node_keys).await?;
-    let resolution_cutover = load_cut_over_on(&mut *conn, chain_id).await?;
+    let ens_v2_root: Option<Arc<str>> = load_admission_on(&mut *conn, chain_id)
+        .await?
+        .map(|admission| admission.root_registry.into());
 
     let wrappers: BTreeMap<String, _> = wrappers
         .into_iter()
@@ -473,7 +475,8 @@ pub async fn load_name_facts_on(
                     input.namehash.to_ascii_lowercase(),
                 ))
                 .cloned(),
-            resolution_cutover,
+            resolution_cutover: ens_v2_root.is_some(),
+            ens_v2_root: ens_v2_root.clone(),
             grace_registries: Arc::clone(&grace_registries),
         });
     }

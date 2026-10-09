@@ -181,7 +181,7 @@ pub use registries::{
     load_subregistry_pointers_for_names,
 };
 pub use registry_token_ids::load_ens_v2_token_ids;
-pub use resolution_state::{Protocol, ResolutionState, load_resolution_state_on};
+pub use resolution_state::{ResolutionState, load_resolution_state_on};
 pub use resolution_support::{
     BASE_MAINNET_CHAIN_ID, BASENAMES_L1_RESOLVER_ADDRESS, BASENAMES_NAMESPACE, ENS_NAMESPACE,
     ETHEREUM_MAINNET_CHAIN_ID, EVENT_LINKED_REGISTRY_SERVING_BASES,

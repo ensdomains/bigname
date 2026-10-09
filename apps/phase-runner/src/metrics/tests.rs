@@ -43,7 +43,11 @@ fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
     }]);
     metrics
         .universal_resolver
-        .apply(&[("ethereum-mainnet".to_owned(), None)]);
+        .apply(&[universal_resolver::ChainState {
+            chain: "ethereum-mainnet".to_owned(),
+            cut_over: false,
+            proxy: None,
+        }]);
 
     let scrape = metrics.registry.encode()?;
     for metric_type in [
@@ -655,7 +659,8 @@ fn ingest_rpc_counters_follow_the_engine_totals() -> Result<()> {
 
 #[test]
 fn universal_resolver_gauges_warn_once_per_unadmitted_implementation() -> Result<()> {
-    use bigname_storage::{Protocol, ResolutionState};
+    use super::universal_resolver::ChainState;
+    use bigname_storage::ResolutionState;
 
     let metrics = PipelineMetrics::new(
         900,
@@ -663,19 +668,26 @@ fn universal_resolver_gauges_warn_once_per_unadmitted_implementation() -> Result
         RunnerPhaseProgress::default(),
     )?;
     let gauges = &metrics.universal_resolver;
-    let sepolia = |protocol: Protocol, implementation: &str, block: i64, unadmitted: bool| {
+    let mainnet = || ChainState {
+        chain: "ethereum-mainnet".to_owned(),
+        cut_over: false,
+        proxy: None,
+    };
+    // Sepolia's profile admits an ENSv2 root registry throughout, so it stays cut over
+    // wherever the proxy forwards.
+    let sepolia = |implementation: &str, block: i64, unadmitted: bool| {
         vec![
-            ("ethereum-mainnet".to_owned(), None),
-            (
-                "ethereum-sepolia".to_owned(),
-                Some(ResolutionState {
-                    protocol,
+            mainnet(),
+            ChainState {
+                chain: "ethereum-sepolia".to_owned(),
+                cut_over: true,
+                proxy: Some(ResolutionState {
                     since_block: block,
                     proxy: "0xmanaged".to_owned(),
                     implementation: implementation.to_owned(),
                     unadmitted,
                 }),
-            ),
+            },
         ]
     };
     let read = |gauge: &str, chain: &str| -> Result<bool> {
@@ -683,7 +695,7 @@ fn universal_resolver_gauges_warn_once_per_unadmitted_implementation() -> Result
         Ok(scrape.contains(&format!("{gauge}{{chain=\"{chain}\"}} 1\n")))
     };
 
-    let admitted = sepolia(Protocol::EnsV2, "0xv2", 20, false);
+    let admitted = sepolia("0xv2", 20, false);
     assert!(gauges.apply(&admitted).is_empty());
     assert!(read(
         "phase_runner_universal_resolver_cut_over",
@@ -694,16 +706,19 @@ fn universal_resolver_gauges_warn_once_per_unadmitted_implementation() -> Result
         "ethereum-sepolia"
     )?);
 
-    let repointed = sepolia(Protocol::EnsV1, "0xnew", 30, true);
+    let repointed = sepolia("0xnew", 30, true);
     assert_eq!(gauges.apply(&repointed), ["ethereum-sepolia"]);
     assert!(
         gauges.apply(&repointed).is_empty(),
         "one warning per transition"
     );
-    assert!(!read(
-        "phase_runner_universal_resolver_cut_over",
-        "ethereum-sepolia"
-    )?);
+    assert!(
+        read(
+            "phase_runner_universal_resolver_cut_over",
+            "ethereum-sepolia"
+        )?,
+        "a rollback to an unlisted implementation leaves the chain cut over"
+    );
     assert!(read(
         "phase_runner_universal_resolver_unadmitted",
         "ethereum-sepolia"
@@ -718,13 +733,11 @@ fn universal_resolver_gauges_warn_once_per_unadmitted_implementation() -> Result
     )?);
 
     assert_eq!(
-        gauges.apply(&sepolia(Protocol::EnsV1, "0xnewer", 40, true)),
+        gauges.apply(&sepolia("0xnewer", 40, true)),
         ["ethereum-sepolia"]
     );
     assert!(
-        gauges
-            .apply(&sepolia(Protocol::EnsV1, "0xmanaged", 10, false))
-            .is_empty(),
+        gauges.apply(&sepolia("0xmanaged", 10, false)).is_empty(),
         "a hop to a proxy with no row yet is not unadmitted"
     );
     assert!(!read(
@@ -732,16 +745,27 @@ fn universal_resolver_gauges_warn_once_per_unadmitted_implementation() -> Result
         "ethereum-sepolia"
     )?);
     assert!(
-        !read(
+        read(
             "phase_runner_universal_resolver_cut_over",
             "ethereum-sepolia"
         )?,
-        "nor cut over"
+        "and the chain is still cut over"
     );
     assert!(gauges.apply(&admitted).is_empty());
     assert_eq!(gauges.apply(&repointed), ["ethereum-sepolia"]);
 
-    gauges.apply(&[("ethereum-mainnet".to_owned(), None)]);
+    // A proxy that forwards to a listed implementation cuts nothing over by itself.
+    gauges.apply(&[ChainState {
+        chain: "ethereum-mainnet".to_owned(),
+        cut_over: false,
+        proxy: admitted[1].proxy.clone(),
+    }]);
+    assert!(!read(
+        "phase_runner_universal_resolver_cut_over",
+        "ethereum-mainnet"
+    )?);
+
+    gauges.apply(&[mainnet()]);
     assert!(
         !metrics
             .registry

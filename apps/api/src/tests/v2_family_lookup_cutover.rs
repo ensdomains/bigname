@@ -1,10 +1,11 @@
-/// Direct lookup writes real disagreements before a proxy-only block makes an unreserved
-/// `.eth` name unresolvable. The publication retires this chain's current evidence atomically.
+/// Direct lookup writes real disagreements while the chain's profile admits no ENSv2 root
+/// registry. Admitting one makes an unreserved `.eth` name unresolvable, and the rebuild that
+/// adopts the manifest change retires this chain's current evidence atomically. No Universal
+/// Resolver proxy event is involved.
 #[tokio::test]
-async fn family_lookup_cutover_retires_only_current_evidence_on_the_publishing_chain() -> Result<()>
-{
+async fn family_lookup_admission_retires_only_current_evidence_on_the_publishing_chain()
+-> Result<()> {
     const PROXY: &str = "0xeeeeeeee14d718c2b47d9923deab1335e144eeee";
-    const IMPLEMENTATION: &str = "0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3";
     for chain in ["ethereum-mainnet", "ethereum-sepolia"] {
         let database = TestDatabase::new_migrated().await?;
         seed_schema_v2_lookup_head(
@@ -28,7 +29,6 @@ async fn family_lookup_cutover_retires_only_current_evidence_on_the_publishing_c
         let (manifest, mut payload): (i64, Value) = sqlx::query_as(
             "SELECT manifest_id, manifest_payload FROM manifest_versions WHERE source_family = 'ens_execution' AND chain_id = $1",
         ).bind(chain).fetch_one(&database.pool).await?;
-        payload["universal_resolver_implementations"] = json!([IMPLEMENTATION]);
         payload["capability_flags"]["verified_resolution"]["status"] = json!("shadow");
         sqlx::query("UPDATE manifest_versions SET manifest_payload = $2 WHERE manifest_id = $1")
             .bind(manifest)
@@ -108,22 +108,7 @@ async fn family_lookup_cutover_retires_only_current_evidence_on_the_publishing_c
             .bind(other).bind(chain).execute(&database.pool).await?;
         let before: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(d) FROM resolution_divergences d ORDER BY resolver_chain_id, observed_positions::text")
             .fetch_all(&database.pool).await?;
-        let mut upgrade = history_event(
-            "ledger-cutover",
-            None,
-            None,
-            Some(chain),
-            Some(202),
-            Some("0xledger202"),
-            Some("0xupgrade"),
-            Some(0),
-            CanonicalityState::Canonical,
-        );
-        upgrade.event_kind = "Upgraded".into();
-        upgrade.source_family = "ens_execution".into();
-        upgrade.before_state = json!({});
-        upgrade.after_state = json!({"proxy_address": PROXY, "implementation": IMPLEMENTATION,
-            "proxy_role": "universal_resolver", "implementation_kind": "admitted_universal_resolver"});
+        admit_ens_v2_root_registry(&database, chain).await?;
         seed_schema_v2_lookup_head(
             &database.pool,
             chain,
@@ -132,13 +117,12 @@ async fn family_lookup_cutover_retires_only_current_evidence_on_the_publishing_c
             "2026-04-17T00:00:24Z",
         )
         .await?;
-        bigname_storage::insert_normalized_event_fixtures(&database.pool, &[upgrade]).await?;
         sqlx::raw_sql("CREATE FUNCTION refuse_cutover() RETURNS trigger LANGUAGE plpgsql AS $$
-            BEGIN IF NEW.current_block_number = 202 THEN RAISE EXCEPTION 'publication refused'; END IF;
-            RETURN NEW; END $$; CREATE TRIGGER refuse_cutover BEFORE UPDATE ON project_family_marker
+            BEGIN IF NEW.current_block_number >= 200 THEN RAISE EXCEPTION 'publication refused'; END IF;
+            RETURN NEW; END $$; CREATE TRIGGER refuse_cutover BEFORE INSERT OR UPDATE ON project_family_marker
             FOR EACH ROW EXECUTE FUNCTION refuse_cutover();").execute(&database.pool).await?;
         assert!(
-            publish_test_families_on(&database.pool, chain, 202)
+            rebuild_fixture_families(&database.pool, chain, 202, "0xledger202")
                 .await
                 .is_err()
         );
@@ -151,10 +135,10 @@ async fn family_lookup_cutover_retires_only_current_evidence_on_the_publishing_c
         sqlx::raw_sql("DROP TRIGGER refuse_cutover ON project_family_marker")
             .execute(&database.pool)
             .await?;
-        publish_test_families_on(&database.pool, chain, 202).await?;
+        rebuild_fixture_families(&database.pool, chain, 202, "0xledger202").await?;
         let row = bigname_storage::families::name::load_family_name(&database.pool, &id)
             .await?
-            .context("cutover name")?;
+            .context("admitted name")?;
         assert_eq!(
             row.declared_summary["unresolvable_reason"],
             json!("no_live_ens_v2_entry")
@@ -167,7 +151,7 @@ async fn family_lookup_cutover_retires_only_current_evidence_on_the_publishing_c
             if previous["resolver_chain_id"] == chain && previous["cleared_at"].is_null() {
                 assert!(
                     current["cleared_at"].is_string(),
-                    "cutover left current evidence active on {chain}: {current}"
+                    "admission left current evidence active on {chain}: {current}"
                 );
                 current["cleared_at"] = Value::Null;
             }

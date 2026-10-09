@@ -379,16 +379,13 @@ async fn refresh_derived(
     let (rows, undo_rows) = super::resolution_paths::refresh(transaction, chain_id, block).await?;
     *stats.rows.entry(NAME_SUMMARY.name).or_default() += rows;
     stats.undo_rows += undo_rows;
-    let (rows, undo_rows) =
-        super::derived::refresh_search_cutover(transaction, chain_id, block).await?;
-    *stats.rows.entry(NAME_SUMMARY.name).or_default() += rows;
-    stats.undo_rows += undo_rows;
     super::lookup::refresh(transaction, chain_id, block, stats).await?;
     Ok(())
 }
 
-/// Journal each family once. The summary-only cutover pass may revisit a summary key;
-/// preserve that key's first before-image while keeping duplicate checks for other families.
+/// Journal each family once. The resolution-path refresh revisits summary and lookup keys the
+/// ordinary refresh already wrote in this block. Preserve such a key's first before-image
+/// while keeping duplicate checks for other families.
 pub(crate) async fn insert_journal(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,

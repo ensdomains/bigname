@@ -6,9 +6,7 @@
 //!
 //! After a block's write the name summaries of the names it touched are composed again
 //! (`summary.rs`); those are journalled, so an undo restores them with the other families.
-mod search_cutover;
 mod summary;
-pub(crate) use search_cutover::refresh as refresh_search_cutover;
 pub(crate) use summary::{
     WORK_LIST as SUMMARY_WORK_LIST, replace_chunk as replace_summary_chunk,
     retire_null_resolver_divergences,

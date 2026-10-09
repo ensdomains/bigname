@@ -161,10 +161,11 @@ fn sepolia_network(resolution: Option<Value>) -> Value {
     json!([network])
 }
 
-/// The Sepolia network's `resolution` follows the client-facing Universal Resolver proxy path
-/// that Project derives from `Upgraded` events under the checked-in manifests, including a
-/// rollback to an unlisted implementation and the return to the listed one, and is withheld
-/// while the publication is not servable.
+/// The Sepolia network's `resolution` follows the checked-in profile's ENSv2 root registry
+/// admission. It reads `ens_v2` from the first servable publication, dated by the root
+/// registry's declared start block. The Universal Resolver proxies' upgrades, including a
+/// rollback to an unlisted implementation, do not move it. It is withheld while the
+/// publication is not servable.
 #[tokio::test]
 async fn v2_namespace_ens_reports_the_resolution_protocol_across_sepolia_upgrades() -> Result<()> {
     const CHAIN: &str = "ethereum-sepolia";
@@ -179,41 +180,22 @@ async fn v2_namespace_ens_reports_the_resolution_protocol_across_sepolia_upgrade
         "no family publication yet"
     );
 
-    for (block, upgrade, expected) in [
-        (11821678, None, json!({ "protocol": "ens_v1", "since_block": null })),
-        (
-            11821679,
-            Some((RESOLUTION_TOP, RESOLUTION_MANAGED)),
-            json!({ "protocol": "ens_v1", "since_block": 11821679 }),
-        ),
-        (
-            11821680,
-            Some((RESOLUTION_MANAGED, RESOLUTION_ADMITTED)),
-            json!({ "protocol": "ens_v2", "since_block": 11821680 }),
-        ),
-        (
-            11821681,
-            Some((RESOLUTION_MANAGED, RESOLUTION_UNLISTED)),
-            json!({ "protocol": "ens_v1", "since_block": 11821681 }),
-        ),
-        (
-            11821682,
-            Some((RESOLUTION_MANAGED, RESOLUTION_ADMITTED)),
-            json!({ "protocol": "ens_v2", "since_block": 11821682 }),
-        ),
-        // Repointing the client-facing proxy later dates the state, not the managed row.
-        (
-            11821683,
-            Some((RESOLUTION_TOP, RESOLUTION_MANAGED)),
-            json!({ "protocol": "ens_v2", "since_block": 11821683 }),
-        ),
+    // The root registry's declared start block in the checked-in Sepolia profile.
+    let admitted = json!({ "protocol": "ens_v2", "since_block": 11820291 });
+    for (block, upgrade) in [
+        (11821678, None),
+        (11821679, Some((RESOLUTION_TOP, RESOLUTION_MANAGED))),
+        (11821680, Some((RESOLUTION_MANAGED, RESOLUTION_ADMITTED))),
+        (11821681, Some((RESOLUTION_MANAGED, RESOLUTION_UNLISTED))),
+        (11821682, Some((RESOLUTION_MANAGED, RESOLUTION_ADMITTED))),
+        (11821683, Some((RESOLUTION_TOP, RESOLUTION_MANAGED))),
     ] {
         publish_resolution_block(&database.pool, CHAIN, block, upgrade).await?;
         let (status, payload) = read_family_response(&database, "/v1/namespaces/ens").await?;
         assert_eq!(status, StatusCode::OK, "{payload:#}");
         assert_eq!(
             payload["data"]["networks"],
-            sepolia_network(Some(expected)),
+            sepolia_network(Some(admitted.clone())),
             "after block {block}"
         );
         assert!(payload["meta"].get("as_of").is_none(), "{payload:#}");
@@ -234,7 +216,7 @@ async fn v2_namespace_ens_reports_the_resolution_protocol_across_sepolia_upgrade
     let (_, payload) = read_family_response(&database, "/v1/namespaces/ens").await?;
     assert_eq!(
         payload["data"]["networks"],
-        sepolia_network(Some(json!({ "protocol": "ens_v2", "since_block": 11821683 })))
+        sepolia_network(Some(admitted))
     );
 
     // Lookup and collection reads refuse during any Interpret redo, including one past the
@@ -266,8 +248,9 @@ async fn v2_namespace_ens_reports_the_resolution_protocol_across_sepolia_upgrade
     database.cleanup().await
 }
 
-/// Mainnet ENS has an execution entrypoint but no proxy upgrade, so once published it reads
-/// ENSv1 with no start; Basenames networks have no ENSv1/ENSv2 split and carry no `resolution`.
+/// Mainnet ENS has an execution entrypoint and no admitted ENSv2 root registry, so once
+/// published it reads ENSv1 with no start. Basenames networks have no ENSv1/ENSv2 split and
+/// carry no `resolution`.
 #[tokio::test]
 async fn v2_namespace_resolution_is_ens_v1_on_mainnet_and_absent_for_basenames() -> Result<()> {
     let database = TestDatabase::new(true).await?;

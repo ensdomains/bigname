@@ -1221,7 +1221,7 @@ CREATE TABLE IF NOT EXISTS project_universal_resolver_proxy (
     CHECK (implementation_kind IN ('admitted_universal_resolver', 'universal_resolver_proxy', 'other'))
 );
 COMMENT ON TABLE project_universal_resolver_proxy IS
-    'Project-owned Universal Resolver proxy state: per declared ens_execution proxy, the implementation its latest Upgraded event installed, in canonical event order. A block resolves through ENSv2 (the Universal Resolver cutover) while the chain of implementations from the client-facing universal_resolver proxy, through declared proxies, ends at an admitted UniversalResolverV2 implementation; a proxy with no row has no known implementation, since its constructor sets the first one without an event. The composed name reader reads every row of the chain at the family publication.';
+    'Project-owned Universal Resolver proxy state, kept for monitoring: per declared ens_execution proxy, the implementation its latest Upgraded event installed, in canonical event order. The phase runner reports whether the chain of implementations from the client-facing universal_resolver proxy, through declared proxies, ends at an implementation the manifest lists. A proxy with no row has no known implementation, since its constructor sets the first one without an event. No name read uses these rows: the Universal Resolver cutover is the admission of the chain''s ENSv2 root registry.';
 COMMENT ON COLUMN project_universal_resolver_proxy.chain_id IS
     'This value is the chain whose events wrote the row.';
 COMMENT ON COLUMN project_universal_resolver_proxy.proxy_address IS

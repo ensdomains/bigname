@@ -1,6 +1,6 @@
 //! Registration schedules are retained independently of current control and resolution.
 //! Only canonical lifecycle evidence changes a selected schedule; crossing its expiry never
-//! switches a post-cutover name back to a different registration's dates.
+//! switches a name on a cut-over chain back to a different registration's dates.
 use std::collections::BTreeMap;
 
 use serde_json::{Map, Value, json};
@@ -244,7 +244,8 @@ pub(super) fn apply(
                 && item.event.position >= instance.origin.position
         });
         // The existing ENSv1 lease remains the public handle/start while an admitted ENSv2
-        // reservation supplies post-cutover dates. An unrelated ENSv2 grant cannot continue it.
+        // reservation supplies the dates on a cut-over chain. An unrelated ENSv2 grant cannot
+        // continue it.
         // A registrar snapshot restates an older lease at a later position, so only an
         // actual registration dates the lease.
         let lease = tagged
