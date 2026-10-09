@@ -2395,8 +2395,8 @@ changes, when a subregistry pointer to it is set or cleared, or when the token
 pointing at it is released, replaced, regenerated, or has its expiry changed or
 crossed. Interpret then walks the registry's
 [name suffix](glossary.md#ensv2-name-suffix-walk): its parent claim, the
-parent token's subregistry pointer and expiry, and so on up to a manifest-declared
-registry, whose suffix is fixed. It compares the result with the same walk over the
+subregistry pointer and expiry of each token that points at it, and so on up to a
+manifest-declared registry, whose suffix is fixed. It compares the result with the same walk over the
 registry-level state as it stood at the previous refresh, which the session keeps
 alongside its other state. That copy shares its unchanged parts with the current
 state, so it costs memory only for what events have changed since; Interpret drops
@@ -2454,7 +2454,9 @@ same expressions, `normalized_events_basenames_direct_node_probe_idx` and
 families. For ENSv2, `normalized_events_v2_direct_node_probe_idx` has the
 same name expression, `normalized_events_v2_key_probe_idx` is an inverted
 (GIN) index over the [ENSv2 state keys](glossary.md#ensv2-state-key) each event
-is filed under, `normalized_events_v2_due_probe_idx` finds registry tokens whose
+is filed under, which the loader probes once per requested key. Its array includes the registry-level key of the registry an event's
+`subregistry` value names, so a registry's read reaches the tokens that point at it.
+`normalized_events_v2_due_probe_idx` finds registry tokens whose
 expiry falls in a batch, and `normalized_events_v2_lookahead_probe_idx`, keyed
 by chain and block, finds the latest ENSv2 registry event before it. An ENSv2
 read of an unloaded state key is retried like an unloaded name. The loader is an access path, not a semantic: it must produce the same

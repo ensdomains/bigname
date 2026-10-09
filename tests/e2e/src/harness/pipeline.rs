@@ -2153,6 +2153,28 @@ impl ProductionApi {
         Ok((status, response.json().await?))
     }
 
+    /// GET `path` exactly as written, for the collection routes.
+    pub async fn get(&self, path: &str) -> Result<(reqwest::StatusCode, Value)> {
+        let response = self
+            .client
+            .get(format!("http://{}{path}", self.address))
+            .send()
+            .await?;
+        let status = response.status();
+        Ok((status, response.json().await?))
+    }
+
+    pub async fn post(&self, path: &str, body: &Value) -> Result<(reqwest::StatusCode, Value)> {
+        let response = self
+            .client
+            .post(format!("http://{}{path}", self.address))
+            .json(body)
+            .send()
+            .await?;
+        let status = response.status();
+        Ok((status, response.json().await?))
+    }
+
     pub async fn stop(mut self) -> Result<()> {
         self.process.stop().await
     }

@@ -379,13 +379,37 @@ jobs:
         with:
           tool: cargo-nextest@0.9.143
 
+      # The ci profile (.config/nextest.toml) writes each test's time to a JUnit report.
       - name: cargo nextest (API partition)
         if: github.event_name != 'push'
+        shell: bash
         run: >-
           cargo nextest run --locked -p bigname-api
           --features bigname-adapters/test-activation,bigname-storage/test-support
           --no-fail-fast
+          --profile ci
           --partition hash:${{ matrix.shard }}/5
+          2>&1 | tee nextest.log
+
+      - name: Check the API partition's JUnit report
+        if: github.event_name != 'push'
+        run: |
+          report=target/nextest/ci/junit.xml
+          test -s "$report" || { echo "::error::$report was not written"; exit 1; }
+          ran=$(sed 's/\x1b\[[0-9;]*m//g' nextest.log \
+            | sed -n 's/.*Summary \[.*\] *\([0-9][0-9]*\) tests\{0,1\} run.*/\1/p' | tail -n 1)
+          cases=$(grep -o '<testcase ' "$report" | wc -l)
+          echo "nextest ran ${ran:-no} tests and $report holds $cases"
+          [ -n "$ran" ] && [ "$ran" -eq "$cases" ]
+
+      - name: Upload the API partition's per-test times
+        if: always() && github.event_name != 'push'
+        uses: actions/upload-artifact@v7
+        with:
+          name: api-junit-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: target/nextest/ci/junit.xml
+          retention-days: 7
+          if-no-files-found: warn
 
       - name: Warm API test dependencies
         if: github.event_name == 'push' && steps.cargo_cache.outputs.cache-hit != 'true'

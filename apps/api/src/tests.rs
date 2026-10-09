@@ -1,11 +1,15 @@
 include!("tests/support.rs");
 
+#[path = "tests/fixture_floor.rs"]
+mod fixture_floor;
 #[path = "tests/openapi_contract.rs"]
 pub(crate) mod openapi_contract;
 #[path = "tests/openapi_responses.rs"]
 mod openapi_responses;
 #[path = "tests/openapi_surface.rs"]
 mod openapi_surface;
+#[path = "tests/seeder_equality.rs"]
+mod seeder_equality;
 
 #[tokio::test]
 async fn healthz_reports_phase_runner_health_from_the_phase_schema() -> Result<()> {

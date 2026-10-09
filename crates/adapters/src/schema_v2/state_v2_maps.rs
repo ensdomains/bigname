@@ -31,6 +31,10 @@ pub(in crate::schema_v2) struct RegistryLabel;
 /// A registry's own parent claim.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(in crate::schema_v2) struct RegistryClaim;
+/// A registry's mounts: the tokens, in any registry, whose subregistry pointer is the registry.
+/// Reported under the same key as the registry's claim.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(in crate::schema_v2) struct RegistryMounts;
 /// A logical name: its current holders.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(in crate::schema_v2) struct Name;
@@ -69,6 +73,16 @@ impl Cover<str> for RegistryClaim {
     }
 }
 impl Cover<String> for RegistryClaim {
+    fn report(registry: &String) {
+        observe_v2(registry, "-");
+    }
+}
+impl Cover<str> for RegistryMounts {
+    fn report(registry: &str) {
+        observe_v2(registry, "-");
+    }
+}
+impl Cover<String> for RegistryMounts {
     fn report(registry: &String) {
         observe_v2(registry, "-");
     }

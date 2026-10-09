@@ -369,6 +369,9 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                         .encode_log_data(),
                     )],
                 ));
+                if dimensions.has(Perturbation::UnattachedParentClaim) {
+                    actions.extend(user_registry(wires.registry, label, seat, owner, expiry));
+                }
             }
             SubnameShape::WrappedChild => {
                 actions.push(action(
@@ -519,6 +522,66 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
         ));
     }
     actions
+}
+
+/// The registry a name's subregistry pointer names, emitting its own logs. It announces
+/// itself, registers `kid`, and claims a label its parent holds no token for, so `kid` is named
+/// only by the parent token that points at the registry. A registry sets its parent and label
+/// without any check against the parent
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L175-L182 @ ens_v2_sepolia_20261001@07e55a05).
+fn user_registry(parent: &str, label: &str, seat: u64, owner: Address, expiry: u64) -> Vec<Action> {
+    let registry = format!("{:?}", actor(0x300 + seat)).to_ascii_lowercase();
+    let hash = labelhash("kid");
+    let token = U256::from_be_bytes(hash.0);
+    vec![
+        action(
+            format!("{label}:user-registry-created"),
+            stage::ANNOUNCE,
+            vec![emission(
+                &registry,
+                V2Registry::RegistryCreated {}.encode_log_data(),
+            )],
+        ),
+        action(
+            format!("{label}:user-registry-kid"),
+            stage::LATE,
+            vec![
+                emission(
+                    &registry,
+                    V2Registry::LabelRegistered {
+                        tokenId: token,
+                        labelHash: hash,
+                        label: "kid".to_owned(),
+                        owner,
+                        expiry,
+                        sender: owner,
+                    }
+                    .encode_log_data(),
+                ),
+                emission(
+                    &registry,
+                    V2Registry::TokenResource {
+                        tokenId: token,
+                        resource: U256::from(0x0700_u64 + seat),
+                    }
+                    .encode_log_data(),
+                ),
+            ],
+        ),
+        action(
+            format!("{label}:user-registry-claim"),
+            stage::LATE,
+            vec![emission(
+                &registry,
+                V2Registry::ParentUpdated {
+                    parent: address(parent),
+                    label: format!("unattached-{label}"),
+                    sender: owner,
+                }
+                .encode_log_data(),
+            )],
+        ),
+    ]
 }
 
 /// A resolver that no manifest role and no registry pointer admits: its own `ResolverCreated()` is

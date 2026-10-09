@@ -1206,48 +1206,102 @@ async fn seed_v2_address_name_identities(
         }}))
         .await?;
     rebuild_fixture_families(&database.pool, "base-mainnet", 1, "0xcount-base-empty").await?;
+    let mut times = Vec::new();
     for spec in specs {
         for at in [spec.created_at, spec.registered_at] {
             let (block, hash) = address_fixture_time_block(at)?;
-            sqlx::query(
-                "INSERT INTO chain_lineage
-                    (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
-                 VALUES ('ethereum-mainnet', $1, $2, $3::timestamptz, 'canonical')
-                 ON CONFLICT (chain_id, block_hash) DO NOTHING",
-            )
-            .bind(&hash)
-            .bind(block)
-            .bind(at)
-            .execute(&database.pool)
-            .await?;
+            times.push((hash, block, at));
         }
     }
-    for spec in specs {
-        let (block, hash) = address_fixture_time_block(spec.created_at)?;
-        seed_family_identity_inputs(
-            &database.pool,
-            "ens",
-            spec.name,
-            "ethereum-mainnet",
-            block,
-            &hash,
-            spec.resource_id,
-            spec.token_lineage_id,
-            spec.surface_binding_id,
-            "ens_v1",
-        )
+    sqlx::query(
+        "INSERT INTO chain_lineage
+            (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         SELECT 'ethereum-mainnet', block_hash, block_number, block_timestamp::timestamptz,
+                'canonical'
+         FROM unnest($1::text[], $2::bigint[], $3::text[]) WITH ORDINALITY
+             AS input(block_hash, block_number, block_timestamp, ordinal)
+         ORDER BY ordinal
+         ON CONFLICT (chain_id, block_hash) DO NOTHING",
+    )
+    .bind(times.iter().map(|(hash, _, _)| hash.as_str()).collect::<Vec<_>>())
+    .bind(times.iter().map(|(_, block, _)| *block).collect::<Vec<_>>())
+    .bind(times.iter().map(|(_, _, at)| *at).collect::<Vec<_>>())
+    .execute(&database.pool)
+    .await?;
+    let created = specs
+        .iter()
+        .map(|spec| address_fixture_time_block(spec.created_at))
+        .collect::<Result<Vec<_>>>()?;
+    let identities = specs
+        .iter()
+        .zip(&created)
+        .map(|(spec, (block, hash))| FamilyIdentity {
+            name: spec.name,
+            block: *block,
+            hash,
+            resource: spec.resource_id,
+            token: spec.token_lineage_id,
+            binding: spec.surface_binding_id,
+        })
+        .collect::<Vec<_>>();
+    seed_family_identities(&database.pool, "ens", "ethereum-mainnet", "ens_v1", &identities)
         .await?;
-        database
-            .seed_snapshot_selector_chain_positions(&json!({"ethereum":{
-                "chain_id":"ethereum-mainnet", "block_number":spec.block_number,
-                "block_hash":spec.block_hash, "timestamp":"2024-05-31T18:26:47Z"
-            }}))
-            .await?;
-    }
+    seed_v2_address_name_heads(database, specs).await?;
     if specs.is_empty() {
         rebuild_address_fixture(database).await?;
     }
     Ok(())
+}
+
+/// What one chain position write per spec leaves: every spec's head block finalized in the
+/// lineage, and Ethereum's position at the last spec's head. The heads are written after every
+/// identity, so they must not share a height with the creation and registration blocks.
+async fn seed_v2_address_name_heads(
+    database: &TestDatabase,
+    specs: &[V2AddressNameSpec],
+) -> Result<()> {
+    let Some(last) = specs.last() else {
+        return Ok(());
+    };
+    let fixture_blocks = 10..10 + ADDRESS_FIXTURE_TIMES.len() as i64;
+    anyhow::ensure!(
+        specs.iter().all(|spec| !fixture_blocks.contains(&spec.block_number)),
+        "an address fixture head shares a height with a creation or registration block"
+    );
+    let hashes = specs.iter().map(|spec| spec.block_hash).collect::<Vec<_>>();
+    sqlx::query(
+        "INSERT INTO bigname_phase.chain_lineage
+            (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         SELECT 'ethereum-mainnet', block_hash, block_number,
+                '2024-05-31T18:26:47Z'::timestamptz, 'finalized'
+         FROM unnest($1::text[], $2::bigint[]) WITH ORDINALITY
+             AS input(block_hash, block_number, ordinal)
+         ORDER BY ordinal
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(&hashes)
+    .bind(specs.iter().map(|spec| spec.block_number).collect::<Vec<_>>())
+    .execute(&database.pool)
+    .await?;
+    for (from, to) in [("observed", "canonical"), ("canonical", "safe"), ("safe", "finalized")] {
+        sqlx::query(
+            "UPDATE bigname_phase.chain_lineage
+             SET canonicality_state = $3::bigname_phase.canonicality_state
+             WHERE chain_id = 'ethereum-mainnet' AND block_hash = ANY($1)
+               AND canonicality_state = $2::bigname_phase.canonicality_state",
+        )
+        .bind(&hashes)
+        .bind(from)
+        .bind(to)
+        .execute(&database.pool)
+        .await?;
+    }
+    database
+        .seed_snapshot_selector_chain_positions(&json!({"ethereum":{
+            "chain_id":"ethereum-mainnet", "block_number":last.block_number,
+            "block_hash":last.block_hash, "timestamp":"2024-05-31T18:26:47Z"
+        }}))
+        .await
 }
 
 // The fixture's creation and registration times, each at its own block below the head blocks.

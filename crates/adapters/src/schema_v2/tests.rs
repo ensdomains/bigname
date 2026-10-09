@@ -2201,7 +2201,7 @@ fn non_utf8_v2_registry_string_payload_becomes_a_shadow_observation() -> anyhow:
 }
 
 #[test]
-fn hostile_parent_update_retracts_a_bound_descendant_and_records_the_shadow_claim()
+fn hostile_parent_update_keeps_a_mounted_descendant_and_records_the_shadow_claim()
 -> anyhow::Result<()> {
     const CHILD: &str = "0x0000000000000000000000000000000000000066";
     let owner: Address = "0x0000000000000000000000000000000000000001".parse()?;
@@ -2338,9 +2338,18 @@ fn hostile_parent_update_retracts_a_bound_descendant_and_records_the_shadow_clai
         .name_surfaces
         .iter()
         .find(|surface| surface.raw_name() == Some("leaf.sub.eth"))
-        .expect("the valid mutual claim first binds the descendant");
-    assert!(output.binding_closures.iter().any(|closure| {
-        closure.logical_name_id == active.logical_name_id && closure.block_number == 6
+        .expect("the parent token's pointer binds the descendant");
+    // The hostile claim names a label the parent holds no token for. The parent token still
+    // points at the registry, so the descendant keeps its name and its binding.
+    // The only closures on the name are the ones a binding writes when it opens, which keep
+    // that binding. None ends it.
+    assert!(output.binding_closures.iter().all(|closure| {
+        closure.logical_name_id != active.logical_name_id
+            || closure.except_surface_binding_id.is_some()
+    }));
+    assert!(output.normalized_events.iter().all(|event| {
+        event.event_kind != "RegistrationReleased"
+            || event.logical_name_id.as_deref() != Some(active.logical_name_id.as_str())
     }));
     assert!(output.normalized_events.iter().any(|event| {
         event.event_kind == "ParentChanged"
@@ -12596,6 +12605,21 @@ fn reserved_child_on_a_claim_path_keeps_reservation_scope_through_topology_legs(
             CHILD,
         )
     };
+    // The parent token's pointer attaches and detaches the child registry. The claim alone
+    // does neither.
+    let mount = |subregistry: Address, block_number| {
+        raw_at(
+            v2_registry::SubregistryUpdated {
+                tokenId: parent_token,
+                subregistry,
+                sender,
+            }
+            .encode_log_data(),
+            block_number,
+            0,
+            CONTRACT,
+        )
+    };
     let reserve = |block_number| {
         raw_at(
             v2_registry::LabelReserved {
@@ -12665,20 +12689,10 @@ fn reserved_child_on_a_claim_path_keeps_reservation_scope_through_topology_legs(
                 0,
                 CONTRACT,
             ),
-            raw_at(
-                v2_registry::SubregistryUpdated {
-                    tokenId: parent_token,
-                    subregistry: CHILD.parse()?,
-                    sender,
-                }
-                .encode_log_data(),
-                5,
-                0,
-                CONTRACT,
-            ),
-            claim(CONTRACT.parse()?, 6),
-            claim(Address::ZERO, 7),
-            claim(CONTRACT.parse()?, 8),
+            claim(CONTRACT.parse()?, 5),
+            mount(CHILD.parse()?, 6),
+            mount(Address::ZERO, 7),
+            mount(CHILD.parse()?, 8),
             raw_at(
                 v2_registry::LabelUnregistered {
                     tokenId: kid_token,
@@ -12719,7 +12733,7 @@ fn reserved_child_on_a_claim_path_keeps_reservation_scope_through_topology_legs(
             .name_surfaces
             .iter()
             .any(|surface| surface.raw_name() == Some("kid.sub.eth") && surface.block_number == 6),
-        "the mutual claim must materialize the reserved child surface"
+        "the mount must materialize the reserved child surface"
     );
     assert!(
         output
@@ -12737,7 +12751,7 @@ fn reserved_child_on_a_claim_path_keeps_reservation_scope_through_topology_legs(
             .map(|binding| binding.block_number)
             .collect::<Vec<_>>(),
         [6, 8],
-        "the registered control binds on each claim materialization"
+        "the registered control binds each time the registry is mounted"
     );
 
     let lifecycle = |logical_name_id: &str| {
@@ -13598,18 +13612,7 @@ fn contested_loser_reregistration_emits_one_marked_name_observation() -> anyhow:
 
 #[test]
 fn topology_departure_reasserts_the_survivor_across_replay_shapes() -> anyhow::Result<()> {
-    const CLAIM_REGISTRY: &str = "0x0000000000000000000000000000000000000059";
-    let departure = raw_at(
-        v2_registry::ParentUpdated {
-            parent: Address::ZERO,
-            label: "eth".to_owned(),
-            sender: CONTRACT.parse()?,
-        }
-        .encode_log_data(),
-        6,
-        0,
-        CLAIM_REGISTRY,
-    );
+    let departure = claim_registry_unmounted(6, CONTRACT.parse()?);
     let setup_logs = contested_claim_path_logs(100)?;
     let mut full_logs = setup_logs.clone();
     full_logs.push(departure.clone());
@@ -13697,7 +13700,7 @@ fn immediate_named_reservation_expiry_replays_across_physical_batches() -> anyho
     let mut prefix = contested_claim_path_logs(100)?; prefix.retain(|log| log.block_number >= 2 && log.block_number != 3);
     prefix.push(raw_at(v2_registry::LabelReserved { tokenId: token, labelHash: keccak256(b"alpha"), label: "alpha".to_owned(), expiry: 6, sender }.encode_log_data(), 6, 0, CLAIM_REGISTRY));
     let suffix = vec![
-        raw_at(v2_registry::ParentUpdated { parent: Address::ZERO, label: "eth".to_owned(), sender }.encode_log_data(), 7, 0, CLAIM_REGISTRY),
+        claim_registry_unmounted(7, sender),
         raw_at(v2_registry::ExpiryUpdated { tokenId: token, newExpiry: 10, sender }.encode_log_data(), 8, 0, CLAIM_REGISTRY),
     ];
     let mut all = prefix.clone(); all.extend(suffix.clone());
@@ -13715,7 +13718,7 @@ fn immediate_named_reservation_expiry_replays_across_physical_batches() -> anyho
 #[test]
 #[rustfmt::skip]
 fn detached_formerly_named_reservation_renewal_restates_its_resource_lifecycle() -> anyhow::Result<()> {
-    const CLAIM_REGISTRY: &str = "0x0000000000000000000000000000000000000059"; let sender: Address = "0x0000000000000000000000000000000000000002".parse()?; let token = versioned_token("beta", 0); let mut prefix = contested_claim_path_logs(100)?; prefix.extend([raw_at(v2_registry::LabelReserved { tokenId: token, labelHash: keccak256(b"beta"), label: "beta".to_owned(), expiry: 8, sender }.encode_log_data(), 6, 0, CLAIM_REGISTRY), raw_at(v2_registry::ParentUpdated { parent: Address::ZERO, label: "eth".to_owned(), sender }.encode_log_data(), 7, 0, CLAIM_REGISTRY)]); let suffix = vec![raw_at(v2_registry::ExpiryUpdated { tokenId: token, newExpiry: 8, sender }.encode_log_data(), 9, 0, CLAIM_REGISTRY), raw_at(v2_registry::ExpiryUpdated { tokenId: token, newExpiry: 20, sender }.encode_log_data(), 10, 0, CLAIM_REGISTRY)];
+    const CLAIM_REGISTRY: &str = "0x0000000000000000000000000000000000000059"; let sender: Address = "0x0000000000000000000000000000000000000002".parse()?; let token = versioned_token("beta", 0); let mut prefix = contested_claim_path_logs(100)?; prefix.extend([raw_at(v2_registry::LabelReserved { tokenId: token, labelHash: keccak256(b"beta"), label: "beta".to_owned(), expiry: 8, sender }.encode_log_data(), 6, 0, CLAIM_REGISTRY), claim_registry_unmounted(7, sender)]); let suffix = vec![raw_at(v2_registry::ExpiryUpdated { tokenId: token, newExpiry: 8, sender }.encode_log_data(), 9, 0, CLAIM_REGISTRY), raw_at(v2_registry::ExpiryUpdated { tokenId: token, newExpiry: 20, sender }.encode_log_data(), 10, 0, CLAIM_REGISTRY)];
     let (first, session) = interpret_test_batch_incremental(contested_claim_path_input(prefix, Vec::new(), (1..=8).map(test_block).collect())?, None)?; let (live, _) = interpret_test_batch_incremental(contested_claim_path_input(suffix.clone(), Vec::new(), vec![test_block(9), test_block(10)])?, Some(session))?;
     let prior = seam::fold_prior_events(Vec::new(), &first.normalized_events, &(1..=8).map(test_block).collect::<Vec<_>>())?; let restored = interpret_test_batch(contested_claim_path_input(suffix, prior, vec![test_block(9), test_block(10)])?)?; assert_eq!(live, restored); let release = first.normalized_events.iter().find(|event| event.block_number == Some(8) && event.event_kind == "RegistrationReleased" && event.after_state["source_event"] == "RegistryPathExpired" && event.logical_name_id.is_none()).expect("detached own-expiry release");
     assert_eq!(live.normalized_events.iter().filter(|event| event.event_kind == "RegistrationRenewed" && event.resource_id == release.resource_id && event.logical_name_id.is_none() && event.after_state["revived_from_expiry"] == true && event.after_state["status"] == "reserved" && event.after_state["reservation_resource"] == true).map(|event| event.block_number).collect::<Vec<_>>(), [Some(10)]);
@@ -13751,7 +13754,7 @@ fn ancestor_expired_reservation_renewal_preserves_resource_retirement_suppressio
 
 #[rustfmt::skip]
 fn assert_detached_expired_reservation_reinstall_rearms_resource_retirement(registered: bool) -> anyhow::Result<()> {
-    const CLAIM_REGISTRY: &str = "0x0000000000000000000000000000000000000059"; let owner: Address = "0x0000000000000000000000000000000000000001".parse()?; let sender: Address = "0x0000000000000000000000000000000000000002".parse()?; let token = versioned_token("beta", 0); let mut prefix = contested_claim_path_logs(100)?; prefix.extend([raw_at(v2_registry::LabelReserved { tokenId: token, labelHash: keccak256(b"beta"), label: "beta".to_owned(), expiry: 8, sender }.encode_log_data(), 6, 0, CLAIM_REGISTRY), raw_at(v2_registry::ParentUpdated { parent: Address::ZERO, label: "eth".to_owned(), sender }.encode_log_data(), 7, 0, CLAIM_REGISTRY)]);
+    const CLAIM_REGISTRY: &str = "0x0000000000000000000000000000000000000059"; let owner: Address = "0x0000000000000000000000000000000000000001".parse()?; let sender: Address = "0x0000000000000000000000000000000000000002".parse()?; let token = versioned_token("beta", 0); let mut prefix = contested_claim_path_logs(100)?; prefix.extend([raw_at(v2_registry::LabelReserved { tokenId: token, labelHash: keccak256(b"beta"), label: "beta".to_owned(), expiry: 8, sender }.encode_log_data(), 6, 0, CLAIM_REGISTRY), claim_registry_unmounted(7, sender)]);
     let reinstall = if registered { raw_at(v2_registry::LabelRegistered { tokenId: token, labelHash: keccak256(b"beta"), label: "beta".to_owned(), owner, expiry: 20, sender }.encode_log_data(), 10, 0, CLAIM_REGISTRY) } else { raw_at(v2_registry::LabelReserved { tokenId: token, labelHash: keccak256(b"beta"), label: "beta".to_owned(), expiry: 20, sender }.encode_log_data(), 10, 0, CLAIM_REGISTRY) };
     let (first, session) = interpret_test_batch_incremental(contested_claim_path_input(prefix, Vec::new(), (1..=8).map(test_block).collect())?, None)?; let first_release = first.normalized_events.iter().find(|event| event.block_number == Some(8) && event.event_kind == "RegistrationReleased" && event.after_state["source_event"] == "RegistryPathExpired" && event.logical_name_id.is_none()).expect("detached own-expiry release");
     let (installed, live_session) = interpret_test_batch_incremental(contested_claim_path_input(vec![reinstall], Vec::new(), vec![test_block(10)])?, Some(session))?; let mut all_events = first.normalized_events.clone(); all_events.extend(installed.normalized_events.clone()); let mut all_blocks = (1..=8).map(test_block).collect::<Vec<_>>(); all_blocks.push(test_block(10)); let prior = seam::fold_prior_events(Vec::new(), &all_events, &all_blocks)?; let (_, restored_session) = interpret_test_batch_incremental(contested_claim_path_input(Vec::new(), prior, Vec::new())?, None)?; assert_eq!(live_session, restored_session);
@@ -13974,6 +13977,22 @@ fn contested_claim_path_input(
         blocks,
         raw_logs,
     })
+}
+
+/// The claim root's `eth` token stops pointing at the claim registry. That detaches the
+/// registry. Clearing its parent claim would not, because the token would still mount it.
+fn claim_registry_unmounted(block_number: i64, sender: Address) -> RawLogInput {
+    raw_at(
+        v2_registry::SubregistryUpdated {
+            tokenId: versioned_token("eth", 1),
+            subregistry: Address::ZERO,
+            sender,
+        }
+        .encode_log_data(),
+        block_number,
+        0,
+        "0x0000000000000000000000000000000000000058",
+    )
 }
 
 fn contested_claim_path_logs(parent_expiry: u64) -> anyhow::Result<Vec<RawLogInput>> {

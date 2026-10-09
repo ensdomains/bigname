@@ -2142,11 +2142,22 @@ until a deeper resolver replaces it. Ancestor resolvers must support ENSIP-10.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L22-L85 @ ens_v2_sepolia_20261001@07e55a05)
 
 A registry's canonical name can expire while another live mount still reaches
-its physical entries. That canonical retirement does not clear the physical
-resolver or subregistry; the alternate path remains usable until a real pointer
-reset, a route change, or the physical entry's own expiry stops it.
+its entries. The entries then move to that mount path, see
+[ENSv2 name path](#ensv2-name-path). At the same block boundary the old path is
+released as expired, the mount path is granted, and each entry's resolver and
+subregistry pointers are restated under it. The old path's row keeps the entry's
+own term as its `status`, so it reads `active` until that term ends and carries
+`lapsed_registration` with `release_kind: expired`. The move never clears a physical
+pointer. A pointer stays usable until a real pointer reset, a route change, or the
+entry's own expiry stops it.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L279-L288 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L474-L513 @ ens_v2_sepolia_20261001@07e55a05)
+
+The mount path can be a name that the ENSv1 registry also holds. The name then
+serves the ENSv2 entry, because a name with an open ENSv2 binding selects ENSv2
+authority. The ENSv1 record is carried as it is for a migrated name: the name
+serves no `ens_v1` object. With no ENSv1→ENSv2 migration behind it, it also
+serves no `migrated_at`.
 
 A proven path with no valid resolver reports
 `unresolvable_reason: "ens_v2_path_no_resolver"`; a missing second-level entry
@@ -2188,6 +2199,53 @@ proof of the initializer's node.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/LockedWrapperReceiver.sol:L148-L164 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20261001@07e55a05)
 
+### ENSv2 name path
+
+An ENSv2 name is served under the path that resolves. A registry below the `eth` anchor is
+named by a parent token that is the current token for its label, whose subregistry pointer
+is the registry and whose entry is unexpired. That is a mount path. A token that
+[token regeneration](#ensv2-token-identity) replaced is not one. A registry answers a
+label's subregistry from its own unexpired entry, without reading the child's parent claim.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L280-L283 @ ens_v2_sepolia_20261001@07e55a05)
+
+A registry's parent claim, set by `setParent`, chooses the path only when it points back:
+the claimed parent holds an unexpired token for the claimed label and that token's pointer
+is the registry.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L175-L182 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L119-L142 @ ens_v2_sepolia_20261001@07e55a05)
+
+When the claim does not point back, the registry's mount path is the name. The claimed path
+is not a name and answers `404 not_found`. A registry with several mount paths and no valid
+claim has one served path:
+
+- Lists and the direct read serve the path with the fewest labels.
+- Among paths of equal length, the labels are compared from `eth` downward by the bytes
+  of each label. The smaller path is served.
+- The other mount paths are not yet served and answer `404 not_found` (TYR-280).
+
+A caller with `ROLE_SET_SUBREGISTRY` on an unexpired entry can point that entry at any
+registry
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L148-L153 @ ens_v2_sepolia_20261001@07e55a05).
+So a registry with no valid claim is named by whoever mounts it under the served path
+above. A valid parent claim is the owner's way to fix the name.
+
+A parent-claim move alone is not a release cause. The name keeps its registration, owner
+and resolver under the mount path. A claim that starts to point back moves the name to the
+claimed path: the old path is released with `registry_name_binding_changed` and the claimed
+path is granted. When the served mount path ends while another mount path remains, the old
+path is released by its own cause below and the name is granted under the remaining path.
+An old path released by expiry keeps the entry's own term as its `status`, with
+`lapsed_registration` and `release_kind: expired`.
+The name is released without a successor when its last mount path goes:
+
+- The parent entry expires (`RegistryPathExpired`).
+- The label is unregistered (`LabelUnregistered`).
+- The parent token is pointed elsewhere. This unmount releases with
+  `registry_name_binding_changed` and carries no `lapsed_registration` block.
+
+This departs from the ENSv2 canonical-name helper, see
+[`upstream.md` § Known divergences](upstream.md#known-divergences).
+
 ### Lapsed registration
 
 A name carries `lapsed_registration` when its control registration has ended: an ENSv1 lease that lapsed
@@ -2197,7 +2255,9 @@ under a live ownerless ENSv2 reservation carries it while the row is `active` or
 carries it too: the name keeps that record as its registry custody, with no `owner` or
 `manager`, and the block names the lease's last holder. Other release causes, such as a
 registration displaced during token regeneration, carry no block and do not enter
-`relation=former_owner`.
+`relation=former_owner`. A parent token pointed away from an ENSv2 registry releases the
+registry's names the same way and carries no block. A parent-claim move alone never
+releases, see [ENSv2 name path](#ensv2-name-path).
 Only those two kinds of registration lapse: a subname with no registrar lease,
 wrapped or not, never carries the block. An ENSv1 lease inside its own registrar grace keeps its current holder.
 ENSv2 control ends at expiry even while the canonical registration is `expired`.

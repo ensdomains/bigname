@@ -1382,9 +1382,12 @@ every event, so a suffix move there needs no extra read and logs no warning.
 Each warning is a slower, larger batch, not a stuck one, and the memory it
 needs is described under
 [Interpret process memory](../storage.md#interpret-process-memory). The read
-uses `normalized_events_v2_key_probe_idx`: after a redo has rewritten much of
-`normalized_events`, run `ANALYZE bigname_phase.normalized_events`, or stale
-statistics can make it scan the table instead.
+uses `normalized_events_v2_key_probe_idx`, whose array also files an event under
+the registry its `subregistry` value names. It probes the index once per
+requested key, and stale statistics do not change that. After a redo has
+rewritten much of `normalized_events`, still run
+`ANALYZE bigname_phase.normalized_events`, because the loader's other reads plan
+from those statistics.
 
 ## Pause and resume indexing
 

@@ -1,0 +1,7 @@
+# CI's api shards run with `--profile ci`. Each shard writes its per-test times to
+# target/nextest/ci/junit.xml, which the workflow uploads.
+[profile.ci]
+fail-fast = false
+
+[profile.ci.junit]
+path = "junit.xml"
