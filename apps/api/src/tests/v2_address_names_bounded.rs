@@ -315,8 +315,12 @@ async fn v2_address_names_walk_and_chunks_serve_identical_pages() -> Result<()> 
                 let exact = walk_all_pages(&database, &uri).await?;
                 let chunked = with_compose_chunk(7, walk_all_pages(&database, &uri)).await?;
                 assert_eq!(exact, chunked, "{uri}");
-                let (walked, paths) =
-                    with_paths(with_exact_total_cap(0, walk_all_pages(&database, &uri))).await;
+                // The walk composes in chunks of 7 too, so its batches span several chunks.
+                let (walked, paths) = with_compose_chunk(
+                    7,
+                    with_paths(with_exact_total_cap(0, walk_all_pages(&database, &uri))),
+                )
+                .await;
                 let walked = walked?;
                 assert!(paths.iter().all(|path| *path == capped_path(&uri)), "{uri}: {paths:?}");
                 assert_eq!(
