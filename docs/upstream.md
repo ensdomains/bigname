@@ -752,6 +752,13 @@ to the applicable entries below.
 > **Why**: an address page must find names set for chains the client does not know in advance, and every coin type shown for a name must be one whose record holds the address. `evm` is also narrower than every stored coin type: legacy SLIP-44 coin types of EVM-compatible chains and non-EVM coin types stay reachable only through a decimal `coin_type`. This is not complete parity with the subgraph's `coinTypes`, and the numeric lookup input of `POST /v1/lookup` keeps its single-coin meaning.
 > **Since**: `2026-09-23`
 
+<a id="ensv1-registry-resolver-pointer-without-an-observed-write"></a>
+> **ENSv1 registry resolver pointer without an observed write** — `ens_v1.resolver` is the latest `NewResolver` bigname observed for the name's node. A node whose resolver was written before the indexed history begins, and never since, has no observed write, so bigname serves `null` where the registry getter returns an address.
+> **Upstream**: `ENSRegistry.resolver(node)` returns the node's stored resolver `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137-L141 @ ens_v1@91c966f)`. `setResolver` emits on every write `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L95 @ ens_v1@91c966f)`, and `setRecord` emits only when the value changes `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174-L188 @ ens_v1@91c966f)`.
+> **Our rule**: `docs/api-v1.md` § Naming Dictionary (`ens_v1.resolver`).
+> **Why**: the field is derived from indexed logs. Reading the getter per node at serve time would add a chain read to every name row and make the response depend on an execution client's state rather than the published block.
+> **Since**: `2026-10-09`
+
 Per-entry format:
 
 > **Surface** — one-line description of what differs.

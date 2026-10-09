@@ -271,6 +271,48 @@ async fn v2_get_names_retains_finite_expiry_beyond_the_calendar_range() -> Resul
     Ok(())
 }
 
+/// A Basenames row carries no `ens_v1` object, so no `ens_v1.resolver`, even with a Basenames
+/// registry pointer event for its node: the field is the ENSv1 registry's pointer.
+#[tokio::test]
+async fn v2_names_a_basenames_row_carries_no_ens_v1_resolver() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_names_fixture(&database).await?;
+    let logical = bigname_storage::logical_name_id_for_name("basenames", "alpha.base.eth");
+    let mut pointer = history_event(
+        "names-alpha.base.eth-pointer",
+        Some(&logical),
+        Some(Uuid::from_u128(0x85000 + 96 * 10)),
+        Some("base-mainnet"),
+        Some(96),
+        Some("0xnames96"),
+        Some("0xnames"),
+        Some(2),
+        CanonicalityState::Canonical,
+    );
+    pointer.namespace = "basenames".into();
+    pointer.event_kind = "ResolverChanged".into();
+    pointer.source_family = "basenames_base_registry".into();
+    pointer.before_state = json!({});
+    pointer.after_state = json!({"source_event": "NewResolver",
+        "node": bigname_lookup::ens_namehash_hex("alpha.base.eth")?,
+        "resolver": "0x00000000000000000000000000000000000000b5"});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[pointer]).await?;
+    publish_v2_names_fixture(&database).await?;
+
+    let listed = v2_names_payload(
+        &database,
+        "/v1/names?namespace=basenames&expires_after=2025-01-01T00:00:00Z",
+    )
+    .await?;
+    assert_eq!(v2_names_listed(&listed), vec!["alpha.base.eth"]);
+    let detail = v2_names_payload(&database, "/v1/names/alpha.base.eth?namespace=basenames").await?;
+    for row in [&listed["data"][0], &detail["data"]] {
+        assert_eq!(row["namespace"], json!("basenames"), "{row:#}");
+        assert!(row.get("ens_v1").is_none(), "{row:#}");
+    }
+    database.cleanup().await
+}
+
 #[tokio::test]
 async fn v2_get_names_lists_a_namespace_expiry_window_in_expiry_order() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -496,7 +538,7 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
                 "expires_at": "1700000000",
                 "grace_ends_at": "1707776000",
                 "authority": "ens_v1",
-                "ens_v1": {"expires_at": "1700000000"},
+                "ens_v1": {"expires_at": "1700000000", "resolver": null},
                 "lapsed_registration": {
                     "owner": HOLDER,
                     "held_through": "registrar",
@@ -517,7 +559,7 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
                 "expires_at": "1900000000",
                 "grace_ends_at": "1907776000",
                 "authority": "ens_v1",
-                "ens_v1": {"expires_at": "1900000000", "wrapper_state":"unwrapped"}
+                "ens_v1": {"expires_at": "1900000000", "resolver": null, "wrapper_state":"unwrapped"}
             }
         ]),
         "the released name keeps its place at its old expiry, with no owner or manager, and \

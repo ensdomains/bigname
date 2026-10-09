@@ -40,6 +40,20 @@ impl PointerRow {
     }
 }
 
+/// `declared_summary.ens_v1_resolver`: the node's `project_registry_pointer` row as the registry
+/// getter returns it, `{chain_id, address}`, or null for a zero pointer, a pointer event without a
+/// resolver, or a node with no pointer event. It is not admitted against the row's name or arm.
+/// It is the node's registry fact, which the served `resolver` may withhold or replace.
+pub(super) fn ens_v1_resolver(pointer: Option<&PointerRow>, chain_id: &str) -> Value {
+    pointer
+        .filter(|pointer| pointer.resolves())
+        .and_then(|pointer| pointer.resolver_address.as_deref())
+        .map_or(
+            Value::Null,
+            |address| serde_json::json!({"chain_id": chain_id, "address": address}),
+        )
+}
+
 /// The serving pointer of a name.
 #[derive(Clone, Debug)]
 pub struct Serving {

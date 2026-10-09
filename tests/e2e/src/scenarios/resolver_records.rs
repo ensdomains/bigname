@@ -1326,9 +1326,14 @@ fn assert_zero_name_shape(record: &Value, namespace: &str, name: &str) {
         keys.push("ens_v1");
         assert_eq!(record["authority"], "ens_v1");
         // An unwrapped lease reports its ended wrapper state without fuse restrictions.
-        assert_keys(&record["ens_v1"], &["expires_at", "wrapper_state"]);
+        assert_keys(
+            &record["ens_v1"],
+            &["expires_at", "resolver", "wrapper_state"],
+        );
         assert_eq!(record["ens_v1"]["wrapper_state"], "unwrapped");
         assert_eq!(record["ens_v1"]["expires_at"], record["expires_at"]);
+        // While ENSv1 resolves the name, its registry pointer is the resolver served.
+        assert_eq!(record["ens_v1"]["resolver"], record["resolver"]);
     }
     assert_keys(record, &keys);
     for field in ["registered_at", "created_at", "expires_at", "grace_ends_at"] {

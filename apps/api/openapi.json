@@ -6789,6 +6789,17 @@
             "description": "BaseRegistrar lease expiry as a decimal Unix-second string, exact up to `9223372036854775807` and served as that value above it, or null when the name has no lease, such as any subname or an ENSv1 registry child with no name row that no NameWrapper or registrar event named. The exception is a registry child with no name row that a NameWrapper or registrar event named only under a label that fails ENSIP-15 normalization: it omits this field and the wrapper fields (presence condition `ens_v1_lifecycle`), because its lease and NameWrapper state are projected without a name row. After the Universal Resolver cutover the top-level `expires_at` of a name with a retained canonical ENSv2 entry is that entry's expiry instead. Below that cap the lease's grace deadline is this value plus 90 days; a capped value does not give the deadline.\n\nPresence condition: The row is not an ENSv1 registry child with no current name row that a NameWrapper or registrar event named only under a label failing ENSIP-15 normalization. Such a child's lease and NameWrapper state are kept without a name row, so its object carries no lifecycle fields: no expires_at and no wrapper fields.",
             "x-presence": "when ens_v1_lifecycle"
           },
+          "resolver": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContractRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The ENSv1 registry's resolver pointer for the name's node, or null when it is zero or no pointer write for the node was observed. A registry fact: it does not say the name resolves through it, and a registry child with no name row reports it too. See `ens_v1.resolver` in the [naming dictionary](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#naming-dictionary)."
+          },
           "wrapper_state": {
             "$ref": "#/components/schemas/WrapperState",
             "description": "Current [NameWrapper lifecycle](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#naming-dictionary) value.\n\nPresence condition: The composed ENSv1 name has backed wrapper state, proven lapse/unwrap, registry custody evidence, or incomplete wrapping evidence described by unknown.",
@@ -6818,7 +6829,10 @@
           }
         },
         "additionalProperties": false,
-        "description": "What only ENSv1 holds about a name while ENSv1 decides it: the BaseRegistrar lease date and the NameWrapper position. Name-shaped rows carry it as `ens_v1` exactly while the name's authority is `ens_v1` or `ens_v0`; see the [naming dictionary](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#naming-dictionary)."
+        "required": [
+          "resolver"
+        ],
+        "description": "What only ENSv1 holds about a name while ENSv1 decides it: the BaseRegistrar lease date, the registry's resolver pointer and the NameWrapper position. Name-shaped rows carry it as `ens_v1` exactly while the name's authority is `ens_v1` or `ens_v0`. See the [naming dictionary](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#naming-dictionary)."
       },
       "NameRecord": {
         "type": "object",

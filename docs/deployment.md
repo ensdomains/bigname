@@ -3496,6 +3496,30 @@ while the index is missing, as
 [ops/v1-lookahead-indexes/README.md](../ops/v1-lookahead-indexes/README.md)
 describes.
 
+### ENSv1 registry resolver pointer on name rows
+
+The build that serves `ens_v1.resolver`
+([naming dictionary](api-v1.md#naming-dictionary)) writes the node's ENSv1
+registry pointer into the composed name row, and the stored search and lookup
+rows carry it. It adds no schema-migration, manifest change or historical
+ingest fetch. The composition (`crates/storage/src/families/name/compose.rs`
+and `serving.rs`), the `ens_v1` object (`crates/storage/src/public_name_fields/ens_v1.rs`)
+and the numeric chain ids it serves (`crates/domain/src/chain_identity.rs`)
+are inputs of the [interpreter content hash](glossary.md#interpreter-content-hash),
+so the compiled hash rotates for every chain. The same build moves the
+record-inventory selection (`crates/storage/src/families/records/inventory_selection.rs`)
+into one function that the resolver records route shares. That changes no
+selected record. A database derived under the
+previous hash needs the full-history Interpret redo and the Project redo it
+installs before the new binaries serve it. Follow the [planned fingerprint
+boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary).
+Until the redo publishes, the fenced name routes answer `409 stale`.
+
+Once the redo publishes, check on Sepolia that a `.eth` name whose ENSv2
+reservation has lapsed while its lease is in grace serves
+`unresolvable_reason: no_live_ens_v2_entry` and no top-level `resolver`, while
+`ens_v1.resolver` names the resolver its ENSv1 registry record points at.
+
 ## Published lookup state
 
 Apply `20261007120000_project_lookup_precomputation.sql` before deploying the

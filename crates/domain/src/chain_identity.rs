@@ -1,7 +1,9 @@
 //! The chain identity an RPC endpoint must report for each admitted chain.
 //!
-//! Kept out of `vocabulary.rs`, which feeds the interpreter content hash: these values only
-//! gate which endpoints the services accept and never change what is indexed.
+//! The numeric chain id also names the chain of the resolver pointer a stored name summary
+//! carries (`ens_v1.resolver`), so this file is an interpreter content hash input
+//! (`crates/content-hash/src/compute.rs`). The genesis hashes only gate which endpoints the
+//! services accept.
 
 use crate::vocabulary::ChainId;
 

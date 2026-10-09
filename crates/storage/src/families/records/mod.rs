@@ -18,6 +18,7 @@ mod candidates;
 pub(crate) mod facts;
 mod former_owners;
 mod inventory;
+mod inventory_cutoff;
 mod inventory_publication;
 mod inventory_selection;
 mod inventory_types;

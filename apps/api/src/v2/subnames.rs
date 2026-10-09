@@ -271,10 +271,12 @@ pub(crate) async fn get_subnames(
             Ok(subname)
         })
         .collect::<V2Result<Vec<_>>>()?;
-    super::name_record::fill_wrapper_expiries(
+    super::name_record::fill_children_ens_v1(
         snapshot.conn().await?,
-        data.iter_mut()
-            .filter_map(|subname| subname.ens_v1.as_mut()),
+        super::name_chain_id(&parent).as_deref(),
+        &storage_page.rows,
+        &child_name_rows,
+        data.iter_mut().map(|subname| subname.ens_v1.as_mut()),
     )
     .await?;
     Ok(Json(Envelope {

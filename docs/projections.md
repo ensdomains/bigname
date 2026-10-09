@@ -323,6 +323,16 @@ coverage, and display context for one logical name. Ordinary lifecycle changes
 within the same authority anchor preserve `resource_id`; wrap, unwrap,
 re-registration, or another authority-anchor change follows the identity rules
 in [`architecture.md`](architecture.md#identity-model).
+
+The row also carries `declared_summary.ens_v1_resolver`, the node's latest ENSv1
+registry resolver pointer from the registry-node pointer family
+(`project_registry_pointer`): `{chain_id, address}`, or null for a zero or empty
+pointer and for a node with none. Unlike the served `resolver`, it is not
+admitted against the name or its authority arm, and resolution withholding does
+not clear it. The `ens_v1` object serves it as `ens_v1.resolver`. A change to
+the node's pointer row puts the node's name on the block's summary work list, so
+the stored summaries and lookup rows follow it.
+
 For ENSv2, current-control selection retains the binding/tombstone policy in
 ADR 0007. The public registration coordinates follow the independent
 [canonical lifecycle](#canonical-registration-lifecycle): latest genuine name

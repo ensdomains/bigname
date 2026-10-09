@@ -30,6 +30,18 @@ pub struct EnsV1 {
         deserialize_with = "present"
     )]
     pub expires_at: Option<Option<String>>,
+    /// The ENSv1 registry's resolver pointer for the name's node, what `ENSRegistry.resolver`
+    /// returns (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137-L141 @ ens_v1@91c966f),
+    /// or null when that is zero or no pointer event for the node was observed. It is reported
+    /// whatever the name resolves through.
+    ///
+    /// The outer `None` omits the field: a row composed without it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub resolver: Option<Option<EnsV1Resolver>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrapper_state: Option<WrapperState>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -65,6 +77,40 @@ pub struct EnsV1 {
     pub pending_wrapper_expiry: Option<PendingExpiry>,
 }
 
+/// A resolver contract: its numeric EVM chain id and lower-cased address.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EnsV1Resolver {
+    pub chain_id: u64,
+    pub address: String,
+}
+
+/// The registry pointer a composed row stores as `declared_summary.ens_v1_resolver`, absent when
+/// the row stores none. A pointer on a chain with no numeric id is an integrity error.
+pub fn ens_v1_resolver(declared_summary: &Value) -> Result<Option<Option<EnsV1Resolver>>> {
+    let Some(pointer) = declared_summary.get("ens_v1_resolver") else {
+        return Ok(None);
+    };
+    if pointer.is_null() {
+        return Ok(Some(None));
+    }
+    let chain_id = pointer
+        .get("chain_id")
+        .and_then(Value::as_str)
+        .and_then(|slug| slug.parse::<bigname_domain::vocabulary::ChainId>().ok())
+        .and_then(|chain| chain.numeric_chain_id());
+    let address = pointer
+        .get("address")
+        .and_then(Value::as_str)
+        .filter(|address| !address.is_empty());
+    match (chain_id, address) {
+        (Some(chain_id), Some(address)) => Ok(Some(Some(EnsV1Resolver {
+            chain_id,
+            address: address.to_ascii_lowercase(),
+        }))),
+        _ => Err(anyhow::anyhow!("stored ens_v1 resolver pointer is invalid")),
+    }
+}
+
 fn unfilled<S: serde::Serializer>(_: &Option<PendingExpiry>, _: S) -> Result<S::Ok, S::Error> {
     Err(serde::ser::Error::custom(
         "ens_v1 wrapper expiry was never read",
@@ -92,6 +138,7 @@ pub fn ens_v1(authority: Option<&str>, declared_summary: &Value) -> Result<Optio
         },
         |(state, fuses)| (Some(state), Some(fuses)),
     );
+    let resolver = ens_v1_resolver(declared_summary)?;
     let (wrapper_expires_at, wrapper_expires_at_reason) = expiry
         .map_or((None, None), |(timestamp, reason)| {
             (Some(timestamp), reason)
@@ -101,6 +148,7 @@ pub fn ens_v1(authority: Option<&str>, declared_summary: &Value) -> Result<Optio
             declared_summary,
             &[&["registration", "ens_v1_expiry"]],
         )),
+        resolver,
         wrapper_state,
         wrapper_fuses,
         wrapper_expires_at,
@@ -147,10 +195,11 @@ fn inconsistent_wrapper_expiry() -> anyhow::Error {
     anyhow::anyhow!("stored wrapper expiry is inconsistent")
 }
 
-/// Deserialize a present `expires_at`, null included, as `Some`; an absent one stays `None`.
-fn present<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+/// Deserialize a present field, null included, as `Some`. An absent one stays `None`.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
 {
-    Option::<String>::deserialize(deserializer).map(Some)
+    Option::<T>::deserialize(deserializer).map(Some)
 }

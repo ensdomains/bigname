@@ -3,9 +3,7 @@
 //! served half of a coin-60 pair.
 use std::collections::{BTreeMap, HashMap};
 
-use super::super::{
-    FamilyPosition, assemble::ServedRecord, facts::ProbedEvent, rows::RecordCandidate,
-};
+use super::{FamilyPosition, assemble::ServedRecord, facts::ProbedEvent, rows::RecordCandidate};
 
 /// A version boundary candidate: its position, its event kind and, for a link, its event id.
 pub(super) type Boundary = (FamilyPosition, &'static str, Option<i64>);

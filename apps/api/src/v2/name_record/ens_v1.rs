@@ -3,7 +3,7 @@ use super::super::{V2Error, V2Result, vocab::Authority};
 use super::wrapper_expiry;
 pub(crate) use bigname_storage::public_name_fields::EnsV1;
 use bigname_storage::{
-    NameCurrentRow,
+    AddressNameCurrentEntry, ChildrenCurrentRow, NameCurrentRow,
     wrapper_expiry::{self, WrapperExpiryKey},
 };
 use serde_json::Value;
@@ -52,12 +52,121 @@ pub(crate) async fn fill_wrapper_expiries<'a>(
     Ok(())
 }
 
+/// One registry child served with no name row: its chain, namespace and node, and its object.
+type RegistryChild<'a> = (&'a str, &'a str, &'a str, &'a mut EnsV1);
+
+/// Serves the ENSv1 registry resolver pointer on each registry child's `ens_v1` object: one
+/// read per chain, on `db`, the snapshot the rows were read on.
+async fn fill_registry_child_resolvers(
+    db: impl Into<bigname_storage::ReadDb<'_>>,
+    children: &mut [RegistryChild<'_>],
+) -> V2Result<()> {
+    let mut db = db.into();
+    let mut by_chain: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (index, (chain_id, ..)) in children.iter().enumerate() {
+        by_chain.entry(chain_id).or_default().push(index);
+    }
+    for (chain_id, indices) in by_chain {
+        let nodes: Vec<(String, String)> = indices
+            .iter()
+            .map(|&index| {
+                let (_, namespace, node, _) = &children[index];
+                ((*namespace).to_owned(), node.to_ascii_lowercase())
+            })
+            .collect();
+        let pointers = bigname_storage::families::name::load_ens_v1_resolvers(
+            db.reborrow(),
+            chain_id,
+            &nodes,
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!(service = "api", error = ?error, "failed to read registry pointers");
+            V2Error::internal_error("failed to read registry resolver pointers")
+        })?;
+        for (index, key) in indices.into_iter().zip(nodes) {
+            let pointer = pointers.get(&key).cloned().unwrap_or(Value::Null);
+            children[index].3.resolver = bigname_storage::public_name_fields::ens_v1_resolver(
+                &serde_json::json!({ "ens_v1_resolver": pointer }),
+            )
+            .map_err(|error| V2Error::internal_error(error.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+/// The response-time reads of a children page's `ens_v1` objects, given in page order: the
+/// registry resolver pointer of each child with no name row, on the parent's chain, then the
+/// wrapper expiries.
+pub(crate) async fn fill_children_ens_v1<'a>(
+    db: impl Into<bigname_storage::ReadDb<'_>>,
+    chain_id: Option<&str>,
+    rows: &'a [ChildrenCurrentRow],
+    name_rows: &BTreeMap<String, NameCurrentRow>,
+    objects: impl IntoIterator<Item = Option<&'a mut EnsV1>>,
+) -> V2Result<()> {
+    let mut children = Vec::new();
+    let mut named = Vec::new();
+    for (row, object) in rows.iter().zip(objects) {
+        let Some(object) = object else {
+            continue;
+        };
+        match chain_id.filter(|_| !name_rows.contains_key(&row.child_logical_name_id)) {
+            Some(chain_id) => children.push((chain_id, &*row.namespace, &*row.namehash, object)),
+            None => named.push(object),
+        }
+    }
+    fill_ens_v1(db, children, named).await
+}
+
+/// [`fill_children_ens_v1`] for an address-names page: an entry with no name row is a registry
+/// child on the chain its provenance names.
+pub(crate) async fn fill_address_names_ens_v1<'a>(
+    db: impl Into<bigname_storage::ReadDb<'_>>,
+    entries: &'a [AddressNameCurrentEntry],
+    name_rows: &BTreeMap<String, NameCurrentRow>,
+    objects: impl IntoIterator<Item = Option<&'a mut EnsV1>>,
+) -> V2Result<()> {
+    let mut children = Vec::new();
+    let mut named = Vec::new();
+    for (entry, object) in entries.iter().zip(objects) {
+        let Some(object) = object else {
+            continue;
+        };
+        let chain_id = entry.provenance.get("chain_id").and_then(Value::as_str);
+        match chain_id.filter(|_| !name_rows.contains_key(&entry.logical_name_id)) {
+            Some(chain_id) => {
+                children.push((chain_id, &*entry.namespace, &*entry.namehash, object));
+            }
+            None => named.push(object),
+        }
+    }
+    fill_ens_v1(db, children, named).await
+}
+
+async fn fill_ens_v1(
+    db: impl Into<bigname_storage::ReadDb<'_>>,
+    mut children: Vec<RegistryChild<'_>>,
+    named: Vec<&mut EnsV1>,
+) -> V2Result<()> {
+    let mut db = db.into();
+    fill_registry_child_resolvers(db.reborrow(), &mut children).await?;
+    fill_wrapper_expiries(
+        db,
+        children.into_iter().map(|(.., object)| object).chain(named),
+    )
+    .await
+}
+
 fn inconsistent_wrapper_expiry() -> V2Error {
     V2Error::internal_error("stored wrapper expiry is inconsistent")
 }
 
 /// The `ens_v1` object of an ENSv1 registry child with no name row, which serves `authority` from
 /// its registry.
+///
+/// The registry resolver pointer is left out here: the response reads it for the whole page
+/// afterwards (`fill_children_ens_v1`, `fill_address_names_ens_v1`).
 ///
 /// A child no label-bearing event named holds only a null expiry. A lease is the BaseRegistrar's
 /// `expiries[id]` and token, which a registry `setSubnodeOwner` child never gets

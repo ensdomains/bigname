@@ -458,8 +458,9 @@ async fn v2_registry_children_serve_the_authority_of_their_registry() -> Result<
             .find(|row| row["namehash"] == json!(node))
             .unwrap_or_else(|| panic!("{node} is a subname: {subnames:#?}"));
         assert_eq!(subname["authority"], row["authority"], "{subname:#}");
-        // No lease, so ENSv1's own object carries only a null expiry.
-        assert_eq!(row["ens_v1"], json!({"expires_at": null}), "{row:#}");
+        // No lease and no pointer event, so ENSv1's own object carries a null expiry and a null
+        // registry pointer.
+        assert_eq!(row["ens_v1"], json!({"expires_at": null, "resolver": null}), "{row:#}");
         assert_eq!(subname["ens_v1"], row["ens_v1"], "{subname:#}");
     }
     let alpha_row = rows
@@ -719,14 +720,14 @@ async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<
         rows_of(&read_family_pages(&database, "/v1/names/alpha.eth/subnames?page_size=10").await?);
     let subname = served_child(&subnames, wrapped);
     assert_eq!(subname["authority"], json!("ens_v1"), "{subname:#}");
-    assert_eq!(subname["ens_v1"], json!({}), "{subname:#}");
+    assert_eq!(subname["ens_v1"], json!({"resolver": null}), "{subname:#}");
     assert_eq!(subname.get("owner"), None, "{subname:#}");
     assert_eq!(subname.get("manager"), None, "{subname:#}");
     for node in [named, plain] {
         let row = served_child(&rows, node);
         for served in [row, served_child(&subnames, node)] {
             assert_eq!(served["authority"], json!("ens_v1"), "{served:#}");
-            assert_eq!(served["ens_v1"], json!({"expires_at": null}), "{served:#}");
+            assert_eq!(served["ens_v1"], json!({"expires_at": null, "resolver": null}), "{served:#}");
             assert_eq!(served["owner"], json!(RC_OWNER), "{served:#}");
             assert_eq!(served["manager"], json!(RC_OWNER), "{served:#}");
         }
@@ -791,7 +792,7 @@ async fn v2_registrar_shadow_child_stays_listed_for_its_registrant() -> Result<(
         assert_eq!(row["relations"], relation, "{row:#}");
         assert_eq!(row["owner"], json!(RC_OWNER), "{relation}: {row:#}");
         assert_eq!(row.get("manager"), None, "{relation}: {row:#}");
-        assert_eq!(row["ens_v1"], json!({}), "{relation}: {row:#}");
+        assert_eq!(row["ens_v1"], json!({"resolver": null}), "{relation}: {row:#}");
     }
     let subnames =
         rows_of(&read_family_pages(&database, "/v1/names/alpha.eth/subnames?page_size=10").await?);
@@ -1472,7 +1473,7 @@ async fn v2_released_surface_less_child_serves_no_owner_or_manager() -> Result<(
     let subname = served_child(&subnames, &node);
     assert_eq!(subname["status"], json!("released"), "{subname:#}");
     assert_eq!(subname["authority"], json!("ens_v1"), "{subname:#}");
-    assert_eq!(subname["ens_v1"], json!({"expires_at": null}), "{subname:#}");
+    assert_eq!(subname["ens_v1"], json!({"expires_at": null, "resolver": null}), "{subname:#}");
     for absent in [
         "owner",
         "manager",

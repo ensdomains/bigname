@@ -4717,6 +4717,9 @@ For a registrar lease first identified by a later readable observation, registra
   `wrapped`, `emancipated`, or `locked`; `lapsed` retains the wrapper expiry,
   while proven `unwrapped` and incomplete `unknown` states do not invent
   current wrapper fields.
+  A row's `ens_v1.resolver` is its node's ENSv1 registry pointer. It can name
+  another resolver than this one, because `bound_names` follows the name's
+  current registration, not the registry pointer.
   Once exact-name authority is activated, `bound_names` includes a logical
   name only under the resolver selected by its current registration. A
   migrated name is absent from its superseded ENSv1 resolver's listing, and a
