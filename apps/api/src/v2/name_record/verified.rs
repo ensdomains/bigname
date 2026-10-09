@@ -152,7 +152,7 @@ async fn build_verified_name_record(
         .then(|| groups.addresses.get("60").cloned().flatten())
         .flatten();
     record.records =
-        (has_current_registration && row.unresolvable_reason().is_none()).then_some(groups);
+        serves_record_groups(row, has_current_registration, alias.is_some()).then_some(groups);
     record.read_status = status;
     record.unsupported_reason = verified_profile_unsupported_reason(answers, status);
     record.failure_reason = verified_profile_failure_reason(answers, status);
@@ -287,6 +287,13 @@ fn is_primary_address_record(record: &ResolutionRecordKey) -> bool {
     record.record_key == "addr:60"
 }
 
+/// Whether verified detail serves its record groups. `unresolvable_reason` describes the
+/// canonical path. Under an alias the read is for the requested path, which the chain resolved,
+/// so the reason withholds nothing there.
+fn serves_record_groups(row: &NameCurrentRow, has_current_registration: bool, alias: bool) -> bool {
+    has_current_registration && (alias || row.unresolvable_reason().is_none())
+}
+
 #[cfg(test)]
 mod tests {
     use bigname_storage::RecordInventoryCurrentRow;
@@ -295,6 +302,35 @@ mod tests {
 
     use super::*;
     use crate::v2::name_records::MAX_RECORD_KEYS;
+
+    /// An alias read keeps the chain's record groups although the canonical row is
+    /// unresolvable. Without an alias the canonical path's reason withholds them.
+    #[test]
+    fn an_alias_keeps_record_groups_the_canonical_reason_withholds() {
+        let row = NameCurrentRow {
+            logical_name_id: "ens:child.m.eth".to_owned(),
+            namespace: "ens".to_owned(),
+            canonical_display_name: "child.m.eth".to_owned(),
+            normalized_name: "child.m.eth".to_owned(),
+            namehash: "0x00".to_owned(),
+            surface_binding_id: None,
+            resource_id: None,
+            serving_resource_id: None,
+            token_lineage_id: None,
+            binding_kind: None,
+            declared_summary: json!({"unresolvable_reason": "ens_v2_path_no_resolver"}),
+            provenance: json!({}),
+            coverage: json!({}),
+            chain_positions: json!({}),
+            canonicality_summary: json!({}),
+            manifest_version: 1,
+            last_recomputed_at: OffsetDateTime::from_unix_timestamp(1_717_171_719)
+                .expect("test timestamp"),
+        };
+        assert!(serves_record_groups(&row, true, true));
+        assert!(!serves_record_groups(&row, true, false));
+        assert!(!serves_record_groups(&row, false, true));
+    }
 
     #[test]
     fn synthetic_primary_address_does_not_reject_maximum_inventory() {

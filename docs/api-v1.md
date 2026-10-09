@@ -2283,10 +2283,13 @@ A path that reaches a token whose served path is another one is an
   it has one, else `404 not_found`. A token whose served row is not composed yet answers
   `404 not_found` too. So does a token whose served path now holds another token, since
   that row is not this token's. A reservation's row is bound to no token, so a reserved
-  token is served only by a reservation row with the same expiry and no registrant. A
-  lapsed reservation has a short window, until the next registry event after its expiry is
-  processed. In that window its alias can show another registry's reservation of the same
-  label with the same expiry, with that reservation's created and registered dates.
+  token is served only by a reservation row with the same expiry and no registrant. The
+  exception is a row whose selected binding is ENSv1, such as a reservation held beside a
+  live ENSv1 registration. That row is bound to the ENSv1 registration, so the reservation
+  alone is enough and the alias serves it. A lapsed reservation has a short window, until
+  the next registry event after its expiry is processed. In that window its alias can show
+  another registry's reservation of the same label with the same expiry, with that
+  reservation's created and registered dates.
 - Only a token with a served path is served. A path can resolve on chain to a token whose
   registry has no served path, such as a registry whose parent claim points at a parent
   with no name. That path answers `404 not_found` until the claim is corrected.

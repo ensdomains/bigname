@@ -124,12 +124,20 @@ pub(crate) async fn load_served_name_for_selected_snapshot(
 
 /// Whether `row` is the reached token's own row. A token's row is bound to its resource. A
 /// reservation's row is bound to none, so it must be a reservation with no registrant, as a
-/// reserved entry has no owner, and with the reached reservation's expiry.
+/// reserved entry has no owner, and with the reached reservation's expiry. When the row's
+/// selected authority arm is ENSv1, the row is bound to the ENSv1 registration, not to an
+/// ENSv2 one, so the reservation's association alone names it.
 fn is_the_targets_row(
     row: &NameCurrentRow,
     target: &bigname_storage::families::alias_path::AliasTarget,
 ) -> bool {
+    let decided_by_ens_v1 = row
+        .provenance
+        .pointer("/authority_selection/authority_arm")
+        .and_then(serde_json::Value::as_str)
+        == Some("ens_v1");
     match (row.resource_id, &target.reservation_expiry) {
+        (_, Some(_)) if decided_by_ens_v1 => true,
         (Some(resource), _) => resource == target.resource_id,
         (None, Some(expiry)) => {
             let registration = &row.declared_summary["registration"];

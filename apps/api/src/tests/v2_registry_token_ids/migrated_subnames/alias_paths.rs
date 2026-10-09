@@ -676,6 +676,27 @@ async fn an_alias_of_a_reservation_whose_canonical_path_holds_another_is_not_fou
     database.cleanup().await
 }
 
+/// T27. A reservation beside a live ENSv1 registration. Before its ENSv1→ENSv2 migration,
+/// `envoy1084.eth` keeps its ENSv1 registration and an ownerless reservation in the
+/// ETHRegistry. `mirror` mounts the ETHRegistry again, so `envoy1084.mirror.eth` reaches the
+/// reservation. Its row is decided by ENSv1 and bound to the ENSv1 registration, and the alias
+/// serves it on the direct read and the records route.
+#[tokio::test]
+async fn an_alias_of_a_reservation_serves_its_ens_v1_row() -> Result<()> {
+    let (database, logs, _) = setup().await?;
+    let before: Vec<_> = logs
+        .iter()
+        .filter(|log| log.block_number <= BASE + 121)
+        .cloned()
+        .collect();
+    seed_and_run(&database, &before, 120, 121).await?;
+    step(&database, 122, vec![mount("mirror", E, u64::MAX)?]).await?;
+    let alias = format!("{LABEL}.mirror.eth");
+    let served = assert_alias(&database, &alias, NAME).await?;
+    assert_eq!(served["data"]["authority"], "ens_v1", "{served:#}");
+    database.cleanup().await
+}
+
 /// T13, T14, T20. A canonical read with a current registration never walks. A miss walks at
 /// most its labels, and a canonical path never serves as its own alias.
 #[tokio::test]
