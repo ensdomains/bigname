@@ -1068,7 +1068,18 @@ impl SampleTree {
         &self.root
     }
 
+    /// Writes a sample file. A file under a crate's `src/` gets a minimal manifest beside that
+    /// directory first, as every walked crate needs one.
     fn write(&self, relative_path: &str, contents: &str) {
+        if let Some((crate_directory, _)) = relative_path.split_once("/src/") {
+            let manifest = self.root.join(crate_directory).join("Cargo.toml");
+            if crate_directory.starts_with("crates/") && !manifest.exists() {
+                fs::create_dir_all(self.root.join(crate_directory))
+                    .expect("sample crate directory must be creatable");
+                fs::write(manifest, "[package]\nbuild = false\n")
+                    .expect("sample manifest must be writable");
+            }
+        }
         let path = self.root.join(relative_path);
         fs::create_dir_all(path.parent().expect("sample file must have a parent"))
             .expect("sample parent must be creatable");

@@ -8,7 +8,7 @@ fn a_crate_root_outside_its_source_root_is_refused() {
     let tree = SampleTree::new();
     tree.write(
         "crates/adapters/Cargo.toml",
-        "[lib]\npath = \"lib/root.rs\"\n",
+        "[package]\nbuild = false\n\n[lib]\npath = \"lib/root.rs\"\n",
     );
     tree.write(
         "crates/adapters/lib/root.rs",
@@ -23,8 +23,31 @@ fn a_crate_root_outside_its_source_root_is_refused() {
 }
 
 #[test]
-fn a_build_script_is_walked_as_a_production_root() {
+fn a_walked_crate_must_turn_build_scripts_off() {
     let tree = SampleTree::new();
+    tree.write(
+        "crates/storage/src/gen.rs",
+        "fn main() { println!(\"cargo:rustc-cfg=alt\"); }\n",
+    );
+    // Any walked crate, hashed or not, and a build script inside `src/` too.
+    for (krate, manifest) in [
+        ("adapters", "[package]\nname = \"adapters\"\n"),
+        ("adapters", "[package]\nbuild = true\n"),
+        ("adapters", "[package]\nbuild = \"tools/gen.rs\"\n"),
+        ("adapters", "[package]\nbuild = [\"gen_a.rs\"]\n"),
+        ("storage", "[package]\nbuild = \"src/gen.rs\"\n"),
+    ] {
+        let path = format!("crates/{krate}/Cargo.toml");
+        tree.write(&path, manifest);
+        let error = interpreter_content_hash(tree.path())
+            .expect_err("a walked crate that may run a build script must fail the hash");
+        assert_names(&error.to_string(), &[&path, "package.build = false"]);
+        tree.write(&path, "[package]\nbuild = false\n");
+    }
+
+    // With `build = false` Cargo never runs a `build.rs`, so a file only it and test code
+    // declare stays test-only.
+    tree.write("crates/adapters/Cargo.toml", "[package]\nbuild = false\n");
     let lib = "pub fn interpret() -> bool { true }\n#[cfg(test)]\nmod gated;\n";
     tree.write("crates/adapters/src/lib.rs", lib);
     tree.write("crates/adapters/src/gated.rs", "pub fn gated() {}\n");
@@ -32,71 +55,18 @@ fn a_build_script_is_walked_as_a_production_root() {
         "crates/adapters/build.rs",
         "#[path = \"src/gated.rs\"]\nmod gated;\nfn main() {}\n",
     );
-    let error = interpreter_content_hash(tree.path())
-        .expect_err("a file a build script shares with test code must fail the hash");
-    assert_names(
-        &error.to_string(),
-        &[
-            "crates/adapters/src/gated.rs",
-            "crates/adapters/src/lib.rs",
-            "crates/adapters/build.rs",
-        ],
-    );
-
-    // A build script outside the hashed sources is refused on its own.
-    tree.write("crates/adapters/build.rs", "fn main() {}\n");
-    let error = interpreter_content_hash(tree.path())
-        .expect_err("a build script outside the hashed sources must fail the hash");
-    assert_names(
-        &error.to_string(),
-        &["crates/adapters/build.rs", "build script"],
-    );
-
-    // `package.build` names the script, and `build = false` turns it off.
-    tree.write(
-        "crates/adapters/Cargo.toml",
-        "[package]\nbuild = \"tools/gen.rs\"\n",
-    );
-    tree.write("crates/adapters/tools/gen.rs", "fn main() {}\n");
-    let error =
-        interpreter_content_hash(tree.path()).expect_err("a named build script must fail the hash");
-    assert_names(
-        &error.to_string(),
-        &["crates/adapters/tools/gen.rs", "build script"],
-    );
-    tree.write("crates/adapters/Cargo.toml", "[package]\nbuild = false\n");
-    interpreter_content_hash(tree.path()).expect("a crate without a build script must hash");
+    interpreter_content_hash(tree.path()).expect("a crate with build scripts off must hash");
+    assert!(!is_input(&tree, "crates/adapters/src/gated.rs"));
 }
 
 #[test]
-fn a_build_script_inside_src_is_refused_whatever_its_crate() {
+fn a_walked_source_root_without_a_manifest_is_refused() {
     let tree = SampleTree::new();
-    tree.write(
-        "crates/storage/Cargo.toml",
-        "[package]\nbuild = \"src/gen.rs\"\n",
-    );
-    tree.write(
-        "crates/storage/src/gen.rs",
-        "fn main() { println!(\"cargo:rustc-cfg=alt\"); }\n",
-    );
+    std::fs::remove_file(tree.path().join("crates/adapters/Cargo.toml"))
+        .expect("sample manifest must be removable");
     let error = interpreter_content_hash(tree.path())
-        .expect_err("a build script in a walked crate must fail the hash");
-    assert_names(
-        &error.to_string(),
-        &["crates/storage/src/gen.rs", "build script"],
-    );
-
-    // A `build` value the walk cannot read is refused too.
-    tree.write(
-        "crates/storage/Cargo.toml",
-        "[package]\nbuild = [\"gen_a.rs\"]\n",
-    );
-    let error = interpreter_content_hash(tree.path())
-        .expect_err("an unreadable build value must fail the hash");
-    assert_names(
-        &error.to_string(),
-        &["crates/storage/Cargo.toml", "package.build"],
-    );
+        .expect_err("a walked src/ without a manifest must fail the hash");
+    assert_names(&error.to_string(), &["crates/adapters/src", "Cargo.toml"]);
 }
 
 #[test]
@@ -134,12 +104,66 @@ fn the_directory_of_an_absent_default_module_is_watched() {
     );
 }
 
+/// Gives `krate` a `[[bin]]` at `src/tool.txt`, which is not Rust.
+fn text_binary(tree: &SampleTree, krate: &str) {
+    tree.write(
+        &format!("crates/{krate}/Cargo.toml"),
+        "[package]\nbuild = false\n\n[[bin]]\nname = \"tool\"\npath = \"src/tool.txt\"\n",
+    );
+    tree.write(&format!("crates/{krate}/src/tool.txt"), "fn main() {}\n");
+}
+
+#[test]
+fn a_root_that_is_not_rust_is_refused_when_an_include_reaches_it_first() {
+    // Lookup is the last seed, after the hashed crates and the other crates of files hashed by
+    // name, so its roots pop first and its `include!` is the first route to adapters' binary.
+    // Its `lib.rs` is not hashed, so the include itself is not refused.
+    let tree = SampleTree::new();
+    text_binary(&tree, "adapters");
+    tree.write(
+        "crates/lookup/src/lib.rs",
+        "include!(\"../../adapters/src/tool.txt\");\n",
+    );
+    let error = interpreter_content_hash(tree.path())
+        .expect_err("a root that is not Rust must fail the hash whatever reaches it first");
+    assert_names(
+        &error.to_string(),
+        &[
+            "crates/adapters/src/tool.txt",
+            "or is not Rust",
+            "crates/lookup/src/lib.rs (include!(",
+        ],
+    );
+}
+
+#[test]
+fn a_root_that_is_not_rust_is_refused_when_an_include_reaches_it_later() {
+    // Lookup's roots pop before storage's, so its binary is reached as a crate root first, and
+    // storage's unhashed `lib.rs` includes it later.
+    let tree = SampleTree::new();
+    text_binary(&tree, "lookup");
+    tree.write(
+        "crates/storage/src/lib.rs",
+        "include!(\"../../lookup/src/tool.txt\");\n",
+    );
+    let error = interpreter_content_hash(tree.path())
+        .expect_err("a root that is not Rust must fail the hash whatever reaches it later");
+    assert_names(
+        &error.to_string(),
+        &[
+            "crates/lookup/src/tool.txt",
+            "or is not Rust",
+            "crates/lookup/src/tool.txt (crate root)",
+        ],
+    );
+}
+
 #[test]
 fn a_manifest_target_that_is_not_rust_is_refused() {
     let tree = SampleTree::new();
     tree.write(
         "crates/adapters/Cargo.toml",
-        "[lib]\npath = \"src/root.txt\"\n",
+        "[package]\nbuild = false\n\n[lib]\npath = \"src/root.txt\"\n",
     );
     tree.write(
         "crates/adapters/src/root.txt",

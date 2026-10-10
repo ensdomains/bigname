@@ -87,13 +87,13 @@ pub(super) fn walk_crates(
         .map(|(file, _)| relative_key(&normal_root, file))
         .collect::<io::Result<_>>()?;
     // A module file that is not Rust is not hashed with its root either, such as a `[lib]` path
-    // to `src/root.txt`.
+    // to `src/root.txt`, whatever else reaches it, an `include!` among them.
     let outside = walk
         .reached
         .iter()
-        .filter(|(file, (test_only, site))| {
+        .filter(|(file, (test_only, _))| {
             let rust = file.extension().is_some_and(|extension| extension == "rs");
-            let module = !site.name.starts_with("include!");
+            let module = walk.compiled.contains(*file);
             !test_only && (!roots.iter().any(|root| file.starts_with(root)) || (module && !rust))
         })
         .map(|(file, (_, site))| (file.clone(), (site.parent.clone(), site.name.clone())))
@@ -117,21 +117,10 @@ fn walk(roots: &[PathBuf], by_name: BTreeSet<PathBuf>) -> io::Result<Walk> {
         ..Walk::default()
     };
     let mut pending = Vec::new();
-    let mut build_scripts = Vec::new();
     for root in roots {
-        let targets = targets::targets(root)?;
-        build_scripts.extend(targets.build_script.clone());
-        let sites = targets
-            .roots
-            .into_iter()
-            .map(|file| (Site::named(&file, "crate root"), file))
-            .chain(
-                targets
-                    .build_script
-                    .map(|file| (Site::named(&file, "build script"), file)),
-            );
-        for (site, file) in sites {
+        for file in targets::targets(root)? {
             let directory = parent(&file)?;
+            let site = Site::crate_root(&file);
             pending.push(Module {
                 by_name: walk.by_name.contains(&file),
                 file,
@@ -143,18 +132,6 @@ fn walk(roots: &[PathBuf], by_name: BTreeSet<PathBuf>) -> io::Result<Walk> {
         }
     }
     walk.drain(&mut pending)?;
-    // A build script can set cfgs, environment and generated code for its crate, and nothing it
-    // does is hashed, so a walked crate may not have one. It is walked first so that a file it
-    // shares with test code is named as such.
-    if let Some(script) = build_scripts.first() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "{} is the build script of a walked crate, which the content hash cannot cover",
-                script.display()
-            ),
-        ));
-    }
     Ok(walk)
 }
 
@@ -166,11 +143,10 @@ struct Site {
 }
 
 impl Site {
-    /// A target root, such as a crate root or a build script, reached from itself.
-    fn named(file: &Path, name: &str) -> Self {
+    fn crate_root(file: &Path) -> Self {
         Self {
             parent: file.to_owned(),
-            name: name.to_owned(),
+            name: "crate root".to_owned(),
         }
     }
 
@@ -200,6 +176,9 @@ struct Walk {
     /// Every file reached, lexically normalized, with whether it is test-only and the first
     /// declaration that reached it.
     reached: BTreeMap<PathBuf, (bool, Site)>,
+    /// Every file production code reaches as a crate root or a module, on any visit, whatever
+    /// reached it first.
+    compiled: BTreeSet<PathBuf>,
     /// Each file with the directory its children resolve in, walked once per pair: one file can
     /// be declared twice with different child directories.
     walked: BTreeSet<(PathBuf, PathBuf, bool, bool)>,
@@ -224,6 +203,9 @@ impl Walk {
     fn drain(&mut self, pending: &mut Vec<Module>) -> io::Result<()> {
         while let Some(module) = pending.pop() {
             self.reach(&module.file, module.test_only, &module.site)?;
+            if !module.test_only {
+                self.compiled.insert(module.file.clone());
+            }
             let walk_key = (
                 module.file.clone(),
                 module.directory.clone(),

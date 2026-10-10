@@ -2722,9 +2722,10 @@ fails instead of guessing when it meets:
 - A production `#[path]` module in a hashed file, a production module declared
   inside an inline module that has a `#[path]`, or a production module declared
   in a file hashed by name or below one, whose file is not a hashed source.
-- A build script in a walked crate, wherever it sits, because the cfgs and
-  code it can set are not hashed. A `package.build` value other than a path,
-  `true` or `false` fails too.
+- A walked crate whose `Cargo.toml` does not set `package.build = false`,
+  because a build script's cfgs and generated code are not hashed. With it,
+  Cargo never runs a `build.rs`, even one added later. A walked `src/` with no
+  `Cargo.toml` beside it fails too, since a manifest elsewhere could compile it.
 - A production file outside the walked source roots that is not a hashed
   source, such as a `[lib]` or `[[bin]]` path or a `#[path]` module outside
   `src/`.

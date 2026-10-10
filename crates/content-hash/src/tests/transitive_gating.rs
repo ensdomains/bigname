@@ -377,7 +377,7 @@ fn every_production_cargo_target_root_is_walked() {
         let tree = SampleTree::new();
         tree.write(
             "crates/adapters/Cargo.toml",
-            "[package]\nname = \"adapters\"\n\n[[bin]]\nname = \"listed\"\npath = \"tools/listed.rs\"\n",
+            "[package]\nname = \"adapters\"\nbuild = false\n\n[[bin]]\nname = \"listed\"\npath = \"tools/listed.rs\"\n",
         );
         tree.write(ADAPTERS_LIB, "#[cfg(test)]\nmod tests;\n");
         tree.write(
@@ -479,7 +479,7 @@ fn a_binary_target_outside_src_is_watched() {
     let tree = SampleTree::new();
     tree.write(
         "crates/adapters/Cargo.toml",
-        "[package]\nname = \"adapters\"\n\n[[bin]]\nname = \"listed\"\npath = \"tools/listed.rs\"\n",
+        "[package]\nname = \"adapters\"\nbuild = false\n\n[[bin]]\nname = \"listed\"\npath = \"tools/listed.rs\"\n",
     );
     let listed = tree.path().join("crates/adapters/tools/listed.rs");
     tree.write("crates/adapters/tools/listed.rs", "fn main() {}\n");
@@ -523,7 +523,7 @@ fn every_directory_the_walk_reads_outside_src_is_watched() {
     let tree = SampleTree::new();
     tree.write(
         "crates/adapters/Cargo.toml",
-        "[package]\nname = \"adapters\"\n\n[[bin]]\nname = \"listed\"\npath = \"tools/listed.rs\"\n",
+        "[package]\nname = \"adapters\"\nbuild = false\n\n[[bin]]\nname = \"listed\"\npath = \"tools/listed.rs\"\n",
     );
     tree.write(
         "crates/adapters/tools/listed.rs",
