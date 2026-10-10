@@ -149,8 +149,9 @@ pub(crate) fn watched_paths(workspace_root: &Path) -> Vec<PathBuf> {
         );
         // A data read from a hashed file is hashed, so its file is watched, and its directory too
         // in case it is created later. Every data read is watched, which only over-watches. An
-        // absent optional `cfg_attr` or `#[path]` file, or an absent default file of a module
-        // that resolves to none, may also be created later, which changes what the walk reaches.
+        // absent optional `cfg_attr`, `#[path]` or `include!` file, or an absent default file of a
+        // module that resolves to none, may also be created later, which changes what the walk
+        // reaches.
         // An absent path is watched through its nearest existing directory, because cargo reruns
         // the build script on every build for a watched path that does not exist.
         for file in walked.data_reads.keys().filter(|file| file.is_file()) {

@@ -159,6 +159,27 @@ fn a_root_that_is_not_rust_is_refused_when_an_include_reaches_it_later() {
 }
 
 #[test]
+fn the_directory_of_an_absent_optional_include_is_watched() {
+    let tree = SampleTree::new();
+    tree.write(
+        "crates/adapters/src/lib.rs",
+        "pub fn interpret() -> bool { true }\n#[cfg(feature = \"x\")]\nmod generated;\n",
+    );
+    tree.write(
+        "crates/adapters/src/generated.rs",
+        "include!(\"../../../generated.rs\");\n",
+    );
+    interpreter_content_hash(tree.path()).expect("an optional absent include target must hash");
+    // The target would sit at the workspace root, its nearest existing directory.
+    let watched = crate::compute::watched_paths(tree.path());
+    assert!(
+        watched.iter().any(|path| path == tree.path()),
+        "{} is not watched",
+        tree.path().display()
+    );
+}
+
+#[test]
 fn a_manifest_target_that_is_not_rust_is_refused() {
     let tree = SampleTree::new();
     tree.write(

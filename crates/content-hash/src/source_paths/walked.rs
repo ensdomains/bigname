@@ -27,9 +27,9 @@ pub(crate) struct Walked {
     /// production root or module file that is not Rust, with the declaring file and declaration
     /// that first reached it.
     pub(super) outside: BTreeMap<PathBuf, (PathBuf, String)>,
-    /// Absent files an optional `cfg_attr` or `#[path]` path names, and the absent default files
-    /// of a module that resolves to none. Their nearest existing directories are watched, so
-    /// creating one reruns the hash.
+    /// Absent files an optional `cfg_attr`, `#[path]` or `include!` path names, and the absent
+    /// default files of a module that resolves to none. Their nearest existing directories are
+    /// watched, so creating one reruns the hash.
     pub(crate) missing: BTreeSet<PathBuf>,
     /// The workspace-relative source roots walked: the crates whose sources are hashed, and each
     /// crate that holds a file hashed by name.

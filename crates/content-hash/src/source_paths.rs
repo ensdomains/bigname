@@ -193,7 +193,9 @@ struct Walk {
     /// Files a production `#[path]` decides, directly or as an inline module's directory, or a
     /// file hashed by name declares, with each declaring file and declaration.
     modules: BTreeMap<PathBuf, BTreeSet<(PathBuf, String)>>,
-    /// Absent files an optional `cfg_attr` path names, whose directories are watched.
+    /// Absent files an optional `cfg_attr`, `#[path]` or `include!` path names, and the absent
+    /// default files of a module that resolves to none. Their nearest existing directories are
+    /// watched, so creating one reruns the hash.
     missing: BTreeSet<PathBuf>,
     /// The files hashed by name.
     by_name: BTreeSet<PathBuf>,
@@ -453,6 +455,8 @@ impl Walk {
                     ),
                 ));
             }
+            // Creating it later changes what the walk reaches.
+            self.missing.insert(file);
             return Ok(());
         }
         let site = Site {
