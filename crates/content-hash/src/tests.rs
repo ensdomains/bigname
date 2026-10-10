@@ -524,18 +524,18 @@ fn a_test_module_declared_in_the_write_parent_stays_out_of_the_hash() {
     // `write.rs` is the hashed root's parent module but lives outside it, so its `#[cfg(test)]`
     // declaration has to be seen or the test file lands inside the fence as production input.
     let tree = SampleTree::new();
-    tree.write("crates/interpret/src/lib.rs", "mod write;\n");
-    tree.write(
+    tree.write_keeping_mounts("crates/interpret/src/lib.rs", "mod write;\n");
+    tree.write_keeping_mounts(
         "crates/interpret/src/write.rs",
         "#[cfg(test)]\nmod tests;\nmod identity_names;\n",
     );
-    tree.write(
+    tree.write_keeping_mounts(
         "crates/interpret/src/write/tests.rs",
         "fn test_only_baseline() {}\n",
     );
     let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
 
-    tree.write(
+    tree.write_keeping_mounts(
         "crates/interpret/src/write/tests.rs",
         "fn test_only_change() {}\n",
     );
@@ -559,7 +559,7 @@ fn write_conflict_policy_changes_the_hash() {
         let tree = SampleTree::new();
         let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
 
-        tree.write(relative_path, "fn source_priority() -> u8 { 2 }\n");
+        tree.write_keeping_mounts(relative_path, "fn source_priority() -> u8 { 2 }\n");
 
         let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
         assert_ne!(first, changed, "{relative_path} must rotate the hash");
@@ -613,10 +613,10 @@ fn storage_semantic_sources_change_the_hash_and_other_storage_sources_do_not() {
         ("crates/storage/src/lib.rs", false),
     ] {
         let tree = SampleTree::new();
-        tree.write(relative_path, "fn compose() -> u8 { 1 }\n");
+        tree.write_keeping_mounts(relative_path, "fn compose() -> u8 { 1 }\n");
         let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
 
-        tree.write(relative_path, "fn compose() -> u8 { 2 }\n");
+        tree.write_keeping_mounts(relative_path, "fn compose() -> u8 { 2 }\n");
 
         let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
         assert_eq!(
@@ -631,12 +631,12 @@ fn storage_semantic_sources_change_the_hash_and_other_storage_sources_do_not() {
 #[test]
 fn a_test_module_declared_in_the_storage_families_stays_out_of_the_hash() {
     let tree = SampleTree::new();
-    tree.write("crates/storage/src/lib.rs", "mod families;\n");
-    tree.write(
+    tree.write_keeping_mounts("crates/storage/src/lib.rs", "mod families;\n");
+    tree.write_keeping_mounts(
         "crates/storage/src/families/mod.rs",
         "#[cfg(test)]\nmod tests;\npub mod name;\n",
     );
-    tree.write(
+    tree.write_keeping_mounts(
         "crates/storage/src/families/tests.rs",
         "fn test_only_baseline() {}\n",
     );
@@ -650,7 +650,7 @@ fn a_test_module_declared_in_the_storage_families_stays_out_of_the_hash() {
         Some("cfg(test)-gated external module")
     );
 
-    tree.write(
+    tree.write_keeping_mounts(
         "crates/storage/src/families/tests.rs",
         "fn test_only_change() {}\n",
     );
@@ -744,6 +744,10 @@ fn a_moved_semantic_source_fails_the_hash_instead_of_narrowing_it() {
     interpreter_content_hash(tree.path()).expect("baseline must hash");
     fs::remove_file(tree.path().join("crates/domain/src/normalization.rs"))
         .expect("semantic source must be removable");
+    let lib = tree.path().join("crates/domain/src/lib.rs");
+    let declarations = fs::read_to_string(&lib).expect("sample crate root must be readable");
+    fs::write(&lib, declarations.replace("pub mod normalization;\n", ""))
+        .expect("sample crate root must be writable");
 
     let error = interpreter_content_hash(tree.path())
         .expect_err("a missing semantic source must fail loudly");
@@ -1046,6 +1050,7 @@ impl SampleTree {
         {
             tree.write(relative_path, "pub fn semantics() -> bool { true }\n");
         }
+        tree.mount_semantic_files();
         tree.write(
             "Cargo.lock",
             &lockfile_document(&sample_lockfile_packages()),
@@ -1068,6 +1073,43 @@ impl SampleTree {
         &self.root
     }
 
+    /// Declares each file hashed by name from its crate root down, as the real crates do, since
+    /// one that production never reaches fails the hash.
+    fn mount_semantic_files(&self) {
+        for relative_path in semantic_source_files() {
+            let (krate, module) = relative_path
+                .split_once("/src/")
+                .expect("a file hashed by name sits in a crate's src");
+            let names = module
+                .trim_end_matches(".rs")
+                .split('/')
+                .collect::<Vec<_>>();
+            let mut parent = format!("{krate}/src/lib.rs");
+            for (index, name) in names.iter().enumerate() {
+                if *name == "mod" {
+                    break;
+                }
+                self.append_once(&parent, &format!("pub mod {name};\n"));
+                let directory = format!("{krate}/src/{}", names[..=index].join("/"));
+                parent = if self.root.join(&directory).join("mod.rs").is_file() {
+                    format!("{directory}/mod.rs")
+                } else {
+                    format!("{directory}.rs")
+                };
+            }
+        }
+    }
+
+    /// Appends `line` to a sample file unless it already holds it.
+    fn append_once(&self, relative_path: &str, line: &str) {
+        let path = self.root.join(relative_path);
+        let mut contents = fs::read_to_string(&path).unwrap_or_default();
+        if !contents.contains(line) {
+            contents.push_str(line);
+            fs::write(path, contents).expect("sample file must be writable");
+        }
+    }
+
     /// Writes a sample file. A file under a crate's `src/` gets a minimal manifest beside that
     /// directory first, as every walked crate needs one.
     fn write(&self, relative_path: &str, contents: &str) {
@@ -1084,6 +1126,12 @@ impl SampleTree {
         fs::create_dir_all(path.parent().expect("sample file must have a parent"))
             .expect("sample parent must be creatable");
         fs::write(path, contents).expect("sample file must be writable");
+    }
+
+    /// Writes a sample file, then declares again any file hashed by name the write undeclared.
+    fn write_keeping_mounts(&self, relative_path: &str, contents: &str) {
+        self.write(relative_path, contents);
+        self.mount_semantic_files();
     }
 
     fn write_manifest_floor(&self) {

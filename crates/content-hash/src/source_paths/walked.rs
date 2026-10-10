@@ -27,17 +27,67 @@ pub(crate) struct Walked {
     /// production root or module file that is not Rust, with the declaring file and declaration
     /// that first reached it.
     pub(super) outside: BTreeMap<PathBuf, (PathBuf, String)>,
+    /// Every production out-of-line module declaration that can resolve to a file.
+    pub(super) slots: Vec<Slot>,
+    /// Each file hashed by name that no production route reaches, with why.
+    pub(super) unreached: Vec<(PathBuf, &'static str)>,
     /// Absent files an optional `cfg_attr`, `#[path]` or `include!` path names, and the absent
     /// default files of a module that resolves to none. Their nearest existing directories are
     /// watched, so creating one reruns the hash.
-    pub(crate) missing: BTreeSet<PathBuf>,
+    pub(crate) missing: BTreeMap<PathBuf, PathBuf>,
     /// The workspace-relative source roots walked: the crates whose sources are hashed, and each
     /// crate that holds a file hashed by name.
     pub(crate) roots: Vec<String>,
     pub(super) normal_root: PathBuf,
 }
 
+/// A production module declaration: the files it can resolve to in production, from its default
+/// location, `#[path]` and `cfg_attr` paths, and its default locations, in its scope's directory
+/// and in that directory as if no `#[path]` on the route had moved it.
+pub(crate) struct Slot {
+    pub(super) declarer: PathBuf,
+    pub(super) declaration: String,
+    pub(super) possible: BTreeSet<PathBuf>,
+    pub(super) defaults: BTreeSet<PathBuf>,
+}
+
 impl Walked {
+    /// A file's workspace-relative key, or its full path when it lies outside the workspace,
+    /// which no hashed key matches.
+    fn name(&self, file: &Path) -> String {
+        relative_key(&self.normal_root, file).unwrap_or_else(|_| file.display().to_string())
+    }
+
+    /// Refuses an absent path the build cannot watch for: one whose nearest existing directory
+    /// is the workspace root, which holds the target directory the build itself writes, or lies
+    /// outside the workspace. Each absent path is watched through that directory.
+    pub(super) fn refuse_unwatchable(&self) -> io::Result<()> {
+        let absent_reads = (self.data_reads.iter())
+            .filter(|(file, _)| !file.is_file())
+            .filter_map(|(file, readers)| Some((file, readers.first()?)));
+        for (file, declarer) in self.missing.iter().chain(absent_reads) {
+            let directory = file
+                .ancestors()
+                .skip(1)
+                .find(|directory| directory.is_dir());
+            if directory.is_some_and(|directory| {
+                directory != self.normal_root && directory.starts_with(&self.normal_root)
+            }) {
+                continue;
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} names {}, which does not exist, and its nearest existing directory is the \
+                     workspace root or outside it, so the build cannot watch for it",
+                    self.name(declarer),
+                    file.display()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// Each existing file read as data by a hashed file, with its workspace-relative key.
     /// `hashed` says whether a workspace-relative key is a hashed input. A read from a hashed file
     /// of a file outside the workspace is an error, because the hash could not name it.
@@ -47,13 +97,22 @@ impl Walked {
     ) -> io::Result<Vec<(String, &Path)>> {
         let mut inputs = Vec::new();
         for (file, readers) in &self.data_reads {
-            let mut read_by_hashed_file = false;
-            for reader in readers {
-                read_by_hashed_file |= hashed(&relative_key(&self.normal_root, reader)?);
-            }
-            if read_by_hashed_file && file.is_file() {
-                inputs.push((relative_key(&self.normal_root, file)?, file.as_path()));
-            }
+            let hashed_reader = readers.iter().find(|reader| hashed(&self.name(reader)));
+            let Some(reader) = hashed_reader.filter(|_| file.is_file()) else {
+                continue;
+            };
+            let key = relative_key(&self.normal_root, file).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{} reads {}, which is outside the workspace, so the content hash cannot \
+                         name it",
+                        self.name(reader),
+                        file.display()
+                    ),
+                )
+            })?;
+            inputs.push((key, file.as_path()));
         }
         Ok(inputs)
     }
@@ -67,9 +126,9 @@ impl Walked {
         hashed: impl Fn(&str) -> bool,
     ) -> io::Result<()> {
         for (file, includers) in &self.inclusions {
-            let target = relative_key(&self.normal_root, file)?;
+            let target = self.name(file);
             for includer in includers {
-                let includer = relative_key(&self.normal_root, includer)?;
+                let includer = self.name(includer);
                 if hashed(&includer) && !hashed(&target) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -90,9 +149,9 @@ impl Walked {
     /// would compile without reaching the hash.
     pub(crate) fn refuse_unhashed_modules(&self, hashed: impl Fn(&str) -> bool) -> io::Result<()> {
         for (file, declarations) in &self.modules {
-            let target = relative_key(&self.normal_root, file)?;
+            let target = self.name(file);
             for (declarer, declaration) in declarations {
-                let declarer = relative_key(&self.normal_root, declarer)?;
+                let declarer = self.name(declarer);
                 if hashed(&declarer) && !hashed(&target) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -104,8 +163,29 @@ impl Walked {
                 }
             }
         }
+        // A declaration that can resolve to a hashed file, or whose default location is hashed,
+        // is a semantic slot: whoever declares it, every file it can resolve to must be hashed.
+        for slot in &self.slots {
+            let semantic = (slot.possible.iter().chain(&slot.defaults))
+                .any(|file| file.is_file() && hashed(&self.name(file)));
+            for file in slot.possible.iter().filter(|_| semantic) {
+                if !hashed(&self.name(file)) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "{} in {} can resolve to {}, which is not a hashed source, although \
+                             another file it can resolve to or its default location is hashed, \
+                             so the content hash cannot cover it",
+                            slot.declaration,
+                            self.name(&slot.declarer),
+                            self.name(file)
+                        ),
+                    ));
+                }
+            }
+        }
         for (file, (declarer, declaration)) in &self.outside {
-            let target = relative_key(&self.normal_root, file)?;
+            let target = self.name(file);
             if !hashed(&target) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -113,10 +193,22 @@ impl Walked {
                         "{target} is compiled outside the walked source roots or is not Rust, \
                          reached from {} ({declaration}), and is not a hashed source, so the \
                          content hash cannot cover it",
-                        relative_key(&self.normal_root, declarer)?
+                        self.name(declarer)
                     ),
                 ));
             }
+        }
+        // A file hashed by name that production never compiles leaves its semantics wherever the
+        // module that should hold it points, which the list does not name.
+        if let Some((file, how)) = self.unreached.first() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} is hashed by name but {how}, so the content hash cannot tell where its \
+                     semantics compile",
+                    self.name(file)
+                ),
+            ));
         }
         Ok(())
     }

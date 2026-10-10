@@ -25,6 +25,10 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        manifest_dir.join("src/compute/watch.rs").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         manifest_dir.join("src/lockfile.rs").display()
     );
     println!(
@@ -51,7 +55,13 @@ fn main() {
         "cargo:rerun-if-changed={}",
         manifest_dir.join("src/storage_families.rs").display()
     );
-    for path in compute::watched_paths(workspace_root) {
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("build output directory"));
+    let target_dir = env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root.join("target"));
+    let watched = compute::guarded_watched_paths(workspace_root, &out_dir, &target_dir)
+        .expect("every watched path must leave unchanged builds alone");
+    for path in watched {
         println!("cargo:rerun-if-changed={}", path.display());
     }
     println!("cargo:rerun-if-env-changed={E2E_MANIFEST_PROFILE_ENV}");
@@ -68,7 +78,6 @@ fn main() {
         generated.push_str(&format!("    ({profile:?}, {profile_hash:?}),\n"));
     }
     generated.push_str("];\n");
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("build output directory"));
     std::fs::write(out_dir.join("interpreter_content_hash.rs"), generated)
         .expect("interpreter content hash constant must be writable");
 }

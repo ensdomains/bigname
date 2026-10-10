@@ -11,8 +11,9 @@ pub(super) fn parent(file: &Path) -> io::Result<PathBuf> {
         .ok_or_else(|| invalid_path(file))
 }
 
-/// Folds `.` and `..` so two spellings of one file compare equal.
-pub(super) fn lexically_normal(path: &Path) -> PathBuf {
+/// Folds `.` and `..` so two spellings of one file compare equal. A `..` at the root stays at
+/// the root, as the filesystem resolves it.
+pub(crate) fn lexically_normal(path: &Path) -> PathBuf {
     let mut normal = PathBuf::new();
     for component in path.components() {
         match component {
@@ -20,6 +21,7 @@ pub(super) fn lexically_normal(path: &Path) -> PathBuf {
             Component::ParentDir if normal.file_name().is_some() => {
                 normal.pop();
             }
+            Component::ParentDir if normal.has_root() => {}
             other => normal.push(other),
         }
     }
@@ -83,4 +85,22 @@ pub(super) fn relative_key(workspace_root: &Path, path: &Path) -> io::Result<Str
                 ),
             )
         })
+}
+
+pub(super) fn mixed_module(
+    file: &Path,
+    gated: &super::Site,
+    production: &super::Site,
+) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "{} is reached both from test-only {} ({}) and from {} ({})",
+            file.display(),
+            gated.parent.display(),
+            gated.name,
+            production.parent.display(),
+            production.name
+        ),
+    )
 }

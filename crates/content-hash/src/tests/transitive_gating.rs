@@ -5,6 +5,7 @@ use super::{SampleTree, hashed_source_paths, interpreter_content_hash, workspace
 mod includes;
 mod modules;
 mod refusals;
+mod slots;
 
 const ADAPTERS_LIB: &str = "crates/adapters/src/lib.rs";
 const SCHEMA_V2: &str = "crates/adapters/src/schema_v2.rs";

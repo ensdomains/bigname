@@ -148,8 +148,8 @@ fn a_data_file_an_unhashed_file_reads_stays_out_of_the_hash() {
     // `crates/interpret/src/load` is walked but not hashed, like interpret's input loader, so the
     // SQL it compiles in stays out with it.
     let tree = SampleTree::new();
-    tree.write("crates/interpret/src/lib.rs", "mod load;\n");
-    tree.write(
+    tree.write_keeping_mounts("crates/interpret/src/lib.rs", "mod load;\n");
+    tree.write_keeping_mounts(
         "crates/interpret/src/load.rs",
         "pub fn events() -> &'static str {\n    include_str!(\"load/events.sql\")\n}\n",
     );
@@ -198,12 +198,12 @@ fn a_hashed_file_including_rust_outside_the_hashed_roots_is_refused() {
 #[test]
 fn an_unhashed_file_may_include_a_file_that_is_not_rust() {
     let tree = SampleTree::new();
-    tree.write("crates/interpret/src/lib.rs", "mod load;\n");
-    tree.write(
+    tree.write_keeping_mounts("crates/interpret/src/lib.rs", "mod load;\n");
+    tree.write_keeping_mounts(
         "crates/interpret/src/load.rs",
         "pub fn value() -> u8 {\n    include!(\"load/value.txt\")\n}\n",
     );
-    tree.write("crates/interpret/src/load/value.txt", "1\n");
+    tree.write_keeping_mounts("crates/interpret/src/load/value.txt", "1\n");
     interpreter_content_hash(tree.path()).expect("an unhashed file's include! is not hashed");
 }
 
@@ -229,7 +229,10 @@ fn a_hashed_file_reading_data_outside_the_workspace_is_refused() {
     let result = interpreter_content_hash(workspace);
     std::fs::remove_file(&outside).expect("remove outside file");
     let error = result.expect_err("a data read outside the workspace must fail the hash");
-    assert_names(&error.to_string(), &[&name, "outside workspace root"]);
+    assert_names(
+        &error.to_string(),
+        &[ADAPTERS_LIB, &name, "outside the workspace"],
+    );
 }
 
 #[test]

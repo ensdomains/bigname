@@ -2697,12 +2697,15 @@ attribute token streams, so a call such as `#![doc = include_str!("shared.rs")]`
 keeps nothing in the hash. Each crate that holds a file hashed by name is walked
 too, so a compiled one is read in rustc's own context, under the same rules. A
 production module that one of these files declares, and each module below it,
-must be a hashed source. A file hashed by name that no route reaches is not
-compiled, so nothing it declares is checked. The walk's refusals below cover all
-of these crates, serving code included, so an ordinary file there fails the
-build on the same shapes. Every other file under the hashed
-source roots is hashed, including a file the walk never reaches, such as an
-undeclared file in a test module's directory. A wider condition, such as
+must be a hashed source. The walk checks module routing only. A `use` alias, or
+semantic logic moved into an unlisted file and called from there, is left to the
+curated list of files hashed by name. Cargo follows a symlink when it scans a
+watched directory, so a symlink in a walked `src/` that points at the workspace
+root would rerun the hash on every build. The walk does not refuse one. The
+walk's refusals below cover all of these crates, serving code included, so an
+ordinary file there fails the build on the same shapes. Every other file under
+the hashed source roots is hashed, including a file the walk never reaches, such
+as an undeclared file in a test module's directory. A wider condition, such as
 `#[cfg(any(test, feature = "test-activation"))]`, stays hashed too. The build
 fails instead of guessing when it meets:
 
@@ -2726,6 +2729,21 @@ fails instead of guessing when it meets:
   because a build script's cfgs and generated code are not hashed. With it,
   Cargo never runs a `build.rs`, even one added later. A walked `src/` with no
   `Cargo.toml` beside it fails too, since a manifest elsewhere could compile it.
+- A module declaration that can resolve to a hashed file, or whose default
+  location is hashed, and can also resolve to a file that is not hashed,
+  whoever declares it. The default location is checked both where the
+  declaration sits and where it would sit if no `#[path]` had moved it. Only a
+  `#[cfg(test)]` declaration or a `cfg_attr` path under exactly `test` stays
+  outside this rule.
+- A file hashed by name that production code never reaches, including one
+  reached only from test code.
+- An absent optional path, or an absent data read, whose nearest existing
+  directory is the workspace root or lies outside the workspace. The build
+  watches an absent path through that directory, and the root holds the
+  `target/` directory the build writes on every run.
+- A path the build script would watch that is not strictly inside the
+  workspace, lies in the target directory, or holds the build's output
+  directory. A present data read is watched as its file only.
 - A production file outside the walked source roots that is not a hashed
   source, such as a `[lib]` or `[[bin]]` path or a `#[path]` module outside
   `src/`.

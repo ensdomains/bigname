@@ -167,15 +167,16 @@ fn the_directory_of_an_absent_optional_include_is_watched() {
     );
     tree.write(
         "crates/adapters/src/generated.rs",
-        "include!(\"../../../generated.rs\");\n",
+        "include!(\"../generated/table.rs\");\n",
     );
     interpreter_content_hash(tree.path()).expect("an optional absent include target must hash");
-    // The target would sit at the workspace root, its nearest existing directory.
+    // The target would sit in the crate's `generated/`, so the crate directory is watched.
     let watched = crate::compute::watched_paths(tree.path());
+    let directory = tree.path().join("crates/adapters");
     assert!(
-        watched.iter().any(|path| path == tree.path()),
+        watched.contains(&directory),
         "{} is not watched",
-        tree.path().display()
+        directory.display()
     );
 }
 
@@ -260,7 +261,7 @@ fn a_module_of_a_semantic_source_resolves_only_where_rustc_looks() {
         "crates/storage/src/identity_search.rs",
         "pub mod tokens;\n",
     );
-    tree.write("crates/storage/src/tokens.rs", "pub fn unrelated() {}\n");
+    tree.write_keeping_mounts("crates/storage/src/tokens.rs", "pub fn unrelated() {}\n");
     interpreter_content_hash(tree.path()).expect("an unrelated sibling must not fail the hash");
     assert!(is_input(
         &tree,
@@ -407,23 +408,23 @@ fn a_semantic_source_reached_by_a_second_route_is_resolved_on_each() {
 #[test]
 fn an_out_of_line_module_under_a_cfg_that_may_be_off_may_include_an_absent_file() {
     let tree = SampleTree::new();
-    tree.write("crates/interpret/src/lib.rs", "mod write;\n");
-    tree.write(
+    tree.write_keeping_mounts("crates/interpret/src/lib.rs", "mod write;\n");
+    tree.write_keeping_mounts(
         "crates/interpret/src/write.rs",
         "#[cfg(any())]\nmod optional;\n",
     );
-    tree.write(
+    tree.write_keeping_mounts(
         "crates/interpret/src/write/optional.rs",
         "include!(\"absent.rs\");\n",
     );
     interpreter_content_hash(tree.path()).expect("an optional absent include target must hash");
 
     // A present target that is not a hashed source is still refused.
-    tree.write(
+    tree.write_keeping_mounts(
         "crates/interpret/src/write/optional.rs",
         "include!(\"table.txt\");\n",
     );
-    tree.write("crates/interpret/src/write/table.txt", "1\n");
+    tree.write_keeping_mounts("crates/interpret/src/write/table.txt", "1\n");
     let error = interpreter_content_hash(tree.path())
         .expect_err("a present unhashed include target must fail the hash");
     assert_names(

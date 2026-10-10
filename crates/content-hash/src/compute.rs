@@ -9,6 +9,11 @@ use alloy_primitives::{hex, keccak256};
 
 use crate::{source_paths, storage_families};
 
+#[path = "compute/watch.rs"]
+mod watch;
+#[allow(unused_imports)]
+pub(crate) use watch::{guarded_watched_paths, watched_paths};
+
 const ADAPTER_SOURCE_ROOT: &str = "crates/adapters/src";
 const MANIFEST_AUTHORITY_SOURCE_ROOT: &str = "crates/manifests/src";
 const MANIFEST_ROOT: &str = "manifests";
@@ -117,63 +122,6 @@ const CFG_TEST_SOURCE_EXCLUSIONS: &[CfgTestSourceExclusion] = &[];
 pub(crate) struct Input {
     pub(crate) key: String,
     pub(crate) content: Vec<u8>,
-}
-
-#[allow(dead_code)]
-pub(crate) fn watched_paths(workspace_root: &Path) -> Vec<PathBuf> {
-    let mut paths = vec![
-        workspace_root.join(ADAPTER_SOURCE_ROOT),
-        workspace_root.join(MANIFEST_AUTHORITY_SOURCE_ROOT),
-        workspace_root.join(MANIFEST_ROOT),
-        workspace_root.join(PROJECT_SOURCE_ROOT),
-        workspace_root.join(STORAGE_FAMILIES_SOURCE_ROOT),
-        workspace_root.join(INTERPRET_WRITE_SOURCE_ROOT),
-    ];
-    // Not all hashed, but walked: a module declaration anywhere in these crates, or in a crate
-    // holding a file hashed by name, can change which files are test-only or what a hashed file
-    // compiles, so it has to trigger a rebuild. A target root or `#[path]` file can sit outside
-    // `src/`, so every directory the walk reads is watched too. A walk that fails here fails the
-    // hash below, and a failed build script always reruns.
-    if let Ok(walked) =
-        source_paths::walk_crates(workspace_root, CRATE_SOURCE_ROOTS, SEMANTIC_SOURCE_FILES)
-    {
-        for source_root in walked.roots.iter().map(|root| workspace_root.join(root)) {
-            paths.extend(source_root.parent().map(|parent| parent.join("Cargo.toml")));
-            paths.push(source_root);
-        }
-        paths.extend(
-            walked
-                .files
-                .iter()
-                .filter_map(|file| file.parent().map(Path::to_owned)),
-        );
-        // A data read from a hashed file is hashed, so its file is watched, and its directory too
-        // in case it is created later. Every data read is watched, which only over-watches. An
-        // absent optional `cfg_attr`, `#[path]` or `include!` file, or an absent default file of a
-        // module that resolves to none, may also be created later, which changes what the walk
-        // reaches.
-        // An absent path is watched through its nearest existing directory, because cargo reruns
-        // the build script on every build for a watched path that does not exist.
-        for file in walked.data_reads.keys().filter(|file| file.is_file()) {
-            paths.push(file.clone());
-        }
-        for file in walked.data_reads.keys().chain(&walked.missing) {
-            let directory = file
-                .ancestors()
-                .skip(1)
-                .find(|directory| directory.is_dir());
-            paths.extend(directory.map(Path::to_owned));
-        }
-    }
-    paths.extend(
-        SEMANTIC_SOURCE_FILES
-            .iter()
-            .map(|relative_path| workspace_root.join(relative_path)),
-    );
-    paths.push(workspace_root.join(crate::lockfile::LOCKFILE));
-    paths.sort();
-    paths.dedup();
-    paths
 }
 
 pub(crate) fn compute(workspace_root: &Path) -> io::Result<String> {

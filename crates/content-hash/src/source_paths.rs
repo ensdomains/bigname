@@ -15,11 +15,11 @@ mod targets;
 #[path = "source_paths/walked.rs"]
 mod walked;
 
-pub(super) use walked::Walked;
+pub(crate) use paths::lexically_normal;
+pub(super) use walked::{Slot, Walked};
 
 use paths::{
-    computed_include, lexically_normal, parent, read_source, relative_key, unparsed,
-    unresolved_module,
+    computed_include, mixed_module, parent, read_source, relative_key, unparsed, unresolved_module,
 };
 
 use syntax::{
@@ -41,8 +41,12 @@ use syntax::{
 /// `semantic_files` are hashed by name. The roots include each of their crates, so a compiled one
 /// is reached in rustc's own context and held to the same rules. The files a production module
 /// declared from one resolves to, and in turn their own modules, like those a production
-/// `#[path]` reaches, must be hashed sources. A file hashed by name that the walk never reaches
-/// is not compiled, so nothing it declares is checked.
+/// `#[path]` reaches, must be hashed sources. A module declaration that can resolve to a hashed
+/// file, or whose default location is hashed, must resolve only to hashed files whoever declares
+/// it, and a file hashed by name must be reached by production code.
+///
+/// The walk checks module routing only. Name resolution is outside it: a `use` alias, or
+/// semantic logic moved into an unlisted file and called from there, is left to the curated list.
 pub(super) fn walk_crates(
     workspace_root: &Path,
     crate_source_roots: &[&str],
@@ -80,6 +84,13 @@ pub(super) fn walk_crates(
         .map(|root| normal_root.join(root))
         .collect::<Vec<_>>();
     let walk = walk(&roots, by_name)?;
+    let unreached = (walk.by_name.iter())
+        .filter_map(|file| match walk.reached.get(file) {
+            Some((false, _)) => None,
+            Some((true, _)) => Some((file.clone(), "only test code reaches it")),
+            None => Some((file.clone(), "no module route reaches it")),
+        })
+        .collect();
     let test_only = walk
         .reached
         .iter()
@@ -98,17 +109,21 @@ pub(super) fn walk_crates(
         })
         .map(|(file, (_, site))| (file.clone(), (site.parent.clone(), site.name.clone())))
         .collect();
-    Ok(Walked {
+    let walked = Walked {
         test_only,
         data_reads: walk.pinned,
         files: walk.reached.into_keys().collect(),
         inclusions: walk.inclusions,
         modules: walk.modules,
         outside,
+        slots: walk.slots.into_values().collect(),
+        unreached,
         missing: walk.missing,
         roots: source_roots,
         normal_root,
-    })
+    };
+    walked.refuse_unwatchable()?;
+    Ok(walked)
 }
 
 fn walk(roots: &[PathBuf], by_name: BTreeSet<PathBuf>) -> io::Result<Walk> {
@@ -124,6 +139,8 @@ fn walk(roots: &[PathBuf], by_name: BTreeSet<PathBuf>) -> io::Result<Walk> {
             pending.push(Module {
                 by_name: walk.by_name.contains(&file),
                 file,
+                default_parent: directory.clone(),
+                default_directory: directory.clone(),
                 directory,
                 test_only: false,
                 site,
@@ -162,6 +179,10 @@ impl Site {
 struct Module {
     file: PathBuf,
     directory: PathBuf,
+    /// Where `directory` would be if no `#[path]` on the route had moved it.
+    default_directory: PathBuf,
+    /// The directory the file itself would sit in if no `#[path]` had moved it.
+    default_parent: PathBuf,
     test_only: bool,
     site: Site,
     /// False under a cfg that may be off, where a declared file need not exist.
@@ -196,9 +217,12 @@ struct Walk {
     /// Absent files an optional `cfg_attr`, `#[path]` or `include!` path names, and the absent
     /// default files of a module that resolves to none. Their nearest existing directories are
     /// watched, so creating one reruns the hash.
-    missing: BTreeSet<PathBuf>,
+    missing: BTreeMap<PathBuf, PathBuf>,
     /// The files hashed by name.
     by_name: BTreeSet<PathBuf>,
+    /// Every production out-of-line module declaration, by declaring file and declaration, with
+    /// what each visit found merged.
+    slots: BTreeMap<(PathBuf, String), Slot>,
 }
 
 impl Walk {
@@ -222,6 +246,7 @@ impl Walk {
                 syn::parse_file(&source).map_err(|error| unparsed(&module.file, &error))?;
             let scope = Scope {
                 directory: module.directory.clone(),
+                default_directory: module.default_directory.clone(),
                 inline: false,
                 explicit: false,
                 test_only: module.test_only,
@@ -300,9 +325,19 @@ impl Walk {
                     None if in_block => path_base.join(&name),
                     None => scope.directory.join(&name),
                 };
+                let default_base = if scope.inline {
+                    &scope.default_directory
+                } else {
+                    &module.default_parent
+                };
                 let inner = Scope {
                     explicit: scope.explicit || explicit_path.is_some(),
                     directory,
+                    default_directory: if in_block {
+                        default_base.join(&name)
+                    } else {
+                        scope.default_directory.join(&name)
+                    },
                     inline: true,
                     test_only,
                     required,
@@ -312,15 +347,21 @@ impl Walk {
             }
             // A `cfg_attr` path applies only when its predicate holds, so its file is optional.
             // It is test-only exactly when the predicate is `test`.
+            let mut possible = Vec::new();
             for (test_predicate, path) in &cfg_attr_paths {
                 let file = lexically_normal(&path_base.join(path));
                 if file.is_file() {
                     if !(test_only || *test_predicate) {
                         self.declare(&file, &site);
                     }
+                    if !(test_only || *test_predicate) {
+                        possible.push(file.clone());
+                    }
                     pending.push(Module {
                         by_name: module.by_name || self.by_name.contains(&file),
                         directory: parent(&file)?,
+                        default_directory: scope.default_directory.join(&name),
+                        default_parent: scope.default_directory.clone(),
                         file,
                         test_only: test_only || *test_predicate,
                         site: site.clone(),
@@ -328,7 +369,7 @@ impl Walk {
                         required: false,
                     });
                 } else {
-                    self.missing.insert(file);
+                    self.missing.insert(file, module.file.clone());
                 }
             }
             let resolved = match explicit_path {
@@ -341,7 +382,7 @@ impl Walk {
                         }
                         Some((parent(&file)?, file))
                     } else {
-                        self.missing.insert(file);
+                        self.missing.insert(file, module.file.clone());
                         None
                     }
                 }
@@ -354,11 +395,33 @@ impl Walk {
                     let found = candidates.iter().find(|candidate| candidate.is_file());
                     if found.is_none() {
                         // Creating one later changes what the walk reaches.
-                        self.missing.extend(candidates.iter().cloned());
+                        (self.missing)
+                            .extend(candidates.iter().map(|c| (c.clone(), module.file.clone())));
                     }
                     found.map(|file| (scope.directory.join(&name), file.clone()))
                 }
             };
+            if !test_only {
+                possible.extend(resolved.as_ref().map(|(_, file)| file.clone()));
+                let slot = (self.slots)
+                    .entry((module.file.clone(), site.name.clone()))
+                    .or_insert_with(|| Slot {
+                        declarer: module.file.clone(),
+                        declaration: site.name.clone(),
+                        possible: BTreeSet::new(),
+                        defaults: BTreeSet::new(),
+                    });
+                slot.possible.extend(possible);
+                let directories = [&scope.default_directory, &scope.directory];
+                slot.defaults
+                    .extend(directories.into_iter().flat_map(|directory| {
+                        [
+                            directory.join(format!("{name}.rs")),
+                            directory.join(&name).join("mod.rs"),
+                        ]
+                        .map(|default| lexically_normal(&default))
+                    }));
+            }
             let Some((child_directory, file)) = resolved else {
                 if required && cfg_attr_paths.is_empty() {
                     return Err(unresolved_module(&module.file, &name));
@@ -374,6 +437,8 @@ impl Walk {
                 by_name: module.by_name || self.by_name.contains(&file),
                 file,
                 directory: lexically_normal(&child_directory),
+                default_directory: lexically_normal(&scope.default_directory.join(&name)),
+                default_parent: scope.default_directory.clone(),
                 test_only,
                 site,
                 required,
@@ -456,7 +521,7 @@ impl Walk {
                 ));
             }
             // Creating it later changes what the walk reaches.
-            self.missing.insert(file);
+            self.missing.insert(file, includer.to_owned());
             return Ok(());
         }
         let site = Site {
@@ -516,22 +581,10 @@ impl Walk {
 /// enclosing modules carry down.
 struct Scope {
     directory: PathBuf,
+    /// Where `directory` would be if no `#[path]` on the route had moved it.
+    default_directory: PathBuf,
     inline: bool,
     explicit: bool,
     test_only: bool,
     required: bool,
-}
-
-fn mixed_module(file: &Path, gated: &Site, production: &Site) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!(
-            "{} is reached both from test-only {} ({}) and from {} ({})",
-            file.display(),
-            gated.parent.display(),
-            gated.name,
-            production.parent.display(),
-            production.name
-        ),
-    )
 }
