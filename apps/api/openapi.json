@@ -4893,6 +4893,362 @@
         }
       }
     },
+    "/v1/resolvers/{chain_id}/{address}/records": {
+      "get": {
+        "operationId": "get_v1_resolvers_chain_id_address_records",
+        "tags": [
+          "resolvers"
+        ],
+        "description": "See [GET /v1/resolvers/{chain_id}/{address}/records](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1resolverschain_idaddressrecords).",
+        "parameters": [
+          {
+            "name": "chain_id",
+            "in": "path",
+            "required": true,
+            "description": "Supported numeric EVM chain ID.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "description": "EVM address in hexadecimal form.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "required": true,
+            "description": "ENS name whose node the resolver is read for, normalized before reading. A label may be spelled as its bracketed labelhash `[<64 lowercase hex digits>]` (see Name inputs in api-v1.md).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "query",
+            "required": false,
+            "description": "Public namespace of the name. Inferred from the name when omitted. It must be the namespace of the resolver's chain.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "at",
+            "in": "query",
+            "required": false,
+            "description": "Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "finality",
+            "in": "query",
+            "required": false,
+            "description": "Snapshot finality; latest is the default.",
+            "schema": {
+              "$ref": "#/components/schemas/Finality",
+              "default": "latest"
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "required": false,
+            "description": "Answer origin. Only indexed answers are served.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "indexed"
+              ],
+              "default": "indexed"
+            }
+          },
+          {
+            "name": "keys",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated record selectors: addr:<decimal>, text:<key>, contenthash or avatar; omitted/blank uses the inventory-derived default keys. At most 200 keys.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 0,
+              "maxItems": 200
+            },
+            "style": "form",
+            "explode": false
+          },
+          {
+            "name": "include",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated expansion names; unlisted values are invalid.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "inventory"
+                ]
+              }
+            },
+            "style": "form",
+            "explode": false
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "description": "ETag validator from an earlier response, a comma-separated validator list, or *; evaluated only for a cacheable indexed read.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The requested answer, including the empty or in-band outcomes documented below. Caching headers appear only on indexed responses that carry meta.as_of_token; primary-name additionally requires explicit source=indexed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordsResponse"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/Cache-Control"
+              }
+            }
+          },
+          "304": {
+            "description": "A cacheable indexed representation matches If-None-Match. The response has no body.",
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/Cache-Control"
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_input`: Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "object",
+                          "properties": {
+                            "code": {
+                              "enum": [
+                                "invalid_input"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not_found`: The selected resource or namespace does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "object",
+                          "properties": {
+                            "code": {
+                              "enum": [
+                                "not_found"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "`request_timeout`: The configured whole-request deadline expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "object",
+                          "properties": {
+                            "code": {
+                              "enum": [
+                                "request_timeout"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`conflict`: The explicit snapshot selector cannot form a canonical snapshot or, for lookup, its selected positions cannot be combined.\n\n`stale`: The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "object",
+                          "properties": {
+                            "code": {
+                              "enum": [
+                                "conflict",
+                                "stale"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`unsupported`: The inventory-derived default record-key set exceeds the 200-key limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "object",
+                          "properties": {
+                            "code": {
+                              "enum": [
+                                "unsupported"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "`internal_error`: Unexpected serving failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "object",
+                          "properties": {
+                            "code": {
+                              "enum": [
+                                "internal_error"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`overloaded`: The process-wide in-flight ceiling is exhausted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "object",
+                          "properties": {
+                            "code": {
+                              "enum": [
+                                "overloaded"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/resolvers/{chain_id}/{address}/roles": {
       "get": {
         "operationId": "get_v1_resolvers_chain_id_address_roles",
@@ -7541,7 +7897,7 @@
                 "type": "null"
               }
             ],
-            "description": "Resolver contract for this answer."
+            "description": "Resolver contract for this answer. On `GET /v1/resolvers/{chain_id}/{address}/records` it is always the path resolver."
           },
           "records": {
             "type": "object",
@@ -9800,7 +10156,7 @@
         "schema": {
           "type": "string"
         },
-        "description": "Weak validator of the complete indexed response body. Only the four documented cacheable indexed reads carry it."
+        "description": "Weak validator of the complete indexed response body. Only the five documented cacheable indexed reads carry it."
       },
       "Cache-Control": {
         "schema": {

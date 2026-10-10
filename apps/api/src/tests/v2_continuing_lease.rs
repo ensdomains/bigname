@@ -8,14 +8,14 @@ use super::*;
 use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 
-const ENS_REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
+pub(super) const ENS_REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
 const BASE_REGISTRAR: &str = "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85";
 const PROXY: &str = "0xeeeeeeee14d718c2b47d9923deab1335e144eeee";
 const IMPLEMENTATION: &str = "0x24e1d8e068620b647ca097f961a61055f4f42d72";
-const OWNER: &str = "0x0000000000000000000000000000000000000051";
-const SECOND_OWNER: &str = "0x0000000000000000000000000000000000000052";
-const NAME: &str = "continuinglease.eth";
-const LEASE: u64 = 2_000_000_000;
+pub(super) const OWNER: &str = "0x0000000000000000000000000000000000000051";
+pub(super) const SECOND_OWNER: &str = "0x0000000000000000000000000000000000000052";
+pub(super) const NAME: &str = "continuinglease.eth";
+pub(super) const LEASE: u64 = 2_000_000_000;
 const EXTENDED: u64 = LEASE + 92 * 86_400;
 const GRACE: u64 = EXTENDED + 28 * 86_400;
 sol! {
@@ -28,14 +28,28 @@ sol! {
     event LabelUnregistered(uint256 indexed tokenId, address indexed sender);
 }
 
-type Logs = Vec<(&'static str, alloy_primitives::LogData)>;
+pub(super) type Logs = Vec<(&'static str, alloy_primitives::LogData)>;
 
 fn label() -> &'static str {
     NAME.strip_suffix(".eth").unwrap()
 }
 
 /// A BaseRegistrar registration and the ownerless reservation premigration writes with it.
-fn registered(previous: Option<&str>, owner: &str, lease: u64) -> Result<Logs> {
+pub(super) fn registered(previous: Option<&str>, owner: &str, lease: u64) -> Result<Logs> {
+    registered_with(previous, owner, lease, Vec::new())
+}
+
+/// `registered`, with `v1` (the ENSv1 resolver pointer and records) between the ENSv1
+/// registration and the reservation, as premigration's `register` orders them in one transaction.
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L177-L178 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L217-L229 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L249-L266 @ ens_v2_sepolia_20261001@07e55a05)
+pub(super) fn registered_with(
+    previous: Option<&str>,
+    owner: &str,
+    lease: u64,
+    v1: Logs,
+) -> Result<Logs> {
     let hash = keccak256(label().as_bytes());
     let eth = keccak256([B256::ZERO.as_slice(), keccak256(b"eth").as_slice()].concat());
     let owner: Address = owner.parse()?;
@@ -82,18 +96,19 @@ fn registered(previous: Option<&str>, owner: &str, lease: u64) -> Result<Logs> {
             }
             .encode_log_data(),
         ),
-        (
-            NEW_REGISTRY,
-            LabelReserved {
-                tokenId: lease_token >> 32 << 32,
-                labelHash: hash,
-                label: label().into(),
-                expiry: lease + 62 * 86_400,
-                sender: owner,
-            }
-            .encode_log_data(),
-        ),
     ]);
+    logs.extend(v1);
+    logs.push((
+        NEW_REGISTRY,
+        LabelReserved {
+            tokenId: lease_token >> 32 << 32,
+            labelHash: hash,
+            label: label().into(),
+            expiry: lease + 62 * 86_400,
+            sender: owner,
+        }
+        .encode_log_data(),
+    ));
     Ok(logs)
 }
 
@@ -110,7 +125,7 @@ fn upgrade() -> Result<Logs> {
 }
 
 /// One Engine batch per block ending at `HEAD`, then a full Project publication.
-async fn publish(database: &TestDatabase, blocks: Vec<(u64, Logs)>) -> Result<()> {
+pub(super) async fn publish(database: &TestDatabase, blocks: Vec<(u64, Logs)>) -> Result<()> {
     let pool = &database.pool;
     bigname_manifests::sync_schema_v2_repository(
         pool,

@@ -613,3 +613,9 @@ mod v2_canonical_association;
 
 #[path = "tests/v2_continuing_lease.rs"]
 mod v2_continuing_lease;
+
+#[path = "tests/v2_resolver_records.rs"]
+mod v2_resolver_records;
+
+#[path = "tests/resolver_node_inventory.rs"]
+mod resolver_node_inventory;

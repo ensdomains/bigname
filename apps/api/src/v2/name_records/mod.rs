@@ -34,7 +34,7 @@ mod keys;
 pub(crate) use build::{
     EXACT_NAME_AUTHORITY_NOT_VERIFIABLE, VERIFIED_NOT_SUPPORTED_REASON,
     build_authority_unsupported_name_records, build_auto_name_records, build_indexed_name_records,
-    build_verified_name_records, ens_universal_resolver_discovery_candidate,
+    build_verified_name_records, ens_universal_resolver_discovery_candidate, indexed_record_answer,
     indexed_records_requiring_verified_fallback,
 };
 pub(crate) use keys::{RecordSelection, parse_record_keys};
@@ -533,7 +533,7 @@ async fn execute_verified_record_lookup(
     }
 }
 
-fn records_include_inventory(include: &[String]) -> V2Result<bool> {
+pub(crate) fn records_include_inventory(include: &[String]) -> V2Result<bool> {
     let mut include_inventory = false;
     for value in include {
         match value.as_str() {

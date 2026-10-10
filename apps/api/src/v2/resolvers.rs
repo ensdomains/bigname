@@ -8,6 +8,10 @@ pub(crate) mod generation_test_hooks;
 mod collections;
 pub(crate) use collections::{get_resolver_links, get_resolver_roles};
 
+#[path = "resolvers/records.rs"]
+mod records;
+pub(crate) use records::get_resolver_records;
+
 use axum::{
     Json,
     extract::{Path, State},

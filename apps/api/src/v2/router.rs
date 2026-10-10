@@ -16,7 +16,8 @@ use super::{
     get_name_authority_diagnostic, get_name_binding_diagnostic, get_name_coverage_diagnostic,
     get_name_record, get_name_records, get_name_records_diagnostic, get_names, get_namespace,
     get_permissions, get_primary_name, get_registry, get_registry_labels, get_resolver,
-    get_resolver_links, get_resolver_roles, get_search, get_status, get_subnames,
+    get_resolver_links, get_resolver_records, get_resolver_roles, get_search, get_status,
+    get_subnames,
 };
 
 /// The routes that serve `ens_v1` on rows composed by more than one read leave each row's
@@ -39,6 +40,10 @@ pub(super) fn router() -> Router<AppState> {
         .route(
             "/v1/resolvers/{chain_id}/{address}",
             get(get_resolver).layer(middleware::from_fn(defer_wrapper_expiries)),
+        )
+        .route(
+            "/v1/resolvers/{chain_id}/{address}/records",
+            get(get_resolver_records),
         )
         .route_layer(middleware::from_fn(indexed_read_cache_headers));
     let wrapper_expiry_deferred = Router::new()

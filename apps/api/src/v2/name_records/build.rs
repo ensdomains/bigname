@@ -231,7 +231,7 @@ pub(crate) fn build_verified_name_records(
     })
 }
 
-fn indexed_record_answer(
+pub(crate) fn indexed_record_answer(
     record_inventory: Option<&RecordInventoryCurrentRow>,
     record: &ResolutionRecordKey,
 ) -> V2Result<RecordAnswer> {

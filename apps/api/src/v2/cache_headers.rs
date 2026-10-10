@@ -4,7 +4,7 @@
 //! change the representation at those same positions. Hash the serialized response body for the
 //! weak validator, so conditional reads return `304 Not Modified` only for an unchanged body.
 //! It applies only to the routes it is mounted
-//! on (name detail, name records, resolver overview, primary name), only to `200` responses whose
+//! on (name detail, name records, resolver overview, resolver records, primary name), only to `200` responses whose
 //! body carries `meta.as_of_token`, and only when the request is an indexed read: a `source` of
 //! `verified` or `auto` executes against a provider and is never cached, and the primary-name route
 //! qualifies only when the caller asked for `source=indexed` explicitly, because its default answer
@@ -86,7 +86,9 @@ pub(crate) fn is_cacheable_indexed_read(method: &Method, uri: &Uri) -> bool {
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
     match segments.as_slice() {
-        ["v1", "names", _] | ["v1", "names", _, "records"] => source_is_absent_or(uri, "indexed"),
+        ["v1", "names", _]
+        | ["v1", "names", _, "records"]
+        | ["v1", "resolvers", _, _, "records"] => source_is_absent_or(uri, "indexed"),
         ["v1", "resolvers", _, _] => true,
         ["v1", "addresses", _, "primary-name"] => source_is_exactly(uri, "indexed"),
         _ => false,
