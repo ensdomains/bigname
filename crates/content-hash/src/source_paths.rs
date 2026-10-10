@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs, io,
+    io,
     path::{Path, PathBuf},
 };
 
@@ -10,13 +10,16 @@ use syn::{Expr, Item, ext::IdentExt, visit::Visit};
 mod paths;
 #[path = "source_paths/syntax.rs"]
 mod syntax;
+#[path = "source_paths/targets.rs"]
+mod targets;
 #[path = "source_paths/walked.rs"]
 mod walked;
 
 pub(super) use walked::Walked;
 
 use paths::{
-    computed_include, lexically_normal, parent, relative_key, unparsed, unresolved_module,
+    computed_include, lexically_normal, parent, read_source, relative_key, unparsed,
+    unresolved_module,
 };
 
 use syntax::{
@@ -83,11 +86,15 @@ pub(super) fn walk_crates(
         .filter(|(file, (test_only, _))| *test_only && !walk.pinned.contains_key(*file))
         .map(|(file, _)| relative_key(&normal_root, file))
         .collect::<io::Result<_>>()?;
+    // A module file that is not Rust is not hashed with its root either, such as a `[lib]` path
+    // to `src/root.txt`.
     let outside = walk
         .reached
         .iter()
-        .filter(|(file, (test_only, _))| {
-            !test_only && !roots.iter().any(|root| file.starts_with(root))
+        .filter(|(file, (test_only, site))| {
+            let rust = file.extension().is_some_and(|extension| extension == "rs");
+            let module = !site.name.starts_with("include!");
+            !test_only && (!roots.iter().any(|root| file.starts_with(root)) || (module && !rust))
         })
         .map(|(file, (_, site))| (file.clone(), (site.parent.clone(), site.name.clone())))
         .collect();
@@ -110,10 +117,21 @@ fn walk(roots: &[PathBuf], by_name: BTreeSet<PathBuf>) -> io::Result<Walk> {
         ..Walk::default()
     };
     let mut pending = Vec::new();
+    let mut build_scripts = Vec::new();
     for root in roots {
-        for file in target_roots(root)? {
+        let targets = targets::targets(root)?;
+        build_scripts.extend(targets.build_script.clone());
+        let sites = targets
+            .roots
+            .into_iter()
+            .map(|file| (Site::named(&file, "crate root"), file))
+            .chain(
+                targets
+                    .build_script
+                    .map(|file| (Site::named(&file, "build script"), file)),
+            );
+        for (site, file) in sites {
             let directory = parent(&file)?;
-            let site = Site::crate_root(&file);
             pending.push(Module {
                 by_name: walk.by_name.contains(&file),
                 file,
@@ -125,63 +143,19 @@ fn walk(roots: &[PathBuf], by_name: BTreeSet<PathBuf>) -> io::Result<Walk> {
         }
     }
     walk.drain(&mut pending)?;
-    Ok(walk)
-}
-
-/// The root files of a crate's library and binary targets: `[lib]` and `[[bin]]` paths from its
-/// `Cargo.toml`, or `src/lib.rs`, plus `src/main.rs`, `src/bin/*.rs` and `src/bin/*/main.rs`.
-/// Tests, examples and benches are not production targets.
-fn target_roots(source_root: &Path) -> io::Result<Vec<PathBuf>> {
-    let crate_directory = parent(source_root)?;
-    let manifest_path = crate_directory.join("Cargo.toml");
-    let manifest = if manifest_path.is_file() {
-        fs::read_to_string(&manifest_path)?
-            .parse::<toml::Table>()
-            .map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("could not parse {}: {error}", manifest_path.display()),
-                )
-            })?
-    } else {
-        toml::Table::new()
-    };
-    let mut roots = vec![
-        manifest.get("lib").and_then(target_path).map_or_else(
-            || source_root.join("lib.rs"),
-            |path| crate_directory.join(path),
-        ),
-        source_root.join("main.rs"),
-    ];
-    let bins = manifest.get("bin").and_then(toml::Value::as_array);
-    roots.extend(
-        bins.into_iter()
-            .flatten()
-            .filter_map(target_path)
-            .map(|path| crate_directory.join(path)),
-    );
-    let bin_directory = source_root.join("bin");
-    if bin_directory.is_dir() {
-        let mut entries = fs::read_dir(&bin_directory)?.collect::<Result<Vec<_>, _>>()?;
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
-            let path = entry.path();
-            roots.push(if path.is_dir() {
-                path.join("main.rs")
-            } else {
-                path
-            });
-        }
+    // A build script can set cfgs, environment and generated code for its crate, and nothing it
+    // does is hashed, so a walked crate may not have one. It is walked first so that a file it
+    // shares with test code is named as such.
+    if let Some(script) = build_scripts.first() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} is the build script of a walked crate, which the content hash cannot cover",
+                script.display()
+            ),
+        ));
     }
-    let mut roots = roots
-        .iter()
-        .map(|root| lexically_normal(root))
-        .filter(|root| {
-            root.is_file() && root.extension().is_some_and(|extension| extension == "rs")
-        })
-        .collect::<Vec<_>>();
-    roots.dedup();
-    Ok(roots)
+    Ok(walk)
 }
 
 /// Where a file was reached from: the declaring file and the declaration, such as `mod x`.
@@ -192,10 +166,11 @@ struct Site {
 }
 
 impl Site {
-    fn crate_root(file: &Path) -> Self {
+    /// A target root, such as a crate root or a build script, reached from itself.
+    fn named(file: &Path, name: &str) -> Self {
         Self {
             parent: file.to_owned(),
-            name: "crate root".to_owned(),
+            name: name.to_owned(),
         }
     }
 
@@ -258,7 +233,7 @@ impl Walk {
             if !self.walked.insert(walk_key) {
                 continue;
             }
-            let source = fs::read_to_string(&module.file)?;
+            let source = read_source(&module.file)?;
             let parsed =
                 syn::parse_file(&source).map_err(|error| unparsed(&module.file, &error))?;
             let scope = Scope {
@@ -382,17 +357,23 @@ impl Walk {
                         }
                         Some((parent(&file)?, file))
                     } else {
+                        self.missing.insert(file);
                         None
                     }
                 }
-                None => [
-                    scope.directory.join(format!("{name}.rs")),
-                    scope.directory.join(&name).join("mod.rs"),
-                ]
-                .into_iter()
-                .map(|candidate| lexically_normal(&candidate))
-                .find(|candidate| candidate.is_file())
-                .map(|file| (scope.directory.join(&name), file)),
+                None => {
+                    let candidates = [
+                        scope.directory.join(format!("{name}.rs")),
+                        scope.directory.join(&name).join("mod.rs"),
+                    ]
+                    .map(|candidate| lexically_normal(&candidate));
+                    let found = candidates.iter().find(|candidate| candidate.is_file());
+                    if found.is_none() {
+                        // Creating one later changes what the walk reaches.
+                        self.missing.extend(candidates.iter().cloned());
+                    }
+                    found.map(|file| (scope.directory.join(&name), file.clone()))
+                }
             };
             let Some((child_directory, file)) = resolved else {
                 if required && cfg_attr_paths.is_empty() {
@@ -509,7 +490,7 @@ impl Walk {
         {
             return Ok(());
         }
-        let source = fs::read_to_string(&file)?;
+        let source = read_source(&file)?;
         // The text is items or one expression, depending on where it is included.
         let parsed = syn::parse_file(&source);
         let expression;
@@ -553,10 +534,6 @@ struct Scope {
     explicit: bool,
     test_only: bool,
     required: bool,
-}
-
-fn target_path(target: &toml::Value) -> Option<&str> {
-    target.get("path").and_then(toml::Value::as_str)
 }
 
 fn mixed_module(file: &Path, gated: &Site, production: &Site) -> io::Error {

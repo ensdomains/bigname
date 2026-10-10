@@ -41,6 +41,10 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        manifest_dir.join("src/source_paths/targets.rs").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         manifest_dir.join("src/source_paths/walked.rs").display()
     );
     println!(

@@ -23,6 +23,137 @@ fn a_crate_root_outside_its_source_root_is_refused() {
 }
 
 #[test]
+fn a_build_script_is_walked_as_a_production_root() {
+    let tree = SampleTree::new();
+    let lib = "pub fn interpret() -> bool { true }\n#[cfg(test)]\nmod gated;\n";
+    tree.write("crates/adapters/src/lib.rs", lib);
+    tree.write("crates/adapters/src/gated.rs", "pub fn gated() {}\n");
+    tree.write(
+        "crates/adapters/build.rs",
+        "#[path = \"src/gated.rs\"]\nmod gated;\nfn main() {}\n",
+    );
+    let error = interpreter_content_hash(tree.path())
+        .expect_err("a file a build script shares with test code must fail the hash");
+    assert_names(
+        &error.to_string(),
+        &[
+            "crates/adapters/src/gated.rs",
+            "crates/adapters/src/lib.rs",
+            "crates/adapters/build.rs",
+        ],
+    );
+
+    // A build script outside the hashed sources is refused on its own.
+    tree.write("crates/adapters/build.rs", "fn main() {}\n");
+    let error = interpreter_content_hash(tree.path())
+        .expect_err("a build script outside the hashed sources must fail the hash");
+    assert_names(
+        &error.to_string(),
+        &["crates/adapters/build.rs", "build script"],
+    );
+
+    // `package.build` names the script, and `build = false` turns it off.
+    tree.write(
+        "crates/adapters/Cargo.toml",
+        "[package]\nbuild = \"tools/gen.rs\"\n",
+    );
+    tree.write("crates/adapters/tools/gen.rs", "fn main() {}\n");
+    let error =
+        interpreter_content_hash(tree.path()).expect_err("a named build script must fail the hash");
+    assert_names(
+        &error.to_string(),
+        &["crates/adapters/tools/gen.rs", "build script"],
+    );
+    tree.write("crates/adapters/Cargo.toml", "[package]\nbuild = false\n");
+    interpreter_content_hash(tree.path()).expect("a crate without a build script must hash");
+}
+
+#[test]
+fn a_build_script_inside_src_is_refused_whatever_its_crate() {
+    let tree = SampleTree::new();
+    tree.write(
+        "crates/storage/Cargo.toml",
+        "[package]\nbuild = \"src/gen.rs\"\n",
+    );
+    tree.write(
+        "crates/storage/src/gen.rs",
+        "fn main() { println!(\"cargo:rustc-cfg=alt\"); }\n",
+    );
+    let error = interpreter_content_hash(tree.path())
+        .expect_err("a build script in a walked crate must fail the hash");
+    assert_names(
+        &error.to_string(),
+        &["crates/storage/src/gen.rs", "build script"],
+    );
+
+    // A `build` value the walk cannot read is refused too.
+    tree.write(
+        "crates/storage/Cargo.toml",
+        "[package]\nbuild = [\"gen_a.rs\"]\n",
+    );
+    let error = interpreter_content_hash(tree.path())
+        .expect_err("an unreadable build value must fail the hash");
+    assert_names(
+        &error.to_string(),
+        &["crates/storage/Cargo.toml", "package.build"],
+    );
+}
+
+#[test]
+fn a_walked_file_that_is_not_text_is_named() {
+    let tree = SampleTree::new();
+    super::write_mounted(&tree, "crates/lookup/src/abi.rs", "mod tables;\n");
+    tree.write("crates/lookup/src/abi/tables.rs", "");
+    std::fs::write(
+        tree.path().join("crates/lookup/src/abi/tables.rs"),
+        [0xff, 0xfe],
+    )
+    .expect("sample file must be writable");
+    let error = interpreter_content_hash(tree.path())
+        .expect_err("a file that is not UTF-8 must fail the hash");
+    assert_names(&error.to_string(), &["crates/lookup/src/abi/tables.rs"]);
+}
+
+#[test]
+fn the_directory_of_an_absent_default_module_is_watched() {
+    let tree = SampleTree::new();
+    super::write_mounted(
+        &tree,
+        "crates/lookup/src/abi.rs",
+        "#[path = \"../optional\"]\nmod implementation {\n    #[cfg_attr(feature = \"alt\", \
+         path = \"../../adapters/src/alt.rs\")]\n    mod tables;\n}\n",
+    );
+    tree.write("crates/lookup/optional/README", "not a module\n");
+    tree.write("crates/adapters/src/alt.rs", "pub fn alt() {}\n");
+    let watched = crate::compute::watched_paths(tree.path());
+    let directory = tree.path().join("crates/lookup/optional");
+    assert!(
+        watched.contains(&directory),
+        "{} is not watched",
+        directory.display()
+    );
+}
+
+#[test]
+fn a_manifest_target_that_is_not_rust_is_refused() {
+    let tree = SampleTree::new();
+    tree.write(
+        "crates/adapters/Cargo.toml",
+        "[lib]\npath = \"src/root.txt\"\n",
+    );
+    tree.write(
+        "crates/adapters/src/root.txt",
+        "pub fn interpret() -> bool { true }\n",
+    );
+    let error = interpreter_content_hash(tree.path())
+        .expect_err("a crate root that is not a hashed source must fail the hash");
+    assert_names(
+        &error.to_string(),
+        &["crates/adapters/src/root.txt", "crate root"],
+    );
+}
+
+#[test]
 fn the_directory_of_an_absent_optional_path_is_watched() {
     let tree = super::adapters_tree(
         "#[cfg_attr(feature = \"alt\", path = \"../../shared/imp.rs\")]\nmod imp;\n",

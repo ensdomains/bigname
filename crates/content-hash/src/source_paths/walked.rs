@@ -23,11 +23,13 @@ pub(crate) struct Walked {
     /// every file a production module declared in or below a file hashed by name resolves to,
     /// with each declaring file and declaration.
     pub(super) modules: BTreeMap<PathBuf, BTreeSet<(PathBuf, String)>>,
-    /// Every production file the walk reaches outside the walked source roots, with the
-    /// declaring file and declaration that first reached it.
+    /// Every production file the walk reaches outside the walked source roots, and every
+    /// production root or module file that is not Rust, with the declaring file and declaration
+    /// that first reached it.
     pub(super) outside: BTreeMap<PathBuf, (PathBuf, String)>,
-    /// Absent files an optional `cfg_attr` path names. Their nearest existing directories are
-    /// watched, so creating one reruns the hash.
+    /// Absent files an optional `cfg_attr` or `#[path]` path names, and the absent default files
+    /// of a module that resolves to none. Their nearest existing directories are watched, so
+    /// creating one reruns the hash.
     pub(crate) missing: BTreeSet<PathBuf>,
     /// The workspace-relative source roots walked: the crates whose sources are hashed, and each
     /// crate that holds a file hashed by name.
@@ -108,9 +110,9 @@ impl Walked {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
-                        "{target} is compiled outside the walked source roots, reached from {} \
-                         ({declaration}), and is not a hashed source, so the content hash cannot \
-                         cover it",
+                        "{target} is compiled outside the walked source roots or is not Rust, \
+                         reached from {} ({declaration}), and is not a hashed source, so the \
+                         content hash cannot cover it",
                         relative_key(&self.normal_root, declarer)?
                     ),
                 ));

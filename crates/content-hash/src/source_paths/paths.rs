@@ -1,7 +1,7 @@
 //! Path folding and the errors the walk shares with its findings.
 
 use std::{
-    io,
+    fs, io,
     path::{Component, Path, PathBuf},
 };
 
@@ -24,6 +24,16 @@ pub(super) fn lexically_normal(path: &Path) -> PathBuf {
         }
     }
     normal
+}
+
+/// Reads a walked file, naming it when it cannot be read as UTF-8 text.
+pub(super) fn read_source(file: &Path) -> io::Result<String> {
+    fs::read_to_string(file).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("could not read {}: {error}", file.display()),
+        )
+    })
 }
 
 pub(super) fn unparsed(file: &Path, error: &syn::Error) -> io::Error {

@@ -2709,7 +2709,7 @@ fails instead of guessing when it meets:
 - A file reached from both test-only and production code.
 - A module or `include!` whose file is missing, unless a non-test cfg or a
   `cfg_attr` path makes it optional.
-- A walked file that does not parse.
+- A walked file that is not UTF-8 text or does not parse.
 - A `cfg_attr` path on an inline module.
 - An `include!`, `include_str!` or `include_bytes!` whose path is not one
   string literal, with an optional trailing comma.
@@ -2722,9 +2722,14 @@ fails instead of guessing when it meets:
 - A production `#[path]` module in a hashed file, a production module declared
   inside an inline module that has a `#[path]`, or a production module declared
   in a file hashed by name or below one, whose file is not a hashed source.
+- A build script in a walked crate, wherever it sits, because the cfgs and
+  code it can set are not hashed. A `package.build` value other than a path,
+  `true` or `false` fails too.
 - A production file outside the walked source roots that is not a hashed
   source, such as a `[lib]` or `[[bin]]` path or a `#[path]` module outside
   `src/`.
+- A target root or module file that is not Rust, such as a `[lib]` path to a
+  `.txt` file.
 - An `include!` in a hashed file whose target is not a hashed source, such as a
   file that is not Rust or sits outside the hashed roots.
 - An `include_str!` or `include_bytes!` in a hashed file that reads a file
