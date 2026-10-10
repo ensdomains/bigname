@@ -1,4 +1,7 @@
 //! Inventory selection at an explicit publication, shared by readers and the Project writer.
+use super::inventory_cutoff::{
+    Boundary, combined_boundary, eligible, latest_eligible, served_records,
+};
 use super::{
     LinkSelection,
     assemble::{BoundaryEvent, ServedRecord},
@@ -13,12 +16,11 @@ use super::{
     serving::{ServingPointer, family_pointer_eligibility, serving_pointers},
 };
 use anyhow::Result;
-use cutoff::{Boundary, combined_boundary, eligible, latest_eligible, served_records};
 use sqlx::PgConnection;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use uuid::Uuid;
 
-use crate::families::lookup::LookupInventoryPublication;
+use crate::families::{lookup::LookupInventoryPublication, name::FamilyPublication};
 /// One resource's records to select: the serving pointer after any mirror substitution, the
 /// pointer before it (whose resolver the link selection reads), and the mirror decision.
 pub(super) struct Plan {
@@ -159,7 +161,6 @@ pub(super) async fn select(
     classifications
         .extend(load_classifications_at(conn, chain_id, &unread, Some(publication)).await?);
 
-    // The admitted partitions, the link selections and the linked record ids of every plan.
     let classified: Vec<(Plan, Option<ResolverClassification>)> = plans
         .into_iter()
         .map(|plan| {
@@ -168,6 +169,85 @@ pub(super) async fn select(
             (plan, classification)
         })
         .collect();
+    let note = WorkNote {
+        resources: resource_ids.len(),
+        started,
+    };
+    let (selected, reads) = select_plans(
+        conn,
+        publication,
+        classified,
+        |plan| keys.map(|keys| &keys[&plan.pointer.resource_id]),
+        keys.is_some(),
+        Some(note),
+    )
+    .await?;
+    for (selected, reads) in selected.iter().zip(&reads) {
+        let plan = &selected.plan;
+        let dependencies = &mut out
+            .get_mut(&plan.pointer.resource_id)
+            .expect("requested resource")
+            .dependencies;
+        dependencies.extend(reads.partitions.iter().map(|(resolver, arm, identity)| {
+            Dependency::Partition {
+                resolver_address: resolver.to_ascii_lowercase(),
+                arm: (*arm).to_owned(),
+                arm_identity: identity.clone(),
+            }
+        }));
+        for node in [
+            &plan.link_pointer.namehash,
+            &super::DEFAULT_RECORD_NODE.to_owned(),
+        ] {
+            dependencies.insert(Dependency::Link {
+                resolver_address: plan.link_pointer.resolver_address.to_ascii_lowercase(),
+                node: node.clone(),
+            });
+        }
+        if let Some((resolver, record_id)) = &reads.record_id {
+            dependencies.insert(Dependency::RecordId {
+                resolver_address: resolver.to_ascii_lowercase(),
+                record_id: record_id.clone(),
+            });
+        }
+    }
+    Ok(Prepared {
+        publications: out,
+        unsupported,
+        selected,
+    })
+}
+
+/// What [`select_plans`] read for one plan beside its [`Selected`]: the admitted partitions and
+/// the linked record id, which the resource-keyed selection records as lookup dependencies.
+pub(super) struct PlanReads {
+    pub(super) partitions: Vec<PartitionKey>,
+    pub(super) record_id: Option<(String, String)>,
+}
+
+/// The lookup work a resource-keyed selection notes: how many resources it selects for and when
+/// it started.
+pub(super) struct WorkNote {
+    pub(super) resources: usize,
+    pub(super) started: Option<std::time::Instant>,
+}
+
+/// The records of each plan once its pointer is chosen, the same for every reader. The admitted
+/// partitions, the link selections and the linked record ids of every plan are read at once.
+/// Then each plan gets its combined version boundary, the cutoff it sets, and the latest eligible
+/// write per record key. `requested` gives a plan's exact record keys when `key_only`, and the
+/// loads read only those keys. The resource-keyed selection ([`select`]) and the
+/// resolver-anchored read (`node_inventory.rs`) both select through it.
+pub(super) async fn select_plans<'k>(
+    conn: &mut PgConnection,
+    publication: &FamilyPublication,
+    classified: Vec<(Plan, Option<ResolverClassification>)>,
+    requested: impl Fn(&Plan) -> Option<&'k BTreeSet<String>>,
+    key_only: bool,
+    note: Option<WorkNote>,
+) -> Result<(Vec<Selected>, Vec<PlanReads>)> {
+    let chain_id = publication.chain_id.as_str();
+    // The admitted partitions, the link selections and the linked record ids of every plan.
     let partitions: Vec<Vec<PartitionKey>> = classified
         .iter()
         .map(|(plan, classification)| {
@@ -177,14 +257,15 @@ pub(super) async fn select(
                 .collect()
         })
         .collect();
-    let partition_keys = keys.map(|keys| {
+    let partition_keys = key_only.then(|| {
         classified
             .iter()
             .zip(&partitions)
             .flat_map(|((plan, _), partitions)| {
                 partitions.iter().flat_map(|partition| {
-                    keys[&plan.pointer.resource_id]
-                        .iter()
+                    requested(plan)
+                        .into_iter()
+                        .flatten()
                         .map(|key| (partition.clone(), key.clone()))
                 })
             })
@@ -231,14 +312,15 @@ pub(super) async fn select(
                 .map(|record_id| (plan.link_pointer.resolver_address.clone(), record_id))
         })
         .collect();
-    let linked_keys = keys.map(|keys| {
+    let linked_keys = key_only.then(|| {
         classified
             .iter()
             .zip(&record_ids)
             .flat_map(|((plan, _), record_id)| {
                 record_id.iter().flat_map(|record_id| {
-                    keys[&plan.pointer.resource_id]
-                        .iter()
+                    requested(plan)
+                        .into_iter()
+                        .flatten()
                         .map(|key| (record_id.clone(), key.clone()))
                 })
             })
@@ -254,46 +336,19 @@ pub(super) async fn select(
     .await?;
 
     let linked_elapsed = linked_started.map(|t| t.elapsed().as_secs_f64() * 1000.0);
-    for (((plan, _), partitions), record_id) in classified.iter().zip(&partitions).zip(&record_ids)
-    {
-        let dependencies = &mut out
-            .get_mut(&plan.pointer.resource_id)
-            .expect("requested resource")
-            .dependencies;
-        dependencies.extend(partitions.iter().map(|(resolver, arm, identity)| {
-            Dependency::Partition {
-                resolver_address: resolver.to_ascii_lowercase(),
-                arm: (*arm).to_owned(),
-                arm_identity: identity.clone(),
-            }
-        }));
-        for node in [
-            &plan.link_pointer.namehash,
-            &super::DEFAULT_RECORD_NODE.to_owned(),
-        ] {
-            dependencies.insert(Dependency::Link {
-                resolver_address: plan.link_pointer.resolver_address.to_ascii_lowercase(),
-                node: node.clone(),
-            });
-        }
-        if let Some((resolver, record_id)) = record_id {
-            dependencies.insert(Dependency::RecordId {
-                resolver_address: resolver.to_ascii_lowercase(),
-                record_id: record_id.clone(),
-            });
-        }
+    if let Some(note) = &note {
+        super::seams::note_lookup_work(|| {
+            serde_json::json!({
+                "stage":"structural_selection", "resources":note.resources, "key_only":key_only,
+                "elapsed_ms_including_source_loads":note.started.map(|t| t.elapsed().as_secs_f64()*1000.0),
+                "partition_load_ms":partition_elapsed, "record_id_load_ms":linked_elapsed,
+            })
+        });
     }
-
-    super::seams::note_lookup_work(|| {
-        serde_json::json!({
-            "stage":"structural_selection", "resources":resource_ids.len(), "key_only":keys.is_some(),
-            "elapsed_ms_including_source_loads":started.map(|t| t.elapsed().as_secs_f64()*1000.0),
-            "partition_load_ms":partition_elapsed, "record_id_load_ms":linked_elapsed,
-        })
-    });
     let winner_started = super::seams::lookup_work_timer();
     // The combined boundary and the latest eligible write per record key of every plan.
     let mut selected = Vec::new();
+    let mut reads = Vec::new();
     let mut identities: Vec<String> = Vec::new();
     for ((((plan, classification), partitions), links), record_id) in classified
         .into_iter()
@@ -303,7 +358,7 @@ pub(super) async fn select(
     {
         let eligibility =
             family_pointer_eligibility(&plan.pointer.namespace, classification.as_ref());
-        let requested = keys.map(|keys| &keys[&plan.pointer.resource_id]);
+        let requested = requested(&plan).filter(|_| key_only);
         let (versions, mut candidates) = partition_rows.of(&partitions, requested);
         let linked = select_values(
             record_id.as_ref().and_then(|key| linked_rows.get(key)),
@@ -336,6 +391,10 @@ pub(super) async fn select(
         if let Some((position, "RecordVersionChanged", _)) = &boundary {
             identities.push(position.event_identity.clone());
         }
+        reads.push(PlanReads {
+            partitions,
+            record_id,
+        });
         selected.push((
             plan,
             classification,
@@ -375,19 +434,14 @@ pub(super) async fn select(
             },
         )
         .collect();
-    super::seams::note_lookup_work(|| {
-        serde_json::json!({
-            "stage":"winner_selection", "resources":resource_ids.len(), "key_only":keys.is_some(),
-            "selected_components":selected.iter().map(|s| s.served.len()).sum::<usize>(),
-            "elapsed_ms_including_sibling_probe":winner_started.map(|t| t.elapsed().as_secs_f64()*1000.0),
-        })
-    });
-    Ok(Prepared {
-        publications: out,
-        unsupported,
-        selected,
-    })
+    if let Some(note) = &note {
+        super::seams::note_lookup_work(|| {
+            serde_json::json!({
+                "stage":"winner_selection", "resources":note.resources, "key_only":key_only,
+                "selected_components":selected.iter().map(|s| s.served.len()).sum::<usize>(),
+                "elapsed_ms_including_sibling_probe":winner_started.map(|t| t.elapsed().as_secs_f64()*1000.0),
+            })
+        });
+    }
+    Ok((selected, reads))
 }
-
-#[path = "inventory_cutoff.rs"]
-mod cutoff;

@@ -20,6 +20,24 @@ mod scoped {
         static SUBMITTED_ROWS: Arc<AtomicU64>;
         static COMPOSED_NAMES: Arc<AtomicU64>;
         static PEAK_SOURCE: Arc<AtomicU64>;
+        static REGISTRY_POINTER_READS: Arc<std::sync::Mutex<Vec<usize>>>;
+    }
+
+    /// Runs `future` appending to `reads` the node count of every registry pointer read
+    /// (`load_ens_v1_resolvers`) in it, one statement each.
+    pub async fn with_registry_pointer_reads<F: Future>(
+        reads: Arc<std::sync::Mutex<Vec<usize>>>,
+        future: F,
+    ) -> F::Output {
+        REGISTRY_POINTER_READS.scope(reads, future).await
+    }
+
+    pub(in crate::families::name) fn note_registry_pointer_read(nodes: usize) {
+        let _ = REGISTRY_POINTER_READS.try_with(|reads| {
+            if let Ok(mut reads) = reads.lock() {
+                reads.push(nodes);
+            }
+        });
     }
 
     /// Runs `future` adding to `counter` every composed row a listing walk in it submits to its
@@ -110,11 +128,14 @@ pub(crate) use scoped::after_publication;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use scoped::before_snapshot;
 #[cfg(any(test, feature = "test-support"))]
-pub(super) use scoped::{batch_size, note_composed_names, note_submitted_rows};
+pub(super) use scoped::{
+    batch_size, note_composed_names, note_registry_pointer_read, note_submitted_rows,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use scoped::{
     with_batch_size, with_composed_names_counter, with_pause_after_publication,
-    with_pause_before_snapshot, with_peak_source_counter, with_submitted_rows_counter,
+    with_pause_before_snapshot, with_peak_source_counter, with_registry_pointer_reads,
+    with_submitted_rows_counter,
 };
 
 #[cfg(not(any(test, feature = "test-support")))]
@@ -133,6 +154,9 @@ pub(super) fn note_submitted_rows(_rows: usize) {}
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(super) fn note_composed_names(_names: usize) {}
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(super) fn note_registry_pointer_read(_nodes: usize) {}
 
 /// The statements the search and bound-name walks run, for their plan tests.
 #[cfg(test)]

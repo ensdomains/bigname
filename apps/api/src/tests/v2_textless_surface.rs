@@ -232,7 +232,15 @@ async fn v2_textless_name_detail_is_served_by_its_bracketed_route() -> Result<()
     // The registry-only binding with an owner reads as it does for a name with bytes.
     assert_eq!(data["status"], json!("active"), "{detail:#}");
     assert_eq!(data["authority"], json!("ens_v1"), "{detail:#}");
-    assert_eq!(data["ens_v1"], json!({"expires_at": null, "wrapper_state":"unwrapped"}), "{detail:#}");
+    assert_eq!(
+        data["ens_v1"],
+        json!({
+            "expires_at": null,
+            "resolver": {"chain_id": 1, "address": "0x0000000000000000000000000000000000000abc"},
+            "wrapper_state": "unwrapped"
+        }),
+        "{detail:#}"
+    );
     assert_eq!(data["owner"], json!(RC_OWNER), "{detail:#}");
     assert_eq!(data["manager"], json!(RC_OWNER), "{detail:#}");
     assert_eq!(data["created_at"], json!("1700000202"), "{detail:#}");

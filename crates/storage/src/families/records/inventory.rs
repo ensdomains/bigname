@@ -21,16 +21,7 @@ use super::inventory_publication::compose_inventories_at;
 pub use super::inventory_types::{FamilyAttribution, FamilyRecordInventory};
 use crate::RecordInventoryCurrentRow;
 
-// The resolver-anchored read (`FamilyRecordInventory::load_resolver_node_on`) applies the same
-// cutoff as the resource-keyed selection. `inventory_selection.rs` compiles the cutoff rules as
-// its own private module, so this reader compiles the same file again as a second private
-// module. Both copies are built from one source file, so they cannot drift apart. The second
-// mount keeps this reader out of the interpreter content hash, which a shared mount in the hashed
-// `records/mod.rs` would rotate. TYR-287's hash-rotating follow-up moves the mount there and
-// removes this allowance.
-#[allow(clippy::duplicate_mod)]
-#[path = "inventory_cutoff.rs"]
-mod cutoff;
+// The resolver-anchored read, `GET /v1/resolvers/{chain_id}/{address}/records`.
 #[path = "node_inventory.rs"]
 mod node_inventory;
 

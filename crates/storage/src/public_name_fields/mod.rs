@@ -10,7 +10,7 @@ mod wrapper_state;
 
 use serde::{Deserialize, Serialize};
 
-pub use ens_v1::{EnsV1, ens_v1};
+pub use ens_v1::{EnsV1, EnsV1Resolver, ens_v1, ens_v1_resolver};
 pub use registration::{
     RegistrationFields, chain_positions_created_at, classify_registration_status,
     declared_created_at, declared_expires_at, declared_grace_ends_at, declared_owner,

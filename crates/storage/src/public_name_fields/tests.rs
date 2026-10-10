@@ -55,3 +55,33 @@ fn invalid_wrapper_is_rejected_even_when_authority_would_omit_the_object() {
         assert!(ens_v1(authority, &json!({"wrapper_state":"wrapped"})).is_err());
     }
 }
+
+#[test]
+fn ens_v1_resolver_reads_absent_null_and_object() {
+    let address = "0x00000000000000000000000000000000000000a1";
+    for (summary, expected) in [
+        (json!({}), None),
+        (json!({"ens_v1_resolver": null}), Some(json!(null))),
+        (
+            json!({"ens_v1_resolver": {"chain_id": "ethereum-sepolia", "address": address}}),
+            Some(json!({"chain_id": 11_155_111, "address": address})),
+        ),
+        (
+            json!({"ens_v1_resolver": {"chain_id": "ethereum-mainnet", "address": address}}),
+            Some(json!({"chain_id": 1, "address": address})),
+        ),
+    ] {
+        let fields = SearchFields {
+            registration: registration_fields("ens", &summary, false),
+            ens_v1: ens_v1(Some("ens_v1"), &summary).unwrap(),
+        };
+        let stored = serde_json::to_value(&fields).unwrap();
+        assert_eq!(
+            stored["ens_v1"].get("resolver").cloned(),
+            expected,
+            "{summary}"
+        );
+        let decoded: SearchFields = serde_json::from_value(stored.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), stored, "{summary}");
+    }
+}

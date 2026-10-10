@@ -461,9 +461,11 @@ pub(crate) async fn get_address_names(
             Ok(row)
         })
         .collect::<V2Result<Vec<_>>>()?;
-    crate::v2::name_record::fill_wrapper_expiries(
+    crate::v2::name_record::fill_address_names_ens_v1(
         snapshot.conn().await?,
-        data.iter_mut().filter_map(|row| row.ens_v1.as_mut()),
+        &storage_page.entries,
+        &name_rows,
+        data.iter_mut().map(|row| row.ens_v1.as_mut()),
     )
     .await?;
     let mut meta = snapshot.finish(&state).await?;

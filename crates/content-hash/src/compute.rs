@@ -48,6 +48,8 @@ const SEMANTIC_SOURCE_FILES: &[&str] = &[
     // resolution topology. Changing either can reshape persisted `name_current` summaries.
     "crates/domain/src/resolution_topology.rs",
     "crates/domain/src/vocabulary.rs",
+    // The numeric chain id the stored `ens_v1.resolver` of a name summary carries.
+    "crates/domain/src/chain_identity.rs",
     // Namehash, DNS encoding, resolver-call encoding, and result decoding shared by the hydration
     // multicalls below.
     "crates/lookup/src/abi.rs",

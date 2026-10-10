@@ -6,25 +6,22 @@
 //! pointer only to choose the resolver and the partitions. This read takes the resolver from the
 //! caller and stands in a pointer for it: the queried node and name, and the pointer family of the
 //! resolver's own family, so the partitions are the ones the resolver's writes are kept in. The
-//! selection after that is `inventory_selection::select` for one pointer, with the same mirror
-//! substitution, cutoff and winner rules and the same assembly. The two must change together.
+//! mirror substitution is the resource-keyed read's, and the records are selected by the same
+//! function (`inventory_selection::select_plans`), with the same cutoff and winner rules, then
+//! assembled the same way.
 use std::collections::BTreeSet;
 
 use anyhow::Result;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
-use super::cutoff::{Boundary, combined_boundary, eligible, latest_eligible, served_records};
 use crate::families::records::{
-    assemble::{self, Assembly, AssemblyReads, BoundaryEvent},
-    facts::{ResolverClassification, load_classifications_at, probe_events},
+    assemble::{self, Assembly, AssemblyReads},
+    facts::{ResolverClassification, load_classifications_at},
+    inventory_selection::{Plan, Selected, select_plans},
     inventory_types::FamilyRecordInventory,
-    links::{link_key, load_family_link_selections_on},
     mirror::{evaluate_family_mirror_at, is_mirror_pointer},
-    rows::{
-        PartitionKey, admitted_partitions, load_partitions, load_record_id_values, select_values,
-    },
-    serving::{ServingPointer, family_pointer_eligibility},
+    serving::ServingPointer,
 };
 use crate::{RecordInventoryCurrentRow, SnapshotSelectionError, families::name::FamilyPublication};
 
@@ -160,7 +157,7 @@ async fn node_inventory_at(
     };
 
     // The mirror walk decides a mirror resolver's substituted pointer, or its unsupported row.
-    let (pointer, mirror, classification) = if is_mirror_pointer(&serving, Some(&classification)) {
+    let (plan, classification) = if is_mirror_pointer(&serving, Some(&classification)) {
         let mirror =
             evaluate_family_mirror_at(conn, chain_id, &serving, classification, publication)
                 .await?;
@@ -189,100 +186,42 @@ async fn node_inventory_at(
         )
         .await?
         .remove(&address);
-        (substituted, Some(mirror), classification)
+        let plan = Plan {
+            pointer: substituted,
+            link_pointer: serving,
+            mirror: Some(mirror),
+        };
+        (plan, classification)
     } else {
-        (serving.clone(), None, Some(classification))
+        let plan = Plan {
+            pointer: serving.clone(),
+            link_pointer: serving,
+            mirror: None,
+        };
+        (plan, Some(classification))
     };
 
-    // The admitted partitions, the link selection and the linked record id.
-    let partitions: Vec<PartitionKey> = admitted_partitions(&pointer, classification.as_ref())
-        .into_iter()
-        .map(|(arm, identity)| (pointer.resolver_address.clone(), arm, identity))
-        .collect();
-    let partition_keys = keys.map(|keys| {
-        partitions
-            .iter()
-            .flat_map(|partition| keys.iter().map(|key| (partition.clone(), key.clone())))
-            .collect::<BTreeSet<_>>()
-    });
-    let partition_rows = load_partitions(
+    let (mut selected, _) = select_plans(
         conn,
-        chain_id,
-        &partitions,
-        publication.block_number,
-        partition_keys.as_ref(),
+        publication,
+        vec![(plan, classification)],
+        |_| keys,
+        keys.is_some(),
+        None,
     )
     .await?;
-    let link_request = (serving.resolver_address.clone(), serving.namehash.clone());
-    let links = load_family_link_selections_on(conn, chain_id, std::slice::from_ref(&link_request))
-        .await?
-        .remove(&link_key(&link_request.0, &link_request.1))
-        .flatten();
-    let record_id = links
-        .as_ref()
-        .and_then(|links| links.record_id.clone())
-        .map(|record_id| (serving.resolver_address.clone(), record_id));
-    let linked_keys = keys.map(|keys| {
-        record_id
-            .iter()
-            .flat_map(|record_id| keys.iter().map(|key| (record_id.clone(), key.clone())))
-            .collect::<BTreeSet<_>>()
-    });
-    let linked_rows = load_record_id_values(
-        conn,
-        chain_id,
-        &record_id.iter().cloned().collect::<Vec<_>>(),
-        linked_keys.as_ref(),
-    )
-    .await?;
-
-    // The combined boundary and the latest eligible write per record key.
-    let eligibility = family_pointer_eligibility(&pointer.namespace, classification.as_ref());
-    let (versions, mut candidates) = partition_rows.of(&partitions, keys);
-    let linked = select_values(
-        record_id.as_ref().and_then(|key| linked_rows.get(key)),
-        keys,
-    );
-    candidates.extend(linked.iter().cloned());
-    let mut boundaries: Vec<Boundary> = versions
-        .into_iter()
-        .map(|position| (position, "RecordVersionChanged", None))
-        .collect();
-    if let Some(links) = &links {
-        for link in links.contributing_links() {
-            boundaries.push((
-                link.position.clone(),
-                "ResolverRecordLinked",
-                link.normalized_event_id,
-            ));
-        }
-    }
-    let (boundary, cutoff) = combined_boundary(boundaries);
-    let winners = latest_eligible(candidates, cutoff.as_ref());
-    let mut identities: Vec<String> = winners
-        .values()
-        .filter_map(|winner| winner.pair_sibling())
-        .filter(|sibling| eligible(cutoff.as_ref(), sibling))
-        .map(|sibling| sibling.event_identity.clone())
-        .collect();
-    if let Some((position, "RecordVersionChanged", _)) = &boundary {
-        identities.push(position.event_identity.clone());
-    }
-    let probed = probe_events(conn, &identities).await?;
-    let served = served_records(winners, cutoff.as_ref(), &probed);
-    let boundary = boundary.map(|(position, kind, id)| BoundaryEvent {
-        normalized_event_id: id.or_else(|| {
-            probed
-                .get(&position.event_identity)
-                .map(|event| event.normalized_event_id)
-        }),
-        position,
-        kind,
-    });
-
+    let Selected {
+        plan,
+        classification,
+        eligibility,
+        links,
+        linked,
+        boundary,
+        served,
+    } = selected.pop().expect("one plan selects one inventory");
     let assembly = Assembly {
         chain_id,
-        pointer: &pointer,
+        pointer: &plan.pointer,
         classification: classification.as_ref(),
         eligibility,
         boundary,
@@ -299,12 +238,12 @@ async fn node_inventory_at(
     )
     .await?;
     let (mut row, record_version_boundary_key, _) = assemble::assemble(assembly, &reads)?;
-    if let Some(mirror) = &mirror {
-        assemble::finish_mirrored(&mut row, mirror, &serving);
+    if let Some(mirror) = &plan.mirror {
+        assemble::finish_mirrored(&mut row, mirror, &plan.link_pointer);
     }
     Ok(Some(FamilyRecordInventory {
         row,
         record_version_boundary_key,
-        mirrored: mirror.is_some(),
+        mirrored: plan.mirror.is_some(),
     }))
 }

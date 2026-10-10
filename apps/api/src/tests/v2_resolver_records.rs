@@ -223,6 +223,17 @@ async fn serves_records_for_a_lapsed_reservation_the_name_route_withholds() -> R
         .await?;
         assert_eq!(body["data"]["records"], served("lapsed.png"), "{body:#}");
         assert_eq!(body["data"]["namespace"], json!("ens"), "{body:#}");
+        // The name's ENSv1 registry pointer names the resolver this route answers for, both
+        // while the name route serves it and once it withholds it.
+        assert_eq!(
+            detail["data"]["ens_v1"]["resolver"]["address"], body["data"]["resolver"]["address"],
+            "{detail:#} {body:#}"
+        );
+        assert_eq!(
+            body["data"]["resolver"]["address"],
+            json!(PUBLIC_RESOLVER),
+            "{body:#}"
+        );
         assert_eq!(
             body["data"]["inventory"]["known_keys"],
             json!(["addr:60", "text:avatar", "text:description"]),

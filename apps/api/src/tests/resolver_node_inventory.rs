@@ -1,5 +1,5 @@
-//! The read by resolver and node (`FamilyRecordInventory::load_resolver_node_on`) repeats the
-//! per-pointer selection of the resource-keyed read. For a name whose pointer is the resolver,
+//! The read by resolver and node (`FamilyRecordInventory::load_resolver_node_on`) selects through
+//! the per-pointer selection of the resource-keyed read. For a name whose pointer is the resolver,
 //! both build the same row. The read by resolver has no resource and no pointer event, so the
 //! fields that name them differ. Each fixture publishes at its pointer's block, so the positions
 //! that fall back to the pointer's block when no record or boundary is later agree too.

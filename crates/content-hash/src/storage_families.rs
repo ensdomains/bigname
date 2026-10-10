@@ -121,6 +121,8 @@ const READER_FILES: &[&str] = &[
     "crates/storage/src/families/name/list/expiring.rs",
     // Test-support measurement of the read-only selector; no Project caller.
     "crates/storage/src/families/name/list/expiring/measure.rs",
+    // The pointer of nodes served without a composed row, read beside the composed rows.
+    "crates/storage/src/families/name/registry_pointer.rs",
     "crates/storage/src/families/name/seams.rs",
     "crates/storage/src/families/name/topology.rs",
     "crates/storage/src/families/records/candidates.rs",

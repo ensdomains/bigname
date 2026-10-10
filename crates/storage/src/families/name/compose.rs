@@ -7,7 +7,7 @@ use super::{
     CoverageShape, FamilyPublication, NameHistory,
     rendered::placeholder_name,
     selection::NameSelection,
-    serving::{PointerRow, ResolverScope, Serving, resolver_block},
+    serving::{PointerRow, ResolverScope, Serving, ens_v1_resolver, resolver_block},
 };
 use crate::{
     NameCurrentRow, SurfaceBindingKind,
@@ -301,6 +301,10 @@ pub(super) fn compose(parts: &Parts<'_>, shape: CoverageShape) -> Result<NameCur
     summary.insert("registration".into(), Value::Object(registration));
     summary.insert("control".into(), Value::Object(shadow.control.clone()));
     summary.insert("resolver".into(), resolver);
+    summary.insert(
+        "ens_v1_resolver".into(),
+        ens_v1_resolver(parts.node_pointer, &parts.publication.chain_id),
+    );
     summary.insert("coverage".into(), coverage_block.clone());
     let staged: Vec<&str> = parts
         .facts

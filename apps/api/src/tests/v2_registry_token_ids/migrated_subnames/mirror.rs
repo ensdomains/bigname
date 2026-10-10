@@ -1,6 +1,8 @@
 //! A valid ENSv1 pointer does not prove that its target's execution is modeled.
 use super::*;
 
+const CUSTOM: &str = "0x0000000000000000000000000000000000000bad";
+
 async fn summaries(database: &TestDatabase) -> Result<Value> {
     Ok(sqlx::query_scalar(
         "SELECT jsonb_agg(to_jsonb(summary) ORDER BY logical_name_id)
@@ -8,6 +10,20 @@ async fn summaries(database: &TestDatabase) -> Result<Value> {
     )
     .fetch_one(&database.pool)
     .await?)
+}
+
+/// `summary` with `CHILD`'s stored `ens_v1.resolver` naming `pointer`. A registry pointer write
+/// changes those bytes of the summary and no others.
+fn with_pointer(summary: &Value, pointer: &str) -> Value {
+    let child = bigname_storage::logical_name_id_for_name("ens", CHILD);
+    let mut summary = summary.clone();
+    for row in summary.as_array_mut().expect("summary rows") {
+        if row["logical_name_id"] == child.as_str() {
+            row["search_fields"]["ens_v1"]["resolver"] =
+                json!({"chain_id": 11_155_111, "address": pointer});
+        }
+    }
+    summary
 }
 
 async fn assert_unknown(database: &TestDatabase, resolver: Address, before: &Value) -> Result<()> {
@@ -29,10 +45,13 @@ async fn assert_unknown(database: &TestDatabase, resolver: Address, before: &Val
         "status",
         "expires_at",
         "grace_ends_at",
-        "ens_v1",
     ] {
         assert_eq!(detail["data"][field], before["data"][field], "{field}");
     }
+    // `ens_v1.resolver` is the registry's pointer, so it names the custom target.
+    let mut ens_v1 = before["data"]["ens_v1"].clone();
+    ens_v1["resolver"] = json!({"chain_id": 11_155_111, "address": CUSTOM});
+    assert_eq!(detail["data"]["ens_v1"], ens_v1, "{detail:#}");
     assert_consumers(database, false, resolver, Some("ens_v2_path_not_projected")).await
 }
 
@@ -65,7 +84,7 @@ async fn migrated_subname_mirror_custom_target_is_unknown_and_restoration_retain
     let custom = emitted(
         NewResolver {
             node,
-            resolver: "0x0000000000000000000000000000000000000bad".parse()?,
+            resolver: CUSTOM.parse()?,
         }
         .encode_log_data(),
         v1,
@@ -73,10 +92,11 @@ async fn migrated_subname_mirror_custom_target_is_unknown_and_restoration_retain
         0,
     );
     seed_and_run_with(&database, &[custom], 122, 122, &[(122, 0, GRANTEE)], None).await?;
+    let pointed = with_pointer(&summary, CUSTOM);
     assert_eq!(
         summaries(&database).await?,
-        summary,
-        "pointer classification must not change summary bytes or clocks"
+        pointed,
+        "pointer classification changes only the stored registry pointer, not the clocks"
     );
     assert_unknown(&database, resolver, &before).await?;
     let families_unknown = replay::families(&database).await?;
@@ -91,7 +111,7 @@ async fn migrated_subname_mirror_custom_target_is_unknown_and_restoration_retain
     assert_eq!(replay::families(&database).await?, families_unknown);
     assert_unknown(&database, resolver, &before).await?;
     replay::assert_rebuild(&database, 122).await?;
-    assert_eq!(summaries(&database).await?, summary);
+    assert_eq!(summaries(&database).await?, pointed);
     assert_unknown(&database, resolver, &before).await?;
     let restore = emitted(NewResolver { node, resolver }.encode_log_data(), v1, 123, 0);
     seed_and_run_with(&database, &[restore], 123, 123, &[(123, 0, GRANTEE)], None).await?;

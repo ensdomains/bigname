@@ -221,10 +221,12 @@ pub(crate) async fn get_registry_labels(
             })
         })
         .collect::<V2Result<Vec<_>>>()?;
-    crate::v2::name_record::fill_wrapper_expiries(
+    crate::v2::name_record::fill_children_ens_v1(
         collection.conn().await?,
-        data.iter_mut()
-            .filter_map(|label| label.name.ens_v1.as_mut()),
+        Some(chain_id_slug),
+        &storage_page.rows,
+        &child_name_rows,
+        data.iter_mut().map(|label| label.name.ens_v1.as_mut()),
     )
     .await?;
     Ok(Json(Envelope {

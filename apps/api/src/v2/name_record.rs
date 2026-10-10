@@ -46,7 +46,8 @@ mod wrapper;
 use declared::chain_positions_created_at;
 pub(crate) use declared::{LapsedRegistration, lapsed_registration, registration_id};
 pub(crate) use ens_v1::{
-    EnsV1, ens_v1, ens_v1_of_registry_child, ens_v1_of_row, fill_wrapper_expiries,
+    EnsV1, ens_v1, ens_v1_of_registry_child, ens_v1_of_row, fill_address_names_ens_v1,
+    fill_children_ens_v1, fill_wrapper_expiries,
 };
 use inventory::load_name_record_inventory;
 pub(super) use values::{

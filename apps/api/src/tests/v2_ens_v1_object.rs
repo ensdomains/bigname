@@ -95,6 +95,7 @@ async fn v2_ens_v1_object_serves_the_lease_and_wrapper_beside_the_ens_v2_reserva
     seed_alice_wrapped_reserved_on_an_admitted_chain(&database).await?;
     let expected = json!({
         "expires_at": "1798608633",
+        "resolver": {"chain_id": 1, "address": "0x0000000000000000000000000000000000000abc"},
         "wrapper_state": "emancipated",
         "wrapper_fuses": {
             "fuses": 196_608, "cannot_unwrap": false, "cannot_burn_fuses": false,
@@ -409,7 +410,11 @@ async fn v2_ens_v1_object_on_an_unwrapped_lease_and_its_absence_under_ens_v2() -
     assert_eq!(unwrapped["data"]["authority"], json!("ens_v1"), "{unwrapped:#}");
     assert_eq!(
         unwrapped["data"]["ens_v1"],
-        json!({"expires_at": "1798859045", "wrapper_state": "unwrapped"}),
+        json!({
+            "expires_at": "1798859045",
+            "resolver": {"chain_id": 1, "address": "0x0000000000000000000000000000000000000abc"},
+            "wrapper_state": "unwrapped"
+        }),
         "proven registry custody serves unwrapped without wrapper expiry or fuses: {unwrapped:#}"
     );
 
@@ -443,7 +448,11 @@ async fn v2_ens_v1_object_serves_a_saturated_lease_expiry_as_i64_max() -> Result
     let detail = v2_name_record_payload_for_database(&database, "/v1/names/alice.eth").await?;
     assert_eq!(
         detail["data"]["ens_v1"],
-        json!({"expires_at": "9223372036854775807", "wrapper_state": "unwrapped"}),
+        json!({
+            "expires_at": "9223372036854775807",
+            "resolver": {"chain_id": 1, "address": "0x0000000000000000000000000000000000000abc"},
+            "wrapper_state": "unwrapped"
+        }),
         "{detail:#}"
     );
     database.cleanup().await

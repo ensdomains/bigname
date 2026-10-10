@@ -675,6 +675,10 @@ fn semantic_dependencies_of_the_watched_roots_affect_the_hash() {
             "pub enum ChainId { Changed }\n",
         ),
         (
+            "crates/domain/src/chain_identity.rs",
+            "impl ChainId { pub const fn numeric_chain_id(self) -> Option<u64> { None } }\n",
+        ),
+        (
             "crates/lookup/src/reverse_names.rs",
             "pub fn decode_reverse_names() -> bool { false }\n",
         ),
