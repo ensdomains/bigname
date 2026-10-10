@@ -797,6 +797,11 @@ collection route carry neither header.
 - Method/path: `GET /v1/names/{name}`
 - Tier: product read.
 - Purpose: name-profile read, using the flat record shape plus registration summary.
+- Alias paths: an ENSv2 name answers on every path that resolves to its token. A path
+  that is not the served one is an [alias path](api-v1.md#alias-paths). It returns the
+  served path's record under the requested `name`, `display_name` and `namehash`, with
+  `canonical_name` naming the served path. A path that resolves to no token answers as
+  before, with the name's own row or `404 not_found`.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`,
   `source`, `include=counts`. `source` accepts `indexed` or `verified`; omitting it is identical
   to `source=indexed`. This name-profile route does not accept `source=auto`.
@@ -1200,6 +1205,10 @@ its value map:
 - Method/path: `GET /v1/names/{name}/records`
 - Tier: product read.
 - Purpose: resolver records.
+- Alias paths: an [alias path](api-v1.md#alias-paths) answers with the served path's
+  resolver, indexed records and inventory, and `canonical_name` names the served path.
+  `source=verified` and the verified keys of `source=auto` read the chain for the
+  requested path. A path that resolves to no token answers as before.
 - Records this route withholds, for a released name, a lapsed reservation or
   a name whose resolution is withheld, can still be read by resolver:
   [`GET /v1/resolvers/{chain_id}/{address}/records`](#get-v1resolverschain_idaddressrecords)

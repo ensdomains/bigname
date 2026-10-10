@@ -659,6 +659,14 @@ Family indexes serve these concrete readers:
   composition looks names up through `project_lifecycle_key_state_name_idx` (beside the key
   state primary key, joined by a BitmapOr) and `project_name_state_name_idx`, since
   `project_name_state`'s primary key leads with the namespace.
+- The direct read's [alias path](glossary.md#alias-path) walk reads each entry
+  (`storage:families.alias_path.entry`) by the `project_ens_v2_entry_owner` primary key, and
+  each hop's subregistry pointer (`storage:families.alias_path.entry_pointer`) through
+  `normalized_events_resource_history_idx`, as `storage:families.name.resolution_entry_pointers`
+  does. The leaf's canonical name (`storage:families.alias_path.association`) reads
+  `project_lifecycle_association_target_idx`, and its check for a later binding release
+  reads `normalized_events_resource_history_idx`. The walk takes its root registry from the
+  family marker. No index is added.
 
 
 Interpret writes `discovery_edges` and `contract_instance_addresses`. A phase

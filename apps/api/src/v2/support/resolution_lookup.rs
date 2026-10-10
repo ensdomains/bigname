@@ -37,17 +37,21 @@ pub(crate) async fn execute_resolution_lookup(
     row: &NameCurrentRow,
     records: &[ResolutionRecordKey],
     selected_snapshot: &mut SelectedSnapshot,
+    path: Option<&bigname_lookup::LookupPath>,
 ) -> std::result::Result<ResolutionLookupOutcome, ResolutionLookupError> {
     if records.is_empty() {
         return Ok(ResolutionLookupOutcome::NotSupported);
     }
 
     let logical_name_id = schema_v2_logical_name_id(row)?;
-    let request = bigname_lookup::LookupRequest::new(
+    let mut request = bigname_lookup::LookupRequest::new(
         logical_name_id,
         records.iter().map(|record| record.record_key.as_str()),
     )
     .map_err(lookup_snapshot_error)?;
+    if let Some(path) = path {
+        request = request.at_path(path.clone());
+    }
     let timer = crate::metrics::verified_execution_timer();
     let admitted_positions = selected_snapshot
         .chain_positions

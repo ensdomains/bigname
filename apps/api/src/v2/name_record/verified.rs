@@ -4,7 +4,7 @@ use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow, SelectedSnapsho
 
 use crate::AppState;
 use crate::v2::support::{
-    PROFILE_FALLBACK_RECORD_KEYS, ResolutionRecordKey, parse_resolution_record_key,
+    AliasPath, PROFILE_FALLBACK_RECORD_KEYS, ResolutionRecordKey, parse_resolution_record_key,
 };
 use crate::v2::vocab::{
     MISSING_UNSUPPORTED_REASON, downgrades_unsupported_name, projected_row_product_reason,
@@ -14,7 +14,7 @@ use super::super::{
     SnapshotReadResource, Source, Status, V2Result, default_requested_records,
     name_records::{
         RecordAnswer, RecordSelection, VERIFIED_NOT_SUPPORTED_REASON, build_verified_name_records,
-        ensure_default_record_limit, load_verified_record_lookup_for_resource,
+        ensure_default_record_limit, load_verified_record_lookup_for_resource, verified_discovery,
     },
 };
 use super::{NameRecord, build_name_record, row_has_current_registration, string_field};
@@ -27,6 +27,7 @@ pub(super) async fn build_name_record_for_source(
     chain_id: Option<u64>,
     selected_snapshot: &mut SelectedSnapshot,
     source: Source,
+    alias: Option<&AliasPath>,
 ) -> V2Result<NameRecord> {
     if let Some(record) = unsupported_name_record(row)? {
         return Ok(record);
@@ -34,8 +35,15 @@ pub(super) async fn build_name_record_for_source(
     match source {
         Source::Indexed => build_name_record(row, record_inventory, chain_id, Status::Ok),
         Source::Verified => {
-            build_verified_name_record(state, row, record_inventory, chain_id, selected_snapshot)
-                .await
+            build_verified_name_record(
+                state,
+                row,
+                record_inventory,
+                chain_id,
+                selected_snapshot,
+                alias,
+            )
+            .await
         }
     }
 }
@@ -73,6 +81,7 @@ pub(super) fn unsupported_name_record(row: &NameCurrentRow) -> V2Result<Option<N
         migrated_at: None,
         name: row.normalized_name.clone(),
         display_name: row.canonical_display_name.clone(),
+        canonical_name: None,
         namespace: row.namespace.clone(),
         namehash: row.namehash.clone(),
         resolver: None,
@@ -98,6 +107,7 @@ async fn build_verified_name_record(
     record_inventory: Option<&RecordInventoryCurrentRow>,
     chain_id: Option<u64>,
     selected_snapshot: &mut SelectedSnapshot,
+    alias: Option<&AliasPath>,
 ) -> V2Result<NameRecord> {
     // Mirror build_name_record's serving guard before deriving requested records: only a
     // current registration or classified ownerless registry read path may steer lookup.
@@ -116,6 +126,7 @@ async fn build_verified_name_record(
         &requested_records,
         selected_snapshot,
         SnapshotReadResource::Name,
+        alias,
     )
     .await?;
     let verified_records = build_verified_name_records(
@@ -123,6 +134,7 @@ async fn build_verified_name_record(
         record_inventory,
         RecordSelection::requested(&requested_records),
         verified_lookup,
+        verified_discovery(row, alias),
         false,
         false,
     )?;
@@ -140,7 +152,8 @@ async fn build_verified_name_record(
         .then(|| groups.addresses.get("60").cloned().flatten())
         .flatten();
     record.records =
-        (has_current_registration && row.unresolvable_reason().is_none()).then_some(groups);
+        serves_record_groups(row, has_current_registration, alias.is_some()).then_some(groups);
+    drop_canonical_path_classification(&mut record, alias.is_some());
     record.read_status = status;
     record.unsupported_reason = verified_profile_unsupported_reason(answers, status);
     record.failure_reason = verified_profile_failure_reason(answers, status);
@@ -275,6 +288,23 @@ fn is_primary_address_record(record: &ResolutionRecordKey) -> bool {
     record.record_key == "addr:60"
 }
 
+/// Whether verified detail serves its record groups. `unresolvable_reason` describes the
+/// canonical path. Under an alias the read is for the requested path, which the chain resolved,
+/// so the reason withholds nothing there.
+fn serves_record_groups(row: &NameCurrentRow, has_current_registration: bool, alias: bool) -> bool {
+    has_current_registration && (alias || row.unresolvable_reason().is_none())
+}
+
+/// Under an alias, drops the canonical path's classification. `unresolvable_reason` and
+/// `resolution_unsupported_reason` describe the canonical path. A verified alias read is for
+/// the requested path, whose classification is the verified lookup's answer for each record.
+fn drop_canonical_path_classification(record: &mut NameRecord, alias: bool) {
+    if alias {
+        record.unresolvable_reason = None;
+        record.resolution_unsupported_reason = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bigname_storage::RecordInventoryCurrentRow;
@@ -283,6 +313,69 @@ mod tests {
 
     use super::*;
     use crate::v2::name_records::MAX_RECORD_KEYS;
+
+    /// An alias read keeps the chain's record groups although the canonical row is
+    /// unresolvable. Without an alias the canonical path's reason withholds them.
+    #[test]
+    fn an_alias_keeps_record_groups_the_canonical_reason_withholds() {
+        let row = classified_row(json!({"unresolvable_reason": "ens_v2_path_no_resolver"}));
+        assert!(serves_record_groups(&row, true, true));
+        assert!(!serves_record_groups(&row, true, false));
+        assert!(!serves_record_groups(&row, false, true));
+    }
+
+    /// A verified alias read drops the canonical path's classification. Without an alias the
+    /// canonical row's reasons stand.
+    #[test]
+    fn an_alias_drops_the_canonical_paths_classification() {
+        let row = classified_row(json!({
+            "unresolvable_reason": "ens_v2_path_no_resolver",
+            "resolution_unsupported_reason": "ens_v2_path_target_not_projected",
+        }));
+        let canonical = build_name_record(&row, None, None, Status::Ok).expect("a record");
+        assert_eq!(
+            canonical.unresolvable_reason.as_deref(),
+            Some("ens_v2_path_no_resolver")
+        );
+        assert_eq!(
+            canonical.resolution_unsupported_reason.as_deref(),
+            Some("ens_v2_path_target_not_projected")
+        );
+        let mut kept = canonical.clone();
+        drop_canonical_path_classification(&mut kept, false);
+        assert_eq!(kept.unresolvable_reason, canonical.unresolvable_reason);
+        assert_eq!(
+            kept.resolution_unsupported_reason,
+            canonical.resolution_unsupported_reason
+        );
+        let mut alias = canonical;
+        drop_canonical_path_classification(&mut alias, true);
+        assert_eq!(alias.unresolvable_reason, None);
+        assert_eq!(alias.resolution_unsupported_reason, None);
+    }
+
+    fn classified_row(declared_summary: serde_json::Value) -> NameCurrentRow {
+        NameCurrentRow {
+            logical_name_id: "ens:child.m.eth".to_owned(),
+            namespace: "ens".to_owned(),
+            canonical_display_name: "child.m.eth".to_owned(),
+            normalized_name: "child.m.eth".to_owned(),
+            namehash: "0x00".to_owned(),
+            surface_binding_id: None,
+            resource_id: None,
+            serving_resource_id: None,
+            token_lineage_id: None,
+            binding_kind: None,
+            declared_summary,
+            provenance: json!({}),
+            coverage: json!({}),
+            chain_positions: json!({}),
+            canonicality_summary: json!({}),
+            manifest_version: 1,
+            last_recomputed_at: OffsetDateTime::from_unix_timestamp(1_717_171_719)
+                .expect("test timestamp"),
+        }
+    }
 
     #[test]
     fn synthetic_primary_address_does_not_reject_maximum_inventory() {

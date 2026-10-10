@@ -12,9 +12,10 @@ use super::record_groups::{AbiSource, RecordGroups, fill_abi_content_types};
 use crate::AppState;
 
 use super::support::{
-    V2_RECORD_UNSUPPORTED_FIELD_NAMES, direct_json_field, load_name_current_for_selected_snapshot,
-    map_internal_api_error, normalize_inferred_route_name, record_addresses_from_entries,
-    record_unsupported_fields, serving_record_inventory, snapshot_selection_api_error,
+    AliasPath, ServedName, V2_RECORD_UNSUPPORTED_FIELD_NAMES, direct_json_field,
+    load_served_name_for_selected_snapshot, map_internal_api_error, normalize_inferred_route_name,
+    record_addresses_from_entries, record_unsupported_fields, serving_record_inventory,
+    snapshot_selection_api_error,
 };
 use super::{
     Envelope, QueryParamAllowlist, RegistryRef, RequestSource, SnapshotReadResource,
@@ -97,6 +98,10 @@ pub(crate) struct NameRecord {
     pub(crate) migrated_at: Option<String>,
     pub(crate) name: String,
     pub(crate) display_name: String,
+    /// The canonical name of the ENSv2 token an alias path reaches; present only when the
+    /// request named an alias path (docs/api-v1.md, "ENSv2 name path").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) canonical_name: Option<String>,
     pub(crate) namespace: String,
     pub(crate) namehash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -176,8 +181,8 @@ pub(crate) async fn get_name_record(
     let mut reads = bigname_storage::begin_read_snapshot(&state.pool)
         .await
         .map_err(|_| V2Error::internal_error("failed to open name read snapshot"))?;
-    let row = load_name_current_for_selected_snapshot(
-        &mut *reads,
+    let ServedName { row, alias } = load_served_name_for_selected_snapshot(
+        &mut reads,
         &namespace,
         &normalized.normalized_name,
         &selected_snapshot,
@@ -237,8 +242,12 @@ pub(crate) async fn get_name_record(
         chain_id,
         &mut selected_snapshot,
         route_source,
+        alias.as_ref(),
     )
     .await?;
+    if let Some(alias) = &alias {
+        serve_under_alias(&mut record, alias);
+    }
     if record.authority == Some(Authority::EnsV2) {
         record.token_id = token_id;
     }
@@ -282,6 +291,15 @@ pub(crate) async fn get_name_record(
         page: None,
         meta,
     }))
+}
+
+/// The canonical row's record under the alias path requested: only the identity of the name
+/// changes, and `canonical_name` names the row served.
+fn serve_under_alias(record: &mut NameRecord, alias: &AliasPath) {
+    record.name = alias.name.clone();
+    record.display_name = alias.display_name.clone();
+    record.namehash = alias.namehash.clone();
+    record.canonical_name = Some(alias.canonical_name.clone());
 }
 
 /// Decimal Unix-second `migrated_at` per logical name for names whose current ENSv2 authority was proven by
@@ -381,6 +399,7 @@ pub(crate) fn build_name_record(
         migrated_at: None,
         name: row.normalized_name.clone(),
         display_name: row.canonical_display_name.clone(),
+        canonical_name: None,
         namespace: row.namespace.clone(),
         namehash: row.namehash.clone(),
         resolver,

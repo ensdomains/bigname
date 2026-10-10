@@ -171,3 +171,34 @@ fn lookup_result(key: &str, status: LookupRecordStatus) -> LookupRecordResult {
         ledger_action: LedgerAction::None,
     }
 }
+
+/// A9. A stale answer covers the keys of the route the lookup ran. Under an alias path the
+/// lookup runs Universal Resolver discovery whatever the canonical row's route
+/// ([`verified_discovery`]), so every requested key is stale, not only those the canonical
+/// row's projected resolver could read back.
+#[test]
+fn a_stale_discovery_answer_covers_every_requested_key() {
+    let timestamp =
+        OffsetDateTime::from_unix_timestamp(1_717_171_719).expect("test timestamp must be valid");
+    let row = current_name_row(timestamp);
+    assert!(!verified_discovery(&row, None));
+    let record = parse_resolution_record_key("avatar").expect("test selector must parse");
+    let status = |discovery| {
+        build_verified_name_records(
+            &row,
+            None,
+            RecordSelection::requested(std::slice::from_ref(&record)),
+            Some(VerifiedRecordLookup::Stale(
+                "selected_block_changed".to_owned(),
+            )),
+            discovery,
+            false,
+            false,
+        )
+        .expect("stale answer must build")
+        .records["avatar"]
+            .status
+    };
+    assert_eq!(status(true), Status::Stale);
+    assert_eq!(status(false), Status::Unsupported);
+}

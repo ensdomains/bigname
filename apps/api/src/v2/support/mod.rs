@@ -22,6 +22,7 @@ pub(crate) const BASENAMES_NAMESPACE: &str = bigname_storage::BASENAMES_NAMESPAC
 const BASENAMES_COMPAT_SOURCE_CHAIN_ID: &str = bigname_storage::BASE_MAINNET_CHAIN_ID;
 const BASENAMES_COMPAT_TARGET_CHAIN_ID: &str = bigname_storage::ETHEREUM_MAINNET_CHAIN_ID;
 
+mod alias_paths;
 mod json;
 mod primary_name_claim_gate;
 mod primary_name_live;
@@ -40,6 +41,7 @@ mod snapshot_disclosure;
 mod snapshots;
 pub(crate) mod status_freshness;
 
+pub(crate) use alias_paths::*;
 pub(crate) use json::*;
 pub(crate) use primary_name_live::*;
 pub(crate) use primary_name_lookup::*;

@@ -2,6 +2,8 @@
 //! Logs follow ENSRegistry.setSubnodeRecord, resolver setters and controller cleanup.
 //! (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L49-L57 @ ens_v1@91c966f)
 //! (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/UnlockedMigrationController.sol:L101-L165 @ ens_v2_sepolia_20261001@07e55a05)
+#[path = "migrated_subnames/alias_paths.rs"]
+mod alias_paths;
 #[path = "migrated_subnames/cost.rs"]
 mod cost;
 #[path = "migrated_subnames/direct.rs"]

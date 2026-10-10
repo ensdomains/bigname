@@ -1,5 +1,6 @@
 //! Production readers over the owned key families (docs/projections.md, "Owned key families").
 //! Names, control, records and topology share the selected family publication.
+pub mod alias_path;
 #[path = "name/basenames_context.rs"]
 pub(crate) mod basenames_context;
 pub mod control;

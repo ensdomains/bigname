@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use super::string_field;
 use crate::v2::name_record::row_has_current_registration;
+use crate::v2::support::AliasPath;
 
 pub(super) fn terminal_no_declared_resolver(row: &NameCurrentRow) -> bool {
     if row.resolution_unsupported_reason().is_some() {
@@ -28,6 +29,13 @@ pub(super) fn terminal_no_declared_resolver(row: &NameCurrentRow) -> bool {
 
     string_field(resolver.get("chain_id")).is_none()
         && string_field(resolver.get("address")).is_none()
+}
+
+/// Whether a verified read of `row` executes Universal Resolver discovery: always under an alias
+/// path, whose resolver the chain discovers for the path requested
+/// (`bigname_lookup::LookupRequest::requested_path`), else when `row` is a discovery candidate.
+pub(crate) fn verified_discovery(row: &NameCurrentRow, alias: Option<&AliasPath>) -> bool {
+    alias.is_some() || ens_universal_resolver_discovery_candidate(row)
 }
 
 pub(crate) fn ens_universal_resolver_discovery_candidate(row: &NameCurrentRow) -> bool {

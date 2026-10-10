@@ -36,8 +36,8 @@ pub use text_records::{
     MULTICALL3_ADDRESS, ens_namehash_hex, execute_ens_text_record_multicall,
 };
 pub use types::{
-    LedgerAction, LookupPosition, LookupRecordResult, LookupRecordStatus, LookupRequest,
-    LookupResponse,
+    LedgerAction, LookupPath, LookupPosition, LookupRecordResult, LookupRecordStatus,
+    LookupRequest, LookupResponse,
 };
 
 pub const ENS_NAMESPACE: &str = Namespace::Ens.as_str();

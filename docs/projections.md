@@ -280,6 +280,7 @@ Project's families and publication marker; the normal rebuild repopulates them b
 | Read model | Published inputs | Read behavior |
 | --- | --- | --- |
 | Exact names | Name/binding, lifecycle, wrapper, registry and pointer families | Compose selected authority, control, registration, resolver and topology |
+| Alias paths | ENSv2 entry owners, physical pointer events and lifecycle associations | Walk the requested path from the admitted root registry the publication recorded and serve the reached token's exact name ([alias path](glossary.md#alias-path)) |
 | Address-to-names | Address candidate indexes and current name/permission families | Admit current `token_holder` and `effective_controller` relations |
 | Address-to-records | Node/record-ID inverse indexes and current inventory | Admit `resolves_to` through the same indexed-record evaluator |
 | Children and labels | Child-edge candidates, parent subregistries and name summary | Filter current reachability, authority, expiry and readable display |

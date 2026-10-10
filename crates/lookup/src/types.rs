@@ -7,6 +7,20 @@ use crate::{LookupError, RecordSelector, Result};
 pub struct LookupRequest {
     pub logical_name_id: String,
     pub records: Vec<RecordSelector>,
+    /// The name to execute in place of the indexed name's own: another path that reaches the
+    /// same ENSv2 token (an alias path, docs/glossary.md#alias-path). The calls go through the
+    /// Universal Resolver with this name, which discovers the path's resolver, so the chain
+    /// resolves the path requested. The indexed name's topology does not route them, and no
+    /// indexed answer is compared with them.
+    pub requested_path: Option<LookupPath>,
+}
+
+/// A name a lookup executes, as the Universal Resolver takes it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LookupPath {
+    pub name: String,
+    pub dns_name: Vec<u8>,
+    pub node: [u8; 32],
 }
 
 impl LookupRequest {
@@ -28,7 +42,14 @@ impl LookupRequest {
         Ok(Self {
             logical_name_id: logical_name_id.into(),
             records,
+            requested_path: None,
         })
+    }
+
+    /// This request executed for `path` instead of the indexed name's own path.
+    pub fn at_path(mut self, path: LookupPath) -> Self {
+        self.requested_path = Some(path);
+        self
     }
 }
 

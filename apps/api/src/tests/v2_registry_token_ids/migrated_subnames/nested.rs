@@ -11,7 +11,7 @@ const USER: &str = "0x9bd8a88719068d09ecee662f36c0e3856708366a";
 const W: &str = "0x0000000000000000000000000000000000001053";
 const X: &str = "0x0000000000000000000000000000000000001054";
 const DEEP: &str = "deep.branch.child.envoy1084.eth";
-fn deploy(
+pub(super) fn deploy(
     registry: Address,
     salt: u64,
     owner: Address,

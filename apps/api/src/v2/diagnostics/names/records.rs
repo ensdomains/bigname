@@ -24,8 +24,8 @@ use super::{
 use crate::v2::{
     RecordAnswer, RecordSelection, SnapshotReadResource, Source, api_error_to_v2_for_resource,
     build_indexed_name_records, build_verified_name_records, default_requested_records,
-    load_ephemeral_verified_record_lookup, parse_raw_query_params_with_allowlist,
-    parse_record_keys, snapshot_meta,
+    ens_universal_resolver_discovery_candidate, load_ephemeral_verified_record_lookup,
+    parse_raw_query_params_with_allowlist, parse_record_keys, snapshot_meta,
 };
 
 pub(crate) const DIAGNOSTIC_RECORDS_DEFAULT_COMPARISON_LIMIT: usize = 16;
@@ -244,6 +244,7 @@ async fn build_bounded_ephemeral_verified_record_answers(
             record_inventory,
             RecordSelection::requested(chunk),
             verified_lookup,
+            ens_universal_resolver_discovery_candidate(row),
             false,
             true,
         )?;

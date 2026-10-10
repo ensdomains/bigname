@@ -234,9 +234,11 @@ fn direct_null_topology(logical_name_id: &str, chain: ChainId) -> ResolutionTopo
     }
 }
 
+/// The resolver a lookup names: none for Universal Resolver discovery, else the projected
+/// topology's last resolver hop.
 pub(super) fn selected_resolver(
     route: LookupRoute,
-    topology: &ResolutionTopology,
+    topology: Option<&ResolutionTopology>,
     resource_chain_id: &str,
 ) -> Result<(ChainId, EvmAddress)> {
     if route == LookupRoute::EnsUniversalResolverDiscovery {
@@ -246,8 +248,7 @@ pub(super) fn selected_resolver(
         return Ok((chain, EvmAddress::from_bytes([0_u8; 20])));
     }
     let hop = topology
-        .resolver_path
-        .as_ref()
+        .and_then(|topology| topology.resolver_path.as_ref())
         .and_then(|path| path.last())
         .ok_or_else(|| LookupError::unsupported("projected topology has no selected resolver"))?;
     match (hop.chain_id, hop.address) {
@@ -446,7 +447,7 @@ mod tests {
         assert_eq!(
             selected_resolver(
                 LookupRoute::EnsUniversalResolverDiscovery,
-                &absent,
+                Some(&absent),
                 ETHEREUM_SEPOLIA_CHAIN_ID
             )
             .expect("discovery selects the null resolver on the resource chain"),
@@ -455,7 +456,7 @@ mod tests {
         assert!(
             selected_resolver(
                 LookupRoute::EnsUniversalResolverDiscovery,
-                &absent,
+                Some(&absent),
                 "base-mainnet"
             )
             .is_err()

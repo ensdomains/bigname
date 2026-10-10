@@ -1,6 +1,8 @@
 //! Actual producer ABI fixtures for the Oct 1 locked wrapper model.
 //! Initialization binds the immutable fallback node; mounting the registry elsewhere does not
 //! change it. These fixtures execute admission, interpretation, Project and public readers.
+#[path = "wrapper/alias.rs"]
+mod alias;
 #[path = "wrapper/getter.rs"]
 mod getter;
 #[path = "wrapper/physical.rs"]
