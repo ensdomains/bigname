@@ -19,9 +19,6 @@ const STORAGE_FAMILIES_SOURCE_ROOT: &str = storage_families::ROOT;
 /// and reanchors bindings, and which surfaces a normalizer-version recompute activates. All of it
 /// decides which identity, discovery, and label-preimage rows the projections then read.
 const INTERPRET_WRITE_SOURCE_ROOT: &str = "crates/interpret/src/write";
-/// Scanned for `#[cfg(test)] mod x;` declarations only. The hashed root's parent module lives here,
-/// so without it a test module declared in `write.rs` would land inside the hashed root undetected.
-const INTERPRET_SOURCE_SCAN_ROOT: &str = "crates/interpret/src";
 const MINIMUM_MANIFEST_EVENT_COUNT: usize = 111;
 const MINIMUM_EVENT_MANIFEST_COUNT: usize = 16;
 const HASH_FORMAT: &[u8] = b"bigname-interpreter-content-v3\0";
@@ -131,16 +128,50 @@ pub(crate) fn watched_paths(workspace_root: &Path) -> Vec<PathBuf> {
         workspace_root.join(PROJECT_SOURCE_ROOT),
         workspace_root.join(STORAGE_FAMILIES_SOURCE_ROOT),
         workspace_root.join(INTERPRET_WRITE_SOURCE_ROOT),
-        // Not hashed, but scanned: a cfg(test) declaration here changes which files under the
-        // hashed root are excluded, so it has to trigger a rebuild.
-        workspace_root.join(INTERPRET_SOURCE_SCAN_ROOT),
     ];
+    // Not all hashed, but walked: a module declaration anywhere in these crates, or in a crate
+    // holding a file hashed by name, can change which files are test-only or what a hashed file
+    // compiles, so it has to trigger a rebuild. A target root or `#[path]` file can sit outside
+    // `src/`, so every directory the walk reads is watched too. A walk that fails here fails the
+    // hash below, and a failed build script always reruns.
+    if let Ok(walked) =
+        source_paths::walk_crates(workspace_root, CRATE_SOURCE_ROOTS, SEMANTIC_SOURCE_FILES)
+    {
+        for source_root in walked.roots.iter().map(|root| workspace_root.join(root)) {
+            paths.extend(source_root.parent().map(|parent| parent.join("Cargo.toml")));
+            paths.push(source_root);
+        }
+        paths.extend(
+            walked
+                .files
+                .iter()
+                .filter_map(|file| file.parent().map(Path::to_owned)),
+        );
+        // A data read from a hashed file is hashed, so its file is watched, and its directory too
+        // in case it is created later. Every data read is watched, which only over-watches. An
+        // absent optional `cfg_attr` or `#[path]` file, or an absent default file of a module
+        // that resolves to none, may also be created later, which changes what the walk reaches.
+        // An absent path is watched through its nearest existing directory, because cargo reruns
+        // the build script on every build for a watched path that does not exist.
+        for file in walked.data_reads.keys().filter(|file| file.is_file()) {
+            paths.push(file.clone());
+        }
+        for file in walked.data_reads.keys().chain(&walked.missing) {
+            let directory = file
+                .ancestors()
+                .skip(1)
+                .find(|directory| directory.is_dir());
+            paths.extend(directory.map(Path::to_owned));
+        }
+    }
     paths.extend(
         SEMANTIC_SOURCE_FILES
             .iter()
             .map(|relative_path| workspace_root.join(relative_path)),
     );
     paths.push(workspace_root.join(crate::lockfile::LOCKFILE));
+    paths.sort();
+    paths.dedup();
     paths
 }
 
@@ -202,21 +233,25 @@ fn hash_inputs(format: &[u8], inputs: &mut [Input]) -> String {
     format!("keccak256:{}", hex::encode(keccak256(encoded)))
 }
 
-const CFG_TEST_SCAN_ROOTS: &[&str] = &[
+/// The crates holding a hashed root. Each module tree is walked from the crate's library and
+/// binary target roots to find the files compiled only under `cfg(test)`.
+const CRATE_SOURCE_ROOTS: &[&str] = &[
     ADAPTER_SOURCE_ROOT,
     MANIFEST_AUTHORITY_SOURCE_ROOT,
     PROJECT_SOURCE_ROOT,
-    STORAGE_FAMILIES_SOURCE_ROOT,
-    INTERPRET_SOURCE_SCAN_ROOT,
+    "crates/interpret/src",
+    "crates/storage/src",
 ];
 
 fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
     let mut inputs = Vec::new();
-    let cfg_test_sources = source_paths::cfg_test_sources(workspace_root, CFG_TEST_SCAN_ROOTS)?;
+    let walked =
+        source_paths::walk_crates(workspace_root, CRATE_SOURCE_ROOTS, SEMANTIC_SOURCE_FILES)?;
+    let cfg_test_sources = &walked.test_only;
     collect_rust_sources(
         workspace_root,
         &workspace_root.join(ADAPTER_SOURCE_ROOT),
-        &cfg_test_sources,
+        cfg_test_sources,
         &mut inputs,
     )?;
     // Manifest declarations select interpretation inputs and supply authority for derived
@@ -225,13 +260,13 @@ fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
     collect_rust_sources(
         workspace_root,
         &workspace_root.join(MANIFEST_AUTHORITY_SOURCE_ROOT),
-        &cfg_test_sources,
+        cfg_test_sources,
         &mut inputs,
     )?;
     collect_rust_sources(
         workspace_root,
         &workspace_root.join(PROJECT_SOURCE_ROOT),
-        &cfg_test_sources,
+        cfg_test_sources,
         &mut inputs,
     )?;
     let project_source_root = workspace_root.join(PROJECT_SOURCE_ROOT);
@@ -249,14 +284,43 @@ fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
     collect_rust_sources(
         workspace_root,
         &workspace_root.join(INTERPRET_WRITE_SOURCE_ROOT),
-        &cfg_test_sources,
+        cfg_test_sources,
         &mut inputs,
     )?;
     collect_manifest_event_blocks(workspace_root, &mut inputs)?;
     collect_semantic_sources(workspace_root, &mut inputs)?;
-    storage_families::collect(workspace_root, &cfg_test_sources, &mut inputs)?;
+    storage_families::collect(workspace_root, cfg_test_sources, &mut inputs)?;
+    // This decides what joins from the complete set of hashed sources, so it must run after every
+    // collector that adds a `source:` input.
+    collect_data_reads(&walked, &mut inputs)?;
     crate::lockfile::collect_semantic_crate_fingerprints(workspace_root, &mut inputs)?;
     Ok(inputs)
+}
+
+/// Files a hashed file compiles in with `include_str!` or `include_bytes!`. They are part of that
+/// file's semantics whatever their extension or directory, so each joins the hash once. A data
+/// read from an unhashed file, such as interpret's input loader, stays out with its reader. An
+/// `include!` from a hashed file must reach a hashed source, or the build fails, and so must a
+/// module the walk records for a hashed file.
+fn collect_data_reads(walked: &source_paths::Walked, inputs: &mut Vec<Input>) -> io::Result<()> {
+    let hashed = inputs
+        .iter()
+        .map(|input| input.key.clone())
+        .collect::<BTreeSet<_>>();
+    let is_hashed = |key: &str| hashed.contains(&format!("source:{key}"));
+    walked.refuse_unhashed_inclusions(is_hashed)?;
+    walked.refuse_unhashed_modules(is_hashed)?;
+    let data_inputs = walked.data_inputs(is_hashed)?;
+    for (key, file) in data_inputs {
+        let key = format!("source:{key}");
+        if !hashed.contains(&key) {
+            inputs.push(Input {
+                key,
+                content: fs::read(file)?,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn collect_semantic_sources(workspace_root: &Path, inputs: &mut Vec<Input>) -> io::Result<()> {
@@ -501,8 +565,14 @@ pub(crate) fn hashed_source_paths(workspace_root: &Path) -> io::Result<Vec<Strin
 }
 
 #[cfg(test)]
-pub(crate) fn cfg_test_scan_roots() -> &'static [&'static str] {
-    CFG_TEST_SCAN_ROOTS
+pub(crate) fn crate_source_roots() -> &'static [&'static str] {
+    CRATE_SOURCE_ROOTS
+}
+
+#[cfg(test)]
+pub(crate) fn cfg_test_source_set(workspace_root: &Path) -> io::Result<BTreeSet<String>> {
+    source_paths::walk_crates(workspace_root, CRATE_SOURCE_ROOTS, SEMANTIC_SOURCE_FILES)
+        .map(|walked| walked.test_only)
 }
 
 #[cfg(test)]
@@ -510,8 +580,7 @@ pub(crate) fn excluded_source_reason(
     workspace_root: &Path,
     path: &Path,
 ) -> io::Result<Option<&'static str>> {
-    let cfg_test_sources = source_paths::cfg_test_sources(workspace_root, CFG_TEST_SCAN_ROOTS)?;
-    source_exclusion(workspace_root, path, &cfg_test_sources)
+    source_exclusion(workspace_root, path, &cfg_test_source_set(workspace_root)?)
 }
 
 #[cfg(test)]

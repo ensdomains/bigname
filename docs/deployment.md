@@ -2222,6 +2222,22 @@ no manifest change and no historical ingest fetch. After it, a change to a
 read-only family query (search, bound names, record, reverse, permission,
 children or topology readers) no longer rotates the hash or forces a redo.
 
+### Test modules declared inside test-only files
+
+The build that treats every module declared inside a test-only file as test-only
+(TYR-292, see [interpretation replay](storage.md#interpretation-replay)) changes
+which files the [interpreter content hash](glossary.md#interpreter-content-hash)
+reads. It rotates the hash once for every chain, although no code that runs
+changes and no stored row changes. Three adapter test files leave the hashed
+set: `crates/adapters/src/schema_v2/state_v2_expiry_tests.rs`, and
+`state_v2_mount_tests.rs` and `state_v2_pointer_tests.rs` beside it. An existing
+deployment finishes the full-history Interpret redo and the Project redo it
+installs before the matching API serves, as for any rotation. A release batch that rotates the hash for
+another change discharges both with one redo pair. It needs no schema-migration,
+no manifest change and no historical ingest fetch. After it, an edit to a test
+file reached only through a test-only parent no longer rotates the hash or
+forces a redo.
+
 ### Verified primary names without a forward resolver
 
 The build that answers a verified ENS primary name `not_found` when its forward

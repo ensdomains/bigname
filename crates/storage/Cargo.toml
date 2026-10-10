@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+# The interpreter content hash cannot cover a build script, so its walk requires `build = false` here.
+build = false
 
 [features]
 test-support = []

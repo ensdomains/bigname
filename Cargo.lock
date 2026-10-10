@@ -1672,6 +1672,7 @@ dependencies = [
  "alloy-primitives",
  "proc-macro2",
  "syn 2.0.117",
+ "toml 0.8.23",
 ]
 
 [[package]]

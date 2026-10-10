@@ -448,6 +448,8 @@ name = "bigname-content-hash"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "syn 2.0.117",
+ "toml",
 ]
 
 [[package]]
