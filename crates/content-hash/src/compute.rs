@@ -129,20 +129,18 @@ pub(crate) fn watched_paths(workspace_root: &Path) -> Vec<PathBuf> {
         workspace_root.join(STORAGE_FAMILIES_SOURCE_ROOT),
         workspace_root.join(INTERPRET_WRITE_SOURCE_ROOT),
     ];
-    // Not all hashed, but walked: a module declaration anywhere in these crates can change which
-    // hashed files are test-only, so it has to trigger a rebuild. A target root or `#[path]` file
-    // can sit outside `src/`, so every directory the walk reads is watched too. A walk that
-    // fails here fails the hash below.
-    for source_root in CRATE_SOURCE_ROOTS {
-        let source_root = workspace_root.join(source_root);
-        if let Some(crate_directory) = source_root.parent() {
-            paths.push(crate_directory.join("Cargo.toml"));
-        }
-        paths.push(source_root);
-    }
+    // Not all hashed, but walked: a module declaration anywhere in these crates, or in a crate
+    // holding a file hashed by name, can change which files are test-only or what a hashed file
+    // compiles, so it has to trigger a rebuild. A target root or `#[path]` file can sit outside
+    // `src/`, so every directory the walk reads is watched too. A walk that fails here fails the
+    // hash below, and a failed build script always reruns.
     if let Ok(walked) =
         source_paths::walk_crates(workspace_root, CRATE_SOURCE_ROOTS, SEMANTIC_SOURCE_FILES)
     {
+        for source_root in walked.roots.iter().map(|root| workspace_root.join(root)) {
+            paths.extend(source_root.parent().map(|parent| parent.join("Cargo.toml")));
+            paths.push(source_root);
+        }
         paths.extend(
             walked
                 .files
@@ -302,7 +300,7 @@ fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
 /// file's semantics whatever their extension or directory, so each joins the hash once. A data
 /// read from an unhashed file, such as interpret's input loader, stays out with its reader. An
 /// `include!` from a hashed file must reach a hashed source, or the build fails, and so must a
-/// module the walk or the scan records for a hashed file.
+/// module the walk records for a hashed file.
 fn collect_data_reads(walked: &source_paths::Walked, inputs: &mut Vec<Input>) -> io::Result<()> {
     let hashed = inputs
         .iter()

@@ -38,6 +38,22 @@ fn hash_error(tree: &SampleTree, relative_path: &str) -> String {
     }
 }
 
+/// Writes a file hashed by name and declares it from its crate root, as the real crates do, so
+/// the walk compiles it. A file hashed by name that no crate declares is not compiled.
+fn write_mounted(tree: &SampleTree, relative_path: &str, contents: &str) {
+    tree.write(relative_path, contents);
+    let (krate, module) = relative_path
+        .split_once("/src/")
+        .expect("a file hashed by name sits in a crate's src");
+    let root = format!("{krate}/src/lib.rs");
+    let declaration = format!("pub mod {};\n", module.trim_end_matches(".rs"));
+    let mut lib = std::fs::read_to_string(tree.path().join(&root)).unwrap_or_default();
+    if !lib.contains(&declaration) {
+        lib.push_str(&declaration);
+        tree.write(&root, &lib);
+    }
+}
+
 fn assert_names(message: &str, sites: &[&str]) {
     for site in sites {
         assert!(message.contains(site), "{site} missing from: {message}");

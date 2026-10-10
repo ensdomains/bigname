@@ -173,7 +173,7 @@ fn a_test_only_path_module_outside_the_source_root_stays_allowed() {
 #[test]
 fn a_module_of_a_semantic_source_outside_the_hashed_sources_is_refused() {
     let tree = SampleTree::new();
-    tree.write("crates/lookup/src/abi.rs", "mod helper;\n");
+    super::write_mounted(&tree, "crates/lookup/src/abi.rs", "mod helper;\n");
     tree.write("crates/lookup/src/abi/helper.rs", "pub fn helper() {}\n");
     assert_refused(
         &tree,
@@ -262,7 +262,11 @@ fn a_use_that_may_alias_an_include_macro_is_refused() {
     );
 
     let tree = SampleTree::new();
-    tree.write("crates/lookup/src/abi.rs", "use core::{include_bytes};\n");
+    super::write_mounted(
+        &tree,
+        "crates/lookup/src/abi.rs",
+        "use core::{include_bytes};\n",
+    );
     let error = interpreter_content_hash(tree.path())
         .expect_err("an imported include macro in a semantic source must fail the hash");
     assert_names(

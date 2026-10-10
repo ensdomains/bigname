@@ -2694,20 +2694,22 @@ test-only. When it is read from a hashed file, it is hashed too, whatever its
 extension or directory and whatever else reaches it. That holds for a call in
 code, including one nested in another macro's arguments. The walk does not scan
 attribute token streams, so a call such as `#![doc = include_str!("shared.rs")]`
-keeps nothing in the hash. The files hashed by name are scanned for the same
-include macros, and an `include!` target from one of them is scanned in turn.
-Each out-of-line module these files declare resolves to one file, as rustc
-resolves it, which must be a hashed source and is scanned in turn. Every other
-file under these crates' sources is hashed, including a file the walk never
-reaches, such as an undeclared file in a test module's directory. A wider
-condition, such as `#[cfg(any(test, feature = "test-activation"))]`, stays
-hashed too. The build fails instead of guessing when it meets:
+keeps nothing in the hash. Each crate that holds a file hashed by name is walked
+too, so a compiled one is read in rustc's own context, under the same rules. A
+production module that one of these files declares, and each module below it,
+must be a hashed source. A file hashed by name that no route reaches is not
+compiled, so nothing it declares is checked. The walk's refusals below cover all
+of these crates, serving code included, so an ordinary file there fails the
+build on the same shapes. Every other file under the hashed
+source roots is hashed, including a file the walk never reaches, such as an
+undeclared file in a test module's directory. A wider condition, such as
+`#[cfg(any(test, feature = "test-activation"))]`, stays hashed too. The build
+fails instead of guessing when it meets:
 
 - A file reached from both test-only and production code.
 - A module or `include!` whose file is missing, unless a non-test cfg or a
-  `cfg_attr` path makes it optional. A file hashed by name gets no such
-  exception for its modules.
-- A walked or scanned file that does not parse.
+  `cfg_attr` path makes it optional.
+- A walked file that does not parse.
 - A `cfg_attr` path on an inline module.
 - An `include!`, `include_str!` or `include_bytes!` whose path is not one
   string literal, with an optional trailing comma.
@@ -2718,8 +2720,8 @@ hashed too. The build fails instead of guessing when it meets:
 - A `use` that imports `include!`, `include_str!` or `include_bytes!`, renamed
   or not.
 - A production `#[path]` module in a hashed file, a production module declared
-  inside an inline module that has a `#[path]`, or an out-of-line module in a
-  file hashed by name, whose file is not a hashed source.
+  inside an inline module that has a `#[path]`, or a production module declared
+  in a file hashed by name or below one, whose file is not a hashed source.
 - A production file outside the walked source roots that is not a hashed
   source, such as a `[lib]` or `[[bin]]` path or a `#[path]` module outside
   `src/`.

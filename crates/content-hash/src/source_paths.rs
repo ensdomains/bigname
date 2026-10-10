@@ -35,32 +35,54 @@ use syntax::{
 /// token streams are not scanned, so `#![doc = include_str!("shared.rs")]` keeps nothing in the
 /// hash.
 ///
-/// `semantic_files` are hashed by name outside the walk. They are scanned for the same include
-/// macros, so what they read or include is held to the same rules. The files their out-of-line
-/// modules declare, like those a production `#[path]` reaches, must be hashed sources.
+/// `semantic_files` are hashed by name. The roots include each of their crates, so a compiled one
+/// is reached in rustc's own context and held to the same rules. The files a production module
+/// declared from one resolves to, and in turn their own modules, like those a production
+/// `#[path]` reaches, must be hashed sources. A file hashed by name that the walk never reaches
+/// is not compiled, so nothing it declares is checked.
 pub(super) fn walk_crates(
     workspace_root: &Path,
     crate_source_roots: &[&str],
     semantic_files: &[&str],
 ) -> io::Result<Walked> {
-    let walk = walk(workspace_root, crate_source_roots)?;
     let normal_root = lexically_normal(workspace_root);
+    let by_name = semantic_files
+        .iter()
+        .map(|file| normal_root.join(file))
+        .collect();
+    // Only the source roots are hashed as trees, so a production file outside them, such as a
+    // `[lib]` path or a `#[path]` module outside `src/`, must be hashed by name. Each crate that
+    // holds a file hashed by name is walked too.
+    let mut source_roots = crate_source_roots
+        .iter()
+        .map(|root| (*root).to_owned())
+        .collect::<Vec<_>>();
+    for file in semantic_files {
+        let Some(end) = file.find("/src/") else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{file} is hashed by name but is not under a crate's src/, so the walk cannot \
+                     reach it"
+                ),
+            ));
+        };
+        let root = file[..end + 4].to_owned();
+        if !source_roots.contains(&root) {
+            source_roots.push(root);
+        }
+    }
+    let roots = source_roots
+        .iter()
+        .map(|root| normal_root.join(root))
+        .collect::<Vec<_>>();
+    let walk = walk(&roots, by_name)?;
     let test_only = walk
         .reached
         .iter()
         .filter(|(file, (test_only, _))| *test_only && !walk.pinned.contains_key(*file))
         .map(|(file, _)| relative_key(&normal_root, file))
         .collect::<io::Result<_>>()?;
-    let semantic_files = semantic_files
-        .iter()
-        .map(|file| normal_root.join(file))
-        .collect::<Vec<_>>();
-    // Only the source roots are hashed as trees, so a production file outside them, such as a
-    // `[lib]` path or a `#[path]` module outside `src/`, must be hashed by name.
-    let roots = crate_source_roots
-        .iter()
-        .map(|root| lexically_normal(&workspace_root.join(root)))
-        .collect::<Vec<_>>();
     let outside = walk
         .reached
         .iter()
@@ -69,7 +91,7 @@ pub(super) fn walk_crates(
         })
         .map(|(file, (_, site))| (file.clone(), (site.parent.clone(), site.name.clone())))
         .collect();
-    let mut walked = Walked {
+    Ok(Walked {
         test_only,
         data_reads: walk.pinned,
         files: walk.reached.into_keys().collect(),
@@ -77,20 +99,23 @@ pub(super) fn walk_crates(
         modules: walk.modules,
         outside,
         missing: walk.missing,
+        roots: source_roots,
         normal_root,
-    };
-    walked.scan_semantic_files(&semantic_files)?;
-    Ok(walked)
+    })
 }
 
-fn walk(workspace_root: &Path, crate_source_roots: &[&str]) -> io::Result<Walk> {
-    let mut walk = Walk::default();
+fn walk(roots: &[PathBuf], by_name: BTreeSet<PathBuf>) -> io::Result<Walk> {
+    let mut walk = Walk {
+        by_name,
+        ..Walk::default()
+    };
     let mut pending = Vec::new();
-    for crate_source_root in crate_source_roots {
-        for file in target_roots(&workspace_root.join(crate_source_root))? {
+    for root in roots {
+        for file in target_roots(root)? {
             let directory = parent(&file)?;
             let site = Site::crate_root(&file);
             pending.push(Module {
+                by_name: walk.by_name.contains(&file),
                 file,
                 directory,
                 test_only: false,
@@ -190,6 +215,9 @@ struct Module {
     site: Site,
     /// False under a cfg that may be off, where a declared file need not exist.
     required: bool,
+    /// Whether the file is hashed by name or declared from one, so its production modules must
+    /// be hashed sources.
+    by_name: bool,
 }
 
 #[derive(Default)]
@@ -199,7 +227,7 @@ struct Walk {
     reached: BTreeMap<PathBuf, (bool, Site)>,
     /// Each file with the directory its children resolve in, walked once per pair: one file can
     /// be declared twice with different child directories.
-    walked: BTreeSet<(PathBuf, PathBuf, bool)>,
+    walked: BTreeSet<(PathBuf, PathBuf, bool, bool)>,
     /// Each `include!` target with the including file's directory, followed once per pair. It is
     /// kept apart from `walked`, so an ordinary module visit of the same file never skips it.
     included: BTreeSet<(PathBuf, PathBuf, bool)>,
@@ -208,11 +236,13 @@ struct Walk {
     pinned: BTreeMap<PathBuf, BTreeSet<PathBuf>>,
     /// Files production code includes with `include!`, with the files that include them.
     inclusions: BTreeMap<PathBuf, BTreeSet<PathBuf>>,
-    /// Files a production `#[path]` decides, directly or as an inline module's directory, with each
-    /// declaring file and declaration.
+    /// Files a production `#[path]` decides, directly or as an inline module's directory, or a
+    /// file hashed by name declares, with each declaring file and declaration.
     modules: BTreeMap<PathBuf, BTreeSet<(PathBuf, String)>>,
     /// Absent files an optional `cfg_attr` path names, whose directories are watched.
     missing: BTreeSet<PathBuf>,
+    /// The files hashed by name.
+    by_name: BTreeSet<PathBuf>,
 }
 
 impl Walk {
@@ -223,6 +253,7 @@ impl Walk {
                 module.file.clone(),
                 module.directory.clone(),
                 module.required,
+                module.by_name,
             );
             if !self.walked.insert(walk_key) {
                 continue;
@@ -329,6 +360,7 @@ impl Walk {
                         self.declare(&file, &site);
                     }
                     pending.push(Module {
+                        by_name: module.by_name || self.by_name.contains(&file),
                         directory: parent(&file)?,
                         file,
                         test_only: test_only || *test_predicate,
@@ -368,11 +400,13 @@ impl Walk {
                 }
                 continue;
             };
-            // A child of an inline module with a `#[path]` resolves wherever that path points.
-            if scope.explicit && !test_only {
+            // A child of an inline module with a `#[path]` resolves wherever that path points, and
+            // a child of a file hashed by name is part of its semantics.
+            if (scope.explicit || module.by_name) && !test_only {
                 self.declare(&file, &site);
             }
             pending.push(Module {
+                by_name: module.by_name || self.by_name.contains(&file),
                 file,
                 directory: lexically_normal(&child_directory),
                 test_only,
@@ -383,8 +417,8 @@ impl Walk {
         Ok(())
     }
 
-    /// Records a production route to an existing `file` that a `#[path]` decides, which must be a
-    /// hashed source.
+    /// Records a production route to an existing `file` that a `#[path]` decides, or that a file
+    /// hashed by name declares, which must be a hashed source.
     fn declare(&mut self, file: &Path, site: &Site) {
         let declaration = (site.parent.clone(), site.name.clone());
         self.modules

@@ -234,10 +234,11 @@ fn a_hashed_file_reading_data_outside_the_workspace_is_refused() {
 
 #[test]
 fn a_data_file_a_semantic_source_reads_rotates_the_hash_and_is_watched() {
-    // `text_records.rs` is hashed by name, outside the walk, and still reads data like any
-    // hashed file.
+    // `text_records.rs` is hashed by name, outside the hashed roots, and still reads data like
+    // any hashed file.
     let tree = SampleTree::new();
-    tree.write(
+    super::write_mounted(
+        &tree,
         "crates/lookup/src/text_records.rs",
         "pub const MULTICALL3_ADDRESS: &str = include_str!(\"multicall3.txt\");\n",
     );
@@ -254,7 +255,11 @@ fn a_data_file_a_semantic_source_reads_rotates_the_hash_and_is_watched() {
 #[test]
 fn a_semantic_source_including_an_unhashed_file_is_refused() {
     let tree = SampleTree::new();
-    tree.write("crates/lookup/src/abi.rs", "include!(\"abi_tables.rs\");\n");
+    super::write_mounted(
+        &tree,
+        "crates/lookup/src/abi.rs",
+        "include!(\"abi_tables.rs\");\n",
+    );
     tree.write("crates/lookup/src/abi_tables.rs", "fn tables() {}\n");
     let error = interpreter_content_hash(tree.path())
         .expect_err("an include! of an unhashed file must fail the hash");
@@ -271,7 +276,8 @@ fn a_semantic_source_including_an_unhashed_file_is_refused() {
 #[test]
 fn a_data_file_read_by_a_target_a_semantic_source_includes_rotates_the_hash_and_is_watched() {
     let tree = SampleTree::new();
-    tree.write(
+    super::write_mounted(
+        &tree,
         "crates/lookup/src/abi.rs",
         "include!(\"../../adapters/src/undeclared_tables.rs\");\n",
     );
@@ -292,7 +298,8 @@ fn a_data_file_read_by_a_target_a_semantic_source_includes_rotates_the_hash_and_
 #[test]
 fn a_macro_invocation_declaring_a_module_in_a_semantic_source_is_refused() {
     let tree = SampleTree::new();
-    tree.write(
+    super::write_mounted(
+        &tree,
         "crates/lookup/src/abi.rs",
         "my_macro! {\n    mod decl;\n}\n",
     );
@@ -312,7 +319,8 @@ fn a_macro_invocation_declaring_a_module_in_a_semantic_source_is_refused() {
 fn an_include_str_with_a_trailing_comma_is_followed() {
     let walked = super::adapters_tree("const T: &str = include_str!(\"table.txt\",);\n");
     let semantic = SampleTree::new();
-    semantic.write(
+    super::write_mounted(
+        &semantic,
         "crates/lookup/src/abi.rs",
         "const T: &str = include_str!(\"table.txt\",);\n",
     );
@@ -328,14 +336,16 @@ fn an_include_str_with_a_trailing_comma_is_followed() {
 #[test]
 fn a_semantic_source_may_include_an_absent_file_under_a_cfg_that_may_be_off() {
     let tree = SampleTree::new();
-    tree.write(
+    super::write_mounted(
+        &tree,
         "crates/lookup/src/abi.rs",
         "#[cfg(any())]\nmod disabled {\n    include!(\"absent.rs\");\n}\n",
     );
     interpreter_content_hash(tree.path()).expect("an optional absent include target must hash");
 
-    // A present target under the same cfg is still scanned and held to the hashed-source rule.
-    tree.write(
+    // A present target under the same cfg is still walked and held to the hashed-source rule.
+    super::write_mounted(
+        &tree,
         "crates/lookup/src/abi.rs",
         "#[cfg(feature = \"x\")]\nmod enabled {\n    include!(\"abi_tables.rs\");\n}\n",
     );

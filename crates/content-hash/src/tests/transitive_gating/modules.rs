@@ -39,9 +39,10 @@ fn the_directory_of_an_absent_optional_path_is_watched() {
 }
 
 #[test]
-fn a_module_target_of_a_semantic_source_is_scanned_in_turn() {
+fn a_module_target_of_a_semantic_source_is_walked_in_turn() {
     let tree = SampleTree::new();
-    tree.write(
+    super::write_mounted(
+        &tree,
         "crates/lookup/src/abi.rs",
         "#[path = \"../../adapters/src/undeclared.rs\"]\nmod tables;\n",
     );
@@ -62,7 +63,7 @@ fn a_module_target_of_a_semantic_source_is_scanned_in_turn() {
     );
     tree.write("crates/adapters/outside.rs", "pub fn outside() {}\n");
     let error = interpreter_content_hash(tree.path())
-        .expect_err("an unhashed module of a scanned target must fail the hash");
+        .expect_err("an unhashed module of a walked target must fail the hash");
     assert_names(
         &error.to_string(),
         &[
@@ -78,7 +79,11 @@ fn a_module_of_a_semantic_source_resolves_only_where_rustc_looks() {
     // `identity_search.rs` owns `identity_search/`, so an unrelated `tokens.rs` beside it is not
     // its `tokens` module.
     let tree = SampleTree::new();
-    tree.write("crates/storage/src/identity_search.rs", "pub mod tokens;\n");
+    super::write_mounted(
+        &tree,
+        "crates/storage/src/identity_search.rs",
+        "pub mod tokens;\n",
+    );
     tree.write("crates/storage/src/tokens.rs", "pub fn unrelated() {}\n");
     interpreter_content_hash(tree.path()).expect("an unrelated sibling must not fail the hash");
     assert!(is_input(
@@ -114,7 +119,8 @@ fn an_absent_path_is_watched_through_its_nearest_existing_directory() {
 #[test]
 fn the_directory_of_an_absent_optional_path_of_a_semantic_source_is_watched() {
     let tree = SampleTree::new();
-    tree.write(
+    super::write_mounted(
+        &tree,
         "crates/storage/src/identity_search.rs",
         "#[cfg_attr(feature = \"alt\", path = \"../alt/tokens.rs\")]\npub mod tokens;\n",
     );
@@ -126,4 +132,139 @@ fn the_directory_of_an_absent_optional_path_of_a_semantic_source_is_watched() {
         "{} is not watched",
         directory.display()
     );
+}
+
+#[test]
+fn a_cfg_attr_path_on_an_inline_module_of_a_semantic_source_is_refused() {
+    // The default directory holds a hashed child, but a feature build would use `alt_dir`.
+    let tree = SampleTree::new();
+    super::write_mounted(
+        &tree,
+        "crates/storage/src/identity_search.rs",
+        "#[cfg_attr(feature = \"alt\", path = \"alt_dir\")]\n#[path = \"identity_search\"]\n\
+         mod inline {\n    mod tokens;\n}\n",
+    );
+    let error = interpreter_content_hash(tree.path())
+        .expect_err("a cfg_attr path on an inline module must fail the hash");
+    assert_names(
+        &error.to_string(),
+        &[
+            "unsupported cfg_attr path on inline module inline",
+            "crates/storage/src/identity_search.rs",
+        ],
+    );
+}
+
+#[test]
+fn a_semantic_source_walked_as_a_module_is_checked_again_when_included() {
+    // `identity_search.rs` is walked first as a module, where `tokens` resolves under
+    // `identity_search/`. Included into `expiry.rs`, the same `mod tokens;` would resolve beside
+    // the includer instead, so the inclusion must still be refused.
+    let tree = SampleTree::new();
+    super::write_mounted(
+        &tree,
+        "crates/storage/src/identity_search.rs",
+        "pub mod tokens;\n",
+    );
+    super::write_mounted(
+        &tree,
+        "crates/storage/src/expiry.rs",
+        "include!(\"identity_search.rs\");\n",
+    );
+    let error = interpreter_content_hash(tree.path())
+        .expect_err("an included file declaring a module must fail the hash");
+    assert_names(
+        &error.to_string(),
+        &[
+            "crates/storage/src/identity_search.rs",
+            "declares mod tokens",
+        ],
+    );
+}
+
+#[test]
+fn a_semantic_source_reached_by_path_resolves_its_modules_beside_it() {
+    // rustc treats a `#[path]` file like a `mod.rs`, so `tokens` is the sibling `src/tokens.rs`,
+    // not the hashed `src/identity_search/tokens.rs`.
+    let tree = SampleTree::new();
+    tree.write(
+        "crates/storage/src/lib.rs",
+        "#[path = \"identity_search.rs\"]\npub mod identity_search;\n",
+    );
+    tree.write("crates/storage/src/identity_search.rs", "pub mod tokens;\n");
+    tree.write("crates/storage/src/tokens.rs", "pub fn compiled() {}\n");
+    let error = interpreter_content_hash(tree.path())
+        .expect_err("the compiled unhashed sibling must fail the hash");
+    assert_names(
+        &error.to_string(),
+        &[
+            "mod tokens",
+            "crates/storage/src/identity_search.rs",
+            "crates/storage/src/tokens.rs",
+        ],
+    );
+}
+
+#[test]
+fn a_semantic_source_reached_by_a_second_route_is_resolved_on_each() {
+    // Through `again`, `identity_search.rs` is a `#[path]` file, so its `tokens` is `src/tokens.rs`.
+    let tree = SampleTree::new();
+    super::write_mounted(
+        &tree,
+        "crates/storage/src/identity_search.rs",
+        "pub mod tokens;\n",
+    );
+    super::write_mounted(
+        &tree,
+        "crates/storage/src/label_preimages.rs",
+        "#[path = \"identity_search.rs\"]\nmod again;\n",
+    );
+    tree.write("crates/storage/src/tokens.rs", "pub fn compiled() {}\n");
+    let error = interpreter_content_hash(tree.path())
+        .expect_err("the second route's unhashed child must fail the hash");
+    assert_names(
+        &error.to_string(),
+        &["mod tokens", "crates/storage/src/tokens.rs"],
+    );
+}
+
+#[test]
+fn an_out_of_line_module_under_a_cfg_that_may_be_off_may_include_an_absent_file() {
+    let tree = SampleTree::new();
+    tree.write("crates/interpret/src/lib.rs", "mod write;\n");
+    tree.write(
+        "crates/interpret/src/write.rs",
+        "#[cfg(any())]\nmod optional;\n",
+    );
+    tree.write(
+        "crates/interpret/src/write/optional.rs",
+        "include!(\"absent.rs\");\n",
+    );
+    interpreter_content_hash(tree.path()).expect("an optional absent include target must hash");
+
+    // A present target that is not a hashed source is still refused.
+    tree.write(
+        "crates/interpret/src/write/optional.rs",
+        "include!(\"table.txt\");\n",
+    );
+    tree.write("crates/interpret/src/write/table.txt", "1\n");
+    let error = interpreter_content_hash(tree.path())
+        .expect_err("a present unhashed include target must fail the hash");
+    assert_names(
+        &error.to_string(),
+        &[
+            "crates/interpret/src/write/optional.rs",
+            "crates/interpret/src/write/table.txt",
+        ],
+    );
+}
+
+#[test]
+fn a_file_hashed_by_name_outside_a_crate_src_is_refused() {
+    let tree = SampleTree::new();
+    let error = match crate::source_paths::walk_crates(tree.path(), &[], &["tools/semantics.rs"]) {
+        Ok(_) => panic!("a file hashed by name outside a crate's src must fail the walk"),
+        Err(error) => error,
+    };
+    assert_names(&error.to_string(), &["tools/semantics.rs", "src/"]);
 }

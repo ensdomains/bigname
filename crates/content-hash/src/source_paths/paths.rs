@@ -1,4 +1,4 @@
-//! Path folding and the errors the walk and the scan share.
+//! Path folding and the errors the walk shares with its findings.
 
 use std::{
     io,
