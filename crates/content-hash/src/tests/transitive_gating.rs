@@ -1,6 +1,6 @@
 use std::io::ErrorKind;
 
-use super::{SampleTree, hashed_source_paths, interpreter_content_hash, workspace_root};
+use super::{SampleTree, hashed_source_paths, projection_content_hash, workspace_root};
 
 mod includes;
 mod modules;
@@ -20,13 +20,13 @@ fn is_input(tree: &SampleTree, relative_path: &str) -> bool {
 
 fn rotates(tree: &SampleTree, relative_path: &str) -> bool {
     tree.write(relative_path, "fn fixture() -> u8 { 1 }\n");
-    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+    let first = projection_content_hash(tree.path()).expect("baseline must hash");
     tree.write(relative_path, "fn fixture() -> u8 { 2 }\n");
-    first != interpreter_content_hash(tree.path()).expect("updated tree must hash")
+    first != projection_content_hash(tree.path()).expect("updated tree must hash")
 }
 
 fn hash_error(tree: &SampleTree, relative_path: &str) -> String {
-    match interpreter_content_hash(tree.path()) {
+    match projection_content_hash(tree.path()) {
         Ok(_) => panic!(
             "the hash accepted an ambiguous module. {relative_path} is an input: {}",
             is_input(tree, relative_path)
@@ -252,14 +252,14 @@ fn a_production_inline_module_reaching_a_gated_file_fails_the_hash() {
 #[test]
 fn module_text_in_a_gated_string_or_comment_declares_nothing() {
     let tree = gated_state_tree("fn test_only() {}\n");
-    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+    let first = projection_content_hash(tree.path()).expect("baseline must hash");
     for payload in [
         "const SOURCE: &str = r#\"\nmod absent;\n\"#;\n",
         "/*\nmod absent;\n*/\n",
         "/* mod absent; */\nfn test_only() {}\n",
     ] {
         tree.write(V2_TESTS, payload);
-        let changed = interpreter_content_hash(tree.path()).expect("test text must hash");
+        let changed = projection_content_hash(tree.path()).expect("test text must hash");
         assert_eq!(first, changed, "{payload:?} must not change the hash");
     }
 }
@@ -327,13 +327,13 @@ fn a_declaration_behind_a_non_test_cfg_may_have_no_file() {
         "#[cfg(feature = \"reth\")]",
     ] {
         let tree = adapters_tree(&format!("{attribute}\nmod win;\n"));
-        interpreter_content_hash(tree.path())
+        projection_content_hash(tree.path())
             .unwrap_or_else(|error| panic!("{attribute} mod win; must hash: {error}"));
     }
     let tree = gated_state_tree("fn test_only() {}\n");
-    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+    let first = projection_content_hash(tree.path()).expect("baseline must hash");
     tree.write(V2_TESTS, "#[cfg(windows)]\nmod win;\nfn test_only() {}\n");
-    let changed = interpreter_content_hash(tree.path()).expect("a cfg'd-out module must hash");
+    let changed = projection_content_hash(tree.path()).expect("a cfg'd-out module must hash");
     assert_eq!(first, changed);
 }
 
@@ -442,7 +442,7 @@ fn a_disabled_enclosing_cfg_may_leave_child_files_absent() {
          #[cfg(feature = \"reth\")]\nmod present;\n",
     );
     tree.write("crates/adapters/src/schema_v2/present.rs", "mod absent;\n");
-    interpreter_content_hash(tree.path()).expect("modules under a disabled cfg must hash");
+    projection_content_hash(tree.path()).expect("modules under a disabled cfg must hash");
 }
 
 #[test]

@@ -4,7 +4,7 @@ use bigname_project::families::{FamilyMode, FamilyOptions};
 
 pub(super) async fn reset_lookup_families(pool: &PgPool) -> AnyResult<()> {
     let token = bigname_project::families::input_token(pool, ETHEREUM).await?;
-    let mut options = FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH);
+    let mut options = FamilyOptions::new(bigname_content_hash::PROJECTION_CONTENT_HASH);
     options.max_blocks_per_run = 0;
     let outcome = bigname_project::families::apply(
         pool,

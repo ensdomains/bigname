@@ -445,7 +445,7 @@ ORDER BY expected.chain_id, expected.source_family, expected.resolver_address"#
 
 pub(super) async fn load(pool: &PgPool) -> Result<ResolverCoverage> {
     let rows: Vec<ResolverCoverageRow> = sqlx::query_as(&resolver_manifest_coverage_sql())
-        .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+        .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
         .fetch_all(pool)
         .await
         .context("failed to reconcile the resolver corpus with Project and stored manifests")?;

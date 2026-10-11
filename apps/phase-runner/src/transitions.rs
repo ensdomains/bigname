@@ -6,6 +6,17 @@ use crate::{
     state::PhaseStatus,
 };
 
+/// The content hash a phase row records: Project and Live write projected rows and record the
+/// projection content hash, every other phase the interpreter content hash.
+pub fn expected_content_hash(phase: PhaseName) -> &'static str {
+    match phase {
+        PhaseName::Project | PhaseName::Live => bigname_content_hash::PROJECTION_CONTENT_HASH,
+        PhaseName::Ingest | PhaseName::Verify | PhaseName::Interpret => {
+            bigname_content_hash::INTERPRETER_CONTENT_HASH
+        }
+    }
+}
+
 #[derive(Clone, Debug, FromRow)]
 pub(crate) struct PhaseStateRow {
     pub phase_name: String,
@@ -126,7 +137,8 @@ pub(crate) fn row_for(rows: &[PhaseStateRow], phase: PhaseName) -> RunnerResult<
         })
 }
 
-pub(crate) fn require_start(
+pub(crate) async fn require_start(
+    transaction: &mut Transaction<'_, Postgres>,
     rows: &[PhaseStateRow],
     chain_id: &str,
     phase: PhaseName,
@@ -136,8 +148,17 @@ pub(crate) fn require_start(
     require_completed_ingest_redo(rows, chain_id, phase, mode)?;
     require_compatible_active_phase(rows, chain_id, phase, mode)?;
     require_prerequisite(rows, chain_id, phase)?;
-    if phase.writes_derived_data() {
-        require_content_hash(rows, chain_id, phase, mode)?;
+    if phase.writes_derived_data()
+        && let Some(stale) = stale_content_hash(rows, phase, mode)?
+    {
+        return Err(crate::content_hash_refusal::refusal(
+            transaction,
+            rows,
+            chain_id,
+            phase,
+            stale,
+        )
+        .await?);
     }
     Ok(())
 }
@@ -260,7 +281,7 @@ fn require_compatible_active_phase(
     let required_ingest_recovery = matches!(phase, PhaseName::Ingest | PhaseName::Live)
         && is_required_downstream_redo(row_for(rows, PhaseName::Ingest)?);
     // An Interpret redo starting an interpreter content-hash rotation supersedes a Project redo of
-    // another hash.
+    // another projection content hash.
     let superseded = crate::redo_supersede::superseded_project_redo(rows, phase, mode)?;
     for row in rows {
         let other: PhaseName = row.phase_name.parse()?;
@@ -282,7 +303,11 @@ fn require_compatible_active_phase(
             return Err(RunnerError::new(
                 ErrorKind::InvalidTransition,
                 format!(
-                    "cannot start phase {phase} for chain {chain_id} while phase {other} is {status}"
+                    "cannot start phase {phase} for chain {chain_id} while phase {other} is \
+                     {status}{}",
+                    crate::content_hash_refusal::stale_project_redo_instruction(
+                        chain_id, rows, row
+                    )
                 ),
             ));
         }
@@ -373,33 +398,29 @@ fn is_required_downstream_redo(row: &PhaseStateRow) -> bool {
             .is_some_and(crate::redo_stamp::owns_required_redo)
 }
 
-fn require_content_hash(
+/// The first phase row this start needs at its expected content hash that records another, if
+/// any. An Interpret row is checked before a Project row, so a stale Project row is reported only
+/// while Interpret is current.
+fn stale_content_hash(
     rows: &[PhaseStateRow],
-    chain_id: &str,
     phase: PhaseName,
     mode: &RunMode,
-) -> RunnerResult<()> {
+) -> RunnerResult<Option<StaleHash>> {
+    let both = || Ok(current(rows, PhaseName::Interpret)?.or(current(rows, PhaseName::Project)?));
     match mode {
-        RunMode::Redo(_) if phase == PhaseName::Interpret => Ok(()),
-        RunMode::Redo(_) if phase == PhaseName::Project => {
-            require_current_hash(rows, chain_id, phase, PhaseName::Interpret)
-        }
-        RunMode::Redo(_) if phase == PhaseName::Live => {
-            require_current_interpret_and_project(rows, chain_id, phase)
-        }
-        RunMode::RecomputeFlags(_) => require_current_interpret_and_project(rows, chain_id, phase),
-        RunMode::Normal if phase == PhaseName::Interpret => {
-            reject_different_hash(rows, chain_id, phase, PhaseName::Interpret)
-        }
+        RunMode::Redo(_) if phase == PhaseName::Interpret => Ok(None),
+        RunMode::Redo(_) if phase == PhaseName::Project => current(rows, PhaseName::Interpret),
+        RunMode::Redo(_) if phase == PhaseName::Live => both(),
+        RunMode::RecomputeFlags(_) => both(),
+        RunMode::Normal if phase == PhaseName::Interpret => different(rows, PhaseName::Interpret),
         RunMode::Normal if phase == PhaseName::Project => {
-            require_current_hash(rows, chain_id, phase, PhaseName::Interpret)?;
-            reject_different_hash(rows, chain_id, phase, PhaseName::Project)
+            Ok(current(rows, PhaseName::Interpret)?.or(different(rows, PhaseName::Project)?))
         }
-        RunMode::Normal if phase == PhaseName::Live && live_can_fill_required_redo(rows)? => Ok(()),
-        RunMode::Normal if phase == PhaseName::Live => {
-            require_current_interpret_and_project(rows, chain_id, phase)
+        RunMode::Normal if phase == PhaseName::Live && live_can_fill_required_redo(rows)? => {
+            Ok(None)
         }
-        _ => Ok(()),
+        RunMode::Normal if phase == PhaseName::Live => both(),
+        _ => Ok(None),
     }
 }
 
@@ -414,67 +435,26 @@ fn live_can_fill_required_redo(rows: &[PhaseStateRow]) -> RunnerResult<bool> {
     )
 }
 
-fn require_current_interpret_and_project(
-    rows: &[PhaseStateRow],
-    chain_id: &str,
-    phase: PhaseName,
-) -> RunnerResult<()> {
-    require_current_hash(rows, chain_id, phase, PhaseName::Interpret)?;
-    require_current_hash(rows, chain_id, phase, PhaseName::Project)
+/// A phase row that records another content hash than this binary expects of it, or none.
+pub(crate) struct StaleHash {
+    pub(crate) recorded_phase: PhaseName,
+    pub(crate) recorded: Option<String>,
 }
 
-fn require_current_hash(
-    rows: &[PhaseStateRow],
-    chain_id: &str,
-    phase: PhaseName,
-    recorded_phase: PhaseName,
-) -> RunnerResult<()> {
-    let row = row_for(rows, recorded_phase)?;
-    match row.input_content_hash.as_deref() {
-        Some(hash) if hash == bigname_content_hash::INTERPRETER_CONTENT_HASH => Ok(()),
-        Some(hash) => Err(content_hash_mismatch(chain_id, phase, recorded_phase, hash)),
-        None => Err(RunnerError::new(
-            ErrorKind::ContentHashMismatch,
-            format!(
-                "refusing derived writes for chain {chain_id} phase {phase}: phase \
-                 {recorded_phase} has no recorded interpretation-input hash"
-            ),
-        )),
-    }
-}
-
-fn reject_different_hash(
-    rows: &[PhaseStateRow],
-    chain_id: &str,
-    phase: PhaseName,
-    recorded_phase: PhaseName,
-) -> RunnerResult<()> {
-    if let Some(hash) = row_for(rows, recorded_phase)?
-        .input_content_hash
-        .as_deref()
-        .filter(|hash| *hash != bigname_content_hash::INTERPRETER_CONTENT_HASH)
-    {
-        return Err(content_hash_mismatch(chain_id, phase, recorded_phase, hash));
-    }
-    Ok(())
-}
-
-fn content_hash_mismatch(
-    chain_id: &str,
-    phase: PhaseName,
-    recorded_phase: PhaseName,
-    recorded_hash: &str,
-) -> RunnerError {
-    RunnerError::new(
-        ErrorKind::ContentHashMismatch,
-        format!(
-            "refusing derived writes for chain {chain_id} phase {phase}: binary \
-             interpretation-input hash {} differs from recorded {recorded_hash} on phase \
-             {recorded_phase}; start the interpreter content-hash rotation with a full-range \
-             Interpret redo",
-            bigname_content_hash::INTERPRETER_CONTENT_HASH
-        ),
+/// The phase's row unless it records exactly its expected content hash.
+fn current(rows: &[PhaseStateRow], recorded_phase: PhaseName) -> RunnerResult<Option<StaleHash>> {
+    let recorded = row_for(rows, recorded_phase)?.input_content_hash.as_deref();
+    Ok(
+        (recorded != Some(expected_content_hash(recorded_phase))).then(|| StaleHash {
+            recorded_phase,
+            recorded: recorded.map(str::to_owned),
+        }),
     )
+}
+
+/// The phase's row when it records a content hash other than its expected one.
+fn different(rows: &[PhaseStateRow], recorded_phase: PhaseName) -> RunnerResult<Option<StaleHash>> {
+    Ok(current(rows, recorded_phase)?.filter(|stale| stale.recorded.is_some()))
 }
 
 pub(crate) fn invalid_transition(

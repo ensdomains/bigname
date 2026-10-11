@@ -183,7 +183,7 @@ pub(super) async fn publish_lookup_families(
         },
         mode,
         &token,
-        &FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH),
+        &FamilyOptions::new(bigname_content_hash::PROJECTION_CONTENT_HASH),
     )
     .await?;
     anyhow::ensure!(

@@ -98,7 +98,7 @@ async fn address_history_create_performance_fixture() -> Result<()> {
         bigname_project::families::FamilyMode::Rebuild,
         &token,
         &bigname_project::families::FamilyOptions::new(
-            bigname_content_hash::INTERPRETER_CONTENT_HASH,
+            bigname_content_hash::PROJECTION_CONTENT_HASH,
         )
         .with_max_blocks_per_run(count as u64 + 1)
         .with_rebuild_ranges(bigname_project::families::RebuildRanges::Through(
@@ -231,7 +231,7 @@ async fn address_history_rebuild_retained_performance_fixture() -> Result<()> {
         bigname_project::families::FamilyMode::Rebuild,
         &token,
         &bigname_project::families::FamilyOptions::new(
-            bigname_content_hash::INTERPRETER_CONTENT_HASH,
+            bigname_content_hash::PROJECTION_CONTENT_HASH,
         )
         .with_max_blocks_per_run(number as u64 + 1)
         .with_rebuild_ranges(bigname_project::families::RebuildRanges::Through(number)),

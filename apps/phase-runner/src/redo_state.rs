@@ -54,7 +54,7 @@ pub(crate) async fn begin(
         )
     })?;
     let rows = lock_chain_phase_state(&mut transaction, chain_id).await?;
-    require_start(&rows, chain_id, phase, mode)?;
+    require_start(&mut transaction, &rows, chain_id, phase, mode).await?;
     let mut previous = row_for(&rows, phase)?.clone();
     let range = mode.range().ok_or_else(|| {
         RunnerError::data_integrity("explicit redo transition is missing its block range")
@@ -76,10 +76,9 @@ pub(crate) async fn begin(
             .is_some_and(crate::redo_stamp::owns_required_redo);
     crate::redo_completion::restore_previous_lifecycle(&mut previous)?;
     let status = previous.status()?;
-    let current_interpreter_hash = bigname_content_hash::INTERPRETER_CONTENT_HASH;
+    let current_hash = crate::transitions::expected_content_hash(phase);
     let recorded_hash = previous.input_content_hash.as_deref();
-    let hash_requires_full_redo = recorded_hash
-        .is_some_and(|hash| hash != current_interpreter_hash)
+    let hash_requires_full_redo = recorded_hash.is_some_and(|hash| hash != current_hash)
         || (status != PhaseStatus::Idle && recorded_hash.is_none());
     let adopts_new_hash =
         matches!(phase, PhaseName::Interpret | PhaseName::Project) && hash_requires_full_redo;
@@ -113,7 +112,7 @@ pub(crate) async fn begin(
             chain_id,
             &previous,
             range,
-            same_project_request && recorded_hash == Some(current_interpreter_hash),
+            same_project_request && recorded_hash == Some(current_hash),
         )
         .await?
     } else if phase == PhaseName::Interpret && matches!(mode, RunMode::Redo(_)) {
@@ -190,7 +189,7 @@ pub(crate) async fn begin(
         && if phase == PhaseName::Ingest {
             !ingest_authority_changed
         } else {
-            !phase.writes_derived_data() || recorded_hash == Some(current_interpreter_hash)
+            !phase.writes_derived_data() || recorded_hash == Some(current_hash)
         };
     let preserve_started_at = resume_same_epoch || same_active_audit;
     let superseded = match crate::redo_supersede::superseded_project_redo(&rows, phase, mode)? {
@@ -257,7 +256,7 @@ pub(crate) async fn begin(
     .bind(resume_same_epoch)
     .bind(preserve_started_at)
     .bind(phase.writes_derived_data())
-    .bind(current_interpreter_hash)
+    .bind(current_hash)
     .bind(format!("{}%", crate::redo_stamp::REQUIRED_REDO_PREFIX))
     .bind(crate::redo_stamp::REQUIRED_REDO_ACTIVE_PREFIX)
     .bind(crate::redo_stamp::REQUIRED_REDO_PREFIX)
@@ -397,7 +396,7 @@ pub(crate) async fn finish(
         return Err(error);
     }
     let content_hash = if phase.writes_derived_data() {
-        Some(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+        Some(crate::transitions::expected_content_hash(phase))
     } else {
         previous.input_content_hash.as_deref()
     };

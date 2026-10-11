@@ -5452,7 +5452,7 @@ async fn seed_completed_spine_prerequisites(
              current_block_hash = $3,
              target_block_number = $2,
              target_block_hash = $3,
-             input_content_hash = $4,
+             input_content_hash = CASE WHEN phase_name = 'project' THEN $5 ELSE $4 END,
              live_handoff_block_number = CASE
                  WHEN phase_name = 'ingest' THEN $2 ELSE NULL
              END,
@@ -5468,6 +5468,7 @@ async fn seed_completed_spine_prerequisites(
     .bind(through)
     .bind(block_hash(chain_id, through))
     .bind(phase_runner::INTERPRETER_CONTENT_HASH)
+    .bind(phase_runner::PROJECTION_CONTENT_HASH)
     .execute(pool)
     .await?;
     Ok(())

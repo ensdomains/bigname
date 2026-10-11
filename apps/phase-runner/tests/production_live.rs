@@ -22,7 +22,7 @@ use bigname_lookup::ChainRpcUrls;
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
 use bigname_storage::load_primary_name_current_snapshot;
 use phase_runner::{
-    INTERPRETER_CONTENT_HASH,
+    INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH,
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, SourceRole, TimingConfig},
     error::{ErrorKind, RunnerError},
@@ -1976,7 +1976,7 @@ async fn attested_redo_restart_resets_progress_after_interpreter_hash_rotation()
         completed,
         (
             Some(INTERPRETER_CONTENT_HASH.to_owned()),
-            Some(INTERPRETER_CONTENT_HASH.to_owned()),
+            Some(PROJECTION_CONTENT_HASH.to_owned()),
             false,
             false,
             0,
@@ -2475,7 +2475,7 @@ async fn hash_rotation_replays_the_stamped_project_range_through_the_live_head()
     assert_eq!(
         interrupted,
         (
-            Some(INTERPRETER_CONTENT_HASH.to_owned()),
+            Some(PROJECTION_CONTENT_HASH.to_owned()),
             true,
             Some(0),
             Some(3),
@@ -2510,7 +2510,7 @@ async fn hash_rotation_replays_the_stamped_project_range_through_the_live_head()
             ),
             (
                 "project".to_owned(),
-                Some(INTERPRETER_CONTENT_HASH.to_owned()),
+                Some(PROJECTION_CONTENT_HASH.to_owned()),
                 false,
             ),
         ]
@@ -3775,8 +3775,8 @@ async fn seed_completed_spine(pool: &PgPool, chain: &str, number: i64, hash: &st
              target_block_hash = $3,
              live_handoff_block_number = CASE WHEN phase_name = 'ingest' THEN $2 END,
              live_handoff_block_hash = CASE WHEN phase_name = 'ingest' THEN $3 END,
-             input_content_hash = CASE
-                 WHEN phase_name IN ('interpret', 'project') THEN $4 END,
+             input_content_hash = CASE phase_name WHEN 'project' THEN $5
+                 WHEN 'interpret' THEN $4 END,
              started_at = now(), finished_at = now(), updated_at = now()
          WHERE chain_id = $1 AND phase_name IN ('ingest', 'interpret', 'project')",
     )
@@ -3784,6 +3784,7 @@ async fn seed_completed_spine(pool: &PgPool, chain: &str, number: i64, hash: &st
     .bind(number)
     .bind(hash)
     .bind(INTERPRETER_CONTENT_HASH)
+    .bind(PROJECTION_CONTENT_HASH)
     .execute(pool)
     .await?;
     sqlx::query(

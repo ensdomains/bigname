@@ -1,7 +1,7 @@
 //! Record-selector vocabulary.
 //!
 //! Split out of `types` because project hydration encodes calls from these selectors before rows
-//! are persisted, which puts this module inside the interpreter content hash. The rest of `types`
+//! are persisted, which puts this module inside the projection content hash. The rest of `types`
 //! is the request-scoped verified-lookup response shape and must stay outside it.
 
 use crate::{LookupError, Result};

@@ -37,7 +37,7 @@ async fn a_small_child_page_does_not_rescan_all_candidates_per_child() -> Result
             let plan: Value = sqlx::query_scalar(&format!(
                 "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE children \
                  ('{PARENT}', '{}', 6)",
-                bigname_content_hash::INTERPRETER_CONTENT_HASH
+                bigname_content_hash::PROJECTION_CONTENT_HASH
             ))
             .fetch_one(&mut *conn)
             .await?;
@@ -117,7 +117,7 @@ async fn install(conn: &mut PgConnection) -> Result<()> {
          FROM generate_series(1, {CHILDREN}) n;
          ANALYZE name_surfaces; ANALYZE chain_lineage; ANALYZE project_family_marker;
          ANALYZE project_child_edge_candidate; ANALYZE project_name_summary;",
-        bigname_content_hash::INTERPRETER_CONTENT_HASH
+        bigname_content_hash::PROJECTION_CONTENT_HASH
     ))
     .execute(conn)
     .await?;
@@ -278,7 +278,7 @@ async fn the_released_lease_probe_reads_the_namehash_index() -> Result<()> {
         .await?;
         let plan: Value = sqlx::query_scalar(&format!(
             "EXPLAIN (FORMAT JSON) EXECUTE children ('{PARENT}', '{}', 6)",
-            bigname_content_hash::INTERPRETER_CONTENT_HASH
+            bigname_content_hash::PROJECTION_CONTENT_HASH
         ))
         .fetch_one(&mut *conn)
         .await?;
@@ -386,7 +386,7 @@ async fn child_counts_do_not_probe_the_lifecycle_table() -> Result<()> {
                 .await?;
             let plan: Value = sqlx::query_scalar(&format!(
                 "EXPLAIN (FORMAT JSON) EXECUTE {name} ({arguments}, '{}')",
-                bigname_content_hash::INTERPRETER_CONTENT_HASH
+                bigname_content_hash::PROJECTION_CONTENT_HASH
             ))
             .fetch_one(&mut *conn)
             .await?;
@@ -454,7 +454,7 @@ async fn owned_registry_children_read_only_their_candidates() -> Result<()> {
                      '{hash}', ARRAY['{node}'], ARRAY['{node}'], ARRAY['{child}'], '{owner}',
                      '{owner}', 100)",
                 node = nodes[0],
-                hash = bigname_content_hash::INTERPRETER_CONTENT_HASH
+                hash = bigname_content_hash::PROJECTION_CONTENT_HASH
             ))
             .fetch_one(&mut *conn)
             .await?;

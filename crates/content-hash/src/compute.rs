@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
@@ -7,101 +7,29 @@ use std::{
 
 use alloy_primitives::{hex, keccak256};
 
-use crate::{source_paths, storage_families};
+use crate::{
+    classes::{
+        ADAPTER_SOURCE_ROOT, Class, MANIFEST_AUTHORITY_SOURCE_ROOT, PROJECT_SOURCE_ROOT, ROOTS,
+        SEMANTIC_SOURCE_FILES,
+    },
+    source_paths, storage_families,
+};
 
-const ADAPTER_SOURCE_ROOT: &str = "crates/adapters/src";
-const MANIFEST_AUTHORITY_SOURCE_ROOT: &str = "crates/manifests/src";
 const MANIFEST_ROOT: &str = "manifests";
-const PROJECT_SOURCE_ROOT: &str = "crates/project/src";
 /// Watched and scanned whole, but only its composition files are hashed (`storage_families`).
 const STORAGE_FAMILIES_SOURCE_ROOT: &str = storage_families::ROOT;
-/// Interpret's persistence stage: which interpreted row wins a conflict, how a redo range reopens
-/// and reanchors bindings, and which surfaces a normalizer-version recompute activates. All of it
-/// decides which identity, discovery, and label-preimage rows the projections then read.
-const INTERPRET_WRITE_SOURCE_ROOT: &str = "crates/interpret/src/write";
 const MINIMUM_MANIFEST_EVENT_COUNT: usize = 111;
 const MINIMUM_EVENT_MANIFEST_COUNT: usize = 16;
-const HASH_FORMAT: &[u8] = b"bigname-interpreter-content-v3\0";
+/// v4 since the projection inputs left it, which also keeps it unequal to every combined value.
+const INTERPRETER_HASH_FORMAT: &[u8] = b"bigname-interpreter-content-v4\0";
+const PROJECTION_HASH_FORMAT: &[u8] = b"bigname-projection-content-v1\0";
+/// The key the projection hash embeds the interpreter hash under. No collected key can take it,
+/// since every collected key has a `source:`, `manifest-event:` or `semantic-crate:` prefix.
+const INTERPRETER_HASH_KEY: &str = "interpreter-content-hash";
 const MANIFEST_PROFILE_HASH_FORMAT: &[u8] = b"bigname-manifest-profile-v1\0";
 
 // `apps/phase-runner` is deliberately outside these roots: it may orchestrate phase work, but
 // semantic interpretation or projection code must never live there.
-
-/// Sources outside the watched roots that those roots call to decide persisted interpretation and
-/// projection output. Without them a change to, say, ENS normalization would alter projected
-/// primary-name rows while leaving the fingerprint — and therefore the redo the phase guard
-/// demands — unchanged.
-///
-/// This is a file list rather than a crate root on purpose. `bigname-lookup` also holds the
-/// request-scoped serving engine, CCIP-Read, storage, and RPC transport, none of which decide a
-/// persisted row; watching the whole crate would rotate the fingerprint (and force a full
-/// re-derivation) for serving-only edits. A missing entry is a hard error so moving one of these
-/// modules fails the build instead of silently narrowing the fingerprint.
-const SEMANTIC_SOURCE_FILES: &[&str] = &[
-    // ENS normalization decides primary-name claim status, the stored spelling, label sets, and
-    // DNS encoding for identity, discovery, and primary-name projection.
-    "crates/domain/src/normalization.rs",
-    // The topology model and its closed vocabularies are the final serializer for projected
-    // resolution topology. Changing either can reshape persisted `name_current` summaries.
-    "crates/domain/src/resolution_topology.rs",
-    "crates/domain/src/vocabulary.rs",
-    // The numeric chain id the stored `ens_v1.resolver` of a name summary carries.
-    "crates/domain/src/chain_identity.rs",
-    // Namehash, DNS encoding, resolver-call encoding, and result decoding shared by the hydration
-    // multicalls below.
-    "crates/lookup/src/abi.rs",
-    // Record-selector vocabulary those calls encode. Deliberately not `crates/lookup/src/types.rs`,
-    // which is otherwise the request-scoped verified-lookup response shape.
-    "crates/lookup/src/record_selector.rs",
-    // Reverse-name and text-record multicall encode/decode used by project hydration before rows
-    // are persisted.
-    "crates/lookup/src/reverse_names.rs",
-    "crates/lookup/src/text_records.rs",
-    // Which provider response those calls accept as an answer, and what value is taken from it.
-    // Deliberately not the rest of `crates/lookup/src/rpc.rs`: client construction, timeouts, and
-    // endpoint configuration abort a request rather than reshape an answer, and its head-block
-    // read has no hydration caller.
-    "crates/lookup/src/json_rpc_envelope.rs",
-    // Redo-range preparation and the normalizer-version recompute that drive the stage above.
-    "crates/interpret/src/write.rs",
-    "crates/interpret/src/recompute.rs",
-    // The expiry and registration timestamp reads the stored name summary (composed under the
-    // storage families root) takes its `expires_at` and `registered_at` from. The rest of the address-names
-    // code serves reads only.
-    "crates/storage/src/address_names/query.rs",
-    "crates/storage/src/address_names/query/timestamps.rs",
-    // The same historical membership/canonicality predicates now decide catalogue rows.
-    "crates/storage/src/history/address_evidence.rs",
-    "crates/storage/src/history/catalogue_contract.rs",
-    "crates/storage/src/history/source.rs",
-    // Atomic identity spelling/import and the shared fields now persisted by Project.
-    "crates/interpret/src/recompute/search.rs",
-    "crates/storage/src/identity_search.rs",
-    "crates/storage/src/identity_search/documents.rs",
-    "crates/storage/src/identity_search/tokens.rs",
-    "crates/storage/src/label_preimages.rs",
-    "crates/storage/src/name_current/wrapper_expiry.rs",
-    // Physical entry identities and shared record gating now decide path deadlines/evidence.
-    "crates/storage/src/identity/ids.rs",
-    "crates/storage/src/name_current/row.rs",
-    "crates/storage/src/name_current/public_authority.rs",
-    "crates/storage/src/public_name_fields/ens_v1.rs",
-    "crates/storage/src/public_name_fields/mod.rs",
-    "crates/storage/src/public_name_fields/registration.rs",
-    "crates/storage/src/public_name_fields/types.rs",
-    "crates/storage/src/public_name_fields/values.rs",
-    "crates/storage/src/public_name_fields/wrapper.rs",
-    "crates/storage/src/public_name_fields/wrapper_fuses.rs",
-    "crates/storage/src/public_name_fields/wrapper_state.rs",
-    // Stable lookup key/field serializers reached by Project's lookup publication.
-    "crates/storage/src/record_inventory/boundary_key.rs",
-    "crates/storage/src/record_inventory/row_decode.rs",
-    "crates/storage/src/identity/types.rs",
-    "crates/storage/src/address_names/types.rs",
-    // Exact expiry decoding and contract sentinel classification also decide stored summaries.
-    "crates/storage/src/unix_seconds.rs",
-    "crates/storage/src/expiry.rs",
-];
 
 #[allow(dead_code)]
 struct CfgTestSourceExclusion {
@@ -117,25 +45,54 @@ const CFG_TEST_SOURCE_EXCLUSIONS: &[CfgTestSourceExclusion] = &[];
 pub(crate) struct Input {
     pub(crate) key: String,
     pub(crate) content: Vec<u8>,
+    pub(crate) class: Class,
+}
+
+/// Both content hashes of a tree, with the inputs they were computed from.
+pub(crate) struct Hashes {
+    pub(crate) interpreter: String,
+    pub(crate) projection: String,
+    pub(crate) inputs: Vec<Input>,
+}
+
+impl Hashes {
+    /// One `class\tkey\tkeccak256(content)` line per input, sorted by key, under a header.
+    pub(crate) fn inputs_tsv(&self) -> String {
+        let mut tsv = String::from("class\tkey\tcontent_keccak256\n");
+        for input in &self.inputs {
+            tsv.push_str(&format!(
+                "{}\t{}\tkeccak256:{}\n",
+                input.class.as_str(),
+                input.key,
+                hex::encode(keccak256(&input.content))
+            ));
+        }
+        tsv
+    }
+}
+
+pub(crate) fn semantic_paths() -> Vec<&'static str> {
+    SEMANTIC_SOURCE_FILES
+        .iter()
+        .map(|entry| entry.path)
+        .collect()
 }
 
 #[allow(dead_code)]
 pub(crate) fn watched_paths(workspace_root: &Path) -> Vec<PathBuf> {
-    let mut paths = vec![
-        workspace_root.join(ADAPTER_SOURCE_ROOT),
-        workspace_root.join(MANIFEST_AUTHORITY_SOURCE_ROOT),
-        workspace_root.join(MANIFEST_ROOT),
-        workspace_root.join(PROJECT_SOURCE_ROOT),
-        workspace_root.join(STORAGE_FAMILIES_SOURCE_ROOT),
-        workspace_root.join(INTERPRET_WRITE_SOURCE_ROOT),
-    ];
+    let mut paths = ROOTS
+        .iter()
+        .map(|root| workspace_root.join(root.path))
+        .collect::<Vec<_>>();
+    paths.push(workspace_root.join(MANIFEST_ROOT));
+    paths.push(workspace_root.join(STORAGE_FAMILIES_SOURCE_ROOT));
     // Not all hashed, but walked: a module declaration anywhere in these crates, or in a crate
     // holding a file hashed by name, can change which files are test-only or what a hashed file
     // compiles, so it has to trigger a rebuild. A target root or `#[path]` file can sit outside
     // `src/`, so every directory the walk reads is watched too. A walk that fails here fails the
     // hash below, and a failed build script always reruns.
     if let Ok(walked) =
-        source_paths::walk_crates(workspace_root, CRATE_SOURCE_ROOTS, SEMANTIC_SOURCE_FILES)
+        source_paths::walk_crates(workspace_root, CRATE_SOURCE_ROOTS, &semantic_paths())
     {
         for source_root in walked.roots.iter().map(|root| workspace_root.join(root)) {
             paths.extend(source_root.parent().map(|parent| parent.join("Cargo.toml")));
@@ -167,7 +124,7 @@ pub(crate) fn watched_paths(workspace_root: &Path) -> Vec<PathBuf> {
     paths.extend(
         SEMANTIC_SOURCE_FILES
             .iter()
-            .map(|relative_path| workspace_root.join(relative_path)),
+            .map(|entry| workspace_root.join(entry.path)),
     );
     paths.push(workspace_root.join(crate::lockfile::LOCKFILE));
     paths.sort();
@@ -175,9 +132,28 @@ pub(crate) fn watched_paths(workspace_root: &Path) -> Vec<PathBuf> {
     paths
 }
 
-pub(crate) fn compute(workspace_root: &Path) -> io::Result<String> {
+/// The interpreter hash covers every input that is not project-class. The projection hash covers
+/// the project-class inputs and the interpreter hash itself, so every interpreter rotation also
+/// rotates the projection hash.
+pub(crate) fn compute(workspace_root: &Path) -> io::Result<Hashes> {
     let mut inputs = collect_inputs(workspace_root)?;
-    Ok(hash_inputs(HASH_FORMAT, &mut inputs))
+    inputs.sort();
+    let (mut interpreter_inputs, mut projection_inputs): (Vec<_>, Vec<_>) = inputs
+        .iter()
+        .cloned()
+        .partition(|input| input.class.feeds_interpreter_hash());
+    let interpreter = hash_inputs(INTERPRETER_HASH_FORMAT, &mut interpreter_inputs);
+    projection_inputs.push(Input {
+        key: INTERPRETER_HASH_KEY.to_owned(),
+        content: interpreter.as_bytes().to_vec(),
+        class: Class::Project,
+    });
+    let projection = hash_inputs(PROJECTION_HASH_FORMAT, &mut projection_inputs);
+    Ok(Hashes {
+        interpreter,
+        projection,
+        inputs,
+    })
 }
 
 pub(crate) fn manifest_profile_hash(manifest_root: &Path) -> io::Result<String> {
@@ -209,6 +185,7 @@ pub(crate) fn manifest_profile_hash(manifest_root: &Path) -> io::Result<String> 
         inputs.push(Input {
             key: format!("manifest:{key}"),
             content: filtered,
+            class: Class::Interpret,
         });
     }
 
@@ -245,30 +222,19 @@ const CRATE_SOURCE_ROOTS: &[&str] = &[
 
 fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
     let mut inputs = Vec::new();
-    let walked =
-        source_paths::walk_crates(workspace_root, CRATE_SOURCE_ROOTS, SEMANTIC_SOURCE_FILES)?;
+    let walked = source_paths::walk_crates(workspace_root, CRATE_SOURCE_ROOTS, &semantic_paths())?;
     let cfg_test_sources = &walked.test_only;
-    collect_rust_sources(
-        workspace_root,
-        &workspace_root.join(ADAPTER_SOURCE_ROOT),
-        cfg_test_sources,
-        &mut inputs,
-    )?;
-    // Manifest declarations select interpretation inputs and supply authority for derived
-    // identity and discovery rows. Scan the whole production source tree so a manifest-authority
-    // change cannot silently change interpreter output without changing the content hash.
-    collect_rust_sources(
-        workspace_root,
-        &workspace_root.join(MANIFEST_AUTHORITY_SOURCE_ROOT),
-        cfg_test_sources,
-        &mut inputs,
-    )?;
-    collect_rust_sources(
-        workspace_root,
-        &workspace_root.join(PROJECT_SOURCE_ROOT),
-        cfg_test_sources,
-        &mut inputs,
-    )?;
+    // Manifest declarations select interpretation inputs and supply authority for derived identity
+    // and discovery rows, so the manifest root is scanned whole like the others.
+    for root in ROOTS {
+        collect_rust_sources(
+            workspace_root,
+            &workspace_root.join(root.path),
+            root.class,
+            cfg_test_sources,
+            &mut inputs,
+        )?;
+    }
     let project_source_root = workspace_root.join(PROJECT_SOURCE_ROOT);
     if project_source_root.exists() {
         let mut project_sql_sources = Vec::new();
@@ -278,15 +244,9 @@ fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
             &mut project_sql_sources,
         )?;
         for path in project_sql_sources {
-            collect_file(workspace_root, &path, &mut inputs)?;
+            collect_file(workspace_root, &path, Class::Project, &mut inputs)?;
         }
     }
-    collect_rust_sources(
-        workspace_root,
-        &workspace_root.join(INTERPRET_WRITE_SOURCE_ROOT),
-        cfg_test_sources,
-        &mut inputs,
-    )?;
     collect_manifest_event_blocks(workspace_root, &mut inputs)?;
     collect_semantic_sources(workspace_root, &mut inputs)?;
     storage_families::collect(workspace_root, cfg_test_sources, &mut inputs)?;
@@ -305,18 +265,20 @@ fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
 fn collect_data_reads(walked: &source_paths::Walked, inputs: &mut Vec<Input>) -> io::Result<()> {
     let hashed = inputs
         .iter()
-        .map(|input| input.key.clone())
-        .collect::<BTreeSet<_>>();
-    let is_hashed = |key: &str| hashed.contains(&format!("source:{key}"));
+        .map(|input| (input.key.clone(), input.class))
+        .collect::<BTreeMap<_, _>>();
+    let class_of = |key: &str| hashed.get(&format!("source:{key}")).copied();
+    let is_hashed = |key: &str| class_of(key).is_some();
     walked.refuse_unhashed_inclusions(is_hashed)?;
     walked.refuse_unhashed_modules(is_hashed)?;
-    let data_inputs = walked.data_inputs(is_hashed)?;
-    for (key, file) in data_inputs {
+    let data_inputs = walked.data_inputs(class_of)?;
+    for (key, file, class) in data_inputs {
         let key = format!("source:{key}");
-        if !hashed.contains(&key) {
+        if !hashed.contains_key(&key) {
             inputs.push(Input {
                 key,
                 content: fs::read(file)?,
+                class,
             });
         }
     }
@@ -324,18 +286,19 @@ fn collect_data_reads(walked: &source_paths::Walked, inputs: &mut Vec<Input>) ->
 }
 
 fn collect_semantic_sources(workspace_root: &Path, inputs: &mut Vec<Input>) -> io::Result<()> {
-    for relative_path in SEMANTIC_SOURCE_FILES {
+    for entry in SEMANTIC_SOURCE_FILES {
+        let relative_path = entry.path;
         let path = workspace_root.join(relative_path);
         if !path.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!(
-                    "interpreter content hash requires semantic source {relative_path}; if those \
+                    "the content hashes require semantic source {relative_path}; if those \
                      semantics moved, update SEMANTIC_SOURCE_FILES in the same change"
                 ),
             ));
         }
-        collect_file(workspace_root, &path, inputs)?;
+        collect_file(workspace_root, &path, entry.class, inputs)?;
     }
     Ok(())
 }
@@ -343,6 +306,7 @@ fn collect_semantic_sources(workspace_root: &Path, inputs: &mut Vec<Input>) -> i
 fn collect_rust_sources(
     workspace_root: &Path,
     directory: &Path,
+    class: Class,
     cfg_test_sources: &BTreeSet<String>,
     inputs: &mut Vec<Input>,
 ) -> io::Result<()> {
@@ -354,11 +318,11 @@ fn collect_rust_sources(
     for entry in entries {
         let path = entry.path();
         if path.is_dir() {
-            collect_rust_sources(workspace_root, &path, cfg_test_sources, inputs)?;
+            collect_rust_sources(workspace_root, &path, class, cfg_test_sources, inputs)?;
         } else if path.extension() == Some(OsStr::new("rs"))
             && source_exclusion(workspace_root, &path, cfg_test_sources)?.is_none()
         {
-            collect_file(workspace_root, &path, inputs)?;
+            collect_file(workspace_root, &path, class, inputs)?;
         }
     }
     Ok(())
@@ -387,12 +351,14 @@ pub(crate) fn source_exclusion(
 pub(crate) fn collect_file(
     workspace_root: &Path,
     path: &Path,
+    class: Class,
     inputs: &mut Vec<Input>,
 ) -> io::Result<()> {
     let key = relative_key(workspace_root, path)?;
     inputs.push(Input {
         key: format!("source:{key}"),
         content: fs::read(path)?,
+        class,
     });
     Ok(())
 }
@@ -500,6 +466,7 @@ fn finish_manifest_event(
     inputs.push(Input {
         key: format!("manifest-event:{relative_path}:{event_index}"),
         content: event.content,
+        class: Class::Interpret,
     });
     Ok(())
 }
@@ -550,8 +517,8 @@ fn append_usize(output: &mut Vec<u8>, value: usize) {
 }
 
 #[cfg(test)]
-pub(crate) fn semantic_source_files() -> &'static [&'static str] {
-    SEMANTIC_SOURCE_FILES
+pub(crate) fn semantic_source_files() -> Vec<&'static str> {
+    semantic_paths()
 }
 
 #[cfg(test)]
@@ -565,13 +532,25 @@ pub(crate) fn hashed_source_paths(workspace_root: &Path) -> io::Result<Vec<Strin
 }
 
 #[cfg(test)]
+pub(crate) fn classed_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
+    compute(workspace_root).map(|hashes| hashes.inputs)
+}
+
+#[cfg(test)]
+pub(crate) fn module_keys(
+    workspace_root: &Path,
+) -> io::Result<std::collections::BTreeMap<(String, Vec<String>), String>> {
+    source_paths::walk_crates(workspace_root, CRATE_SOURCE_ROOTS, &semantic_paths())?.module_keys()
+}
+
+#[cfg(test)]
 pub(crate) fn crate_source_roots() -> &'static [&'static str] {
     CRATE_SOURCE_ROOTS
 }
 
 #[cfg(test)]
 pub(crate) fn cfg_test_source_set(workspace_root: &Path) -> io::Result<BTreeSet<String>> {
-    source_paths::walk_crates(workspace_root, CRATE_SOURCE_ROOTS, SEMANTIC_SOURCE_FILES)
+    source_paths::walk_crates(workspace_root, CRATE_SOURCE_ROOTS, &semantic_paths())
         .map(|walked| walked.test_only)
 }
 

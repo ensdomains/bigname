@@ -1193,7 +1193,7 @@ async fn reset_v2_resolver_fixture(database: &TestDatabase) -> Result<()> {
     let token_input =
         bigname_project::families::input_token(&database.pool, "ethereum-mainnet").await?;
     let mut options = bigname_project::families::FamilyOptions::new(
-        bigname_content_hash::INTERPRETER_CONTENT_HASH,
+        bigname_content_hash::PROJECTION_CONTENT_HASH,
     );
     options.max_blocks_per_run = 0;
     bigname_project::families::apply(

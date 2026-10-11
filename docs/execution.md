@@ -31,11 +31,11 @@ positions from `bigname_phase`. Every admitted projection row must be at or
 before that selection and must resolve through `bigname_phase.chain_lineage`.
 The API revalidates the selected project generation before returning. A moved
 head, mismatched hash, future publication, missing canonical lineage, or
-interpreter-content-hash mismatch returns `409 stale`; it does not fall back to
+projection-content-hash mismatch returns `409 stale`; it does not fall back to
 an answer at another position.
 
 Lookup captures the participating family publications: block number, block hash,
-interpreter content hash and marker sequence, together with the selected input
+projection content hash and marker sequence, together with the selected input
 revision, bindings, inventory boundary and real manifest provenance. A live
 publication may trail the stored head by the API's
 [publication lag tolerance](glossary.md#publication-lag-tolerance) (`BIGNAME_API_PUBLICATION_LAG_TOLERANCE_BLOCKS`, one

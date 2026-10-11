@@ -976,13 +976,13 @@ async fn insert_project_head(pool: &PgPool, chain_id: &str, block_number: i64) {
     .bind(chain_id)
     .bind(block_number)
     .bind(format!("project-head-{block_number}"))
-    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
     .execute(pool)
     .await
     .unwrap();
     sqlx::query("INSERT INTO project_family_marker (chain_id,current_block_number,current_block_hash,input_content_hash,state) VALUES ($1,$2,$3,$4,'live')")
         .bind(chain_id).bind(block_number).bind(format!("project-head-{block_number}"))
-        .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH).execute(pool).await.unwrap();
+        .bind(bigname_content_hash::PROJECTION_CONTENT_HASH).execute(pool).await.unwrap();
     sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,canonicality_state) VALUES ($1,$2,$3,'canonical')")
         .bind(chain_id).bind(format!("project-head-{block_number}")).bind(block_number).execute(pool).await.unwrap();
     sqlx::query(

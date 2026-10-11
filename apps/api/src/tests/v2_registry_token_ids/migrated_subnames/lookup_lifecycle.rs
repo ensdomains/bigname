@@ -4,7 +4,7 @@ use bigname_project::families::{self, FamilyMode, FamilyOptions, RebuildRanges};
 use lookup_publication::{assert_name_prepared_parity, components};
 
 fn options() -> FamilyOptions {
-    FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    FamilyOptions::new(bigname_content_hash::PROJECTION_CONTENT_HASH)
         .with_rebuild_ranges(RebuildRanges::Off)
 }
 async fn apply(

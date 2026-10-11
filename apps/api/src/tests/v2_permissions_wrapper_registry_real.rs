@@ -467,12 +467,13 @@ async fn publish(database: &TestDatabase, offset: i64) -> Result<()> {
             current_block_hash, target_block_number, target_block_hash, input_content_hash,
             started_at, finished_at)
         VALUES ($1, 'interpret', 'completed', $2, $3, $2, $3, $4, now(), now()),
-               ($1, 'project', 'completed', $2, $3, $2, $3, $4, now(), now())
+               ($1, 'project', 'completed', $2, $3, $2, $3, $5, now(), now())
         ON CONFLICT (chain_id, phase_name) DO UPDATE SET phase_status = 'completed',
             current_block_number = EXCLUDED.current_block_number, current_block_hash = EXCLUDED.current_block_hash,
             target_block_number = EXCLUDED.target_block_number, target_block_hash = EXCLUDED.target_block_hash,
             input_content_hash = EXCLUDED.input_content_hash")
         .bind(CHAIN).bind(block).bind(block_hash(block)).bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+        .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
         .execute(&database.pool).await?;
     publish_test_families_on(&database.pool, CHAIN, block).await?;
     head(database, offset).await

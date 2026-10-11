@@ -146,7 +146,7 @@ async fn chain_settled_by_supervisor_start(chain_id: &str) -> Result<ScratchData
     ] {
         let hash = phase
             .writes_derived_data()
-            .then_some(phase_runner::INTERPRETER_CONTENT_HASH);
+            .then(|| phase_runner::expected_content_hash(phase));
         mark_completed(scratch.pool(), chain_id, phase, hash).await?;
         set_phase_extent(scratch.pool(), chain_id, phase, TIP).await?;
     }

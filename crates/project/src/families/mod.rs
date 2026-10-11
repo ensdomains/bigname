@@ -197,7 +197,7 @@ pub struct FamilyOptions {
     pub hydration_rpc_urls: Option<bigname_lookup::ChainRpcUrls>,
     /// How long a head block's hydration may wait on RPC.
     pub hydration_time_limits: HydrationTimeLimits,
-    /// The interpreter content hash the marker records for every block.
+    /// The projection content hash the marker records for every block.
     pub input_content_hash: String,
     /// Blocks of undo rows kept below the marker at least.
     pub retained_undo_depth: i64,
@@ -211,7 +211,7 @@ pub struct FamilyOptions {
     /// Events one rebuild range applies at most, unless its first block alone holds more.
     pub max_range_events: u64,
     /// The redo this run serves resumes an interrupted redo of the same range under the same
-    /// interpreter content hash (the runner kept its saved progress). A rebuild the interrupted
+    /// projection content hash (the runner kept its saved progress). A rebuild the interrupted
     /// attempt left then resumes rather than starting again.
     pub resumes_interrupted_redo: bool,
 }

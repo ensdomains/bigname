@@ -2,6 +2,7 @@ pub mod capacity;
 pub mod cli;
 mod completed_phase_recovery;
 pub mod config;
+mod content_hash_refusal;
 pub mod database;
 pub mod error;
 mod head_finality;
@@ -55,11 +56,19 @@ mod verify_level;
 pub mod verify_phase;
 mod verify_store;
 
-pub use bigname_content_hash::INTERPRETER_CONTENT_HASH;
+pub use bigname_content_hash::{INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH};
 pub use progress_monitor::RunnerPhaseProgress;
+pub use transitions::expected_content_hash;
 
 pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const BUILD_SHA: &str = match option_env!("BIGNAME_BUILD_SHA") {
     Some(build_sha) => build_sha,
     None => "unknown",
+};
+
+/// The build and both content hashes this binary reports on `build_info`.
+pub(crate) const BUILD_INFO: bigname_metrics::BuildInfo<'static> = bigname_metrics::BuildInfo {
+    build_sha: BUILD_SHA,
+    interpreter_content_hash: INTERPRETER_CONTENT_HASH,
+    projection_content_hash: PROJECTION_CONTENT_HASH,
 };

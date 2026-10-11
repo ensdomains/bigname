@@ -252,7 +252,7 @@ async fn publish_mode(
         mode,
         &input,
         &bigname_project::families::FamilyOptions::new(
-            bigname_content_hash::INTERPRETER_CONTENT_HASH,
+            bigname_content_hash::PROJECTION_CONTENT_HASH,
         ),
     )
     .await?;

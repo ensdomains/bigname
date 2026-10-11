@@ -216,7 +216,7 @@ async fn project(pool: &PgPool, target: i64, resume: Option<i64>) -> Result<()> 
             FamilyMode::Rebuild
         },
         &families::input_token(pool, CHAIN).await?,
-        &FamilyOptions::new(phase_runner::INTERPRETER_CONTENT_HASH),
+        &FamilyOptions::new(phase_runner::PROJECTION_CONTENT_HASH),
     )
     .await?;
     assert_eq!(outcome.marker.as_ref(), Some(&target));

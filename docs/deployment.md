@@ -3832,3 +3832,42 @@ records no record inventory resource for a released ENSv2 registration.
 Once the redo publishes, check on Sepolia that an ENSv2 name released by expiry
 answers `GET /v1/names/{name}/records?keys=addr:60` with `not_found`, and that
 `/v1/names/{name}?include=counts` has no `record_count`.
+
+## Split interpreter and projection content hashes
+
+The build that splits the one content hash in two (TYR-276, see
+[interpretation replay](storage.md#interpretation-replay)) lets a change that
+only Project reads cost one Project redo instead of an Interpret redo and a
+Project redo.
+
+- The [interpreter content hash](glossary.md#interpreter-content-hash) now
+  covers only what Interpret persists. Ingest, Verify and Interpret rows record
+  it. The new [projection content hash](glossary.md#projection-content-hash)
+  covers it plus what only Project reads. Project and Live rows, the family
+  marker, the repair record and the address-history catalogue marker record it.
+- `/healthz` reports `identity.projection_content_hash` beside
+  `identity.interpreter_content_hash`, and `build_info` on both binaries gains
+  the `projection_content_hash` label. The API serves a publication only while
+  its family marker records the API's projection content hash. Deploy tooling
+  that reads one hash must read the Interpret row and
+  `interpreter_content_hash` for the interpreter content hash, and the Project
+  row and `projection_content_hash` for the projection content hash.
+- A projection-only rotation is refused at a normal Project or Live start with
+  the full-range Project redo to run. The runner never starts it. Run that redo
+  with no attestation, as the
+  [planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
+  describes.
+- Both hashes rotate for every chain, because the interpreter content hash has a
+  new format and fewer inputs. The build therefore needs the full-history
+  Interpret redo and the Project redo it installs before the matching API
+  serves, and it ships only in a release that rotates the interpreter content
+  hash anyway. It rides the next re-derivation release and shares that release's
+  one Interpret and Project redo pair.
+- Schema-migration `20261011120000_split_content_hash_comments` rewrites the
+  comments of `chain_phase_state.input_content_hash`,
+  `project_family_marker.input_content_hash`,
+  `project_repair_record.completed_input_hash` and
+  `project_history_catalogue_marker.input_content_hash`. It changes no column,
+  index or row.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and
+  the compiled watch plan are unchanged, so stamp no Ingest redo.

@@ -540,7 +540,7 @@ async fn parent_release_retires_only_affected_descendant_evidence() -> Result<()
                     mode,
                     &token,
                     &bigname_project::families::FamilyOptions::new(
-                        bigname_content_hash::INTERPRETER_CONTENT_HASH,
+                        bigname_content_hash::PROJECTION_CONTENT_HASH,
                     ),
                 )
                 .await?;

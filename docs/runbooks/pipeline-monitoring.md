@@ -202,7 +202,7 @@ ops dashboards tracked in Linear TYR-34.
 
 - `phase_runner_served_publication_block{chain}` is an absolute block height:
   the [family marker](../glossary.md#family-marker)'s block while the marker is
-  `live`, uses this binary's interpreter content hash, lies on readable
+  `live`, uses this binary's projection content hash, lies on readable
   canonical lineage and is at or below the stored head. The chain must also
   have its Project phase row for the metrics query. Missing or rebuilding
   (`bootstrap_pending`) publication reads `-1`. This gauge does not apply the
@@ -280,8 +280,11 @@ while the chain moves on, so check it together with the Live heartbeat age and
 `phase_runner_head_lag_blocks{phase="live"}`.
 
 The build identity is already exported as
-`build_info{build_sha, interpreter_content_hash}`, with the value `1` for the
-running binary.
+`build_info{build_sha, interpreter_content_hash, projection_content_hash}`,
+with the value `1` for the running binary. The API exports the same labels.
+Interpret's phase row records the
+[interpreter content hash](../glossary.md#interpreter-content-hash) and
+Project's the [projection content hash](../glossary.md#projection-content-hash).
 
 ## Universal Resolver cutover
 

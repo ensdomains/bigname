@@ -40,7 +40,7 @@ pub(super) async fn publish(pool: &PgPool, chain: &str, head: i64) -> Result<()>
     let hash: String = sqlx::query_scalar("SELECT block_hash FROM chain_lineage WHERE chain_id=$1 AND block_number=$2 AND canonicality_state='canonical'")
         .bind(chain).bind(head).fetch_one(pool).await?;
     let target = Marker { number: head, hash };
-    let options = FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    let options = FamilyOptions::new(bigname_content_hash::PROJECTION_CONTENT_HASH)
         .with_rebuild_ranges(RebuildRanges::Through(head))
         .with_max_blocks_per_run(u64::try_from(head + 1)?);
     let token = families::input_token(pool, chain).await?;

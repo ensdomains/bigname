@@ -35,10 +35,12 @@ pub async fn ensure_publications(
         let current: bool = sqlx::query_scalar(
             "/* storage:families.lookup.inputs */
             SELECT count(*)=2 FROM bigname_phase.chain_phase_state
-            WHERE chain_id=$1 AND phase_name IN ('interpret','project') AND input_content_hash=$2",
+            WHERE chain_id=$1 AND ((phase_name='interpret' AND input_content_hash=$2)
+               OR (phase_name='project' AND input_content_hash=$3))",
         )
         .bind(&publication.chain_id)
         .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+        .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
         .fetch_one(&mut *conn)
         .await
         .context("failed to admit lookup input hashes")?;

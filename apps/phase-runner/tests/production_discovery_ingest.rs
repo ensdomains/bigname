@@ -1472,7 +1472,7 @@ async fn seed_completed_discovery_state(pool: &sqlx::PgPool) -> Result<()> {
     }
     sqlx::query("INSERT INTO chain_heads (chain_id, latest_block_hash, latest_block_number, safe_block_hash, safe_block_number, finalized_block_hash, finalized_block_number) VALUES ($1,$2,2,$2,2,$2,2)").bind(CHAIN).bind(BLOCK_2).execute(pool).await?;
     for phase in PhaseName::ALL {
-        sqlx::query("INSERT INTO chain_phase_state (chain_id, phase_name, phase_status, current_block_number, current_block_hash, target_block_number, target_block_hash, input_content_hash, started_at, finished_at) VALUES ($1,$2,'completed',2,$3,2,$3,CASE WHEN $2 IN ('interpret','project') THEN $4 END,now(),now())").bind(CHAIN).bind(phase.as_str()).bind(BLOCK_2).bind(phase_runner::INTERPRETER_CONTENT_HASH).execute(pool).await?;
+        sqlx::query("INSERT INTO chain_phase_state (chain_id, phase_name, phase_status, current_block_number, current_block_hash, target_block_number, target_block_hash, input_content_hash, started_at, finished_at) VALUES ($1,$2,'completed',2,$3,2,$3,CASE WHEN $2 IN ('interpret','project') THEN $4 END,now(),now())").bind(CHAIN).bind(phase.as_str()).bind(BLOCK_2).bind(phase_runner::expected_content_hash(phase)).execute(pool).await?;
     }
     sqlx::query("INSERT INTO ingest_cursors (chain_id, source_key, source_kind, seed_basis, start_block_number, next_block_number, target_block_number, last_processed_block_number, last_processed_block_hash) VALUES ($1,'intake','drpc','ethereum_head',0,3,2,2,$2)").bind(CHAIN).bind(BLOCK_2).execute(pool).await?;
     add_discovered_resolver(pool, RESOLVER, 1).await
@@ -1510,8 +1510,8 @@ async fn seed_pre_live_spine(pool: &sqlx::PgPool) -> Result<()> {
              target_block_hash = $2,
              live_handoff_block_number = CASE WHEN phase_name = 'ingest' THEN 0 END,
              live_handoff_block_hash = CASE WHEN phase_name = 'ingest' THEN $2 END,
-             input_content_hash = CASE
-                 WHEN phase_name IN ('interpret', 'project') THEN $3 END,
+             input_content_hash = CASE phase_name WHEN 'project' THEN $4
+                 WHEN 'interpret' THEN $3 END,
              verification_level = CASE WHEN phase_name = 'verify' THEN 'quick_synced' END,
              started_at = now(), finished_at = now(), updated_at = now()
          WHERE chain_id = $1
@@ -1520,6 +1520,7 @@ async fn seed_pre_live_spine(pool: &sqlx::PgPool) -> Result<()> {
     .bind(CHAIN)
     .bind(BLOCK_0)
     .bind(phase_runner::INTERPRETER_CONTENT_HASH)
+    .bind(phase_runner::PROJECTION_CONTENT_HASH)
     .execute(pool)
     .await?;
     sqlx::query(

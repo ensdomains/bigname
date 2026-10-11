@@ -168,11 +168,13 @@ async fn shadow_by_manifest_sync(
 /// The redo's hash adoption on `chains`.
 async fn adopt_this_build(pool: &PgPool, chains: &[&str]) -> Result<()> {
     sqlx::query(
-        "UPDATE chain_phase_state SET input_content_hash = $2
+        "UPDATE chain_phase_state
+         SET input_content_hash = CASE WHEN phase_name = 'project' THEN $3 ELSE $2 END
          WHERE chain_id = ANY($1) AND phase_name IN ('interpret', 'project')",
     )
     .bind(chains)
     .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
     .execute(pool)
     .await?;
     Ok(())

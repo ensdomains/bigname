@@ -339,7 +339,7 @@ COMMENT ON COLUMN chain_phase_state.target_block_number IS
 COMMENT ON COLUMN chain_phase_state.target_block_hash IS
     'This value identifies the phase target block.';
 COMMENT ON COLUMN chain_phase_state.input_content_hash IS
-    'This value identifies the interpretation inputs.';
+    'This value identifies the inputs the phase ran under: the interpreter content hash on Ingest, Verify and Interpret, the projection content hash on Project and Live, or a manifest-authority invalidation marker.';
 COMMENT ON COLUMN chain_phase_state.redo_in_progress IS
     'This value records an unfinished explicit redo.';
 COMMENT ON COLUMN chain_phase_state.redo_attempt_generation IS

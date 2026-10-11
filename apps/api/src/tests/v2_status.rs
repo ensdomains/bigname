@@ -45,7 +45,7 @@ async fn v2_status_and_startup_chain_discovery_read_phase_state() -> Result<()> 
         )
         "#,
     )
-    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
     .execute(&database.lookup_pool)
     .await?;
     // The indexed block is the family publication's block.
@@ -130,7 +130,7 @@ async fn v2_status_maps_phase_lifecycle_and_heartbeat_to_readiness() -> Result<(
         "UPDATE chain_phase_state SET input_content_hash = $1 \
          WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
     )
-    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
     .execute(&database.lookup_pool)
     .await?;
     rebuild_fixture_families(&database.pool, "ethereum-mainnet", 120, "0xphase-head").await?;
@@ -217,7 +217,8 @@ async fn v2_status_maps_phase_lifecycle_and_heartbeat_to_readiness() -> Result<(
     assert_eq!(payload["data"]["chains"]["1"]["status"], json!("ready"));
     assert_eq!(payload["data"]["status"], json!("ready"));
 
-    // A publication another build wrote is not current for this one.
+    // A publication another build wrote is not current for this one, and neither is one that
+    // records this build's interpreter content hash where the projection content hash belongs.
     publish_status_families(&database, 120, "0xphase-head", "old-interpreter").await?;
     assert_eq!(status_value(state.clone()).await?, json!("degraded"));
     publish_status_families(
@@ -225,6 +226,14 @@ async fn v2_status_maps_phase_lifecycle_and_heartbeat_to_readiness() -> Result<(
         120,
         "0xphase-head",
         bigname_content_hash::INTERPRETER_CONTENT_HASH,
+    )
+    .await?;
+    assert_eq!(status_value(state.clone()).await?, json!("degraded"));
+    publish_status_families(
+        &database,
+        120,
+        "0xphase-head",
+        bigname_content_hash::PROJECTION_CONTENT_HASH,
     )
     .await?;
     assert_eq!(status_value(state.clone()).await?, json!("ready"));
@@ -244,7 +253,7 @@ async fn v2_status_maps_phase_lifecycle_and_heartbeat_to_readiness() -> Result<(
         &database,
         115,
         "0xphase-projected",
-        bigname_content_hash::INTERPRETER_CONTENT_HASH,
+        bigname_content_hash::PROJECTION_CONTENT_HASH,
     )
     .await?;
     assert_eq!(status_value(state.clone()).await?, json!("degraded"));
@@ -252,7 +261,7 @@ async fn v2_status_maps_phase_lifecycle_and_heartbeat_to_readiness() -> Result<(
         &database,
         120,
         "0xphase-head",
-        bigname_content_hash::INTERPRETER_CONTENT_HASH,
+        bigname_content_hash::PROJECTION_CONTENT_HASH,
     )
     .await?;
     assert_eq!(status_value(state.clone()).await?, json!("ready"));
@@ -355,7 +364,7 @@ async fn v2_status_keeps_sepolia_unready_until_verification_floor_is_met() -> Re
         )
         "#,
     )
-    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
     .execute(&database.lookup_pool)
     .await?;
     sqlx::raw_sql(

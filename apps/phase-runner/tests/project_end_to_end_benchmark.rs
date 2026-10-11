@@ -18,7 +18,7 @@ use bigname_lookup::ChainRpcUrls;
 use bigname_project::families::RebuildRanges;
 use bigname_storage::{PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS, load_served_project_generation};
 use phase_runner::{
-    INTERPRETER_CONTENT_HASH, RunnerPhaseProgress,
+    INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH, RunnerPhaseProgress,
     heads::{BlockMarker, HeadMarkers, publish_heads},
     metrics::{RunnerLoopHeartbeat, RunnerMetricsFeed},
     phase::{Phase, PhaseBatchOutcome, PhaseContext, PhaseName, PhaseResume, RunMode},
@@ -401,7 +401,7 @@ async fn compare_with_rebuild(
     let incremental = families(pool).await?;
     let started = Instant::now();
     let token = bigname_project::families::input_token(pool, CHAIN).await?;
-    let mut options = bigname_project::families::FamilyOptions::new(INTERPRETER_CONTENT_HASH);
+    let mut options = bigname_project::families::FamilyOptions::new(PROJECTION_CONTENT_HASH);
     options.max_blocks_per_run = 0;
     let reset = bigname_project::families::apply(
         pool,

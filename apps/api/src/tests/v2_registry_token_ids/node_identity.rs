@@ -236,7 +236,7 @@ async fn redo(database: &TestDatabase, from: i64, to: i64, head: i64) -> Result<
         bigname_project::families::FamilyMode::Redo { from, to: head },
         &token,
         &bigname_project::families::FamilyOptions::new(
-            bigname_content_hash::INTERPRETER_CONTENT_HASH,
+            bigname_content_hash::PROJECTION_CONTENT_HASH,
         ),
     )
     .await?;

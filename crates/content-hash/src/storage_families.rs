@@ -1,6 +1,6 @@
 //! The storage families code (`crates/storage/src/families`) mixes the composition Project's
 //! family step stores with read-only serving queries. Only the composition decides persisted rows,
-//! so only its files are hashed; a reader edit leaves the hash alone.
+//! so only its files are hashed. A reader edit leaves both hashes alone.
 //!
 //! Every production `.rs` file under the root must be listed in exactly one of the two lists below.
 //! A listed composition file that is missing, or an unlisted `.rs` file, fails the hash, so a file
@@ -11,82 +11,186 @@
 
 use std::{collections::BTreeSet, ffi::OsStr, fs, io, path::Path};
 
-use crate::compute::{Input, collect_file, relative_key, source_exclusion};
+use crate::{
+    classes::{Classified, both, project},
+    compute::{Input, collect_file, relative_key, source_exclusion},
+};
 
 pub(crate) const ROOT: &str = "crates/storage/src/families";
 
+/// Lookup decisions, per-key output and inventory dependency emission.
+const LOOKUP: &str = "Project's lookup publication";
+/// Family positions and the emission ordinal Project orders journal rows and hydration by.
+const POSITIONS: &str = "Project's family positions and emission ordinal";
+/// The summary composition and the composed-row loader it calls (`batch::load_chain`).
+const SUMMARY: &str = "Project's name summary composition";
+/// The expiry listing's eligibility and public authority, which the summary stores.
+const EXPIRY: &str = "the expiry eligibility and authority Project's summary stores";
+/// Current ENSv2 path decisions also schedule summary deadlines.
+const PATHS: &str = "ENSv2 path decisions that schedule Project's summary deadlines";
+/// The lifecycle evaluation and the control rows it loads and decides from.
+const LIFECYCLE: &str = "the lifecycle evaluation Project's summary decides from";
+
 /// Reached from Project's family step (`crates/project/src/families`): the name summary
 /// composition (`derived/summary.rs`), its `RequiredOwnerMissing` check, and the family position
-/// ordinals (`position.rs`, `hydrate/{reverse,text}.rs`).
-pub(crate) const COMPOSITION_FILES: &[&str] = &[
-    // Shared lookup decisions, per-key output and inventory dependency emission.
-    "crates/storage/src/families/lookup/mod.rs",
-    "crates/storage/src/families/lookup/types.rs",
-    "crates/storage/src/families/lookup/inventory.rs",
-    "crates/storage/src/families/name/lookup.rs",
-    "crates/storage/src/families/records/address_names.rs",
-    "crates/storage/src/families/records/assemble.rs",
-    "crates/storage/src/families/records/inventory_publication.rs",
-    "crates/storage/src/families/records/inventory_selection.rs",
-    "crates/storage/src/families/records/inventory_types.rs",
-    "crates/storage/src/families/records/inventory_cutoff.rs",
-    "crates/storage/src/families/records/links.rs",
-    "crates/storage/src/families/records/payload.rs",
-    "crates/storage/src/families/records/pointer.rs",
-    "crates/storage/src/families/records/profiles.rs",
-    "crates/storage/src/families/records/rows.rs",
-    "crates/storage/src/families/records/text_hydration.rs",
-    // Family positions and the emission ordinal Project orders journal rows and hydration by.
-    "crates/storage/src/families/position.rs",
-    // The summary composition and the composed-row loader it calls (`batch::load_chain`).
-    "crates/storage/src/families/name/mod.rs",
-    "crates/storage/src/families/name/summary.rs",
-    "crates/storage/src/families/name/batch.rs",
-    "crates/storage/src/families/name/compose.rs",
-    "crates/storage/src/families/name/heads.rs",
-    "crates/storage/src/families/name/wrapper_fields.rs",
-    "crates/storage/src/families/search_dictionary/shape.rs",
-    // The expiry listing's eligibility and public authority, which the summary stores.
-    "crates/storage/src/families/name/list_keys.rs",
-    "crates/storage/src/families/name/loaders.rs",
-    "crates/storage/src/families/name/rendered.rs",
-    "crates/storage/src/families/name/resolvability.rs",
-    // Current ENSv2 path decisions also schedule summary deadlines.
-    "crates/storage/src/families/name/resolution_path.rs",
-    "crates/storage/src/families/name/resolution_path/facts.rs",
-    "crates/storage/src/families/name/resolution_path/physical.rs",
-    "crates/storage/src/families/name/resolution_path/wrapper.rs",
-    "crates/storage/src/families/control/permissions/registry_support.rs",
-    "crates/storage/src/families/records/facts.rs",
-    "crates/storage/src/families/records/mirror.rs",
-    "crates/storage/src/families/records/mod.rs",
-    "crates/storage/src/families/records/serving.rs",
-    "crates/storage/src/families/name/selection.rs",
-    "crates/storage/src/families/name/serving.rs",
-    "crates/storage/src/families/records/address_publication.rs",
-    "crates/storage/src/families/records/address_relation_inputs.rs",
-    "crates/storage/src/families/records/address_relations.rs",
-    "crates/storage/src/families/records/address_roles.rs",
-    "crates/storage/src/families/control/permissions/grants.rs",
-    // The lifecycle evaluation and the control rows it loads and decides from.
-    "crates/storage/src/families/control/cutover.rs",
-    "crates/storage/src/families/control/position.rs",
-    "crates/storage/src/families/control/registry.rs",
-    "crates/storage/src/families/control/rows.rs",
-    "crates/storage/src/families/control/wrapper.rs",
-    "crates/storage/src/families/control/lifecycle/mod.rs",
-    "crates/storage/src/families/control/lifecycle/admission.rs",
-    "crates/storage/src/families/control/lifecycle/canonical.rs",
-    "crates/storage/src/families/control/lifecycle/policy.rs",
-    "crates/storage/src/families/control/lifecycle/control.rs",
-    "crates/storage/src/families/control/lifecycle/expiry.rs",
-    "crates/storage/src/families/control/lifecycle/laterals.rs",
-    "crates/storage/src/families/control/lifecycle/load.rs",
-    "crates/storage/src/families/control/lifecycle/membership.rs",
-    "crates/storage/src/families/control/lifecycle/select.rs",
-    "crates/storage/src/families/control/lifecycle/served.rs",
-    "crates/storage/src/families/control/lifecycle/tombstone.rs",
-    "crates/storage/src/families/control/lifecycle/view.rs",
+/// ordinals (`position.rs`, `hydrate/{reverse,text}.rs`). Every entry is project-class except one
+/// Interpret also reaches.
+pub(crate) const COMPOSITION_FILES: &[Classified] = &[
+    project("crates/storage/src/families/lookup/mod.rs", LOOKUP),
+    project("crates/storage/src/families/lookup/types.rs", LOOKUP),
+    project("crates/storage/src/families/lookup/inventory.rs", LOOKUP),
+    project("crates/storage/src/families/name/lookup.rs", LOOKUP),
+    project(
+        "crates/storage/src/families/records/address_names.rs",
+        LOOKUP,
+    ),
+    project("crates/storage/src/families/records/assemble.rs", LOOKUP),
+    project(
+        "crates/storage/src/families/records/inventory_publication.rs",
+        LOOKUP,
+    ),
+    project(
+        "crates/storage/src/families/records/inventory_selection.rs",
+        LOOKUP,
+    ),
+    project(
+        "crates/storage/src/families/records/inventory_types.rs",
+        LOOKUP,
+    ),
+    project(
+        "crates/storage/src/families/records/inventory_cutoff.rs",
+        LOOKUP,
+    ),
+    project("crates/storage/src/families/records/links.rs", LOOKUP),
+    project("crates/storage/src/families/records/payload.rs", LOOKUP),
+    project("crates/storage/src/families/records/pointer.rs", LOOKUP),
+    project("crates/storage/src/families/records/profiles.rs", LOOKUP),
+    project("crates/storage/src/families/records/rows.rs", LOOKUP),
+    project(
+        "crates/storage/src/families/records/text_hydration.rs",
+        LOOKUP,
+    ),
+    project("crates/storage/src/families/position.rs", POSITIONS),
+    project("crates/storage/src/families/name/mod.rs", SUMMARY),
+    project("crates/storage/src/families/name/summary.rs", SUMMARY),
+    project("crates/storage/src/families/name/batch.rs", SUMMARY),
+    project("crates/storage/src/families/name/compose.rs", SUMMARY),
+    project("crates/storage/src/families/name/heads.rs", SUMMARY),
+    project(
+        "crates/storage/src/families/name/wrapper_fields.rs",
+        SUMMARY,
+    ),
+    project(
+        "crates/storage/src/families/search_dictionary/shape.rs",
+        SUMMARY,
+    ),
+    project("crates/storage/src/families/name/list_keys.rs", EXPIRY),
+    project("crates/storage/src/families/name/loaders.rs", EXPIRY),
+    both(
+        "crates/storage/src/families/name/rendered.rs",
+        "Interpret writes identity search documents through rendered_name_sql_unqualified",
+    ),
+    project("crates/storage/src/families/name/resolvability.rs", EXPIRY),
+    project("crates/storage/src/families/name/resolution_path.rs", PATHS),
+    project(
+        "crates/storage/src/families/name/resolution_path/facts.rs",
+        PATHS,
+    ),
+    project(
+        "crates/storage/src/families/name/resolution_path/physical.rs",
+        PATHS,
+    ),
+    project(
+        "crates/storage/src/families/name/resolution_path/wrapper.rs",
+        PATHS,
+    ),
+    project(
+        "crates/storage/src/families/control/permissions/registry_support.rs",
+        PATHS,
+    ),
+    project("crates/storage/src/families/records/facts.rs", PATHS),
+    project("crates/storage/src/families/records/mirror.rs", PATHS),
+    project("crates/storage/src/families/records/mod.rs", PATHS),
+    project("crates/storage/src/families/records/serving.rs", PATHS),
+    project("crates/storage/src/families/name/selection.rs", PATHS),
+    project("crates/storage/src/families/name/serving.rs", PATHS),
+    project(
+        "crates/storage/src/families/records/address_publication.rs",
+        PATHS,
+    ),
+    project(
+        "crates/storage/src/families/records/address_relation_inputs.rs",
+        PATHS,
+    ),
+    project(
+        "crates/storage/src/families/records/address_relations.rs",
+        PATHS,
+    ),
+    project(
+        "crates/storage/src/families/records/address_roles.rs",
+        PATHS,
+    ),
+    project(
+        "crates/storage/src/families/control/permissions/grants.rs",
+        PATHS,
+    ),
+    project("crates/storage/src/families/control/cutover.rs", LIFECYCLE),
+    project("crates/storage/src/families/control/position.rs", LIFECYCLE),
+    project("crates/storage/src/families/control/registry.rs", LIFECYCLE),
+    project("crates/storage/src/families/control/rows.rs", LIFECYCLE),
+    project("crates/storage/src/families/control/wrapper.rs", LIFECYCLE),
+    project(
+        "crates/storage/src/families/control/lifecycle/mod.rs",
+        LIFECYCLE,
+    ),
+    project(
+        "crates/storage/src/families/control/lifecycle/admission.rs",
+        LIFECYCLE,
+    ),
+    project(
+        "crates/storage/src/families/control/lifecycle/canonical.rs",
+        LIFECYCLE,
+    ),
+    project(
+        "crates/storage/src/families/control/lifecycle/policy.rs",
+        LIFECYCLE,
+    ),
+    project(
+        "crates/storage/src/families/control/lifecycle/control.rs",
+        LIFECYCLE,
+    ),
+    project(
+        "crates/storage/src/families/control/lifecycle/expiry.rs",
+        LIFECYCLE,
+    ),
+    project(
+        "crates/storage/src/families/control/lifecycle/laterals.rs",
+        LIFECYCLE,
+    ),
+    project(
+        "crates/storage/src/families/control/lifecycle/load.rs",
+        LIFECYCLE,
+    ),
+    project(
+        "crates/storage/src/families/control/lifecycle/membership.rs",
+        LIFECYCLE,
+    ),
+    project(
+        "crates/storage/src/families/control/lifecycle/select.rs",
+        LIFECYCLE,
+    ),
+    project(
+        "crates/storage/src/families/control/lifecycle/served.rs",
+        LIFECYCLE,
+    ),
+    project(
+        "crates/storage/src/families/control/lifecycle/tombstone.rs",
+        LIFECYCLE,
+    ),
+    project(
+        "crates/storage/src/families/control/lifecycle/view.rs",
+        LIFECYCLE,
+    ),
 ];
 
 /// Serving reads and module wiring the composition does not call.
@@ -154,18 +258,19 @@ pub(crate) fn collect(
     cfg_test_sources: &BTreeSet<String>,
     inputs: &mut Vec<Input>,
 ) -> io::Result<()> {
-    for relative_path in COMPOSITION_FILES {
+    for entry in COMPOSITION_FILES {
+        let relative_path = entry.path;
         let path = workspace_root.join(relative_path);
         if !path.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!(
-                    "interpreter content hash requires storage family composition source \
+                    "the content hashes require storage family composition source \
                      {relative_path}; if it moved, update COMPOSITION_FILES in the same change"
                 ),
             ));
         }
-        collect_file(workspace_root, &path, inputs)?;
+        collect_file(workspace_root, &path, entry.class, inputs)?;
     }
     check_classified(workspace_root, &workspace_root.join(ROOT), cfg_test_sources)
 }
@@ -190,7 +295,9 @@ fn check_classified(
             continue;
         }
         let relative_path = relative_key(workspace_root, &path)?;
-        if !COMPOSITION_FILES.contains(&relative_path.as_str())
+        if !COMPOSITION_FILES
+            .iter()
+            .any(|entry| entry.path == relative_path)
             && !READER_FILES.contains(&relative_path.as_str())
         {
             return Err(io::Error::new(

@@ -59,10 +59,9 @@ async fn response(State(state): State<RpcState>, Json(request): Json<Value>) -> 
 async fn apply_hydrated(database: &TestDatabase, block: i64, endpoint: &str) -> Result<()> {
     use bigname_project::families::{self, FamilyMode, FamilyOptions};
     let token = families::input_token(&database.pool, CHAIN).await?;
-    let options = FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH)
-        .with_hydration(bigname_lookup::ChainRpcUrls::from_entries(&[format!(
-            "{CHAIN}={endpoint}"
-        )])?);
+    let options = FamilyOptions::new(bigname_content_hash::PROJECTION_CONTENT_HASH).with_hydration(
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("{CHAIN}={endpoint}")])?,
+    );
     let outcome = families::apply(
         &database.pool,
         CHAIN,

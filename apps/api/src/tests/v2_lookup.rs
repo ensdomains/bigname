@@ -2866,7 +2866,7 @@ async fn advance_v2_lookup_phase_only_ethereum_head(
     )
     .bind(block_number)
     .bind(block_hash)
-    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
     .execute(&database.lookup_pool)
     .await?;
     Ok(())

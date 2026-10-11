@@ -383,7 +383,7 @@ async fn ensure_classification_publications(
             ")"
         ))
         .bind(chain_id)
-        .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+        .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
         .fetch_one(&mut *connection)
         .await?;
         if !available {

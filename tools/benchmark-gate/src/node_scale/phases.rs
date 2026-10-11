@@ -229,7 +229,7 @@ async fn project(
         number: head,
         hash: block_hash(head),
     };
-    let options = FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH);
+    let options = FamilyOptions::new(bigname_content_hash::PROJECTION_CONTENT_HASH);
     let resume = store
         .phase_resume(CHAIN, PhaseName::Project, &RunMode::Normal)
         .await?;

@@ -176,6 +176,22 @@ async fn endpoint_exports_failed_phase_and_stale_heartbeat_signals() -> Result<(
         ensure!(!line.contains("hash=") && !line.contains("source="));
     }
     ensure!(body.contains("build_info{"));
+    for label in [
+        format!(
+            "interpreter_content_hash=\"{}\"",
+            phase_runner::INTERPRETER_CONTENT_HASH
+        ),
+        format!(
+            "projection_content_hash=\"{}\"",
+            phase_runner::PROJECTION_CONTENT_HASH
+        ),
+    ] {
+        ensure!(
+            body.lines()
+                .any(|line| line.starts_with("build_info{") && line.contains(&label)),
+            "build_info lacks {label}"
+        );
+    }
 
     cancellation.cancel();
     tokio::task::yield_now().await;
@@ -428,7 +444,7 @@ async fn seed_served_lag_state(pool: &sqlx::PgPool, chain: &str) -> Result<()> {
          WHERE chain_id = $1 AND phase_name = 'project'",
     )
     .bind(chain)
-    .bind(phase_runner::INTERPRETER_CONTENT_HASH)
+    .bind(phase_runner::PROJECTION_CONTENT_HASH)
     .execute(pool)
     .await?;
     sqlx::query(
@@ -443,7 +459,7 @@ async fn seed_served_lag_state(pool: &sqlx::PgPool, chain: &str) -> Result<()> {
          WHERE chain_id = $1 AND phase_name = 'live'",
     )
     .bind(chain)
-    .bind(phase_runner::INTERPRETER_CONTENT_HASH)
+    .bind(phase_runner::PROJECTION_CONTENT_HASH)
     .execute(pool)
     .await?;
     Ok(())
@@ -533,7 +549,7 @@ async fn seed_metric_state(pool: &sqlx::PgPool, chain: &str) -> Result<()> {
          WHERE chain_id = $1 AND phase_name = 'live'",
     )
     .bind(chain)
-    .bind(phase_runner::INTERPRETER_CONTENT_HASH)
+    .bind(phase_runner::PROJECTION_CONTENT_HASH)
     .execute(pool)
     .await?;
     sqlx::query(

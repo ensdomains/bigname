@@ -44,7 +44,7 @@ pub(super) fn position_for_chain(positions: &Value, chain_id: &str) -> Result<Pr
 /// The publication a lookup captures at its start and the database guard
 /// (`revalidate_resolution_lookup_state`) rechecks before any comparison is written.
 pub(super) struct CapturedPublication {
-    /// The marker's position, interpreter hash and sequence, captured with the input rows.
+    /// The marker's position, projection hash and sequence, captured with the input rows.
     pub family: Value,
     /// The marker's block, where same-chain verified calls execute.
     pub position: LookupPosition,

@@ -55,7 +55,7 @@ async fn seed_chain(pool: &sqlx::PgPool, chain: &str) -> Result<()> {
         .bind(status)
         .bind(block)
         .bind(target)
-        .bind(phase_runner::INTERPRETER_CONTENT_HASH)
+        .bind(phase_runner::PROJECTION_CONTENT_HASH)
         .execute(pool)
         .await?;
     }
@@ -121,14 +121,14 @@ async fn served_lag_measures_only_the_live_family_marker() -> Result<()> {
         pool,
         "live-marker",
         "live",
-        phase_runner::INTERPRETER_CONTENT_HASH,
+        phase_runner::PROJECTION_CONTENT_HASH,
     )
     .await?;
     seed_marker(
         pool,
         "rebuilding",
         "bootstrap_pending",
-        phase_runner::INTERPRETER_CONTENT_HASH,
+        phase_runner::PROJECTION_CONTENT_HASH,
     )
     .await?;
     seed_marker(pool, "older-hash", "live", "older-fingerprint").await?;

@@ -616,7 +616,8 @@ collection route carry neither header.
   eligible for `ready` when that completed publication is present and its
   block and time lag are within `BIGNAME_API_STATUS_MAX_BLOCK_LAG` and
   `BIGNAME_API_STATUS_MAX_LAG_SECS`. Readiness also requires the publication's
-  interpreter content hash to match this API build and, at the same height as
+  [projection content hash](glossary.md#projection-content-hash) to match this
+  API build and, at the same height as
   the stored head, its block hash to match exactly. A generation mismatch is
   `degraded`. A running phase without a completed publication is `degraded`;
   lag beyond either threshold is `stale`. A failed

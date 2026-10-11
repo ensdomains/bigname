@@ -7,7 +7,10 @@
 
 use std::{collections::BTreeMap, fs, io, path::Path};
 
-use crate::compute::{Input, assignment_name};
+use crate::{
+    classes::Class,
+    compute::{Input, assignment_name},
+};
 
 pub(crate) const LOCKFILE: &str = "Cargo.lock";
 
@@ -37,7 +40,7 @@ pub(crate) fn collect_semantic_crate_fingerprints(
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "interpreter content hash requires semantic-crate fingerprints from {LOCKFILE}; if \
+                "the content hashes require semantic-crate fingerprints from {LOCKFILE}; if \
                  the lockfile moved, update LOCKFILE in the same change"
             ),
         ));
@@ -60,7 +63,7 @@ pub(crate) fn collect_semantic_crate_fingerprints(
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "interpreter content hash requires a {LOCKFILE} entry for semantic crate \
+                    "the content hashes require a {LOCKFILE} entry for semantic crate \
                      {required}; if persisted output no longer depends on it, update \
                      REQUIRED_SEMANTIC_CRATES in the same change"
                 ),
@@ -81,6 +84,7 @@ pub(crate) fn collect_semantic_crate_fingerprints(
         inputs.push(Input {
             key: format!("semantic-crate:{name}"),
             content,
+            class: Class::Both,
         });
     }
     Ok(())

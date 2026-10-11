@@ -62,7 +62,7 @@ async fn seed_partial_base_address_families(database: &TestDatabase) -> Result<(
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
     let token = bigname_project::families::input_token(&database.pool, chain).await?;
     let mut options = bigname_project::families::FamilyOptions::new(
-        bigname_content_hash::INTERPRETER_CONTENT_HASH);
+        bigname_content_hash::PROJECTION_CONTENT_HASH);
     // Identity at 200 and events at 201..203; leave the target block for the next run.
     options.max_blocks_per_run = 4;
     options.rebuild_ranges = bigname_project::families::RebuildRanges::Off;
@@ -126,7 +126,7 @@ async fn v2_nonempty_ens_address_reads_ignore_an_unrelated_family_rebuild() -> R
 async fn reset_records_families(database: &TestDatabase) -> Result<()> {
     let token = bigname_project::families::input_token(&database.pool, FAMILY_CHAIN).await?;
     let mut options = bigname_project::families::FamilyOptions::new(
-        bigname_content_hash::INTERPRETER_CONTENT_HASH,
+        bigname_content_hash::PROJECTION_CONTENT_HASH,
     );
     options.max_blocks_per_run = 0;
     let outcome = bigname_project::families::apply(

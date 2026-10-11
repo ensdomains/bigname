@@ -3,6 +3,8 @@ use std::{env, path::PathBuf};
 const E2E_MANIFEST_PROFILE_ENV: &str = "BIGNAME_E2E_MANIFEST_PROFILE_ROOT";
 const E2E_MANIFEST_PROFILE_PREFIX: &str = ".bigname-e2e-runtime-profile-";
 
+#[path = "src/classes.rs"]
+mod classes;
 #[path = "src/compute.rs"]
 mod compute;
 #[path = "src/lockfile.rs"]
@@ -19,6 +21,10 @@ fn main() {
         .and_then(|path| path.parent())
         .expect("content-hash must be two directories below the workspace root");
 
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("src/classes.rs").display()
+    );
     println!(
         "cargo:rerun-if-changed={}",
         manifest_dir.join("src/compute.rs").display()
@@ -56,13 +62,16 @@ fn main() {
     }
     println!("cargo:rerun-if-env-changed={E2E_MANIFEST_PROFILE_ENV}");
 
-    let hash =
-        compute::compute(workspace_root).expect("interpreter content hash must be computable");
+    let hashes = compute::compute(workspace_root).expect("content hashes must be computable");
     let mut profiles = manifest_profile_hashes(workspace_root);
     if let Some(profile) = e2e_manifest_profile_hash(workspace_root) {
         profiles.push(profile);
     }
-    let mut generated = format!("pub const INTERPRETER_CONTENT_HASH: &str = {hash:?};\n");
+    let mut generated = format!(
+        "pub const INTERPRETER_CONTENT_HASH: &str = {:?};\n\
+         pub const PROJECTION_CONTENT_HASH: &str = {:?};\n",
+        hashes.interpreter, hashes.projection
+    );
     generated.push_str("pub const HASHED_MANIFEST_PROFILES: &[(&str, &str)] = &[\n");
     for (profile, profile_hash) in profiles {
         generated.push_str(&format!("    ({profile:?}, {profile_hash:?}),\n"));
@@ -70,7 +79,10 @@ fn main() {
     generated.push_str("];\n");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("build output directory"));
     std::fs::write(out_dir.join("interpreter_content_hash.rs"), generated)
-        .expect("interpreter content hash constant must be writable");
+        .expect("content hash constants must be writable");
+    // Not compiled in: release tooling reads it to attribute a rotation to its inputs.
+    std::fs::write(out_dir.join("content_hash_inputs.tsv"), hashes.inputs_tsv())
+        .expect("content hash input list must be writable");
 }
 
 fn manifest_profile_hashes(workspace_root: &std::path::Path) -> Vec<(String, String)> {

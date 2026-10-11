@@ -29,7 +29,7 @@ pub(super) async fn publish(pool: &PgPool, target: i64, mode: FamilyMode) -> Tes
         &marker,
         mode,
         &token,
-        &FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH),
+        &FamilyOptions::new(bigname_content_hash::PROJECTION_CONTENT_HASH),
     )
     .await?;
     assert_eq!(outcome.marker, Some(marker));
@@ -288,7 +288,7 @@ async fn canonical_reservation_deadline_survives_engine_restart_and_passive_expi
             &marker,
             FamilyMode::Rebuild,
             &token,
-            &FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+            &FamilyOptions::new(bigname_content_hash::PROJECTION_CONTENT_HASH)
                 .with_rebuild_ranges(ranges),
         )
         .await?;

@@ -1314,7 +1314,9 @@ redo:
 
 The second case also follows a refusal at a progress write. A later build
 with another interpreter content hash gets out of it: the Interpret redo that
-adopts the new hash supersedes the Project redo.
+adopts the new hash supersedes the Project redo. A build that changes only the
+projection content hash does not, because no Interpret redo supersedes a
+Project redo while Interpret records the build's interpreter content hash.
 
 The redo holds the Live lock only while it settles a stale row. A supervisor
 that starts at that instant and tries to take the Live lock during the hold
@@ -2638,54 +2640,94 @@ the row is left as it was. Witness identity is repaired even when a replacement
 has the same block timestamp. This change rotates the content hash and requires
 full Interpret plus Project re-derivation before publication.
 
-The interpreter content hash covers the current interpretation inputs: the
-adapter, manifest-authority, and project sources, the manifest ABI event
-declarations, and the named semantic dependencies those sources call to decide
-a persisted row — ENS normalization, the typed projected-resolution topology
-serializer and its closed wire vocabularies, plus the resolver-call
-encode/decode, record-selector vocabulary, batched record and reverse-name read
-helpers, and the JSON-RPC envelope interpretation deciding which provider
-response those helpers accept as an answer. The lockfile fingerprints (version
-and checksum) of the semantic dependencies are covered on the same rule:
+Two content hashes cover the interpretation and projection inputs. The
+[interpreter content hash](glossary.md#interpreter-content-hash) covers what
+Interpret persists. The [projection content
+hash](glossary.md#projection-content-hash) covers that hash plus what only
+Project reads: it hashes the project inputs together with the interpreter
+content hash as one more input, so every interpreter change rotates both. Each
+hashed root and file carries one class and a reason
+(`crates/content-hash/src/classes.rs`). An *interpret* or *both* input feeds
+the interpreter content hash, and a *project* input feeds only the projection
+content hash. A file joins the interpreter set when any path Interpret's
+persistence or manifest sync executes can be changed by it. Otherwise it joins
+the projection set when Project's persisted output depends on it. A doubtful
+file is labelled interpret: a wrong project label would leave interpreted rows
+stale with no redo, while a wrong interpret label costs one unneeded Interpret
+redo. A file that production code compiles in with `include_str!` or
+`include_bytes!` takes the class of the files that read it, and interpret when
+both kinds do.
+
+The interpreter set holds the adapter and manifest-authority sources, the
+manifest ABI event declarations, Interpret's persistence stage (below), and the
+named semantic dependencies those sources call to decide a persisted row: ENS
+normalization, the closed wire vocabularies the manifest repository uses, the
+resolver-read features the manifest model re-exports, and the storage code
+Interpret prepares and refreshes identity search documents and label preimages
+through, including the rendered-name SQL those documents embed
+(`crates/storage/src/families/name/rendered.rs`). The lockfile fingerprints
+(version and checksum) of the semantic dependencies are in it on the same rule:
 alloy-sol-types, alloy-sol-macro and its expander and input crates,
 alloy-sol-type-parser, alloy-dyn-abi, and alloy-primitives can change how a raw
 log word decodes into a persisted event body; serde, serde-core, serde-derive,
-and serde-json can change the final projected-topology serialization. The rest
-of the lockfile stays
-outside, so an unrelated dependency bump does not force a re-derivation.
+and serde-json can change how a manifest parses and the final projected-topology
+serialization. The rest of the lockfile stays outside, so an unrelated
+dependency bump does not force a re-derivation.
+
+The projection set holds the project sources and the semantic dependencies only
+Project calls: the typed projected-resolution topology serializer, the chain
+identity a stored resolver summary carries, the resolver-call encode/decode,
+record-selector vocabulary, batched record and reverse-name read helpers, and
+the JSON-RPC envelope interpretation deciding which provider response those
+helpers accept as an answer during hydration.
 Every `.sql` file under `crates/project/src` is a hash input, because the hash
 reads those files whole without asking which code loads them. SQL that only
 tests load, such as fixtures and reference-oracle queries, therefore lives in
 `crates/project/testdata/sql/`, outside the hashed tree, and a content-hash
 test fails when SQL under `crates/project/src` is loaded only by test code.
 The part of the storage families code (`crates/storage/src/families`) that
-Project's family step calls is covered as well: the step stores the [name
-summaries](glossary.md#name-summary) that code composes and orders its rows by
-the family positions defined there, so a change to it rotates the hash and
-forces a rebuild like a project change does. That part is an explicit file list
+Project's family step calls is in the projection set as well: the step stores
+the [name summaries](glossary.md#name-summary) that code composes and orders
+its rows by the family positions defined there, so a change to it rotates the
+projection content hash and forces a Project rebuild like a project change
+does. That part is an explicit file list
 (`COMPOSITION_FILES` in `crates/content-hash/src/storage_families.rs`): the
 summary composition, the composed name-row loader it calls, the lifecycle
 evaluation and control rows that loader reads, and the position ordinals. The
 physical-pointer predicate shared by name composition and Project's dependency
-walk is also in that composition list. The
+walk is also in that composition list. The rendered-name SQL is the one
+composition file in the interpreter set, because Interpret writes search
+documents through it. The
 read-only queries beside it (search and bound-name listings, record, reverse,
 permission, children and topology readers) are listed as readers and stay
 outside, so an API-only change there needs no redo. Every production `.rs` file
 under that directory must be in exactly one of the two lists: a listed
 composition file that is missing, or an unlisted `.rs` file, fails the build, so
 a file cannot move into or out of the hashed set unreviewed. A file the
-composition embeds, such as SQL, must be listed as composition by hand. Also covered are
-`crates/storage/src/address_names/query.rs` and its
+composition embeds, such as SQL, must be listed as composition by hand. Also in
+the projection set are `crates/storage/src/address_names/query.rs` and its
 `query/timestamps.rs` helper, whose expiry and registration timestamp reads the
 summaries store, plus `crates/storage/src/unix_seconds.rs` and `expiry.rs`, which
 decode exact expiry and classify the contract-specific absent-expiry values.
 The rest of the
 storage crate serves reads and stays outside.
-Interpret's persistence stage is covered on the
+Interpret's persistence stage is in the interpreter set on the
 same rule: which interpreted row wins a conflict, how a redo range reopens and
 reanchors bindings, and which surfaces a normalizer-version recompute
 activates all decide which identity, discovery, and label-preimage rows the
 projections then read, so they are interpretation rather than plumbing.
+
+Three tests hold the classes. The crate graph guard proves the root labels: no
+interpret-side crate depends on `bigname-project`, and `bigname-project`
+depends on none of the adapter, manifest and interpret crates. The interpret
+closure guard parses every interpret- and both-class file and fails when a path
+it names resolves to a project-class file or to a file neither hash covers,
+following `use` re-exports. Its few exemptions each name the item and a reason,
+such as error plumbing that aborts a write and never shapes a row. A third test
+checks that every input has exactly one class and a reason. Each build writes
+both hashes and the list of every input with its class and content hash
+(`content_hash_inputs.tsv` beside the generated constants), which
+`scripts/check-upstream-rotation` compares between two trees.
 Interpret's batch sizing stays outside, because completed walks that fold the same events into
 differently sized physical batches produce the same rows. Request-scoped
 serving is outside because it writes no interpreted, discovery, or projection
@@ -2803,8 +2845,22 @@ binary clears the redo cursor written under the prior interpreter content hash
 and walks the range from its beginning while retaining the durable audit
 association. A Project redo the prior hash started and left unfinished is superseded when
 the new hash's Interpret redo starts, in the same transaction, and stamped again
-when that redo completes. Moving a covered semantic source without updating the covered set
-fails the build rather than silently narrowing the fingerprint.
+when that redo completes.
+A projection content hash rotation on its own, where Interpret records this
+binary's interpreter content hash and Project another projection content hash,
+needs one full-range Project redo and no Interpret redo or watch-set
+attestation. The runner never starts that redo itself. A normal Project or Live
+start is refused with `redo the full range A..=B of phase project alone` and the
+`phase-runner redo --phase project` command to run, and a Project redo short of
+that range is refused with the full range. A Project redo that began under
+another projection content hash restarts from the first block instead of
+resuming its cursor. While it is active, an Interpret redo is refused and names
+that Project redo, with the interrupted redo's range, to finish first: no
+Interpret redo supersedes it while Interpret records this binary's interpreter
+content hash. A rerun short of the full range is refused with the full range
+printed. Moving a covered
+semantic source without updating the covered set fails the build rather than
+silently narrowing the fingerprint.
 
 ### Walk index set
 
@@ -3018,7 +3074,8 @@ does not change which stored projection rows are authoritative or when they are
 rebuilt.
 
 Every selection also requires a live [family marker](glossary.md#family-marker)
-with the API's compiled interpreter content hash, at or below the newest stored
+with the API's compiled [projection content
+hash](glossary.md#projection-content-hash), at or below the newest stored
 head and at most the API's
 [publication lag tolerance](glossary.md#publication-lag-tolerance) (one block
 by default) behind it. The API reads only projections eligible for the selected

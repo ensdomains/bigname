@@ -1,5 +1,5 @@
-//! The range a phase must redo to adopt this binary's interpreter content hash, and the Project
-//! stamp an Interpret redo leaves so that range is what the follow-on Project redo runs.
+//! The range a phase must redo to adopt this binary's content hash for it, and the Project stamp
+//! an Interpret redo leaves so that range is what the follow-on Project redo runs.
 use sqlx::{Postgres, Transaction};
 
 use crate::{
@@ -79,6 +79,8 @@ pub(crate) async fn require_full_hash_redo(
         ));
     };
     if range != full {
+        // Release tooling parses this wording to rerun with the printed full range. Do not reword
+        // it.
         return Err(RunnerError::new(
             ErrorKind::ContentHashMismatch,
             format!(
@@ -92,10 +94,10 @@ pub(crate) async fn require_full_hash_redo(
 }
 
 /// Stamp the Project redo a completed Interpret redo requires. While Project still records
-/// another hash, its redo must adopt this one, which needs the full range: that can reach past
-/// Project's own head up to the Ingest handoff (Project behind Interpret when the release landed),
-/// so the stamp is not clipped to Project's head. Otherwise the stamp covers `range` up to
-/// Project's head, as before.
+/// another projection content hash, its redo must adopt this one, which needs the full range.
+/// That range can reach past Project's own head up to the Ingest handoff (Project behind
+/// Interpret when the release landed), so the stamp is not clipped to Project's head. Otherwise
+/// the stamp covers `range` up to Project's head, as before.
 pub(crate) async fn stamp_project_after_interpret(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -118,7 +120,7 @@ pub(crate) async fn stamp_project_after_interpret(
         )
     })?;
     if let Some((Some(head), hash)) = project
-        && hash.as_deref() != Some(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+        && hash.as_deref() != Some(bigname_content_hash::PROJECTION_CONTENT_HASH)
         && let Some(full) =
             full_hash_range(transaction, chain_id, PhaseName::Project, Some(head), false).await?
     {

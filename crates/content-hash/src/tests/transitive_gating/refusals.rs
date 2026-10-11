@@ -1,13 +1,13 @@
 //! The shapes the walk refuses rather than guess, and the files it must parse.
 
-use super::interpreter_content_hash;
+use super::projection_content_hash;
 use super::{ADAPTERS_LIB, SampleTree, adapters_tree, assert_names, hash_error, is_input};
 
 #[test]
 fn a_walked_file_without_module_text_must_parse() {
     let tree = adapters_tree("mod present;\n");
     tree.write("crates/adapters/src/schema_v2/present.rs", "fn broken( {\n");
-    let error = interpreter_content_hash(tree.path()).expect_err("every walked file must parse");
+    let error = projection_content_hash(tree.path()).expect_err("every walked file must parse");
     assert!(
         error.to_string().contains("could not parse"),
         "unexpected error: {error}"
@@ -18,7 +18,7 @@ fn a_walked_file_without_module_text_must_parse() {
 fn an_unparseable_production_file_behind_a_feature_fails_the_hash() {
     let tree = adapters_tree("#[cfg(feature = \"reth\")]\nmod present;\n");
     tree.write("crates/adapters/src/schema_v2/present.rs", "mod broken {\n");
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("an unparseable production module must fail the hash");
     assert!(
         error.to_string().contains("could not parse"),
@@ -31,7 +31,7 @@ fn a_cfg_attr_path_on_an_inline_module_is_refused() {
     let tree = adapters_tree("#[cfg_attr(test, path = \"other\")]\nmod inline {\n    mod x;\n}\n");
     tree.write("crates/adapters/src/schema_v2/inline/x.rs", "fn x() {}\n");
     tree.write("crates/adapters/src/other/x.rs", "fn x() {}\n");
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("an inline cfg_attr path must fail the hash");
     assert_names(
         &error.to_string(),
@@ -46,7 +46,7 @@ fn an_include_with_a_computed_path_is_refused() {
         ADAPTERS_LIB,
         "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\n",
     );
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("a computed include! path must fail the hash");
     assert_names(&error.to_string(), &["include!", ADAPTERS_LIB]);
 }
@@ -58,7 +58,7 @@ fn a_macro_that_declares_a_module_is_refused() {
         ADAPTERS_LIB,
         "macro_rules! mount {\n    ($name:ident) => {\n        mod $name;\n    };\n}\n",
     );
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("a macro declaring a module must fail the hash");
     assert_names(&error.to_string(), &["macro_rules!", "mount", ADAPTERS_LIB]);
 }
@@ -90,7 +90,7 @@ fn a_macro_that_includes_a_file_is_refused() {
         "macro_rules! helpers {\n    () => {\n        include!(\"helpers.rs\");\n    };\n}\n",
     );
     tree.write("crates/adapters/src/helpers.rs", "fn helpers() {}\n");
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("a macro calling include! must fail the hash");
     assert_names(
         &error.to_string(),
@@ -109,7 +109,7 @@ fn a_cfg_attr_alternate_need_not_have_its_children() {
 }
 
 fn assert_refused(tree: &SampleTree, sites: &[&str]) {
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("a module outside the hashed sources must fail the hash");
     assert_names(&error.to_string(), sites);
 }
@@ -167,7 +167,7 @@ fn a_test_only_path_module_outside_the_source_root_stays_allowed() {
          mod shared;\n",
     );
     tree.write("crates/adapters/tests/shared.rs", "pub fn shared() {}\n");
-    interpreter_content_hash(tree.path()).expect("a test-only #[path] module must hash");
+    projection_content_hash(tree.path()).expect("a test-only #[path] module must hash");
 }
 
 #[test]
@@ -207,7 +207,7 @@ fn a_module_assembled_from_macro_arguments_is_refused() {
 fn a_macro_body_holding_mod_anywhere_is_refused() {
     let tree =
         adapters_tree("macro_rules! wrap {\n    ($n:ident) => {\n        mod $n {}\n    };\n}\n");
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("a macro body holding mod must fail the hash");
     assert_names(
         &error.to_string(),
@@ -254,7 +254,7 @@ fn a_use_that_may_alias_an_include_macro_is_refused() {
     let tree =
         adapters_tree("use std::include_str as load;\nconst T: &str = load!(\"table.txt\");\n");
     tree.write("crates/adapters/src/table.txt", "a\n");
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("an aliased include macro must fail the hash");
     assert_names(
         &error.to_string(),
@@ -267,7 +267,7 @@ fn a_use_that_may_alias_an_include_macro_is_refused() {
         "crates/lookup/src/abi.rs",
         "use core::{include_bytes};\n",
     );
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("an imported include macro in a semantic source must fail the hash");
     assert_names(
         &error.to_string(),
@@ -307,7 +307,7 @@ fn an_include_macro_passed_as_a_token_is_refused() {
          const T: &str = emit!(include_str, \"table.txt\");\n",
     );
     tree.write("crates/adapters/src/table.txt", "a\n");
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("an include macro passed as a token must fail the hash");
     assert_names(
         &error.to_string(),
@@ -317,7 +317,7 @@ fn an_include_macro_passed_as_a_token_is_refused() {
     let tree = adapters_tree(
         "macro_rules! load {\n    ($p:literal) => {\n        call!(include_str, $p)\n    };\n}\n",
     );
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("a macro body naming an include macro must fail the hash");
     assert_names(&error.to_string(), &["macro_rules!", "load", "include_str"]);
 }

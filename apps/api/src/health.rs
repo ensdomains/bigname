@@ -33,6 +33,7 @@ pub(crate) struct HealthIdentityResponse {
     pub(crate) version: &'static str,
     pub(crate) build_sha: &'static str,
     pub(crate) interpreter_content_hash: &'static str,
+    pub(crate) projection_content_hash: &'static str,
 }
 
 #[derive(Serialize)]
@@ -197,6 +198,7 @@ pub(crate) async fn health(
                 version: SOFTWARE_VERSION,
                 build_sha: BUILD_SHA,
                 interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH,
+                projection_content_hash: bigname_content_hash::PROJECTION_CONTENT_HASH,
             },
             status: if aggregate_ready { "ready" } else { "degraded" },
             api_status: if api_ready { "ready" } else { "degraded" },

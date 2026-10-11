@@ -1149,9 +1149,8 @@ async fn required_ingest_redo_demotes_an_overlapping_completed_verify_attestatio
         "UPDATE chain_phase_state
          SET phase_status = 'completed', current_block_number = $2,
              current_block_hash = $3, target_block_number = $2,
-             target_block_hash = $3, input_content_hash = CASE
-                 WHEN phase_name IN ('interpret', 'project') THEN $4
-             END,
+             target_block_hash = $3, input_content_hash = CASE phase_name WHEN 'project' THEN $5
+                 WHEN 'interpret' THEN $4 END,
              live_handoff_block_number = CASE
                  WHEN phase_name = 'ingest' THEN $2
              END,
@@ -1166,6 +1165,7 @@ async fn required_ingest_redo_demotes_an_overlapping_completed_verify_attestatio
     .bind(tip)
     .bind(verify_attestation_hash(tip))
     .bind(phase_runner::INTERPRETER_CONTENT_HASH)
+    .bind(phase_runner::PROJECTION_CONTENT_HASH)
     .execute(scratch.pool())
     .await?;
     let references = Arc::new(AttestationReferences::default());

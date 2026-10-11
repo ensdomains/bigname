@@ -16,9 +16,9 @@ mod expiry_policy;
 pub use expiry_policy::expected_registration_expiry;
 
 pub const CHAIN: &str = "ethereum-sepolia";
-/// The interpreter hash of this build: the composed name reader serves only a marker written by
-/// it, as the publication fence does.
-pub const CONTENT_HASH: &str = bigname_test_support::INTERPRETER_CONTENT_HASH;
+/// The projection content hash of this build: the composed name reader serves only a marker
+/// written by it, as the publication fence does.
+pub const CONTENT_HASH: &str = bigname_test_support::PROJECTION_CONTENT_HASH;
 
 pub fn hash(block: i64) -> String {
     format!("0x{block:064x}")

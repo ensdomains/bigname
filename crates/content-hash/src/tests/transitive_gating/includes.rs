@@ -2,7 +2,7 @@
 //! keep their files in the hash.
 
 use super::{
-    ADAPTERS_LIB, SampleTree, assert_names, hash_error, interpreter_content_hash, is_input, rotates,
+    ADAPTERS_LIB, SampleTree, assert_names, hash_error, is_input, projection_content_hash, rotates,
 };
 
 const TESTS: &str = "crates/adapters/src/tests.rs";
@@ -90,7 +90,7 @@ fn an_include_str_with_a_computed_path_is_refused() {
         ADAPTERS_LIB,
         "const DATA: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/data.txt\"));\n",
     );
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("a computed include_str! path must fail the hash");
     assert_names(
         &error.to_string(),
@@ -106,7 +106,7 @@ fn a_macro_that_reads_a_file_as_data_is_refused() {
         "macro_rules! data {\n    () => {\n        include_bytes!(\"shared.rs\")\n    };\n}\n",
     );
     tree.write(SHARED, "1\n");
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("a macro calling include_bytes! must fail the hash");
     assert_names(
         &error.to_string(),
@@ -166,7 +166,7 @@ fn a_hashed_file_including_a_file_that_is_not_rust_is_refused() {
         "pub fn value() -> u8 {\n    include!(\"value.txt\")\n}\n",
     );
     tree.write("crates/adapters/src/value.txt", "1\n");
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("an include! of an unhashed file must fail the hash");
     assert_names(
         &error.to_string(),
@@ -183,7 +183,7 @@ fn a_hashed_file_including_rust_outside_the_hashed_roots_is_refused() {
     let tree = SampleTree::new();
     tree.write(ADAPTERS_LIB, "include!(\"../shared/items.rs\");\n");
     tree.write("crates/adapters/shared/items.rs", "fn shared() {}\n");
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("an include! of an unhashed file must fail the hash");
     assert_names(
         &error.to_string(),
@@ -204,7 +204,7 @@ fn an_unhashed_file_may_include_a_file_that_is_not_rust() {
         "pub fn value() -> u8 {\n    include!(\"load/value.txt\")\n}\n",
     );
     tree.write("crates/interpret/src/load/value.txt", "1\n");
-    interpreter_content_hash(tree.path()).expect("an unhashed file's include! is not hashed");
+    projection_content_hash(tree.path()).expect("an unhashed file's include! is not hashed");
 }
 
 #[test]
@@ -226,7 +226,7 @@ fn a_hashed_file_reading_data_outside_the_workspace_is_refused() {
             "pub fn data() -> &'static str {{\n    include_str!(\"../../../../{name}\")\n}}\n"
         ),
     );
-    let result = interpreter_content_hash(workspace);
+    let result = projection_content_hash(workspace);
     std::fs::remove_file(&outside).expect("remove outside file");
     let error = result.expect_err("a data read outside the workspace must fail the hash");
     assert_names(&error.to_string(), &[&name, "outside workspace root"]);
@@ -261,7 +261,7 @@ fn a_semantic_source_including_an_unhashed_file_is_refused() {
         "include!(\"abi_tables.rs\");\n",
     );
     tree.write("crates/lookup/src/abi_tables.rs", "fn tables() {}\n");
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("an include! of an unhashed file must fail the hash");
     assert_names(
         &error.to_string(),
@@ -303,7 +303,7 @@ fn a_macro_invocation_declaring_a_module_in_a_semantic_source_is_refused() {
         "crates/lookup/src/abi.rs",
         "my_macro! {\n    mod decl;\n}\n",
     );
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("a macro invocation declaring a module must fail the hash");
     assert_names(
         &error.to_string(),
@@ -341,7 +341,7 @@ fn a_semantic_source_may_include_an_absent_file_under_a_cfg_that_may_be_off() {
         "crates/lookup/src/abi.rs",
         "#[cfg(any())]\nmod disabled {\n    include!(\"absent.rs\");\n}\n",
     );
-    interpreter_content_hash(tree.path()).expect("an optional absent include target must hash");
+    projection_content_hash(tree.path()).expect("an optional absent include target must hash");
 
     // A present target under the same cfg is still walked and held to the hashed-source rule.
     super::write_mounted(
@@ -350,7 +350,7 @@ fn a_semantic_source_may_include_an_absent_file_under_a_cfg_that_may_be_off() {
         "#[cfg(feature = \"x\")]\nmod enabled {\n    include!(\"abi_tables.rs\");\n}\n",
     );
     tree.write("crates/lookup/src/abi_tables.rs", "const T: u8 = 1;\n");
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("a present unhashed include target must fail the hash");
     assert_names(
         &error.to_string(),

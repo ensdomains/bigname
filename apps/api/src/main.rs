@@ -118,6 +118,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         version = SOFTWARE_VERSION,
         build_sha = BUILD_SHA,
         interpreter_content_hash = bigname_content_hash::INTERPRETER_CONTENT_HASH,
+        projection_content_hash = bigname_content_hash::PROJECTION_CONTENT_HASH,
         request_timeout_ms = args.bounds.request_timeout_ms,
         db_statement_timeout_ms = args.bounds.db_statement_timeout_ms,
         health_database_check_timeout_ms = HEALTH_DATABASE_CHECK_TIMEOUT.as_millis(),

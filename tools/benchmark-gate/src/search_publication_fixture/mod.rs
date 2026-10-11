@@ -180,9 +180,10 @@ async fn publish(pool: &PgPool, chain: &str, block: i64, clock: i64) -> Result<(
         .bind(chain).bind(&hash).bind(block).execute(pool).await?;
     // The existing normal-input fixture admission state; the family marker below is written only by Project.
     sqlx::query("INSERT INTO chain_phase_state(chain_id,phase_name,phase_status,current_block_number,current_block_hash,target_block_number,target_block_hash,input_content_hash,started_at,finished_at)
-        SELECT $1,phase,'completed',$2,$3,$2,$3,$4,now(),now() FROM unnest(ARRAY['interpret','project']) phase
-        ON CONFLICT(chain_id,phase_name) DO UPDATE SET phase_status='completed',current_block_number=$2,current_block_hash=$3,target_block_number=$2,target_block_hash=$3,input_content_hash=$4,finished_at=now(),updated_at=now()")
-        .bind(chain).bind(block).bind(&hash).bind(bigname_content_hash::INTERPRETER_CONTENT_HASH).execute(pool).await?;
+        SELECT $1,phase,'completed',$2,$3,$2,$3,CASE phase WHEN 'project' THEN $5 ELSE $4 END,now(),now() FROM unnest(ARRAY['interpret','project']) phase
+        ON CONFLICT(chain_id,phase_name) DO UPDATE SET phase_status='completed',current_block_number=$2,current_block_hash=$3,target_block_number=$2,target_block_hash=$3,input_content_hash=EXCLUDED.input_content_hash,finished_at=now(),updated_at=now()")
+        .bind(chain).bind(block).bind(&hash).bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+        .bind(bigname_content_hash::PROJECTION_CONTENT_HASH).execute(pool).await?;
     let token = bigname_project::families::input_token(pool, chain).await?;
     let outcome = bigname_project::families::apply(
         pool,
@@ -194,7 +195,7 @@ async fn publish(pool: &PgPool, chain: &str, block: i64, clock: i64) -> Result<(
         bigname_project::families::FamilyMode::Rebuild,
         &token,
         &bigname_project::families::FamilyOptions::new(
-            bigname_content_hash::INTERPRETER_CONTENT_HASH,
+            bigname_content_hash::PROJECTION_CONTENT_HASH,
         ),
     )
     .await?;

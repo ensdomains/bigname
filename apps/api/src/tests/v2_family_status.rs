@@ -26,7 +26,7 @@ async fn seed_family_status_fixture(database: &TestDatabase) -> Result<AppState>
              $1, now(), now()
          )",
     )
-    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
     .execute(&database.lookup_pool)
     .await?;
     publish_test_families_on(&database.lookup_pool, "ethereum-mainnet", 119).await?;

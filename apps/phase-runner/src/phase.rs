@@ -162,8 +162,8 @@ pub struct PhaseContext {
 pub struct RedoAttemptFence {
     pub generation: i64,
     pub execution_range: BlockRange,
-    /// The attempt resumes an interrupted redo of the same mode and range under the same
-    /// interpreter content hash, so the redo's saved progress was kept; Project may then resume
+    /// The attempt resumes an interrupted redo of the same mode and range under the same content
+    /// hash, so the redo's saved progress was kept; Project may then resume
     /// the family rebuild the interrupted attempt left.
     pub resumes_interrupted: bool,
 }

@@ -445,17 +445,20 @@ checks turn the setting off themselves, transaction-locally, and put the
 caller's value back; `scripts/check-schema` proves that for each of them.
 
 Adding, editing, or deleting a covered interpreter input rotates the compiled
-[interpreter content hash](../glossary.md#interpreter-content-hash);
-`docs/storage.md` names what is covered. Covered files are hashed whole, so
-editing a unit test that lives inside one rotates the hash as surely as
-changing its production code. Do not mix new interpretation output with rows
-published under the old hash. For such a release:
+[interpreter content hash](../glossary.md#interpreter-content-hash) and, with
+it, the [projection content hash](../glossary.md#projection-content-hash). A
+covered input only Project reads rotates the projection content hash alone.
+`docs/storage.md` names what is covered and which hash each input feeds.
+Covered files are hashed whole, so editing a unit test that lives inside one
+rotates the hash as surely as changing its production code. Do not mix new
+interpretation or projection output with rows published under the old hash.
+For such a release:
 
 A planned [re-derivation boundary](../glossary.md#re-derivation-boundary) may
 combine separately reviewed and separately merged PRs. Before merging the first
 one, the release record must list the complete artifact set, intended per-chain
 product and diagnostic deltas, generated watch-plan widening, historical-fetch
-range, combined content hash, acceptance corpus, and rollback point. Do not
+range, both content hashes, acceptance corpus, and rollback point. Do not
 deploy any subset. In the test environment, run the slice-isolation gates and a
 combined-artifact comparison that permits only the recorded deltas. Production
 publication and readiness remain per chain rather than cross-chain atomic; keep
@@ -466,6 +469,12 @@ Before restoring traffic, run the separate
 [production-scale benchmark gate](benchmark-gate.md) against a disposable
 production-shaped copy and the drained new API generation. A small test database
 run is not release evidence.
+
+A release that rotates only the projection content hash follows the same steps
+but skips the Interpret redo of step 7. It runs only the full-history Project
+redo of step 8, with no attestation, over the range the runner prints when it
+refuses to start Project (`redo the full range A..=B of phase project alone`).
+The runner never starts that redo itself.
 
 A phase-runner restart during a re-walk rebuilds its session cache with a full
 ranked scan over all interpreted events. That scan is expensive at production
@@ -724,12 +733,11 @@ ordinary index build blocks writes. After the new binary starts in step 9, run
 [`ops/project-progressive/validate-after-switch.sql`](../../ops/project-progressive/validate-after-switch.sql),
 which fails while either earlier label-array index still exists.
 
-This release also edits Project SQL, a covered input of the
-[interpreter content hash](../glossary.md#interpreter-content-hash), so the new
-binary's hash differs from the running one's and it must re-walk the complete
-retained range before normal derived writes continue: run the full-history
-Interpret and Project redos of steps 7 and 8 before step 9, and record the new
-hash in the release record.
+This release also edited Project SQL, then a covered input of the single
+content hash, so the new binary's hash differed from the running one's and it
+had to re-walk the complete retained range before normal derived writes
+continued: run the full-history Interpret and Project redos of steps 7 and 8
+before step 9, and record the new hash in the release record.
 
 On a deployment that already recorded
 `20260922010100_project_mirror_scope_indexes.sql` (Sepolia), update its recorded
@@ -1248,8 +1256,13 @@ in the same step.
    row rather than the log. The Interpret redo's completion then stamps the
    Project redo again under the new hash. The Interpret redo refuses with a lock error while any runner still
    holds the Project lock; stop that runner and rerun. A Project redo whose row
-   records the running binary's hash is never superseded: it still blocks the
-   Interpret redo until it is completed by rerunning its reported command. While
+   records the running binary's projection content hash is never superseded: it
+   still blocks the Interpret redo until it is completed by rerunning its
+   reported command. Nor is a Project redo of another projection content hash
+   while Interpret records the running binary's interpreter content hash: the
+   Interpret redo is refused and names that Project redo, with the interrupted
+   redo's range, to finish first. A rerun short of the full range is refused
+   with the full range printed. Rerun over that range. While
    Project records the prior hash, the stamp reaches from the first ingested
    block to the Ingest handoff or Project's recorded head, whichever is higher,
    which is the range Project needs to adopt the new hash, even when Project
@@ -1262,7 +1275,7 @@ in the same step.
    stopped. If it stops part-way, rerun the same command. The rerun resumes the
    owned-key family rebuild from the family marker instead of starting again at
    the first block when all of these hold: the range is the same; the Project
-   row still records the running binary's interpreter content hash, so neither
+   row still records the running binary's projection content hash, so neither
    a binary with another hash nor a manifest or authority invalidation (which
    writes an invalidation marker in place of the hash) intervened; the rebuild
    was left by the attempt immediately before the rerun (a process killed after
@@ -1722,7 +1735,8 @@ The restore-or-re-roll decision was validated on 2026-07-29.
 4. Apply the release's reviewed re-derivation decision before starting
    services. Any deploy that changes the interpreter content hash requires the
    full re-walk under the [planned re-derivation
-   boundary](#planned-migration-and-fingerprint-boundary). A semantic change
+   boundary](#planned-migration-and-fingerprint-boundary), and one that changes
+   only the projection content hash requires the full-range Project redo. A semantic change
    outside that hash can also require re-derivation; review the surfaces listed
    under [interpretation replay](../storage.md#interpretation-replay). Keep the
    stack down until every required re-derivation step completes.

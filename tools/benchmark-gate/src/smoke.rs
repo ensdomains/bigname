@@ -122,7 +122,7 @@ async fn prepare_existing_projection(pool: &PgPool) -> Result<()> {
         hash: fixture::block_hash(HEAD),
     };
     let options = bigname_project::families::FamilyOptions::new(
-        bigname_content_hash::INTERPRETER_CONTENT_HASH,
+        bigname_content_hash::PROJECTION_CONTENT_HASH,
     );
     let mut mode = bigname_project::families::FamilyMode::Rebuild;
     loop {

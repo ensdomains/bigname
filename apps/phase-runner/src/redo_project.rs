@@ -51,7 +51,7 @@ pub(crate) async fn execution_range(
         .await?
         .ok_or_else(|| RunnerError::data_integrity("Project redo target is not readable"))?;
     let options = bigname_project::families::FamilyOptions::new(
-        bigname_content_hash::INTERPRETER_CONTENT_HASH,
+        bigname_content_hash::PROJECTION_CONTENT_HASH,
     )
     .with_resumed_redo(resumes);
     let (from, to) = bigname_project::families::redo_extent(

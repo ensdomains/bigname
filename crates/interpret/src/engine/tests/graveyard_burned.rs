@@ -1325,7 +1325,7 @@ async fn publish(pool: &PgPool, target: i64, mode: FamilyMode) -> TestResult {
         &marker,
         mode,
         &token,
-        &FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH),
+        &FamilyOptions::new(bigname_content_hash::PROJECTION_CONTENT_HASH),
     )
     .await?;
     assert_eq!(outcome.marker, Some(marker));

@@ -93,7 +93,7 @@ pub(super) async fn run(
     }
 
     let rebuilding = active.filter(|record| record.state == State::Rebuilding);
-    // The same redo rerun after a stop (the runner kept its range, interpreter hash and saved
+    // The same redo rerun after a stop (the runner kept its range, projection hash and saved
     // progress) finds the rebuild the attempt just before it left. A rebuild depends on its input,
     // not on its attempt: carry it over to this attempt and resume it. Another range, a moved
     // input revision or families written under another hash start it again below.

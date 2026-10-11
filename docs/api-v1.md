@@ -940,7 +940,8 @@ failed Project or expired heartbeat maps to `stale`; an active Interpret redo
 or a paused, redoing, or missing-heartbeat Project maps
 to `degraded`. A running Project with a completed publication remains eligible
 for `ready` when its block and time lag are within the configured thresholds,
-its interpreter content hash matches this API build, and a same-height
+its [projection content hash](glossary.md#projection-content-hash) matches
+this API build, and a same-height
 publication has the stored head's exact block hash. These checks read the
 [family marker](glossary.md#family-marker), which must also be `live`, on
 readable lineage, and at most the
@@ -1047,7 +1048,7 @@ concurrent replacement of any of them, including the `default.reverse`
 registrar declaration, returns `409 stale` and no verified answer.
 
 Verified lookup captures a live family publication before provider execution.
-The post-call guard compares its block identity, interpreter content hash and
+The post-call guard compares its block identity, projection content hash and
 marker sequence, alongside the stored head it was admitted against and the
 manifest declarations. A
 new publication or same-height republish returns `409 stale`. An Interpret or
@@ -1064,7 +1065,7 @@ publication, such as an older `safe` or `finalized` position or an `at` before
 or after the publication's block, still reports the verified section `stale`.
 
 Indexed snapshot selection uses the [family marker](glossary.md#family-marker).
-It must be `live`, carry this build's interpreter content hash, sit on readable
+It must be `live`, carry this build's projection content hash, sit on readable
 lineage and trail the stored head by at most the publication lag tolerance:
 `BIGNAME_API_PUBLICATION_LAG_TOLERANCE_BLOCKS`, one block by default, never
 negative, and one count for every chain. A `bootstrap_pending` marker means a
@@ -1665,7 +1666,7 @@ The API selects current `latest`, `safe`, and `finalized` positions from
 `bigname_phase.chain_heads` and obtains their timestamps from readable
 `bigname_phase.chain_lineage`. Every selection is available only when a live
 [family marker](glossary.md#family-marker) carries the API's compiled
-interpreter content hash on readable lineage at most the publication lag
+projection content hash on readable lineage at most the publication lag
 tolerance behind the latest head (see the publication-lag rule above); the
 Project phase may be running meanwhile. Timestamp `at` selection and opaque-token replay
 still choose historical positions: every supplied or resolved position must

@@ -137,7 +137,7 @@ fn preflight_failure_report_records_observed_totals_and_floors() {
         production,
         ApiTargetIdentity {
             build_sha: "release".to_owned(),
-            interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH.to_owned(),
+            projection_content_hash: bigname_content_hash::PROJECTION_CONTENT_HASH.to_owned(),
             database_identity: "keccak256:database".to_owned(),
         },
         "keccak256:database".to_owned(),
@@ -159,7 +159,7 @@ fn reachable_health_without_database_identity_returns_a_red_report() {
         HealthResponse {
             identity: HealthIdentity {
                 build_sha: "release".to_owned(),
-                interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH.to_owned(),
+                projection_content_hash: bigname_content_hash::PROJECTION_CONTENT_HASH.to_owned(),
             },
             database: HealthDatabase { identity: None },
         },

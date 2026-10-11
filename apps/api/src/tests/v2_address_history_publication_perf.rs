@@ -34,7 +34,7 @@ async fn address_history_read_retained_without_count() -> Result<()> {
     let (number, hash, generation, content_hash): (i64, String, String, String) = sqlx::query_as(
         "SELECT current_block_number,current_block_hash,sequence::text,input_content_hash FROM project_family_marker WHERE chain_id=$1",
     ).bind(CHAIN).fetch_one(&pool).await?;
-    anyhow::ensure!(content_hash == bigname_content_hash::INTERPRETER_CONTENT_HASH);
+    anyhow::ensure!(content_hash == bigname_content_hash::PROJECTION_CONTENT_HASH);
     let kinds: Vec<String> = match mode.as_str() {
         "direct" => vec!["RegistrationGranted".to_owned()],
         "record-page" => vec![
@@ -197,7 +197,7 @@ async fn address_history_publish_retained_performance_fixture() -> Result<()> {
             bigname_project::families::FamilyMode::Normal,
             &token,
             &bigname_project::families::FamilyOptions::new(
-                bigname_content_hash::INTERPRETER_CONTENT_HASH,
+                bigname_content_hash::PROJECTION_CONTENT_HASH,
             ),
         )
         .await?;

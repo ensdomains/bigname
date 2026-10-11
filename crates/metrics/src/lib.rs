@@ -19,6 +19,7 @@ const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8"
 pub struct BuildInfo<'a> {
     pub build_sha: &'a str,
     pub interpreter_content_hash: &'a str,
+    pub projection_content_hash: &'a str,
 }
 
 #[derive(Clone)]
@@ -36,11 +37,19 @@ impl MetricsRegistry {
                 "build_info",
                 "Build and interpretation identity for this process.",
             ),
-            &["build_sha", "interpreter_content_hash"],
+            &[
+                "build_sha",
+                "interpreter_content_hash",
+                "projection_content_hash",
+            ],
         )
         .context("failed to define build_info")?;
         build_info
-            .with_label_values(&[build.build_sha, build.interpreter_content_hash])
+            .with_label_values(&[
+                build.build_sha,
+                build.interpreter_content_hash,
+                build.projection_content_hash,
+            ])
             .set(1.0);
         registry.register(build_info)?;
         Ok(registry)

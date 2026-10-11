@@ -40,7 +40,7 @@ where
 async fn reset_family_families(database: &TestDatabase) -> Result<()> {
     let token = bigname_project::families::input_token(&database.pool, FAMILY_CHAIN).await?;
     let mut options = bigname_project::families::FamilyOptions::new(
-        bigname_content_hash::INTERPRETER_CONTENT_HASH,
+        bigname_content_hash::PROJECTION_CONTENT_HASH,
     );
     options.max_blocks_per_run = 0;
     let outcome = bigname_project::families::apply(

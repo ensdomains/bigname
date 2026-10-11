@@ -151,7 +151,7 @@ mod tests {
                 phase_status: Some("completed".to_owned()),
                 current_block_number: Some(10),
                 current_block_hash: Some("0x10".to_owned()),
-                input_content_hash: Some(bigname_content_hash::INTERPRETER_CONTENT_HASH.to_owned()),
+                input_content_hash: Some(bigname_content_hash::PROJECTION_CONTENT_HASH.to_owned()),
                 row_generation: Some("7".to_owned()),
             }],
             manifest_authority: vec![ManifestAuthority {

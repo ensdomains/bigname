@@ -48,7 +48,7 @@ async fn install(pool: &PgPool) -> Result<()> {
     ] {
         raw_sql(baseline).execute(pool).await?;
     }
-    let hash = bigname_content_hash::INTERPRETER_CONTENT_HASH;
+    let hash = bigname_content_hash::PROJECTION_CONTENT_HASH;
     raw_sql(&format!(
         "INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp,
              canonicality_state)

@@ -7,6 +7,7 @@ use std::{
 };
 
 use super::paths::relative_key;
+use crate::classes::Class;
 
 /// What the walk found across the crates that hold hashed sources.
 pub(crate) struct Walked {
@@ -23,6 +24,9 @@ pub(crate) struct Walked {
     /// every file a production module declared in or below a file hashed by name resolves to,
     /// with each declaring file and declaration.
     pub(super) modules: BTreeMap<PathBuf, BTreeSet<(PathBuf, String)>>,
+    /// Each production module, file or inline, by crate target root and module path, with the
+    /// file that holds it.
+    pub(super) module_files: BTreeMap<(PathBuf, Vec<String>), PathBuf>,
     /// Every production file the walk reaches outside the walked source roots, and every
     /// production root or module file that is not Rust, with the declaring file and declaration
     /// that first reached it.
@@ -38,21 +42,51 @@ pub(crate) struct Walked {
 }
 
 impl Walked {
-    /// Each existing file read as data by a hashed file, with its workspace-relative key.
-    /// `hashed` says whether a workspace-relative key is a hashed input. A read from a hashed file
-    /// of a file outside the workspace is an error, because the hash could not name it.
+    /// Each production module by workspace-relative target root and module path, with the
+    /// workspace-relative file that holds it. The interpret-closure guard resolves the paths a
+    /// file names with it.
+    #[allow(dead_code)]
+    pub(crate) fn module_keys(&self) -> io::Result<BTreeMap<(String, Vec<String>), String>> {
+        self.module_files
+            .iter()
+            .map(|((root, path), file)| {
+                Ok((
+                    (relative_key(&self.normal_root, root)?, path.clone()),
+                    relative_key(&self.normal_root, file)?,
+                ))
+            })
+            .collect()
+    }
+
+    /// Each existing file read as data by a hashed file, with its workspace-relative key and the
+    /// class it takes from its hashed readers. `class_of` gives the class of a hashed
+    /// workspace-relative key and `None` for an unhashed one. A file only project-class files
+    /// read is project-class, one a both-class file reads is both, and any other is interpret. A
+    /// read from a hashed file of a file outside the workspace is an error, because the hash
+    /// could not name it.
     pub(crate) fn data_inputs(
         &self,
-        hashed: impl Fn(&str) -> bool,
-    ) -> io::Result<Vec<(String, &Path)>> {
+        class_of: impl Fn(&str) -> Option<Class>,
+    ) -> io::Result<Vec<(String, &Path, Class)>> {
         let mut inputs = Vec::new();
         for (file, readers) in &self.data_reads {
-            let mut read_by_hashed_file = false;
+            let mut classes = BTreeSet::new();
             for reader in readers {
-                read_by_hashed_file |= hashed(&relative_key(&self.normal_root, reader)?);
+                classes.extend(class_of(&relative_key(&self.normal_root, reader)?));
             }
-            if read_by_hashed_file && file.is_file() {
-                inputs.push((relative_key(&self.normal_root, file)?, file.as_path()));
+            let class = if classes.contains(&Class::Both) {
+                Class::Both
+            } else if classes.contains(&Class::Interpret) {
+                Class::Interpret
+            } else {
+                Class::Project
+            };
+            if !classes.is_empty() && file.is_file() {
+                inputs.push((
+                    relative_key(&self.normal_root, file)?,
+                    file.as_path(),
+                    class,
+                ));
             }
         }
         Ok(inputs)

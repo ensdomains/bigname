@@ -91,10 +91,11 @@ async fn fixture(name: &str) -> Result<TestDatabase> {
              (chain_id, phase_name, phase_status, current_block_number, current_block_hash,
               target_block_number, target_block_hash, input_content_hash, started_at, finished_at)
          VALUES ($1, 'project', 'completed', 11, $2, 11, $2, $3, now(), now()),
-                ($1, 'interpret', 'completed', 11, $2, 11, $2, $3, now(), now())",
+                ($1, 'interpret', 'completed', 11, $2, 11, $2, $4, now(), now())",
     )
     .bind(CHAIN_ID)
     .bind(HASH_11)
+    .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
     .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
     .execute(pool)
     .await?;
@@ -107,7 +108,7 @@ async fn fixture(name: &str) -> Result<TestDatabase> {
     )
     .bind(CHAIN_ID)
     .bind(HASH_11)
-    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
     .bind(SEQUENCE)
     .execute(pool)
     .await?;

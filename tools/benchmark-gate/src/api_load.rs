@@ -43,7 +43,7 @@ struct Sample {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 struct ApiTargetIdentity {
     build_sha: String,
-    interpreter_content_hash: String,
+    projection_content_hash: String,
     database_identity: String,
 }
 
@@ -56,7 +56,7 @@ struct HealthResponse {
 #[derive(Debug, Deserialize)]
 struct HealthIdentity {
     build_sha: String,
-    interpreter_content_hash: String,
+    projection_content_hash: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,11 +77,11 @@ fn api_identity_failures(
             expected_build_sha.unwrap_or_default()
         ));
     }
-    if actual.interpreter_content_hash != bigname_content_hash::INTERPRETER_CONTENT_HASH {
+    if actual.projection_content_hash != bigname_content_hash::PROJECTION_CONTENT_HASH {
         failures.push(format!(
-            "target API interpreter content hash {:?} does not match harness {:?}",
-            actual.interpreter_content_hash,
-            bigname_content_hash::INTERPRETER_CONTENT_HASH
+            "target API projection content hash {:?} does not match harness {:?}",
+            actual.projection_content_hash,
+            bigname_content_hash::PROJECTION_CONTENT_HASH
         ));
     }
     if actual.database_identity != expected_database_identity {
@@ -237,15 +237,15 @@ pub async fn run(
     Ok(ApiReport {
         api_build_sha: identity.build_sha,
         expected_api_build_sha: expected_build_sha.map(str::to_owned),
-        api_interpreter_content_hash: identity.interpreter_content_hash,
+        api_projection_content_hash: identity.projection_content_hash,
         api_database_identity: identity.database_identity,
         corpus_database_identity: database_identity,
         postflight_api_build_sha: postflight_identity
             .as_ref()
             .map(|identity| identity.build_sha.clone()),
-        postflight_api_interpreter_content_hash: postflight_identity
+        postflight_api_projection_content_hash: postflight_identity
             .as_ref()
-            .map(|identity| identity.interpreter_content_hash.clone()),
+            .map(|identity| identity.projection_content_hash.clone()),
         postflight_api_database_identity: postflight_identity
             .map(|identity| identity.database_identity),
         postflight_corpus_database_identity: postflight_database_identity,
@@ -326,7 +326,7 @@ fn health_identity(
     };
     Ok(ApiTargetIdentity {
         build_sha: health.identity.build_sha,
-        interpreter_content_hash: health.identity.interpreter_content_hash,
+        projection_content_hash: health.identity.projection_content_hash,
         database_identity,
     })
     .map(|identity| (identity, failures))
@@ -749,7 +749,7 @@ mod tests {
         let failures = api_identity_failures(
             &ApiTargetIdentity {
                 build_sha: "old-release".to_owned(),
-                interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH.to_owned(),
+                projection_content_hash: bigname_content_hash::PROJECTION_CONTENT_HASH.to_owned(),
                 database_identity: "database".to_owned(),
             },
             Some("new-release"),
@@ -760,7 +760,7 @@ mod tests {
         let failures = api_identity_failures(
             &ApiTargetIdentity {
                 build_sha: "new-release".to_owned(),
-                interpreter_content_hash: "keccak256:old-interpreter".to_owned(),
+                projection_content_hash: "keccak256:old-projection".to_owned(),
                 database_identity: "database".to_owned(),
             },
             Some("new-release"),
@@ -770,7 +770,7 @@ mod tests {
 
         let before = ApiTargetIdentity {
             build_sha: "new-release".to_owned(),
-            interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH.to_owned(),
+            projection_content_hash: bigname_content_hash::PROJECTION_CONTENT_HASH.to_owned(),
             database_identity: "database-before".to_owned(),
         };
         let mut after = before.clone();
@@ -800,7 +800,7 @@ mod tests {
     fn boundary_probe_errors_are_endpoint_named_report_failures() {
         let preflight = ApiTargetIdentity {
             build_sha: "release".to_owned(),
-            interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH.to_owned(),
+            projection_content_hash: bigname_content_hash::PROJECTION_CONTENT_HASH.to_owned(),
             database_identity: "database".to_owned(),
         };
         let (target, database, failures) = preflight::classify_api_boundary(

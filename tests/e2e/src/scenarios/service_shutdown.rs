@@ -315,9 +315,10 @@ async fn drain(
         drop(_start);
         ensure!(boot["fields"]["build_sha"] == sha, "wrong API build");
         ensure!(boot["fields"]["request_timeout_ms"] == if extended { 60000 } else { 30000 } && boot["fields"]["db_statement_timeout_ms"] == if extended { 55000 } else { 25000 }, "timeouts changed");
-        let hashes: Vec<String> = sqlx::query_scalar("SELECT input_content_hash FROM chain_phase_state WHERE phase_name IN ('interpret','project') AND phase_status='completed'")
+        let hashes: Vec<(String, String)> = sqlx::query_as("SELECT phase_name, input_content_hash FROM chain_phase_state WHERE phase_name IN ('interpret','project') AND phase_status='completed'")
             .fetch_all(pool).await?;
-        ensure!(hashes.len() == 2 && hashes.iter().all(|h| boot["fields"]["interpreter_content_hash"] == *h), "producer/API generation mismatch");
+        let field = |phase: &str| if phase == "project" { "projection_content_hash" } else { "interpreter_content_hash" };
+        ensure!(hashes.len() == 2 && hashes.iter().all(|(phase, h)| boot["fields"][field(phase)] == *h), "producer/API generation mismatch");
         let url = format!("http://{address}/v1/names/alice.eth?source=indexed");
         let baseline = response(url.clone()).await?;
         ensure!(baseline["data"]["name"] == "alice.eth" && baseline["meta"]["source"] == "indexed", "wrong indexed identity");

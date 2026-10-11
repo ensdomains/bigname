@@ -24,7 +24,7 @@ use family_reads::*;
 #[path = "production_interpret/sepolia_redeploy.rs"]
 mod sepolia_redeploy;
 use phase_runner::{
-    INTERPRETER_CONTENT_HASH,
+    INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH,
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
     error::{ErrorKind, RunnerError},
@@ -11363,7 +11363,7 @@ async fn initialize_completed_recompute_extent(
     .bind(chain_id)
     .bind(head)
     .bind(block_hash(chain_id, head))
-    .bind(INTERPRETER_CONTENT_HASH)
+    .bind(PROJECTION_CONTENT_HASH)
     .execute(pool)
     .await?;
     Ok(())

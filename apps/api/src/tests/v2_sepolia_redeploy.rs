@@ -410,13 +410,15 @@ async fn complete_phases_at(pool: &PgPool, head: i64) -> Result<()> {
              current_block_number = $2, current_block_hash = $3,
              live_handoff_block_number = CASE WHEN phase_name='ingest' THEN $2 END,
              live_handoff_block_hash = CASE WHEN phase_name='ingest' THEN $3 END,
-             input_content_hash = CASE WHEN phase_name IN ('interpret', 'project') THEN $4 END
+             input_content_hash = CASE phase_name WHEN 'interpret' THEN $4
+                 WHEN 'project' THEN $5 END
          WHERE chain_id = $1",
     )
     .bind(CHAIN)
     .bind(head)
     .bind(block_hash(head))
     .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
     .execute(pool)
     .await?;
     Ok(())
@@ -461,7 +463,7 @@ async fn interpret_and_project_range(
         bigname_project::families::FamilyMode::Rebuild,
         &token,
         &bigname_project::families::FamilyOptions::new(
-            bigname_content_hash::INTERPRETER_CONTENT_HASH,
+            bigname_content_hash::PROJECTION_CONTENT_HASH,
         )
         .with_max_blocks_per_run(200_000),
     )
@@ -601,8 +603,9 @@ async fn adopt_redeployment(pool: &PgPool) -> Result<()> {
     .await
     .context("redeployment adoption exceeded60seconds")??;
     let adopted: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM chain_phase_state WHERE chain_id=$1 AND phase_name IN ('interpret','project') AND input_content_hash=$2 AND phase_status='completed' AND NOT redo_in_progress AND current_block_number=$3",
-    ).bind(CHAIN).bind(bigname_content_hash::INTERPRETER_CONTENT_HASH).bind(COMPACT_HEAD).fetch_one(pool).await?;
+        "SELECT count(*) FROM chain_phase_state WHERE chain_id=$1 AND ((phase_name='interpret' AND input_content_hash=$2) OR (phase_name='project' AND input_content_hash=$4)) AND phase_status='completed' AND NOT redo_in_progress AND current_block_number=$3",
+    ).bind(CHAIN).bind(bigname_content_hash::INTERPRETER_CONTENT_HASH).bind(COMPACT_HEAD)
+        .bind(bigname_content_hash::PROJECTION_CONTENT_HASH).fetch_one(pool).await?;
     assert_eq!(adopted, 2);
     Ok(())
 }

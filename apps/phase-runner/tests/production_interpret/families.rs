@@ -24,7 +24,7 @@ pub async fn publish_families(
         &target,
         mode,
         &token,
-        &FamilyOptions::new(INTERPRETER_CONTENT_HASH).with_max_blocks_per_run(100_000),
+        &FamilyOptions::new(PROJECTION_CONTENT_HASH).with_max_blocks_per_run(100_000),
     )
     .await?;
     assert!(!outcome.budget_exhausted);

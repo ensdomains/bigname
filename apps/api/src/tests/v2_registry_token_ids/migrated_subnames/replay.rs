@@ -33,7 +33,7 @@ pub(super) async fn assert_rebuild(database: &TestDatabase, offset: i64) -> Resu
             },
             FamilyMode::Rebuild,
             &token,
-            &FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+            &FamilyOptions::new(bigname_content_hash::PROJECTION_CONTENT_HASH)
                 .with_rebuild_ranges(ranges),
         )
         .await?;

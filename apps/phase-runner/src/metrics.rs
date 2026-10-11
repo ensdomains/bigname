@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use bigname_metrics::{BuildInfo, IntGauge, IntGaugeVec, MetricsRegistry, MetricsServer};
+use bigname_metrics::{IntGauge, IntGaugeVec, MetricsRegistry, MetricsServer};
 use sqlx::{FromRow, PgPool};
 use tokio_util::sync::CancellationToken;
 
@@ -134,10 +134,7 @@ impl PipelineMetrics {
             heartbeat_stale_after_secs > 0,
             "heartbeat stale threshold must be positive"
         );
-        let registry = MetricsRegistry::new(BuildInfo {
-            build_sha: crate::BUILD_SHA,
-            interpreter_content_hash: crate::INTERPRETER_CONTENT_HASH,
-        })?;
+        let registry = MetricsRegistry::new(crate::BUILD_INFO)?;
         let process_start_timestamp_milliseconds = registry.int_gauge(
             "phase_runner_process_start_timestamp_milliseconds",
             "Unix timestamp in milliseconds when this phase-runner process started.",

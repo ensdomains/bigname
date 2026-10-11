@@ -194,7 +194,7 @@ pub(super) async fn publish(database: &TestDatabase, blocks: Vec<(u64, Logs)>) -
         bigname_project::families::FamilyMode::Rebuild,
         &input,
         &bigname_project::families::FamilyOptions::new(
-            bigname_content_hash::INTERPRETER_CONTENT_HASH,
+            bigname_content_hash::PROJECTION_CONTENT_HASH,
         ),
     )
     .await?;

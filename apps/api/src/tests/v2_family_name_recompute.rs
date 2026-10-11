@@ -120,7 +120,7 @@ async fn v2_recomputed_name_flags_refuse_the_old_publication_until_project_repla
         bigname_project::families::FamilyMode::Normal,
         &token,
         &bigname_project::families::FamilyOptions::new(
-            bigname_content_hash::INTERPRETER_CONTENT_HASH,
+            bigname_content_hash::PROJECTION_CONTENT_HASH,
         ),
     )
     .await?;

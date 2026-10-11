@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use bigname_ingest::load_persisted_watch_filter;
 use bigname_manifests::{load_repository, registry_announcement_topic0, sync_schema_v2_repository};
 use phase_runner::{
-    INTERPRETER_CONTENT_HASH,
+    INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH,
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
     error::ErrorKind,
@@ -952,10 +952,11 @@ async fn checked_in_sepolia_resolver_admission_clamps_retained_redo_to_cursor_fl
     .execute(scratch.pool())
     .await?;
     sqlx::query(
-        "UPDATE chain_phase_state SET input_content_hash = $1
+        "UPDATE chain_phase_state SET input_content_hash = CASE WHEN phase_name = 'project' THEN $2 ELSE $1 END
          WHERE chain_id = 'ethereum-sepolia' AND phase_name IN ('interpret', 'project')",
     )
     .bind(INTERPRETER_CONTENT_HASH)
+    .bind(PROJECTION_CONTENT_HASH)
     .execute(scratch.pool())
     .await?;
     let marker_before = interpret_input_hash(scratch.pool(), "ethereum-sepolia").await?;
@@ -1237,7 +1238,7 @@ async fn interrupted_recompute_resume_waits_for_required_ingest() -> Result<()> 
         "UPDATE chain_phase_state
          SET phase_status = 'running', redo_in_progress = true,
              current_block_number = 1, current_block_hash = $2,
-             target_block_number = 1, target_block_hash = $2, input_content_hash = $3,
+             target_block_number = 1, target_block_hash = $2, input_content_hash = CASE WHEN phase_name = 'project' THEN $4 ELSE $3 END,
              redo_mode = CASE phase_name WHEN 'interpret' THEN 'recompute_flags' ELSE 'redo' END,
              redo_previous_phase_status = 'completed', redo_previous_started_at = now(),
              redo_previous_finished_at = now(), redo_from_block_number = 0, redo_to_block_number = 1,
@@ -1250,6 +1251,7 @@ async fn interrupted_recompute_resume_waits_for_required_ingest() -> Result<()> 
     .bind(chain_id)
     .bind(format!("{chain_id}-manifest-sync-head-1"))
     .bind(INTERPRETER_CONTENT_HASH)
+    .bind(PROJECTION_CONTENT_HASH)
     .execute(scratch.pool())
     .await?;
 
@@ -1344,7 +1346,7 @@ async fn widening_after_rewind_targets_the_readable_head_and_can_complete() -> R
              current_block_hash = CASE WHEN phase_name = 'interpret' THEN $2 ELSE $3 END,
              target_block_number = CASE WHEN phase_name = 'interpret' THEN 1 ELSE 0 END,
              target_block_hash = CASE WHEN phase_name = 'interpret' THEN $2 ELSE $3 END,
-             input_content_hash = $4,
+             input_content_hash = CASE WHEN phase_name = 'project' THEN $5 ELSE $4 END,
              started_at = now(), finished_at = now()
          WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
     )
@@ -1352,6 +1354,7 @@ async fn widening_after_rewind_targets_the_readable_head_and_can_complete() -> R
     .bind(format!("{chain_id}-manifest-sync-head-1"))
     .bind(format!("{chain_id}-manifest-sync-head-0"))
     .bind(INTERPRETER_CONTENT_HASH)
+    .bind(PROJECTION_CONTENT_HASH)
     .execute(scratch.pool())
     .await?;
 
@@ -1399,7 +1402,7 @@ async fn widen_behind_a_project_left_running(
          SET phase_status = CASE phase_name WHEN 'project' THEN 'running' ELSE 'completed' END,
              current_block_number = CASE phase_name WHEN 'project' THEN 0 ELSE 1 END,
              current_block_hash = CASE phase_name WHEN 'project' THEN $3 ELSE $2 END,
-             target_block_number = 1, target_block_hash = $2, input_content_hash = $4,
+             target_block_number = 1, target_block_hash = $2, input_content_hash = CASE WHEN phase_name = 'project' THEN $5 ELSE $4 END,
              started_at = now(),
              finished_at = CASE phase_name WHEN 'project' THEN NULL ELSE now() END
          WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
@@ -1408,6 +1411,7 @@ async fn widen_behind_a_project_left_running(
     .bind(format!("{chain_id}-manifest-sync-head-1"))
     .bind(format!("{chain_id}-manifest-sync-head-0"))
     .bind(INTERPRETER_CONTENT_HASH)
+    .bind(PROJECTION_CONTENT_HASH)
     .execute(scratch.pool())
     .await?;
     fixture.write(true, false)?;
@@ -3219,11 +3223,12 @@ async fn unchanged_omitted_manifest_repairs_legacy_floor_with_redo() -> Result<(
     sync_schema_v2_repository(pool, &load_repository(&fixture.root)?).await?;
     seed_completed_ingest_range(&scratch, chain_id).await?;
     sqlx::query(
-        "UPDATE chain_phase_state SET input_content_hash = $2 \
+        "UPDATE chain_phase_state SET input_content_hash = CASE WHEN phase_name = 'project' THEN $3 ELSE $2 END \
          WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
     )
     .bind(chain_id)
     .bind(INTERPRETER_CONTENT_HASH)
+    .bind(PROJECTION_CONTENT_HASH)
     .execute(pool)
     .await?;
     sqlx::query(
@@ -3296,11 +3301,12 @@ async fn retired_omitted_initial_epoch_repairs_legacy_floor_on_readmission() -> 
     assert_eq!(retired_floor, Some(1));
     fs::write(&path, omitted_manifest)?;
     sqlx::query(
-        "UPDATE chain_phase_state SET input_content_hash = $2 \
+        "UPDATE chain_phase_state SET input_content_hash = CASE WHEN phase_name = 'project' THEN $3 ELSE $2 END \
          WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
     )
     .bind(chain_id)
     .bind(INTERPRETER_CONTENT_HASH)
+    .bind(PROJECTION_CONTENT_HASH)
     .execute(pool)
     .await?;
     sync_schema_v2_repository(pool, &load_repository(&fixture.root)?).await?;
@@ -4023,13 +4029,14 @@ async fn legacy_payload_upgrade_materializes_compiled_watch_without_spurious_ing
                 "UPDATE chain_phase_state
                  SET phase_status = 'completed', current_block_number = 1,
                      current_block_hash = $2, target_block_number = 1,
-                     target_block_hash = $2, input_content_hash = $3,
+                     target_block_hash = $2, input_content_hash = CASE WHEN phase_name = 'project' THEN $4 ELSE $3 END,
                      started_at = now(), finished_at = now()
                  WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
             )
             .bind(&chain_id)
             .bind(head_hash)
             .bind(INTERPRETER_CONTENT_HASH)
+            .bind(PROJECTION_CONTENT_HASH)
             .execute(scratch.pool())
             .await?;
         } else {
@@ -4106,13 +4113,14 @@ async fn legacy_family_watch_without_namespace_syncs_without_spurious_ingest() -
         "UPDATE chain_phase_state
          SET phase_status = 'completed', current_block_number = 1,
              current_block_hash = $2, target_block_number = 1,
-             target_block_hash = $2, input_content_hash = $3,
+             target_block_hash = $2, input_content_hash = CASE WHEN phase_name = 'project' THEN $4 ELSE $3 END,
              started_at = now(), finished_at = now()
          WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
     )
     .bind(chain_id)
     .bind(format!("{chain_id}-manifest-sync-head-1"))
     .bind(INTERPRETER_CONTENT_HASH)
+    .bind(PROJECTION_CONTENT_HASH)
     .execute(scratch.pool())
     .await?;
 
@@ -4442,7 +4450,7 @@ async fn schema_v2_manifest_sync_is_idempotent_and_retires_absent_history() -> R
          WHERE chain_id = $1 AND phase_name = 'project'",
     )
     .bind("ethereum-mainnet")
-    .bind(INTERPRETER_CONTENT_HASH)
+    .bind(PROJECTION_CONTENT_HASH)
     .execute(scratch.pool())
     .await?;
     sqlx::query(
@@ -4503,7 +4511,7 @@ async fn schema_v2_manifest_sync_is_idempotent_and_retires_absent_history() -> R
     .await?;
     assert_ne!(
         hash.as_deref(),
-        Some(INTERPRETER_CONTENT_HASH),
+        Some(PROJECTION_CONTENT_HASH),
         "history repair must invalidate Project so rows built from the stale event are re-derived"
     );
     assert!(
@@ -4576,11 +4584,12 @@ async fn historical_floor_repair_waits_for_executable_readmission() -> Result<()
     .execute(scratch.pool())
     .await?;
     sqlx::query(
-        "UPDATE chain_phase_state SET input_content_hash = $2 \
+        "UPDATE chain_phase_state SET input_content_hash = CASE WHEN phase_name = 'project' THEN $3 ELSE $2 END \
          WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
     )
     .bind(retired_chain)
     .bind(INTERPRETER_CONTENT_HASH)
+    .bind(PROJECTION_CONTENT_HASH)
     .execute(scratch.pool())
     .await?;
     let marker_before = interpret_input_hash(scratch.pool(), retired_chain).await?;
@@ -4685,7 +4694,7 @@ async fn schema_v2_manifest_authority_change_requires_derived_redo() -> Result<(
         "
         UPDATE chain_phase_state
         SET phase_status = 'completed',
-            input_content_hash = $2,
+            input_content_hash = CASE WHEN phase_name = 'project' THEN $3 ELSE $2 END,
             started_at = now(),
             finished_at = now()
         WHERE chain_id = $1
@@ -4694,6 +4703,7 @@ async fn schema_v2_manifest_authority_change_requires_derived_redo() -> Result<(
     )
     .bind(chain_id)
     .bind(INTERPRETER_CONTENT_HASH)
+    .bind(PROJECTION_CONTENT_HASH)
     .execute(scratch.pool())
     .await?;
 
@@ -4738,7 +4748,7 @@ async fn returning_to_the_same_manifest_authority_mints_a_new_generation() -> Re
     sqlx::query(
         "UPDATE chain_phase_state
          SET phase_status = 'completed',
-             input_content_hash = $2,
+             input_content_hash = CASE WHEN phase_name = 'project' THEN $3 ELSE $2 END,
              started_at = now(),
              finished_at = now()
          WHERE chain_id = $1
@@ -4746,6 +4756,7 @@ async fn returning_to_the_same_manifest_authority_mints_a_new_generation() -> Re
     )
     .bind(chain_id)
     .bind(INTERPRETER_CONTENT_HASH)
+    .bind(PROJECTION_CONTENT_HASH)
     .execute(scratch.pool())
     .await?;
     seed_chain_head(scratch.pool(), chain_id, 30_000_000).await?;
@@ -4803,7 +4814,7 @@ async fn basenames_execution_retirement_invalidates_the_base_project_epoch() -> 
             "
             UPDATE chain_phase_state
             SET phase_status = 'completed',
-                input_content_hash = $2,
+                input_content_hash = CASE WHEN phase_name = 'project' THEN $3 ELSE $2 END,
                 started_at = now(),
                 finished_at = now()
             WHERE chain_id = $1
@@ -4812,6 +4823,7 @@ async fn basenames_execution_retirement_invalidates_the_base_project_epoch() -> 
         )
         .bind(chain_id)
         .bind(INTERPRETER_CONTENT_HASH)
+        .bind(PROJECTION_CONTENT_HASH)
         .execute(scratch.pool())
         .await?;
     }
@@ -4863,7 +4875,7 @@ async fn basenames_execution_retirement_invalidates_the_base_project_epoch() -> 
         "UPDATE chain_phase_state SET input_content_hash = $1
          WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
     )
-    .bind(INTERPRETER_CONTENT_HASH)
+    .bind(PROJECTION_CONTENT_HASH)
     .execute(scratch.pool())
     .await?;
     let shadow_manifest_id: i64 = sqlx::query_scalar(
@@ -4915,11 +4927,12 @@ async fn basenames_execution_retirement_invalidates_the_base_project_epoch() -> 
     );
 
     sqlx::query(
-        "UPDATE chain_phase_state SET input_content_hash = $1
+        "UPDATE chain_phase_state SET input_content_hash = CASE WHEN phase_name = 'project' THEN $2 ELSE $1 END
          WHERE chain_id IN ('ethereum-mainnet', 'base-mainnet')
            AND phase_name IN ('interpret', 'project')",
     )
     .bind(INTERPRETER_CONTENT_HASH)
+    .bind(PROJECTION_CONTENT_HASH)
     .execute(scratch.pool())
     .await?;
     seed_chain_head(scratch.pool(), "ethereum-mainnet", 30_000_000).await?;
@@ -4977,7 +4990,7 @@ async fn basenames_execution_retirement_invalidates_the_base_project_epoch() -> 
         "UPDATE chain_phase_state SET input_content_hash = $1
          WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
     )
-    .bind(INTERPRETER_CONTENT_HASH)
+    .bind(PROJECTION_CONTENT_HASH)
     .execute(scratch.pool())
     .await?;
     sync_schema_v2_repository(scratch.pool(), &base_repository).await?;

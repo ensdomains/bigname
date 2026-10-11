@@ -97,7 +97,7 @@ pub(super) async fn select_source(
              WHERE chain_id=$1 AND block_number=$2 AND block_hash=$3
                AND publication_sequence::text=$4 AND input_content_hash=$5 AND catalogue_version=$6)",
         ).bind(&expected.chain_id).bind(block).bind(&hash).bind(&generation)
-            .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH).bind(contract::CATALOGUE_VERSION)
+            .bind(bigname_content_hash::PROJECTION_CONTENT_HASH).bind(contract::CATALOGUE_VERSION)
             .fetch_one(&mut *connection).await?;
         if !stamped {
             return unavailable(&expected.chain_id, &captured, &observed, gap);

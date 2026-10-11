@@ -412,8 +412,11 @@ pub(super) async fn seed_publication_state(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
     for phase in ["ingest", "interpret", "project"] {
-        let input_hash =
-            (phase != "ingest").then_some(bigname_content_hash::INTERPRETER_CONTENT_HASH);
+        let input_hash = match phase {
+            "interpret" => Some(bigname_content_hash::INTERPRETER_CONTENT_HASH),
+            "project" => Some(bigname_content_hash::PROJECTION_CONTENT_HASH),
+            _ => None,
+        };
         sqlx::query(
             "INSERT INTO chain_phase_state (
                  chain_id, phase_name, phase_status, current_block_number, current_block_hash,

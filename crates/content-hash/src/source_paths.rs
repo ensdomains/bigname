@@ -104,6 +104,7 @@ pub(super) fn walk_crates(
         files: walk.reached.into_keys().collect(),
         inclusions: walk.inclusions,
         modules: walk.modules,
+        module_files: walk.module_files,
         outside,
         missing: walk.missing,
         roots: source_roots,
@@ -123,6 +124,8 @@ fn walk(roots: &[PathBuf], by_name: BTreeSet<PathBuf>) -> io::Result<Walk> {
             let site = Site::crate_root(&file);
             pending.push(Module {
                 by_name: walk.by_name.contains(&file),
+                root: file.clone(),
+                path: Vec::new(),
                 file,
                 directory,
                 test_only: false,
@@ -169,6 +172,9 @@ struct Module {
     /// Whether the file is hashed by name or declared from one, so its production modules must
     /// be hashed sources.
     by_name: bool,
+    /// The crate target root the module was reached from, and its module path below that root.
+    root: PathBuf,
+    path: Vec<String>,
 }
 
 #[derive(Default)]
@@ -197,6 +203,9 @@ struct Walk {
     missing: BTreeSet<PathBuf>,
     /// The files hashed by name.
     by_name: BTreeSet<PathBuf>,
+    /// Each production module, file or inline, by crate target root and module path, with the
+    /// file that holds it.
+    module_files: BTreeMap<(PathBuf, Vec<String>), PathBuf>,
 }
 
 impl Walk {
@@ -205,6 +214,10 @@ impl Walk {
             self.reach(&module.file, module.test_only, &module.site)?;
             if !module.test_only {
                 self.compiled.insert(module.file.clone());
+                self.module_files.insert(
+                    (module.root.clone(), module.path.clone()),
+                    module.file.clone(),
+                );
             }
             let walk_key = (
                 module.file.clone(),
@@ -224,6 +237,7 @@ impl Walk {
                 explicit: false,
                 test_only: module.test_only,
                 required: module.required,
+                path: module.path.clone(),
             };
             self.items(&module, &parsed.items, &scope, pending)?;
         }
@@ -273,6 +287,8 @@ impl Walk {
                 .collect::<Vec<_>>();
             let name = declaration.ident.unraw().to_string();
             let site = Site::module(&module.file, &name);
+            let mut module_path = scope.path.clone();
+            module_path.push(name.clone());
             // A `#[path]` at the top of a file is relative to the file's own directory, without
             // the offset a non-mod-rs file gives its plain children. Inside an inline module it is
             // relative to that module's directory.
@@ -298,12 +314,19 @@ impl Walk {
                     None if in_block => path_base.join(&name),
                     None => scope.directory.join(&name),
                 };
+                if !test_only {
+                    self.module_files.insert(
+                        (module.root.clone(), module_path.clone()),
+                        module.file.clone(),
+                    );
+                }
                 let inner = Scope {
                     explicit: scope.explicit || explicit_path.is_some(),
                     directory,
                     inline: true,
                     test_only,
                     required,
+                    path: module_path,
                 };
                 self.items(module, content, &inner, pending)?;
                 continue;
@@ -324,6 +347,8 @@ impl Walk {
                         site: site.clone(),
                         // The predicate may be off, so the file's own children need not exist.
                         required: false,
+                        root: module.root.clone(),
+                        path: module_path.clone(),
                     });
                 } else {
                     self.missing.insert(file);
@@ -375,6 +400,8 @@ impl Walk {
                 test_only,
                 site,
                 required,
+                root: module.root.clone(),
+                path: module_path,
             });
         }
         Ok(())
@@ -516,6 +543,7 @@ struct Scope {
     explicit: bool,
     test_only: bool,
     required: bool,
+    path: Vec<String>,
 }
 
 fn mixed_module(file: &Path, gated: &Site, production: &Site) -> io::Error {

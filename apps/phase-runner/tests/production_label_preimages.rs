@@ -19,7 +19,7 @@ use bigname_storage::{
     load_children_current_page,
 };
 use phase_runner::{
-    INTERPRETER_CONTENT_HASH,
+    INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH,
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
     interpret_phase::InterpretPhase,
@@ -511,7 +511,7 @@ async fn run_project(
         &target,
         mode,
         &token,
-        &FamilyOptions::new(INTERPRETER_CONTENT_HASH),
+        &FamilyOptions::new(PROJECTION_CONTENT_HASH),
     )
     .await?;
     assert!(!outcome.budget_exhausted);
@@ -738,9 +738,8 @@ async fn seed_completed_project_extent(pool: &PgPool, head: i64) -> Result<()> {
              live_handoff_block_hash = CASE
                  WHEN phase_name = 'ingest' THEN $3
              END,
-             input_content_hash = CASE
-                 WHEN phase_name IN ('interpret', 'project') THEN $4
-             END,
+             input_content_hash = CASE phase_name WHEN 'project' THEN $5
+                 WHEN 'interpret' THEN $4 END,
              started_at = now(),
              finished_at = now()
          WHERE chain_id = $1
@@ -750,6 +749,7 @@ async fn seed_completed_project_extent(pool: &PgPool, head: i64) -> Result<()> {
     .bind(head)
     .bind(&hash)
     .bind(INTERPRETER_CONTENT_HASH)
+    .bind(PROJECTION_CONTENT_HASH)
     .execute(pool)
     .await?;
     sqlx::query(

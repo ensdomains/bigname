@@ -126,7 +126,7 @@ COMMENT ON COLUMN project_family_marker.current_block_hash IS
 COMMENT ON COLUMN project_family_marker.block_timestamp IS
     'This value is that block''s timestamp from chain_lineage, the block clock the family reads will use.';
 COMMENT ON COLUMN project_family_marker.input_content_hash IS
-    'This value is the interpreter content hash of the binary that applied the block.';
+    'This value is the projection content hash of the binary that applied the block.';
 COMMENT ON COLUMN project_family_marker.sequence IS
     'This value counts every family block and every family undo applied on the chain; it only grows. It is the explicit publication generation of the design, named so because schema-v2 reserves generation for authorised columns.';
 COMMENT ON COLUMN project_family_marker.interpret_input_content_hash IS
@@ -241,7 +241,7 @@ COMMENT ON COLUMN project_repair_record.completed_marker_number IS
 COMMENT ON COLUMN project_repair_record.completed_marker_hash IS
     'This value is the family marker hash when the repair completed; null until complete.';
 COMMENT ON COLUMN project_repair_record.completed_input_hash IS
-    'This value is the interpreter content hash the completing loop ran under; null until complete.';
+    'This value is the projection content hash the completing loop ran under; null until complete.';
 COMMENT ON COLUMN project_repair_record.updated_at IS
     'This value is when the record last changed.';
 COMMENT ON COLUMN project_repair_record.reset_sequence IS
@@ -2623,7 +2623,7 @@ COMMENT ON COLUMN project_history_catalogue_marker.publication_sequence IS
     'The current family sequence, including undo/replay generations at the same block.';
 
 COMMENT ON COLUMN project_history_catalogue_marker.input_content_hash IS
-    'The semantic input hash of the family publication.';
+    'The projection content hash of the family publication.';
 
 COMMENT ON COLUMN project_history_catalogue_marker.catalogue_version IS
     'The frozen catalogue layout/encoding version; currently 1.';

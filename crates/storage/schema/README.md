@@ -185,7 +185,8 @@ therefore identifies an ingested block. Every active row must identify that
 block in `chain_lineage` with the same chain, hash, height, and timestamp and
 with readable canonicality; the strict position trigger remains required. The
 guarded writer receives the captured family publication (marker sequence, block
-identity and interpreter content hash) with the captured name and inventory,
+identity and [projection content
+hash](../../../docs/glossary.md#projection-content-hash)) with the captured name and inventory,
 and accepts a mutation only while the live
 [family marker](../../../docs/glossary.md#family-marker) still matches that
 publication. It evaluates the indexed answer from the captured exact entries

@@ -563,7 +563,7 @@ async fn assert_committed(pool: &PgPool, fixture: &Value, project_block: i64) ->
         bigname_project::families::FamilyMode::Rebuild,
         &token,
         &bigname_project::families::FamilyOptions::new(
-            bigname_content_hash::INTERPRETER_CONTENT_HASH,
+            bigname_content_hash::PROJECTION_CONTENT_HASH,
         ),
     )
     .await?;

@@ -154,7 +154,7 @@ pub(crate) async fn publication(
         crate::snapshot_selection::family_inputs_not_in_redo!()
     ))
     .bind(chain_id)
-    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
     .fetch_optional(conn)
     .await
     .with_context(|| format!("failed to load the family marker of {chain_id}"))?;

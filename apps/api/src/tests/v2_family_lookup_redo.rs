@@ -58,8 +58,9 @@ impl RedoFixture {
         // non-overlap control redo only work above that publication, through the real runner.
         sqlx::query("INSERT INTO chain_lineage (chain_id,block_number,block_hash,parent_hash,block_timestamp,canonicality_state) VALUES ($1,241,'0xhistory241','0xhistory240',to_timestamp(241),'canonical') ON CONFLICT DO NOTHING")
             .bind(FAMILY_CHAIN).execute(&database.pool).await?;
-        sqlx::query("UPDATE chain_phase_state SET phase_status='completed',current_block_number=241,current_block_hash='0xhistory241',target_block_number=241,target_block_hash='0xhistory241',input_content_hash=$2,started_at=now(),finished_at=now() WHERE chain_id=$1")
-            .bind(FAMILY_CHAIN).bind(bigname_content_hash::INTERPRETER_CONTENT_HASH).execute(&database.pool).await?;
+        sqlx::query("UPDATE chain_phase_state SET phase_status='completed',current_block_number=241,current_block_hash='0xhistory241',target_block_number=241,target_block_hash='0xhistory241',input_content_hash=CASE WHEN phase_name IN ('project','live') THEN $3 ELSE $2 END,started_at=now(),finished_at=now() WHERE chain_id=$1")
+            .bind(FAMILY_CHAIN).bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+            .bind(bigname_content_hash::PROJECTION_CONTENT_HASH).execute(&database.pool).await?;
         sqlx::query("INSERT INTO ingest_cursors (chain_id,source_key,source_kind,seed_basis,start_block_number,next_block_number,target_block_number,last_processed_block_number,last_processed_block_hash) VALUES ($1,'lookup-redo','jsonrpc','new_signature_range',200,242,241,241,'0xhistory241')")
             .bind(FAMILY_CHAIN).execute(&database.pool).await?;
         let chain = ChainConfig::new(

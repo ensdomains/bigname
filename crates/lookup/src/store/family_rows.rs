@@ -135,7 +135,7 @@ pub(super) async fn publication(
                   AND COALESCE(input_phase.redo_requested_from_block_number, input_phase.redo_from_block_number) <= marker.current_block_number
             )")
         .bind(&head.chain_id).bind(head.block_number).bind(&head.block_hash)
-        .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+        .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
         .bind(lag_tolerance_blocks)
         .fetch_optional(&mut **transaction).await.map_err(database("load lookup family publication"))?
         ;

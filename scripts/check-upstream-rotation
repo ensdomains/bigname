@@ -1418,7 +1418,9 @@ def mapped_range(mapping: dict[int, int], start: int, end: int) -> tuple[int, in
     return values[0], values[-1]
 
 
-def carrier_class(path: str, citation: Citation) -> str:
+def carrier_class(
+    path: str, citation: Citation, hashed_sources: frozenset[str] | None = None
+) -> str:
     if path in {"AGENTS.md", "CLAUDE.md"} or ("/" not in path and path.endswith(".md")):
         return "root_process_doc"
     if path.startswith("docs/adrs/") and path.endswith(".md"):
@@ -1428,26 +1430,11 @@ def carrier_class(path: str, citation: Citation) -> str:
     if path.startswith("manifests/") and path.endswith(".toml"):
         return "manifest_toml_comment"
     if path.endswith(".rs"):
-        hashed = (
-            path.startswith("crates/adapters/src/")
-            or path.startswith("crates/manifests/src/")
-            or path.startswith("crates/project/src/")
-            or path.startswith("crates/interpret/src/write/")
-            or path
-            in {
-                "crates/domain/src/normalization.rs",
-                "crates/domain/src/resolution_topology.rs",
-                "crates/domain/src/vocabulary.rs",
-                "crates/lookup/src/abi.rs",
-                "crates/lookup/src/record_selector.rs",
-                "crates/lookup/src/reverse_names.rs",
-                "crates/lookup/src/text_records.rs",
-                "crates/lookup/src/json_rpc_envelope.rs",
-                "crates/interpret/src/write.rs",
-                "crates/interpret/src/recompute.rs",
-            }
-        )
-        return "hashed_rust_comment" if hashed else "other_rust_comment"
+        # Only the head build's content_hash_inputs.tsv says which sources are hashed; without
+        # it a Rust carrier stays unclassified.
+        if hashed_sources is None:
+            return "rust_comment"
+        return "hashed_rust_comment" if path in hashed_sources else "other_rust_comment"
     if path.endswith(".md"):
         return "docs_markdown"
     return "other_code_comment"
@@ -2463,7 +2450,7 @@ def production_delta_errors(base: str, head: str) -> tuple[list[str], list[str]]
     metadata, while parsed production manifest values remain protected below.
     """
     errors: list[str] = []
-    hashed_carriers: list[str] = []
+    rust_carriers: list[str] = []
     base_paths = set(tracked_paths(base))
     head_paths = set(revision_paths(head))
     for path in changed_paths(base, head):
@@ -2483,8 +2470,7 @@ def production_delta_errors(base: str, head: str) -> tuple[list[str], list[str]]
         if path.endswith(".rs"):
             if rust_without_comments_and_space(old) != rust_without_comments_and_space(new):
                 errors.append(f"Rust tokens changed: {path}")
-            if carrier_class(path, Citation("", "", 1, 1, "", 0, 0, 1, b"", True, 0)) == "hashed_rust_comment":
-                hashed_carriers.append(path)
+            rust_carriers.append(path)
             continue
         if path == "crates/adapters/tests/fixtures/interpreters/raw-events.json":
             before = scrub_fixture_citations(json.loads(old))
@@ -2493,16 +2479,51 @@ def production_delta_errors(base: str, head: str) -> tuple[list[str], list[str]]
                 errors.append(f"non-citation fixture JSON changed: {path}")
             continue
         errors.append(f"unsupported changed production path: {path}")
-    return errors, sorted(hashed_carriers)
+    return errors, sorted(rust_carriers)
 
 
-def parse_generated_hashes(path: Path) -> tuple[str, dict[str, str]]:
+@dataclasses.dataclass(frozen=True)
+class ContentHashes:
+    """What one content-hash build generated. A build from before the split reports one
+    combined hash as the interpreter hash and has neither a projection hash nor an input list."""
+
+    interpreter: str
+    projection: str | None
+    profiles: dict[str, str]
+    # Each hash input's key with its class and content hash, from content_hash_inputs.tsv.
+    inputs: dict[str, tuple[str, str]] | None
+
+    def hashed_sources(self) -> frozenset[str]:
+        if self.inputs is None:
+            raise RotationError("the head build lists no content-hash inputs")
+        return frozenset(
+            key.removeprefix("source:") for key in self.inputs if key.startswith("source:")
+        )
+
+
+def parse_generated_hashes(path: Path) -> ContentHashes:
     text = path.read_text(encoding="utf-8")
     interpreter = re.search(r'INTERPRETER_CONTENT_HASH: &str = "([^"]+)"', text)
     if interpreter is None:
         raise RotationError(f"missing INTERPRETER_CONTENT_HASH in {path}")
+    projection = re.search(r'PROJECTION_CONTENT_HASH: &str = "([^"]+)"', text)
     profiles = dict(re.findall(r'\("([^"]+)", "([^"]+)"\)', text))
-    return interpreter.group(1), profiles
+    listing = path.with_name("content_hash_inputs.tsv")
+    inputs = None
+    if listing.exists():
+        lines = listing.read_text(encoding="utf-8").splitlines()
+        if not lines or lines[0] != "class\tkey\tcontent_keccak256":
+            raise RotationError(f"unexpected header in {listing}")
+        inputs = {}
+        for line in lines[1:]:
+            class_name, key, digest = line.split("\t")
+            inputs[key] = (class_name, digest)
+    return ContentHashes(
+        interpreter.group(1),
+        projection.group(1) if projection else None,
+        profiles,
+        inputs,
+    )
 
 
 def generated_hash_file(target: Path) -> Path | None:
@@ -2512,7 +2533,7 @@ def generated_hash_file(target: Path) -> Path | None:
     return matches[0] if matches else None
 
 
-def build_hashes(repo: Path, target: Path) -> tuple[str, dict[str, str]]:
+def build_hashes(repo: Path, target: Path) -> ContentHashes:
     environment = os.environ.copy()
     environment["CARGO_TARGET_DIR"] = str(target)
     result = subprocess.run(
@@ -2530,7 +2551,40 @@ def build_hashes(repo: Path, target: Path) -> tuple[str, dict[str, str]]:
     return parse_generated_hashes(generated)
 
 
-def fingerprint_report(base: str, head: str, hashed_carriers: list[str]) -> str:
+# The head build fingerprint_report made, keyed by its immutable commit, so verify can classify
+# the baseline's Rust carriers from the same input list.
+HEAD_HASHES: dict[str, ContentHashes] = {}
+
+
+def delta(before: str | None, after: str | None) -> str:
+    return "changed" if before != after else "unchanged"
+
+
+def rotation_verdict(before: ContentHashes, after: ContentHashes) -> str:
+    if before.interpreter != after.interpreter:
+        return "interpreter"
+    if before.projection != after.projection:
+        return "projection-only"
+    return "none"
+
+
+def changed_inputs(before: ContentHashes, after: ContentHashes) -> list[str]:
+    """Each input whose content or class differs between the builds, with its head class."""
+    if before.inputs is None or after.inputs is None:
+        return ["  base lists no inputs; compare the hashes above"]
+    lines = []
+    for key in sorted(before.inputs.keys() | after.inputs.keys()):
+        old = before.inputs.get(key)
+        new = after.inputs.get(key)
+        if old == new:
+            continue
+        class_name = (new or old or ("", ""))[0]
+        state = "added" if old is None else "removed" if new is None else "changed"
+        lines.append(f"  {class_name}\t{state}\t{key}")
+    return lines or ["  none"]
+
+
+def fingerprint_report(base: str, head: str, rust_carriers: list[str]) -> str:
     # Always build both committed revisions in fresh target directories. A report
     # directory can outlive worktree edits, so generated constants stored there
     # are not a sound cache key.
@@ -2555,33 +2609,43 @@ def fingerprint_report(base: str, head: str, hashed_carriers: list[str]) -> str:
                 run(["git", "worktree", "remove", "--force", str(head_tree)])
         finally:
             run(["git", "worktree", "remove", "--force", str(base_tree)])
-    before_interpreter, before_profiles = before
-    after_interpreter, after_profiles = after
-    if before_interpreter != after_interpreter and not hashed_carriers:
-        raise RotationError(
-            "interpreter fingerprint changed without an interpreter-content-hash carrier"
-        )
+    HEAD_HASHES[report_revision(head)] = after
+    hashed = after.hashed_sources()
+    carriers = [path for path in rust_carriers if path in hashed]
+    verdict = rotation_verdict(before, after)
+    if verdict != "none" and not carriers:
+        raise RotationError("content fingerprint changed without a hashed-source carrier")
     lines = [
         "INTERPRETER_CONTENT_HASH",
-        f"  before: {before_interpreter}",
-        f"  after:  {after_interpreter}",
-        f"  delta:  {'changed' if before_interpreter != after_interpreter else 'unchanged'}",
+        f"  before: {before.interpreter}",
+        f"  after:  {after.interpreter}",
+        f"  delta:  {delta(before.interpreter, after.interpreter)}",
+        "",
+        "PROJECTION_CONTENT_HASH",
+        f"  before: {before.projection or 'absent'}",
+        f"  after:  {after.projection or 'absent'}",
+        f"  delta:  {delta(before.projection, after.projection)}",
+        "",
+        f"ROTATION: {verdict}",
+        "",
+        "CHANGED_INPUTS",
+        *changed_inputs(before, after),
         "",
         "HASHED_MANIFEST_PROFILES",
     ]
-    for profile in sorted(set(before_profiles) | set(after_profiles)):
-        old = before_profiles.get(profile, "missing")
-        new = after_profiles.get(profile, "missing")
+    for profile in sorted(set(before.profiles) | set(after.profiles)):
+        old = before.profiles.get(profile, "missing")
+        new = after.profiles.get(profile, "missing")
         lines.extend(
             [
                 f"  {profile}:",
                 f"    before: {old}",
                 f"    after:  {new}",
-                f"    delta:  {'changed' if old != new else 'unchanged'}",
+                f"    delta:  {delta(old, new)}",
             ]
         )
-    lines.extend(["", "INTERPRETER_CONTENT_HASH_CARRIERS"])
-    lines.extend(f"  {path}" for path in hashed_carriers)
+    lines.extend(["", "CONTENT_HASH_CARRIERS"])
+    lines.extend(f"  {after.inputs[f'source:{path}'][0]}\t{path}" for path in carriers)
     return "\n".join(lines) + "\n"
 
 
@@ -2839,7 +2903,7 @@ def verify(base: str, head: str, spec: dict[str, Any], report_dir: Path) -> str:
     unused_live_allowlist = sum(allowlisted.values())
     if unused_live_allowlist:
         errors.append(f"live-deployment allowlist has {unused_live_allowlist} unused entries")
-    delta_errors, hashed_carriers = production_delta_errors(base, head)
+    delta_errors, rust_carriers = production_delta_errors(base, head)
     errors.extend(delta_errors)
     if final_raw:
         errors.append(f"final tree contains {final_raw} raw stale tags")
@@ -2857,7 +2921,16 @@ def verify(base: str, head: str, spec: dict[str, Any], report_dir: Path) -> str:
         raise RotationError("verification failed:\n  " + "\n  ".join(errors[:50]))
 
     immutable_head = report_revision(head)
-    fingerprint_text = fingerprint_report(base, head, hashed_carriers)
+    fingerprint_text = fingerprint_report(base, head, rust_carriers)
+    head_hashes = HEAD_HASHES.get(immutable_head)
+    hashed_carriers = rust_carriers
+    if head_hashes is not None:
+        hashed = head_hashes.hashed_sources()
+        hashed_carriers = [path for path in rust_carriers if path in hashed]
+        for row in baseline.rows:
+            row["carrier_class"] = carrier_class(
+                row["carrier_path"], Citation("", "", 1, 1, "", 0, 0, 1, b"", True, 0), hashed
+            )
     report_dir.mkdir(parents=True, exist_ok=True)
     write_reports(report_dir, baseline, spec)
     disposition_text = "".join(json_line(row) + "\n" for row in sorted(dispositions, key=lambda row: row["id"]))
@@ -2884,7 +2957,7 @@ def verify(base: str, head: str, spec: dict[str, Any], report_dir: Path) -> str:
         "production Rust and embedded-SQL executable-token delta: zero\n"
         "upstream citations in PostgreSQL -- comments are metadata-only\n"
         "parsed production-manifest delta: zero\n"
-        + "interpreter-content-hash carriers:\n"
+        + "content-hash carriers:\n"
         + "".join(f"  {path}\n" for path in hashed_carriers),
         encoding="utf-8",
     )

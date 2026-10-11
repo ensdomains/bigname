@@ -6,14 +6,16 @@ use std::{
 };
 
 use super::{
-    HASHED_MANIFEST_PROFILES, INTERPRETER_CONTENT_HASH, interpreter_content_hash,
-    manifest_profile_hash,
+    HASHED_MANIFEST_PROFILES, INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH,
+    content_hash_inputs, interpreter_content_hash, manifest_profile_hash, projection_content_hash,
 };
 use crate::compute::{
     cfg_test_source_exclusions, excluded_source_reason, hashed_source_paths, semantic_source_files,
 };
 use crate::lockfile::{semantic_crate_fingerprints, semantic_crate_lists};
 
+mod classes;
+mod interpret_closure;
 mod project_sql;
 mod storage_families;
 mod transitive_gating;
@@ -51,11 +53,21 @@ fn lockfile_document(packages: &[(&str, &str, &str)]) -> String {
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
 #[test]
-fn build_time_hash_matches_checked_in_sources() {
+fn build_time_hashes_match_checked_in_sources() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     assert_eq!(
-        interpreter_content_hash(workspace_root).expect("source hash must compute"),
+        interpreter_content_hash(&workspace_root).expect("interpreter hash must compute"),
         INTERPRETER_CONTENT_HASH
+    );
+    assert_eq!(
+        projection_content_hash(&workspace_root).expect("projection hash must compute"),
+        PROJECTION_CONTENT_HASH
+    );
+    assert_ne!(INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH);
+    assert!(
+        content_hash_inputs(&workspace_root)
+            .expect("input list must compute")
+            .starts_with("class\tkey\tcontent_keccak256\n")
     );
 }
 
@@ -126,15 +138,15 @@ fn manifest_profile_fingerprint_excludes_only_normalizer_version() {
 #[test]
 fn hash_changes_for_sources_and_manifest_event_mappings() {
     let tree = SampleTree::new();
-    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
-    let repeated = interpreter_content_hash(tree.path()).expect("repeat must hash");
+    let first = projection_content_hash(tree.path()).expect("baseline must hash");
+    let repeated = projection_content_hash(tree.path()).expect("repeat must hash");
     assert_eq!(first, repeated, "an unchanged tree must have one hash");
 
     tree.write(
         "crates/adapters/src/lib.rs",
         "pub fn interpret() -> bool { false }\n",
     );
-    let changed_source = interpreter_content_hash(tree.path()).expect("source must hash");
+    let changed_source = projection_content_hash(tree.path()).expect("source must hash");
     assert_ne!(first, changed_source);
 
     tree.write(
@@ -142,7 +154,7 @@ fn hash_changes_for_sources_and_manifest_event_mappings() {
         "pub fn interpret() -> bool { true }\n",
     );
     tree.write_example_manifest("[\"ResolverChanged\"]");
-    let changed_mapping = interpreter_content_hash(tree.path()).expect("mapping must hash");
+    let changed_mapping = projection_content_hash(tree.path()).expect("mapping must hash");
     assert_ne!(first, changed_mapping);
 }
 
@@ -153,13 +165,13 @@ fn hash_changes_for_project_sql_sources() {
         "crates/project/src/builders/name_current/build.sql",
         "SELECT 'first';\n",
     );
-    let first = interpreter_content_hash(tree.path()).expect("project SQL baseline must hash");
+    let first = projection_content_hash(tree.path()).expect("project SQL baseline must hash");
 
     tree.write(
         "crates/project/src/builders/name_current/build.sql",
         "SELECT 'second';\n",
     );
-    let changed = interpreter_content_hash(tree.path()).expect("project SQL change must hash");
+    let changed = projection_content_hash(tree.path()).expect("project SQL change must hash");
     assert_ne!(
         first, changed,
         "Project SQL source changes must alter the hash"
@@ -169,14 +181,14 @@ fn hash_changes_for_project_sql_sources() {
 #[test]
 fn projection_and_whole_manifest_event_blocks_change_the_hash() {
     let tree = SampleTree::new();
-    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+    let first = projection_content_hash(tree.path()).expect("baseline must hash");
 
     tree.write(
         "crates/project/src/projection.rs",
         "fn derive_invalidations() { let changed = true; }\n",
     );
     let projection_change =
-        interpreter_content_hash(tree.path()).expect("projection source must hash");
+        projection_content_hash(tree.path()).expect("projection source must hash");
     assert_ne!(
         first, projection_change,
         "projection invalidation derivation must affect the hash"
@@ -192,7 +204,7 @@ fn projection_and_whole_manifest_event_blocks_change_the_hash() {
         "[\"registry\"]",
         "[\"RecordChanged\"]",
     );
-    let fragment_change = interpreter_content_hash(tree.path()).expect("event fragment must hash");
+    let fragment_change = projection_content_hash(tree.path()).expect("event fragment must hash");
     assert_ne!(
         first, fragment_change,
         "manifest ABI event fragments must affect the hash"
@@ -204,7 +216,7 @@ fn projection_and_whole_manifest_event_blocks_change_the_hash() {
         "[\"resolver\"]",
         "[\"RecordChanged\"]",
     );
-    let emitter_change = interpreter_content_hash(tree.path()).expect("emitter mapping must hash");
+    let emitter_change = projection_content_hash(tree.path()).expect("emitter mapping must hash");
     assert_ne!(
         first, emitter_change,
         "manifest emitter-role mappings must affect the hash"
@@ -217,7 +229,7 @@ fn projection_and_whole_manifest_event_blocks_change_the_hash() {
         "[\"ResolverChanged\"]",
     );
     let normalized_change =
-        interpreter_content_hash(tree.path()).expect("normalized mapping must hash");
+        projection_content_hash(tree.path()).expect("normalized mapping must hash");
     assert_ne!(
         first, normalized_change,
         "manifest normalized-event mappings must affect the hash"
@@ -230,7 +242,7 @@ fn projection_and_whole_manifest_event_blocks_change_the_hash() {
         "[]",
     );
     let intake_only_change =
-        interpreter_content_hash(tree.path()).expect("intake-only event block must hash");
+        projection_content_hash(tree.path()).expect("intake-only event block must hash");
     assert_ne!(
         first, intake_only_change,
         "an empty-output manifest ABI addition must rotate the interpreter hash"
@@ -284,7 +296,7 @@ fn base_and_sepolia_manifest_edits_rotate_only_their_containing_profiles() {
 #[test]
 fn normalizer_version_and_test_only_sources_do_not_change_hash() {
     let tree = SampleTree::new();
-    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+    let first = projection_content_hash(tree.path()).expect("baseline must hash");
 
     tree.write(
         "manifests/.bigname-e2e-runtime-profile-999999/local.toml",
@@ -299,14 +311,14 @@ fn normalizer_version_and_test_only_sources_do_not_change_hash() {
     );
     tree.write("crates/project/src/tests.rs", "fn test_only_change() {}\n");
     tree.write_example_manifest_with_normalizer("ensip15@new", "[\"RecordChanged\"]");
-    let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
+    let changed = projection_content_hash(tree.path()).expect("updated tree must hash");
     assert_eq!(first, changed);
 }
 
 #[test]
 fn phase_orchestration_does_not_change_hash() {
     let tree = SampleTree::new();
-    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+    let first = projection_content_hash(tree.path()).expect("baseline must hash");
 
     tree.write(
         "apps/phase-runner/src/interpret_phase.rs",
@@ -314,7 +326,7 @@ fn phase_orchestration_does_not_change_hash() {
     );
     tree.write("crates/interpret/src/engine.rs", "fn size_batches() {}\n");
 
-    let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
+    let changed = projection_content_hash(tree.path()).expect("updated tree must hash");
     assert_eq!(
         first, changed,
         "phase orchestration and the interpret engine must remain outside the hash"
@@ -353,7 +365,7 @@ fn every_hash_input_is_watched_for_rebuilds() {
 #[test]
 fn decode_crate_version_bumps_rotate_the_hash() {
     let tree = SampleTree::new();
-    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+    let first = projection_content_hash(tree.path()).expect("baseline must hash");
 
     let mut packages = sample_lockfile_packages();
     let bumped = packages
@@ -363,7 +375,7 @@ fn decode_crate_version_bumps_rotate_the_hash() {
     bumped.1 = "1.5.8";
     tree.write("Cargo.lock", &lockfile_document(&packages));
 
-    let changed = interpreter_content_hash(tree.path()).expect("bumped lockfile must hash");
+    let changed = projection_content_hash(tree.path()).expect("bumped lockfile must hash");
     assert_ne!(
         first, changed,
         "a decode-semantic crate bump must rotate the hash"
@@ -374,7 +386,7 @@ fn decode_crate_version_bumps_rotate_the_hash() {
 fn serializer_crate_version_bumps_rotate_the_hash() {
     for serializer_crate in ["serde", "serde_core", "serde_derive", "serde_json"] {
         let tree = SampleTree::new();
-        let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+        let first = projection_content_hash(tree.path()).expect("baseline must hash");
 
         let mut packages = sample_lockfile_packages();
         let bumped = packages
@@ -384,7 +396,7 @@ fn serializer_crate_version_bumps_rotate_the_hash() {
         bumped.1 = "9.9.9";
         tree.write("Cargo.lock", &lockfile_document(&packages));
 
-        let changed = interpreter_content_hash(tree.path()).expect("bumped lockfile must hash");
+        let changed = projection_content_hash(tree.path()).expect("bumped lockfile must hash");
         assert_ne!(
             first, changed,
             "a {serializer_crate} bump must force projection re-derivation"
@@ -395,7 +407,7 @@ fn serializer_crate_version_bumps_rotate_the_hash() {
 #[test]
 fn unrelated_lockfile_bumps_do_not_rotate_the_hash() {
     let tree = SampleTree::new();
-    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+    let first = projection_content_hash(tree.path()).expect("baseline must hash");
 
     let mut packages = sample_lockfile_packages();
     let bumped = packages
@@ -405,7 +417,7 @@ fn unrelated_lockfile_bumps_do_not_rotate_the_hash() {
     bumped.1 = "1.0.101";
     tree.write("Cargo.lock", &lockfile_document(&packages));
 
-    let changed = interpreter_content_hash(tree.path()).expect("bumped lockfile must hash");
+    let changed = projection_content_hash(tree.path()).expect("bumped lockfile must hash");
     assert_eq!(
         first, changed,
         "an unrelated dependency bump must not force a re-derivation"
@@ -452,9 +464,9 @@ fn decode_crate_git_revisions_rotate_the_hash() {
 
     let tree = SampleTree::new();
     tree.write("Cargo.lock", &document("aaaa1111"));
-    let first = interpreter_content_hash(tree.path()).expect("first revision must hash");
+    let first = projection_content_hash(tree.path()).expect("first revision must hash");
     tree.write("Cargo.lock", &document("bbbb2222"));
-    let second = interpreter_content_hash(tree.path()).expect("second revision must hash");
+    let second = projection_content_hash(tree.path()).expect("second revision must hash");
     assert_ne!(
         first, second,
         "two git revisions of one decode-crate version must fingerprint differently"
@@ -464,14 +476,14 @@ fn decode_crate_git_revisions_rotate_the_hash() {
 #[test]
 fn duplicate_decode_crate_versions_fingerprint_both() {
     let tree = SampleTree::new();
-    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+    let first = projection_content_hash(tree.path()).expect("baseline must hash");
 
     // The lockfile can carry two versions of one crate (the workspace lock already does for
     // other alloy crates); both stanzas must enter the fingerprint, in sorted order.
     let mut duplicated = sample_lockfile_packages();
     duplicated.push(("alloy-sol-types", "1.4.0", "zz"));
     tree.write("Cargo.lock", &lockfile_document(&duplicated));
-    let with_older = interpreter_content_hash(tree.path()).expect("duplicated lockfile must hash");
+    let with_older = projection_content_hash(tree.path()).expect("duplicated lockfile must hash");
     assert_ne!(
         first, with_older,
         "a second decode-crate version must rotate the hash"
@@ -479,7 +491,7 @@ fn duplicate_decode_crate_versions_fingerprint_both() {
 
     duplicated.reverse();
     tree.write("Cargo.lock", &lockfile_document(&duplicated));
-    let reversed = interpreter_content_hash(tree.path()).expect("reordered lockfile must hash");
+    let reversed = projection_content_hash(tree.path()).expect("reordered lockfile must hash");
     assert_eq!(
         with_older, reversed,
         "stanza order in the lockfile must not change the fingerprint"
@@ -489,11 +501,11 @@ fn duplicate_decode_crate_versions_fingerprint_both() {
 #[test]
 fn a_missing_lockfile_fails_the_hash_instead_of_narrowing_it() {
     let tree = SampleTree::new();
-    interpreter_content_hash(tree.path()).expect("baseline must hash");
+    projection_content_hash(tree.path()).expect("baseline must hash");
     fs::remove_file(tree.path().join("Cargo.lock")).expect("lockfile must be removable");
 
     let error =
-        interpreter_content_hash(tree.path()).expect_err("a missing lockfile must fail loudly");
+        projection_content_hash(tree.path()).expect_err("a missing lockfile must fail loudly");
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     assert!(
         error.to_string().contains("Cargo.lock"),
@@ -510,7 +522,7 @@ fn a_missing_semantic_crate_fails_the_hash_instead_of_narrowing_it() {
         .collect();
     tree.write("Cargo.lock", &lockfile_document(&packages));
 
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("a lockfile without a required semantic crate must fail loudly");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(
@@ -533,14 +545,14 @@ fn a_test_module_declared_in_the_write_parent_stays_out_of_the_hash() {
         "crates/interpret/src/write/tests.rs",
         "fn test_only_baseline() {}\n",
     );
-    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+    let first = projection_content_hash(tree.path()).expect("baseline must hash");
 
     tree.write(
         "crates/interpret/src/write/tests.rs",
         "fn test_only_change() {}\n",
     );
 
-    let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
+    let changed = projection_content_hash(tree.path()).expect("updated tree must hash");
     assert_eq!(
         first, changed,
         "a cfg(test) module must not rotate the hash"
@@ -557,11 +569,11 @@ fn write_conflict_policy_changes_the_hash() {
         "crates/interpret/src/recompute.rs",
     ] {
         let tree = SampleTree::new();
-        let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+        let first = projection_content_hash(tree.path()).expect("baseline must hash");
 
         tree.write(relative_path, "fn source_priority() -> u8 { 2 }\n");
 
-        let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
+        let changed = projection_content_hash(tree.path()).expect("updated tree must hash");
         assert_ne!(first, changed, "{relative_path} must rotate the hash");
     }
 }
@@ -614,11 +626,11 @@ fn storage_semantic_sources_change_the_hash_and_other_storage_sources_do_not() {
     ] {
         let tree = SampleTree::new();
         tree.write(relative_path, "fn compose() -> u8 { 1 }\n");
-        let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+        let first = projection_content_hash(tree.path()).expect("baseline must hash");
 
         tree.write(relative_path, "fn compose() -> u8 { 2 }\n");
 
-        let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
+        let changed = projection_content_hash(tree.path()).expect("updated tree must hash");
         assert_eq!(
             first != changed,
             rotates,
@@ -640,7 +652,7 @@ fn a_test_module_declared_in_the_storage_families_stays_out_of_the_hash() {
         "crates/storage/src/families/tests.rs",
         "fn test_only_baseline() {}\n",
     );
-    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+    let first = projection_content_hash(tree.path()).expect("baseline must hash");
     assert_eq!(
         excluded_source_reason(
             tree.path(),
@@ -655,7 +667,7 @@ fn a_test_module_declared_in_the_storage_families_stays_out_of_the_hash() {
         "fn test_only_change() {}\n",
     );
 
-    let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
+    let changed = projection_content_hash(tree.path()).expect("updated tree must hash");
     assert_eq!(
         first, changed,
         "a cfg(test) module must not rotate the hash"
@@ -703,9 +715,9 @@ fn semantic_dependencies_of_the_watched_roots_affect_the_hash() {
         ),
     ] {
         let tree = SampleTree::new();
-        let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+        let first = projection_content_hash(tree.path()).expect("baseline must hash");
         tree.write(relative_path, changed_source);
-        let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
+        let changed = projection_content_hash(tree.path()).expect("updated tree must hash");
         assert_ne!(
             first, changed,
             "{relative_path} decides persisted rows and must rotate the interpreter hash"
@@ -716,7 +728,7 @@ fn semantic_dependencies_of_the_watched_roots_affect_the_hash() {
 #[test]
 fn request_scoped_lookup_sources_do_not_change_hash() {
     let tree = SampleTree::new();
-    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+    let first = projection_content_hash(tree.path()).expect("baseline must hash");
 
     for relative_path in [
         "crates/lookup/src/engine.rs",
@@ -731,7 +743,7 @@ fn request_scoped_lookup_sources_do_not_change_hash() {
         tree.write(relative_path, "fn serving_only_change() {}\n");
     }
 
-    let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
+    let changed = projection_content_hash(tree.path()).expect("updated tree must hash");
     assert_eq!(
         first, changed,
         "request-scoped serving, transport, and ingest-range sources must stay outside the hash"
@@ -741,11 +753,11 @@ fn request_scoped_lookup_sources_do_not_change_hash() {
 #[test]
 fn a_moved_semantic_source_fails_the_hash_instead_of_narrowing_it() {
     let tree = SampleTree::new();
-    interpreter_content_hash(tree.path()).expect("baseline must hash");
+    projection_content_hash(tree.path()).expect("baseline must hash");
     fs::remove_file(tree.path().join("crates/domain/src/normalization.rs"))
         .expect("semantic source must be removable");
 
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("a missing semantic source must fail loudly");
     assert!(
         error
@@ -769,7 +781,7 @@ fn checked_in_semantic_sources_are_hash_covered() {
             "semantic source {relative_path} must exist on disk"
         );
         assert!(
-            hashed.contains(*relative_path),
+            hashed.contains(relative_path),
             "semantic source {relative_path} is not content-hash covered"
         );
     }
@@ -779,13 +791,13 @@ fn checked_in_semantic_sources_are_hash_covered() {
 fn newly_added_adapter_and_project_modules_affect_the_hash() {
     let adapter_tree = SampleTree::new();
     let adapter_before =
-        interpreter_content_hash(adapter_tree.path()).expect("adapter baseline must hash");
+        projection_content_hash(adapter_tree.path()).expect("adapter baseline must hash");
     adapter_tree.write(
         "crates/adapters/src/future_interpreter.rs",
         "fn interpret_future_event() {}\n",
     );
     let adapter_after =
-        interpreter_content_hash(adapter_tree.path()).expect("new adapter module must hash");
+        projection_content_hash(adapter_tree.path()).expect("new adapter module must hash");
     assert_ne!(
         adapter_before, adapter_after,
         "a new adapter source file must enter the hash automatically"
@@ -793,13 +805,13 @@ fn newly_added_adapter_and_project_modules_affect_the_hash() {
 
     let project_tree = SampleTree::new();
     let project_before =
-        interpreter_content_hash(project_tree.path()).expect("project baseline must hash");
+        projection_content_hash(project_tree.path()).expect("project baseline must hash");
     project_tree.write(
         "crates/project/src/future_projection.rs",
         "fn derive_future_projection() {}\n",
     );
     let project_after =
-        interpreter_content_hash(project_tree.path()).expect("new project module must hash");
+        projection_content_hash(project_tree.path()).expect("new project module must hash");
     assert_ne!(
         project_before, project_after,
         "a new project semantic source file must enter the hash automatically"
@@ -810,12 +822,12 @@ fn newly_added_adapter_and_project_modules_affect_the_hash() {
 fn manifest_authority_source_changes_affect_the_hash() {
     let tree = SampleTree::new();
     let before =
-        interpreter_content_hash(tree.path()).expect("manifest-authority baseline must hash");
+        projection_content_hash(tree.path()).expect("manifest-authority baseline must hash");
     tree.write(
         "crates/manifests/src/schema_v2.rs",
         "fn persist_manifest_authority() {}\n",
     );
-    let after = interpreter_content_hash(tree.path()).expect("manifest-authority source must hash");
+    let after = projection_content_hash(tree.path()).expect("manifest-authority source must hash");
     assert_ne!(
         before, after,
         "manifest authority persistence must affect the hash"
@@ -825,11 +837,11 @@ fn manifest_authority_source_changes_affect_the_hash() {
 #[test]
 fn excluded_sources_are_insensitive_but_production_support_is_hashed() {
     let tree = SampleTree::new();
-    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+    let first = projection_content_hash(tree.path()).expect("baseline must hash");
 
     tree.write("crates/project/src/tests.rs", "fn changed_test() {}\n");
     let excluded_change =
-        interpreter_content_hash(tree.path()).expect("excluded sources must be inspectable");
+        projection_content_hash(tree.path()).expect("excluded sources must be inspectable");
     assert_eq!(
         first, excluded_change,
         "cfg(test)-only sources must be excluded"
@@ -840,7 +852,7 @@ fn excluded_sources_are_insensitive_but_production_support_is_hashed() {
         "fn production_support_changed() {}\n",
     );
     let production_support_change =
-        interpreter_content_hash(tree.path()).expect("production support must hash");
+        projection_content_hash(tree.path()).expect("production support must hash");
     assert_ne!(
         first, production_support_change,
         "production support files must not be blanket-excluded"
@@ -858,13 +870,13 @@ fn conventionally_named_source_is_hashed_without_a_cfg_test_gate() {
         "crates/project/src/conventional/tests.rs",
         "pub fn interpret() -> bool { false }\n",
     );
-    let first = interpreter_content_hash(tree.path()).expect("production module must hash");
+    let first = projection_content_hash(tree.path()).expect("production module must hash");
 
     tree.write(
         "crates/project/src/conventional/tests.rs",
         "pub fn interpret() -> bool { true }\n",
     );
-    let changed = interpreter_content_hash(tree.path()).expect("changed module must hash");
+    let changed = projection_content_hash(tree.path()).expect("changed module must hash");
     assert_ne!(first, changed);
 }
 
@@ -876,13 +888,13 @@ fn descendants_of_a_cfg_test_module_are_excluded() {
         "crates/project/src/tests/support.rs",
         "pub fn fixture() -> bool { false }\n",
     );
-    let first = interpreter_content_hash(tree.path()).expect("test module tree must hash");
+    let first = projection_content_hash(tree.path()).expect("test module tree must hash");
 
     tree.write(
         "crates/project/src/tests/support.rs",
         "pub fn fixture() -> bool { true }\n",
     );
-    let changed = interpreter_content_hash(tree.path()).expect("changed test helper must hash");
+    let changed = projection_content_hash(tree.path()).expect("changed test helper must hash");
     assert_eq!(first, changed);
 }
 
@@ -995,7 +1007,7 @@ fn manifest_parser_fails_loudly_below_the_checked_in_floor() {
     );
 
     let error =
-        interpreter_content_hash(tree.path()).expect_err("an undersized manifest corpus must fail");
+        projection_content_hash(tree.path()).expect_err("an undersized manifest corpus must fail");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(
         error
@@ -1040,10 +1052,11 @@ impl SampleTree {
             "crates/interpret/src/write/identity_names.rs",
             "fn source_priority() -> u8 { 1 }\n",
         );
-        for relative_path in semantic_source_files()
-            .iter()
-            .chain(crate::storage_families::COMPOSITION_FILES)
-        {
+        for relative_path in semantic_source_files().into_iter().chain(
+            crate::storage_families::COMPOSITION_FILES
+                .iter()
+                .map(|entry| entry.path),
+        ) {
             tree.write(relative_path, "pub fn semantics() -> bool { true }\n");
         }
         tree.write(

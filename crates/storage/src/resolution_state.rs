@@ -3,7 +3,7 @@
 //! (`families::control::cutover`). This reads Project's proxy rows and names the row where the
 //! client-facing proxy chain ends, so a reader can tell an implementation the manifest does not
 //! admit from a proxy with no `Upgraded` yet. It sits outside `families`, so it is not part of
-//! the interpreter content hash.
+//! either content hash.
 use anyhow::{Context, Result};
 use sqlx::{FromRow, PgConnection};
 

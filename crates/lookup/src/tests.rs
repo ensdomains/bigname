@@ -4239,7 +4239,7 @@ async fn seed_project_state(pool: &PgPool, chain_id: &str, block_hash: &str) -> 
     )
     .bind(chain_id)
     .bind(block_hash)
-    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
     .execute(pool)
     .await?;
     Ok(())

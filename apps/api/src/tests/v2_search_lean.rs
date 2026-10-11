@@ -170,7 +170,7 @@ async fn v2_search_lean_retained_component_measurement() -> Result<()> {
     assert_eq!(before, input["publication"]);
     assert_eq!(
         before["input_hash"],
-        bigname_content_hash::INTERPRETER_CONTENT_HASH
+        bigname_content_hash::PROJECTION_CONTENT_HASH
     );
     let filter = lean_filter("ens", "a");
     let mut results = Vec::new();

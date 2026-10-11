@@ -4,7 +4,7 @@
 //! Split out of `rpc` because project hydration calls through here before rows are persisted —
 //! widening what counts as a success turns a batch that aborts today into persisted
 //! `primary_names_current` and `record_inventory_current` values — which puts this module inside
-//! the interpreter content hash. The rest of `rpc` is HTTP client construction, timeouts, and
+//! the projection content hash. The rest of `rpc` is HTTP client construction, timeouts, and
 //! endpoint configuration, which can only abort a request, plus a head-block read no hydration
 //! path calls. Route any new provider-result interpretation hydration reaches through here.
 

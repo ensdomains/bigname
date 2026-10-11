@@ -3,7 +3,7 @@
 /// (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L311 @ ensnode@2017ae6)
 /// (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L316 @ ensnode@2017ae6).
 /// This list selects which reverse claims get hydrated and therefore which
-/// primary claim rows are hydrated, so it lives inside the interpreter content hash's watched
+/// primary claim rows are hydrated, so it lives inside the projection content hash's watched
 /// roots rather than in a serving crate.
 pub(crate) const EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES: &[&str] =
     &["0xa2c122be93b0074270ebee7f6b7292c7deb45047"];

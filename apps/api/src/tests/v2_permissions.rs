@@ -1496,7 +1496,7 @@ async fn v2_permissions_refuse_an_incomplete_family_rebuild()
     let outcome = bigname_project::families::apply(&database.pool, chain,
         &bigname_project::Marker { number:130, hash:"0xperms130".into() },
         bigname_project::families::FamilyMode::Rebuild, &token,
-        &bigname_project::families::FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+        &bigname_project::families::FamilyOptions::new(bigname_content_hash::PROJECTION_CONTENT_HASH)
             .with_max_blocks_per_run(1)).await?;
     assert!(outcome.reset);
     assert_ne!(outcome.marker.as_ref().map(|marker| marker.number), Some(130));

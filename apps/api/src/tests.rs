@@ -32,6 +32,10 @@ async fn healthz_reports_phase_runner_health_from_the_phase_schema() -> Result<(
         payload["identity"]["interpreter_content_hash"],
         json!(bigname_content_hash::INTERPRETER_CONTENT_HASH)
     );
+    assert_eq!(
+        payload["identity"]["projection_content_hash"],
+        json!(bigname_content_hash::PROJECTION_CONTENT_HASH)
+    );
 
     database.cleanup().await
 }

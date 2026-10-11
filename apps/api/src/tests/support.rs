@@ -464,7 +464,7 @@ async fn rebuild_fixture_families(
         bigname_project::families::FamilyMode::Rebuild,
         &token,
         &bigname_project::families::FamilyOptions::new(
-            bigname_content_hash::INTERPRETER_CONTENT_HASH,
+            bigname_content_hash::PROJECTION_CONTENT_HASH,
         ),
     )
     .await?;
@@ -841,7 +841,7 @@ impl TestDatabase {
                 )
                 VALUES
                     ($1, 'interpret', 'completed', $2, $3, $2, $3, $4, now(), now()),
-                    ($1, 'project', 'completed', $2, $3, $2, $3, $4, now(), now())
+                    ($1, 'project', 'completed', $2, $3, $2, $3, $5, now(), now())
                 ON CONFLICT (chain_id, phase_name) DO UPDATE SET
                     phase_status = EXCLUDED.phase_status,
                     current_block_number = EXCLUDED.current_block_number,
@@ -858,6 +858,7 @@ impl TestDatabase {
             .bind(block_number)
             .bind(block_hash)
             .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+            .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
             .execute(&self.lookup_pool)
             .await
             .with_context(|| {
@@ -1105,7 +1106,7 @@ async fn seed_schema_v2_lookup_head(
     .bind(chain_id)
     .bind(block_number)
     .bind(block_hash)
-    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
     .execute(pool)
     .await?;
     Ok(())
@@ -3967,7 +3968,7 @@ async fn publish_test_families_on(pool: &PgPool, chain: &str, target: i64) -> Re
     let outcome = bigname_project::families::apply(
         pool, chain, &bigname_project::Marker { number: target, hash },
         bigname_project::families::FamilyMode::Normal, &token,
-        &bigname_project::families::FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH),
+        &bigname_project::families::FamilyOptions::new(bigname_content_hash::PROJECTION_CONTENT_HASH),
     ).await?;
     anyhow::ensure!(outcome.marker.as_ref().map(|marker| marker.number) == Some(target),
         "the families published {chain} at {target}: {outcome:?}");

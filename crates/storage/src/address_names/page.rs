@@ -336,8 +336,8 @@ pub(crate) async fn load_address_names_filtered_ids_from(
 
 /// A surface-less registry child's `served_manager` from its composed relation rows, all of which
 /// carry the same one, its registry owner (`families::records::registry_children`). It rides
-/// beside the page query rather than through it: query.rs is an input of the interpreter content
-/// hash (crates/content-hash/src/compute.rs, `SEMANTIC_SOURCE_FILES`).
+/// beside the page query rather than through it: query.rs is an input of the projection content
+/// hash (crates/content-hash/src/classes.rs, `SEMANTIC_SOURCE_FILES`).
 fn attach_served_managers(entries: &mut [AddressNameCurrentEntry], source: RowSource<'_>) {
     let RowSource::Composed { rows, .. } = source;
     let mut managers: BTreeMap<&str, &str> = BTreeMap::new();

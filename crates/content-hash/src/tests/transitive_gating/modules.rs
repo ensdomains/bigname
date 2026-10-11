@@ -1,7 +1,7 @@
 //! Where modules resolve outside the walk's own tree: target roots outside `src/`, optional
 //! files that do not exist yet, and the modules of the files hashed by name.
 
-use super::{SampleTree, assert_names, interpreter_content_hash, is_input, rotates};
+use super::{SampleTree, assert_names, is_input, projection_content_hash, rotates};
 
 #[test]
 fn a_crate_root_outside_its_source_root_is_refused() {
@@ -14,7 +14,7 @@ fn a_crate_root_outside_its_source_root_is_refused() {
         "crates/adapters/lib/root.rs",
         "pub fn interpret() -> bool { true }\n",
     );
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("a crate root outside the hashed sources must fail the hash");
     assert_names(
         &error.to_string(),
@@ -39,7 +39,7 @@ fn a_walked_crate_must_turn_build_scripts_off() {
     ] {
         let path = format!("crates/{krate}/Cargo.toml");
         tree.write(&path, manifest);
-        let error = interpreter_content_hash(tree.path())
+        let error = projection_content_hash(tree.path())
             .expect_err("a walked crate that may run a build script must fail the hash");
         assert_names(&error.to_string(), &[&path, "package.build = false"]);
         tree.write(&path, "[package]\nbuild = false\n");
@@ -55,7 +55,7 @@ fn a_walked_crate_must_turn_build_scripts_off() {
         "crates/adapters/build.rs",
         "#[path = \"src/gated.rs\"]\nmod gated;\nfn main() {}\n",
     );
-    interpreter_content_hash(tree.path()).expect("a crate with build scripts off must hash");
+    projection_content_hash(tree.path()).expect("a crate with build scripts off must hash");
     assert!(!is_input(&tree, "crates/adapters/src/gated.rs"));
 }
 
@@ -64,7 +64,7 @@ fn a_walked_source_root_without_a_manifest_is_refused() {
     let tree = SampleTree::new();
     std::fs::remove_file(tree.path().join("crates/adapters/Cargo.toml"))
         .expect("sample manifest must be removable");
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("a walked src/ without a manifest must fail the hash");
     assert_names(&error.to_string(), &["crates/adapters/src", "Cargo.toml"]);
 }
@@ -79,7 +79,7 @@ fn a_walked_file_that_is_not_text_is_named() {
         [0xff, 0xfe],
     )
     .expect("sample file must be writable");
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("a file that is not UTF-8 must fail the hash");
     assert_names(&error.to_string(), &["crates/lookup/src/abi/tables.rs"]);
 }
@@ -124,7 +124,7 @@ fn a_root_that_is_not_rust_is_refused_when_an_include_reaches_it_first() {
         "crates/lookup/src/lib.rs",
         "include!(\"../../adapters/src/tool.txt\");\n",
     );
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("a root that is not Rust must fail the hash whatever reaches it first");
     assert_names(
         &error.to_string(),
@@ -146,7 +146,7 @@ fn a_root_that_is_not_rust_is_refused_when_an_include_reaches_it_later() {
         "crates/storage/src/lib.rs",
         "include!(\"../../lookup/src/tool.txt\");\n",
     );
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("a root that is not Rust must fail the hash whatever reaches it later");
     assert_names(
         &error.to_string(),
@@ -169,7 +169,7 @@ fn a_manifest_target_that_is_not_rust_is_refused() {
         "crates/adapters/src/root.txt",
         "pub fn interpret() -> bool { true }\n",
     );
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("a crate root that is not a hashed source must fail the hash");
     assert_names(
         &error.to_string(),
@@ -217,7 +217,7 @@ fn a_module_target_of_a_semantic_source_is_walked_in_turn() {
         "#[path = \"../outside.rs\"]\nmod outside;\n",
     );
     tree.write("crates/adapters/outside.rs", "pub fn outside() {}\n");
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("an unhashed module of a walked target must fail the hash");
     assert_names(
         &error.to_string(),
@@ -240,7 +240,7 @@ fn a_module_of_a_semantic_source_resolves_only_where_rustc_looks() {
         "pub mod tokens;\n",
     );
     tree.write("crates/storage/src/tokens.rs", "pub fn unrelated() {}\n");
-    interpreter_content_hash(tree.path()).expect("an unrelated sibling must not fail the hash");
+    projection_content_hash(tree.path()).expect("an unrelated sibling must not fail the hash");
     assert!(is_input(
         &tree,
         "crates/storage/src/identity_search/tokens.rs"
@@ -299,7 +299,7 @@ fn a_cfg_attr_path_on_an_inline_module_of_a_semantic_source_is_refused() {
         "#[cfg_attr(feature = \"alt\", path = \"alt_dir\")]\n#[path = \"identity_search\"]\n\
          mod inline {\n    mod tokens;\n}\n",
     );
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("a cfg_attr path on an inline module must fail the hash");
     assert_names(
         &error.to_string(),
@@ -326,7 +326,7 @@ fn a_semantic_source_walked_as_a_module_is_checked_again_when_included() {
         "crates/storage/src/expiry.rs",
         "include!(\"identity_search.rs\");\n",
     );
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("an included file declaring a module must fail the hash");
     assert_names(
         &error.to_string(),
@@ -348,7 +348,7 @@ fn a_semantic_source_reached_by_path_resolves_its_modules_beside_it() {
     );
     tree.write("crates/storage/src/identity_search.rs", "pub mod tokens;\n");
     tree.write("crates/storage/src/tokens.rs", "pub fn compiled() {}\n");
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("the compiled unhashed sibling must fail the hash");
     assert_names(
         &error.to_string(),
@@ -375,7 +375,7 @@ fn a_semantic_source_reached_by_a_second_route_is_resolved_on_each() {
         "#[path = \"identity_search.rs\"]\nmod again;\n",
     );
     tree.write("crates/storage/src/tokens.rs", "pub fn compiled() {}\n");
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("the second route's unhashed child must fail the hash");
     assert_names(
         &error.to_string(),
@@ -395,7 +395,7 @@ fn an_out_of_line_module_under_a_cfg_that_may_be_off_may_include_an_absent_file(
         "crates/interpret/src/write/optional.rs",
         "include!(\"absent.rs\");\n",
     );
-    interpreter_content_hash(tree.path()).expect("an optional absent include target must hash");
+    projection_content_hash(tree.path()).expect("an optional absent include target must hash");
 
     // A present target that is not a hashed source is still refused.
     tree.write(
@@ -403,7 +403,7 @@ fn an_out_of_line_module_under_a_cfg_that_may_be_off_may_include_an_absent_file(
         "include!(\"table.txt\");\n",
     );
     tree.write("crates/interpret/src/write/table.txt", "1\n");
-    let error = interpreter_content_hash(tree.path())
+    let error = projection_content_hash(tree.path())
         .expect_err("a present unhashed include target must fail the hash");
     assert_names(
         &error.to_string(),

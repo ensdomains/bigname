@@ -1349,6 +1349,10 @@ impl SequentialFixtureReplay {
         // between fixture windows would stamp a manifest-authority redo and turn the incremental
         // history test into a full interpretation replay.
         super::facts::seed_anvil_snapshot(pool, chain, &rpc_url, target_block).await?;
+        let projection_hash = previous_hashes
+            .iter()
+            .find(|(phase, _)| phase == "project")
+            .and_then(|(_, hash)| hash.clone());
         for (phase, content_hash) in previous_hashes {
             sqlx::query(
                 "UPDATE chain_phase_state
@@ -1373,19 +1377,12 @@ impl SequentialFixtureReplay {
             Some(&rpc_url),
         )
         .await?;
-        let interpreter_hash: String = sqlx::query_scalar(
-            "SELECT input_content_hash FROM chain_phase_state
-             WHERE chain_id = $1 AND phase_name = 'interpret'",
-        )
-        .bind(chain)
-        .fetch_one(pool)
-        .await?;
         sqlx::query(
             "UPDATE chain_phase_state SET input_content_hash = $2
              WHERE chain_id = $1 AND phase_name = 'project'",
         )
         .bind(chain)
-        .bind(interpreter_hash)
+        .bind(projection_hash)
         .execute(pool)
         .await?;
         run_phase_redo(

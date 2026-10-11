@@ -162,7 +162,7 @@ impl PhaseStore {
             })?;
             return Ok(StartDisposition::AlreadyCompleted);
         }
-        require_start(&rows, chain_id, phase, mode)?;
+        require_start(&mut transaction, &rows, chain_id, phase, mode).await?;
         if recovering_completed {
             transaction.commit().await.map_err(|error| {
                 RunnerError::transient(format!(
@@ -212,7 +212,7 @@ impl PhaseStore {
         )
         .bind(chain_id)
         .bind(phase.as_str())
-        .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+        .bind(crate::transitions::expected_content_hash(phase))
         .bind(resume_position)
         .execute(&mut *transaction)
         .await

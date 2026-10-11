@@ -161,7 +161,7 @@ async fn completed_project_cannot_enter_ingest_verify_retained_recovery() -> Res
         scratch.pool(),
         chain_id,
         PhaseName::Project,
-        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+        Some(phase_runner::PROJECTION_CONTENT_HASH),
     )
     .await?;
     sqlx::query(
@@ -610,11 +610,15 @@ async fn runner_writes_transitions_cursors_heads_and_heartbeats() -> Result<()> 
         FROM chain_phase_state
         WHERE chain_id = $1
           AND phase_status = 'completed'
-          AND input_content_hash = $2
+          AND input_content_hash = CASE
+              WHEN phase_name IN ('project', 'live') THEN $3
+              ELSE $2
+          END
         ",
     )
     .bind(chain_id)
     .bind(phase_runner::INTERPRETER_CONTENT_HASH)
+    .bind(phase_runner::PROJECTION_CONTENT_HASH)
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(stamped_rows, 5);
@@ -804,7 +808,7 @@ async fn attested_operator_interpret_redo_repairs_discovery_before_project() -> 
         ),
         (
             PhaseName::Project,
-            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+            Some(phase_runner::PROJECTION_CONTENT_HASH),
         ),
     ] {
         mark_completed(scratch.pool(), chain_id, phase, content_hash).await?;
@@ -923,7 +927,7 @@ async fn all_phase_redo_repairs_discovery_before_project() -> Result<()> {
         ),
         (
             PhaseName::Project,
-            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+            Some(phase_runner::PROJECTION_CONTENT_HASH),
         ),
         (PhaseName::Verify, None),
     ] {
@@ -1783,7 +1787,7 @@ async fn capacity_breach_pauses_and_then_resumes_the_phase() -> Result<()> {
         scratch.pool(),
         "capacity-chain",
         PhaseName::Project,
-        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+        Some(phase_runner::PROJECTION_CONTENT_HASH),
     )
     .await?;
     sqlx::query(
@@ -1920,7 +1924,7 @@ async fn a_batch_prelude_measures_afresh_after_a_batch_consumed_the_headroom() -
             scratch.pool(),
             chain_id,
             PhaseName::Project,
-            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+            Some(phase_runner::PROJECTION_CONTENT_HASH),
         )
         .await?;
         sqlx::query(
@@ -2042,7 +2046,7 @@ async fn transient_phase_error_restarts_with_backoff() -> Result<()> {
         scratch.pool(),
         "restart-chain",
         PhaseName::Project,
-        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+        Some(phase_runner::PROJECTION_CONTENT_HASH),
     )
     .await?;
     mark_completed(scratch.pool(), "restart-chain", PhaseName::Verify, None).await?;
@@ -2105,7 +2109,7 @@ async fn a_settled_batch_resets_the_restart_backoff() -> Result<()> {
         scratch.pool(),
         "backoff-chain",
         PhaseName::Project,
-        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+        Some(phase_runner::PROJECTION_CONTENT_HASH),
     )
     .await?;
     mark_completed(scratch.pool(), "backoff-chain", PhaseName::Verify, None).await?;
@@ -2366,7 +2370,7 @@ async fn readding_chain_preserves_settled_derived_phase_without_a_canonical_head
                 scratch.pool(),
                 &chain_id,
                 PhaseName::Project,
-                Some(phase_runner::INTERPRETER_CONTENT_HASH),
+                Some(phase_runner::PROJECTION_CONTENT_HASH),
             )
             .await?;
         }
@@ -3277,7 +3281,7 @@ async fn redo_restores_the_full_phase_lifecycle_state() -> Result<()> {
         scratch.pool(),
         chain_id,
         PhaseName::Project,
-        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+        Some(phase_runner::PROJECTION_CONTENT_HASH),
     )
     .await?;
     sqlx::query(
@@ -3381,7 +3385,7 @@ async fn recompute_flags_stopped_during_interpret_says_to_rerun_recompute_flags(
         ),
         (
             PhaseName::Project,
-            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+            Some(phase_runner::PROJECTION_CONTENT_HASH),
         ),
         (PhaseName::Verify, None),
     ] {
@@ -3439,7 +3443,7 @@ async fn all_phase_redo_stopped_between_phases_keeps_the_all_phase_instruction()
         ),
         (
             PhaseName::Project,
-            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+            Some(phase_runner::PROJECTION_CONTENT_HASH),
         ),
         (PhaseName::Verify, None),
     ] {
@@ -3523,7 +3527,7 @@ async fn all_phase_redo_stopped_between_chains_reports_the_chains_it_never_start
             ),
             (
                 PhaseName::Project,
-                Some(phase_runner::INTERPRETER_CONTENT_HASH),
+                Some(phase_runner::PROJECTION_CONTENT_HASH),
             ),
             (PhaseName::Verify, None),
         ] {
@@ -3598,7 +3602,7 @@ async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() 
             ),
             (
                 PhaseName::Project,
-                Some(phase_runner::INTERPRETER_CONTENT_HASH),
+                Some(phase_runner::PROJECTION_CONTENT_HASH),
             ),
             (PhaseName::Verify, None),
         ] {
@@ -3807,7 +3811,7 @@ async fn all_phase_redo_refuses_a_range_beyond_the_verify_extent() -> Result<()>
         ),
         (
             PhaseName::Project,
-            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+            Some(phase_runner::PROJECTION_CONTENT_HASH),
             1,
         ),
         (PhaseName::Verify, None, 0),
@@ -3864,7 +3868,7 @@ async fn all_phase_project_failure_keeps_the_original_range_in_recovery() -> Res
         ),
         (
             PhaseName::Project,
-            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+            Some(phase_runner::PROJECTION_CONTENT_HASH),
             1,
         ),
         (PhaseName::Verify, None, 0),
@@ -3935,7 +3939,7 @@ async fn all_phase_redo_refuses_to_absorb_a_pending_project_redo() -> Result<()>
         scratch.pool(),
         chain_id,
         PhaseName::Project,
-        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+        Some(phase_runner::PROJECTION_CONTENT_HASH),
     )
     .await?;
     set_phase_extent(scratch.pool(), chain_id, PhaseName::Project, 1).await?;
@@ -4259,7 +4263,7 @@ async fn redo_interpret_can_start_a_new_content_hash_epoch() -> Result<()> {
             ),
             (
                 "project".to_owned(),
-                Some(phase_runner::INTERPRETER_CONTENT_HASH.to_owned())
+                Some(phase_runner::PROJECTION_CONTENT_HASH.to_owned())
             ),
         ]
     );
@@ -4685,7 +4689,7 @@ async fn redo_progress_refuses_a_range_widened_while_the_phase_is_running() -> R
             phase,
             phase
                 .writes_derived_data()
-                .then_some(phase_runner::INTERPRETER_CONTENT_HASH),
+                .then(|| phase_runner::expected_content_hash(phase)),
         )
         .await?;
         set_phase_extent(scratch.pool(), chain_id, phase, 2).await?;
@@ -5341,7 +5345,7 @@ async fn project_redo_rejects_an_incomplete_intake_source_set_before_its_marker(
             phase,
             phase
                 .writes_derived_data()
-                .then_some(phase_runner::INTERPRETER_CONTENT_HASH),
+                .then(|| phase_runner::expected_content_hash(phase)),
         )
         .await?;
     }
@@ -6544,7 +6548,6 @@ async fn a_new_hash_interpret_redo_supersedes_a_prior_hash_project_redo() -> Res
     .bind(chain_id)
     .fetch_all(scratch.pool())
     .await?;
-    let current = Some(phase_runner::INTERPRETER_CONTENT_HASH.to_owned());
     assert_eq!(
         rows,
         vec![
@@ -6552,9 +6555,14 @@ async fn a_new_hash_interpret_redo_supersedes_a_prior_hash_project_redo() -> Res
                 "interpret".into(),
                 "completed".into(),
                 false,
-                current.clone()
+                Some(phase_runner::INTERPRETER_CONTENT_HASH.to_owned())
             ),
-            ("project".into(), "completed".into(), false, current),
+            (
+                "project".into(),
+                "completed".into(),
+                false,
+                Some(phase_runner::PROJECTION_CONTENT_HASH.to_owned())
+            ),
         ],
         "the interpreter content-hash rotation ran Interpret and the stamped Project redo"
     );
@@ -6572,10 +6580,18 @@ async fn a_same_hash_active_project_redo_still_blocks_interpret_redo() -> Result
         phase_runner::INTERPRETER_CONTENT_HASH,
     )
     .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET input_content_hash = $2
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain_id)
+    .bind(phase_runner::PROJECTION_CONTENT_HASH)
+    .execute(scratch.pool())
+    .await?;
     leave_project_redo_active(
         scratch.pool(),
         chain_id,
-        phase_runner::INTERPRETER_CONTENT_HASH,
+        phase_runner::PROJECTION_CONTENT_HASH,
     )
     .await?;
     let before = active_project_redo(scratch.pool(), chain_id).await?;
@@ -6849,7 +6865,6 @@ async fn assert_new_hash_epoch_completed(pool: &sqlx::PgPool, chain_id: &str) ->
     .bind(chain_id)
     .fetch_all(pool)
     .await?;
-    let current = Some(phase_runner::INTERPRETER_CONTENT_HASH.to_owned());
     assert_eq!(
         rows,
         vec![
@@ -6857,9 +6872,14 @@ async fn assert_new_hash_epoch_completed(pool: &sqlx::PgPool, chain_id: &str) ->
                 "interpret".into(),
                 "completed".into(),
                 false,
-                current.clone()
+                Some(phase_runner::INTERPRETER_CONTENT_HASH.to_owned())
             ),
-            ("project".into(), "completed".into(), false, current),
+            (
+                "project".into(),
+                "completed".into(),
+                false,
+                Some(phase_runner::PROJECTION_CONTENT_HASH.to_owned())
+            ),
         ],
         "the interpreter content-hash rotation ran Interpret and the stamped Project redo"
     );

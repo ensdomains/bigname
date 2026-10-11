@@ -13,7 +13,7 @@ use std::{
 
 use anyhow::{Result, ensure};
 use phase_runner::{
-    INTERPRETER_CONTENT_HASH,
+    INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH,
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
     heads::{BlockMarker, HeadMarkers},
@@ -438,9 +438,8 @@ async fn ready(prefix: &str) -> Result<ScratchDatabase> {
              target_block_number = $2, target_block_hash = $3,
              live_handoff_block_number = CASE WHEN phase_name = 'ingest' THEN $2 END,
              live_handoff_block_hash = CASE WHEN phase_name = 'ingest' THEN $3 END,
-             input_content_hash = CASE
-                 WHEN phase_name IN ('interpret', 'project') THEN $4
-             END,
+             input_content_hash = CASE phase_name WHEN 'project' THEN $5
+                 WHEN 'interpret' THEN $4 END,
              started_at = now(), finished_at = now()
          WHERE chain_id = $1 AND phase_name IN ('ingest', 'interpret', 'project')",
     )
@@ -448,6 +447,7 @@ async fn ready(prefix: &str) -> Result<ScratchDatabase> {
     .bind(HEAD)
     .bind(&hash)
     .bind(INTERPRETER_CONTENT_HASH)
+    .bind(PROJECTION_CONTENT_HASH)
     .execute(scratch.pool())
     .await?;
     sqlx::query(

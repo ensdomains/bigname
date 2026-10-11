@@ -31,7 +31,7 @@ pub(super) struct ProjectPublication {
     pub block_hash: String,
 }
 
-/// The current live family marker for this binary's interpreter generation.
+/// The current live family marker for this binary's projection content hash.
 pub(super) async fn load_current_project_publication(
     connection: &mut PgConnection,
     chain_id: &str,
@@ -39,7 +39,7 @@ pub(super) async fn load_current_project_publication(
     let sql = { CURRENT_FAMILY_MARKER_PUBLICATION };
     let row: Option<(i64, String)> = sqlx::query_as(sql)
         .bind(chain_id)
-        .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+        .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
         .fetch_optional(&mut *connection)
         .await
         .map_err(|error| {
@@ -54,7 +54,7 @@ pub(super) async fn load_current_project_publication(
 }
 
 /// The servable family marker of a chain, as a `FROM ... WHERE` clause binding the chain as `$1`
-/// and this build's interpreter content hash as `$2`, with the marker as `marker`. A marker is
+/// and this build's projection content hash as `$2`, with the marker as `marker`. A marker is
 /// servable once it is `live` (`bootstrap_pending` means a rebuild is still populating the
 /// families: the first-sync fence), written by this build, and on the readable lineage (a reorg
 /// that orphans its block makes it unservable until the families republish). The publication
@@ -123,7 +123,7 @@ pub async fn load_served_project_generation<'e>(
         .bind(chain_id)
         .bind(block_number)
         .bind(block_hash)
-        .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+        .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
         .bind(lag_tolerance_blocks)
         .bind(require_position_is_publication)
         .bind(require_interpret_not_redo)

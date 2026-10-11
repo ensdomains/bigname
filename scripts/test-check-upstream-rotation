@@ -1845,5 +1845,79 @@ class PolicyTests(unittest.TestCase):
         )
 
 
+class ContentHashSplitTests(unittest.TestCase):
+    def generated(self, directory: Path, projection: bool, rows: list[str] | None) -> Path:
+        constants = directory / "interpreter_content_hash.rs"
+        text = 'pub const INTERPRETER_CONTENT_HASH: &str = "keccak256:i";\n'
+        if projection:
+            text += 'pub const PROJECTION_CONTENT_HASH: &str = "keccak256:p";\n'
+        constants.write_text(text, encoding="utf-8")
+        if rows is not None:
+            (directory / "content_hash_inputs.tsv").write_text(
+                "class\tkey\tcontent_keccak256\n" + "".join(f"{row}\n" for row in rows),
+                encoding="utf-8",
+            )
+        return constants
+
+    def test_a_combined_era_build_has_no_projection_hash_or_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            parsed = rotation.parse_generated_hashes(
+                self.generated(Path(temporary), False, None)
+            )
+        self.assertEqual((parsed.interpreter, parsed.projection, parsed.inputs), ("keccak256:i", None, None))
+        with self.assertRaisesRegex(rotation.RotationError, "lists no content-hash inputs"):
+            parsed.hashed_sources()
+
+    def test_the_head_input_list_classifies_rust_carriers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            parsed = rotation.parse_generated_hashes(
+                self.generated(
+                    Path(temporary),
+                    True,
+                    [
+                        "project\tsource:crates/storage/src/expiry.rs\tkeccak256:a",
+                        "both\tsemantic-crate:serde\tkeccak256:b",
+                    ],
+                )
+            )
+        hashed = parsed.hashed_sources()
+        citation = rotation.Citation("", "", 1, 1, "", 0, 0, 1, b"", True, 0)
+        self.assertEqual(hashed, frozenset({"crates/storage/src/expiry.rs"}))
+        self.assertEqual(
+            rotation.carrier_class("crates/storage/src/expiry.rs", citation, hashed),
+            "hashed_rust_comment",
+        )
+        self.assertEqual(
+            rotation.carrier_class("crates/storage/src/lib.rs", citation, hashed),
+            "other_rust_comment",
+        )
+        self.assertEqual(
+            rotation.carrier_class("crates/storage/src/expiry.rs", citation), "rust_comment"
+        )
+
+    def test_the_verdict_names_the_rotation(self) -> None:
+        def hashes(interpreter: str, projection: str | None, inputs=None):
+            return rotation.ContentHashes(interpreter, projection, {}, inputs)
+
+        self.assertEqual(
+            rotation.rotation_verdict(hashes("i", None), hashes("i2", "p")), "interpreter"
+        )
+        self.assertEqual(
+            rotation.rotation_verdict(hashes("i", "p"), hashes("i", "p2")), "projection-only"
+        )
+        self.assertEqual(rotation.rotation_verdict(hashes("i", "p"), hashes("i", "p")), "none")
+        self.assertEqual(
+            rotation.changed_inputs(
+                hashes("i", "p", {"source:a.rs": ("project", "x"), "source:b.rs": ("both", "y")}),
+                hashes("i", "p2", {"source:a.rs": ("project", "z"), "source:b.rs": ("both", "y")}),
+            ),
+            ["  project\tchanged\tsource:a.rs"],
+        )
+        self.assertEqual(
+            rotation.changed_inputs(hashes("i", None), hashes("i2", "p", {})),
+            ["  base lists no inputs; compare the hashes above"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

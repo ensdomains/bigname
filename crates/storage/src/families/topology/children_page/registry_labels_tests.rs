@@ -43,7 +43,7 @@ async fn registry_labels_match_the_unnarrowed_relation_and_probe_the_indexes() -
     let result = async {
         let mut conn = database.pool().acquire().await?;
         install(&mut conn).await?;
-        let hash = bigname_content_hash::INTERPRETER_CONTENT_HASH;
+        let hash = bigname_content_hash::PROJECTION_CONTENT_HASH;
         let filter = ChildrenCurrentPageFilter::default();
         let owner = registry(0xb0b);
         let cases = [
@@ -393,7 +393,7 @@ async fn install(conn: &mut PgConnection) -> Result<()> {
         FROM generate_series(1, 4000) n;
         ANALYZE;
         "#,
-        hash = bigname_content_hash::INTERPRETER_CONTENT_HASH,
+        hash = bigname_content_hash::PROJECTION_CONTENT_HASH,
     ))
     .execute(&mut *conn)
     .await?;

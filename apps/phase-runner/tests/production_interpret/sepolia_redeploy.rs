@@ -380,14 +380,15 @@ async fn the_sepolia_redeploy_replaces_the_dropped_set_through_the_attested_redo
          SET phase_status = 'completed', started_at = now(), finished_at = now(),
              current_block_number = $2,
              current_block_hash = $3,
-             input_content_hash = CASE WHEN phase_name IN ('interpret', 'project')
-                                       THEN $4 END
+             input_content_hash = CASE phase_name WHEN 'project' THEN $5
+                 WHEN 'interpret' THEN $4 END
          WHERE chain_id = $1",
     )
     .bind(CHAIN)
     .bind(HEAD)
     .bind(block_hash(CHAIN, HEAD))
     .bind(INTERPRETER_CONTENT_HASH)
+    .bind(PROJECTION_CONTENT_HASH)
     .execute(pool)
     .await?;
     interpret_through_head(pool, FIRST, InterpretRunMode::Normal).await?;

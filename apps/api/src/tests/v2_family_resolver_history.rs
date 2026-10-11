@@ -83,7 +83,7 @@ async fn advance_family_without_resolver_changes(database: &TestDatabase) -> Res
         bigname_project::families::FamilyMode::Normal,
         &token,
         &bigname_project::families::FamilyOptions::new(
-            bigname_content_hash::INTERPRETER_CONTENT_HASH,
+            bigname_content_hash::PROJECTION_CONTENT_HASH,
         ),
     )
     .await?;

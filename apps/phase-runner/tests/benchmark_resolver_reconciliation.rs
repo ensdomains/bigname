@@ -3,7 +3,7 @@ mod support;
 
 use anyhow::Result;
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
-use phase_runner::{INTERPRETER_CONTENT_HASH, state::PhaseStore};
+use phase_runner::{PROJECTION_CONTENT_HASH, state::PhaseStore};
 
 use support::ScratchDatabase;
 
@@ -168,7 +168,7 @@ async fn publish_project_heads(scratch: &ScratchDatabase) -> Result<()> {
                AND head.chain_id = project.chain_id",
         )
         .bind(chain_id)
-        .bind(INTERPRETER_CONTENT_HASH)
+        .bind(PROJECTION_CONTENT_HASH)
         .execute(scratch.pool())
         .await?;
         let (number, hash) = sqlx::query_as::<_, (i64, String)>(
@@ -185,7 +185,7 @@ async fn publish_project_heads(scratch: &ScratchDatabase) -> Result<()> {
             &target,
             bigname_project::families::FamilyMode::Rebuild,
             &token,
-            &bigname_project::families::FamilyOptions::new(INTERPRETER_CONTENT_HASH),
+            &bigname_project::families::FamilyOptions::new(PROJECTION_CONTENT_HASH),
         )
         .await?;
         assert_eq!(outcome.marker.as_ref(), Some(&target));

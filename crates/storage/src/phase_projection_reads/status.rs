@@ -126,7 +126,7 @@ pub async fn load_phase_indexing_status(
         ORDER BY known_chains.chain_id
         "#
     ))
-    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
     .bind(bigname_domain::vocabulary::ChainId::EthereumSepolia.as_str())
     .bind(lag_tolerance_blocks)
     .fetch_all(pool)

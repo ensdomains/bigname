@@ -2331,7 +2331,7 @@ completion. A run that stops between blocks is resumed by the next. Each
 start of a Project redo moves the Project row to a new redo attempt, so a
 rebuild records the attempt it began under. When the runner reruns an
 interrupted redo with the same requested range while the Project row still records the
-running binary's interpreter content hash (no other hash and no manifest or
+running binary's [projection content hash](glossary.md#projection-content-hash) (no other hash and no manifest or
 authority invalidation marker in between), keeping its saved progress, a rebuild the attempt just before it left is
 carried over to the new attempt and resumes from the family marker, provided
 its input revision is unchanged and the families were written under this

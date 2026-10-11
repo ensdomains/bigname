@@ -86,7 +86,7 @@ database copy because all three operations write derived state:
 
 The published-head re-apply starts from a copy whose selected head is already
 published under the current
-[interpreter content hash](../glossary.md#interpreter-content-hash), then
+[projection content hash](../glossary.md#projection-content-hash), then
 measures the real Project redo transition, journal undo and replay of that head.
 Every invocation receives a fresh redo attempt, so repeating the measurement cannot
 become a completed-attempt no-op. Rebuild and redo perform no provider calls.
@@ -159,7 +159,7 @@ payload. Every active resolver family must contribute at least one currently
 applicable, supported, API-visible request target; one healthy family cannot
 conceal zero ENSv2 coverage. The head must be a completed
 publication at the latest published/readable chain head under the
-API's [interpreter content hash](../glossary.md#interpreter-content-hash); a
+API's [projection content hash](../glossary.md#projection-content-hash); a
 missing, running, stale, or invalidated head
 makes the gate red. A concrete declaration whose `start_block` is no later than
 that head must have a
@@ -288,7 +288,7 @@ file is authoritative for the exact route mapping.
 
 ## Prepare the targets
 
-Record the release commit, [interpreter content hash](../glossary.md#interpreter-content-hash), host CPU and memory,
+Record the release commit, [interpreter content hash](../glossary.md#interpreter-content-hash) and [projection content hash](../glossary.md#projection-content-hash), host CPU and memory,
 PostgreSQL version and settings, database size, selected chain and head, dense
 Interpret range, and whether the API target is host-local or reached over a
 network. Keep those facts with both JSON reports. The API report records the
@@ -439,7 +439,7 @@ the API half therefore makes the run red at the next boundary, even if it
 completed and cleared the flag inside the endpoint window, instead of silently
 narrowing lookup requests. The harness also checks `/healthz` and requires
 the target build SHA to match the clean harness checkout's `HEAD`, and requires
-the interpreter content hash to match the harness.
+the projection content hash to match the harness.
 It also requires the API-reported opaque database identity to match the
 read-only database connection used to count and sample the corpus. The report
 records both sides of that identity check. Configure the API database URL and
@@ -470,7 +470,7 @@ and chain membership, redo flag, PostgreSQL row-version, API build,
 content-hash, and running-database identity checks and rechecks the corpus
 connection. It also compares the selected Project publication rows and the
 complete active public manifest authority snapshot with the preflight values.
-The Project comparison includes the published block, interpreter content hash,
+The Project comparison includes the published block, projection content hash,
 status, and row generation. The manifest comparison includes each manifest's
 identity, version, normalizer version, load time, payload, and latest finalized
 manifest event content, so a same-namespace and same-chain manifest rotation is

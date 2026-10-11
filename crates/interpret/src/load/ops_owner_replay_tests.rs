@@ -410,7 +410,7 @@ async fn project(
         &marker,
         mode,
         &token,
-        &FamilyOptions::new(bigname_test_support::INTERPRETER_CONTENT_HASH),
+        &FamilyOptions::new(bigname_test_support::PROJECTION_CONTENT_HASH),
     )
     .await?;
     assert!(!outcome.budget_exhausted);

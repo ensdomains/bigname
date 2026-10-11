@@ -1715,14 +1715,29 @@ older nonzero owner.
 ## Interpreter content hash
 
 the build-time identifier for checked-in inputs
-that can change Interpret or Project output. Derived phase state records this
-hash, and a binary with a different value must re-walk the complete retained
-range before normal derived writes continue. It covers interpreter, projection,
-manifest, ABI, normalization, provider-response decoding, and selected
-dependency inputs as detailed under [interpretation
-replay](storage.md#interpretation-replay), including the storage code that
-composes the stored [name summaries](#name-summary) but not the read-only
-queries beside it. It is not an Ethereum contract bytecode hash.
+that can change what Interpret persists: adapter, manifest, ABI, normalization,
+Interpret's persistence stage, the storage code Interpret writes search
+documents through, and selected dependency inputs, as detailed under
+[interpretation replay](storage.md#interpretation-replay). The Ingest, Verify
+and Interpret rows record it. A binary with a different value runs a full-range
+Interpret redo, and the Project redo it stamps, before normal derived writes
+continue. The [projection content hash](#projection-content-hash) includes it.
+It is not an Ethereum contract bytecode hash.
+
+## Projection content hash
+
+the build-time identifier for everything that can change Project output: the
+[interpreter content hash](#interpreter-content-hash) plus the inputs only
+Project reads, such as the Project crate and its SQL, the storage code that
+composes the [owned key families](#owned-key-family) and stored [name
+summaries](#name-summary) (but not the read-only queries beside it), and
+provider-response decoding for hydration. The Project and Live rows, the
+[family marker](#family-marker), the [repair record](#repair-record) and the
+address-history catalogue marker record it, and the API serves a publication
+only while its marker records the API's own value. A binary whose projection
+content hash differs while its interpreter content hash matches needs one
+full-range Project redo and no Interpret redo. The runner never starts that
+redo itself: a normal Project or Live start is refused and names it.
 
 ## Interpreter session
 
@@ -2138,8 +2153,10 @@ a planned point when the indexed dataset is rebuilt
 from raw chain data, starting at block zero or a documented lower bound, because
 interpretation semantics changed. The [interpreter content
 hash](#interpreter-content-hash) names the generation of interpretation
-semantics used for that rebuild; a deployment that changes that hash happens
-only at a re-derivation boundary.
+semantics used for that rebuild, and the [projection content
+hash](#projection-content-hash) the generation of projection semantics. A
+deployment that changes either hash happens only at a re-derivation boundary. A
+change to the projection content hash alone re-derives Project only.
 At the boundary, Ingest performs the mandatory historical fetch for every range
 added by the generated watch plan, Interpret runs from the chosen lower bound
 through the fixed readable head, Project runs through that same head, and the
@@ -2758,7 +2775,7 @@ against the generation it planned from.
 The marker is what the API serves from: snapshot selection and the verified lookup's
 admission accept a chain's publication only while its marker is `live` (never
 `bootstrap_pending`, the state of a rebuild still populating the families),
-belongs to this build's interpreter, sits on readable lineage and trails the
+records this build's [projection content hash](#projection-content-hash), sits on readable lineage and trails the
 stored head by at most the API's [publication lag
 tolerance](#publication-lag-tolerance) (one block by default), and the marker's `sequence` is the served
 generation a same-request recheck compares, and the verified lookup's guard

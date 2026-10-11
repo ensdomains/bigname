@@ -28,7 +28,7 @@ async fn catalogue_count_retained_plans() -> Result<()> {
         .fetch_one(&mut connection).await?;
     ensure!(database.starts_with("bigname_api_test_tyr235_integrated"));
     ensure!(
-        hash == bigname_content_hash::INTERPRETER_CONTENT_HASH,
+        hash == bigname_content_hash::PROJECTION_CONTENT_HASH,
         "fixture and compiled reader hashes differ"
     );
     ensure!(

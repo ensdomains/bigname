@@ -1,11 +1,13 @@
-//! A Project redo left in progress by a binary with another interpreter content hash cannot finish
-//! under this binary: Project refuses to write while Interpret records the other hash, and the
-//! other binary may be gone (a schema-migration can drop the tables it needs). Its progress is
-//! invalid under this hash anyway. The Interpret redo that starts the interpreter content-hash
-//! rotation therefore supersedes it: in the transaction that begins the Interpret redo, the Project
-//! row is restored the way a finished redo restores it, and the Interpret redo's completion stamps
-//! the Project redo again under this hash. A Project redo from this binary's own hash is live work
-//! and still blocks Interpret.
+//! A Project redo left in progress by a binary with another projection content hash cannot finish
+//! under this binary while Interpret also records another interpreter content hash: Project
+//! refuses to write until Interpret is current, and the other binary may be gone (a
+//! schema-migration can drop the tables it needs). Its progress is invalid under this hash anyway.
+//! The Interpret redo that starts the interpreter content-hash rotation therefore supersedes it: in
+//! the transaction that begins the Interpret redo, the Project row is restored the way a finished
+//! redo restores it, and the Interpret redo's completion stamps the Project redo again under this
+//! hash. A Project redo from this binary's own projection hash is live work and still blocks
+//! Interpret. So does one of another projection hash while Interpret is current: it must finish
+//! first (`content_hash_refusal`).
 use sqlx::{Postgres, Transaction};
 
 use crate::{
@@ -16,8 +18,8 @@ use crate::{
 };
 
 /// The Project row an Interpret redo starting an interpreter content-hash rotation supersedes, if
-/// any: a Project redo
-/// that began under another hash, while Interpret itself still records another hash. A stamped
+/// any: a Project redo that began under another projection content hash, while Interpret itself
+/// still records another interpreter content hash. A stamped
 /// Project redo that has not begun (or whose stop was recorded) already lets Interpret start and
 /// is widened by Interpret's completion, so it is left alone.
 pub(crate) fn superseded_project_redo<'a>(
@@ -28,7 +30,7 @@ pub(crate) fn superseded_project_redo<'a>(
     if phase != PhaseName::Interpret || !matches!(mode, RunMode::Redo(_)) {
         return Ok(None);
     }
-    if !other_hash(row_for(rows, PhaseName::Interpret)?) {
+    if !other_hash(row_for(rows, PhaseName::Interpret)?, PhaseName::Interpret) {
         return Ok(None);
     }
     let project = row_for(rows, PhaseName::Project)?;
@@ -39,14 +41,14 @@ pub(crate) fn superseded_project_redo<'a>(
     Ok((running
         && project.redo_in_progress
         && !is_pending_required_downstream_redo(project)
-        && other_hash(project))
+        && other_hash(project, PhaseName::Project))
     .then_some(project))
 }
 
-fn other_hash(row: &PhaseStateRow) -> bool {
+fn other_hash(row: &PhaseStateRow, phase: PhaseName) -> bool {
     row.input_content_hash
         .as_deref()
-        .is_some_and(|hash| hash != bigname_content_hash::INTERPRETER_CONTENT_HASH)
+        .is_some_and(|hash| hash != crate::transitions::expected_content_hash(phase))
 }
 
 /// Restore the superseded Project row as `redo_state::finish` restores a finished redo: its
@@ -75,7 +77,7 @@ pub(crate) async fn supersede(
         return Err(RunnerError::new(
             ErrorKind::LockHeld,
             format!(
-                "chain {chain_id} phase project is still running a redo under interpreter content \
+                "chain {chain_id} phase project is still running a redo under projection content \
                  hash {}; stop that runner before starting the interpreter content-hash rotation",
                 project.input_content_hash.as_deref().unwrap_or("none")
             ),
@@ -163,10 +165,11 @@ impl Superseded {
             chain_id,
             superseded_hash = self.hash.as_deref(),
             interpreter_content_hash = bigname_content_hash::INTERPRETER_CONTENT_HASH,
+            projection_content_hash = bigname_content_hash::PROJECTION_CONTENT_HASH,
             redo_attempt_generation = self.generation,
             redo_from_block = self.from,
             redo_to_block = self.to,
-            "superseded a Project redo left by another interpreter content hash; the Interpret \
+            "superseded a Project redo left by another projection content hash; the Interpret \
              redo that starts this interpreter content-hash rotation stamps it again"
         );
     }

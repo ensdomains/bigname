@@ -235,11 +235,11 @@ pub(super) fn served_lag(observed_head: Option<i64>, publication: Option<i64>) -
 ///   already show that state, and this gauge measures publication eligibility only.
 ///
 /// The publication is the family marker while it is `live` with this
-/// build's interpreter hash; a rebuild (`bootstrap_pending`) or a missing marker reports -1,
+/// build's projection content hash; a rebuild (`bootstrap_pending`) or a missing marker reports -1,
 /// since nothing is served then. Chains are still those with a Project row.
 pub(super) async fn load(pool: &PgPool) -> Result<Vec<ServedLagRow>> {
     sqlx::query_as(FAMILY_MARKER_SERVED_LAG)
-        .bind(crate::INTERPRETER_CONTENT_HASH)
+        .bind(crate::PROJECTION_CONTENT_HASH)
         .fetch_all(pool)
         .await
         .context("failed to read served-lag state")

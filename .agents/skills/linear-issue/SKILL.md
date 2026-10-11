@@ -39,7 +39,7 @@ Status and provenance first: where this came from. The PR number or ticket id wh
 When code is involved:
 
 - Give code references as `path:line` at a named commit.
-- State the impact of a fix on the interpreter content hash when it is known (`docs/glossary.md` "Interpreter content hash"). Otherwise say it is unknown until there is a diff. Once a diff exists, the measured result is required.
+- State the impact of a fix on the interpreter and projection content hashes when it is known (`docs/glossary.md` "Interpreter content hash" and "Projection content hash"). Otherwise say it is unknown until there is a diff. Once a diff exists, the measured result is required.
 
 ### Analysis (optional, no fixed heading)
 

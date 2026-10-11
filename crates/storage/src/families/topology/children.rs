@@ -102,7 +102,7 @@ pub(super) fn push_selected<'a>(
              AND marker_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
             WHERE marker.state = 'live' AND marker.input_content_hash = ",
     );
-    builder.push_bind(bigname_content_hash::INTERPRETER_CONTENT_HASH);
+    builder.push_bind(bigname_content_hash::PROJECTION_CONTENT_HASH);
     builder.push(format!(
         "
         ), parent AS (

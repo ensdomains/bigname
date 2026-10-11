@@ -134,7 +134,7 @@ async fn ready(chain: &str) -> Result<(ScratchDatabase, RpcFixture)> {
         &target,
         FamilyMode::Normal,
         &token,
-        &FamilyOptions::new(INTERPRETER_CONTENT_HASH).with_rebuild_ranges(RebuildRanges::Off),
+        &FamilyOptions::new(PROJECTION_CONTENT_HASH).with_rebuild_ranges(RebuildRanges::Off),
     )
     .await;
     if let Some(error) = error {

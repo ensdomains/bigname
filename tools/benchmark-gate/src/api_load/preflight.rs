@@ -350,7 +350,7 @@ mod tests {
                  ('base-mainnet', 'interpret', false, 'completed', 16, '0x10', NULL),
                  ('ethereum-mainnet', 'project', false, 'completed', 16, '0x10', '{content_hash}'),
                  ('base-mainnet', 'project', false, 'completed', 16, '0x10', '{content_hash}');",
-            content_hash = bigname_content_hash::INTERPRETER_CONTENT_HASH,
+            content_hash = bigname_content_hash::PROJECTION_CONTENT_HASH,
         ))
         .execute(database.pool())
         .await
@@ -481,7 +481,7 @@ mod tests {
             .unwrap();
         let identity = ApiTargetIdentity {
             build_sha: "release".to_owned(),
-            interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH.to_owned(),
+            projection_content_hash: bigname_content_hash::PROJECTION_CONTENT_HASH.to_owned(),
             database_identity: database_identity.clone(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -490,7 +490,7 @@ mod tests {
         let body = serde_json::json!({
             "identity": {
                 "build_sha": identity.build_sha,
-                "interpreter_content_hash": identity.interpreter_content_hash,
+                "projection_content_hash": identity.projection_content_hash,
             },
             "database": {"identity": identity.database_identity},
         })
@@ -553,7 +553,7 @@ mod tests {
             .unwrap();
         let identity = ApiTargetIdentity {
             build_sha: "release".to_owned(),
-            interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH.to_owned(),
+            projection_content_hash: bigname_content_hash::PROJECTION_CONTENT_HASH.to_owned(),
             database_identity: database_identity.clone(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -562,7 +562,7 @@ mod tests {
         let body = serde_json::json!({
             "identity": {
                 "build_sha": identity.build_sha,
-                "interpreter_content_hash": identity.interpreter_content_hash,
+                "projection_content_hash": identity.projection_content_hash,
             },
             "database": {"identity": identity.database_identity},
         })

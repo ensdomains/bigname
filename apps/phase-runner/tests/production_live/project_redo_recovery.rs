@@ -150,7 +150,7 @@ async fn undo_of_a_range_transaction_records_its_actual_predecessor() -> Result<
         &target,
         FamilyMode::Rebuild,
         &token,
-        &FamilyOptions::new(INTERPRETER_CONTENT_HASH)
+        &FamilyOptions::new(PROJECTION_CONTENT_HASH)
             .with_rebuild_ranges(RebuildRanges::Through(HEAD)),
     )
     .await;
@@ -300,12 +300,101 @@ async fn old_hash_interrupted_rebuild_recovers_through_full_interpret_project_ad
         state,
         (
             "live".into(),
-            INTERPRETER_CONTENT_HASH.into(),
-            INTERPRETER_CONTENT_HASH.into(),
+            PROJECTION_CONTENT_HASH.into(),
+            PROJECTION_CONTENT_HASH.into(),
             false
         )
     );
     assert_eq!(family_marker(&scratch, chain).await?, HEAD);
+    fixture.server.abort();
+    scratch.cleanup().await
+}
+
+// A projection-only rotation: Interpret records this binary's interpreter content hash, while the
+// Project row and the family marker record another projection content hash. One full-range Project
+// redo rebuilds the families under this binary's projection hash and leaves Interpret alone.
+#[tokio::test]
+async fn projection_only_rotation_rebuilds_the_families_with_one_project_redo() -> Result<()> {
+    let chain = "project-projection-only-rotation";
+    let (scratch, fixture) = ready(chain).await?;
+    let before = pointers(&scratch, chain).await?;
+    let reset = reset_sequence(&scratch, chain).await?;
+    let interpret_row = "SELECT input_content_hash, redo_attempt_generation, finished_at::text
+        FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'interpret'";
+    let interpret_before: (Option<String>, i64, Option<String>) = sqlx::query_as(interpret_row)
+        .bind(chain)
+        .fetch_one(scratch.pool())
+        .await?;
+    assert_eq!(
+        interpret_before.0.as_deref(),
+        Some(INTERPRETER_CONTENT_HASH)
+    );
+    sqlx::query(
+        "UPDATE chain_phase_state SET input_content_hash = 'keccak256:prior-projection'
+        WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE project_family_marker SET input_content_hash = 'keccak256:prior-projection'
+        WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    let phase = runner(&scratch, chain, 3)?;
+    let refused = phase
+        .redo(
+            &live_chain(chain, &fixture.endpoint)?,
+            RedoPhase::Phase(PhaseName::Project),
+            BlockRange::new(HEAD, HEAD)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a projection-only rotation cannot adopt a narrow repair");
+    assert_eq!(refused.kind(), ErrorKind::ContentHashMismatch);
+    phase
+        .redo(
+            &live_chain(chain, &fixture.endpoint)?,
+            RedoPhase::Phase(PhaseName::Project),
+            BlockRange::new(0, HEAD)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_ne!(
+        reset_sequence(&scratch, chain).await?,
+        reset,
+        "families from another projection content hash must be rebuilt"
+    );
+    let state: (String, String, String, bool) = sqlx::query_as(
+        "SELECT marker.state, marker.input_content_hash, phase.input_content_hash, phase.redo_in_progress
+         FROM project_family_marker marker JOIN chain_phase_state phase USING (chain_id)
+         WHERE marker.chain_id = $1 AND phase.phase_name = 'project'")
+        .bind(chain).fetch_one(scratch.pool()).await?;
+    assert_eq!(
+        state,
+        (
+            "live".into(),
+            PROJECTION_CONTENT_HASH.into(),
+            PROJECTION_CONTENT_HASH.into(),
+            false
+        )
+    );
+    let interpret_after: (Option<String>, i64, Option<String>) = sqlx::query_as(interpret_row)
+        .bind(chain)
+        .fetch_one(scratch.pool())
+        .await?;
+    assert_eq!(interpret_after, interpret_before, "Interpret is not redone");
+    let attestations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM manifest_authority_attestations WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(attestations, 0, "a Project redo is never attested");
+    assert_eq!(family_marker(&scratch, chain).await?, HEAD);
+    assert_eq!(pointers(&scratch, chain).await?, before);
     fixture.server.abort();
     scratch.cleanup().await
 }
@@ -379,7 +468,7 @@ impl Phase for LegacyRebuild {
                 },
                 FamilyMode::Rebuild,
                 &token,
-                &FamilyOptions::new(INTERPRETER_CONTENT_HASH)
+                &FamilyOptions::new(PROJECTION_CONTENT_HASH)
                     .with_max_blocks_per_run(3)
                     .with_rebuild_ranges(RebuildRanges::Off),
             )

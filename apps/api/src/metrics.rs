@@ -28,6 +28,7 @@ impl ApiMetrics {
         let registry = MetricsRegistry::new(BuildInfo {
             build_sha: crate::BUILD_SHA,
             interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH,
+            projection_content_hash: bigname_content_hash::PROJECTION_CONTENT_HASH,
         })?;
         let http_requests = registry.int_counter_vec(
             "http_requests_total",
@@ -263,6 +264,22 @@ mod tests {
 
         let body = parse_http_scrape(&response)?;
         ensure!(body.contains("# TYPE build_info gauge"));
+        for label in [
+            format!(
+                "interpreter_content_hash=\"{}\"",
+                bigname_content_hash::INTERPRETER_CONTENT_HASH
+            ),
+            format!(
+                "projection_content_hash=\"{}\"",
+                bigname_content_hash::PROJECTION_CONTENT_HASH
+            ),
+        ] {
+            ensure!(
+                body.lines()
+                    .any(|line| line.starts_with("build_info{") && line.contains(&label)),
+                "build_info lacks {label}"
+            );
+        }
         ensure!(body.contains("# TYPE http_requests_total counter"));
         Ok(())
     }
