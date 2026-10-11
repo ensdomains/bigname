@@ -520,6 +520,13 @@ async fn v2_ens_v1_resolver_a_redo_keeps_serving_the_pointer_set_after_the_reser
     sqlx::query("UPDATE chain_phase_state SET redo_attempt_generation=redo_attempt_generation+1 WHERE chain_id=$1 AND phase_name='project'")
         .bind(CHAIN).execute(&database.pool).await?;
     let token = bigname_project::families::input_token(&database.pool, CHAIN).await?;
+    // The family marker records the hash the fixture's Project phase row records.
+    let project_hash: String = sqlx::query_scalar(
+        "SELECT input_content_hash FROM chain_phase_state WHERE chain_id=$1 AND phase_name='project'",
+    )
+    .bind(CHAIN)
+    .fetch_one(&database.pool)
+    .await?;
     bigname_project::families::apply(
         &database.pool,
         CHAIN,
@@ -532,9 +539,7 @@ async fn v2_ens_v1_resolver_a_redo_keeps_serving_the_pointer_set_after_the_reser
             to: HEAD,
         },
         &token,
-        &bigname_project::families::FamilyOptions::new(
-            bigname_content_hash::INTERPRETER_CONTENT_HASH,
-        ),
+        &bigname_project::families::FamilyOptions::new(project_hash),
     )
     .await?;
     let redone = (
