@@ -238,3 +238,121 @@ async fn configured_parallelism_bounds_actual_window_log_queries() -> Result<()>
     assert!(traffic.peak <= 2);
     Ok(())
 }
+
+fn hashes(label: &str, count: usize) -> Vec<String> {
+    (0..count)
+        .map(|index| hash_of(label, index as i64))
+        .collect()
+}
+
+fn addresses(count: usize) -> Vec<String> {
+    (0..count).map(|index| format!("0x{index:040x}")).collect()
+}
+
+#[tokio::test]
+async fn no_topic0_issues_no_request() -> Result<()> {
+    let node = endpoint(IngestConfig::default(), false, false).await?;
+    let addresses = addresses(1_001);
+    assert!(
+        node.provider
+            .range_logs(1, 18, &addresses, &[], &[])
+            .await?
+            .is_empty()
+    );
+    assert!(
+        node.provider
+            .verification_logs(1, 18, &addresses, &[], &hashes("topic1", 2))
+            .await?
+            .is_empty()
+    );
+    assert!(node.traffic.lock().unwrap().requests.is_empty());
+    Ok(())
+}
+
+#[test]
+fn positions_over_the_limit_multiply_in_nested_order() {
+    let addresses = addresses(1_001);
+    let topic0s = hashes("topic0", 501);
+    let topic1s = hashes("topic1", 2);
+    let parts = log_filter_split::split_filter(&addresses, &topic0s, &topic1s, 500);
+    let shape = parts
+        .iter()
+        .map(|part| {
+            (
+                part.addresses[0].clone(),
+                part.addresses.len(),
+                part.topic0s[0].clone(),
+                part.topic0s.len(),
+                part.topic1s.len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut expected = Vec::new();
+    for (address, address_count) in [(0, 500), (500, 500), (1_000, 1)] {
+        for (topic0, topic0_count) in [(0, 500), (500, 1)] {
+            expected.push((
+                addresses[address].clone(),
+                address_count,
+                topic0s[topic0].clone(),
+                topic0_count,
+                2,
+            ));
+        }
+    }
+    assert_eq!(shape, expected);
+}
+
+#[test]
+fn all_emitter_split_keeps_the_wildcard() -> Result<()> {
+    let topic0s = hashes("topic0", 1_501);
+    let parts = log_filter_split::split_filter(&[], &topic0s, &[], 500);
+    assert_eq!(parts.len(), 4);
+    for part in parts {
+        assert!(part.addresses.is_empty());
+        let filter = types::range_log_filter(1, 2, part.addresses, part.topic0s, part.topic1s)?;
+        assert!(filter.get("address").is_none(), "{filter}");
+        assert_eq!(
+            filter["topics"][0].as_array().unwrap().len(),
+            part.topic0s.len()
+        );
+        assert!(filter["topics"].get(1).is_none(), "{filter}");
+    }
+    Ok(())
+}
+
+#[test]
+fn merge_collapses_duplicates_sorts_and_refuses_conflicts() {
+    let log = |block_number: i64, log_index: i64, data: u8| Log {
+        block_hash: hash_of("block", block_number),
+        block_number,
+        transaction_hash: hash_of("transaction", block_number),
+        transaction_index: 0,
+        log_index,
+        address: WATCHED_ADDRESS.to_owned(),
+        topics: vec![WATCHED_TOPIC.to_owned()],
+        data: vec![data],
+    };
+    let merged = log_filter_split::merge_split_logs(vec![
+        vec![log(2, 0, 0), log(3, 1, 0)],
+        vec![log(1, 4, 0), log(2, 0, 0), log(3, 0, 0)],
+    ])
+    .unwrap();
+    assert_eq!(
+        merged
+            .iter()
+            .map(|log| (log.block_number, log.log_index))
+            .collect::<Vec<_>>(),
+        [(1, 4), (2, 0), (3, 0), (3, 1)]
+    );
+    let error = log_filter_split::merge_split_logs(vec![vec![log(2, 0, 0)], vec![log(2, 0, 1)]])
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("conflicting log identity"),
+        "{error}"
+    );
+    assert!(!is_retryable(&error));
+    assert_eq!(
+        provider_error("failed to fetch selected chain logs", error).kind(),
+        crate::ErrorKind::DataIntegrity
+    );
+}

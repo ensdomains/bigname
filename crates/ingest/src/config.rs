@@ -6,6 +6,7 @@ pub struct IngestConfig {
     blocks_per_batch: u32,
     rpc_batch_size: usize,
     rpc_max_in_flight: usize,
+    rpc_log_filter_position_limit: usize,
     rpc_chain_check: Option<RpcChainCheck>,
 }
 
@@ -15,6 +16,7 @@ impl Default for IngestConfig {
             blocks_per_batch: 256,
             rpc_batch_size: 32,
             rpc_max_in_flight: 8,
+            rpc_log_filter_position_limit: 500,
             rpc_chain_check: None,
         }
     }
@@ -45,8 +47,20 @@ impl IngestConfig {
             blocks_per_batch,
             rpc_batch_size,
             rpc_max_in_flight,
-            rpc_chain_check: None,
+            ..Self::default()
         })
+    }
+
+    /// Most addresses, or most topics, one `eth_getLogs` filter position may list. Longer lists
+    /// are split across several queries whose results are merged.
+    pub fn with_rpc_log_filter_position_limit(mut self, limit: usize) -> Result<Self> {
+        if limit == 0 {
+            return Err(IngestError::configuration(
+                "ingest RPC log filter position limit must be at least 1",
+            ));
+        }
+        self.rpc_log_filter_position_limit = limit;
+        Ok(self)
     }
 
     /// Guards every RPC provider built from this configuration with the RPC chain check.
@@ -70,6 +84,10 @@ impl IngestConfig {
     /// Concurrent HTTP requests across all users of one configured provider.
     pub const fn rpc_max_in_flight(self) -> usize {
         self.rpc_max_in_flight
+    }
+
+    pub const fn rpc_log_filter_position_limit(self) -> usize {
+        self.rpc_log_filter_position_limit
     }
 
     pub const fn rpc_chain_check(self) -> Option<RpcChainCheck> {
@@ -104,5 +122,22 @@ mod tests {
                 crate::ErrorKind::Configuration
             );
         }
+        assert_eq!(IngestConfig::default().rpc_log_filter_position_limit(), 500);
+        for limit in [1, 1_000, 1_000_000] {
+            assert_eq!(
+                IngestConfig::default()
+                    .with_rpc_log_filter_position_limit(limit)
+                    .unwrap()
+                    .rpc_log_filter_position_limit(),
+                limit
+            );
+        }
+        assert_eq!(
+            IngestConfig::default()
+                .with_rpc_log_filter_position_limit(0)
+                .unwrap_err()
+                .kind(),
+            crate::ErrorKind::Configuration
+        );
     }
 }

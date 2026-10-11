@@ -5,10 +5,11 @@ use tokio::sync::Mutex;
 
 use super::*;
 use crate::{
+    IngestConfig,
     engine::prefetch::RangeLogCache,
     test_chain::{
         NOISE_ADDRESS, NOISE_TOPIC, Tamper, TestBlock, TestChain, TestLog, TestTransaction,
-        WATCHED_ADDRESS, WATCHED_TOPIC, hash_of, serve,
+        WATCHED_ADDRESS, WATCHED_TOPIC, WIDEST_FILTER_POSITION, hash_of, serve, serve_with_config,
     },
 };
 
@@ -524,5 +525,199 @@ async fn repeated_resolver_creation_reads_one_suffix_for_indexing_and_verificati
             .map(|log| (log.block_number, log.log_index, log.address, log.topics))
             .collect::<Vec<_>>()
     );
+    Ok(())
+}
+
+fn filter_position_cap(failures: usize) -> Tamper {
+    Tamper::FilterPositionCap {
+        limit: usize::MAX,
+        failures,
+        code: -32000,
+    }
+}
+
+#[tokio::test]
+async fn one_filter_position_cap_is_retried_inside_the_provider() -> Result<()> {
+    let endpoint = serve(TestChain::synthetic(FIRST, 1, 1), filter_position_cap(1)).await?;
+    let provider = Arc::new(endpoint.provider);
+    let filter = filter(FIRST);
+    let result = WindowReader {
+        provider: &provider,
+        coinbase: None,
+        prefetch: None,
+        filter: &filter,
+    }
+    .fetch(FIRST, FIRST)
+    .await?;
+    assert_eq!(result.facts.logs.len(), 3);
+    assert_eq!(endpoint.counts.get("eth_getLogs"), 2);
+    assert_eq!(
+        endpoint.counts.get("eth_getBlockByNumber"),
+        2,
+        "the window was not fetched again"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn persistent_filter_position_cap_is_transient_not_data_integrity() -> Result<()> {
+    let endpoint = serve(
+        TestChain::synthetic(FIRST, 1, 1),
+        filter_position_cap(usize::MAX),
+    )
+    .await?;
+    let provider = Arc::new(endpoint.provider);
+    let filter = filter(FIRST);
+    let error = WindowReader {
+        provider: &provider,
+        coinbase: None,
+        prefetch: None,
+        filter: &filter,
+    }
+    .fetch(FIRST, FIRST)
+    .await
+    .err()
+    .expect("a provider that always refuses the filter cannot load the window");
+    assert_eq!(error.kind(), ErrorKind::Transient, "{error}");
+    assert_eq!(
+        endpoint.counts.get("eth_getLogs"),
+        5,
+        "every provider attempt"
+    );
+    assert_eq!(
+        endpoint.counts.get("eth_getBlockByNumber"),
+        1,
+        "the window was not fetched again"
+    );
+    Ok(())
+}
+
+const SECOND_ADDRESS: &str = "0x3333333333333333333333333333333333333333";
+
+/// One block in which three emitters each announce themselves and then emit a scoped log.
+fn three_announcing_emitters() -> TestChain {
+    let logs = [WATCHED_ADDRESS, NOISE_ADDRESS, SECOND_ADDRESS]
+        .into_iter()
+        .enumerate()
+        .flat_map(|(index, address)| {
+            [WATCHED_TOPIC, NOISE_TOPIC]
+                .into_iter()
+                .enumerate()
+                .map(move |(offset, topic)| TestLog {
+                    log_index: (index * 2 + offset) as i64,
+                    address: address.to_owned(),
+                    topics: vec![topic.to_owned()],
+                    data: "0x00".to_owned(),
+                })
+        })
+        .collect();
+    TestChain {
+        blocks: vec![TestBlock {
+            number: FIRST,
+            hash: hash_of("block", FIRST),
+            parent_hash: hash_of("block", FIRST - 1),
+            transactions: vec![TestTransaction {
+                hash: hash_of("announce", FIRST),
+                index: 0,
+                logs,
+            }],
+        }],
+    }
+}
+
+#[tokio::test]
+async fn window_prefetch_and_discovery_queries_are_split() -> Result<()> {
+    let config = IngestConfig::default().with_rpc_log_filter_position_limit(2)?;
+    let cap = Tamper::FilterPositionCap {
+        limit: 2,
+        failures: 0,
+        code: -32602,
+    };
+
+    // A persisted query over three addresses, read through the wide-range prefetch.
+    let chain = TestChain::synthetic(FIRST, 512, 4);
+    let persisted = WatchFilter::watching_addresses(
+        &[WATCHED_ADDRESS, NOISE_ADDRESS, SECOND_ADDRESS],
+        FIRST,
+        FIRST + 255,
+        &[WATCHED_TOPIC.to_owned()],
+    );
+    assert_eq!(persisted.queries()[0].addresses.len(), 3);
+    let capped = serve_with_config(chain.clone(), cap, config).await?;
+    let clean = serve(chain, Tamper::None).await?;
+    let capped_provider = Arc::new(capped.provider);
+    let clean_provider = Arc::new(clean.provider);
+    let cache = Mutex::new(RangeLogCache::default());
+    let prefetch = Prefetcher::new(&cache, "provider".into(), FIRST + 9_999);
+    let actual = WindowReader {
+        provider: &capped_provider,
+        coinbase: None,
+        prefetch: Some(&prefetch),
+        filter: &persisted,
+    }
+    .fetch(FIRST, FIRST + 255)
+    .await?;
+    let expected = WindowReader {
+        provider: &clean_provider,
+        coinbase: None,
+        prefetch: None,
+        filter: &persisted,
+    }
+    .fetch(FIRST, FIRST + 255)
+    .await?;
+    assert_eq!(
+        capped.counts.get("wide_logs"),
+        2,
+        "one prefetch, split in two"
+    );
+    assert_eq!(capped.counts.get("window_logs"), 0);
+    assert_eq!(capped.counts.get(WIDEST_FILTER_POSITION), 2);
+    assert_eq!(actual.facts.logs, expected.facts.logs);
+    assert_eq!(actual.facts.transactions, expected.facts.transactions);
+    assert_eq!(actual.facts.receipts, expected.facts.receipts);
+    assert_eq!(actual.selected, expected.selected);
+    assert_eq!(actual.selected.len(), 128);
+
+    // A discovery query that admits three announced emitters mid-window.
+    let discovery = WatchFilter::watching_registry_announcements(
+        FIRST,
+        FIRST,
+        WATCHED_TOPIC,
+        &[NOISE_TOPIC.to_owned()],
+    );
+    let capped = serve_with_config(three_announcing_emitters(), cap, config).await?;
+    let clean = serve(three_announcing_emitters(), Tamper::None).await?;
+    let capped_provider = Arc::new(capped.provider);
+    let clean_provider = Arc::new(clean.provider);
+    let actual = WindowReader {
+        provider: &capped_provider,
+        coinbase: None,
+        prefetch: None,
+        filter: &discovery,
+    }
+    .fetch(FIRST, FIRST)
+    .await?;
+    let expected = WindowReader {
+        provider: &clean_provider,
+        coinbase: None,
+        prefetch: None,
+        filter: &discovery,
+    }
+    .fetch(FIRST, FIRST)
+    .await?;
+    assert_eq!(
+        actual.queries.last().map(|query| query.addresses.len()),
+        Some(3)
+    );
+    assert_eq!(
+        capped.counts.get("eth_getLogs"),
+        3,
+        "announcement scan plus two parts"
+    );
+    assert_eq!(capped.counts.get(WIDEST_FILTER_POSITION), 2);
+    assert_eq!(actual.queries, expected.queries);
+    assert_eq!(actual.selected, expected.selected);
+    assert_eq!(actual.facts.logs, expected.facts.logs);
+    assert_eq!(actual.selected.len(), 6);
     Ok(())
 }

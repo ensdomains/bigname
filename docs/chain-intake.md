@@ -513,6 +513,20 @@ windows therefore always read their own range.
 Supplemental discovery queries — the ones that admit registry-announced
 addresses part-way through a window — are never prefetched, for the same reason.
 
+**Filter position limit.** No range log query lists more than the configured
+number of addresses, `topic0` values or `topic1` values
+([tuning](deployment.md#phase-runner-configuration)). That covers a window's own
+queries, prefetches, discovery queries and the reads of Verify's separate
+reference provider.
+A longer list is cut into chunks, and every combination of chunks is queried in
+turn. An empty list still matches every value. The answers are merged by block
+hash and log index, so the result equals one unsplit query. Two different logs
+under one identity are a data-integrity failure. Each split query halves its
+own block range on a `range_too_large` refusal, so one query's refusal never
+narrows the others. A provider's refusal of a filter over its own cap is
+transient and retried like any other transient provider error. A failure in
+any split query fails the whole lookup, and a prefetch caches nothing from it.
+
 **Concurrency.** The initial batched block-hash lookups (`resolve`), the subsequent batched
 header lookups (`headers`), the per-window range log queries, and the per-transaction
 receipt and transaction fetches all run with the same bounded parallelism,

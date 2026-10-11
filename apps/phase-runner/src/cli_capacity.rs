@@ -18,6 +18,14 @@ pub(super) struct CapacityArgs {
     /// Concurrent HTTP requests per Ingest/Live RPC provider (1..=32).
     #[arg(long, env = "BIGNAME_INGEST_RPC_MAX_IN_FLIGHT", default_value_t = 8)]
     ingest_rpc_max_in_flight: usize,
+    /// Most addresses, or most topics, one `eth_getLogs` filter position may list (at least 1).
+    /// Longer lists are split across several queries.
+    #[arg(
+        long,
+        env = "BIGNAME_INGEST_RPC_LOG_FILTER_POSITION_LIMIT",
+        default_value_t = 500
+    )]
+    ingest_rpc_log_filter_position_limit: usize,
     /// What the RPC chain check compares on every RPC endpoint: full (chain id, and block 0
     /// where the chain pins a genesis) or chain-id-only, for local nodes run under a production
     /// chain's id.
@@ -81,6 +89,9 @@ pub(super) fn resolve_capacity(args: CapacityArgs) -> RunnerResult<CapacityConfi
         args.ingest_rpc_batch_size,
         args.ingest_rpc_max_in_flight,
     )
+    .and_then(|config| {
+        config.with_rpc_log_filter_position_limit(args.ingest_rpc_log_filter_position_limit)
+    })
     .map_err(|error| RunnerError::new(ErrorKind::Configuration, error.to_string()))?
     .with_rpc_chain_check(args.rpc_chain_check);
     Ok(CapacityConfig {

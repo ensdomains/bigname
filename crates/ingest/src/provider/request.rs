@@ -8,6 +8,8 @@ use tracing::warn;
 use super::{JsonRpcProvider, RpcCountKind, redacted_text};
 
 const MAX_ATTEMPTS: usize = 5;
+/// Some upstreams cap the entries in one `eth_getLogs` filter position.
+const FILTER_POSITION_CAP: &str = "addresses or topics per search position";
 
 #[derive(Clone, Debug)]
 pub(super) struct BatchCall {
@@ -46,6 +48,7 @@ impl JsonRpcProvider {
                         component = "ingest_provider",
                         method,
                         attempt = attempt + 1,
+                        reason = retry_reason(&error),
                         error = %redacted_text(&error, self.endpoint.as_str()),
                         "retrying transient JSON-RPC request"
                     );
@@ -286,6 +289,7 @@ pub(super) fn retryable(error: &anyhow::Error) -> bool {
             "connection closed",
             // dRPC answers HTTP 400 when no node it routes to serves the request right now.
             "route your request to suitable provider",
+            FILTER_POSITION_CAP,
             "provider block hashes changed during range log lookup",
             "provider block disappeared during range log lookup",
             "provider returned log outside resolved block",
@@ -297,6 +301,14 @@ pub(super) fn retryable(error: &anyhow::Error) -> bool {
         ]
         .iter()
         .any(|needle| message.contains(needle))
+}
+
+/// A fixed label for the retry warning, which never carries the provider's own message.
+fn retry_reason(error: &anyhow::Error) -> Option<&'static str> {
+    format!("{error:#}")
+        .to_ascii_lowercase()
+        .contains(FILTER_POSITION_CAP)
+        .then_some("filter_position_cap")
 }
 
 fn redact_url(error: &mut reqwest::Error) {
@@ -454,6 +466,43 @@ mod tests {
         assert!(!retryable(&anyhow::anyhow!(
             "provider request failed with HTTP 400 Bad Request: invalid JSON"
         )));
+    }
+
+    #[test]
+    fn filter_position_cap_refusals_are_transient() {
+        let error = |code, message: &str| -> anyhow::Error {
+            JsonRpcError {
+                method: "eth_getLogs".to_owned(),
+                code,
+                message: message.to_owned(),
+            }
+            .into()
+        };
+        for (code, message) in [
+            (-32000, "exceed max addresses or topics per search position"),
+            (
+                -32602,
+                "query exceeds the maximum of 1000 addresses or topics per search position",
+            ),
+        ] {
+            assert!(retryable(&error(code, message)), "{message}");
+            assert_eq!(
+                retry_reason(&error(code, message)),
+                Some("filter_position_cap")
+            );
+            assert_eq!(
+                crate::provider::provider_error(
+                    "failed to fetch selected chain logs",
+                    error(code, message)
+                )
+                .kind(),
+                crate::ErrorKind::Transient,
+                "{message}"
+            );
+        }
+        let other = error(-32602, "address count exceeds the maximum of 1000");
+        assert!(!retryable(&other));
+        assert_eq!(retry_reason(&other), None);
     }
 
     #[test]

@@ -1276,6 +1276,28 @@ impl WatchFilter {
         }
     }
 
+    /// Builds a filter watching several addresses over one range, for tests outside this
+    /// module.
+    pub(crate) fn watching_addresses(
+        addresses: &[&str],
+        from_block: i64,
+        to_block: i64,
+        topic0s: &[String],
+    ) -> Self {
+        Self {
+            address_ranges: addresses
+                .iter()
+                .map(|address| AddressRange {
+                    address: address.to_ascii_lowercase(),
+                    from_block,
+                    to_block,
+                    topic0s: topic0s.to_vec(),
+                })
+                .collect(),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn watching_creation(
         from: i64,
         to: i64,

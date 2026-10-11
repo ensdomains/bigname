@@ -137,6 +137,47 @@ async fn mainnet_rpc_intake_persists_provider_rows_and_cursor() -> Result<()> {
     scratch.cleanup().await
 }
 
+/// A provider that keeps refusing a filter's size must not end the chain supervisor.
+///
+/// The first six range queries are refused: more than the provider's own five attempts, and
+/// more than the window's three. The runner restarts Ingest after the provider gives up, and
+/// the seventh query succeeds.
+#[tokio::test]
+async fn persistent_filter_position_cap_restarts_ingest_instead_of_stopping_the_chain() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("production_ingest_filter_position_cap").await?;
+    let chain_id = "ethereum-mainnet";
+    seed_watch_set(scratch.pool(), chain_id).await?;
+    let refusals = Arc::new(AtomicUsize::new(6));
+    let (endpoint, server) = spawn_filter_cap_rpc(Arc::clone(&refusals)).await?;
+    let chain = ChainConfig::new(
+        chain_id,
+        vec![SourceConfig::new(
+            chain_id,
+            "rpc",
+            "drpc",
+            SeedBasis::EthereumHead,
+            0,
+            endpoint,
+        )?],
+        false,
+    )?;
+    let runner = production_ingest_runner(scratch.runner(), "filter-position-cap")?;
+    run_until_ingest_handoff(runner, chain, scratch.pool(), BLOCK_1).await?;
+    server.abort();
+    assert_eq!(
+        refusals.load(Ordering::SeqCst),
+        0,
+        "all six refusals were answered"
+    );
+    let logs: i64 = sqlx::query_scalar("SELECT count(*) FROM raw_logs WHERE chain_id = $1")
+        .bind(chain_id)
+        .fetch_one(scratch.pool())
+        .await?;
+    assert_eq!(logs, 2);
+    scratch.cleanup().await
+}
+
 #[tokio::test]
 async fn verification_only_source_never_reaches_finite_ingest_or_cursors() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_production_ingest").await?;
@@ -5154,6 +5195,57 @@ async fn spawn_rpc(
         .expect("test RPC server");
     });
     Ok((format!("http://{address}/"), server))
+}
+
+/// [`spawn_rpc`]'s chain, whose range log queries answer a provider's per-position filter cap
+/// while `refusals` is above zero.
+async fn spawn_filter_cap_rpc(
+    refusals: Arc<AtomicUsize>,
+) -> Result<(String, tokio::task::JoinHandle<()>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/", post(filter_cap_rpc))
+                .with_state(refusals),
+        )
+        .await
+        .expect("filter-cap test RPC server");
+    });
+    Ok((format!("http://{address}/"), server))
+}
+
+async fn filter_cap_rpc(
+    State(refusals): State<Arc<AtomicUsize>>,
+    Json(request): Json<Value>,
+) -> Json<Value> {
+    let respond = |request: &Value| {
+        let range_logs =
+            request["method"] == "eth_getLogs" && request.pointer("/params/0/fromBlock").is_some();
+        if range_logs
+            && refusals
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+        {
+            return json!({
+                "jsonrpc": "2.0",
+                "id": request.get("id").cloned().unwrap_or(json!(1)),
+                "error": {
+                    "code": -32000,
+                    "message": "exceed max addresses or topics per search position"
+                }
+            });
+        }
+        rpc_response(request, true, false)
+    };
+    match request.as_array() {
+        Some(requests) => Json(Value::Array(requests.iter().map(respond).collect())),
+        None => Json(respond(&request)),
+    }
 }
 
 async fn spawn_approval_rpc() -> Result<(String, tokio::task::JoinHandle<()>)> {

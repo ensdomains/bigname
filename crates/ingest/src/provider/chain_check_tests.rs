@@ -557,3 +557,86 @@ async fn concurrent_requests_on_a_cold_guard_all_complete() -> Result<()> {
     assert_eq!(node.count("eth_chainId"), 1);
     Ok(())
 }
+
+#[tokio::test]
+async fn filter_position_cap_retry_warning_omits_the_provider_message() -> Result<()> {
+    #[derive(Clone, Default)]
+    struct Logs(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Logs {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let logs = Logs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer({
+            let logs = logs.clone();
+            move || logs.clone()
+        })
+        .finish();
+    let _logs = tracing::subscriber::set_default(subscriber);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("http://{}/", listener.local_addr()?);
+    tokio::spawn(async move {
+        let mut answers = vec![
+            json!({"jsonrpc": "2.0", "id": 1, "result": []}),
+            json!({"jsonrpc": "2.0", "id": 1, "error": {
+                "code": -32005,
+                "message": "rate limit exceeded",
+            }}),
+            json!({"jsonrpc": "2.0", "id": 1, "error": {
+                "code": -32000,
+                "message": "exceed max addresses or topics per search position",
+            }}),
+        ];
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let _ = read_request_body(&mut socket).await;
+            let body = answers
+                .pop()
+                .unwrap_or_else(|| json!({"jsonrpc": "2.0", "id": 1, "result": []}))
+                .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+
+    let provider = JsonRpcProvider::new(&endpoint)?;
+    let topics = [OTHER_HASH.to_owned()];
+    assert!(
+        provider
+            .range_logs(1, 1, &[], &topics, &[])
+            .await?
+            .is_empty()
+    );
+    assert_eq!(provider.request_attempts(), 3);
+    let logged = String::from_utf8(logs.0.lock().unwrap().clone())?;
+    let warning = |code: &str| {
+        logged
+            .lines()
+            .find(|line| {
+                line.contains("retrying transient JSON-RPC request") && line.contains(code)
+            })
+            .unwrap_or_else(|| panic!("no retry warning for {code}: {logged}"))
+    };
+    let cap = warning("eth_getLogs: -32000");
+    assert!(
+        cap.contains("reason=\"filter_position_cap\"")
+            && cap.contains("(invalid input or server error; provider message omitted)"),
+        "{cap}"
+    );
+    assert!(
+        !warning("eth_getLogs: -32005").contains("reason="),
+        "{logged}"
+    );
+    assert!(!logged.contains("search position"), "{logged}");
+    Ok(())
+}

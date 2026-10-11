@@ -176,7 +176,7 @@ Project hydration and API lookups are not counted.
 | Counter | What it counts |
 | --- | --- |
 | `phase_runner_ingest_rpc_requests_total{chain,source,outcome}` | HTTP requests, one per standalone call or batch, including retries. `outcome` is `ok`, or `failed` for a transport error, a non-2xx status or a body that is not JSON. A JSON-RPC error inside a 200 response counts as `ok`. |
-| `phase_runner_ingest_rpc_calls_total{chain,source,method}` | JSON-RPC calls, each call of a batch counted once and each retry counted again. This is roughly what a per-call provider bills. |
+| `phase_runner_ingest_rpc_calls_total{chain,source,method}` | JSON-RPC calls, each call of a batch counted once and each retry counted again. This is roughly what a per-call provider bills. An `eth_getLogs` filter that lists more addresses or topics than the [filter position limit](../deployment.md#phase-runner-configuration) is split, so watching many contracts adds `eth_getLogs` calls. |
 | `phase_runner_ingest_provider_null_results_total{chain,source,method}` | `null` answers for the receipt (`eth_getTransactionReceipt`) or transaction (`eth_getTransactionByHash`) of a selected log: every `null` answer Ingest accepted, including re-requests. |
 
 A request still in flight when its window fails on another error is abandoned

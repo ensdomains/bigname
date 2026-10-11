@@ -15,7 +15,10 @@ use anyhow::Result as AnyResult;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::provider::{ChainProvider, ResolvedBlock};
+use crate::{
+    IngestConfig,
+    provider::{ChainProvider, ResolvedBlock},
+};
 
 pub(crate) const WATCHED_ADDRESS: &str = "0x1111111111111111111111111111111111111111";
 pub(crate) const NOISE_ADDRESS: &str = "0x2222222222222222222222222222222222222222";
@@ -56,6 +59,20 @@ pub(crate) enum Tamper {
     NullPayloadAnswers(i64, usize),
     /// A receipt answered null whose transaction the provider refuses to route, every time.
     NullReceiptBesideRefusedTransaction(i64),
+    /// Range queries answer a provider's per-position filter cap, with JSON-RPC `code`, when
+    /// a filter position lists more than `limit` entries, and for the first `failures` range
+    /// queries regardless.
+    FilterPositionCap {
+        limit: usize,
+        failures: usize,
+        code: i64,
+    },
+    /// The Nth range query answers an invalid-argument error that is neither retried nor
+    /// halved.
+    RangeQueryInvalid(usize),
+    /// Range queries that list this address and span more than one block answer a block-range
+    /// refusal.
+    RangeLimitedFor(&'static str),
 }
 
 #[derive(Clone, Debug)]
@@ -206,6 +223,12 @@ impl RequestCounts {
             .or_default() += 1;
     }
 
+    fn record_max(&self, label: &str, value: usize) {
+        let mut counts = self.0.lock().expect("counter lock");
+        let entry = counts.entry(label.to_owned()).or_default();
+        *entry = (*entry).max(value);
+    }
+
     pub(crate) fn get(&self, label: &str) -> usize {
         self.0
             .lock()
@@ -259,6 +282,9 @@ impl TestNode {
                 } else {
                     "eth_getLogs"
                 });
+                if let Some(error) = self.refuse_range_logs(&filter) {
+                    return json!({ "jsonrpc": "2.0", "id": id, "error": error });
+                }
                 self.logs(&filter)
             }
             "eth_getBlockReceipts" => {
@@ -493,6 +519,52 @@ impl TestNode {
         answers
     }
 
+    fn refuse_range_logs(&self, filter: &Value) -> Option<Value> {
+        let (Some(from), Some(to)) = (
+            filter
+                .get("fromBlock")
+                .and_then(Value::as_str)
+                .and_then(parse_quantity),
+            filter
+                .get("toBlock")
+                .and_then(Value::as_str)
+                .and_then(parse_quantity),
+        ) else {
+            return None;
+        };
+        let widest = ["/address", "/topics/0", "/topics/1"]
+            .into_iter()
+            .map(|pointer| filter_entries(filter, pointer).len())
+            .max()
+            .unwrap_or_default();
+        self.counts.record_max(WIDEST_FILTER_POSITION, widest);
+        let range_queries = self.counts.get("eth_getLogs");
+        match self.tamper {
+            Tamper::FilterPositionCap {
+                limit,
+                failures,
+                code,
+            } if range_queries <= failures || widest > limit => Some(json!({
+                "code": code,
+                "message": "exceed max addresses or topics per search position",
+            })),
+            Tamper::RangeQueryInvalid(query) if range_queries == query => Some(json!({
+                "code": -32602,
+                "message": "invalid argument 0: hex string has odd length",
+            })),
+            Tamper::RangeLimitedFor(address)
+                if to > from
+                    && filter_entries(filter, "/address").contains(&address.to_owned()) =>
+            {
+                Some(json!({
+                    "code": -32602,
+                    "message": "query block range exceeds server limit, narrow your filter: 1",
+                }))
+            }
+            _ => None,
+        }
+    }
+
     fn logs(&self, filter: &Value) -> Value {
         if let (Some(from), Some(to)) = (
             filter
@@ -510,31 +582,12 @@ impl TestNode {
                 "window_logs"
             });
         }
-        let addresses = filter
-            .get("address")
-            .and_then(Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_ascii_lowercase)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let addresses = filter_entries(filter, "/address");
         for address in &addresses {
             self.counts.record(&format!("eth_getLogs({address})"));
         }
-        let topic0s = filter
-            .pointer("/topics/0")
-            .and_then(Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_ascii_lowercase)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let topic0s = filter_entries(filter, "/topics/0");
+        let topic1s = filter_entries(filter, "/topics/1");
         let blocks = if let Some(hash) = filter.get("blockHash").and_then(Value::as_str) {
             self.chain
                 .block_by_hash(hash)
@@ -571,6 +624,10 @@ impl TestNode {
                         && (topic0s.is_empty()
                             || log.topics.first().is_some_and(|topic| {
                                 topic0s.contains(&topic.to_ascii_lowercase())
+                            }))
+                        && (topic1s.is_empty()
+                            || log.topics.get(1).is_some_and(|topic| {
+                                topic1s.contains(&topic.to_ascii_lowercase())
                             })));
                 // Only the trailing watched log is dropped, so the transaction is still
                 // selected and its receipt still exposes the gap.
@@ -604,6 +661,8 @@ pub(crate) const BLOCK_BODY: &str = "eth_getBlockByHash(full)";
 pub(crate) const BLOCK_RECEIPTS: &str = "eth_getBlockReceipts";
 /// Label for the exact-block log fetch the per-transaction path must never issue.
 pub(crate) const EXACT_BLOCK_LOGS: &str = "eth_getLogs(blockHash)";
+/// Label for the most entries any one position of any range query's filter listed.
+pub(crate) const WIDEST_FILTER_POSITION: &str = "widest filter position";
 /// Label for each null receipt a `Null*Answers` tamper gave.
 pub(crate) const NULL_RECEIPT_ANSWERS: &str = "null receipt answers";
 /// Label for each null transaction a `Null*Answers` tamper gave.
@@ -617,6 +676,15 @@ pub(crate) struct TestEndpoint {
 
 /// Serves `chain` over HTTP JSON-RPC until the test process ends.
 pub(crate) async fn serve(chain: TestChain, tamper: Tamper) -> AnyResult<TestEndpoint> {
+    serve_with_config(chain, tamper, IngestConfig::default()).await
+}
+
+/// Like [`serve`], with the provider built from `config` and no RPC chain check.
+pub(crate) async fn serve_with_config(
+    chain: TestChain,
+    tamper: Tamper,
+    config: IngestConfig,
+) -> AnyResult<TestEndpoint> {
     let counts = Arc::new(RequestCounts::default());
     let node = Arc::new(TestNode {
         chain,
@@ -653,7 +721,7 @@ pub(crate) async fn serve(chain: TestChain, tamper: Tamper) -> AnyResult<TestEnd
         }
     });
     Ok(TestEndpoint {
-        provider: ChainProvider::new("test-chain", "rpc", &endpoint)?,
+        provider: ChainProvider::with_config("test-chain", "rpc", "rpc", &endpoint, None, config)?,
         endpoint,
         counts,
     })
@@ -694,6 +762,21 @@ fn content_length(headers: &[u8]) -> Option<usize> {
         }
     }
     None
+}
+
+/// The lowercased string entries of one filter position; empty when the position is absent.
+fn filter_entries(filter: &Value, pointer: &str) -> Vec<String> {
+    filter
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_ascii_lowercase)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn parse_quantity(value: &str) -> Option<i64> {

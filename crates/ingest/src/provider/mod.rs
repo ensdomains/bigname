@@ -19,6 +19,9 @@ mod chain_check_tests;
 mod counters;
 mod decode;
 mod http_client;
+mod log_filter_split;
+#[cfg(test)]
+mod log_filter_split_tests;
 mod request;
 mod reth_db;
 mod rpc;
@@ -48,6 +51,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 /// Existing range-query parallelism for the direct database reader.
 pub const PROVIDER_PARALLELISM: usize = 8;
 
+// Few long-lived instances exist, one per configured source, so the size gap between variants
+// does not matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum ChainProvider {
     JsonRpc(JsonRpcProvider),

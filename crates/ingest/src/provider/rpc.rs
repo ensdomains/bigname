@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use super::{
     JsonRpcProvider, RpcCountKind,
     decode::normalize_hash,
+    log_filter_split::{FilterPart, merge_split_logs, split_filter},
     request::{BatchCall, backoff},
     types::{
         Block, BlockBundle, BlockTag, HeadSnapshot, Log, Receipt, ResolvedBlock, Transaction,
@@ -154,11 +155,8 @@ impl JsonRpcProvider {
         topics: &[String],
         topic1s: &[String],
     ) -> Result<Vec<Log>> {
-        self.range_log_values(from, to, addresses, topics, topic1s)
-            .await?
-            .iter()
-            .map(Log::from_unpinned_value)
-            .collect()
+        self.range_log_entries(from, to, addresses, topics, topic1s)
+            .await
     }
 
     /// Fetches the receipt and the transaction of every hash in `hashes`.
@@ -244,45 +242,73 @@ impl JsonRpcProvider {
         topics: &[String],
         topic1s: &[String],
     ) -> Result<Vec<Log>> {
-        let values = self
-            .range_log_values(from_block, to_block, addresses, topics, topic1s)
+        let logs = self
+            .range_log_entries(from_block, to_block, addresses, topics, topic1s)
             .await?;
-        let logs = values
+        if let Some(log) = logs
             .iter()
-            .map(Log::from_unpinned_value)
-            .map(|result| {
-                let log = result?;
-                if !(from_block..=to_block).contains(&log.block_number) {
-                    bail!(
-                        "provider returned verification log at block {} outside \
-                         {from_block}..={to_block}",
-                        log.block_number
-                    );
-                }
-                Ok(log)
-            })
-            .collect::<Result<Vec<_>>>()?;
+            .find(|log| !(from_block..=to_block).contains(&log.block_number))
+        {
+            bail!(
+                "provider returned verification log at block {} outside \
+                 {from_block}..={to_block}",
+                log.block_number
+            );
+        }
         Ok(logs)
     }
 
-    async fn range_log_values(
+    /// Range log lookup with every filter position split at the configured limit.
+    ///
+    /// Split queries run one after another, and each halves its own block range on a
+    /// `range_too_large` refusal. A failure in any of them fails the whole lookup.
+    async fn range_log_entries(
         &self,
         from_block: i64,
         to_block: i64,
         addresses: &[String],
         topics: &[String],
         topic1s: &[String],
-    ) -> Result<Vec<Value>> {
+    ) -> Result<Vec<Log>> {
         if from_block > to_block || topics.is_empty() {
             return Ok(Vec::new());
         }
+        let limit = self.config.rpc_log_filter_position_limit();
+        let mut answers = Vec::new();
+        for part in split_filter(addresses, topics, topic1s, limit) {
+            let values = self.range_log_values(from_block, to_block, part).await?;
+            answers.push(
+                values
+                    .iter()
+                    .map(Log::from_unpinned_value)
+                    .collect::<Result<Vec<_>>>()?,
+            );
+        }
+        match <[Vec<Log>; 1]>::try_from(answers) {
+            Ok([logs]) => Ok(logs),
+            Err(answers) => merge_split_logs(answers),
+        }
+    }
+
+    async fn range_log_values(
+        &self,
+        from_block: i64,
+        to_block: i64,
+        part: FilterPart<'_>,
+    ) -> Result<Vec<Value>> {
         let mut queue = VecDeque::from([(from_block, to_block)]);
         let mut values = Vec::new();
         while let Some((first, last)) = queue.pop_front() {
             let result = self
                 .request(
                     "eth_getLogs",
-                    vec![range_log_filter(first, last, addresses, topics, topic1s)?],
+                    vec![range_log_filter(
+                        first,
+                        last,
+                        part.addresses,
+                        part.topic0s,
+                        part.topic1s,
+                    )?],
                 )
                 .await;
             match result {
@@ -519,6 +545,18 @@ mod range_limit_tests {
             "provider returned JSON-RPC error for eth_getLogs: -32602: invalid argument 0: hex string",
             "provider returned JSON-RPC error for eth_getLogs: -32602: Block range 10..1 is invalid",
             "provider returned JSON-RPC error for eth_getLogs: -32602: address count exceeds the maximum of 1000",
+        ] {
+            assert!(!range_too_large(&anyhow::anyhow!(message)), "{message}");
+        }
+    }
+
+    #[test]
+    fn filter_position_cap_is_not_a_block_range_refusal() {
+        for message in [
+            "provider returned JSON-RPC error for eth_getLogs: -32000: exceed max addresses or \
+             topics per search position",
+            "provider returned JSON-RPC error for eth_getLogs: -32602: query exceeds the maximum \
+             of 1000 addresses or topics per search position",
         ] {
             assert!(!range_too_large(&anyhow::anyhow!(message)), "{message}");
         }

@@ -926,12 +926,15 @@ fn ingest_options_reach_both_run_and_redo_configuration() {
                 "128",
                 "--ingest-rpc-max-in-flight",
                 "4",
+                "--ingest-rpc-log-filter-position-limit",
+                "1000000",
             ],
         )
         .unwrap();
         assert_eq!(config.blocks_per_batch(), 1024);
         assert_eq!(config.rpc_batch_size(), 128);
         assert_eq!(config.rpc_max_in_flight(), 4);
+        assert_eq!(config.rpc_log_filter_position_limit(), 1_000_000);
         for (flag, too_large) in [
             ("--ingest-blocks-per-batch", "4097"),
             ("--ingest-rpc-batch-size", "257"),
@@ -942,6 +945,9 @@ fn ingest_options_reach_both_run_and_redo_configuration() {
                 assert_eq!(error.kind(), ErrorKind::Configuration);
             }
         }
+        let error =
+            ingest_options(command, &["--ingest-rpc-log-filter-position-limit", "0"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Configuration);
     }
 }
 
@@ -953,6 +959,7 @@ fn ingest_environment_and_cli_precedence() {
             assert_eq!(config.blocks_per_batch(), 1024);
             assert_eq!(config.rpc_batch_size(), 128);
             assert_eq!(config.rpc_max_in_flight(), 4);
+            assert_eq!(config.rpc_log_filter_position_limit(), 1_000);
             let override_config = ingest_options(
                 command,
                 &[
@@ -962,12 +969,15 @@ fn ingest_environment_and_cli_precedence() {
                     "1",
                     "--ingest-rpc-max-in-flight",
                     "2",
+                    "--ingest-rpc-log-filter-position-limit",
+                    "250",
                 ],
             )
             .unwrap();
             assert_eq!(override_config.blocks_per_batch(), 4096);
             assert_eq!(override_config.rpc_batch_size(), 1);
             assert_eq!(override_config.rpc_max_in_flight(), 2);
+            assert_eq!(override_config.rpc_log_filter_position_limit(), 250);
         }
         return;
     }
@@ -982,6 +992,7 @@ fn ingest_environment_and_cli_precedence() {
         .env("BIGNAME_INGEST_BLOCKS_PER_BATCH", "1024")
         .env("BIGNAME_INGEST_RPC_BATCH_SIZE", "128")
         .env("BIGNAME_INGEST_RPC_MAX_IN_FLIGHT", "4")
+        .env("BIGNAME_INGEST_RPC_LOG_FILTER_POSITION_LIMIT", "1000")
         .output()
         .unwrap();
     assert!(

@@ -495,6 +495,7 @@ Ingest throughput can be tuned at process startup for both `run` and `redo`:
 | `BIGNAME_INGEST_BLOCKS_PER_BATCH` | `--ingest-blocks-per-batch` | 256 | 1–4096 |
 | `BIGNAME_INGEST_RPC_BATCH_SIZE` | `--ingest-rpc-batch-size` | 32 | 1–256 |
 | `BIGNAME_INGEST_RPC_MAX_IN_FLIGHT` | `--ingest-rpc-max-in-flight` | 8 | 1–32 |
+| `BIGNAME_INGEST_RPC_LOG_FILTER_POSITION_LIMIT` | `--ingest-rpc-log-filter-position-limit` | 500 | 1 or more |
 
 The block limit applies to normal RPC Ingest and the shared window used by
 Ingest redo. Normal Coinbase SQL keeps its 1024-block window; normal direct-Reth
@@ -508,6 +509,22 @@ standalone calls. The in-flight limit is shared across HTTP requests to each
 provider instance, including range-log queries, retries and batch fallbacks.
 It is not a process-wide limit across different chains/providers. All header,
 source-boundary and reorg checks still run, regardless of window size.
+
+The filter position limit is the most addresses, or the most values for one
+topic, that one `eth_getLogs` filter may list. Some hosted providers refuse a
+filter that lists more than their own cap. Ingest splits a longer list across
+several queries, run one after another, and merges their answers. Splitting
+changes no result, but watching many contracts multiplies the `eth_getLogs`
+calls. A provider with no per-position cap can take a high value to avoid split
+queries. The verification provider always splits at the default of 500.
+
+A provider's refusal of a filter over its cap is a transient error. Ingest
+retries it with the usual provider backoff, and the runner restarts Ingest
+when those retries run out, so the refusal never stops the chain. A provider
+whose cap is below the configured limit refuses every attempt, and Ingest
+makes no progress. Repeated `retrying transient JSON-RPC request` warnings
+whose `reason` field is `filter_position_cap` mean the limit is too high for
+that provider: lower it.
 
 Some hosted providers answer `null` for a receipt or transaction they hold when
 many batches run at once. Ingest asks for each selected receipt or transaction
@@ -3535,6 +3552,20 @@ Once the redo publishes, check on Sepolia that a `.eth` name whose ENSv2
 reservation has lapsed while its lease is in grace serves
 `unresolvable_reason: no_live_ens_v2_entry` and no top-level `resolver`, while
 `ens_v1.resolver` names the resolver its ENSv1 registry record points at.
+
+### Filter position limit for range log queries
+
+The build that splits range log queries at a filter position limit (see
+[the RPC settings](#phase-runner-configuration)) adds
+`BIGNAME_INGEST_RPC_LOG_FILTER_POSITION_LIMIT`, with a default of 500. It edits
+no file the [interpreter content hash](glossary.md#interpreter-content-hash)
+covers and adds no schema-migration, so the hash does not rotate and no redo is
+needed. A provider's refusal of an `eth_getLogs` filter that lists too many
+addresses or topics in one position is now retried as a transient error. It no
+longer stops the chain as a data integrity fault. Repeated retry warnings
+whose `reason` field is `filter_position_cap` mean the provider's cap is below
+the limit, so lower the limit. A provider with no per-position cap can take a
+higher limit to avoid split queries.
 
 ## Published lookup state
 
