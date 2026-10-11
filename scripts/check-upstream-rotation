@@ -22,7 +22,7 @@ import tempfile
 import tomllib
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1418,8 +1418,33 @@ def mapped_range(mapping: dict[int, int], start: int, end: int) -> tuple[int, in
     return values[0], values[-1]
 
 
+# The hashed sources as this script named them before a build listed its own inputs. They
+# classify the Rust carriers of a head build that generates no content_hash_inputs.tsv, and
+# nothing else reads them.
+LEGACY_HASHED_SOURCE_PREFIXES = (
+    "crates/adapters/src/",
+    "crates/manifests/src/",
+    "crates/project/src/",
+    "crates/interpret/src/write/",
+)
+LEGACY_HASHED_SOURCE_FILES = frozenset(
+    {
+        "crates/domain/src/normalization.rs",
+        "crates/domain/src/resolution_topology.rs",
+        "crates/domain/src/vocabulary.rs",
+        "crates/lookup/src/abi.rs",
+        "crates/lookup/src/record_selector.rs",
+        "crates/lookup/src/reverse_names.rs",
+        "crates/lookup/src/text_records.rs",
+        "crates/lookup/src/json_rpc_envelope.rs",
+        "crates/interpret/src/write.rs",
+        "crates/interpret/src/recompute.rs",
+    }
+)
+
+
 def carrier_class(
-    path: str, citation: Citation, hashed_sources: frozenset[str] | None = None
+    path: str, citation: Citation, is_hashed_source: Callable[[str], bool] | None = None
 ) -> str:
     if path in {"AGENTS.md", "CLAUDE.md"} or ("/" not in path and path.endswith(".md")):
         return "root_process_doc"
@@ -1430,11 +1455,11 @@ def carrier_class(
     if path.startswith("manifests/") and path.endswith(".toml"):
         return "manifest_toml_comment"
     if path.endswith(".rs"):
-        # Only the head build's content_hash_inputs.tsv says which sources are hashed; without
-        # it a Rust carrier stays unclassified.
-        if hashed_sources is None:
+        # Only the head build says which sources are hashed. Until verify has it, a Rust carrier
+        # stays unclassified.
+        if is_hashed_source is None:
             return "rust_comment"
-        return "hashed_rust_comment" if path in hashed_sources else "other_rust_comment"
+        return "hashed_rust_comment" if is_hashed_source(path) else "other_rust_comment"
     if path.endswith(".md"):
         return "docs_markdown"
     return "other_code_comment"
@@ -2493,12 +2518,20 @@ class ContentHashes:
     # Each hash input's key with its class and content hash, from content_hash_inputs.tsv.
     inputs: dict[str, tuple[str, str]] | None
 
-    def hashed_sources(self) -> frozenset[str]:
+    def is_hashed_source(self, path: str) -> bool:
         if self.inputs is None:
-            raise RotationError("the head build lists no content-hash inputs")
-        return frozenset(
-            key.removeprefix("source:") for key in self.inputs if key.startswith("source:")
-        )
+            if self.projection is not None:
+                raise RotationError("the head build lists no content-hash inputs")
+            return path.startswith(LEGACY_HASHED_SOURCE_PREFIXES) or (
+                path in LEGACY_HASHED_SOURCE_FILES
+            )
+        return f"source:{path}" in self.inputs
+
+    def carrier_line(self, path: str) -> str:
+        """A hashed source as the report lists it, under its class when the build names one."""
+        if self.inputs is None:
+            return f"  {path}"
+        return f"  {self.inputs[f'source:{path}'][0]}\t{path}"
 
 
 def parse_generated_hashes(path: Path) -> ContentHashes:
@@ -2570,8 +2603,10 @@ def rotation_verdict(before: ContentHashes, after: ContentHashes) -> str:
 
 def changed_inputs(before: ContentHashes, after: ContentHashes) -> list[str]:
     """Each input whose content or class differs between the builds, with its head class."""
-    if before.inputs is None or after.inputs is None:
+    if before.inputs is None:
         return ["  base lists no inputs; compare the hashes above"]
+    if after.inputs is None:
+        return ["  head lists no inputs; compare the hashes above"]
     lines = []
     for key in sorted(before.inputs.keys() | after.inputs.keys()):
         old = before.inputs.get(key)
@@ -2610,8 +2645,7 @@ def fingerprint_report(base: str, head: str, rust_carriers: list[str]) -> str:
         finally:
             run(["git", "worktree", "remove", "--force", str(base_tree)])
     HEAD_HASHES[report_revision(head)] = after
-    hashed = after.hashed_sources()
-    carriers = [path for path in rust_carriers if path in hashed]
+    carriers = [path for path in rust_carriers if after.is_hashed_source(path)]
     verdict = rotation_verdict(before, after)
     if verdict != "none" and not carriers:
         raise RotationError("content fingerprint changed without a hashed-source carrier")
@@ -2645,8 +2679,21 @@ def fingerprint_report(base: str, head: str, rust_carriers: list[str]) -> str:
             ]
         )
     lines.extend(["", "CONTENT_HASH_CARRIERS"])
-    lines.extend(f"  {after.inputs[f'source:{path}'][0]}\t{path}" for path in carriers)
+    lines.extend(after.carrier_line(path) for path in carriers)
     return "\n".join(lines) + "\n"
+
+
+def classify_rust_carriers(
+    head_hashes: ContentHashes, rust_carriers: list[str], rows: list[dict[str, Any]]
+) -> list[str]:
+    """Class each baseline row's carrier from the head build and return the hashed carriers."""
+    for row in rows:
+        row["carrier_class"] = carrier_class(
+            row["carrier_path"],
+            Citation("", "", 1, 1, "", 0, 0, 1, b"", True, 0),
+            head_hashes.is_hashed_source,
+        )
+    return [path for path in rust_carriers if head_hashes.is_hashed_source(path)]
 
 
 def verify(base: str, head: str, spec: dict[str, Any], report_dir: Path) -> str:
@@ -2925,12 +2972,7 @@ def verify(base: str, head: str, spec: dict[str, Any], report_dir: Path) -> str:
     head_hashes = HEAD_HASHES.get(immutable_head)
     hashed_carriers = rust_carriers
     if head_hashes is not None:
-        hashed = head_hashes.hashed_sources()
-        hashed_carriers = [path for path in rust_carriers if path in hashed]
-        for row in baseline.rows:
-            row["carrier_class"] = carrier_class(
-                row["carrier_path"], Citation("", "", 1, 1, "", 0, 0, 1, b"", True, 0), hashed
-            )
+        hashed_carriers = classify_rust_carriers(head_hashes, rust_carriers, baseline.rows)
     report_dir.mkdir(parents=True, exist_ok=True)
     write_reports(report_dir, baseline, spec)
     disposition_text = "".join(json_line(row) + "\n" for row in sorted(dispositions, key=lambda row: row["id"]))

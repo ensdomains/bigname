@@ -1865,8 +1865,10 @@ class ContentHashSplitTests(unittest.TestCase):
                 self.generated(Path(temporary), False, None)
             )
         self.assertEqual((parsed.interpreter, parsed.projection, parsed.inputs), ("keccak256:i", None, None))
-        with self.assertRaisesRegex(rotation.RotationError, "lists no content-hash inputs"):
-            parsed.hashed_sources()
+        self.assertTrue(parsed.is_hashed_source("crates/interpret/src/write/identity.rs"))
+        self.assertTrue(parsed.is_hashed_source("crates/lookup/src/abi.rs"))
+        self.assertFalse(parsed.is_hashed_source("crates/storage/src/expiry.rs"))
+        self.assertEqual(parsed.carrier_line("crates/lookup/src/abi.rs"), "  crates/lookup/src/abi.rs")
 
     def test_the_head_input_list_classifies_rust_carriers(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1880,9 +1882,13 @@ class ContentHashSplitTests(unittest.TestCase):
                     ],
                 )
             )
-        hashed = parsed.hashed_sources()
+        hashed = parsed.is_hashed_source
         citation = rotation.Citation("", "", 1, 1, "", 0, 0, 1, b"", True, 0)
-        self.assertEqual(hashed, frozenset({"crates/storage/src/expiry.rs"}))
+        self.assertEqual(
+            parsed.carrier_line("crates/storage/src/expiry.rs"),
+            "  project\tcrates/storage/src/expiry.rs",
+        )
+        self.assertFalse(hashed("serde"))
         self.assertEqual(
             rotation.carrier_class("crates/storage/src/expiry.rs", citation, hashed),
             "hashed_rust_comment",
@@ -1916,6 +1922,97 @@ class ContentHashSplitTests(unittest.TestCase):
         self.assertEqual(
             rotation.changed_inputs(hashes("i", None), hashes("i2", "p", {})),
             ["  base lists no inputs; compare the hashes above"],
+        )
+        self.assertEqual(
+            rotation.changed_inputs(hashes("i", "p", {}), hashes("i2", None)),
+            ["  head lists no inputs; compare the hashes above"],
+        )
+
+
+class CombinedEraHeadTests(unittest.TestCase):
+    """A head built before the split generates the constants file and no input list. The
+    report and the carrier classes then come from the hashed set the script once hard-coded."""
+
+    HASHED = "crates/adapters/src/schema_v2/protocol/v1/resolver.rs"
+    UNHASHED = "crates/storage/src/expiry.rs"
+
+    def run_without_git_or_cargo(self, hashes: dict[str, str]):
+        """Stands in for Git and Cargo. Each `cargo build` writes the constants a combined-era
+        build generates, with the hash named for its worktree, and no content_hash_inputs.tsv."""
+
+        def fake(args, **kwargs):
+            if args[0] == "cargo":
+                out = (
+                    Path(kwargs["env"]["CARGO_TARGET_DIR"])
+                    / "debug/build/bigname-content-hash-0123456789abcdef/out"
+                )
+                out.mkdir(parents=True)
+                (out / "interpreter_content_hash.rs").write_text(
+                    "pub const INTERPRETER_CONTENT_HASH: &str = "
+                    f'"{hashes[Path(kwargs["cwd"]).name]}";\n'
+                    'pub const MANIFEST_PROFILE_HASHES: &[(&str, &str)] = &[("mainnet", "m")];\n',
+                    encoding="utf-8",
+                )
+            return subprocess.CompletedProcess(args, 0, stdout="resolved-head\n", stderr="")
+
+        return mock.patch.object(rotation.subprocess, "run", side_effect=fake)
+
+    def test_the_report_lists_the_carriers_of_a_head_without_an_input_list(self) -> None:
+        with self.run_without_git_or_cargo({"base": "keccak256:old", "head": "keccak256:new"}):
+            report = rotation.fingerprint_report(
+                "base-commit", "head-commit", [self.HASHED, self.UNHASHED]
+            )
+        self.assertIn("ROTATION: interpreter\n", report)
+        self.assertIn("  before: absent\n  after:  absent\n  delta:  unchanged\n", report)
+        self.assertIn("CHANGED_INPUTS\n  base lists no inputs; compare the hashes above\n", report)
+        self.assertTrue(report.endswith(f"CONTENT_HASH_CARRIERS\n  {self.HASHED}\n"), report)
+
+    def test_the_legacy_hashed_set_is_the_one_the_script_hard_coded(self) -> None:
+        self.assertEqual(
+            rotation.LEGACY_HASHED_SOURCE_PREFIXES,
+            (
+                "crates/adapters/src/",
+                "crates/manifests/src/",
+                "crates/project/src/",
+                "crates/interpret/src/write/",
+            ),
+        )
+        self.assertEqual(
+            rotation.LEGACY_HASHED_SOURCE_FILES,
+            frozenset(
+                {
+                    "crates/domain/src/normalization.rs",
+                    "crates/domain/src/resolution_topology.rs",
+                    "crates/domain/src/vocabulary.rs",
+                    "crates/lookup/src/abi.rs",
+                    "crates/lookup/src/record_selector.rs",
+                    "crates/lookup/src/reverse_names.rs",
+                    "crates/lookup/src/text_records.rs",
+                    "crates/lookup/src/json_rpc_envelope.rs",
+                    "crates/interpret/src/write.rs",
+                    "crates/interpret/src/recompute.rs",
+                }
+            ),
+        )
+
+    def test_a_rotation_without_a_legacy_hashed_carrier_is_still_refused(self) -> None:
+        with self.run_without_git_or_cargo({"base": "keccak256:old", "head": "keccak256:new"}):
+            with self.assertRaisesRegex(
+                rotation.RotationError, "without a hashed-source carrier"
+            ):
+                rotation.fingerprint_report("base-commit", "head-commit", [self.UNHASHED])
+
+    def test_classify_rust_carriers_classes_rows_of_a_head_without_an_input_list(self) -> None:
+        rows = [{"carrier_path": path} for path in (self.HASHED, self.UNHASHED, "docs/a.md")]
+        with self.run_without_git_or_cargo({"base": "keccak256:same", "head": "keccak256:same"}):
+            rotation.fingerprint_report("base-commit", "head-commit", [])
+        carriers = rotation.classify_rust_carriers(
+            rotation.HEAD_HASHES["resolved-head"], [self.HASHED, self.UNHASHED], rows
+        )
+        self.assertEqual(carriers, [self.HASHED])
+        self.assertEqual(
+            [row["carrier_class"] for row in rows],
+            ["hashed_rust_comment", "other_rust_comment", "docs_markdown"],
         )
 
 
