@@ -62,8 +62,13 @@ pub(super) async fn prepare_redo(
         .iter()
         .map(|surface| surface.labelhashes.clone())
         .collect();
-    bigname_storage::identity_search::prepare(transaction, &changed, &paths, &names)
-        .await
-        .map_err(failure)?;
+    bigname_storage::identity_search::prepare(
+        transaction,
+        bigname_storage::identity_search::LabelWrite::Insert(&changed),
+        &paths,
+        &names,
+    )
+    .await
+    .map_err(failure)?;
     Ok(names)
 }

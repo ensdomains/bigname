@@ -1953,7 +1953,13 @@ async fn upsert_test_name_surfaces(
             },
         );
         let mut transaction = pool.begin().await?;
-        bigname_storage::identity_search::prepare(&mut transaction, &[], &paths, &names).await?;
+        bigname_storage::identity_search::prepare(
+            &mut transaction,
+            bigname_storage::identity_search::LabelWrite::NONE,
+            &paths,
+            &names,
+        )
+        .await?;
         sqlx::query(
             r#"
             INSERT INTO bigname_phase.name_surfaces (
@@ -3828,7 +3834,7 @@ async fn insert_textless_surface(
     let mut transaction = pool.begin().await?;
     bigname_storage::identity_search::prepare(
         &mut transaction,
-        &[],
+        bigname_storage::identity_search::LabelWrite::NONE,
         &[labelhashes.to_vec()],
         std::slice::from_ref(&logical_name_id),
     )
@@ -4038,8 +4044,13 @@ async fn insert_family_label_preimages(pool: &PgPool, raw_labels: &[&[u8]]) -> R
             decoded_labels.push(decoded);
         }
         let mut transaction = pool.begin().await?;
-        bigname_storage::identity_search::prepare(&mut transaction, &chunk_hashes, &[], &[])
-            .await?;
+        bigname_storage::identity_search::prepare(
+            &mut transaction,
+            bigname_storage::identity_search::LabelWrite::Insert(&chunk_hashes),
+            &[],
+            &[],
+        )
+        .await?;
         sqlx::query(
             "INSERT INTO label_preimages (labelhash, raw_label, decoded_label, normalizer_version,
             normalized_under_version, normalization_error, source_kind, source_priority)

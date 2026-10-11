@@ -387,3 +387,79 @@ async fn recompute_and_actual_rainbow_import_preserve_both_changes_after_waits()
     database.cleanup().await?;
     Ok(())
 }
+
+/// Recompute rewrites stored verdicts, so every label it loads stays changed: it still locks and
+/// respells an unnamed surface outside its block range that carries a stored label.
+#[tokio::test]
+async fn recompute_locks_present_label_fanout_outside_range() -> TestResult {
+    use std::time::{Duration, Instant};
+    let database = bigname_test_support::TestDatabase::create(
+        bigname_test_support::TestDatabaseConfig::new("recompute_search_outside_range")
+            .pool_max_connections(6),
+    )
+    .await?;
+    for source in [
+        include_str!("../../storage/schema/baseline/01_chain.sql"),
+        include_str!("../../storage/schema/baseline/03_identity.sql"),
+        include_str!("../../storage/schema/baseline/04_manifests.sql"),
+        include_str!("../../storage/schema/baseline/05_normalized_events.sql"),
+        include_str!("../../storage/schema/baseline/07_labels.sql"),
+    ] {
+        sqlx::raw_sql(source).execute(database.pool()).await?;
+    }
+    let first = format!("{:#x}", alloy_primitives::keccak256(b"first"));
+    sqlx::raw_sql("INSERT INTO chain_lineage(chain_id,block_hash,block_number,block_timestamp,canonicality_state)
+        VALUES ('recompute','fifty',50,to_timestamp(50),'canonical')").execute(database.pool()).await?;
+    sqlx::query("INSERT INTO name_surfaces(logical_name_id,namespace,namehash,labelhashes,normalizer_version,
+        visibility_state,chain_id,block_hash,block_number,canonicality_state)
+        VALUES ('ens:outside','ens','outside',$1,'old','active','recompute','fifty',50,'canonical')")
+        .bind(vec![first.clone()]).execute(database.pool()).await?;
+    sqlx::query(
+        "INSERT INTO label_preimages(labelhash,raw_label,decoded_label,normalizer_version,
+        normalized_under_version,normalization_error,source_kind,source_priority,provenance)
+        VALUES ($1,$2,'first','old',false,'old verdict',$3,10,'{}')",
+    )
+    .bind(&first)
+    .bind(b"first".as_slice())
+    .bind(bigname_storage::ENS_RAINBOW_SOURCE_KIND)
+    .execute(database.pool())
+    .await?;
+    let mut seed = database.pool().begin().await?;
+    bigname_storage::identity_search::refresh(&mut seed, &["ens:outside".to_owned()], &[]).await?;
+    seed.commit().await?;
+    let spelling = || {
+        sqlx::query_scalar::<_, String>("SELECT name FROM name_search_documents")
+            .fetch_one(database.pool())
+    };
+    assert!(spelling().await?.starts_with('['));
+    let mut blocker = database.pool().begin().await?;
+    let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
+    sqlx::query("SELECT logical_name_id FROM name_surfaces FOR NO KEY UPDATE")
+        .execute(&mut *blocker)
+        .await?;
+    let pool = database.pool().clone();
+    let recompute = tokio::spawn(async move { run(&pool, "recompute", 0, 1).await });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut blocked = false;
+    while !recompute.is_finished() && !blocked && Instant::now() < deadline {
+        blocked = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
+               AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%identity_search.name_locks%')",
+        )
+        .bind(holder)
+        .fetch_one(database.pool())
+        .await?;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    blocker.commit().await?;
+    tokio::time::timeout(Duration::from_secs(10), recompute).await???;
+    assert!(
+        blocked,
+        "recompute must lock unnamed surfaces carrying a label it rewrites"
+    );
+    assert_eq!(spelling().await?, "first");
+    database.cleanup().await?;
+    Ok(())
+}

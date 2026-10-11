@@ -244,14 +244,28 @@ Documents may retain an orphaned anchor; the reader always rechecks canonical
 lineage and the current publication before serving a candidate.
 
 A writer determines its full label lock set before changing labels or surfaces:
-256 fixed advisory label buckets, exclusive for changed served labels and shared
-for other path labels, with exclusive winning when paths share a bucket. It
-locks buckets in increasing order, then every affected existing `name_surfaces`
-row in logical-name order, before changing any source row. A bucket collision
-can serialize unrelated writers; readers take none of these locks. It never
-upgrades a shared bucket or acquires a new one after a row lock. Label
-updates, affected document replacements, length-class changes and exact posting
-set replacement commit atomically. An aborted import or Interpret write exposes
+256 fixed advisory label buckets, exclusive for every label it submits to
+`label_preimages` and shared for other path labels, with exclusive winning when
+paths share a bucket. It locks buckets in increasing order, then every affected
+existing `name_surfaces` row in logical-name order, before changing any source
+row. The affected rows are the names the writer changes and every surface
+without raw bytes whose path holds a changed label. A bucket collision can
+serialize unrelated writers; readers take none of these locks. It never
+upgrades a shared bucket or acquires a new one after a row lock.
+
+A changed label is a label the write inserts into `label_preimages` or rewrites
+there, meaning a label whose rendering the write can change. Interpret and the
+rainbow-table import are insert-only writers: neither changes the bytes or the
+normalization verdict of a stored row. So for them a submitted label that is
+already stored is unchanged. They read which submitted labels are stored after
+taking the buckets. The normalizer recompute rewrites the verdict of every label it
+loads, so all of its labels are changed. Every writer that inserts or rewrites
+a `label_preimages` row takes that label's bucket exclusive first, and nothing
+deletes from the table. A stored row read under the bucket therefore stays as
+read until the writer commits.
+
+Label updates, affected document replacements, length-class changes and exact
+posting set replacement commit atomically. An aborted import or Interpret write exposes
 none of those changes. Reorg re-anchoring and normalizer recompute use the same
 writer; retained verified preimages are not deleted with a chain observation.
 

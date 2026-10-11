@@ -434,7 +434,13 @@ async fn real_batch_redo_replaces_lost_raw_search_evidence_atomically() -> TestR
     insert_hash_path_observation(database.pool(), 1).await?;
     insert_preimage(database.pool(), 3).await?;
     let mut tx = database.pool().begin().await?;
-    bigname_storage::identity_search::prepare(&mut tx, &[], &[], &[NAME.to_owned()]).await?;
+    bigname_storage::identity_search::prepare(
+        &mut tx,
+        bigname_storage::identity_search::LabelWrite::NONE,
+        &[],
+        &[NAME.to_owned()],
+    )
+    .await?;
     bigname_storage::identity_search::refresh(&mut tx, &[NAME.to_owned()], &[]).await?;
     tx.commit().await?;
     let before: (String, i16) =

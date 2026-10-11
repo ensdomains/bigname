@@ -25,8 +25,13 @@ pub(super) async fn lock(
     .map_err(|error| {
         InterpretError::database("failed to read normalization search scope", error)
     })?;
-    bigname_storage::identity_search::prepare(transaction, labels, &[], &names)
-        .await
-        .map_err(failure)?;
+    bigname_storage::identity_search::prepare(
+        transaction,
+        bigname_storage::identity_search::LabelWrite::Rewrite(labels),
+        &[],
+        &names,
+    )
+    .await
+    .map_err(failure)?;
     Ok(names)
 }

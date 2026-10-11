@@ -160,7 +160,13 @@ async fn insert_label_preimages(pool: &PgPool, preimages: &[RainbowPreimage]) ->
     sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
         .execute(&mut *transaction)
         .await?;
-    crate::identity_search::prepare(&mut transaction, &labelhashes, &[], &[]).await?;
+    crate::identity_search::prepare(
+        &mut transaction,
+        crate::identity_search::LabelWrite::Insert(&labelhashes),
+        &[],
+        &[],
+    )
+    .await?;
     let inserted = sqlx::query_scalar::<_, String>(
         r#"
         INSERT INTO label_preimages (

@@ -423,3 +423,379 @@ async fn resumed_middle_refreshes_label_fanout_and_empty_final_repairs_witnesses
     fixture.db.cleanup().await?;
     Ok(())
 }
+
+/// Runs `job` while `lock` holds rows and reports whether the job waited on `lock` at the
+/// statement tagged `tag`. The lock is released before the job is joined, so a failed
+/// assertion is never a leaked transaction or a timeout.
+async fn waited_on<T: Send + 'static>(
+    pool: &PgPool,
+    mut lock: sqlx::Transaction<'static, sqlx::Postgres>,
+    tag: &str,
+    job: tokio::task::JoinHandle<T>,
+) -> TestResult<(bool, T)> {
+    let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *lock)
+        .await?;
+    let until = Instant::now() + Duration::from_secs(15);
+    let mut blocked = false;
+    while !job.is_finished() && !blocked && Instant::now() < until {
+        blocked = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE $2)")
+            .bind(holder).bind(format!("%{tag}%")).fetch_one(pool).await?;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let finished = job.is_finished();
+    lock.rollback().await?;
+    let output = tokio::time::timeout(Duration::from_secs(30), job).await??;
+    assert!(
+        blocked || finished,
+        "job reached neither completion nor the observed lock within the observation window"
+    );
+    Ok((blocked, output))
+}
+
+async fn lock_rows(
+    pool: &PgPool,
+    statement: &str,
+    key: &str,
+) -> TestResult<sqlx::Transaction<'static, sqlx::Postgres>> {
+    let mut lock = pool.begin().await?;
+    sqlx::query(statement).bind(key).execute(&mut *lock).await?;
+    Ok(lock)
+}
+
+const LOCK_SURFACE: &str = "SELECT 1 FROM name_surfaces WHERE logical_name_id=$1 FOR NO KEY UPDATE";
+
+struct Labels {
+    db: TestDatabase,
+    marker: Marker,
+    /// `[x].eth`: unnamed, and carries only the stored label `eth` besides its own.
+    x: String,
+    /// `[fresh].[beta].eth`: unnamed, and carries the absent label `fresh`.
+    fanout: String,
+}
+
+/// One Normal batch stores `eth` through `seed.eth` and leaves `x`, `beta` and `fresh` absent.
+async fn labels(prefix: &str) -> TestResult<Labels> {
+    let db = fixture(prefix, 8).await?;
+    let pool = db.pool();
+    for offset in 0..8 {
+        insert_transaction(pool, SETUP_BLOCK + offset, NAME_WRAPPER).await?;
+    }
+    let eth = new_owner(pool, SETUP_BLOCK, 0, B256::ZERO, "eth").await?;
+    let x = new_owner(pool, SETUP_BLOCK, 1, eth, "x").await?;
+    let beta = new_owner(pool, SETUP_BLOCK, 2, eth, "beta").await?;
+    let fanout = new_owner(pool, SETUP_BLOCK, 3, beta, "fresh").await?;
+    wrapped(pool, SETUP_BLOCK + 1, 0, &["seed", "eth"]).await?;
+    let marker = Engine::new(pool.clone())
+        .run_batch(request(SETUP_BLOCK, SETUP_BLOCK + 1, None, RunMode::Normal))
+        .await?
+        .current;
+    Ok(Labels {
+        db,
+        marker,
+        x: format!("ens:{x:#x}"),
+        fanout: format!("ens:{fanout:#x}"),
+    })
+}
+
+fn next_batch(
+    pool: &PgPool,
+    block: i64,
+    marker: Marker,
+) -> tokio::task::JoinHandle<crate::Result<BatchOutcome>> {
+    let engine = Engine::new(pool.clone());
+    tokio::spawn(async move {
+        engine
+            .run_batch(request(block, block, Some(marker), RunMode::Normal))
+            .await
+    })
+}
+
+#[tokio::test]
+async fn known_label_batch_does_not_lock_unnamed_surfaces() -> TestResult {
+    let fixture = labels("search_known_label_locks").await?;
+    let pool = fixture.db.pool();
+    let block = SETUP_BLOCK + 2;
+    let foo = wrapped(pool, block, 0, &["foo", "eth"]).await?;
+    let lock = lock_rows(pool, LOCK_SURFACE, &fixture.x).await?;
+    let job = next_batch(pool, block, fixture.marker.clone());
+    let (blocked, outcome) =
+        waited_on(pool, lock, "storage:identity_search.name_locks", job).await?;
+    assert_eq!(outcome?.current.number, block);
+    assert_spelling(pool, &foo, "foo.eth", 0).await?;
+    assert_spelling(pool, &fixture.x, &format!("[{:x}].eth", keccak256(b"x")), 1).await?;
+    fixture.db.cleanup().await?;
+    assert!(
+        !blocked,
+        "a batch whose only stored label is eth locked an unnamed eth surface"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn absent_label_batch_locks_and_respells_fanout() -> TestResult {
+    let fixture = labels("search_absent_label_locks").await?;
+    let pool = fixture.db.pool();
+    let block = SETUP_BLOCK + 2;
+    wrapped(pool, block, 0, &["fresh", "eth"]).await?;
+    let lock = lock_rows(pool, LOCK_SURFACE, &fixture.fanout).await?;
+    let job = next_batch(pool, block, fixture.marker.clone());
+    let (blocked, outcome) =
+        waited_on(pool, lock, "storage:identity_search.name_locks", job).await?;
+    assert_eq!(outcome?.current.number, block);
+    assert!(
+        blocked,
+        "a batch that stores a new label must lock the unnamed surfaces carrying it"
+    );
+    assert_spelling(
+        pool,
+        &fixture.fanout,
+        &format!("fresh.[{:x}].eth", keccak256(b"beta")),
+        1,
+    )
+    .await?;
+    fixture.db.cleanup().await?;
+    Ok(())
+}
+
+/// A label whose lock bucket differs from every given label's bucket.
+async fn label_outside_buckets(pool: &PgPool, labels: &[&str]) -> TestResult<String> {
+    let hash = |label: &str| format!("{:#x}", keccak256(label.as_bytes()));
+    let taken: Vec<String> = labels.iter().map(|label| hash(label)).collect();
+    for n in 0..300 {
+        let label = format!("y{n}");
+        let separate: bool = sqlx::query_scalar(
+            "SELECT NOT EXISTS (SELECT 1 FROM unnest($2::text[]) AS taken(label)
+             WHERE hashtext(taken.label) & 255 = hashtext($1) & 255)",
+        )
+        .bind(hash(&label))
+        .bind(&taken)
+        .fetch_one(pool)
+        .await?;
+        if separate {
+            return Ok(label);
+        }
+    }
+    Err("no label outside the given buckets".into())
+}
+
+/// The batch holds `eth` (stored) and `foo` (absent) while an import of an absent `y` respells
+/// `[y].eth`. Neither waits for the other, because the batch cannot respell `[y].eth`.
+#[tokio::test]
+async fn known_label_batch_does_not_block_absent_label_import() -> TestResult {
+    let fixture = labels("search_known_label_import").await?;
+    let pool = fixture.db.pool();
+    let y = label_outside_buckets(pool, &["eth", "foo"]).await?;
+    let eth = keccak256([B256::ZERO.as_slice(), keccak256(b"eth").as_slice()].concat());
+    let y_eth = new_owner(pool, SETUP_BLOCK + 2, 0, eth, &y).await?;
+    let marker = Engine::new(pool.clone())
+        .run_batch(request(
+            SETUP_BLOCK + 2,
+            SETUP_BLOCK + 2,
+            Some(fixture.marker.clone()),
+            RunMode::Normal,
+        ))
+        .await?
+        .current;
+    let y_eth = format!("ens:{y_eth:#x}");
+    sqlx::query("INSERT INTO ens_names VALUES ($1,$2)")
+        .bind(format!("{:#x}", keccak256(y.as_bytes())))
+        .bind(&y)
+        .execute(pool)
+        .await?;
+    // Hold the batch after its search locks, at its upsert of the stored eth preimage.
+    let lock = lock_rows(
+        pool,
+        "SELECT 1 FROM label_preimages WHERE labelhash=$1 FOR UPDATE",
+        &format!("{:#x}", keccak256(b"eth")),
+    )
+    .await?;
+    let wrapped_foo = wrapped(pool, SETUP_BLOCK + 3, 0, &["foo", "eth"]).await?;
+    let batch = next_batch(pool, SETUP_BLOCK + 3, marker);
+    let until = Instant::now() + Duration::from_secs(15);
+    let mut held = false;
+    while !batch.is_finished() && !held && Instant::now() < until {
+        held = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%INSERT INTO label_preimages%')")
+            .fetch_one(pool).await?;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut importer = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            bigname_storage::import_label_preimages_from_ens_names_table(&pool, None, None).await
+        })
+    };
+    let early = tokio::time::timeout(Duration::from_secs(10), &mut importer).await;
+    lock.rollback().await?;
+    let outcome = tokio::time::timeout(Duration::from_secs(30), batch).await??;
+    let waited = early.is_err();
+    let imported = match early {
+        Ok(joined) => joined??,
+        Err(_) => tokio::time::timeout(Duration::from_secs(30), importer).await???,
+    };
+    assert!(held, "the batch never reached the held preimage upsert");
+    assert_eq!(outcome?.current.number, SETUP_BLOCK + 3);
+    assert_eq!(imported.retained_row_count, 1);
+    assert_spelling(pool, &wrapped_foo, "foo.eth", 0).await?;
+    assert_spelling(pool, &y_eth, &format!("{y}.eth"), 1).await?;
+    fixture.db.cleanup().await?;
+    assert!(
+        !waited,
+        "an absent-label import waited for a batch that holds only the stored label eth"
+    );
+    Ok(())
+}
+
+async fn stored_with_versions(pool: &PgPool) -> TestResult<serde_json::Value> {
+    Ok(sqlx::query_scalar("SELECT jsonb_build_object(
+        'documents',(SELECT jsonb_agg(jsonb_build_array(logical_name_id,name,spelling_class,display_name_override,xmin::text) ORDER BY logical_name_id) FROM name_search_documents),
+        'postings',(SELECT jsonb_agg(jsonb_build_array(search_id,spelling_class,token_kind,token_length,encode(token_bytes,'hex'),xmin::text) ORDER BY search_id,spelling_class,token_kind,token_length,token_bytes) FROM name_search_postings))")
+        .fetch_one(pool).await?)
+}
+
+async fn refresh_every_surface(pool: &PgPool) -> TestResult {
+    let names: Vec<String> = sqlx::query_scalar("SELECT logical_name_id FROM name_surfaces")
+        .fetch_all(pool)
+        .await?;
+    let mut tx = pool.begin().await?;
+    bigname_storage::identity_search::refresh(&mut tx, &names, &[]).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Batches with stored and new labels leave exactly what a refresh of every surface derives:
+/// that refresh changes no document or posting and rewrites no tuple.
+#[tokio::test]
+async fn label_writes_match_full_refresh() -> TestResult {
+    let fixture = labels("search_label_full_refresh").await?;
+    let pool = fixture.db.pool();
+    let block = SETUP_BLOCK + 2;
+    wrapped(pool, block, 0, &["foo", "eth"]).await?;
+    wrapped(pool, block, 1, &["fresh", "eth"]).await?;
+    next_batch(pool, block, fixture.marker.clone()).await??;
+    assert_spelling(pool, &fixture.x, &format!("[{:x}].eth", keccak256(b"x")), 1).await?;
+    assert_spelling(
+        pool,
+        &fixture.fanout,
+        &format!("fresh.[{:x}].eth", keccak256(b"beta")),
+        1,
+    )
+    .await?;
+    let before = stored_with_versions(pool).await?;
+    refresh_every_surface(pool).await?;
+    assert_eq!(stored_with_versions(pool).await?, before);
+    fixture.db.cleanup().await?;
+    Ok(())
+}
+
+fn statement_cost(queries: &str, tag: &str) -> serde_json::Value {
+    let field = |line: &str, key: &str| {
+        line.split_whitespace()
+            .find_map(|part| part.strip_prefix(key))
+            .and_then(|value| value.trim_matches('"').parse::<f64>().ok())
+    };
+    let lines: Vec<&str> = queries.lines().filter(|line| line.contains(tag)).collect();
+    serde_json::json!({
+        "statements": lines.len(),
+        "milliseconds": lines.iter().filter_map(|line| field(line, "elapsed_secs=")).sum::<f64>() * 1000.0,
+        "rows_returned": lines.iter().filter_map(|line| field(line, "rows_returned=")).sum::<f64>(),
+    })
+}
+
+/// The cost of a batch that submits the stored label `eth` while SEARCH_LABEL_FANOUT unnamed
+/// `[h].eth` surfaces exist. Run the same file at two commits on one host and compare.
+#[tokio::test]
+#[ignore = "operator measurement; SEARCH_LABEL_FANOUT sets the unnamed eth surfaces"]
+async fn known_label_lock_cost() -> TestResult {
+    let fanout: i64 = std::env::var("SEARCH_LABEL_FANOUT")
+        .unwrap_or_else(|_| "210000".into())
+        .parse()?;
+    let db = fixture("search_label_lock_cost", 8).await?;
+    let pool = db.pool();
+    for offset in 0..=5 {
+        insert_transaction(pool, SETUP_BLOCK + offset, NAME_WRAPPER).await?;
+    }
+    let seed = wrapped(pool, SETUP_BLOCK, 0, &["seed", "eth"]).await?;
+    for k in 1..=5 {
+        wrapped(pool, SETUP_BLOCK + k, 0, &[&format!("foo{k}"), "eth"]).await?;
+    }
+    let engine = Engine::new(pool.clone());
+    let mut marker = engine
+        .run_batch(request(SETUP_BLOCK, SETUP_BLOCK, None, RunMode::Normal))
+        .await?
+        .current;
+    let setup = Instant::now();
+    sqlx::query("INSERT INTO name_surfaces(logical_name_id,namespace,namehash,labelhashes,
+            normalizer_version,visibility_state,chain_id,block_hash,block_number,canonicality_state)
+        SELECT 'ens:'||node.hash,'ens',node.hash,
+               ARRAY['0x'||md5('label-'||n)||md5('hash-'||n),$2],
+               seed.normalizer_version,'active',seed.chain_id,seed.block_hash,seed.block_number,'canonical'
+        FROM generate_series(1,$3::bigint) n
+        CROSS JOIN (SELECT * FROM name_surfaces WHERE logical_name_id=$1) seed
+        CROSS JOIN LATERAL (SELECT '0x'||md5('node-'||n)||md5('name-'||n) AS hash) node")
+        .bind(&seed)
+        .bind(format!("{:#x}", keccak256(b"eth")))
+        .bind(fanout)
+        .execute(pool)
+        .await?;
+    refresh_every_surface(pool).await?;
+    sqlx::query("ANALYZE").execute(pool).await?;
+    let settings:Vec<(String,String)>=sqlx::query_as("SELECT name,setting FROM pg_settings WHERE name IN ('shared_buffers','work_mem','effective_cache_size','max_parallel_workers_per_gather','jit','synchronous_commit','fsync') ORDER BY name").fetch_all(pool).await?;
+    println!("SETTINGS {}", serde_json::to_string(&settings)?);
+    println!(
+        "FIXTURE {}",
+        serde_json::json!({"fanout":fanout,"setup_seconds":setup.elapsed().as_secs_f64(),"compiled_hash":bigname_content_hash::INTERPRETER_CONTENT_HASH})
+    );
+    let log = SqlLog::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer({
+            let log = log.clone();
+            move || log.clone()
+        })
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    for k in 1..=5 {
+        log.take();
+        let start = Instant::now();
+        marker = engine
+            .run_batch(request(
+                SETUP_BLOCK + k,
+                SETUP_BLOCK + k,
+                Some(marker),
+                RunMode::Normal,
+            ))
+            .await?
+            .current;
+        let milliseconds = start.elapsed().as_secs_f64() * 1000.0;
+        let queries = log.take();
+        println!(
+            "SAMPLE {}",
+            serde_json::json!({"batch":k,"milliseconds":milliseconds,
+                "name_locks":statement_cost(&queries,"identity_search.name_locks"),
+                "label_locks":statement_cost(&queries,"identity_search.label_locks"),
+                "new_labels":statement_cost(&queries,"identity_search.new_labels")})
+        );
+    }
+    let digest: (i64, i64, String) = sqlx::query_as(
+        "WITH tokens AS (
+             SELECT search_id, count(*) AS n, string_agg(concat_ws(',',spelling_class,token_kind,
+                    token_length,encode(token_bytes,'hex')),';'
+                    ORDER BY spelling_class,token_kind,token_length,token_bytes) AS tokens
+             FROM name_search_postings GROUP BY search_id)
+         SELECT count(*), COALESCE(sum(tokens.n),0)::bigint,
+                md5(string_agg(md5(concat_ws('|',d.logical_name_id,d.chain_id,d.namespace,d.namehash,
+                    d.name,d.display_name_override,d.spelling_class,tokens.tokens)),'' ORDER BY d.logical_name_id))
+         FROM name_search_documents d LEFT JOIN tokens USING (search_id)",
+    )
+    .fetch_one(pool)
+    .await?;
+    println!(
+        "SNAPSHOT {}",
+        serde_json::json!({"documents":digest.0,"postings":digest.1,"md5":digest.2})
+    );
+    db.cleanup().await?;
+    Ok(())
+}

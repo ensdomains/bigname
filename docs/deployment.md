@@ -3778,3 +3778,32 @@ rows ready under the new hash.
 
 It adds no schema-migration, table, manifest or setting. The manifest-authority
 fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## Search locks for labels that are already stored
+
+The build that stops an Interpret batch or a rainbow-table import from locking
+names it cannot respell (TYR-310, see
+[durable search data](storage.md#durable-search-data)) changes the search
+writer's lock step. Before, a batch locked every `name_surfaces` row without raw
+bytes whose path held a label the batch submitted, even a label already in
+`label_preimages`. Nearly every batch submits `eth`, so a batch on any chain
+locked every unnamed `.eth` name and rewrote none of them.
+Now these writers lock their own names and the unnamed names that hold a label
+they newly store. The normalizer recompute still locks the unnamed names of
+every label it rewrites.
+
+- Stored documents and postings are the same, row for row.
+- It adds no schema-migration, table, index, manifest or setting. The
+  manifest-authority fingerprint and the compiled watch plan are unchanged, so
+  stamp no Ingest redo.
+- It edits `crates/storage/src/identity_search.rs`,
+  `crates/storage/src/label_preimages.rs`, `crates/interpret/src/write` and
+  `crates/interpret/src/recompute/search.rs`. All are inputs of the
+  [interpreter content hash](glossary.md#interpreter-content-hash), so the hash
+  rotates for every chain. An existing deployment finishes the full-history
+  Interpret redo and the Project redo it installs before the matching API
+  serves. The change rides the next re-derivation release and shares that
+  release's one Interpret and Project redo pair with its other hash-rotating
+  changes.
+- Writers that submit the same label still wait for each other on that label's
+  lock bucket, as before.

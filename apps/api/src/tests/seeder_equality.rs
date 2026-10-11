@@ -677,7 +677,7 @@ async fn per_row_name_surfaces(
         let mut transaction = pool.begin().await?;
         bigname_storage::identity_search::prepare(
             &mut transaction,
-            &[],
+            bigname_storage::identity_search::LabelWrite::NONE,
             std::slice::from_ref(&labelhashes),
             std::slice::from_ref(&logical_name_id),
         )
@@ -892,7 +892,7 @@ async fn per_row_label_preimage(pool: &PgPool, raw_label: &[u8]) -> Result<Strin
     let mut transaction = pool.begin().await?;
     bigname_storage::identity_search::prepare(
         &mut transaction,
-        std::slice::from_ref(&hash),
+        bigname_storage::identity_search::LabelWrite::Insert(std::slice::from_ref(&hash)),
         &[],
         &[],
     )

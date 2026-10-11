@@ -30,7 +30,7 @@
 //! | u | the page statement is not kept prepared | `page_statement_is_not_kept_prepared` | |
 mod wire;
 
-use super::{documents, prepare, refresh};
+use super::{LabelWrite, documents, prepare, refresh};
 use anyhow::{Context, Result, ensure};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use futures_util::FutureExt;
@@ -501,7 +501,7 @@ async fn prepare_then_refresh_reads_the_uncommitted_write() -> Result<()> {
     let mut conn = fixture.connect().await?;
     let mut tx = conn.begin().await?;
     let changed = [own_label(3)];
-    prepare(&mut tx, &changed, &[], &names).await?;
+    prepare(&mut tx, LabelWrite::Insert(&changed), &[], &names).await?;
     reveal(&mut tx, &changed[0], "third").await?;
     let trace = refresh_like_previous(&fixture.wire, &mut tx, &names, &changed).await?;
     tx.commit().await?;

@@ -1,6 +1,6 @@
 //! The real verified-import transaction racing the same lexical helper Interpret calls.
 use super::*;
-use crate::identity_search;
+use crate::identity_search::{self, LabelWrite};
 use anyhow::ensure;
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use sqlx::{PgConnection, Postgres, Transaction};
@@ -46,7 +46,13 @@ async fn insert_surface(conn: &mut PgConnection, id: &str, path: &[String]) -> R
 async fn surface(db: &TestDatabase, number: u64, path: &[String]) -> Result<String> {
     let id = name_id(number);
     let mut tx = db.pool().begin().await?;
-    identity_search::prepare(&mut tx, &[], &[path.to_vec()], std::slice::from_ref(&id)).await?;
+    identity_search::prepare(
+        &mut tx,
+        LabelWrite::NONE,
+        &[path.to_vec()],
+        std::slice::from_ref(&id),
+    )
+    .await?;
     insert_surface(&mut tx, &id, path).await?;
     identity_search::refresh(&mut tx, std::slice::from_ref(&id), &[]).await?;
     tx.commit().await?;
@@ -152,7 +158,7 @@ async fn absent_label_import_waits_for_new_structural_surface_then_refreshes_it(
     let mut creator = db.pool().begin().await?;
     identity_search::prepare(
         &mut creator,
-        &[],
+        LabelWrite::NONE,
         std::slice::from_ref(&path),
         std::slice::from_ref(&id),
     )
@@ -214,7 +220,7 @@ async fn different_label_imports_wait_for_shared_names_and_use_fresh_post_wait_r
 }
 
 async fn raw_evidence(tx: &mut Transaction<'_, Postgres>, id: &str, name: &str) -> Result<()> {
-    identity_search::prepare(tx, &[], &[], &[id.to_owned()]).await?;
+    identity_search::prepare(tx, LabelWrite::NONE, &[], &[id.to_owned()]).await?;
     sqlx::query("UPDATE name_surfaces SET raw_name=$2, raw_labels=string_to_array($2,'.'),
         dns_encoded_name=convert_to($2,'UTF8'), preimage_event_identity='revealed' WHERE logical_name_id=$1")
         .bind(id).bind(name).execute(&mut **tx).await?;
@@ -285,7 +291,7 @@ async fn colliding_buckets_serialize_complete_multi_name_work_without_lock_upgra
     let mut first = db.pool().begin().await?;
     identity_search::prepare(
         &mut first,
-        std::slice::from_ref(&hashes[a]),
+        LabelWrite::Insert(std::slice::from_ref(&hashes[a])),
         &[vec![hashes[b].clone()]],
         &ids,
     )
@@ -321,7 +327,7 @@ async fn lexical_writes_refuse_repeatable_read_before_mutating_anything() -> Res
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
         .execute(&mut *tx)
         .await?;
-    let error = identity_search::prepare(&mut tx, &[], &[], &[])
+    let error = identity_search::prepare(&mut tx, LabelWrite::NONE, &[], &[])
         .await
         .unwrap_err();
     ensure!(error.to_string().contains("READ COMMITTED"));
@@ -336,7 +342,7 @@ async fn new_surface_waiting_on_import_reads_the_committed_preimage() -> Result<
     let mut importing = db.pool().begin().await?;
     identity_search::prepare(
         &mut importing,
-        std::slice::from_ref(&label.labelhash),
+        LabelWrite::Insert(std::slice::from_ref(&label.labelhash)),
         &[],
         &[],
     )
@@ -362,7 +368,7 @@ async fn new_surface_waiting_on_import_reads_the_committed_preimage() -> Result<
         let mut tx = pool.begin().await?;
         identity_search::prepare(
             &mut tx,
-            &[],
+            LabelWrite::NONE,
             &[vec![labelhash.clone()]],
             std::slice::from_ref(&id),
         )
@@ -376,5 +382,47 @@ async fn new_surface_waiting_on_import_reads_the_committed_preimage() -> Result<
     importing.commit().await?;
     let id = creator.await??;
     ensure!(spelling(&mut *db.pool().acquire().await?, &id).await?.0 == "arrived");
+    db.cleanup().await
+}
+
+/// A stored label renders the same after an insert-only write, so importing it again locks no
+/// unnamed surface that carries it.
+#[tokio::test]
+async fn present_label_import_locks_no_unnamed_surface() -> Result<()> {
+    let db = database("search_present_import").await?;
+    let label = preimage("present");
+    let id = surface(&db, 9, std::slice::from_ref(&label.labelhash)).await?;
+    ensure!(import(db.pool(), &["present"]).await? == 1);
+    let mut blocker = db.pool().begin().await?;
+    let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
+    sqlx::query("SELECT 1 FROM name_surfaces WHERE logical_name_id=$1 FOR NO KEY UPDATE")
+        .bind(&id)
+        .execute(&mut *blocker)
+        .await?;
+    let pool = db.pool().clone();
+    let rerun = tokio::spawn(async move { import(&pool, &["present"]).await });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut blocked = false;
+    while !rerun.is_finished() && !blocked && Instant::now() < deadline {
+        blocked = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
+               AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%identity_search.name_locks%')",
+        )
+        .bind(holder)
+        .fetch_one(db.pool())
+        .await?;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let finished = rerun.is_finished();
+    blocker.rollback().await?;
+    let inserted = rerun.await??;
+    ensure!(
+        !blocked,
+        "an import of a stored label locked an unnamed surface"
+    );
+    ensure!(finished && inserted == 0);
+    ensure!(spelling(&mut *db.pool().acquire().await?, &id).await?.0 == "present");
     db.cleanup().await
 }

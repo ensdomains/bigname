@@ -55,7 +55,7 @@ pub async fn name(
         .await?;
     bigname_storage::identity_search::prepare(
         &mut tx,
-        &[],
+        bigname_storage::identity_search::LabelWrite::NONE,
         std::slice::from_ref(&hashes),
         std::slice::from_ref(&id),
     )
