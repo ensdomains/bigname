@@ -366,7 +366,9 @@ fn reconcile_registration(
             continue;
         }
         let event = &mut output.normalized_events[index];
+        // Keep a name the row carried at emission.
         event.logical_name_id = (registration.surface_known
+            || event.logical_name_id.as_ref() == Some(&registration.logical_name_id)
             || event.after_state[crate::schema_v2::seam::NAME_IDENTITY_OBSERVED_KEY] == true)
             .then(|| registration.logical_name_id.clone());
         event.resource_id = Some(registration.resource_id);

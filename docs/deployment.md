@@ -3752,3 +3752,29 @@ other hash-rotating changes. Do not mark old rows ready under the new hash.
 It adds no schema-migration, table, index, manifest or setting. The
 manifest-authority fingerprint and the compiled watch plan are unchanged, so
 stamp no Ingest redo.
+
+## ENSv1 resolver set after a same-transaction reservation
+
+The build that keeps the name on ENSv1 registry writes made after a same-transaction
+[ENSv2 reservation](glossary.md#premigration-reservation) (TYR-294) changes
+same-transaction reconciliation in `crates/adapters/src`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
+
+What changes for names:
+
+- A `.eth` name whose registry resolver was set after its ENSv2 reservation, in the
+  transaction that registered it, serves that resolver on `GET /v1/names/{name}` and
+  `GET /v1/names/{name}/records`. Before, the name route answered `resolver: null` until
+  a later pointer change.
+- Any other registry row written at that point that reconciliation moves to the
+  registration, such as a resolver clear, keeps its name too.
+
+These rows arrive through re-derivation, not through an in-place change. Every chain
+needs a full-history Interpret redo, then the Project redo it installs, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and
+API binaries. The change rides the next re-derivation release and shares that release's
+one Interpret and Project redo pair with its other hash-rotating changes. Do not mark old
+rows ready under the new hash.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority
+fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.

@@ -1227,9 +1227,10 @@ the written rows batch-independent:
   same-transaction reconciliation may attribute registry, resolver, and
   permission observations to a registration established later in the same
   transaction, and predecessor-epoch permission closures may be attributed
-  when they share the registration's block. Reconciliation never reaches
-  across a block boundary — batches never split a block, so the block is the
-  atomic unit every [batch grid](glossary.md#batch-grid) loads — so
+  when they share the registration's block. Moving a row to the registration
+  keeps a `logical_name_id` the row already carried. Reconciliation never
+  reaches across a block boundary — batches never split a block, so the
+  block is the atomic unit every [batch grid](glossary.md#batch-grid) loads — so
   predecessor-epoch observations that only
   a later block's registration could identify keep their event-time
   attribution (null `logical_name_id`/`resource_id` where no authority was

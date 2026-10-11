@@ -6,7 +6,7 @@
 //! Sepolia tests run raw logs through Interpret and Project on the checked-in profile, which admits
 //! the ENSv2 root registry, so the chain is cut over from its first block.
 use super::v2_continuing_lease::{Logs, publish};
-use super::v2_sepolia_redeploy::{NEW_REGISTRY, get, lookup};
+use super::v2_sepolia_redeploy::{CHAIN, HEAD, NEW_REGISTRY, get, lookup};
 use super::*;
 use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
@@ -50,6 +50,22 @@ fn registered(label: &str) -> Result<Logs> {
 /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L177-L178 @ ens_v2_sepolia_20261001@07e55a05)
 /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L217-L229 @ ens_v2_sepolia_20261001@07e55a05).
 fn registered_with(label: &str, v1: Logs) -> Result<Logs> {
+    registered_around(label, v1, Vec::new())
+}
+
+/// `registered`, with `after` (ENSv1 registry writes) after the reservation in the same
+/// transaction. Premigration's `register` with no resolver makes the registrant the registry
+/// owner of the node, and the owner may set its resolver
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L212-L214 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L110-L116 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L150 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L19 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L95 @ ens_v1@91c966f).
+fn registered_then(label: &str, after: Logs) -> Result<Logs> {
+    registered_around(label, Vec::new(), after)
+}
+
+fn registered_around(label: &str, v1: Logs, after: Logs) -> Result<Logs> {
     let hash = keccak256(label.as_bytes());
     let eth = keccak256([B256::ZERO.as_slice(), keccak256(b"eth").as_slice()].concat());
     let owner: Address = OWNER.parse()?;
@@ -95,6 +111,7 @@ fn registered_with(label: &str, v1: Logs) -> Result<Logs> {
         }
         .encode_log_data(),
     ));
+    logs.extend(after);
     Ok(logs)
 }
 
@@ -380,6 +397,153 @@ async fn v2_ens_v1_resolver_reports_the_new_pointer_after_a_move() -> Result<()>
     )
     .await?;
     assert_pointer(&database, "moved", pointer(OTHER_RESOLVER)).await?;
+    database.cleanup().await
+}
+
+/// The top-level resolver of the name route and of its records route for `label`.eth, both
+/// `expected`, and the records route answers a key rather than reporting no inventory.
+async fn assert_served(database: &TestDatabase, label: &str, expected: &str) -> Result<()> {
+    let data = detail(database, label).await?;
+    assert_eq!(data["resolver"], pointer(expected), "{label}: {data:#}");
+    let records = served_records(database, label).await?;
+    assert_eq!(
+        records["resolver"],
+        pointer(expected),
+        "{label}: {records:#}"
+    );
+    assert_ne!(
+        records["records"]["addr:60"]["unsupported_reason"],
+        json!("inventory_not_available"),
+        "{label}: {records:#}"
+    );
+    Ok(())
+}
+
+async fn served_records(database: &TestDatabase, label: &str) -> Result<Value> {
+    let (status, body) = get(
+        database,
+        &format!("/v1/names/{label}.eth/records?namespace=ens&keys=addr:60"),
+    )
+    .await?;
+    anyhow::ensure!(status == StatusCode::OK, "{body}");
+    Ok(body["data"].clone())
+}
+
+/// A registration and its reservation share a transaction. The name route serves the registry
+/// pointer whether it was set before the reservation, after it in the same transaction, or in a
+/// later block.
+#[tokio::test]
+async fn v2_ens_v1_resolver_the_name_route_serves_the_pointer_in_every_order() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    publish(
+        &database,
+        vec![
+            (
+                LEASE - 100,
+                registered_with("setbefore", vec![pointed("setbefore", PUBLIC_RESOLVER)?])?,
+            ),
+            (
+                LEASE - 90,
+                registered_then("setafter", vec![pointed("setafter", PUBLIC_RESOLVER)?])?,
+            ),
+            (LEASE - 80, registered("setlater")?),
+            (LEASE - 70, vec![pointed("setlater", PUBLIC_RESOLVER)?]),
+        ],
+    )
+    .await?;
+    for label in ["setbefore", "setlater", "setafter"] {
+        assert_pointer(&database, label, pointer(PUBLIC_RESOLVER)).await?;
+        assert_served(&database, label, PUBLIC_RESOLVER).await?;
+    }
+    database.cleanup().await
+}
+
+/// Two pointers after the reservation in one transaction: the later one is served.
+#[tokio::test]
+async fn v2_ens_v1_resolver_two_pointers_after_the_reservation_serve_the_last() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    publish(
+        &database,
+        vec![(
+            LEASE - 100,
+            registered_then(
+                "settwice",
+                vec![
+                    pointed("settwice", PUBLIC_RESOLVER)?,
+                    pointed("settwice", OTHER_RESOLVER)?,
+                ],
+            )?,
+        )],
+    )
+    .await?;
+    assert_pointer(&database, "settwice", pointer(OTHER_RESOLVER)).await?;
+    assert_served(&database, "settwice", OTHER_RESOLVER).await?;
+    database.cleanup().await
+}
+
+/// An Interpret redo of the block, then a Project redo, serves the same pointer as the first
+/// pass.
+#[tokio::test]
+async fn v2_ens_v1_resolver_a_redo_keeps_serving_the_pointer_set_after_the_reservation()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    publish(
+        &database,
+        vec![
+            (
+                LEASE - 100,
+                registered_then("redone", vec![pointed("redone", PUBLIC_RESOLVER)?])?,
+            ),
+            (LEASE - 90, vec![]),
+        ],
+    )
+    .await?;
+    let served = (
+        detail(&database, "redone").await?,
+        served_records(&database, "redone").await?,
+    );
+    let block = HEAD - 1;
+    database
+        .simulate_interpret_redo_begin(CHAIN, "redo")
+        .await?;
+    let outcome = bigname_interpret::Engine::new(database.pool.clone())
+        .run_batch(bigname_interpret::BatchRequest {
+            chain_id: CHAIN.into(),
+            from_block: block,
+            to_block: block,
+            resume_current: None,
+            mode: bigname_interpret::RunMode::Redo,
+        })
+        .await?;
+    assert!(outcome.complete);
+    database.simulate_interpret_redo_finish(CHAIN).await?;
+    sqlx::query("UPDATE chain_phase_state SET redo_attempt_generation=redo_attempt_generation+1 WHERE chain_id=$1 AND phase_name='project'")
+        .bind(CHAIN).execute(&database.pool).await?;
+    let token = bigname_project::families::input_token(&database.pool, CHAIN).await?;
+    bigname_project::families::apply(
+        &database.pool,
+        CHAIN,
+        &bigname_project::Marker {
+            number: HEAD,
+            hash: format!("{CHAIN}-block-{HEAD}"),
+        },
+        bigname_project::families::FamilyMode::Redo {
+            from: block,
+            to: HEAD,
+        },
+        &token,
+        &bigname_project::families::FamilyOptions::new(
+            bigname_content_hash::INTERPRETER_CONTENT_HASH,
+        ),
+    )
+    .await?;
+    let redone = (
+        detail(&database, "redone").await?,
+        served_records(&database, "redone").await?,
+    );
+    assert_eq!(redone, served);
+    assert_pointer(&database, "redone", pointer(PUBLIC_RESOLVER)).await?;
+    assert_served(&database, "redone", PUBLIC_RESOLVER).await?;
     database.cleanup().await
 }
 
