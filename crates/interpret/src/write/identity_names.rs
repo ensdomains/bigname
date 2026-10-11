@@ -33,7 +33,7 @@ pub(super) async fn write(
         &names,
     )
     .await
-    .map_err(super::search::failure)?;
+    .map_err(|error| InterpretError::database_anyhow("failed to prepare search labels", error))?;
     write_preimages(transaction, output).await?;
     write_surfaces(transaction, output).await?;
     bigname_storage::identity_search::refresh(transaction, &names, &changed)

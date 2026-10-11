@@ -239,3 +239,37 @@ async fn tied_preimage_priority_preserves_last_occurrence() -> TestResult {
     database.cleanup().await?;
     Ok(())
 }
+
+/// A lock timeout while preparing the search locks is a retryable database error, not a data
+/// integrity fault that stops the chain.
+#[tokio::test]
+async fn search_lock_timeout_is_transient() -> TestResult {
+    let database = database("interpret_search_lock_timeout").await?;
+    let output = BatchOutput {
+        name_surfaces: vec![surface("ens:held", "held.eth")],
+        ..BatchOutput::default()
+    };
+    write_output(&database, &output).await?;
+    let mut holder = database.pool().begin().await?;
+    sqlx::query("SELECT 1 FROM name_surfaces WHERE logical_name_id='ens:held' FOR UPDATE")
+        .execute(&mut *holder)
+        .await?;
+    let mut transaction = database.pool().begin().await?;
+    sqlx::query("SET LOCAL lock_timeout = '200ms'")
+        .execute(&mut *transaction)
+        .await?;
+    let error = write(&mut transaction, &output)
+        .await
+        .expect_err("the held surface must time out the search lock");
+    transaction.rollback().await?;
+    holder.rollback().await?;
+    assert_eq!(error.kind(), crate::ErrorKind::Transient, "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("failed to lock affected search identities"),
+        "{error}"
+    );
+    database.cleanup().await?;
+    Ok(())
+}
