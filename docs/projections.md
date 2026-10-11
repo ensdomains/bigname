@@ -416,8 +416,10 @@ The Project dependency walk uses this same distinction for later deeper changes.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L279-L288 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L474-L513 @ ens_v2_sepolia_20261001@07e55a05)
 
-The retained resolver survives only when the selected node-based target matches
-ordinary child pointer admission, directly or through the ENSv1 mirror. A
+The retained resolver survives only when the selected target matches ordinary
+child pointer admission: directly, for a node-based ENSv1 resolver, or through
+the ENSv1 mirror. At the requested node itself, the mirror's target may also be
+an admitted PermissionedResolver, read through its node link. A
 proven absence sets `unresolvable_reason`; a different or unproved target sets
 `resolution_unsupported_reason`. Both withhold the record-serving resource and
 direct topology without changing ownership, registration or authority coverage.

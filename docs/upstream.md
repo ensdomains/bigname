@@ -456,7 +456,7 @@ to the applicable entries below.
 <a id="retained-child-resolution-path"></a>
 > **Retained ENSv1 child resolution after migration** — after cutover, indexed
 > child records require a proven current ENSv2 route to the same projected
-> node-based target. A recognized different target and unknown registry behavior
+> target. A recognized different target and unknown registry behavior
 > remain explicit unsupported indexed resolution. Verified Universal Resolver
 > discovery can answer per request. This does not expand ownership or transfer
 > inheritance, change the accepted expiry representation, enumerate ancestor

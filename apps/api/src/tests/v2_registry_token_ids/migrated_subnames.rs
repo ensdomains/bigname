@@ -8,6 +8,8 @@ mod alias_paths;
 mod cost;
 #[path = "migrated_subnames/direct.rs"]
 mod direct;
+#[path = "migrated_subnames/ensv2_target.rs"]
+mod ensv2_target;
 #[path = "migrated_subnames/lookup_hydration.rs"]
 mod lookup_hydration;
 #[path = "migrated_subnames/lookup_import.rs"]
@@ -30,6 +32,8 @@ mod mirror;
 mod missing_parent;
 #[path = "migrated_subnames/nested.rs"]
 mod nested;
+#[path = "migrated_subnames/permissioned.rs"]
+mod permissioned;
 #[path = "migrated_subnames/replay.rs"]
 mod replay;
 #[path = "migrated_subnames/wrapper.rs"]

@@ -1,4 +1,5 @@
 //! Real resolver initialization and setters cover absent/default/exact link dependencies.
+use super::permissioned::{FACTORY, LINKED, address, address_bytes, deploy_linked, link, text};
 use super::*;
 use alloy_primitives::B256;
 
@@ -6,66 +7,6 @@ use alloy_primitives::B256;
 const SUBJECT: &str = "linked105.eth";
 const COMPANION: &str = "companion105.eth";
 const ETH: &str = "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4";
-const LINKED: &str = "0x0000000000000000000000000000000000025910";
-const IMPLEMENTATION: &str = "0x115eb53f0c60696633855f90b138178fb40b2b2c";
-const FACTORY: &str = "0xda70306c98e97ece36f997a21368e53298572991";
-sol! {
-    event ResolverCreated();
-    event Linked(uint256 indexed recordId, bytes32 indexed node, bytes name);
-    event TextUpdated(uint256 indexed recordId, string indexed keyHash, string key, string value);
-    event AddressUpdated(uint256 indexed recordId, uint256 coinType, bytes addressBytes);
-    event ProxyDeployed(address indexed sender, address indexed proxyAddress, uint256 salt, address implementation);
-}
-
-fn link(name: &str, id: u64) -> Result<(Address, alloy_primitives::LogData)> {
-    let dns = if name.is_empty() {
-        vec![0]
-    } else {
-        bigname_domain::normalization::normalize_name(name)?.dns_encoded_name
-    };
-    Ok((
-        LINKED.parse()?,
-        Linked {
-            recordId: U256::from(id),
-            node: bigname_lookup::ens_namehash_hex(name)?.parse()?,
-            name: dns.into(),
-        }
-        .encode_log_data(),
-    ))
-}
-
-fn text(id: u64, key: &str, value: &str) -> Result<(Address, alloy_primitives::LogData)> {
-    Ok((
-        LINKED.parse()?,
-        TextUpdated {
-            recordId: U256::from(id),
-            keyHash: keccak256(key),
-            key: key.into(),
-            value: value.into(),
-        }
-        .encode_log_data(),
-    ))
-}
-
-fn address_bytes(
-    id: u64,
-    coin: u64,
-    value: Vec<u8>,
-) -> Result<(Address, alloy_primitives::LogData)> {
-    Ok((
-        LINKED.parse()?,
-        AddressUpdated {
-            recordId: U256::from(id),
-            coinType: U256::from(coin),
-            addressBytes: value.into(),
-        }
-        .encode_log_data(),
-    ))
-}
-
-fn address(id: u64, value: &str) -> Result<(Address, alloy_primitives::LogData)> {
-    address_bytes(id, 60, value.parse::<Address>()?.to_vec())
-}
 
 async fn update(
     database: &TestDatabase,
@@ -124,41 +65,7 @@ async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_u
     logs.retain(|log| log.block_number <= BASE + 121);
     Box::pin(seed_and_run(&database, &logs, 120, 121)).await?;
     let resolver: Address = LINKED.parse()?;
-    let owner: Address = GRANTEE.parse()?;
-    let implementation: Address = IMPLEMENTATION.parse()?;
-    // The known PermissionedResolver proxy initializes root setter/link grants before use.
-    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/PermissionedResolver.sol:L119-L132 @ ens_v2_sepolia_20261001@07e55a05)
-    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L10-L58 @ ens_v2_sepolia_20261001@07e55a05)
-    let mut creation = transaction(
-        122,
-        0,
-        vec![
-            (resolver, Upgraded { implementation }.encode_log_data()),
-            (resolver, ResolverCreated {}.encode_log_data()),
-            (
-                resolver,
-                EACRolesChanged {
-                    resource: U256::ZERO,
-                    account: owner,
-                    oldRoleBitmap: U256::ZERO,
-                    newRoleBitmap: [0, 4, 28, 128, 132, 156]
-                        .into_iter()
-                        .fold(U256::ZERO, |roles, bit| roles | (U256::from(1) << bit)),
-                }
-                .encode_log_data(),
-            ),
-            (
-                FACTORY.parse()?,
-                ProxyDeployed {
-                    sender: owner,
-                    proxyAddress: resolver,
-                    salt: U256::from(25910),
-                    implementation,
-                }
-                .encode_log_data(),
-            ),
-        ],
-    );
+    let mut creation = transaction(122, 0, deploy_linked(GRANTEE.parse()?)?);
     // Each name is registered in the ETH registry with the linked resolver on its own entry,
     // so the ENSv2 path reaches that resolver directly.
     // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/UniversalResolverV2.sol:L55-L63 @ ens_v2_sepolia_20261001@07e55a05)
@@ -354,8 +261,8 @@ async fn lookup_precomputation_admitted_link_defaults_arrival_clear_and_record_u
 
 /// An ENSv1 registry pointer that names an admitted ENSv2 resolver. The retained child's owner
 /// deploys a PermissionedResolver proxy, points the child's ENSv1 registry entry at it, and links
-/// a record to the child. The name records route withholds the child's resolver and records,
-/// and the resolver records route answers what the resolver holds for the node.
+/// a record to the child. The name records route and the resolver records route both answer
+/// what the resolver holds for the node.
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L86-L95 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/PermissionedResolver.sol:L352-L370 @ ens_v2_sepolia_20261001@07e55a05)
 #[tokio::test]
@@ -364,39 +271,7 @@ async fn resolver_route_answers_an_ens_v2_resolver_named_by_an_ens_v1_pointer() 
     logs.retain(|log| log.block_number <= BASE + 121);
     Box::pin(seed_and_run(&database, &logs, 120, 121)).await?;
     let resolver: Address = LINKED.parse()?;
-    let owner: Address = GRANTEE.parse()?;
-    let implementation: Address = IMPLEMENTATION.parse()?;
-    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/PermissionedResolver.sol:L119-L132 @ ens_v2_sepolia_20261001@07e55a05)
-    let mut creation = transaction(
-        122,
-        0,
-        vec![
-            (resolver, Upgraded { implementation }.encode_log_data()),
-            (resolver, ResolverCreated {}.encode_log_data()),
-            (
-                resolver,
-                EACRolesChanged {
-                    resource: U256::ZERO,
-                    account: owner,
-                    oldRoleBitmap: U256::ZERO,
-                    newRoleBitmap: [0, 4, 28, 128, 132, 156]
-                        .into_iter()
-                        .fold(U256::ZERO, |roles, bit| roles | (U256::from(1) << bit)),
-                }
-                .encode_log_data(),
-            ),
-            (
-                FACTORY.parse()?,
-                ProxyDeployed {
-                    sender: owner,
-                    proxyAddress: resolver,
-                    salt: U256::from(25910),
-                    implementation,
-                }
-                .encode_log_data(),
-            ),
-        ],
-    );
+    let mut creation = transaction(122, 0, deploy_linked(GRANTEE.parse()?)?);
     creation.extend(transaction(
         122,
         1,
@@ -428,16 +303,20 @@ async fn resolver_route_answers_an_ens_v2_resolver_named_by_an_ens_v1_pointer() 
     ))
     .await?;
     publish(&database, 122).await?;
-    let withheld = path_get(
+    let served = path_get(
         &database,
         &format!("/v1/names/{CHILD}/records?keys=text:exact"),
     )
     .await?;
-    assert!(withheld["data"]["resolver"].is_null(), "{withheld:#}");
-    assert_ne!(
-        withheld["data"]["records"]["text:exact"]["status"],
-        json!("ok"),
-        "{withheld:#}"
+    assert_eq!(
+        served["data"]["resolver"],
+        json!({"chain_id": 11_155_111, "address": LINKED}),
+        "{served:#}"
+    );
+    assert_eq!(
+        served["data"]["records"],
+        json!({"text:exact": {"status": "ok", "value": "kept"}}),
+        "{served:#}"
     );
     let body = path_get(
         &database,

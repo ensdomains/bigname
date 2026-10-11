@@ -3720,3 +3720,35 @@ manifest or setting.
 before. Any other read walks once, which costs one statement, then two indexed reads per
 label from the admitted root registry, `eth` included. On a chain that is not cut over it
 costs one.
+
+## Retained ENSv1 names at a PermissionedResolver
+
+The build that serves a retained ENSv1 name, an ENSv1 subname kept under a parent
+that moved to ENSv2, whose ENSv1 registry resolver is an admitted
+PermissionedResolver (TYR-288, see
+[Expiry and grace](api-v1.md#expiry-and-grace)) changes the retained-name path
+walk in `crates/storage/src/families/name`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
+
+What changes for names:
+
+- A name whose ENSv2 path reaches the
+  [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver),
+  and whose own ENSv1 registry entry names an admitted PermissionedResolver,
+  serves that resolver and its records for the node. Before, it served no resolver and reported
+  `resolution_unsupported_reason: "ens_v2_path_target_not_projected"`.
+- Its primary address, `resolves_to` membership and stored lookup answers follow.
+- A name that reaches such a resolver only through an ancestor is unchanged.
+- A name whose ENSv1 registry entry names another ENSv2 resolver, such as
+  PublicResolverV2, is unchanged.
+
+These rows arrive through re-derivation, not through an in-place change. Every
+chain needs a full-history Interpret redo, then the Project redo it installs, at
+a planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+matching runner and API binaries. The change rides the next re-derivation
+release and shares that release's one Interpret and Project redo pair with its
+other hash-rotating changes. Do not mark old rows ready under the new hash.
+
+It adds no schema-migration, table, index, manifest or setting. The
+manifest-authority fingerprint and the compiled watch plan are unchanged, so
+stamp no Ingest redo.

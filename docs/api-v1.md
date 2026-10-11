@@ -2181,20 +2181,33 @@ resolver, indexed records, primary address, direct resolution topology and
 authority coverage remain independent. Verified execution uses current Universal
 Resolver discovery and may supply a request-scoped answer.
 
-The same classification requirement applies to the inner ENSv1 resolver selected
-by a mirror. A missing, inactive, unsupported or differently namespaced declaration
+The same classification requirement applies to the inner resolver selected by a
+mirror. A missing, inactive, unsupported or differently namespaced declaration
 leaves that target unproved, even when its address matches the retained child
 pointer. Existing mirror record-row reasons and provenance remain unchanged.
 
 A direct leaf at a declared ENSv1 node-based resolver preserves records when it
-selects the same resolver and requested node as the ordinary child row. An
-ENSV1Resolver path preserves exact-child records only when the mirror's ENSv1
-walk reaches that same admitted target. Ancestor wildcard targets
-are explicit unsupported indexed targets, not borrowed ancestor records. A
-recognized migration-created WrapperRegistry can supply this mirror fallback
-when the original wrapped node's child has unexpired PARENT_CANNOT_CONTROL fuses,
-a nonzero ENSv1 registry getter and no positive stored ENSv2 entry expiry. The
-getter can be nonzero even when the public owner display is empty for Graveyard;
+selects the same resolver and requested node as the ordinary child row.
+
+An ENSV1Resolver path preserves exact-child records only when the mirror's ENSv1
+walk selects that same admitted target at the requested node itself. The target
+can be an admitted ENSv1 resolver or an admitted PermissionedResolver. The mirror
+forwards to whatever resolver the ENSv1 registry holds for the node and does not
+check its family. The name then serves that resolver's records for the requested
+node. For a PermissionedResolver, those are the record linked to the node, or its
+default record when the node has no link.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/AbstractMirrorResolver.sol:L67-L69 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L16-L39 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/AbstractRecordResolver.sol:L110-L123 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/PermissionedResolver.sol:L380-L386 @ ens_v2_sepolia_20261001@07e55a05)
+
+Ancestor wildcard targets are explicit unsupported indexed targets, not borrowed
+ancestor records. A recognized migration-created WrapperRegistry can supply the
+ENSV1Resolver mirror fallback when the original wrapped node's child has
+unexpired PARENT_CANNOT_CONTROL fuses, a nonzero ENSv1 registry getter and no
+positive stored ENSv2 entry expiry. The getter can be nonzero even when the
+public owner display is empty for Graveyard;
 registry-self ownership remains zero-equivalent. Missing getter evidence is
 unknown, not proven absence. Unwrap alone does not remove that fallback. Ordinary
 name authority and pointer admission still apply: an original child whose post-unwrap selection cannot project its old

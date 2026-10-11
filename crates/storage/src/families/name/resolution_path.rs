@@ -13,7 +13,7 @@ use crate::families::{
     records::{
         facts::{ResolverClassification, load_classifications_at},
         is_cleared,
-        mirror::evaluate_family_mirror_at,
+        mirror::{MirrorSelection, evaluate_family_mirror_at},
         serving::ServingPointer,
     },
 };
@@ -253,6 +253,16 @@ impl Walk {
         let mirror =
             evaluate_family_mirror_at(conn, &publication.chain_id, &pointer, class, publication)
                 .await?;
+        let inner = match mirror.nearest.as_ref() {
+            Some(nearest)
+                if nearest.mirrored_unsupported_reason.as_deref()
+                    == Some("mirrored_resolver_not_ensv1") =>
+            {
+                self.classification(conn, publication, &nearest.mirrored_resolver_address)
+                    .await?
+            }
+            _ => None,
+        };
         outcome.decision = if mirror
             .nearest
             .as_ref()
@@ -264,6 +274,7 @@ impl Walk {
         } else if mirror
             .substituted(&pointer)
             .is_some_and(|target| retained_resolver == Some(target.resolver_address.as_str()))
+            || mirror_retains_permissioned_target(&mirror, inner.as_ref(), retained_resolver)
         {
             Decision::Retained
         } else if mirror.nearest.as_ref().is_none_or(|nearest| {
@@ -276,3 +287,36 @@ impl Walk {
         Ok(outcome)
     }
 }
+
+/// Whether the mirror's ENSv1 walk selects the retained pointer's target at the requested node
+/// itself, where that target is an admitted PermissionedResolver. The mirror record row rejects
+/// it as not an ENSv1 resolver, but the mirror forwards to it with no family check, and it
+/// answers for the queried node: its linked record, or its default record when the node has no
+/// link. The retained pointer's own inventory reads that same record.
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/AbstractMirrorResolver.sol:L67-L69 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/AbstractRecordResolver.sol:L110-L123 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/PermissionedResolver.sol:L380-L386 @ ens_v2_sepolia_20261001@07e55a05)
+fn mirror_retains_permissioned_target(
+    mirror: &MirrorSelection,
+    inner: Option<&ResolverClassification>,
+    retained_resolver: Option<&str>,
+) -> bool {
+    let Some(nearest) = mirror.nearest.as_ref() else {
+        return false;
+    };
+    mirror.mirror.supported()
+        && mirror.mirror_namespace_matches
+        && nearest.ancestor_depth == 0
+        && nearest.mirrored_unsupported_reason.as_deref() == Some("mirrored_resolver_not_ensv1")
+        && retained_resolver == Some(nearest.mirrored_resolver_address.as_str())
+        && inner.is_some_and(|inner| {
+            inner.supported()
+                && inner.declared_in(&nearest.mirrored_pointer_namespace)
+                && inner.field("role") == Some("permissioned_resolver")
+        })
+}
+
+#[cfg(test)]
+#[path = "resolution_path_tests.rs"]
+mod tests;
