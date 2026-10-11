@@ -2849,10 +2849,13 @@ when that redo completes.
 A projection content hash rotation on its own, where Interpret records this
 binary's interpreter content hash and Project another projection content hash,
 needs one full-range Project redo and no Interpret redo or watch-set
-attestation. The runner never starts that redo itself. A normal Project or Live
-start is refused with `redo the full range A..=B of phase project alone` and the
-`phase-runner redo --phase project` command to run, and a Project redo short of
-that range is refused with the full range. A Project redo that began under
+attestation. The runner never starts that redo itself. A normal Project start
+that has blocks to process is refused with
+`redo the full range A..=B of phase project alone` and the
+`phase-runner redo --phase project` command to run. A completed Project that
+already stands at the canonical head is not restarted, so it is not refused.
+The Live start that follows in the same run gives that refusal. A Project redo
+short of that range is refused with the full range. A Project redo that began under
 another projection content hash restarts from the first block instead of
 resuming its cursor. While it is active, an Interpret redo is refused and names
 that Project redo, with the interrupted redo's range, to finish first: no

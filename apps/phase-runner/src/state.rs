@@ -153,6 +153,8 @@ impl PhaseStore {
             }
             _ => false,
         };
+        // A completed phase that is not restarted skips `require_start`, so a caught-up Project
+        // does not report a stale projection content hash. The Live start that follows does.
         if status == PhaseStatus::Completed && !restarts_completed {
             transaction.commit().await.map_err(|error| {
                 RunnerError::transient(format!(

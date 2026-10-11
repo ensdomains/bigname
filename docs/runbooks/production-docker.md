@@ -473,8 +473,10 @@ run is not release evidence.
 A release that rotates only the projection content hash follows the same steps
 but skips the Interpret redo of step 7. It runs only the full-history Project
 redo of step 8, with no attestation, over the range the runner prints when it
-refuses to start Project (`redo the full range A..=B of phase project alone`).
-The runner never starts that redo itself.
+refuses the start (`redo the full range A..=B of phase project alone`). A
+Project start that has blocks to process gives that refusal. A Project already
+at the canonical head is not restarted, so the Live start that follows in the
+same run gives it. The runner never starts that redo itself.
 
 A phase-runner restart during a re-walk rebuilds its session cache with a full
 ranked scan over all interpreted events. That scan is expensive at production

@@ -3852,9 +3852,10 @@ Project redo.
   that reads one hash must read the Interpret row and
   `interpreter_content_hash` for the interpreter content hash, and the Project
   row and `projection_content_hash` for the projection content hash.
-- A projection-only rotation is refused at a normal Project or Live start with
-  the full-range Project redo to run. The runner never starts it. Run that redo
-  with no attestation, as the
+- A projection-only rotation is refused with the full-range Project redo to
+  run: at a normal Project start that has blocks to process, otherwise at the
+  Live start that follows. The runner never starts it. Run that redo with no
+  attestation, as the
   [planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
   describes.
 - Both hashes rotate for every chain, because the interpreter content hash has a
