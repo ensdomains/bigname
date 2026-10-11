@@ -9,6 +9,7 @@ const ALT: &str = "native105.eth";
 const LEAF: &str = "leaf.native105.eth";
 const DEEP: &str = "deep.branch.native105.eth";
 const RESET: &str = "reset.branch.native105.eth";
+const SIDE_DEEP: &str = "deep.side105.eth";
 const USER: &str = "0x9bd8a88719068d09ecee662f36c0e3856708366a";
 const X: &str = "0x0000000000000000000000000000000000001055";
 const T: u64 = RESERVATION_EXPIRY;
@@ -454,9 +455,8 @@ fn assert_moved_leaf(leaf: &Value, resolver: Address, resource: Uuid) {
 }
 
 /// `leaf.native105.eth` once W's `leaf` entry has expired. The row is a released ENSv2
-/// registration with no resolver. Like any released ENSv2 row on main it keeps its serving
-/// resource, with no record inventory, so the records route answers `inventory_not_available`
-/// rather than `not_found` (crates/storage/src/name_current/row.rs:35-40, TYR-291).
+/// registration with no resolver and no record-serving resource, so its records answer
+/// `not_found`.
 async fn assert_released_leaf(
     database: &TestDatabase,
     address: &str,
@@ -496,15 +496,82 @@ async fn assert_released_leaf(
     .await?;
     assert_eq!(
         records["data"]["records"]["addr:60"],
-        json!({"status": "unsupported", "unsupported_reason": "inventory_not_available"}),
+        json!({"status": "not_found"}),
         "{records:#}"
     );
     let logical = format!("ens:{}", bigname_lookup::ens_namehash_hex(LEAF)?);
     let row = bigname_storage::families::name::load_family_name(&database.pool, &logical)
         .await?
         .context("leaf row")?;
-    assert_eq!(row.record_serving_resource_id(), Some(resource));
+    assert!(row.record_serving_resource_id().is_none(), "{row:#?}");
+    assert!(row.declared_summary.get("topology").is_none(), "{row:#?}");
     Ok(())
+}
+
+/// `deep.side105.eth`, X's canonical name, serves records through X's `deep` token while the
+/// entry is live.
+#[tokio::test]
+async fn an_active_ensv2_name_keeps_its_record_resource() -> Result<()> {
+    let (database, _, resources) = setup_native().await?;
+    let detail = lookup_publication::assert_name_prepared_parity(&database, SIDE_DEEP).await?;
+    assert_eq!(detail["authority"], "ens_v2", "{detail:#}");
+    assert_eq!(detail["status"], "active", "{detail:#}");
+    assert_eq!(
+        lookup_publication::record_resource(&database, SIDE_DEEP).await?,
+        Some(resources["deep"])
+    );
+    let records = path_get(
+        &database,
+        &format!("/v1/names/{SIDE_DEEP}/records?source=indexed&keys=addr:60"),
+    )
+    .await?;
+    assert_eq!(
+        records["data"]["records"]["addr:60"]["status"], "not_found",
+        "{records:#}"
+    );
+    assert!(records["data"]["resolver"].is_object(), "{records:#}");
+    database.cleanup().await
+}
+
+/// `deep.side105.eth` once its own entry expires: a released ENSv2 registration with no
+/// record-serving resource. Every source that reads the index answers `not_found`.
+#[tokio::test]
+async fn a_released_ensv2_name_answers_not_found_after_its_own_expiry() -> Result<()> {
+    let (database, _, resources) = setup_native().await?;
+    empty_clock(&database, 124, T).await?;
+    empty_clock(&database, 125, T + 20).await?;
+    let counted = path_get(&database, &format!("/v1/names/{SIDE_DEEP}?include=counts")).await?;
+    let detail = lookup_publication::assert_name_prepared_parity(&database, SIDE_DEEP).await?;
+    assert_eq!(detail["authority"], "ens_v2", "{detail:#}");
+    assert_eq!(detail["status"], "released", "{detail:#}");
+    assert_eq!(
+        detail["registration_id"],
+        resources["deep"].to_string(),
+        "{detail:#}"
+    );
+    assert!(detail.get("resolver").is_none(), "{detail:#}");
+    assert!(counted["data"].get("record_count").is_none(), "{counted:#}");
+    assert_eq!(
+        lookup_publication::record_resource(&database, SIDE_DEEP).await?,
+        None
+    );
+    for source in ["indexed", "auto"] {
+        let records = path_get(
+            &database,
+            &format!("/v1/names/{SIDE_DEEP}/records?source={source}&keys=addr:60"),
+        )
+        .await?;
+        assert_eq!(
+            records["data"]["records"]["addr:60"],
+            json!({"status": "not_found"}),
+            "{source}: {records:#}"
+        );
+        assert!(
+            records["data"]["resolver"].is_null(),
+            "{source}: {records:#}"
+        );
+    }
+    database.cleanup().await
 }
 
 async fn assert_physical_deadlines(database: &TestDatabase) -> Result<()> {

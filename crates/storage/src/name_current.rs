@@ -3,6 +3,8 @@ mod list;
 mod migration;
 mod public_authority;
 mod row;
+#[cfg(test)]
+mod row_tests;
 mod snapshot;
 pub mod wrapper_expiry;
 
@@ -30,8 +32,12 @@ pub use public_authority::{
 pub(crate) use public_authority::{
     push_public_authority_filter_in, push_public_authority_predicate,
 };
-pub use row::NameCurrentRow;
 use row::decode_name_current_row;
+pub(crate) use row::has_event_linked_registry_serving_provenance;
+pub use row::{
+    EVENT_LINKED_REGISTRY_SERVING_BASES, NameCurrentRow,
+    name_current_has_event_linked_registry_serving,
+};
 pub use snapshot::load_name_current_for_snapshot;
 
 pub const DEFAULT_NAME_CURRENT_LINEAGE_JOINS: &str = r#"

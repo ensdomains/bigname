@@ -923,3 +923,104 @@ async fn a_verified_alias_read_without_a_resolver_is_not_found() -> Result<()> {
     }
     database.cleanup().await
 }
+
+/// Pointing the only mount elsewhere releases `child.m.eth` with no successor path. The released
+/// row has no record-serving resource, so its records answer `not_found`.
+#[tokio::test]
+async fn an_unmounted_name_answers_not_found() -> Result<()> {
+    let (database, _) = base(u64::MAX, u64::MAX).await?;
+    let owner = HOLDER.parse()?;
+    step(
+        &database,
+        124,
+        vec![deploy(address(EMPTY), 2803, owner)?, repoint(E, "m", EMPTY)],
+    )
+    .await?;
+    let detail =
+        super::lookup_publication::assert_name_prepared_parity(&database, "child.m.eth").await?;
+    assert_eq!(detail["status"], "released", "{detail:#}");
+    assert!(detail.get("lapsed_registration").is_none(), "{detail:#}");
+    assert!(detail.get("resolver").is_none(), "{detail:#}");
+    assert_eq!(
+        super::lookup_publication::record_resource(&database, "child.m.eth").await?,
+        None
+    );
+    let records = ok(&database, "/v1/names/child.m.eth/records?keys=addr:60").await?;
+    assert!(
+        records["data"].get("canonical_name").is_none(),
+        "{records:#}"
+    );
+    assert_eq!(
+        records["data"]["records"]["addr:60"],
+        json!({"status": "not_found"}),
+        "{records:#}"
+    );
+    database.cleanup().await
+}
+
+/// A parent claim moves the canonical path from `child.a.eth` back to `child.m.eth`. The old
+/// path's own row is released and keeps no record-serving resource in any store. Its records
+/// still serve through the alias.
+#[tokio::test]
+async fn a_claim_moved_old_path_keeps_no_record_resource() -> Result<()> {
+    let (database, _) = base(u64::MAX, u64::MAX).await?;
+    step(&database, 124, vec![mount("z", R, u64::MAX)?]).await?;
+    step(&database, 125, vec![mount("a", R, u64::MAX)?]).await?;
+    step(&database, 126, vec![claim(R, E, "m")]).await?;
+    let old = "child.a.eth";
+    let id = format!("ens:{}", bigname_lookup::ens_namehash_hex(old)?);
+    assert_eq!(
+        super::lookup_publication::record_resource(&database, old).await?,
+        None
+    );
+    let prepared: Option<Uuid> = sqlx::query_scalar(
+        "SELECT record_serving_resource_id FROM project_lookup_name WHERE chain_id=$1 AND logical_name_id=$2",
+    )
+    .bind(PATH_CHAIN)
+    .bind(&id)
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(prepared, None);
+    let mut stored =
+        bigname_storage::load_phase_identity_records_by_ids(&database.pool, &[id]).await?;
+    let stored = stored.pop().context("stored old path")?;
+    assert!(
+        stored.record_inventory_current.is_none(),
+        "{:#?}",
+        stored.record_inventory_current
+    );
+    let records = ok(&database, &format!("/v1/names/{old}/records?keys=addr:60")).await?;
+    assert_eq!(
+        records["data"]["canonical_name"], "child.m.eth",
+        "{records:#}"
+    );
+    assert_alias(&database, old, "child.m.eth").await?;
+    database.cleanup().await
+}
+
+/// `child.m.eth` released by its own expiry answers `not_found` at the response's own
+/// `as_of_token` too.
+#[tokio::test]
+async fn a_released_name_answers_not_found_at_its_as_of_token() -> Result<()> {
+    let (database, _) = base(u64::MAX, clock(126)).await?;
+    for block in 124..=126 {
+        step(&database, block, vec![]).await?;
+    }
+    let detail = ok(&database, "/v1/names/child.m.eth").await?;
+    assert_eq!(detail["data"]["status"], "released", "{detail:#}");
+    let token = detail["meta"]["as_of_token"]
+        .as_str()
+        .context("an as_of token")?
+        .to_owned();
+    let records = ok(
+        &database,
+        &format!("/v1/names/child.m.eth/records?keys=addr:60&at={token}"),
+    )
+    .await?;
+    assert_eq!(
+        records["data"]["records"]["addr:60"],
+        json!({"status": "not_found"}),
+        "{records:#}"
+    );
+    database.cleanup().await
+}

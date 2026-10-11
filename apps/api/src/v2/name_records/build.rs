@@ -102,7 +102,9 @@ pub(crate) fn build_indexed_name_records(
                 record.record_key.clone(),
                 if let Some(reason) = row.resolution_unsupported_reason() {
                     unsupported_answer(reason)?
-                } else if row.unresolvable_reason().is_some() {
+                } else if row.unresolvable_reason().is_some()
+                    || (!retain_audit_state && row.released_ens_v2_registration())
+                {
                     not_found_answer(None)?
                 } else {
                     indexed_record_answer(record_inventory, record)?

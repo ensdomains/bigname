@@ -93,10 +93,7 @@ fn control_status(
     if !has_binding {
         return RegistrationStatus::Unregistered;
     }
-    if registration.is_some_and(|value| {
-        value.get("released_at").is_some_and(json_value_present)
-            || value.get("status").and_then(Value::as_str) == Some("released")
-    }) {
+    if registration.is_some_and(released) {
         return RegistrationStatus::Released;
     }
     match registration
@@ -112,6 +109,20 @@ fn control_status(
         }
         _ => RegistrationStatus::Unregistered,
     }
+}
+
+/// Whether the declared registration was released, as current control reads it. Unlike
+/// `lifecycle_status`, it holds for an old ENSv2 path released by expiry, whose lifecycle keeps
+/// the entry's own term.
+pub fn registration_released(summary: &Value) -> bool {
+    declared_registration(summary).is_some_and(released)
+}
+
+fn released(registration: &Value) -> bool {
+    registration
+        .get("released_at")
+        .is_some_and(json_value_present)
+        || registration.get("status").and_then(Value::as_str) == Some("released")
 }
 
 pub fn has_registration_identity(namespace: &str, summary: &Value, has_binding: bool) -> bool {

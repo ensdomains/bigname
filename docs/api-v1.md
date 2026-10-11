@@ -1534,6 +1534,39 @@ authoritative (`full` or `projected` with no `unsupported_reason`); an
 and no `value` for every key, whatever entries the projection retained
 ([api-v1-routes.md](api-v1-routes.md#get-v1namesnamerecords)).
 
+A released registration serves no resolver or records on name detail and lookup
+([Cursors And Pagination](#cursors-and-pagination)). The records route answers
+by authority:
+
+- A released ENSv2 registration's own row serves no records. Read through that
+  row, every requested key answers `not_found` on `source=indexed` and
+  `source=auto`, the response has `resolver: null` and no record inventory, and
+  name detail has no `record_count`. The row is released by path expiry,
+  `unregister`, an unmount, a parent-claim move, or a smaller mount path
+  replacing it ([ENSv2 name path](#ensv2-name-path)). On chain the registry returns no
+  resolver for an entry whose expiry has passed, and `unregister` sets the
+  expiry to the current block
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L286-L289 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L671-L673 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L238 @ ens_v2_sepolia_20261001@07e55a05).
+  The resolver walk follows each parent's current subregistry, so an unmounted
+  path no longer reaches the entry
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L58-L85 @ ens_v2_sepolia_20261001@07e55a05).
+  A released old path that still resolves, such as a claim-moved path or one a
+  smaller mount replaced, answers through the token's served path, as an
+  [alias path](#alias-paths).
+  `source=verified` is unchanged. The records diagnostic still reads the former
+  registration's record inventory as audit state.
+- A released ENSv1 `.eth` lease on a cut-over chain has no live ENSv2 entry. It
+  answers `not_found` and reports `unresolvable_reason: "no_live_ens_v2_entry"`
+  ([Expiry and grace](#expiry-and-grace)). Before the
+  [Universal Resolver cutover](glossary.md#universal-resolver-cutover) the chain
+  still resolves such a name through its ENSv1 registry record, which bigname
+  does not serve, so its indexed keys answer `inventory_not_available`
+  ([known divergence](upstream.md#released-ensv1-lease-before-the-cutover))
+  (upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L16-L39 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137-L141 @ ens_v1@91c966f).
+
 For a successful `contenthash` answer, `value` is a lowercase,
 `0x`-prefixed hex string containing the bytes returned by the resolver. The API
 does not decode those bytes into a URI or media-type-specific representation.
@@ -1911,7 +1944,9 @@ same way as a [released v1 authority](glossary.md#released-v1-authority):
 `status` `released` with the registration identity, timestamps and
 the lapsed lease's own `expires_at`, no current `owner`, `manager`, resolver or
 records, and its history intact. Only a name that never had a
-readable surface answers `404 not_found`.
+readable surface answers `404 not_found`. The records route's answer for a
+released name is under
+[Resolver record answers and values](#resolver-record-answers-and-values).
 
 ### Current-state list cursors
 

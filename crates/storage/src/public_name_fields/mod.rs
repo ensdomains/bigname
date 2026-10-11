@@ -15,7 +15,7 @@ pub use registration::{
     RegistrationFields, chain_positions_created_at, classify_registration_status,
     declared_created_at, declared_expires_at, declared_grace_ends_at, declared_owner,
     declared_registered_at, declared_registration, declared_registry_owner, has_current_control,
-    has_registration_identity, registration_fields,
+    has_registration_identity, registration_fields, registration_released,
 };
 pub use types::{ExpiryTimestamp, RegistrationStatus};
 pub use wrapper::{

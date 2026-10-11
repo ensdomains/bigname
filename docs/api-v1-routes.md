@@ -1654,7 +1654,9 @@ its value map:
 - Status semantics: a missing name returns `404 not_found`. Missing, unset, or
   unsupported requested or default record values are reported with the common result
   `status` vocabulary inside the record answer rather than by changing the
-  envelope. A proven migration uses
+  envelope. A released registration answers as
+  [Resolver record answers and values](api-v1.md#resolver-record-answers-and-values)
+  states for its authority. A proven migration uses
   only the selected ENSv2 resolver; the retained ENSv1 resolver is historical.
   A name whose exact-name projection is unsupported exposes no resolver values.
   Every unsupported reason except `current_authority_not_projected`

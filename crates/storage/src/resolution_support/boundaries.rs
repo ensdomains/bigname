@@ -2,8 +2,13 @@ use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+pub use crate::name_current::{
+    EVENT_LINKED_REGISTRY_SERVING_BASES, name_current_has_event_linked_registry_serving,
+};
 use crate::{
-    IdentityNameCurrentRow, identity::SurfaceBindingKind, name_current::NameCurrentRow,
+    IdentityNameCurrentRow,
+    identity::SurfaceBindingKind,
+    name_current::{NameCurrentRow, has_event_linked_registry_serving_provenance},
     record_inventory::RecordInventoryCurrentRow,
 };
 
@@ -27,9 +32,11 @@ pub fn resolution_supports_avatar_readback(
     resolution_verified_support_boundary(row, record_inventory_row).is_some()
 }
 
+/// The records diagnostic's inventory key. It reads the resource a released ENSv2 registration
+/// kept ([`NameCurrentRow::audit_record_resource_id`]), which the product routes do not serve.
 pub fn resolution_record_inventory_lookup_key(row: &NameCurrentRow) -> Option<(Uuid, Value)> {
     Some((
-        row.record_serving_resource_id()?,
+        row.audit_record_resource_id()?,
         build_supported_resolution_declared_boundary(row)?,
     ))
 }
@@ -237,6 +244,9 @@ fn build_supported_resolution_verified_boundary(row: &NameCurrentRow) -> Option<
     Some(build_resolution_version_boundary(row, &chain_position))
 }
 
+/// Read by the records diagnostic and, behind gates that need a record-serving resource, by the
+/// verified support boundary. It therefore keeps a released ENSv2 registration's former resource,
+/// as does [`build_resolution_version_boundary`].
 fn build_supported_resolution_declared_boundary(row: &NameCurrentRow) -> Option<Value> {
     let binding_supported = name_current_has_event_linked_registry_serving(row)
         || match row.namespace.as_str() {
@@ -245,7 +255,7 @@ fn build_supported_resolution_declared_boundary(row: &NameCurrentRow) -> Option<
             }
             _ => false,
         };
-    if !binding_supported || row.record_serving_resource_id().is_none() {
+    if !binding_supported || row.audit_record_resource_id().is_none() {
         return None;
     }
 
@@ -295,7 +305,7 @@ fn build_resolution_version_boundary(
     );
     boundary.insert(
         "resource_id".to_owned(),
-        row.record_serving_resource_id()
+        row.audit_record_resource_id()
             .map(|value| Value::String(value.to_string()))
             .unwrap_or(Value::Null),
     );
@@ -308,23 +318,6 @@ fn build_resolution_version_boundary(
     Value::Object(boundary)
 }
 
-/// `name_current.provenance.read_reachability.basis` values that select a serving resource from
-/// an event-linked registry resolver pointer: the retained pointer of an ownerless ENSv1 or
-/// Basenames registry name, and the root-registry pointer of an ENSv2 TLD with no projected
-/// authority (`docs/projections.md`).
-pub const EVENT_LINKED_REGISTRY_SERVING_BASES: [&str; 2] = [
-    "retained_registry_resolver_pointer",
-    "root_registry_resolver_pointer",
-];
-
-pub fn name_current_has_event_linked_registry_serving(row: &NameCurrentRow) -> bool {
-    row.resource_id.is_none()
-        && row.surface_binding_id.is_none()
-        && row.binding_kind.is_none()
-        && row.serving_resource_id.is_some()
-        && has_event_linked_registry_serving_provenance(&row.namespace, &row.provenance)
-}
-
 pub fn identity_name_current_has_event_linked_registry_serving(
     row: &IdentityNameCurrentRow,
 ) -> bool {
@@ -333,15 +326,6 @@ pub fn identity_name_current_has_event_linked_registry_serving(
         && row.binding_kind.is_none()
         && row.serving_resource_id.is_some()
         && has_event_linked_registry_serving_provenance(&row.namespace, &row.provenance)
-}
-
-fn has_event_linked_registry_serving_provenance(namespace: &str, provenance: &Value) -> bool {
-    matches!(namespace, ENS_NAMESPACE | BASENAMES_NAMESPACE)
-        && json_string_field(
-            json_field(provenance, "read_reachability")
-                .and_then(|value| json_field(value, "basis")),
-        )
-        .is_some_and(|basis| EVENT_LINKED_REGISTRY_SERVING_BASES.contains(&basis.as_str()))
 }
 
 fn boundary_chain_id_matches(boundary: &Value, expected_chain_id: &str) -> bool {

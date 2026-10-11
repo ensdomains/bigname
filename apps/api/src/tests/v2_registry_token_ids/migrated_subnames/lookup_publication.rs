@@ -138,13 +138,8 @@ pub(super) async fn assert_name_prepared_parity(
                 resource,
                 FamilyAttribution::Omit,
             )
-            .await?;
-            // A released ENSv2 row keeps its serving resource with no inventory in either
-            // store, as on main (crates/storage/src/name_current/row.rs:35-40, TYR-291).
-            let Some(expected) = expected else {
-                assert!(stored.record_inventory_current.is_none(), "{name}");
-                return Ok(detail["data"].clone());
-            };
+            .await?
+            .context("composed inventory")?;
             let actual = stored
                 .record_inventory_current
                 .context("stored inventory")?;
@@ -164,6 +159,15 @@ pub(super) async fn assert_name_prepared_parity(
         }
     }
     Ok(detail["data"].clone())
+}
+
+/// The resource the composed row of `name` serves records through.
+pub(super) async fn record_resource(database: &TestDatabase, name: &str) -> Result<Option<Uuid>> {
+    let id = format!("ens:{}", bigname_lookup::ens_namehash_hex(name)?);
+    Ok(load_family_name(&database.pool, &id)
+        .await?
+        .context("composed name")?
+        .record_serving_resource_id())
 }
 
 pub(super) fn text(

@@ -747,3 +747,89 @@ async fn seed_v2_diagnostics_name_fixture(
         .context("diagnostic fixture snapshot token")?
         .to_owned())
 }
+
+/// `alice.eth` held as an ENSv2 registration, then released by `unregister`.
+async fn seed_alice_unregistered_ens_v2_inputs(database: &TestDatabase) -> Result<()> {
+    seed_alice_state_inputs(database, AliceInputState::Registry).await?;
+    append_alice_name_input(
+        database,
+        "RegistrationReleased",
+        "ens_v2_registry_l1",
+        json!({"source_event":"LabelUnregistered", "authority_kind":"ens_v2_registry",
+            "released_at":1_776_384_003, "expiry":4_000_000_000_u64}),
+    )
+    .await?;
+    sqlx::query("UPDATE surface_bindings SET active_to = to_timestamp(1776384003) WHERE surface_binding_id = $1")
+        .bind(Uuid::from_u128(0x3300)).execute(&database.pool).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await
+}
+
+/// A registration released by `unregister` answers its records `not_found` and has no
+/// `record_count`.
+#[tokio::test]
+async fn v2_name_records_answer_not_found_after_ensv2_unregister() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_alice_unregistered_ens_v2_inputs(&database).await?;
+    let records = request_v2_diagnostics_json(
+        &database,
+        "/v1/names/alice.eth/records?keys=addr:60",
+        StatusCode::OK,
+    )
+    .await?;
+    assert_eq!(
+        records["data"]["records"]["addr:60"],
+        json!({"status": "not_found"}),
+        "{records:#}"
+    );
+    assert!(records["data"]["resolver"].is_null(), "{records:#}");
+    let counted = request_v2_diagnostics_json(
+        &database,
+        "/v1/names/alice.eth?include=counts",
+        StatusCode::OK,
+    )
+    .await?;
+    assert_eq!(counted["data"]["authority"], "ens_v2", "{counted:#}");
+    assert_eq!(counted["data"]["status"], "released", "{counted:#}");
+    assert_eq!(
+        counted["data"]["lapsed_registration"]["release_kind"], "unregistered",
+        "{counted:#}"
+    );
+    assert!(counted["data"].get("record_count").is_none(), "{counted:#}");
+    database.cleanup().await
+}
+
+/// The records diagnostic keeps reading a released ENSv2 registration's former resource, which
+/// the product records route no longer serves.
+#[tokio::test]
+async fn v2_diagnostics_name_records_keeps_released_ensv2_audit_inventory() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_alice_unregistered_ens_v2_inputs(&database).await?;
+    let detail = request_v2_diagnostics_json(&database, "/v1/names/alice.eth", StatusCode::OK).await?;
+    assert_eq!(detail["data"]["authority"], "ens_v2", "{detail:#}");
+    assert_eq!(detail["data"]["status"], "released", "{detail:#}");
+
+    let payload = request_v2_diagnostics_json(
+        &database,
+        "/v1/diagnostics/names/alice.eth/records?keys=addr:60",
+        StatusCode::OK,
+    )
+    .await?;
+    let boundary = json!({"chain_position":{"block_hash":"0xbinding","block_number":21000003,
+        "chain_id":"ethereum-mainnet","timestamp":"1776384003"},"event_kind":null,"name":"alice.eth",
+        "namespace":"ens","normalized_event_id":null,
+        "registration_id":Uuid::from_u128(0x2200).to_string()});
+    assert_eq!(
+        payload["data"]["record_inventory"],
+        json!({"enumeration_basis":{"capability_declared_families":true,
+            "globally_enumerable":false,"observed_selectors":false},"explicit_gaps":[],
+            "last_change":null,"record_version_boundary":boundary,"selectors":[],
+            "unsupported_families":[]}),
+        "{payload:#}"
+    );
+    assert_eq!(
+        payload["data"]["comparison"]["addr:60"]["indexed"],
+        json!({"status":"ok","value":"0x0000000000000000000000000000000000000def"}),
+        "{payload:#}"
+    );
+    database.cleanup().await
+}

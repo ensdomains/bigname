@@ -92,6 +92,7 @@ pub(crate) async fn load_at(
     publications: &BTreeMap<String, FamilyPublication>,
 ) -> Result<Vec<IdentityNameRecordRow>> {
     let mut out = BTreeMap::new();
+    let mut record_resources = BTreeMap::new();
     for ids in ids.chunks(256) {
         let identities = sqlx::query(&format!("/* storage:families.lookup.names */
             SELECT surface.logical_name_id, surface.chain_id, surface.namespace, surface.namehash,
@@ -143,6 +144,7 @@ pub(crate) async fn load_at(
                 serde_json::from_value(core).context("invalid stored lookup name")?;
             core.provenance["surface_block_number"] =
                 json!(identity.try_get::<i64, _>("block_number")?);
+            record_resources.insert(id.clone(), core.record_serving_resource_id);
             let spelling: String = identity.try_get("rendered_name")?;
             let rendered = crate::rendered_name::parse(&spelling)
                 .context("invalid lookup identity spelling")?;
@@ -203,7 +205,7 @@ pub(crate) async fn load_at(
     if include_inventory {
         let mut resources: BTreeMap<String, BTreeSet<Uuid>> = BTreeMap::new();
         for record in out.values() {
-            if let Some(resource) = record_resource(record) {
+            if let Some(&Some(resource)) = record_resources.get(&record.row.logical_name_id) {
                 let chain = record.row.provenance["chain_id"]
                     .as_str()
                     .context("lookup name has no chain")?;
@@ -223,21 +225,14 @@ pub(crate) async fn load_at(
             );
         }
         for record in out.values_mut() {
-            record.record_inventory_current =
-                record_resource(record).and_then(|id| inventories.get(&id).cloned());
+            record.record_inventory_current = record_resources
+                .get(&record.row.logical_name_id)
+                .copied()
+                .flatten()
+                .and_then(|id| inventories.get(&id).cloned());
         }
     }
     Ok(out.into_values().collect())
-}
-
-pub(crate) fn record_resource(record: &IdentityNameRecordRow) -> Option<Uuid> {
-    let summary = &record.row.declared_summary;
-    if summary["unresolvable_reason"].is_string()
-        || summary["resolution_unsupported_reason"].is_string()
-    {
-        return None;
-    }
-    record.row.serving_resource_id.or(record.row.resource_id)
 }
 
 pub(crate) fn relation_kind(relation: &str) -> Result<AddressNameRelation> {

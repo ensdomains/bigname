@@ -3807,3 +3807,28 @@ every label it rewrites.
   changes.
 - Writers that submit the same label still wait for each other on that label's
   lock bucket, as before.
+
+## Released ENSv2 names serve no records
+
+The build that stops serving records for a released ENSv2 registration (see
+[Resolver record answers and values](api-v1.md#resolver-record-answers-and-values))
+changes which resource a composed name row serves records through. The row
+(`crates/storage/src/name_current/row.rs`) and the registration fields
+(`crates/storage/src/public_name_fields`) are inputs of the
+[interpreter content hash](glossary.md#interpreter-content-hash), so the hash
+rotates for every chain. The stored lookup name row (`project_lookup_name`)
+records no record inventory resource for a released ENSv2 registration.
+
+- It adds no table, index, schema-migration, manifest or setting.
+- The manifest-authority fingerprint and the compiled watch plan are unchanged,
+  so no Ingest redo is stamped.
+- These rows arrive through re-derivation, not through an in-place change. Every
+  chain needs a full-history Interpret redo, then the Project redo it installs,
+  at a planned [re-derivation boundary](glossary.md#re-derivation-boundary)
+  under matching runner and API binaries. The change rides the next
+  re-derivation release and shares its one Interpret and Project redo pair. Do
+  not mark old rows ready under the new hash.
+
+Once the redo publishes, check on Sepolia that an ENSv2 name released by expiry
+answers `GET /v1/names/{name}/records?keys=addr:60` with `not_found`, and that
+`/v1/names/{name}?include=counts` has no `record_count`.

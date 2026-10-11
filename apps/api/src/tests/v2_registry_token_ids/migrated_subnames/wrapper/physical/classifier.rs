@@ -105,6 +105,24 @@ async fn observe(database: &TestDatabase, resource: Uuid, declared: bool) -> Res
     lookup_publication::assert_name_prepared_parity(database, LEAF).await?;
     Ok(evidence)
 }
+/// `cleared.native105.eth`, a control whose resolver was cleared. The shared parity helper
+/// requires a record inventory, so only lookup and detail agreement is checked here. Its records
+/// answer is not pinned.
+async fn cleared_parity(database: &TestDatabase) -> Result<Value> {
+    let detail = path_get(database, &format!("/v1/names/{CLEARED}")).await?;
+    let lookup = path_lookup(
+        database,
+        json!({"profile":"detail","inputs":[{"name":CLEARED}]}),
+    )
+    .await?;
+    assert_eq!(lookup["data"][0]["status"], "ok", "{lookup:#}");
+    assert_eq!(lookup["data"][0]["record"], detail["data"], "{lookup:#}");
+    assert_eq!(
+        lookup["meta"]["as_of"], detail["meta"]["as_of"],
+        "{lookup:#}"
+    );
+    Ok(detail["data"].clone())
+}
 async fn physical(database: &TestDatabase, resource: Uuid) -> Result<Value> {
     let predicate = bigname_storage::families::name::PHYSICAL_POINTER_EVENT_SQL;
     sqlx::query_scalar(&format!("SELECT to_jsonb(event) FROM normalized_events event
@@ -298,7 +316,7 @@ async fn lookup_precomputation_classifier_upgrade_refreshes_a_moved_mount_path()
     let unchanged = invariant(&database).await?;
     let family_before = replay::families(&database).await?;
     let controls_before = vec![
-        lookup_publication::assert_name_prepared_parity(&database, CLEARED).await?,
+        cleared_parity(&database).await?,
         lookup_publication::assert_name_prepared_parity(&database, DEEP).await?,
         lookup_publication::assert_name_prepared_parity(&database, RESET).await?,
     ];
@@ -344,7 +362,7 @@ async fn lookup_precomputation_classifier_upgrade_refreshes_a_moved_mount_path()
         );
     }
     let controls_after = vec![
-        lookup_publication::assert_name_prepared_parity(&database, CLEARED).await?,
+        cleared_parity(&database).await?,
         lookup_publication::assert_name_prepared_parity(&database, DEEP).await?,
         lookup_publication::assert_name_prepared_parity(&database, RESET).await?,
     ];
