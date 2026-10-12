@@ -1,10 +1,10 @@
 use std::{
     str::FromStr,
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use sqlx::{
     PgConnection, PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
@@ -28,6 +28,8 @@ static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
 const TEMPLATE_PREFIX: &str = "bigname_tpl_";
 const TEMPLATE_SCRATCH_PREFIX: &str = "bigname_tpl_scratch";
+/// A close with every connection returned takes milliseconds.
+const POOL_CLOSE_LIMIT: Duration = Duration::from_secs(10);
 
 /// Default database URL for local development.
 pub const fn default_database_url() -> &'static str {
@@ -275,6 +277,10 @@ impl TestDatabase {
         &self.database_name
     }
 
+    /// Drop the database. Return every connection and transaction taken from [`Self::pool`]
+    /// first: the pool's close can wait for them. If the close has not finished after 10
+    /// seconds, the database is dropped anyway and the call fails. A held connection does not
+    /// always delay the close, so a passing cleanup does not show that none was held.
     pub async fn cleanup(self) -> Result<()> {
         let Self {
             admin_pool,
@@ -282,7 +288,8 @@ impl TestDatabase {
             database_name,
         } = self;
 
-        pool.close().await;
+        let closed = tokio::time::timeout(POOL_CLOSE_LIMIT, pool.close()).await;
+        let held = pool.size();
         sqlx::query(&format!(
             "DROP DATABASE IF EXISTS {} WITH (FORCE)",
             quote_identifier(&database_name)
@@ -291,6 +298,13 @@ impl TestDatabase {
         .await
         .with_context(|| format!("failed to drop test database {database_name}"))?;
         admin_pool.close().await;
+        ensure!(
+            closed.is_ok(),
+            "dropped test database {database_name} {} s into cleanup with pooled connections \
+             still checked out ({held}). Return every connection and transaction taken from \
+             the test pool before TestDatabase::cleanup.",
+            POOL_CLOSE_LIMIT.as_secs()
+        );
         Ok(())
     }
 }
