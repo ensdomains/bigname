@@ -54,20 +54,62 @@ const APPROVED: &str = "approval.authority_kind = 'registry'
     AND approval.relation_kind = 'operator' AND approval.approved";
 const ACCOUNT_SCOPE: &str = "concat('account:', approval.chain_id, ':registry:',
     approval.authority_contract, ':', approval.owner) AS scope";
+/// The approvals of an observation's registry owner, for the registry sources of a read bound
+/// to one resource on chain `$9`. Those start from the resource instead of from every approval.
+///
+/// Keeping to the resource's chain drops no served key. A resource is on one chain (the
+/// resource id is the primary key of `resources`), Project writes observations and binding
+/// candidates under the chain it is projecting (`crates/project/src/families/registry.rs`,
+/// `identity.rs`), and composition already drops a key of another chain: it reads a key's
+/// binding and approvals on the resource's chain and builds the scope from that chain.
+const OBSERVED: &str = "JOIN bigname_phase.project_account_approval approval
+      ON approval.chain_id = observation.chain_id
+     AND approval.authority_contract = observation.registry_contract
+     AND approval.owner = observation.registry_owner
+    WHERE observation.chain_id = $9 AND observation.applicable";
 
-/// The next candidate keys in the public bytewise tuple order. A cursor can continue within
-/// one resource or one subject without loading the keys that precede it. Namespace membership
-/// precedes publication checks, so an unrelated namespace's rebuilding chain is not read.
-/// `token` is what a read bound to one resource knows about it.
-pub(super) async fn page(
-    conn: &mut PgConnection,
+/// The registry sources of a read bound to one resource on chain `$9`: the observations that
+/// reach the resource, the resource's own, and those of the names bound to it.
+fn resource_registry_sources() -> [String; 3] {
+    [
+        format!(
+            "SELECT approval.subject, observation.target_resource_id AS resource_id,
+             {ACCOUNT_SCOPE}
+             FROM bigname_phase.project_registry_binding_observation observation
+             {OBSERVED} AND {APPROVED} AND observation.target_resource_id = $2"
+        ),
+        format!(
+            "SELECT approval.subject, observation.resource_id, {ACCOUNT_SCOPE}
+             FROM bigname_phase.project_registry_binding_observation observation
+             {OBSERVED} AND {APPROVED} AND observation.resource_id = $2"
+        ),
+        // A named observation's identity is its name, so the primary key finds it:
+        // `observation_identity` is `COALESCE(logical_name_id, resource_id)`, as its column
+        // comment in the baseline schema says and as its one writer sets it (`observation` in
+        // `crates/project/src/families/registry.rs`). The name comparison stays, so a row
+        // that broke the rule would be dropped, never wrongly added.
+        format!(
+            "SELECT approval.subject, candidate.resource_id, {ACCOUNT_SCOPE}
+             FROM bigname_phase.project_binding_candidate candidate
+             JOIN bigname_phase.project_registry_binding_observation observation
+               ON observation.chain_id = candidate.chain_id
+              AND observation.observation_identity = candidate.logical_name_id
+              AND observation.logical_name_id = candidate.logical_name_id
+             {OBSERVED} AND {APPROVED} AND observation.attributed_via = 'name'
+               AND candidate.chain_id = $9 AND candidate.resource_id = $2"
+        ),
+    ]
+}
+
+/// The candidate-key statement of [`page`]: nine sources, each cut to the page before the
+/// union. `token` is what a read bound to one resource knows about it. With it, the three
+/// registry sources look the resource up on its chain, and without it they are unchanged.
+pub(super) fn statement(
     subject: Option<&str>,
     resource_id: Option<Uuid>,
-    namespace: Option<&str>,
     after: Option<&PermissionsCurrentAccountResourceCursor>,
-    limit: i64,
     token: Option<&TokenRead>,
-) -> Result<Vec<Key>> {
+) -> String {
     let registry_target = format!(
         "SELECT approval.subject, observation.target_resource_id AS resource_id,
          {ACCOUNT_SCOPE} {REGISTRY} WHERE {APPROVED}"
@@ -82,6 +124,12 @@ pub(super) async fn page(
            ON candidate.logical_name_id = observation.logical_name_id
          WHERE {APPROVED} AND observation.attributed_via = 'name'"
     );
+    let [registry_target, registry_resource, registry_name] =
+        if resource_id.is_some() && token.is_some() {
+            resource_registry_sources()
+        } else {
+            [registry_target, registry_resource, registry_name]
+        };
     // Expose the leading seek key to the source indexes, even when the tuple contains a
     // computed account scope. The full tuple comparison below retains within-resource paging.
     let seek = if subject
@@ -120,22 +168,42 @@ pub(super) async fn page(
                       AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')))
               ORDER BY subject, resource_id, scope LIMIT $7)"
         )).collect::<Vec<_>>().join(" UNION ");
-    sqlx::query_as(&format!(
+    format!(
         "/* storage:families.control.permissions.candidate_page */
          SELECT subject, resource_id, scope FROM ({arms}) candidates
          ORDER BY subject COLLATE \"C\", resource_id, scope COLLATE \"C\" LIMIT $7"
-    ))
-    .persistent(false)
-    .bind(subject)
-    .bind(resource_id)
-    .bind(namespace)
-    .bind(after.map(|key| key.subject.as_str()))
-    .bind(after.map(|key| key.resource_id))
-    .bind(after.map(|key| key.scope.as_str()))
-    .bind(limit)
-    .bind(token.and_then(|token| token.root))
-    .bind(token.map(|token| token.chain_id.as_str()))
-    .fetch_all(conn)
-    .await
-    .map_err(Into::into)
+    )
 }
+
+/// The next candidate keys in the public bytewise tuple order. A cursor can continue within
+/// one resource or one subject without loading the keys that precede it. Namespace membership
+/// precedes publication checks, so an unrelated namespace's rebuilding chain is not read.
+/// `token` is what a read bound to one resource knows about it.
+pub(super) async fn page(
+    conn: &mut PgConnection,
+    subject: Option<&str>,
+    resource_id: Option<Uuid>,
+    namespace: Option<&str>,
+    after: Option<&PermissionsCurrentAccountResourceCursor>,
+    limit: i64,
+    token: Option<&TokenRead>,
+) -> Result<Vec<Key>> {
+    sqlx::query_as(&statement(subject, resource_id, after, token))
+        .persistent(false)
+        .bind(subject)
+        .bind(resource_id)
+        .bind(namespace)
+        .bind(after.map(|key| key.subject.as_str()))
+        .bind(after.map(|key| key.resource_id))
+        .bind(after.map(|key| key.scope.as_str()))
+        .bind(limit)
+        .bind(token.and_then(|token| token.root))
+        .bind(token.map(|token| token.chain_id.as_str()))
+        .fetch_all(conn)
+        .await
+        .map_err(Into::into)
+}
+
+#[cfg(test)]
+#[path = "candidates_tests.rs"]
+mod tests;
