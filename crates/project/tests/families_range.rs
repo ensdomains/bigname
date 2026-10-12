@@ -9,7 +9,7 @@ mod families_support;
 
 use anyhow::{Result, ensure};
 use bigname_project::families::{self, FamilyMode, FamilyOptions, FamilyOutcome, RebuildRanges};
-use families_support::{CHAIN, CONTENT_HASH, Event, Fixture, hash, uuid};
+use families_support::{CHAIN, CONTENT_HASH, Event, Fixture, ens_v2_path, hash, uuid};
 use serde_json::{Value, json};
 
 const REGISTRY: &str = "0x00000000000000000000000000000000000000e1";
@@ -910,5 +910,50 @@ async fn a_range_ends_before_the_block_past_its_event_cap() -> Result<()> {
         vec![10, 12, 14, 16, 17, 19, 21, 23, 25, 27, 29, 30],
         "two events a range: [10], then pairs, and block 17's three events alone"
     );
+    fixture.cleanup().await
+}
+
+// ENSv2 entry and pointer changes select the names under them from the journal of the whole
+// publication. The path history changes an entry at block 5, pointers at block 7 and two
+// entries at block 8, and announces a created registry at block 9, with blocks that name
+// nothing between them. A range holds several of those changes and publishes them once, at its
+// last block. Followed block by block, rebuilt in
+// one range, in ranges of four and of two blocks, and block by block, it writes the same rows.
+// Block 8 is also undone and applied again on the way.
+#[tokio::test]
+async fn an_ensv2_path_fixture_rebuilds_equal_in_ranges_and_block_by_block() -> Result<()> {
+    let fixture = Fixture::new("families_range_ens_v2_path", 12).await?;
+    let names = ens_v2_path::history(&fixture).await?;
+    fixture.assert_undo_restores(8).await?;
+    follow(&fixture, 9, 12).await?;
+    // No event after block 3 names `sub.bob.eth`. The entry changes still moved its row.
+    let unresolvable: Option<String> = sqlx::query_scalar(
+        "SELECT core -> 'declared_summary' ->> 'unresolvable_reason'
+         FROM project_lookup_name WHERE chain_id = $1 AND logical_name_id = $2",
+    )
+    .bind(CHAIN)
+    .bind(&names.sub)
+    .fetch_one(&fixture.pool)
+    .await?;
+    ensure!(
+        unresolvable.is_none(),
+        "the path history left sub.bob.eth unresolvable for {unresolvable:?}"
+    );
+    // Five blocks change a path: 5, 7, 8, 9 and 10. A rebuild in fewer than five ranges puts
+    // two of them in one range.
+    let whole = rebuild_equal(&fixture, 12, &in_ranges(12)).await?;
+    ensure!(
+        (1..5).contains(&whole.ranges),
+        "the rebuild applied {} ranges, so no range is known to hold two path changes",
+        whole.ranges
+    );
+    for options in [
+        in_ranges(12).with_range_caps(4, u64::MAX),
+        in_ranges(12).with_range_caps(2, u64::MAX),
+    ] {
+        let outcome = rebuild_equal(&fixture, 12, &options).await?;
+        ensure!(outcome.ranges > 0, "the rebuild applied no range");
+    }
+    fixture.assert_rebuild_equal(12).await?;
     fixture.cleanup().await
 }

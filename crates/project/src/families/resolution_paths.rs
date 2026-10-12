@@ -2,6 +2,8 @@
 //! and resolver membership publication; selection happens before due summary clocks advance.
 //! Ordinary record values and links never expand descendants.
 mod selection;
+#[cfg(test)]
+mod selection_tests;
 
 use super::input::BlockHeader;
 use crate::{ProjectError, Result};

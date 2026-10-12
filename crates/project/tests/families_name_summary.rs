@@ -11,7 +11,11 @@ use anyhow::{Result, ensure};
 use bigname_project::families;
 use bigname_storage::families::name::load_family_name;
 use serde_json::{Value, json};
-use support::{CHAIN, Event, Fixture, uuid};
+use support::{
+    CHAIN, Event, Fixture,
+    ens_v2_path::{self, Pointer, RESOLVER},
+    uuid,
+};
 
 const REGISTRAR: &str = "0x00000000000000000000000000000000000000e3";
 const REGISTRY: &str = "0x00000000000000000000000000000000000000e5";
@@ -902,4 +906,91 @@ async fn a_rebuild_range_reads_the_registry_events_of_every_block_it_applies() -
 async fn publish(fixture: &Fixture, target: i64) -> Result<()> {
     fixture.apply(target, families::FamilyMode::Normal).await?;
     Ok(())
+}
+
+/// The lookup row of `logical_name_id` without its chain, and the row version it was written in.
+async fn lookup(fixture: &Fixture, logical_name_id: &str) -> Result<Option<(Value, String)>> {
+    Ok(sqlx::query_as(
+        "SELECT to_jsonb(lookup) - 'chain_id', lookup.xmin::text
+         FROM project_lookup_name lookup
+         WHERE lookup.chain_id = $1 AND lookup.logical_name_id = $2",
+    )
+    .bind(CHAIN)
+    .bind(logical_name_id)
+    .fetch_optional(&fixture.pool)
+    .await?)
+}
+
+/// The lookup and summary rows of a name, each with its row version.
+async fn published(fixture: &Fixture, logical_name_id: &str) -> Result<[(Value, String); 2]> {
+    Ok([
+        lookup(fixture, logical_name_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("{logical_name_id} has no lookup row"))?,
+        summary(fixture, logical_name_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("{logical_name_id} has no summary row"))?,
+    ])
+}
+
+const FAR: u64 = 1_900_000_000;
+
+// A publication selects the names under a changed ENSv2 entry once, into a work table that
+// lives for its transaction, and two writers read it there: the lookup rows and the name
+// summaries. Block 6 registers `bob` in the `.eth` registry with a resolver. No event of the block names
+// `sub.bob.eth`, and both of its rows move: the ENSv2 path now reaches a live entry, and the
+// summary's clock takes the entry's expiry. `kid.carol.eth` is under no changed entry and keeps
+// both rows.
+#[tokio::test]
+async fn the_work_table_reaches_lookup_and_summary_in_one_publication() -> Result<()> {
+    let fixture = Fixture::new("families_name_summary_path", 12).await?;
+    let eth = ens_v2_path::admit(&fixture).await?;
+    ens_v2_path::leased(&fixture, "bob.eth", 2, 1, FAR).await?;
+    let sub = ens_v2_path::subname(&fixture, "sub.bob.eth", 1, 1).await?;
+    ens_v2_path::leased(&fixture, "carol.eth", 3, 1, FAR).await?;
+    let kid = ens_v2_path::subname(&fixture, "kid.carol.eth", 2, 1).await?;
+    ens_v2_path::register(&fixture, 6, 0, &eth, "bob", FAR).await?;
+    ens_v2_path::point(&fixture, 6, 2, &eth, "bob", Pointer::Resolver(RESOLVER)).await?;
+    ens_v2_path::filler(&fixture, 7).await?;
+    publish(&fixture, 5).await?;
+    let (before, unrelated) = (
+        published(&fixture, &sub).await?,
+        published(&fixture, &kid).await?,
+    );
+
+    publish(&fixture, 6).await?;
+    let [lookup_row, summary_row] = published(&fixture, &sub).await?;
+    ensure!(
+        lookup_row.0 != before[0].0
+            && lookup_row.0["core"]["declared_summary"]["unresolvable_reason"].is_null(),
+        "block 6 left the lookup row of the name under the entry as {}",
+        lookup_row.0
+    );
+    ensure!(
+        summary_row.0 != before[1].0 && summary_row.0["recompose_at"] == json!(FAR),
+        "block 6 left the summary of the name under the entry as {}",
+        summary_row.0
+    );
+    ensure!(
+        published(&fixture, &kid).await? == unrelated,
+        "block 6 rewrote the rows of a name under no changed entry"
+    );
+    // The fixture's pool holds one session. The work table went with the transaction, and the
+    // next publication on the session selects afresh: a block that names nothing rewrites
+    // neither row.
+    let work_table: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('pg_temp.bigname_resolution_path_work')::text")
+            .fetch_one(&fixture.pool)
+            .await?;
+    ensure!(
+        work_table.is_none(),
+        "the work table outlived its publication"
+    );
+    publish(&fixture, 7).await?;
+    ensure!(
+        published(&fixture, &sub).await? == [lookup_row, summary_row],
+        "block 7 rewrote the rows block 6 published"
+    );
+    fixture.assert_rebuild_equal(7).await?;
+    fixture.cleanup().await
 }

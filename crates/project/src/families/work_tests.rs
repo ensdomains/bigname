@@ -388,3 +388,187 @@ async fn the_resolver_edge_sources_return_distinct_readable_boundaries_up_to_the
     database.cleanup().await?;
     Ok(())
 }
+
+/// The work list as it stood before its resolver edge sources read their boundary indexes: each
+/// collected both boundaries of every resolver edge, and of every address of a resolver edge's
+/// destination, and filtered them afterwards. A frozen copy, never edited to follow
+/// `input::work_blocks`.
+const WORK_BLOCKS_BEFORE: &str = "
+     SELECT DISTINCT work.block_number FROM (
+         (SELECT DISTINCT event.block_number
+          FROM normalized_events event
+          JOIN chain_lineage lineage
+            ON lineage.chain_id = event.chain_id
+           AND lineage.block_number = event.block_number
+           AND lineage.block_hash = event.block_hash
+          WHERE event.chain_id = $1 AND event.block_number BETWEEN $3 AND $2
+            AND event.consumer_visibility = 'activated'
+            AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+            AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+          ORDER BY 1
+          LIMIT $5)
+         UNION ALL
+         (SELECT DISTINCT binding.block_number
+          FROM surface_bindings binding
+          JOIN chain_lineage lineage
+            ON lineage.chain_id = binding.chain_id
+           AND lineage.block_number = binding.block_number
+           AND lineage.block_hash = binding.block_hash
+          WHERE binding.chain_id = $1 AND binding.block_number BETWEEN $3 AND $2
+            AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')
+            AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+          ORDER BY 1
+          LIMIT $5)
+         UNION ALL
+         (SELECT boundary.block_number
+          FROM (SELECT DISTINCT boundary.block_number
+                FROM discovery_edges edge
+                CROSS JOIN LATERAL (VALUES (edge.active_from_block_number),
+                                           (edge.active_to_block_number))
+                    boundary (block_number)
+                WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
+                  AND boundary.block_number BETWEEN $3 AND $2) boundary
+          -- An activation below the retained lineage has no block to apply; the first
+          -- readable work block classifies under it.
+          WHERE EXISTS (
+              SELECT 1 FROM chain_lineage lineage
+              WHERE lineage.chain_id = $1 AND lineage.block_number = boundary.block_number
+                AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
+          ORDER BY 1
+          LIMIT $5)
+         UNION ALL
+         (SELECT boundary.block_number
+          FROM (SELECT DISTINCT boundary.block_number
+                FROM discovery_edges edge
+                JOIN contract_instance_addresses address
+                  ON address.contract_instance_id = edge.to_contract_instance_id
+                 AND address.chain_id = edge.chain_id
+                CROSS JOIN LATERAL (VALUES (address.active_from_block_number),
+                                           (address.active_to_block_number))
+                    boundary (block_number)
+                WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
+                  AND boundary.block_number BETWEEN $3 AND $2) boundary
+          WHERE EXISTS (
+              SELECT 1 FROM chain_lineage lineage
+              WHERE lineage.chain_id = $1 AND lineage.block_number = boundary.block_number
+                AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
+          ORDER BY 1
+          LIMIT $5)
+         UNION ALL
+         (SELECT DISTINCT start.block_number
+          FROM unnest($4::bigint[]) start (block_number)
+          WHERE EXISTS (
+              SELECT 1 FROM chain_lineage lineage
+              WHERE lineage.chain_id = $1 AND lineage.block_number = start.block_number
+                AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
+          ORDER BY 1
+          LIMIT $5)
+     ) work
+     ORDER BY 1
+     LIMIT $5";
+
+const FROM: i64 = 100_000;
+const TO: i64 = 100_200;
+/// Resolver edges, and addresses of their destinations, that start or stop outside the range.
+const OUTSIDE: i64 = 50_000;
+
+/// A chain with `OUTSIDE` resolver edges and destination addresses whose boundaries lie below
+/// `FROM` or above `TO`, and these inside the range:
+///
+/// - resolver edges that start at 100010 (two of them) and at 100020, and one that stops at
+///   100030;
+/// - a subregistry edge that starts at 100080;
+/// - addresses of resolver edge destinations: one from 100040 to 100050, one that starts at
+///   100060 and one that stops at 100090;
+/// - an address of the subregistry edge's destination that starts at 100070, and one of an
+///   instance no edge names that starts at 100075.
+///
+/// Every block named has a readable lineage row except 100020, whose row is orphaned, and
+/// 100060, which has none.
+async fn resolver_boundaries(pool: &sqlx::PgPool) -> Result<()> {
+    sqlx::raw_sql(&format!(
+        "INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp,
+             canonicality_state)
+         SELECT '{CHAIN}', '0x' || lpad(to_hex(block), 64, '0'), block,
+                to_timestamp(1800000000 + block * 12),
+                CASE WHEN block = 100020 THEN 'orphaned' ELSE 'canonical' END::canonicality_state
+         FROM unnest(ARRAY[100010, 100020, 100030, 100040, 100050, 100070, 100075, 100080,
+                           100090]) block;
+
+         INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+         SELECT md5('instance' || n)::uuid, '{CHAIN}', 'contract'
+         FROM generate_series(0, {OUTSIDE} + 10) n;
+
+         CREATE TEMP TABLE span ON COMMIT DROP AS
+         SELECT n, CASE WHEN n % 50 = 0 THEN 200000 + n ELSE n END AS from_block,
+                CASE WHEN n % 50 = 0 THEN NULL WHEN n % 2 = 1 THEN n + 10 END AS to_block
+         FROM generate_series(1, {OUTSIDE}) n;
+
+         INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id,
+             to_contract_instance_id, discovery_source, admission_basis,
+             active_from_block_number, active_from_block_hash, active_to_block_number,
+             active_to_block_hash, canonicality_state)
+         SELECT '{CHAIN}', kind, md5('instance0')::uuid, md5('instance' || n)::uuid,
+                'NewResolver', 'fixture', from_block, '0x' || to_hex(from_block), to_block,
+                '0x' || to_hex(to_block), 'canonical'
+         FROM (
+             SELECT 'resolver', n, from_block, to_block FROM span
+             UNION ALL
+             VALUES ('resolver', {OUTSIDE} + 1, 100010, NULL),
+                    ('resolver', {OUTSIDE} + 2, 100020, NULL),
+                    ('resolver', {OUTSIDE} + 3, 50, 100030),
+                    ('subregistry', {OUTSIDE} + 4, 100080, NULL),
+                    ('resolver', {OUTSIDE} + 5, 100010, NULL)
+         ) edge (kind, n, from_block, to_block);
+
+         INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address,
+             active_from_block_number, active_to_block_number)
+         SELECT md5('instance' || n)::uuid, '{CHAIN}', '0x' || lpad(to_hex(n), 40, '0'),
+                from_block, to_block
+         FROM (
+             SELECT n, from_block, to_block FROM span
+             UNION ALL
+             VALUES ({OUTSIDE} + 1, 100040, 100050),
+                    ({OUTSIDE} + 2, 100060, NULL),
+                    ({OUTSIDE} + 3, 60, 100090),
+                    ({OUTSIDE} + 4, 100070, NULL),
+                    ({OUTSIDE} + 6, 100075, NULL)
+         ) address (n, from_block, to_block);
+
+         ANALYZE"
+    ))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// The work list returns the boundaries it returned before its resolver edge sources
+// read their boundary indexes: the lowest readable ones, each once, up to the limit.
+#[tokio::test]
+async fn work_blocks_returns_the_resolver_boundaries_it_returned_before() -> Result<()> {
+    let (database, pool) = database().await?;
+    resolver_boundaries(&pool).await?;
+    let history = manifests::History::read(&pool, CHAIN, TO).await?;
+    for (limit, expected) in [
+        (1, &[100_010][..]),
+        (3, &[100_010, 100_030, 100_040]),
+        (i64::MAX, &[100_010, 100_030, 100_040, 100_050, 100_090]),
+    ] {
+        let before: Vec<i64> = sqlx::query_scalar(WORK_BLOCKS_BEFORE)
+            .bind(CHAIN)
+            .bind(TO)
+            .bind(FROM)
+            .bind(Vec::<i64>::new())
+            .bind(limit)
+            .fetch_all(&pool)
+            .await?;
+        assert_eq!(before, expected, "before, limit {limit}");
+        assert_eq!(
+            input::work_blocks(&pool, CHAIN, FROM, TO, &history, limit).await?,
+            expected,
+            "limit {limit}"
+        );
+    }
+    database.cleanup().await?;
+    Ok(())
+}

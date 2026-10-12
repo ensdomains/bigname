@@ -1,5 +1,6 @@
-//! The recognized root-to-ETHRegistry path for the synthetic missing-parent test. Its local
-//! block coordinates start at zero; the API producer companion uses the real manifest starts.
+//! The recognized root-to-ETHRegistry path the family tests build their ENSv2 paths on. Its
+//! local block coordinates start at zero. The API producer companion uses the real manifest
+//! starts.
 use super::{CHAIN, Fixture, OWNER, hash, json, uuid};
 use alloy_primitives::{U256, keccak256};
 use anyhow::Result;
@@ -9,7 +10,7 @@ const ROOT: &str = "0xb458d6a3a77919449d03e7a6903c26827c1ec43f";
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ETHRegistry.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
 const ETH: &str = "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4";
 
-pub(super) async fn root_eth_entry(fixture: &Fixture) -> Result<()> {
+pub async fn root_eth_entry(fixture: &Fixture) -> Result<()> {
     for (family, role, address) in [
         ("ens_v2_root_l1", "root_registry", ROOT),
         ("ens_v2_registry_l1", "registry", ETH),
@@ -105,7 +106,7 @@ pub(super) async fn root_eth_entry(fixture: &Fixture) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn assert_deployed_path(fixture: &Fixture) -> Result<()> {
+pub async fn assert_deployed_path(fixture: &Fixture) -> Result<()> {
     let entries: Vec<(String, String, Option<String>)> = sqlx::query_as(
         "SELECT entry.registry, entry.status,
              (SELECT event.after_state->>'subregistry' FROM normalized_events event

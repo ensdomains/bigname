@@ -10,8 +10,6 @@
 //! registrar grace. The registration time of such a name is its ENSv1 registration's through
 //! renewals, the reservation and the ENSv1→ENSv2 migration. Only a new registration after a
 //! release starts a new one (TYR-131).
-#[path = "families_expiry_grace/declared_path.rs"]
-mod declared_path;
 #[path = "families_support/mod.rs"]
 mod support;
 
@@ -20,7 +18,7 @@ use anyhow::{Result, ensure};
 use bigname_project::families::FamilyMode;
 use bigname_storage::families::name::load_family_name;
 use serde_json::{Value, json};
-use support::{CHAIN, Event, Fixture, hash, uuid};
+use support::{CHAIN, Event, Fixture, ens_v2_path::declared_path, hash, uuid};
 
 const REGISTRAR: &str = "0x00000000000000000000000000000000000000e3";
 const REGISTRY: &str = "0x00000000000000000000000000000000000000e5";
