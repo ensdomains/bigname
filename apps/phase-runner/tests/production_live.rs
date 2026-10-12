@@ -3654,6 +3654,7 @@ async fn rewind_refuses_to_overlap_a_downstream_writer() -> Result<()> {
             .fetch_one(&mut *project_lock)
             .await?;
     assert!(released);
+    drop(project_lock);
     scratch.cleanup().await
 }
 

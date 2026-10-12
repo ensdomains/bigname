@@ -721,6 +721,7 @@ async fn v2_collection_reads_one_publication_across_a_republish() -> Result<()> 
         error.envelope().error.message,
         "collection publication changed during the read; retry the request"
     );
+    drop(late);
     database.cleanup().await
 }
 
