@@ -536,9 +536,9 @@ CREATE INDEX IF NOT EXISTS normalized_events_pointer_before_resolver_history_idx
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
 -- History's registry handoff read (crates/storage/src/history/registry_handoffs.rs) finds
--- the ENSv1 registry owner observations of one name by chain and name key: Transfer by
--- node, NewOwner by child node. These access paths intentionally have no
--- consumer_visibility restriction.
+-- the owner events of one name in source family ens_v1_registry_l1 by chain and name key:
+-- AuthorityTransferred events by node, SubregistryChanged events by child_node. These
+-- access paths intentionally have no consumer_visibility restriction.
 CREATE INDEX IF NOT EXISTS normalized_events_project_name_node_idx
     ON normalized_events (chain_id, (namespace || ':' || lower(after_state ->> 'node')), block_number)
     INCLUDE (normalized_event_id)

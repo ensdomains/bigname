@@ -832,8 +832,8 @@ install them:
 
 | Index | Serves |
 | --- | --- |
-| `normalized_events_project_name_child_idx` | the `SubregistryChanged` arm of `owner_probe`: the ENSv1 registry `NewOwner` observations of one name, by chain and name key, the namespace joined by `:` to `lower(after_state ->> 'child_node')` |
-| `normalized_events_project_name_node_idx` | the `AuthorityTransferred` arm of `owner_probe`: the ENSv1 registry `Transfer` observations of one name, by chain and name key, the namespace joined by `:` to `lower(after_state ->> 'node')` |
+| `normalized_events_project_name_child_idx` | the `SubregistryChanged` arm of `owner_probe`: the `SubregistryChanged` events of one name in source family `ens_v1_registry_l1`, by chain and name key, the namespace joined by `:` to `lower(after_state ->> 'child_node')` |
+| `normalized_events_project_name_node_idx` | the `AuthorityTransferred` arm of `owner_probe`: the `AuthorityTransferred` events of one name in source family `ens_v1_registry_l1`, by chain and name key, the namespace joined by `:` to `lower(after_state ->> 'node')` |
 
 Neither index restricts `consumer_visibility`. The statement filters it.
 `history/registry_handoffs_tests.rs` checks that each arm reads its index.

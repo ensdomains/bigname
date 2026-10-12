@@ -10,10 +10,11 @@ This package builds two indexes on `bigname_phase.normalized_events`:
 The name key is the namespace, a colon, and the lowercased node.
 
 History's registry handoff read (`load_history_registry_handoffs` in
-`crates/storage/src/history/registry_handoffs.rs`) is their reader. For one ENSv1 name it
-looks up the registry owner observations of that name: `Transfer` events by node and
-`NewOwner` events by child node. Each lookup gives the chain and the name key, so it reads
-one index range instead of every owner event of the chain.
+`crates/storage/src/history/registry_handoffs.rs`) is their reader. For one name it
+looks up the owner events of that name in source family `ens_v1_registry_l1`:
+`AuthorityTransferred` events by `node` and `SubregistryChanged` events by `child_node`.
+Each lookup gives the chain and the name key, so it reads one index range instead of every
+owner event of the chain.
 [`docs/storage.md`](../../docs/storage.md#table-ownership) lists both indexes with that
 reader.
 
