@@ -650,7 +650,10 @@ Family indexes serve these concrete readers:
   resources through `project_binding_candidate_resource_idx`.
 - Permission pages use `project_grant_subject_idx`, `project_grant_scope_idx`,
   `project_account_approval_subject_idx`, `project_registry_binding_observation_resource_idx`
-  and `project_registry_binding_observation_owner_idx`.
+  and `project_registry_binding_observation_owner_idx`. Their registry lookups also read
+  `project_registry_binding_observation_target_idx`, the
+  `project_registry_binding_observation` primary key and
+  `project_binding_candidate_resource_idx`.
 - The [ENSv2 registry entry](projections.md#ensv2-registry-entries) tables carry the indexes
   the registry operator read will use and no reader uses yet:
   `project_ens_v2_entry_owner_owner_idx` `(chain_id, owner, registry, entry_key)` over rows
