@@ -914,8 +914,8 @@ async fn a_range_ends_before_the_block_past_its_event_cap() -> Result<()> {
 }
 
 // ENSv2 entry and pointer changes select the names under them from the journal of the whole
-// publication. The path history changes an entry at block 5, pointers at block 7 and two
-// entries at block 8, and announces a created registry at block 9, with blocks that name
+// publication. The path history writes an entry event at block 5, pointer events at block 7,
+// two entry events at block 8 and a created-registry event at block 9, with blocks that name
 // nothing between them. A range holds several of those changes and publishes them once, at its
 // last block. Followed block by block, rebuilt in
 // one range, in ranges of four and of two blocks, and block by block, it writes the same rows.

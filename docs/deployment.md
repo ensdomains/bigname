@@ -3937,20 +3937,55 @@ definition differs from this one. Drop `name_surfaces_project_entry_keys_idx`
 and the function, then run the schema-migrations again.
 
 `IF NOT EXISTS` matches the index name only. An interrupted concurrent build
-leaves an invalid index. The schema-migration refuses an index of either name
-that is not valid, and names it. After
-each concurrent build, and again before the runner starts, confirm that both
-indexes are valid and that `pg_get_indexdef` shows the two definitions above:
+leaves an invalid index. The schema-migration checks both names before its own
+builds and again after them. It refuses a name that is not an index, is on
+another table, is not valid and ready, or has another definition, and its error
+names the index. Check the same things yourself after each concurrent build,
+so the schema-migration does not stop inside the maintenance window:
 
 ```sql
-SELECT indexrelid::regclass, indisvalid, indisready, pg_get_indexdef(indexrelid)
-FROM pg_index
-WHERE indexrelid IN (
-    'bigname_phase.name_surfaces_project_entry_keys_idx'::regclass,
-    'bigname_phase.name_surfaces_project_path_hash_idx'::regclass);
+SET search_path = pg_catalog;
+SELECT c.relname, c.relkind, i.indrelid::regclass, i.indisvalid, i.indisready,
+       pg_get_indexdef(i.indexrelid)
+FROM pg_class AS c
+LEFT JOIN pg_index AS i ON i.indexrelid = c.oid
+WHERE c.relnamespace = 'bigname_phase'::regnamespace
+  AND c.relname IN (
+      'name_surfaces_project_entry_keys_idx',
+      'name_surfaces_project_path_hash_idx');
+RESET search_path;
 ```
 
-Drop an invalid index with `DROP INDEX CONCURRENTLY` and build it again.
+It must return two rows. Each has `relkind` `i`, `indrelid`
+`bigname_phase.name_surfaces`, and `indisvalid` and `indisready` true. The
+definitions must be exactly these two lines, which are the text the
+schema-migration compares:
+
+```text
+CREATE INDEX name_surfaces_project_entry_keys_idx ON bigname_phase.name_surfaces USING gin (bigname_phase.entry_key_hashes(labelhashes))
+CREATE INDEX name_surfaces_project_path_hash_idx ON bigname_phase.name_surfaces USING btree (namespace, hash_array_extended(labelhashes, (0)::bigint))
+```
+
+A missing index has no row. The schema-migration then builds it under the SHARE
+lock, so build it concurrently first.
+
+Build the GIN index without storage parameters. A build with `fastupdate = off`
+or any other option prints a `WITH` clause, and the schema-migration refuses it
+as another definition.
+
+The remedy depends on the refusal:
+
+- A name that is not an index: remove or rename that relation, then build the
+  index.
+- An index of the name on another table, or one that is not valid and ready:
+  drop it with `DROP INDEX CONCURRENTLY bigname_phase.<index name>`, then build
+  it again with the statement above.
+- Another definition: the error prints the definition it found and the one it
+  expects. Drop the index the same way and build it again with the statement
+  above.
+
+Before any drop, confirm in `pg_stat_progress_create_index` that no build of
+the index is still running. Then run the schema-migrations again.
 
 Interpret writes one more btree entry and one GIN entry for each label when it
 inserts a name surface. A batch insert into `name_surfaces` took about 20% longer

@@ -529,7 +529,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=487
+expected_refusal_assertions=493
 predecessor_shape_proof_count=0
 # Includes registration_lifecycle applied after lookup_precomputation on the removal path.
 expected_predecessor_shape_proof_count=80
@@ -3669,7 +3669,6 @@ SQL
 } | run_psql
 assert_migration_context_count "$path_index_migration" empty-schema 1
 assert_migration_context_count "$path_index_migration" preceding-shape 1
-assert_migration_context_count "$path_index_migration" baseline-first 5
 # Another function under the name would give the index other hashes than the
 # statement looks up. The schema-migration must refuse it.
 assert_migration_refusal entry-key-hashes-function-body \
@@ -3679,17 +3678,86 @@ DROP INDEX name_surfaces_project_entry_keys_idx;
 CREATE OR REPLACE FUNCTION entry_key_hashes(labelhashes text[]) RETURNS bigint[]
 LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS 'SELECT ARRAY[]::bigint[]';
 SQL
-# An interrupted concurrent prebuild leaves an index that is not valid. The
-# planner never reads it, so the schema-migration must refuse it by name.
+# The schema-migration reads definitions under search_path pg_catalog and with
+# quote_all_identifiers off, and must leave both settings as it found them, in
+# the session and inside one transaction.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    emit_phase_migration "$path_index_migration" baseline-first
+    assert_search_path_sql "$scratch_schema"
+    printf 'SET search_path TO public;\n'
+    emit_phase_migration "$path_index_migration" baseline-first
+    assert_search_path_sql public
+    printf 'BEGIN;\nSET LOCAL search_path TO "%s", public;\n' "$scratch_schema"
+    render_phase_migration "$path_index_migration"
+    assert_search_path_sql "$scratch_schema, public"
+    printf 'COMMIT;\n'
+    assert_search_path_sql public
+    emit_quote_all_identifiers_probe "$path_index_migration" in-transaction
+} | run_psql
+assert_migration_context_count "$path_index_migration" baseline-first 7
+# Put each index in turn into every shape the schema-migration must refuse,
+# inside a transaction that rolls back: an invalid index, as an interrupted
+# concurrent prebuild leaves, a table under the name, another definition, and
+# an index of the name on another table. The schema-migration checks before
+# and after its builds with the same messages, so these assertions do not show
+# which pass refused. Its refusal of a missing name has no assertion here,
+# because the builds run just before that check.
+path_index_recovery="drop it with DROP INDEX CONCURRENTLY, build it again as docs/deployment.md describes, then run the schema-migrations again"
+declare -A path_index_wrong_keys=(
+    [name_surfaces_project_entry_keys_idx]="USING gin (labelhashes)"
+    [name_surfaces_project_path_hash_idx]="(namespace, hash_array_extended(labelhashes, 1))"
+)
 for path_index_name in \
     name_surfaces_project_entry_keys_idx \
     name_surfaces_project_path_hash_idx
 do
+    path_index_reviewed_definition="$(
+        {
+            printf 'SET search_path TO "%s";\n' "$scratch_schema"
+            printf '%s\n' \
+                '\pset tuples_only on' \
+                '\pset format unaligned' \
+                "SET search_path TO pg_catalog;" \
+                "SELECT pg_get_indexdef('$scratch_schema.$path_index_name'::regclass);"
+        } | run_psql
+    )"
+    path_index_wrong_definition="$(
+        {
+            printf 'BEGIN;\nSET LOCAL search_path TO "%s";\n' "$scratch_schema"
+            printf '%s\n' \
+                '\pset tuples_only on' \
+                '\pset format unaligned' \
+                "DROP INDEX $path_index_name;" \
+                "CREATE INDEX $path_index_name ON name_surfaces ${path_index_wrong_keys[$path_index_name]};" \
+                "SET LOCAL search_path TO pg_catalog;" \
+                "SELECT pg_get_indexdef('$scratch_schema.$path_index_name'::regclass);" \
+                "ROLLBACK;"
+        } | run_psql
+    )"
     assert_migration_refusal "invalid-$path_index_name" \
         "$path_index_migration" \
-        "$scratch_schema.$path_index_name exists but is not valid; drop it with DROP INDEX CONCURRENTLY, build it again as docs/deployment.md describes, then run the schema-migrations again" <<SQL
+        "$scratch_schema.$path_index_name exists but is not a valid and ready index on $scratch_schema.name_surfaces; $path_index_recovery" <<SQL
 UPDATE pg_index SET indisvalid = false
 WHERE indexrelid = '$path_index_name'::regclass;
+SQL
+    assert_migration_refusal "table-named-$path_index_name" \
+        "$path_index_migration" \
+        "$scratch_schema.$path_index_name is a table, not an index, so the index was never built; remove or rename that relation, then run the schema-migrations again" <<SQL
+DROP INDEX $path_index_name;
+CREATE TABLE $path_index_name ();
+SQL
+    assert_migration_refusal "wrong-definition-$path_index_name" \
+        "$path_index_migration" \
+        "$scratch_schema.$path_index_name exists but does not have the reviewed definition; found \"$path_index_wrong_definition\", expected \"$path_index_reviewed_definition\"; $path_index_recovery" <<SQL
+DROP INDEX $path_index_name;
+CREATE INDEX $path_index_name ON name_surfaces ${path_index_wrong_keys[$path_index_name]};
+SQL
+    assert_migration_refusal "other-table-$path_index_name" \
+        "$path_index_migration" \
+        "$scratch_schema.$path_index_name exists but is not a valid and ready index on $scratch_schema.name_surfaces; $path_index_recovery" <<SQL
+DROP INDEX $path_index_name;
+CREATE INDEX $path_index_name ON discovery_edges (chain_id);
 SQL
 done
 # The live prebuild in ops/project-progressive/install.sql must build the

@@ -1,6 +1,9 @@
-//! An observed ENSv2 path for the family tests: the admitted root registry whose `eth` entry
-//! points at the `.eth` registry, entries a test registers in that registry, and ENSv1 names
-//! whose surfaces carry real label hashes, so the ENSv2 registry walk places them under `.eth`.
+//! A synthetic ENSv2 path for the family tests. Every helper writes normalized events, name
+//! surfaces or bindings of the kinds and source families the family reducers read. None is
+//! taken from a chain, and no comment here says what a contract emits. The fixture holds an
+//! admitted root registry whose `eth` entry row points at a `.eth` registry address, entry
+//! events a test writes for that address, and names whose surfaces carry the label hashes of
+//! their labels, so Project's registry walk places them under `.eth`.
 use alloy_primitives::{B256, U256, keccak256};
 use anyhow::Result;
 use serde_json::json;
@@ -27,8 +30,8 @@ pub fn logical_name_id(name: &str) -> String {
     format!("ens:{:#x}", namehash(name))
 }
 
-/// Admit the root registry from block 0 and write its `eth` entry, as deployment leaves it.
-/// Returns the address of the `.eth` registry the entry points at.
+/// Admit the root registry from block 0 and write the events of its `eth` entry. Returns the
+/// `.eth` registry address the written `SubregistryChanged` event carries.
 pub async fn admit(fixture: &Fixture) -> Result<String> {
     declared_path::root_eth_entry(fixture).await?;
     Ok(sqlx::query_scalar(
@@ -71,7 +74,8 @@ pub async fn surface(fixture: &Fixture, name: &str) -> Result<String> {
     Ok(logical_name_id)
 }
 
-/// The ENSv1 registry sets `RESOLVER` on the name at `block`, log `log`.
+/// Write a `ResolverChanged` event of source family `ens_v1_registry_l1` for the name at
+/// `block`, log `log`, with `RESOLVER` as its resolver.
 pub async fn resolver(
     fixture: &Fixture,
     logical_name_id: &str,
@@ -97,8 +101,10 @@ pub async fn resolver(
     Ok(())
 }
 
-/// A second-level name with ENSv1 lease `n`: bound at `block`, granted one block later until
-/// `expiry`, with `RESOLVER` set one block after that. Returns its logical name id.
+/// A second-level name with lease resource `n`, written as events of source family
+/// `ens_v1_registrar_l1`: a binding and a `SurfaceBound` at `block`, a `RegistrationGranted`
+/// until `expiry` one block later, and the `resolver` event one block after that. Returns its
+/// logical name id.
 pub async fn leased(
     fixture: &Fixture,
     name: &str,
@@ -159,8 +165,9 @@ pub async fn leased(
     Ok(logical_name_id)
 }
 
-/// A subname the ENSv1 registry alone holds, as resource `n`: owned from `block`, with
-/// `RESOLVER` set two blocks later. Returns its logical name id.
+/// A subname with resource `n`, written as events of source family `ens_v1_registry_l1`
+/// alone: a binding and an `AuthorityTransferred` to `OWNER` at `block`, and the `resolver`
+/// event two blocks later. Returns its logical name id.
 pub async fn subname(fixture: &Fixture, name: &str, n: u32, block: i64) -> Result<String> {
     let logical_name_id = surface(fixture, name).await?;
     let node = uuid(0x3000 + n);
@@ -196,7 +203,9 @@ pub async fn subname(fixture: &Fixture, name: &str, n: u32, block: i64) -> Resul
     Ok(logical_name_id)
 }
 
-/// The token id of `label`'s entry at version 0 and its resource in `registry`.
+/// The ids the fixture writes for `label` in `registry`: the label hash with its low 32 bits
+/// cleared as the token id, a contract instance id derived from the address, and the resource
+/// id storage derives from both.
 fn entry(registry: &str, label: &str) -> (String, String, String) {
     let token = format!(
         "{:#066x}",
@@ -210,8 +219,9 @@ fn entry(registry: &str, label: &str) -> (String, String, String) {
     (token, instance.to_string(), resource)
 }
 
-/// What `registry` logs at `block` when it registers `label` to `OWNER` until `expiry`, as far
-/// as the family reducers read it: the registration at log `log` and the token's resource at
+/// Write the two events of source family `ens_v2_registry_l1` the family reducers read as a
+/// registration of `label` to `OWNER` until `expiry`, with `registry` as their emitting
+/// address: a `RegistrationGranted` at `block`, log `log`, and a `TokenResourceLinked` at
 /// `log + 1`. The events carry no name, so only the entry links them to the names under the
 /// label.
 pub async fn register(
@@ -254,14 +264,15 @@ pub async fn register(
     Ok(())
 }
 
-/// A pointer of `label`'s entry in `registry`.
+/// The pointer event `point` writes for `label`'s entry in `registry`.
 pub enum Pointer<'a> {
     Resolver(&'a str),
     Subregistry(&'a str),
 }
 
-/// What `registry` logs at `block`, log `log`, when the entry of `label` is pointed at a
-/// resolver or a subregistry. The event carries no name.
+/// Write a `ResolverChanged` or `SubregistryChanged` event of source family
+/// `ens_v2_registry_l1` for the entry of `label` at `block`, log `log`, with `registry` as its
+/// emitting address. The event carries no name.
 pub async fn point(
     fixture: &Fixture,
     block: i64,
@@ -273,8 +284,7 @@ pub async fn point(
     pointed(fixture, block, log, registry, label, pointer, None).await
 }
 
-/// `point` for an entry whose name the adapter knew when it wrote the event: the event names
-/// `logical_name_id`, the name the entry stands for.
+/// `point`, with `logical_name_id` as the name the written event carries.
 pub async fn point_named(
     fixture: &Fixture,
     block: i64,
@@ -328,8 +338,8 @@ async fn pointed(
     Ok(())
 }
 
-/// What `registry` logs at `block`, log `log`, when it announces that it is mounted at the
-/// entry of `label` in `parent`.
+/// Write a `ParentChanged` event of source family `ens_v2_registry_l1` at `block`, log `log`,
+/// with `registry` as its emitting address, `parent` as the parent and `label` as the label.
 pub async fn parent(
     fixture: &Fixture,
     block: i64,
@@ -351,8 +361,9 @@ pub async fn parent(
     Ok(())
 }
 
-/// The event that announces `registry` as a created registry at `block`, log `log`. Every
-/// name mounted below a created registry is selected in that block.
+/// Write a `RegistryCreated` event of source family `ens_v2_registry_l1` at `block`, log
+/// `log`, that carries `registry`. Project selects every name it finds mounted below that
+/// address in that block.
 pub async fn created(fixture: &Fixture, block: i64, log: i64, registry: &str) -> Result<()> {
     let identity = format!("RegistryCreated:{registry}:{block}:{log}");
     fixture
@@ -370,8 +381,8 @@ pub async fn created(fixture: &Fixture, block: i64, log: i64, registry: &str) ->
     Ok(())
 }
 
-/// The ENSv1 registry's child edge of `child` under `parent` at `block`, log `log`: the
-/// NewOwner log that gives the child node to `OWNER`.
+/// Write a `SubregistryChanged` event of source family `ens_v1_registry_l1` at `block`, log
+/// `log`: the child edge of `child` under `parent`, with `OWNER` as the owner.
 pub async fn edge(
     fixture: &Fixture,
     block: i64,
@@ -416,7 +427,7 @@ pub async fn filler(fixture: &Fixture, block: i64) -> Result<()> {
     Ok(())
 }
 
-/// A registry the `.eth` registry's `bob` entry points at in `history`.
+/// The registry address the `bob` entry's `SubregistryChanged` event carries in `history`.
 pub const USER_REGISTRY: &str = "0x00000000000000000000000000000000000000e9";
 
 /// The logical name ids of the names in `history`.
@@ -433,21 +444,22 @@ pub fn block_time(block: i64) -> u64 {
     1_800_000_000 + 12 * block.unsigned_abs()
 }
 
-/// A history over blocks 0 to 12 in which ENSv2 entry and pointer changes move names that no
-/// event of their block names:
+/// A history over blocks 0 to 12 in which ENSv2 entry and pointer events move names that no
+/// event of their block names. Each line lists the synthetic events the helpers write:
 ///
-/// - 0: the root registry is admitted and its `eth` entry points at the `.eth` registry.
-/// - 1 to 4: ENSv1 leases `bob.eth` and `carol.eth` and sets their resolvers. The ENSv1
-///   registry holds `sub.bob.eth`, `deep.sub.bob.eth` and `kid.carol.eth` with resolvers, and
-///   logs the child edge of `sub.bob.eth` at block 3.
-/// - 5: the `.eth` registry registers `bob`, far into the future.
-/// - 7: it sets `bob`'s resolver and points `bob` at `USER_REGISTRY`, in an event that names
-///   `bob.eth`. `USER_REGISTRY` announces `bob` in the `.eth` registry as its parent.
-/// - 8: `USER_REGISTRY` registers `sub`, and the `.eth` registry registers `carol` until
-///   block 10's time and sets its resolver.
-/// - 9: `USER_REGISTRY` is announced as a created registry.
-/// - 10: the ENSv1 registry sets `deep.sub.bob.eth`'s resolver again, and `carol`'s entry
-///   expires by the clock.
+/// - 0: the root registry is admitted, with the events of its `eth` entry.
+/// - 1 to 4: `leased` writes `bob.eth` and `carol.eth`. `subname` writes `sub.bob.eth`,
+///   `deep.sub.bob.eth` and `kid.carol.eth`. `edge` writes the child edge of `sub.bob.eth`
+///   at block 3.
+/// - 5: `register` writes `bob` for the `.eth` registry address, far into the future.
+/// - 7: `point` writes `bob`'s resolver. `point_named` writes its subregistry,
+///   `USER_REGISTRY`, in an event that names `bob.eth`. `parent` writes `USER_REGISTRY`'s
+///   parent as `bob` in the `.eth` registry address.
+/// - 8: `register` writes `sub` for `USER_REGISTRY`, and `carol` for the `.eth` registry
+///   address until block 10's time. `point` writes `carol`'s resolver.
+/// - 9: `created` writes `USER_REGISTRY` as a created registry.
+/// - 10: `resolver` writes `deep.sub.bob.eth`'s resolver again, and the expiry written for
+///   `carol`'s entry passes by the clock.
 ///
 /// The expiry at block 10 is load-bearing. No event of block 10 names `carol.eth` or
 /// `kid.carol.eth`, so their rows move only if the publication selects the names with a due
