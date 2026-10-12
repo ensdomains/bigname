@@ -259,19 +259,21 @@ impl BlockEvent {
 /// history the run captured (`manifests::History::declaration_starts`), the one population
 /// classifies under, not from a read of their own. A rebuild visits only these: any other block
 /// owns no family fact. At most `limit` blocks are returned, the lowest first. Each source takes
-/// its own lowest `limit` distinct readable block numbers, so at most five times `limit` rows
+/// its own lowest `limit` distinct readable block numbers, so at most seven times `limit` rows
 /// reach the outer deduplication, and the lowest `limit` of the sources' union is the lowest
 /// `limit` overall. That bounds each source's output, not its scan: the events and bindings
 /// sources can stop early when the planner walks their `(chain_id, block_number)` indexes in
 /// order, but duplicate rows per block, rejected rows and other plans can make them read much or
-/// all of the remaining interval. The two resolver edge sources deduplicate their in-range
-/// boundaries before applying readability and the per-source limit; with an ordered nested-loop
-/// plan the lineage probes stop once enough readable boundaries are produced or the candidates
-/// are exhausted (unreadable candidates need probes too), but that plan is not guaranteed and
-/// other plans may read more lineage rows. Collecting the boundaries still reads the chain's
-/// resolver edges and the matching addresses; the declaration source reads the captured start
-/// list. Readability is checked inside each source, before its limit, so no source spends its
-/// limit on blocks that are then dropped.
+/// all of the remaining interval. The four resolver edge sources are the edges that start in
+/// the range, the edges that stop in it, and the addresses of a resolver edge's destination
+/// that start or stop in it. Each reads only the rows with that boundary in the range, through
+/// the boundary's own index, and deduplicates them before applying readability and the
+/// per-source limit. An address costs one more probe, of the resolver destination index. With
+/// an ordered nested-loop plan the lineage probes stop once enough readable boundaries are
+/// produced or the candidates are exhausted (unreadable candidates need probes too), but that
+/// plan is not guaranteed and other plans may read more lineage rows. The declaration source
+/// reads the captured start list. Readability is checked inside each source, before its limit,
+/// so no source spends its limit on blocks that are then dropped.
 pub(crate) async fn work_blocks(
     pool: &sqlx::PgPool,
     chain_id: &str,
@@ -309,13 +311,10 @@ pub(crate) async fn work_blocks(
               LIMIT $5)
              UNION ALL
              (SELECT boundary.block_number
-              FROM (SELECT DISTINCT boundary.block_number
+              FROM (SELECT DISTINCT edge.active_from_block_number AS block_number
                     FROM discovery_edges edge
-                    CROSS JOIN LATERAL (VALUES (edge.active_from_block_number),
-                                               (edge.active_to_block_number))
-                        boundary (block_number)
                     WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
-                      AND boundary.block_number BETWEEN $3 AND $2) boundary
+                      AND edge.active_from_block_number BETWEEN $3 AND $2) boundary
               -- An activation below the retained lineage has no block to apply; the first
               -- readable work block classifies under it.
               WHERE EXISTS (
@@ -326,16 +325,48 @@ pub(crate) async fn work_blocks(
               LIMIT $5)
              UNION ALL
              (SELECT boundary.block_number
-              FROM (SELECT DISTINCT boundary.block_number
+              FROM (SELECT DISTINCT edge.active_to_block_number AS block_number
                     FROM discovery_edges edge
-                    JOIN contract_instance_addresses address
-                      ON address.contract_instance_id = edge.to_contract_instance_id
-                     AND address.chain_id = edge.chain_id
-                    CROSS JOIN LATERAL (VALUES (address.active_from_block_number),
-                                               (address.active_to_block_number))
-                        boundary (block_number)
                     WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
-                      AND boundary.block_number BETWEEN $3 AND $2) boundary
+                      AND edge.active_to_block_number BETWEEN $3 AND $2) boundary
+              WHERE EXISTS (
+                  SELECT 1 FROM chain_lineage lineage
+                  WHERE lineage.chain_id = $1 AND lineage.block_number = boundary.block_number
+                    AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
+              ORDER BY 1
+              LIMIT $5)
+             UNION ALL
+             (SELECT boundary.block_number
+              FROM (SELECT DISTINCT address.active_from_block_number AS block_number
+                    FROM contract_instance_addresses address
+                    WHERE address.chain_id = $1
+                      AND address.active_from_block_number BETWEEN $3 AND $2
+                      -- The address of a resolver edge's destination. OFFSET 0 keeps this
+                      -- one index probe for each address that starts in the range.
+                      AND EXISTS (
+                          SELECT 1 FROM discovery_edges edge
+                          WHERE edge.chain_id = address.chain_id
+                            AND edge.to_contract_instance_id = address.contract_instance_id
+                            AND edge.edge_kind = 'resolver'
+                          OFFSET 0)) boundary
+              WHERE EXISTS (
+                  SELECT 1 FROM chain_lineage lineage
+                  WHERE lineage.chain_id = $1 AND lineage.block_number = boundary.block_number
+                    AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
+              ORDER BY 1
+              LIMIT $5)
+             UNION ALL
+             (SELECT boundary.block_number
+              FROM (SELECT DISTINCT address.active_to_block_number AS block_number
+                    FROM contract_instance_addresses address
+                    WHERE address.chain_id = $1
+                      AND address.active_to_block_number BETWEEN $3 AND $2
+                      AND EXISTS (
+                          SELECT 1 FROM discovery_edges edge
+                          WHERE edge.chain_id = address.chain_id
+                            AND edge.to_contract_instance_id = address.contract_instance_id
+                            AND edge.edge_kind = 'resolver'
+                          OFFSET 0)) boundary
               WHERE EXISTS (
                   SELECT 1 FROM chain_lineage lineage
                   WHERE lineage.chain_id = $1 AND lineage.block_number = boundary.block_number

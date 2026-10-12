@@ -2844,9 +2844,11 @@ canonical surface binding, a resolver discovery edge or its target's contract
 address starting or stopping there, or the start block of a manifest
 declaration the run captured. A rebuild visits only these blocks, plus its
 target, since no other block owns a family fact; the block-by-block catch-up
-outside a rebuild applies every block. The sources are the five unions of
+outside a rebuild applies every block. The sources are the seven unions of
 `work_blocks` in `crates/project/src/families/input.rs`
-([projections](projections.md#owned-key-families)).
+([projections](projections.md#owned-key-families)). Resolver edges that start,
+resolver edges that stop, and the addresses of their targets that start or stop
+are four of them.
 
 ## Rebuild range
 

@@ -6,7 +6,7 @@ use serde_json::json;
 
 use super::{
     FamilyOptions, block,
-    guard_tests::{CHAIN, NO_INTERPRET, database},
+    guard_tests::{CHAIN, NO_INTERPRET, database, executed_scans, reads_through},
     input, manifests, marker,
 };
 
@@ -569,6 +569,82 @@ async fn work_blocks_returns_the_resolver_boundaries_it_returned_before() -> Res
             "limit {limit}"
         );
     }
+    database.cleanup().await?;
+    Ok(())
+}
+
+// The work list reads the resolver edges and addresses that start or stop inside its
+// range through the four boundary indexes, and asks whether an address belongs to a resolver
+// edge's destination through that index. It reads no edge or address outside the range, under
+// a custom and a generic plan.
+#[tokio::test]
+async fn work_blocks_reads_resolver_boundaries_by_index() -> Result<()> {
+    const EDGE_INDEXES: [&str; 3] = [
+        "project_families_discovery_edges_resolver_from_block_idx",
+        "project_families_discovery_edges_resolver_to_block_idx",
+        "project_families_discovery_edges_resolver_destination_idx",
+    ];
+    const ADDRESS_INDEXES: [&str; 2] = [
+        "project_families_contract_instance_addresses_from_block_idx",
+        "project_families_contract_instance_addresses_to_block_idx",
+    ];
+    let (database, pool) = database().await?;
+    resolver_boundaries(&pool).await?;
+    let history = manifests::History::read(&pool, CHAIN, TO).await?;
+    input::work_blocks(&pool, CHAIN, FROM, TO, &history, 3).await?;
+    // The pool holds one session, and sqlx keeps the statement `work_blocks` prepared on it.
+    let prepared: String = sqlx::query_scalar(
+        "SELECT name FROM pg_prepared_statements
+         WHERE statement LIKE '/* project:families.input.work_blocks */%'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let mut failures = Vec::new();
+    for mode in ["force_custom_plan", "force_generic_plan"] {
+        sqlx::raw_sql(&format!("SET plan_cache_mode = {mode}"))
+            .execute(&pool)
+            .await?;
+        let plan: serde_json::Value = sqlx::query_scalar(&format!(
+            "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE {prepared} ('{CHAIN}', {TO}, {FROM}, '{{}}', 3)"
+        ))
+        .fetch_one(&pool)
+        .await?;
+        let mut scans = Vec::new();
+        executed_scans(&plan[0]["Plan"], "", &mut scans);
+        let mut read = std::collections::BTreeSet::new();
+        for (_, node) in scans {
+            read.extend(node["Index Name"].as_str());
+            let indexes = match node["Relation Name"].as_str() {
+                Some("discovery_edges") => &EDGE_INDEXES[..],
+                Some("contract_instance_addresses") => &ADDRESS_INDEXES[..],
+                _ => continue,
+            };
+            if !reads_through(node, indexes) {
+                failures.push(format!(
+                    "{mode}: {} of {} by {}",
+                    node["Node Type"], node["Relation Name"], node["Index Name"]
+                ));
+            }
+            if let Some(removed) = node["Rows Removed by Filter"].as_i64()
+                && removed * node["Actual Loops"].as_i64().unwrap_or(1) > 16
+            {
+                failures.push(format!(
+                    "{mode}: a scan of {} filters out {removed} rows",
+                    node["Relation Name"]
+                ));
+            }
+        }
+        for index in EDGE_INDEXES[..2].iter().chain(&ADDRESS_INDEXES) {
+            if !read.contains(index) {
+                failures.push(format!("{mode}: {index} is not read"));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "the work list's access paths:\n{}",
+        failures.join("\n")
+    );
     database.cleanup().await?;
     Ok(())
 }

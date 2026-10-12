@@ -3878,14 +3878,18 @@ Project redo.
 The build that makes the selection of names under a changed ENSv2 path read only
 what a publication touches (see
 [owned key families](projections.md#owned-key-families) and
-[table ownership](storage.md#table-ownership)) changes one Project statement
+[table ownership](storage.md#table-ownership)) changes two Project statements
 and adds one schema-migration.
 
 - `project:families.resolution_paths.prepare` read every `name_surfaces` row of
   the namespace up to three times in each publication. It now finds its rows through
   two new indexes. The names it selects are the same.
+- `project:families.input.work_blocks` read every resolver discovery edge of the
+  chain for each rebuild work list. It now reads the edges and addresses that
+  start or stop in the requested range, through indexes that already exist. The
+  blocks it returns are the same.
 - Stored rows do not change. API responses do not change.
-- The statement is in `crates/project/src`, an input of the
+- Both statements are in `crates/project/src`, an input of the
   [projection content hash](glossary.md#projection-content-hash) only. That hash
   rotates for every chain. The
   [interpreter content hash](glossary.md#interpreter-content-hash) does not.
