@@ -100,8 +100,15 @@ async fn run_with(
 async fn families_text(pool: &PgPool) -> Result<Vec<(&'static str, String)>> {
     let mut tables = Vec::new();
     for table in families::family_tables() {
+        // As `Fixture::exact` in `families_support`. The catalogue stamp carries the family marker's
+        // sequence. It counts marker writes, so it differs between the two rebuilds.
+        let row = if table == "project_history_catalogue_marker" {
+            "to_jsonb(t) - 'publication_sequence'"
+        } else {
+            "to_jsonb(t)"
+        };
         let text = sqlx::query_scalar(&format!(
-            "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]')::text FROM {table} t"
+            "SELECT coalesce(jsonb_agg({row} ORDER BY ({row})::text), '[]')::text FROM {table} t"
         ))
         .fetch_one(pool)
         .await?;

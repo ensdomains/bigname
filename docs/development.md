@@ -106,6 +106,38 @@ phase-runner verification integration tests also create one shared, unprivileged
 test login role; that server user therefore needs `CREATEROLE` for the full
 phase-runner suite.
 
+A test returns every connection and transaction it took from
+`TestDatabase::pool()` before it calls `TestDatabase::cleanup`. Cleanup closes
+the pool before it drops the database, and the close can wait for connections
+that are still checked out. When the close has not finished after 10 seconds,
+cleanup drops the database anyway and fails the test with a message that says
+pooled connections were still checked out. A held connection does not always
+delay the close, so a passing cleanup does not show that none was held.
+
+Tests have time limits:
+
+- `cargo nextest` kills a test that runs for 12 minutes and reports it as
+  `TIMEOUT`, which fails the run. The limit is the default profile's
+  `slow-timeout` in `.config/nextest.toml`.
+- `cargo test` has no per-test limit. CI gives the core suite's run step 20
+  minutes. In the log of a run cut off there, a test that never finished has a
+  "has been running for over 60 seconds" line and no result line.
+
+On CI the slowest test takes under 4 minutes.
+
+The CI jobs for the core, API and phase-runner suites record where a stalled
+test stopped, before a limit ends it:
+
+- `scripts/ci-pg-hang-watch` runs in the background. For each database with a
+  client session older than 6 minutes it writes, once, the database's
+  `pg_stat_activity` rows and the `pg_locks` rows that are not granted. The
+  rows give each session's state, wait event, blocking sessions, start times
+  and last statement. A statement that mentions a password or a URL is not
+  shown. The job's "Report stalled test databases" step prints the report.
+- The PostgreSQL service runs with `log_lock_waits=on`. Its log, which GitHub
+  prints when the job ends, names every lock wait longer than one second with
+  the sessions that hold the lock.
+
 ## Bootstrap migration hygiene
 
 During bootstrap, bigname has no active deployments or shared production

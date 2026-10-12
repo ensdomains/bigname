@@ -54,18 +54,17 @@ impl Wire {
                 if client.set_nodelay(true).is_err() || server.set_nodelay(true).is_err() {
                     continue;
                 }
-                let (Ok(mut replies), Ok(mut back)) = (server.try_clone(), client.try_clone())
-                else {
+                let (Ok(replies), Ok(back)) = (server.try_clone(), client.try_clone()) else {
                     continue;
                 };
                 thread::spawn(move || {
-                    let _ = std::io::copy(&mut replies, &mut back);
-                    let _ = back.shutdown(Shutdown::Both);
+                    let ends = ClosedOnExit(replies, back);
+                    let _ = std::io::copy(&mut &ends.0, &mut &ends.1);
                 });
                 let sent = sent.clone();
                 thread::spawn(move || {
-                    let _ = relay(client, &server, &sent);
-                    let _ = server.shutdown(Shutdown::Both);
+                    let ends = ClosedOnExit(client, server);
+                    let _ = relay(&ends.0, &ends.1, &sent);
                 });
             }
         });
@@ -74,6 +73,17 @@ impl Wire {
 
     pub fn take(&self) -> Vec<Sent> {
         std::mem::take(&mut *self.sent.lock().unwrap())
+    }
+}
+
+/// Shuts both ends of a relayed connection when its thread ends, by return or by panic, so
+/// neither peer waits on a socket that the other relay thread still holds open.
+struct ClosedOnExit(TcpStream, TcpStream);
+
+impl Drop for ClosedOnExit {
+    fn drop(&mut self) {
+        let _ = self.0.shutdown(Shutdown::Both);
+        let _ = self.1.shutdown(Shutdown::Both);
     }
 }
 
@@ -93,7 +103,7 @@ fn int16(bytes: &[u8]) -> (usize, &[u8]) {
 }
 
 fn relay(
-    mut client: TcpStream,
+    mut client: &TcpStream,
     mut server: &TcpStream,
     sent: &Mutex<Vec<Sent>>,
 ) -> std::io::Result<()> {

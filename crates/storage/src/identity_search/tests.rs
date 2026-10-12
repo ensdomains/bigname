@@ -39,6 +39,8 @@ use sqlx::{
     postgres::{PgConnectOptions, PgSslMode},
 };
 use std::{
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
     panic::AssertUnwindSafe,
     time::{Duration, Instant},
 };
@@ -779,6 +781,7 @@ async fn later_refresh_never_reads_rows_staged_before() -> Result<()> {
     let mut setup = fixture.db.pool().acquire().await?;
     reveal(&mut setup, &own_label(5), "five").await?;
     reveal(&mut setup, &own_label(125), "later").await?;
+    drop(setup);
     let mut tx = conn.begin().await?;
     let trace = refresh_like_previous(&fixture.wire, &mut tx, &ids(131..=140), &[]).await?;
     ensure!(staged_rows(&mut tx).await? == 10);
@@ -1011,4 +1014,26 @@ async fn page_statement_is_not_kept_prepared() -> Result<()> {
         "the page statement is prepared and can keep a stale plan"
     );
     fixture.db.cleanup().await
+}
+
+#[test]
+fn relay_closes_both_sockets_when_its_thread_fails() -> Result<()> {
+    let upstream = TcpListener::bind(("127.0.0.1", 0))?;
+    let wire = Wire::start("127.0.0.1", upstream.local_addr()?.port())?;
+    let mut client = TcpStream::connect(("127.0.0.1", wire.port))?;
+    client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    // A 2.0 startup packet fails the relay's protocol assertion.
+    client.write_all(&[0, 0, 0, 8, 0, 2, 0, 0])?;
+    let mut byte = [0_u8; 1];
+    let read = client
+        .read(&mut byte)
+        .context("the relay kept the client's socket open")?;
+    ensure!(read == 0, "the relay answered the refused startup");
+    let (mut server, _) = upstream.accept()?;
+    server.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let read = server
+        .read(&mut byte)
+        .context("the relay kept the server's socket open")?;
+    ensure!(read == 0, "the relay forwarded the refused startup");
+    Ok(())
 }

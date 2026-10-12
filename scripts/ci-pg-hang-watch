@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Usage: scripts/ci-pg-hang-watch <postgres-container> <report-file> [user]
+#
+# CI starts this in the background before a database-backed test step. Every 15
+# seconds it asks the PostgreSQL service container which databases have a
+# client session older than 6 minutes. No test takes that long, so such a
+# database belongs to a stalled test. For each one, once, it appends the
+# database's sessions and the locks they wait for to the report file. It must
+# do so before the test's time limit: a killed test takes its sessions with it.
+#
+# It reaches the server through `docker exec` and the container's local socket,
+# so it handles no password and no connection URL. A statement that mentions a
+# password or a URL is not printed. It ends when the container does, prints
+# nothing, and never fails.
+set -u
+
+container=${1:-} report=${2:-} user=${3:-bigname}
+[ -n "$container" ] && [ -n "$report" ] || exit 0
+command -v docker >/dev/null 2>&1 || exit 0
+
+sql() {
+  timeout 20 docker exec -i "$container" psql -X -q -v ON_ERROR_STOP=1 -U "$user" "$@" 2>/dev/null
+}
+
+reported=$'\n'
+while [ "$(docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null)" = true ]; do
+  stalled=$(sql -d postgres -At -c "
+    SELECT datname FROM pg_stat_activity
+    WHERE backend_type = 'client backend' AND datname IS NOT NULL AND pid <> pg_backend_pid()
+    GROUP BY datname HAVING min(backend_start) < now() - interval '6 minutes'" </dev/null) || stalled=
+  while IFS= read -r database; do
+    [ -n "$database" ] || continue
+    case "$reported" in *$'\n'"$database"$'\n'*) continue ;; esac
+    reported+="$database"$'\n'
+    {
+      echo "== $(date -u +%H:%M:%SZ) database $database has a session older than 6 minutes"
+      sql -d "$database" <<'SQL'
+SELECT pid, state, wait_event_type, wait_event, pg_blocking_pids(pid) AS blocked_by,
+       backend_start, xact_start, state_change,
+       CASE WHEN query ~* 'password|://' THEN '(not shown: mentions a password or a URL)'
+            ELSE left(regexp_replace(query, '\s+', ' ', 'g'), 300) END AS last_statement
+FROM pg_stat_activity
+WHERE datname = current_database() AND pid <> pg_backend_pid()
+ORDER BY backend_start;
+SELECT pid, locktype, mode, relation::regclass, transactionid, virtualxid, classid, objid, waitstart
+FROM pg_locks
+WHERE NOT granted
+  AND pid IN (SELECT pid FROM pg_stat_activity WHERE datname = current_database());
+SQL
+    } >>"$report" 2>/dev/null
+  done <<<"$stalled"
+  sleep 15
+done
+exit 0
