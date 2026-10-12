@@ -1,12 +1,33 @@
 //! One SQL work selection shared by Project consumers. Physical entry changes retain their key.
 //! A deduplicated registry walk consumes observed name prefixes, so repeated registries terminate
 //! by name depth and nested/rebound mounts are dependencies without a persistent graph.
+//!
+//! Three steps look names up in `name_surfaces` and read two indexes Project owns there
+//! (docs/storage.md, "Table ownership"). The ancestors of a touched name are found by the hash
+//! of each of its suffixes, in `name_surfaces_project_path_hash_idx`. The names that hold a
+//! changed entry's label, and the names under a changed prefix, are found by the hash of the
+//! label's entry key, in `name_surfaces_project_entry_keys_idx`. An index only narrows the
+//! surfaces read. The comparison of the label hashes themselves decides, so a hash collision
+//! never changes the selection. Each lookup sits in a `LATERAL (... OFFSET 0)` subquery, which
+//! the planner runs once per outer row and cannot turn into a join over every surface.
+//!
+//! Three cases read every observed ENS surface, because they can move every name: a changed
+//! registry, a classification change of the v1 fallback resolver, and a prefix of no labels.
+//! A prefix whose first label hash is null has no entry key to look up and also reads them all.
 //! Missing/current/former membership and divergence evidence never restrict this candidate set.
 //! SourceManifestUpdated has no block position. Supported manifest sync invalidates phase hashes
 //! and requires a complete Interpret/Project redo; it is not an incremental event-range trigger.
 use bigname_storage::families::name::PHYSICAL_POINTER_EVENT_SQL;
 
 pub(super) fn statement(normal_work: &str) -> String {
+    // The `.eth` names among the surfaces `child`, and the test that `child` is `prefix` or a
+    // name under it. Every arm of `affected` that reads surfaces applies the first, and the two
+    // arms that follow a prefix apply the second.
+    let eth_name = "child.chain_id=$1 AND child.namespace='ens' AND cardinality(child.labelhashes)>=1
+          AND lower(child.labelhashes[cardinality(child.labelhashes)])='0x4f5b812789fc606be1b3b16908db13fc7a9adf7ca72641f84d75b47069d3d7f0'";
+    let under_prefix = "cardinality(prefix.labelhashes)<=cardinality(child.labelhashes)
+              AND (cardinality(prefix.labelhashes)=0 OR
+                child.labelhashes[cardinality(child.labelhashes)-cardinality(prefix.labelhashes)+1:]=prefix.labelhashes)";
     format!(
         r#"/* project:families.resolution_paths.prepare */
     INSERT INTO pg_temp.bigname_resolution_path_work (logical_name_id)
@@ -53,12 +74,20 @@ pub(super) fn statement(normal_work: &str) -> String {
         FROM changed_resolvers changed JOIN project_registry_pointer pointer
           ON pointer.chain_id=$1 AND pointer.resolver_address=changed.resolver
     ), source_ancestors AS MATERIALIZED (
-        SELECT DISTINCT ancestor.logical_name_id FROM source_names name
+        -- An ancestor of two or more labels is the child's suffix from `depth`. The index
+        -- finds the surfaces with that suffix's hash and the suffix comparison decides.
+        SELECT DISTINCT probe.logical_name_id FROM source_names name
         JOIN name_surfaces child ON child.logical_name_id=name.logical_name_id AND child.chain_id=$1
-        JOIN name_surfaces ancestor ON ancestor.chain_id=$1 AND ancestor.namespace='ens'
-          AND cardinality(ancestor.labelhashes)>=2
-          AND cardinality(ancestor.labelhashes)<=cardinality(child.labelhashes)
-          AND child.labelhashes[cardinality(child.labelhashes)-cardinality(ancestor.labelhashes)+1:]=ancestor.labelhashes
+        CROSS JOIN LATERAL generate_series(1,cardinality(child.labelhashes)-1) depth
+        CROSS JOIN LATERAL (
+            SELECT ancestor.logical_name_id FROM name_surfaces ancestor
+            WHERE ancestor.chain_id=$1 AND ancestor.namespace='ens'
+              AND hash_array_extended(ancestor.labelhashes,0)=hash_array_extended(child.labelhashes[depth:],0)
+              AND cardinality(ancestor.labelhashes)>=2
+              AND cardinality(ancestor.labelhashes)<=cardinality(child.labelhashes)
+              AND child.labelhashes[cardinality(child.labelhashes)-cardinality(ancestor.labelhashes)+1:]=ancestor.labelhashes
+            OFFSET 0
+        ) probe
         WHERE EXISTS (SELECT 1 FROM source_names)
     ), changed_entries AS MATERIALIZED (
         SELECT key->>1 AS registry, key->>2 AS entry_key FROM journal WHERE family='project_ens_v2_entry_owner'
@@ -133,12 +162,23 @@ pub(super) fn statement(normal_work: &str) -> String {
         SELECT DISTINCT surface.labelhashes FROM source_names name JOIN name_surfaces surface
           ON surface.logical_name_id=name.logical_name_id AND surface.chain_id=$1 AND surface.namespace='ens'
     ), candidates AS MATERIALIZED (
+        -- A changed registry can sit below any name, so every surface is a candidate.
         SELECT surface.labelhashes FROM name_surfaces surface
-        WHERE (EXISTS (SELECT 1 FROM changed_entries) OR EXISTS (SELECT 1 FROM changed_registries))
+        WHERE EXISTS (SELECT 1 FROM changed_registries)
           AND surface.chain_id=$1 AND surface.namespace='ens' AND cardinality(surface.labelhashes)>0
-          AND (EXISTS (SELECT 1 FROM changed_registries) OR EXISTS (
-            SELECT 1 FROM unnest(surface.labelhashes) label JOIN changed_entries changed
-              ON changed.entry_key=left(lower(label),58)||'00000000'))
+        UNION ALL
+        -- With changed entries alone, a candidate holds a label of a changed entry key. The
+        -- index finds the surfaces with the key's hash and the label comparison decides.
+        SELECT probe.labelhashes FROM (SELECT DISTINCT entry_key FROM changed_entries) changed
+        CROSS JOIN LATERAL (
+            SELECT surface.labelhashes FROM name_surfaces surface
+            WHERE entry_key_hashes(surface.labelhashes) @> ARRAY[hashtextextended(changed.entry_key,0)]
+              AND surface.chain_id=$1 AND surface.namespace='ens' AND cardinality(surface.labelhashes)>0
+              AND EXISTS (SELECT 1 FROM unnest(surface.labelhashes) label
+                WHERE changed.entry_key=left(lower(label),58)||'00000000')
+            OFFSET 0
+        ) probe
+        WHERE NOT EXISTS (SELECT 1 FROM changed_registries)
     ), wanted AS MATERIALIZED (
         SELECT DISTINCT candidate.labelhashes[depth:] AS labelhashes
         FROM candidates candidate CROSS JOIN LATERAL generate_series(1,cardinality(candidate.labelhashes)) depth
@@ -180,14 +220,34 @@ pub(super) fn statement(normal_work: &str) -> String {
     ), prefixes AS MATERIALIZED (
         SELECT labelhashes FROM logical_prefixes UNION SELECT labelhashes FROM physical_prefixes
     ), affected AS MATERIALIZED (
+        -- A fallback resolver change or a prefix of no labels affects every `.eth` name.
         SELECT child.logical_name_id FROM name_surfaces child
-        WHERE (EXISTS (SELECT 1 FROM global_change) OR EXISTS (SELECT 1 FROM prefixes))
-          AND child.chain_id=$1 AND child.namespace='ens' AND cardinality(child.labelhashes)>=1
-          AND lower(child.labelhashes[cardinality(child.labelhashes)])='0x4f5b812789fc606be1b3b16908db13fc7a9adf7ca72641f84d75b47069d3d7f0'
-          AND (EXISTS (SELECT 1 FROM global_change) OR EXISTS (
-            SELECT 1 FROM prefixes prefix WHERE cardinality(prefix.labelhashes)<=cardinality(child.labelhashes)
-              AND (cardinality(prefix.labelhashes)=0 OR
-                child.labelhashes[cardinality(child.labelhashes)-cardinality(prefix.labelhashes)+1:]=prefix.labelhashes)))
+        WHERE (EXISTS (SELECT 1 FROM global_change)
+            OR EXISTS (SELECT 1 FROM prefixes prefix WHERE cardinality(prefix.labelhashes)=0))
+          AND {eth_name}
+        UNION
+        -- A name under a prefix holds the prefix's first label. The index finds the surfaces
+        -- with the hash of that label's entry key and the suffix comparison decides.
+        SELECT probe.logical_name_id FROM prefixes prefix
+        CROSS JOIN LATERAL (
+            SELECT child.logical_name_id FROM name_surfaces child
+            WHERE entry_key_hashes(child.labelhashes)
+                @> ARRAY[hashtextextended(left(lower(prefix.labelhashes[1]),58)||'00000000',0)]
+              AND {eth_name}
+              AND {under_prefix}
+            OFFSET 0
+        ) probe
+        WHERE prefix.labelhashes[1] IS NOT NULL
+        UNION
+        -- A first label hash that is null has no key to look up. Label hash arrays compare
+        -- two nulls as equal, so such a prefix keeps the read of every surface.
+        SELECT child.logical_name_id FROM name_surfaces child
+        WHERE EXISTS (SELECT 1 FROM prefixes prefix
+            WHERE prefix.labelhashes[1] IS NULL AND cardinality(prefix.labelhashes)>0)
+          AND {eth_name}
+          AND EXISTS (SELECT 1 FROM prefixes prefix
+            WHERE prefix.labelhashes[1] IS NULL AND cardinality(prefix.labelhashes)>0
+              AND {under_prefix})
         UNION
         SELECT summary.logical_name_id FROM project_name_summary summary
         WHERE summary.chain_id=$1 AND summary.recompose_at<=$3

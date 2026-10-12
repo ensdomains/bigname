@@ -52,6 +52,66 @@ pub(super) async fn database() -> Result<(TestDatabase, PgPool)> {
     Ok((database, pool))
 }
 
+/// The scan nodes of an `EXPLAIN (ANALYZE, FORMAT JSON)` plan that ran, each with the CTE it
+/// ran under (`""` for the statement itself). A node the executor never reached is left out.
+pub(super) fn executed_scans<'a>(
+    node: &'a serde_json::Value,
+    cte: &'a str,
+    scans: &mut Vec<(&'a str, &'a serde_json::Value)>,
+) {
+    let cte = node["Subplan Name"]
+        .as_str()
+        .and_then(|name| name.strip_prefix("CTE "))
+        .unwrap_or(cte);
+    let scan = node["Node Type"]
+        .as_str()
+        .is_some_and(|kind| kind.contains("Scan"));
+    if scan && node["Actual Loops"].as_i64().unwrap_or(0) > 0 {
+        scans.push((cte, node));
+    }
+    for child in node["Plans"].as_array().into_iter().flatten() {
+        executed_scans(child, cte, scans);
+    }
+}
+
+/// Whether a scan node reads its table through one of `indexes`: an index scan of one, or a
+/// bitmap heap scan fed only by bitmap index scans of them.
+pub(super) fn reads_through(node: &serde_json::Value, indexes: &[&str]) -> bool {
+    let read = indexes_read(node);
+    !read.is_empty() && read.iter().all(|index| indexes.contains(index))
+}
+
+/// The indexes a scan node reads its table through: the index of an index scan, or the indexes
+/// of the bitmap index scans that feed a bitmap heap scan. Empty for any other scan.
+pub(super) fn indexes_read(node: &serde_json::Value) -> Vec<&str> {
+    match node["Node Type"].as_str().unwrap_or_default() {
+        "Index Scan" | "Index Only Scan" => node["Index Name"].as_str().into_iter().collect(),
+        "Bitmap Heap Scan" => {
+            let mut indexes = Vec::new();
+            bitmap_indexes(node, &mut indexes);
+            indexes
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The indexes of the bitmap index scans that feed `node`. A subplan of the node, such as the
+/// one that evaluates a filter, is no part of its bitmap.
+fn bitmap_indexes<'a>(node: &'a serde_json::Value, indexes: &mut Vec<&'a str>) {
+    for child in node["Plans"].as_array().into_iter().flatten() {
+        if matches!(
+            child["Parent Relationship"].as_str(),
+            Some("SubPlan" | "InitPlan")
+        ) {
+            continue;
+        }
+        if child["Node Type"] == "Bitmap Index Scan" {
+            indexes.push(child["Index Name"].as_str().unwrap_or_default());
+        }
+        bitmap_indexes(child, indexes);
+    }
+}
+
 /// The revision a chain with no Interpret row reads.
 pub(super) const NO_INTERPRET: crate::families::Revision = (None, None);
 

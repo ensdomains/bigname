@@ -529,10 +529,10 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=484
+expected_refusal_assertions=487
 predecessor_shape_proof_count=0
 # Includes registration_lifecycle applied after lookup_precomputation on the removal path.
-expected_predecessor_shape_proof_count=79
+expected_predecessor_shape_proof_count=80
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -764,6 +764,7 @@ check_served_projection_removal() {
             emit_phase_migration "$ROOT/migrations/20261009120000_normalized_events_v2_key_probe_subregistry.sql" baseline-first
             emit_phase_migration "$ROOT/migrations/20261009130000_project_family_marker_admission.sql" baseline-first
             emit_phase_migration "$ROOT/migrations/20261011120000_split_content_hash_comments.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261012120000_name_surfaces_project_path_indexes.sql" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -912,7 +913,8 @@ for migration_file in \
     "$ROOT/migrations/20261008120000_registration_lifecycle.sql" \
     "$ROOT/migrations/20261009120000_normalized_events_v2_key_probe_subregistry.sql" \
     "$ROOT/migrations/20261009130000_project_family_marker_admission.sql" \
-    "$ROOT/migrations/20261011120000_split_content_hash_comments.sql"
+    "$ROOT/migrations/20261011120000_split_content_hash_comments.sql" \
+    "$ROOT/migrations/20261012120000_name_surfaces_project_path_indexes.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1266,7 +1268,9 @@ for migration_file in \
     "$ROOT/migrations/20261009130000_project_family_marker_admission.sql" \
     "$ROOT/migrations/20261009130000_project_family_marker_admission.sql" \
     "$ROOT/migrations/20261011120000_split_content_hash_comments.sql" \
-    "$ROOT/migrations/20261011120000_split_content_hash_comments.sql"
+    "$ROOT/migrations/20261011120000_split_content_hash_comments.sql" \
+    "$ROOT/migrations/20261012120000_name_surfaces_project_path_indexes.sql" \
+    "$ROOT/migrations/20261012120000_name_surfaces_project_path_indexes.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
@@ -3587,6 +3591,105 @@ SQL
         "$label_hash_index_name exists but is not a valid and ready index on $scratch_schema.name_surfaces; $label_hash_recovery" <<SQL
 DROP INDEX $label_hash_index_name;
 CREATE INDEX $label_hash_index_name ON discovery_edges (chain_id);
+SQL
+done
+# Build the two Project path indexes and their entry_key_hashes function from
+# the shape before them: neither index and no function. The schema-migration
+# must build what the fresh baseline builds, and a rerun must leave that
+# unchanged. The function must hash the entry key of each label hash, which is
+# the label hash in lower case with its low 32 bits cleared, and keep a null.
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/utils/LibLabel.sol:L7-L16 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L677-L693 @ ens_v2_sepolia_20261001@07e55a05)
+path_index_migration="$ROOT/migrations/20261012120000_name_surfaces_project_path_indexes.sql"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_path_indexes AS
+SELECT index_class.relname AS index_name,
+       pg_get_indexdef(pg_index.indexrelid) AS definition
+FROM pg_index
+JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
+WHERE pg_index.indrelid = 'name_surfaces'::regclass
+  AND index_class.relname IN (
+      'name_surfaces_project_entry_keys_idx',
+      'name_surfaces_project_path_hash_idx'
+  );
+CREATE TEMP TABLE expected_entry_key_hashes AS
+SELECT btrim(regexp_replace(prosrc, '\s+', ' ', 'g')) AS body, provolatile, proisstrict,
+       proparallel, prorettype
+FROM pg_proc
+WHERE oid = to_regprocedure('entry_key_hashes(text[])');
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM expected_path_indexes) <> 2
+        OR (SELECT count(*) FROM expected_entry_key_hashes) <> 1 THEN
+        RAISE EXCEPTION 'fresh baseline does not define both Project path indexes and entry_key_hashes';
+    END IF;
+END $$;
+DROP INDEX name_surfaces_project_entry_keys_idx, name_surfaces_project_path_hash_idx;
+DROP FUNCTION entry_key_hashes(text[]);
+SQL
+    emit_phase_migration "$path_index_migration" preceding-shape
+    emit_phase_migration "$path_index_migration" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF (
+        SELECT count(*)
+        FROM expected_path_indexes expected
+        JOIN pg_class index_class ON index_class.relname = expected.index_name
+        JOIN pg_index ON pg_index.indexrelid = index_class.oid
+        WHERE pg_index.indrelid = 'name_surfaces'::regclass
+          AND pg_index.indisvalid AND pg_index.indisready
+          AND pg_get_indexdef(pg_index.indexrelid) = expected.definition
+    ) <> 2
+        OR NOT EXISTS (
+            SELECT 1
+            FROM pg_proc
+            JOIN expected_entry_key_hashes expected
+              ON expected.body = btrim(regexp_replace(pg_proc.prosrc, '\s+', ' ', 'g'))
+             AND expected.provolatile = pg_proc.provolatile
+             AND expected.proisstrict = pg_proc.proisstrict
+             AND expected.proparallel = pg_proc.proparallel
+             AND expected.prorettype = pg_proc.prorettype
+            WHERE pg_proc.oid = to_regprocedure('entry_key_hashes(text[])')
+        ) THEN
+        RAISE EXCEPTION 'Project path index upgrade differs from the baseline';
+    END IF;
+    IF entry_key_hashes(ARRAY['0xABCDEF0123456789abcdef0123456789abcdef0123456789abcdef01ffffFFFF', NULL])
+        IS DISTINCT FROM ARRAY[
+            hashtextextended('0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0100000000', 0),
+            NULL
+        ] THEN
+        RAISE EXCEPTION 'entry_key_hashes does not hash the entry key of each label hash';
+    END IF;
+END $$;
+DROP TABLE expected_path_indexes, expected_entry_key_hashes;
+SQL
+} | run_psql
+assert_migration_context_count "$path_index_migration" empty-schema 1
+assert_migration_context_count "$path_index_migration" preceding-shape 1
+assert_migration_context_count "$path_index_migration" baseline-first 5
+# Another function under the name would give the index other hashes than the
+# statement looks up. The schema-migration must refuse it.
+assert_migration_refusal entry-key-hashes-function-body \
+    "$path_index_migration" \
+    "$scratch_schema.entry_key_hashes(text[]) exists but does not have the reviewed definition; drop name_surfaces_project_entry_keys_idx and the function, then run the schema-migrations again" <<SQL
+DROP INDEX name_surfaces_project_entry_keys_idx;
+CREATE OR REPLACE FUNCTION entry_key_hashes(labelhashes text[]) RETURNS bigint[]
+LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS 'SELECT ARRAY[]::bigint[]';
+SQL
+# An interrupted concurrent prebuild leaves an index that is not valid. The
+# planner never reads it, so the schema-migration must refuse it by name.
+for path_index_name in \
+    name_surfaces_project_entry_keys_idx \
+    name_surfaces_project_path_hash_idx
+do
+    assert_migration_refusal "invalid-$path_index_name" \
+        "$path_index_migration" \
+        "$scratch_schema.$path_index_name exists but is not valid; drop it with DROP INDEX CONCURRENTLY, build it again as docs/deployment.md describes, then run the schema-migrations again" <<SQL
+UPDATE pg_index SET indisvalid = false
+WHERE indexrelid = '$path_index_name'::regclass;
 SQL
 done
 # The live prebuild in ops/project-progressive/install.sql must build the

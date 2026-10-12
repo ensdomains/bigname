@@ -13,7 +13,10 @@
 //! the journal at the publication's block, the family tables as just written, events up to the
 //! block, and every name surface as a path member whatever its block, visibility or
 //! canonicality. Only its last step keeps the readable surfaces at or below the block.
+//!
+//! `scaling_tests.rs` holds the tests on how many surfaces a selection reads.
 mod oracle;
+mod scaling_tests;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -23,7 +26,7 @@ use bigname_test_support::TestDatabase;
 use serde_json::{Value, json};
 use sqlx::{Connection, PgConnection, PgPool, raw_sql};
 
-use super::prepare;
+use super::{prepare, selection};
 use crate::families::{
     derived::SUMMARY_WORK_LIST,
     guard_tests::{CHAIN, database, hash},
@@ -441,6 +444,11 @@ async fn work(connection: &mut PgConnection) -> Result<BTreeSet<String>> {
             .into_iter()
             .collect(),
     )
+}
+
+/// The statement text `prepare` sends.
+fn current() -> String {
+    selection::statement(SUMMARY_WORK_LIST)
 }
 
 // A rebuild range journals every block under its last block, before the selection runs. The

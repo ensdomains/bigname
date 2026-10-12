@@ -645,6 +645,29 @@ CREATE INDEX IF NOT EXISTS name_surfaces_project_label_hashes_idx ON name_surfac
 CREATE INDEX IF NOT EXISTS name_surfaces_project_suffix_hash_idx ON name_surfaces(namespace, hash_array_extended(raw_labels, 0));
 CREATE INDEX IF NOT EXISTS name_surfaces_project_node_idx ON name_surfaces(namespace, lower(namehash));
 
+-- Project selects the names under a changed ENSv2 path by label hash
+-- (project:families.resolution_paths.prepare). An ENSv2 registry keys an entry by the label
+-- hash with its low 32 bits cleared, so this function gives one 64-bit hash of that key per
+-- label hash, in label order.
+-- (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/utils/LibLabel.sol:L7-L16 @ ens_v2_sepolia_20261001@07e55a05)
+-- (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L677-L693 @ ens_v2_sepolia_20261001@07e55a05)
+-- The first index finds the surfaces that hold a label of a
+-- given entry key. The second finds a surface by the hash of its whole label hash path. The
+-- statement also compares the label hashes themselves, so a hash collision never changes
+-- its result. Neither index is partial: the statement reads surfaces of every visibility
+-- and chain state as path members.
+CREATE OR REPLACE FUNCTION entry_key_hashes(labelhashes text[])
+RETURNS bigint[]
+LANGUAGE sql
+IMMUTABLE
+STRICT
+PARALLEL SAFE
+AS $$
+    SELECT ARRAY(SELECT pg_catalog.hashtextextended(pg_catalog."left"(pg_catalog.lower(label), 58) || '00000000', 0) FROM pg_catalog.unnest(labelhashes) AS label)
+$$;
+CREATE INDEX IF NOT EXISTS name_surfaces_project_entry_keys_idx ON name_surfaces USING gin(entry_key_hashes(labelhashes));
+CREATE INDEX IF NOT EXISTS name_surfaces_project_path_hash_idx ON name_surfaces(namespace, hash_array_extended(labelhashes, 0));
+
 -- Current spelling and lexical membership are derived atomically by Interpret and verified imports.
 CREATE TABLE IF NOT EXISTS name_search_documents (
     search_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

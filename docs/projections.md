@@ -2094,7 +2094,37 @@ writer composes at most 1,000 affected names at a time, journals the first
 summary before-image and retires active direct-divergence evidence for withheld
 resolvers. It creates no persistent path cache or new schema family. Normal
 publication and rebuild use the same decision; undo restores the journalled
-summary rows. A manifest sync has no block position: its existing phase-hash
+summary rows.
+
+The capture is one statement, `project:families.resolution_paths.prepare`. It
+looks names up in `name_surfaces` through two indexes Project owns there
+([storage](storage.md#table-ownership)).
+
+- It finds the ancestors of a touched name by the hash of each suffix of its
+  label hash path.
+- It finds the names that hold a changed entry's label, and the names under a
+  changed path, by the hash of the label's entry key. The entry key is the
+  label hash with its low 32 bits cleared, as
+  [ENSv2 registry entries](#ensv2-registry-entries) defines it.
+
+The surfaces it reads then follow the names the publication touches, not the
+number of names on the chain. The indexes change how the statement finds its
+rows and not which names it selects.
+
+Four cases still read every observed ENS surface:
+
+- A registry is created, upgraded or announced in the publication.
+- A touched name is, or sits under, a name whose retained migration evidence
+  holds a created registry. The migration can be in any earlier block.
+- The classification of the
+  [v1 fallback resolver](glossary.md#v1-fallback-resolver-ensv1resolver-exposed-as-v1_resolver)
+  changes.
+- A changed path has no labels, which is the root registry itself.
+
+A path whose first label hash is null also reads them all. How often real
+publications take the second case has not been measured.
+
+A manifest sync has no block position: its existing phase-hash
 invalidation requires the normal full Interpret/Project redo.
 
 The summary also stores the supported search row's public registration fields,
