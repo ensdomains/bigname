@@ -205,9 +205,22 @@ async fn handoff_probes_are_indexed_by_chain_and_exact_node() -> Result<()> {
             let condition = clear_scan["Index Cond"].as_str().unwrap();
             assert!(condition.contains("chain_id = target.chain") && condition.contains("target.name_key"), "{condition}");
             assert_eq!(clear_scan["Actual Loops"], target_count);
+            let mut owner_indexes = Vec::new();
             for scan in scans {
                 assert_ne!(scan["Node Type"], "Seq Scan", "unbounded owner observation scan: {scan}");
+                if scan["Alias"].as_str().is_some_and(|alias| alias.starts_with("observed")) {
+                    let expected = if scan.to_string().contains("SubregistryChanged") {
+                        "normalized_events_project_name_child_idx"
+                    } else {
+                        "normalized_events_project_name_node_idx"
+                    };
+                    assert_eq!(scan["Index Name"], expected, "{name}: {scan}");
+                    owner_indexes.push(expected);
+                }
             }
+            owner_indexes.sort_unstable();
+            owner_indexes.dedup();
+            assert_eq!(owner_indexes.len(), 2, "{name}: both owner observation arms must be planned");
         }
         Ok(())
     }.await;

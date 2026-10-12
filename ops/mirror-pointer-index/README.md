@@ -13,18 +13,16 @@ The index `normalized_events_project_v1_pointer_addressed_node_idx` keys ENSv1
 registry, registrar and wrapper `ResolverChanged` rows by chain, namespace, that
 addressed name and block. The history reader's mirror lookup
 (`crates/storage/src/history/attribution/mirror.rs`) reads the pointers by that
-addressed name. The older `normalized_events_project_v1_pointer_node_idx` keys
-`node` alone, so it cannot serve that lookup. Without the new index each probe reads every ENSv1
+addressed name. The older `normalized_events_project_v1_pointer_node_idx` keyed
+`node` alone, so it could not serve that lookup, and
+`20261012130000_drop_unread_indexes.sql` drops it. Without the new index each probe reads every ENSv1
 pointer on the chain: on an 800,000-event test table one consulted name took a
 sequential scan of the whole table per probe, and with the index each probe read
 one row.
 
 This changes an access path only: no normalized event, canonicality state, raw
 intake or [interpreter content hash](../../docs/glossary.md#interpreter-content-hash)
-input changes by installing it. The older index stays for now; the running binary
-uses it until the release that contains
-`20260924120000_normalized_events_project_v1_pointer_addressed_node_idx.sql` is
-started, and nothing in that release reads it.
+input changes by installing it.
 
 Install it before, or together with, that release. For an initialized database,
 prebuild the index using `install.sql` with the writer role and

@@ -46,15 +46,13 @@ async fn expiry_scope_indexes_migration_repairs_an_initialized_phase_schema() ->
             .pool_connect_context("failed to connect expiry index schema-migration test pool"),
     )
     .await?;
+    // The baseline defines neither index: 20261012130000_drop_unread_indexes.sql drops both.
     initialize_schema_v2(database.pool()).await?;
-    sqlx::query("DROP INDEX bigname_phase.normalized_events_v2_expiry_scope_idx")
-        .execute(database.pool())
-        .await?;
-    sqlx::query("DROP INDEX bigname_phase.normalized_events_subregistry_registration_history_idx")
-        .execute(database.pool())
-        .await?;
     let absent_before: bool = sqlx::query_scalar(
-        "SELECT to_regclass('bigname_phase.normalized_events_v2_expiry_scope_idx') IS NULL",
+        "SELECT to_regclass('bigname_phase.normalized_events_v2_expiry_scope_idx') IS NULL
+            AND to_regclass(
+                'bigname_phase.normalized_events_subregistry_registration_history_idx'
+            ) IS NULL",
     )
     .fetch_one(database.pool())
     .await?;
@@ -118,7 +116,7 @@ async fn expiry_scope_indexes_migration_repairs_an_initialized_phase_schema() ->
     .join("\n");
     assert!(
         plan.contains("normalized_events_subregistry_registration_history_idx"),
-        "reserved topology history query lost its bounded index:\n{plan}"
+        "20260831150000 did not build a usable index:\n{plan}"
     );
     planner.rollback().await?;
 
@@ -138,6 +136,27 @@ async fn expiry_scope_migration_preserves_a_prebuilt_reserved_history_index() ->
     )
     .await?;
     initialize_schema_v2(database.pool()).await?;
+    // The baseline no longer defines the index, so prebuild it as an operator did.
+    sqlx::query(
+        "CREATE INDEX normalized_events_subregistry_registration_history_idx
+         ON bigname_phase.normalized_events (
+             chain_id,
+             (after_state ->> 'registry_contract_instance_id'),
+             block_number DESC,
+             normalized_event_id DESC,
+             logical_name_id
+         )
+         WHERE event_kind IN (
+                   'RegistrationGranted', 'RegistrationReserved',
+                   'RegistrationRenewed', 'RegistrationReleased'
+               )
+           AND source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND logical_name_id IS NOT NULL
+           AND after_state ->> 'registry_contract_instance_id' IS NOT NULL",
+    )
+    .execute(database.pool())
+    .await?;
     let before_oid: i64 = sqlx::query_scalar(
         "SELECT 'bigname_phase.normalized_events_subregistry_registration_history_idx'::regclass::oid::bigint",
     )

@@ -358,21 +358,6 @@ CREATE INDEX IF NOT EXISTS normalized_events_history_discovery_resource_idx
           'safe'::canonicality_state,
           'finalized'::canonicality_state);
 
-CREATE INDEX IF NOT EXISTS normalized_events_v1_subregistry_after_node_scope_idx
-    ON normalized_events (
-        chain_id,
-        (namespace || ':' || lower(after_state ->> 'node')),
-        block_number
-    )
-WHERE event_kind = 'SubregistryChanged'
-  AND source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
-  AND consumer_visibility = 'activated'
-  AND canonicality_state IN ('canonical', 'safe', 'finalized')
-  AND after_state ->> 'node' IS NOT NULL
-  AND btrim(after_state ->> 'node') <> ''
-  AND after_state ->> 'child_node' IS NOT NULL
-  AND btrim(after_state ->> 'child_node') <> '';
-
 CREATE INDEX IF NOT EXISTS normalized_events_v1_subregistry_after_child_scope_idx
     ON normalized_events (
         chain_id,
@@ -388,21 +373,6 @@ WHERE event_kind = 'SubregistryChanged'
   AND after_state ->> 'child_node' IS NOT NULL
   AND btrim(after_state ->> 'child_node') <> '';
 
-CREATE INDEX IF NOT EXISTS normalized_events_v1_subregistry_before_node_scope_idx
-    ON normalized_events (
-        chain_id,
-        (namespace || ':' || lower(before_state ->> 'node')),
-        block_number
-    )
-WHERE event_kind = 'SubregistryChanged'
-  AND source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
-  AND consumer_visibility = 'activated'
-  AND canonicality_state IN ('canonical', 'safe', 'finalized')
-  AND before_state ->> 'node' IS NOT NULL
-  AND btrim(before_state ->> 'node') <> ''
-  AND before_state ->> 'child_node' IS NOT NULL
-  AND btrim(before_state ->> 'child_node') <> '';
-
 CREATE INDEX IF NOT EXISTS normalized_events_v2_subregistry_pointer_scope_idx
     ON normalized_events USING gin ((ARRAY[
         lower(after_state ->> 'subregistry'),
@@ -413,21 +383,6 @@ CREATE INDEX IF NOT EXISTS normalized_events_v2_subregistry_pointer_scope_idx
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized')
       AND logical_name_id IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS normalized_events_v1_subregistry_before_child_scope_idx
-    ON normalized_events (
-        chain_id,
-        (namespace || ':' || lower(before_state ->> 'child_node')),
-        block_number
-    )
-WHERE event_kind = 'SubregistryChanged'
-  AND source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
-  AND consumer_visibility = 'activated'
-  AND canonicality_state IN ('canonical', 'safe', 'finalized')
-  AND before_state ->> 'node' IS NOT NULL
-  AND btrim(before_state ->> 'node') <> ''
-  AND before_state ->> 'child_node' IS NOT NULL
-  AND btrim(before_state ->> 'child_node') <> '';
 
 CREATE INDEX IF NOT EXISTS normalized_events_interpreter_state_history_idx
     ON normalized_events (
@@ -479,22 +434,6 @@ CREATE INDEX IF NOT EXISTS normalized_events_emitter_history_idx
     )
     WHERE raw_fact_ref ->> 'emitting_address' IS NOT NULL
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
-
-CREATE INDEX IF NOT EXISTS normalized_events_v2_expiry_scope_idx
-    ON normalized_events (
-        chain_id,
-        ((after_state ->> 'expiry')::numeric),
-        block_number,
-        logical_name_id
-    )
-    WHERE logical_name_id IS NOT NULL
-      AND source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
-      AND event_kind IN (
-          'RegistrationGranted', 'RegistrationReserved',
-          'RegistrationRenewed', 'RegistrationReleased', 'ExpiryChanged'
-      )
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND jsonb_typeof(after_state -> 'expiry') = 'number';
 
 CREATE INDEX IF NOT EXISTS normalized_events_ens_v1_record_node_resolver_idx
     ON normalized_events (
@@ -564,20 +503,6 @@ CREATE INDEX IF NOT EXISTS normalized_events_record_id_link_idx
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
-CREATE INDEX IF NOT EXISTS normalized_events_resolver_alias_history_idx
-    ON normalized_events (
-        chain_id,
-        lower(COALESCE(
-            after_state ->> 'resolver',
-            before_state ->> 'resolver',
-            raw_fact_ref ->> 'emitting_address'
-        )),
-        block_number DESC,
-        normalized_event_id DESC
-    )
-    WHERE event_kind = 'AliasChanged'
-      AND canonicality_state IN ('canonical', 'safe', 'finalized');
-
 CREATE INDEX IF NOT EXISTS normalized_events_resolver_upgrade_history_idx
     ON normalized_events (
         chain_id,
@@ -610,51 +535,10 @@ CREATE INDEX IF NOT EXISTS normalized_events_pointer_before_resolver_history_idx
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
-CREATE INDEX IF NOT EXISTS normalized_events_permission_after_resolver_history_idx
-    ON normalized_events (
-        chain_id,
-        lower(after_state #>> '{scope,resolver_address}'),
-        block_number,
-        block_hash
-    ) INCLUDE (resource_id)
-    WHERE event_kind = 'PermissionChanged'
-      AND consumer_visibility = 'activated'
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND after_state #>> '{scope,kind}' = 'resolver'
-      AND resource_id IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS normalized_events_permission_before_resolver_history_idx
-    ON normalized_events (
-        chain_id,
-        lower(before_state #>> '{scope,resolver_address}'),
-        block_number,
-        block_hash
-    ) INCLUDE (resource_id)
-    WHERE event_kind = 'PermissionChanged'
-      AND consumer_visibility = 'activated'
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND before_state #>> '{scope,kind}' = 'resolver'
-      AND resource_id IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS normalized_events_subregistry_registration_history_idx
-    ON normalized_events (
-        chain_id,
-        (after_state ->> 'registry_contract_instance_id'),
-        block_number DESC,
-        normalized_event_id DESC,
-        logical_name_id
-    )
-    WHERE event_kind IN (
-              'RegistrationGranted', 'RegistrationReserved',
-              'RegistrationRenewed', 'RegistrationReleased'
-          )
-      AND source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND logical_name_id IS NOT NULL
-      AND after_state ->> 'registry_contract_instance_id' IS NOT NULL;
-
--- Project rebuild scope also needs before-state and candidate evidence. These
--- access paths intentionally have no consumer_visibility restriction.
+-- History's registry handoff read (crates/storage/src/history/registry_handoffs.rs) finds
+-- the ENSv1 registry owner observations of one name by chain and name key: Transfer by
+-- node, NewOwner by child node. These access paths intentionally have no
+-- consumer_visibility restriction.
 CREATE INDEX IF NOT EXISTS normalized_events_project_name_node_idx
     ON normalized_events (chain_id, (namespace || ':' || lower(after_state ->> 'node')), block_number)
     INCLUDE (normalized_event_id)
@@ -672,64 +556,6 @@ CREATE INDEX IF NOT EXISTS normalized_events_project_name_child_idx
                AND source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')))
       AND canonicality_state IN ('canonical', 'safe', 'finalized')
       AND (namespace || ':' || lower(after_state ->> 'child_node')) IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS normalized_events_project_name_after_target_idx
-    ON normalized_events (chain_id, (after_state ->> 'to_logical_name_id'), block_number)
-    INCLUDE (normalized_event_id)
-    WHERE (event_kind IN ('SubregistryChanged', 'AliasChanged')
-           OR (event_kind = 'AuthorityTransferred'
-               AND source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')))
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND (after_state ->> 'to_logical_name_id') IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS normalized_events_project_name_before_target_idx
-    ON normalized_events (chain_id, (before_state ->> 'to_logical_name_id'), block_number)
-    INCLUDE (normalized_event_id)
-    WHERE (event_kind IN ('SubregistryChanged', 'AliasChanged')
-           OR (event_kind = 'AuthorityTransferred'
-               AND source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')))
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND (before_state ->> 'to_logical_name_id') IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS normalized_events_project_primary_after_idx
-    ON normalized_events (
-        chain_id, (lower(after_state ->> 'address')), (after_state ->> 'coin_type'), (after_state ->> 'namespace'), block_number
-    ) INCLUDE (normalized_event_id)
-    WHERE event_kind IN ('ReverseChanged', 'RecordChanged')
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND (lower(after_state ->> 'address')) IS NOT NULL
-      AND (after_state ->> 'coin_type') IS NOT NULL
-      AND (after_state ->> 'namespace') IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS normalized_events_project_primary_before_idx
-    ON normalized_events (
-        chain_id, (lower(before_state ->> 'address')), (before_state ->> 'coin_type'), (before_state ->> 'namespace'), block_number
-    ) INCLUDE (normalized_event_id)
-    WHERE event_kind IN ('ReverseChanged', 'RecordChanged')
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND (lower(before_state ->> 'address')) IS NOT NULL
-      AND (before_state ->> 'coin_type') IS NOT NULL
-      AND (before_state ->> 'namespace') IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS normalized_events_project_primary_after_source_idx
-    ON normalized_events (
-        chain_id, (lower(after_state -> 'primary_claim_source' ->> 'address')), (after_state -> 'primary_claim_source' ->> 'coin_type'), (after_state -> 'primary_claim_source' ->> 'namespace'), block_number
-    ) INCLUDE (normalized_event_id)
-    WHERE event_kind IN ('ReverseChanged', 'RecordChanged')
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND (lower(after_state -> 'primary_claim_source' ->> 'address')) IS NOT NULL
-      AND (after_state -> 'primary_claim_source' ->> 'coin_type') IS NOT NULL
-      AND (after_state -> 'primary_claim_source' ->> 'namespace') IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS normalized_events_project_primary_before_source_idx
-    ON normalized_events (
-        chain_id, (lower(before_state -> 'primary_claim_source' ->> 'address')), (before_state -> 'primary_claim_source' ->> 'coin_type'), (before_state -> 'primary_claim_source' ->> 'namespace'), block_number
-    ) INCLUDE (normalized_event_id)
-    WHERE event_kind IN ('ReverseChanged', 'RecordChanged')
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND (lower(before_state -> 'primary_claim_source' ->> 'address')) IS NOT NULL
-      AND (before_state -> 'primary_claim_source' ->> 'coin_type') IS NOT NULL
-      AND (before_state -> 'primary_claim_source' ->> 'namespace') IS NOT NULL;
 
 -- Interpret's per-batch ENSv1 lookahead loader reads prior state for the names one batch
 -- touches. The first index finds registrar events whose expiry falls in a time range; its
@@ -1070,14 +896,6 @@ CREATE INDEX IF NOT EXISTS normalized_events_project_node_history_idx
             AND source_family IN ('ens_v1_resolver_l1', 'ens_v2_resolver_l1', 'basenames_base_resolver'))
            OR (event_kind = 'ResolverChanged'
                AND source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1')));
-
-CREATE INDEX IF NOT EXISTS normalized_events_project_v1_pointer_node_idx
-    ON normalized_events(chain_id, namespace, lower(after_state ->> 'node'), block_number)
-    WHERE event_kind = 'ResolverChanged'
-      AND source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1')
-      AND after_state ->> 'node' IS NOT NULL
-      AND consumer_visibility = 'activated'
-      AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
 -- The ENSv1 registry's resolver pointers by the name each event addresses, read in
 -- the adapters' shared order (V1_EVENT_NODE_FIELDS in

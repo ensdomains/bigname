@@ -529,12 +529,35 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=493
+expected_refusal_assertions=467
 predecessor_shape_proof_count=0
 # Includes registration_lifecycle applied after lookup_precomputation on the removal path.
-expected_predecessor_shape_proof_count=80
+expected_predecessor_shape_proof_count=81
 refusal_probe_seconds=0
 timing_started=$SECONDS
+unread_index_migration="$ROOT/migrations/20261012130000_drop_unread_indexes.sql"
+# label_hashes and its GIN index as the identity baseline defined them before
+# 20261012130000_drop_unread_indexes.sql. The baseline no longer does, so a proof that
+# starts from the earlier shape builds both from this text.
+unread_label_hash_shape_sql="CREATE FUNCTION label_hashes(labels text[])
+RETURNS bigint[]
+LANGUAGE sql
+IMMUTABLE
+STRICT
+PARALLEL SAFE
+AS \$\$
+    SELECT ARRAY(SELECT pg_catalog.hashtextextended(label, 0) FROM pg_catalog.unnest(labels) AS label)
+\$\$;
+CREATE INDEX name_surfaces_project_label_hashes_idx ON name_surfaces USING gin(label_hashes(raw_labels));"
+# normalized_events_project_v1_pointer_node_idx as the baseline defined it before the same
+# schema-migration, for the proofs that need one of the fifteen back.
+unread_pointer_node_index_sql="CREATE INDEX normalized_events_project_v1_pointer_node_idx
+    ON normalized_events(chain_id, namespace, lower(after_state ->> 'node'), block_number)
+    WHERE event_kind = 'ResolverChanged'
+      AND source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1')
+      AND after_state ->> 'node' IS NOT NULL
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');"
 
 cleanup() {
     if [ -n "${schema_v2_race_pid:-}" ] \
@@ -765,6 +788,15 @@ check_served_projection_removal() {
             emit_phase_migration "$ROOT/migrations/20261009130000_project_family_marker_admission.sql" baseline-first
             emit_phase_migration "$ROOT/migrations/20261011120000_split_content_hash_comments.sql" baseline-first
             emit_phase_migration "$ROOT/migrations/20261012120000_name_surfaces_project_path_indexes.sql" baseline-first
+            # The unread indexes: the pre-7c shape holds the fifteen on normalized_events,
+            # and the baseline defines none of them. The identity file has no pre-7c copy,
+            # so build label_hashes and its index as the baseline defined them.
+            if [ "$suffix" = removal ]; then
+                printf '%s\n' "$unread_label_hash_shape_sql"
+                emit_phase_migration "$unread_index_migration" preceding-shape
+            fi
+            emit_phase_migration "$unread_index_migration" baseline-first
+            emit_phase_migration "$unread_index_migration" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -914,7 +946,8 @@ for migration_file in \
     "$ROOT/migrations/20261009120000_normalized_events_v2_key_probe_subregistry.sql" \
     "$ROOT/migrations/20261009130000_project_family_marker_admission.sql" \
     "$ROOT/migrations/20261011120000_split_content_hash_comments.sql" \
-    "$ROOT/migrations/20261012120000_name_surfaces_project_path_indexes.sql"
+    "$ROOT/migrations/20261012120000_name_surfaces_project_path_indexes.sql" \
+    "$unread_index_migration"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -955,6 +988,16 @@ check_served_projection_removal
 apply_historical_baseline
 apply_historical_baseline
 report_timing baseline-install
+# name_surfaces has no pre-7c copy, so these are the indexes the baseline alone gives it.
+# The unread index proof below compares against them after every earlier schema-migration.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TABLE name_surfaces_baseline_indexes AS
+SELECT pg_get_indexdef(indexrelid) AS definition
+FROM pg_index WHERE indrelid = 'name_surfaces'::regclass;
+SQL
+} | run_psql
 # The production functions intentionally bind their SECURITY DEFINER lookups
 # to bigname_phase. Prove that contract before rebinding only this scratch
 # schema's copies so the remainder of this isolated harness can exercise them.
@@ -1020,34 +1063,14 @@ BEGIN
             (
                 'normalized_events_pointer_after_resolver_history_idx',
                 '%chain_id%lower%after_state%resolver%block_number%block_hash%INCLUDE%normalized_event_id%',
-                'ResolverChanged',
-                NULL,
-                false
+                'ResolverChanged'
             ),
             (
                 'normalized_events_pointer_before_resolver_history_idx',
                 '%chain_id%lower%before_state%resolver%block_number%block_hash%INCLUDE%normalized_event_id%',
-                'ResolverChanged',
-                NULL,
-                false
-            ),
-            (
-                'normalized_events_permission_after_resolver_history_idx',
-                '%chain_id%lower%after_state%scope%resolver_address%block_number%block_hash%INCLUDE%resource_id%',
-                'PermissionChanged',
-                '%after_state%scope%kind%resolver%',
-                true
-            ),
-            (
-                'normalized_events_permission_before_resolver_history_idx',
-                '%chain_id%lower%before_state%scope%resolver_address%block_number%block_hash%INCLUDE%resource_id%',
-                'PermissionChanged',
-                '%before_state%scope%kind%resolver%',
-                true
+                'ResolverChanged'
             )
-    ) AS required(
-        index_name, definition_pattern, event_kind, scope_pattern, resource_required
-    )
+    ) AS required(index_name, definition_pattern, event_kind)
     WHERE NOT EXISTS (
         SELECT 1
         FROM pg_class index_relation
@@ -1067,16 +1090,6 @@ BEGIN
               LIKE '%consumer_visibility%activated%'
           AND pg_get_expr(index_state.indpred, index_state.indrelid, true)
               LIKE '%canonicality_state%canonical%safe%finalized%'
-          AND (
-              required.scope_pattern IS NULL
-              OR pg_get_expr(index_state.indpred, index_state.indrelid, true)
-                  LIKE required.scope_pattern
-          )
-          AND (
-              NOT required.resource_required
-              OR pg_get_expr(index_state.indpred, index_state.indrelid, true)
-                  LIKE '%resource_id%IS NOT NULL%'
-          )
     );
 
     IF invalid_indexes IS NOT NULL THEN
@@ -1998,7 +2011,9 @@ SQL
 done
 # Recreate all eight additive project-scoped history indexes from their
 # preceding schema shape. Compare every resulting catalog definition to the
-# fresh baseline, then prove a rerun leaves them unchanged.
+# one the installed schema held, then prove a rerun leaves them unchanged. The
+# baseline still defines two of the eight. 20261012130000_drop_unread_indexes.sql,
+# proved below, drops the other six.
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     cat <<'SQL'
@@ -2021,7 +2036,7 @@ WHERE pg_index.indrelid = 'normalized_events'::regclass
 DO $$
 BEGIN
     IF (SELECT count(*) FROM expected_project_scoped_history_indexes) <> 8 THEN
-        RAISE EXCEPTION 'fresh baseline does not define all eight project-scoped history indexes';
+        RAISE EXCEPTION 'installed schema does not hold all eight project-scoped history indexes';
     END IF;
 END $$;
 DROP INDEX
@@ -2049,7 +2064,7 @@ BEGIN
           AND pg_index.indpred IS NOT NULL
           AND pg_get_indexdef(pg_index.indexrelid) = expected.definition
     ) <> 8 THEN
-        RAISE EXCEPTION 'project-scoped history index upgrade differs from the baseline';
+        RAISE EXCEPTION 'project-scoped history index upgrade differs from the installed definitions';
     END IF;
 END $$;
 DROP TABLE expected_project_scoped_history_indexes;
@@ -2244,6 +2259,11 @@ project_history_index_names=(
     normalized_events_project_primary_after_source_idx
     normalized_events_project_primary_before_source_idx
 )
+# The two that history's registry handoff read uses. The installer builds only these.
+project_history_installed_index_names=(
+    normalized_events_project_name_node_idx
+    normalized_events_project_name_child_idx
+)
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     emit_phase_migration "$project_history_validity_migration" baseline-first
@@ -2258,12 +2278,12 @@ project_history_index_names=(
     assert_search_path_sql public
     emit_quote_all_identifiers_probe "$project_history_validity_migration" in-transaction
 } | run_psql
-# The live prebuild in ops/project-scoped-history/install.sql builds all eight
+# The live prebuild in ops/project-scoped-history/install.sql builds both
 # indexes in one file. For each in turn it must build the baseline definition,
 # refuse an invalid index, a valid index with other keys, a valid index whose
 # JSON key literals start with the schema name, and a table under the name,
 # and recover as its README says.
-for project_history_index_name in "${project_history_index_names[@]}"; do
+for project_history_index_name in "${project_history_installed_index_names[@]}"; do
     assert_concurrent_index_installer "project-history-$project_history_index_name" \
         "$project_history_index_name" \
         "$project_history_install" \
@@ -2294,8 +2314,8 @@ assert_index_install_hint() {
 # The installer refuses before it builds anything. With the last index invalid
 # and the first one absent, it must stop on the invalid one, tell the operator
 # how to drop it, and leave the first one unbuilt.
-project_history_first_index="${project_history_index_names[0]}"
-project_history_last_index="${project_history_index_names[7]}"
+project_history_first_index="${project_history_installed_index_names[0]}"
+project_history_last_index="${project_history_installed_index_names[1]}"
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     printf '%s\n' \
@@ -2337,11 +2357,12 @@ assert_index_install_hint project-history-index-on-another-table-hint \
     printf '%s\n' "DROP INDEX $project_history_first_index;"
     render_phase_migration "$project_history_install"
 } | run_psql >/dev/null
-# All eight indexes are now the ones the installer built. The validity check
-# passes on that shape under both search_path settings and changes nothing.
-# The count names the eight indexes: the baseline also carries other
-# normalized_events_project_*_idx indexes (the scoped node history and ENSv1
-# pointer-node indexes), which this check does not cover.
+# The two installer indexes are now the ones the installer built, beside the six
+# 20260917131000 built. The validity check passes on that shape under both
+# search_path settings and changes nothing. The count names the eight indexes:
+# the schema also carries other normalized_events_project_*_idx indexes (the
+# scoped node history and ENSv1 pointer-node indexes), which this check does not
+# cover.
 project_history_index_list="$(printf "'%s'," "${project_history_index_names[@]}")"
 project_history_index_list="${project_history_index_list%,}"
 {
@@ -2372,7 +2393,7 @@ assert_migration_context_count "$project_history_validity_migration" baseline-fi
 # Put each index in turn into every shape CREATE INDEX IF NOT EXISTS skips,
 # inside a transaction that rolls back, and require the schema-migration to
 # fail rather than record success. The expected definition it names must be how
-# the fresh-baseline index prints.
+# the installed index prints.
 project_history_recovery="follow the recovery steps in $project_history_readme, then run the schema-migrations again"
 project_history_rebuild="build the index with ops/project-scoped-history/install.sql as $project_history_readme describes, then run the schema-migrations again"
 for project_history_index_name in "${project_history_index_names[@]}"; do
@@ -3212,6 +3233,212 @@ assert_index_install_hint address-match-index-on-another-table-hint \
 # This migration must adopt validated concurrent candidates without rebuilding
 # them and refuse an incomplete set before attempting any old-index drop.
 source "$ROOT/scripts/tests/check-address-history-catalogue-indexes.sh"
+# 20261012130000_drop_unread_indexes.sql. The schema holds the shape every earlier
+# schema-migration leaves: the fifteen unread normalized_events indexes of the pre-7c
+# shape, and label_hashes with its GIN index, which 20260923140000 rebuilt above on the
+# baseline's name_surfaces. From it the schema-migration must drop exactly those sixteen
+# and the function, keep every other index on both tables, leave name_surfaces with the
+# indexes the baseline alone gives it, and put the caller's lock_timeout back. It must
+# finish a set an operator dropped part of by hand, drop an invalid index like a valid
+# one, and drop label_hashes whatever its body. Each of those runs in a transaction that
+# rolls back. A relation under one of the names that is not an index on its table, an
+# object that still depends on label_hashes, and a table lock it cannot take in five
+# seconds must each stop it. The last application commits, a rerun changes nothing, and
+# the walk index set proof below starts from that shape.
+unread_index_names=(
+    name_surfaces_project_label_hashes_idx
+    normalized_events_v1_subregistry_after_node_scope_idx
+    normalized_events_v1_subregistry_before_node_scope_idx
+    normalized_events_v1_subregistry_before_child_scope_idx
+    normalized_events_v2_expiry_scope_idx
+    normalized_events_resolver_alias_history_idx
+    normalized_events_permission_after_resolver_history_idx
+    normalized_events_permission_before_resolver_history_idx
+    normalized_events_subregistry_registration_history_idx
+    normalized_events_project_name_after_target_idx
+    normalized_events_project_name_before_target_idx
+    normalized_events_project_primary_after_idx
+    normalized_events_project_primary_before_idx
+    normalized_events_project_primary_after_source_idx
+    normalized_events_project_primary_before_source_idx
+    normalized_events_project_v1_pointer_node_idx
+)
+unread_index_list="$(printf "'%s'," "${unread_index_names[@]}")"
+unread_index_list="${unread_index_list%,}"
+unread_index_dropped_sql="DO \$\$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM unnest(ARRAY[$unread_index_list]) AS name
+        WHERE to_regclass(name) IS NOT NULL
+    ) OR to_regprocedure('label_hashes(text[])') IS NOT NULL THEN
+        RAISE EXCEPTION 'dropping the unread indexes left one of them or label_hashes in place';
+    END IF;
+    IF EXISTS (
+        (SELECT index_class.relname::text, pg_index.indrelid, pg_get_indexdef(pg_index.indexrelid)
+         FROM pg_index JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
+         WHERE pg_index.indrelid IN ('normalized_events'::regclass, 'name_surfaces'::regclass)
+         EXCEPT SELECT index_name, table_oid, definition FROM unread_index_kept)
+        UNION ALL
+        (SELECT index_name, table_oid, definition FROM unread_index_kept
+         EXCEPT
+         SELECT index_class.relname::text, pg_index.indrelid, pg_get_indexdef(pg_index.indexrelid)
+         FROM pg_index JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
+         WHERE pg_index.indrelid IN ('normalized_events'::regclass, 'name_surfaces'::regclass))
+    ) THEN
+        RAISE EXCEPTION 'dropping the unread indexes changed an index it does not name';
+    END IF;
+    IF EXISTS (
+        (SELECT pg_get_indexdef(indexrelid) FROM pg_index WHERE indrelid = 'name_surfaces'::regclass
+         EXCEPT SELECT definition FROM name_surfaces_baseline_indexes)
+        UNION ALL
+        (SELECT definition FROM name_surfaces_baseline_indexes
+         EXCEPT
+         SELECT pg_get_indexdef(indexrelid) FROM pg_index WHERE indrelid = 'name_surfaces'::regclass)
+    ) THEN
+        RAISE EXCEPTION 'name_surfaces indexes differ from the baseline after the unread index drop';
+    END IF;
+END \$\$;"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<SQL
+CREATE TABLE unread_index_kept AS
+SELECT index_class.relname::text AS index_name, pg_index.indrelid AS table_oid,
+       pg_get_indexdef(pg_index.indexrelid) AS definition
+FROM pg_index JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
+WHERE pg_index.indrelid IN ('normalized_events'::regclass, 'name_surfaces'::regclass)
+  AND index_class.relname NOT IN ($unread_index_list);
+DO \$\$
+BEGIN
+    IF (
+        SELECT count(*)
+        FROM pg_index JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
+        WHERE pg_index.indrelid IN ('normalized_events'::regclass, 'name_surfaces'::regclass)
+          AND pg_index.indisvalid AND pg_index.indisready
+          AND index_class.relname IN ($unread_index_list)
+    ) <> 16 OR to_regprocedure('label_hashes(text[])') IS NULL THEN
+        RAISE EXCEPTION 'the schema does not hold the sixteen unread indexes and label_hashes before the drop';
+    END IF;
+END \$\$;
+
+-- A set an operator dropped part of by hand, under a caller's own lock_timeout.
+BEGIN;
+SET LOCAL lock_timeout = '7s';
+DROP INDEX name_surfaces_project_label_hashes_idx,
+    normalized_events_v2_expiry_scope_idx,
+    normalized_events_resolver_alias_history_idx,
+    normalized_events_project_name_after_target_idx,
+    normalized_events_project_primary_before_idx,
+    normalized_events_project_primary_after_source_idx,
+    normalized_events_project_v1_pointer_node_idx;
+SQL
+    emit_phase_migration "$unread_index_migration" specialized
+    cat <<SQL
+$unread_index_dropped_sql
+DO \$\$
+BEGIN
+    IF current_setting('lock_timeout') <> '7s' THEN
+        RAISE EXCEPTION 'the unread index drop left lock_timeout at %', current_setting('lock_timeout');
+    END IF;
+END \$\$;
+ROLLBACK;
+
+-- An interrupted DROP INDEX CONCURRENTLY leaves an invalid index under the name.
+BEGIN;
+UPDATE pg_index SET indisvalid = false, indisready = false
+WHERE indexrelid IN (
+    'name_surfaces_project_label_hashes_idx'::regclass,
+    'normalized_events_permission_after_resolver_history_idx'::regclass
+);
+SQL
+    emit_phase_migration "$unread_index_migration" specialized
+    cat <<SQL
+$unread_index_dropped_sql
+ROLLBACK;
+
+-- label_hashes with another body is still dropped, by its signature.
+BEGIN;
+CREATE OR REPLACE FUNCTION label_hashes(labels text[]) RETURNS bigint[]
+LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS 'SELECT ARRAY[]::bigint[]';
+SQL
+    emit_phase_migration "$unread_index_migration" specialized
+    cat <<SQL
+$unread_index_dropped_sql
+ROLLBACK;
+
+-- The function already gone, with its index.
+BEGIN;
+DROP INDEX name_surfaces_project_label_hashes_idx;
+DROP FUNCTION label_hashes(text[]);
+SQL
+    emit_phase_migration "$unread_index_migration" specialized
+    cat <<SQL
+$unread_index_dropped_sql
+ROLLBACK;
+SQL
+} | run_psql
+assert_migration_refusal table-named-name_surfaces_project_label_hashes_idx \
+    "$unread_index_migration" \
+    "$scratch_schema.name_surfaces_project_label_hashes_idx is not an index on $scratch_schema.name_surfaces; it is not dropped" <<'SQL'
+DROP INDEX name_surfaces_project_label_hashes_idx;
+CREATE TABLE name_surfaces_project_label_hashes_idx (placeholder integer);
+SQL
+assert_migration_refusal other-table-normalized_events_project_v1_pointer_node_idx \
+    "$unread_index_migration" \
+    "$scratch_schema.normalized_events_project_v1_pointer_node_idx is not an index on $scratch_schema.normalized_events; it is not dropped" <<'SQL'
+DROP INDEX normalized_events_project_v1_pointer_node_idx;
+CREATE INDEX normalized_events_project_v1_pointer_node_idx ON discovery_edges (chain_id);
+SQL
+assert_migration_refusal label-hashes-dependent-index \
+    "$unread_index_migration" \
+    "cannot drop function label_hashes(text[]) because other objects depend on it" <<'SQL'
+CREATE INDEX name_surfaces_operator_label_hashes_idx
+    ON name_surfaces USING gin (label_hashes(raw_labels));
+SQL
+# A transaction that holds name_surfaces makes the drop wait. The schema-migration
+# gives up after its own five-second lock_timeout, whatever the caller's setting is.
+schema_v2_race_log="$(mktemp)"
+schema_v2_race_application="schema_v2_unread_index_lock_${PPID}_$$"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf "SET application_name TO '%s';\n" "$schema_v2_race_application"
+    cat <<'SQL'
+BEGIN;
+LOCK TABLE name_surfaces IN ACCESS SHARE MODE;
+SELECT pg_sleep(60);
+ROLLBACK;
+SQL
+} | run_psql >"$schema_v2_race_log" 2>&1 &
+schema_v2_race_pid=$!
+if ! wait_for_schema_v2_race_session "$schema_v2_race_application"; then
+    printf '%s\n' "the session holding name_surfaces did not become ready" >&2
+    cat "$schema_v2_race_log" >&2
+    exit 1
+fi
+assert_migration_refusal unread-index-lock-timeout \
+    "$unread_index_migration" \
+    "canceling statement due to lock timeout" <<'SQL'
+SET LOCAL lock_timeout = 0;
+SQL
+printf "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = '%s';\n" \
+    "$schema_v2_race_application" | run_psql >/dev/null
+wait "$schema_v2_race_pid" >/dev/null 2>&1 || true
+schema_v2_race_pid=""
+rm -f -- "$schema_v2_race_log"
+schema_v2_race_log=""
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    emit_phase_migration "$unread_index_migration" preceding-shape
+    printf '%s\n' "$unread_index_dropped_sql"
+    emit_phase_migration "$unread_index_migration" baseline-first
+    emit_phase_migration "$unread_index_migration" baseline-first
+    printf '%s\n' "$unread_index_dropped_sql" \
+        "DROP TABLE unread_index_kept;" \
+        "DROP TABLE name_surfaces_baseline_indexes;"
+} | run_psql
+assert_migration_context_count "$unread_index_migration" empty-schema 1
+assert_migration_context_count "$unread_index_migration" preceding-shape 2
+assert_migration_context_count "$unread_index_migration" specialized 4
+assert_migration_context_count "$unread_index_migration" baseline-first 6
 # ops/walk-index-set/drop.sql must refuse while a chain may be served: its Project
 # is running, has a current block or a live family marker and its Interpret is not redoing,
 # including a marker committed before Project recorded progress, and must fail after
@@ -3221,6 +3448,8 @@ source "$ROOT/scripts/tests/check-address-history-catalogue-indexes.sh"
 # Interpret redo it must drop exactly its list and keep every other index, and a
 # rerun must be a no-op. install.sql must then rebuild the fresh baseline's
 # definitions, rerun as a no-op, and refuse each bad name as the other installers do.
+# On a database where 20261012130000_drop_unread_indexes.sql has not run, both scripts
+# must leave an index it drops alone.
 walk_index_drop="$ROOT/ops/walk-index-set/drop.sql"
 walk_index_install="$ROOT/ops/walk-index-set/install.sql"
 walk_index_readme=ops/walk-index-set/README.md
@@ -3239,8 +3468,8 @@ JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
 WHERE pg_index.indrelid = 'normalized_events'::regclass;
 DO \$\$
 BEGIN
-    IF (SELECT count(*) FROM walk_index_baseline WHERE index_name IN ($walk_index_dropped)) <> 45 THEN
-        RAISE EXCEPTION 'drop.sql does not list 45 baseline indexes on normalized_events';
+    IF (SELECT count(*) FROM walk_index_baseline WHERE index_name IN ($walk_index_dropped)) <> 30 THEN
+        RAISE EXCEPTION 'drop.sql does not list 30 baseline indexes on normalized_events';
     END IF;
 END \$\$;
 INSERT INTO chain_phase_state (chain_id, phase_name, current_block_number, current_block_hash)
@@ -3352,6 +3581,30 @@ BEGIN
         RAISE EXCEPTION 'walk index set install differs from the baseline';
     END IF;
 END $$;
+SQL
+    printf '%s\n' "$unread_pointer_node_index_sql"
+    render_phase_migration "$walk_index_drop"
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF to_regclass('normalized_events_project_v1_pointer_node_idx') IS NULL OR (
+        SELECT count(*) FROM pg_index WHERE indrelid = 'normalized_events'::regclass
+    ) <> 18 THEN
+        RAISE EXCEPTION 'walk index set drop did not leave an unlisted index alone';
+    END IF;
+END $$;
+SQL
+    render_phase_migration "$walk_index_install"
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF to_regclass('normalized_events_project_v1_pointer_node_idx') IS NULL OR (
+        SELECT count(*) FROM pg_index WHERE indrelid = 'normalized_events'::regclass
+    ) <> (SELECT count(*) + 1 FROM walk_index_baseline) THEN
+        RAISE EXCEPTION 'walk index set install did not leave an unlisted index alone';
+    END IF;
+END $$;
+DROP INDEX normalized_events_project_v1_pointer_node_idx;
 DELETE FROM chain_phase_state WHERE chain_id = 'walk-index-served';
 DROP TABLE walk_index_baseline;
 SQL
@@ -3452,8 +3705,10 @@ done
 # Rebuild the two Project label-hash indexes and their label_hashes function
 # from the shape an earlier version of 20260922010100_project_mirror_scope_indexes.sql
 # left on Sepolia: the label-array GIN and btree indexes and no function. The schema-migration must
-# drop the old two and build what the fresh baseline builds, and a rerun must
-# leave that unchanged.
+# drop the old two and build the reviewed definitions, and a rerun must
+# leave that unchanged. The baseline still defines the suffix-hash index. It defined
+# label_hashes and its GIN index until 20261012130000_drop_unread_indexes.sql, applied
+# above, so those two are first built here as the baseline defined them.
 label_hash_migration="$ROOT/migrations/20260923140000_project_name_surfaces_label_indexes.sql"
 label_hash_install="$ROOT/ops/project-progressive/install.sql"
 label_hash_readme=ops/project-progressive/README.md
@@ -3463,6 +3718,7 @@ label_hash_index_names=(
 )
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' "$unread_label_hash_shape_sql"
     cat <<'SQL'
 CREATE TEMP TABLE expected_label_hash_indexes AS
 SELECT index_class.relname AS index_name,
@@ -3477,7 +3733,7 @@ WHERE pg_index.indrelid = 'name_surfaces'::regclass
 DO $$
 BEGIN
     IF (SELECT count(*) FROM expected_label_hash_indexes) <> 2 THEN
-        RAISE EXCEPTION 'fresh baseline does not define both Project label-hash indexes';
+        RAISE EXCEPTION 'the schema does not hold both Project label-hash indexes';
     END IF;
 END $$;
 DROP INDEX name_surfaces_project_suffix_hash_idx, name_surfaces_project_label_hashes_idx;
@@ -3502,7 +3758,7 @@ BEGIN
         OR to_regclass('name_surfaces_project_labels_idx') IS NOT NULL
         OR to_regclass('name_surfaces_project_suffix_idx') IS NOT NULL
         OR to_regprocedure('label_hashes(text[])') IS NULL THEN
-        RAISE EXCEPTION 'Project label-hash index upgrade differs from the baseline';
+        RAISE EXCEPTION 'Project label-hash index upgrade differs from the reviewed definitions';
     END IF;
 END $$;
 DROP TABLE expected_label_hash_indexes;
@@ -3761,12 +4017,13 @@ CREATE INDEX $path_index_name ON discovery_edges (chain_id);
 SQL
 done
 # The live prebuild in ops/project-progressive/install.sql must build the
-# baseline definition of each label-hash index from the shape without it, pass
+# baseline definition of the suffix-hash index from the shape without it, pass
 # its own check, leave a caller's search_path and quote_all_identifiers as it
 # found them, refuse an invalid index, an index with another definition, and a
 # table under the name, and recover as its README says. It never drops an index.
+# It no longer builds label_hashes or the GIN index over it.
 label_hash_install_recovery="follow the recovery steps in $label_hash_readme before retrying"
-for label_hash_index_name in "${label_hash_index_names[@]}"; do
+for label_hash_index_name in name_surfaces_project_suffix_hash_idx; do
     label_hash_matches_baseline="DO \$\$
 BEGIN
     IF NOT EXISTS (
@@ -3835,36 +4092,21 @@ END \$\$;"
         printf '%s\n' "$label_hash_matches_baseline" "DROP TABLE expected_installed_label_hash_index;"
     } | run_psql >/dev/null
 done
-# The installer never replaces label_hashes: another definition is refused
-# before anything is built.
-{
-    printf 'SET search_path TO "%s";\n' "$scratch_schema"
-    printf '%s\n' \
-        "DROP INDEX name_surfaces_project_label_hashes_idx;" \
-        "CREATE OR REPLACE FUNCTION label_hashes(labels text[]) RETURNS bigint[]" \
-        "LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS 'SELECT ARRAY[]::bigint[]';"
-} | run_psql >/dev/null
-assert_index_install_refusal label-hash-function-body \
-    "$label_hash_install" \
-    "$scratch_schema.label_hashes(text[]) is missing or does not have the reviewed definition; $label_hash_install_recovery"
-# With one index absent and the other invalid, the installer stops on the
+# With one index absent and another invalid, the installer stops on the
 # invalid one before building the absent one, and names the recovery.
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
-    printf '%s\n' "DROP FUNCTION label_hashes(text[]);"
-    sed -n '/^CREATE OR REPLACE FUNCTION label_hashes/,/^\$\$;/p' "$ROOT/crates/storage/schema/baseline/03_identity.sql"
     printf '%s\n' \
-        "CREATE INDEX name_surfaces_project_label_hashes_idx ON name_surfaces USING gin (label_hashes(raw_labels));" \
         "DROP INDEX name_surfaces_project_suffix_hash_idx;" \
         "UPDATE pg_index SET indisvalid = false" \
-        "WHERE indexrelid = 'name_surfaces_project_label_hashes_idx'::regclass;"
+        "WHERE indexrelid = 'name_surfaces_project_node_idx'::regclass;"
 } | run_psql >/dev/null
 assert_index_install_refusal label-hash-refuses-before-building \
     "$label_hash_install" \
-    "name_surfaces_project_label_hashes_idx is missing from $scratch_schema.name_surfaces or is not valid and ready; $label_hash_install_recovery"
+    "name_surfaces_project_node_idx is missing from $scratch_schema.name_surfaces or is not valid and ready; $label_hash_install_recovery"
 assert_index_install_hint label-hash-invalid-index-hint \
     "$label_hash_install" \
-    "An interrupted concurrent build leaves an invalid index. Confirm in pg_stat_progress_create_index that no build is still running, run DROP INDEX CONCURRENTLY $scratch_schema.name_surfaces_project_label_hashes_idx, then rerun this script."
+    "An interrupted concurrent build leaves an invalid index. Confirm in pg_stat_progress_create_index that no build is still running, run DROP INDEX CONCURRENTLY $scratch_schema.name_surfaces_project_node_idx, then rerun this script."
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     cat <<'SQL'
@@ -3874,7 +4116,7 @@ BEGIN
         RAISE EXCEPTION 'Project label-hash installer built an index before refusing';
     END IF;
 END $$;
-DROP INDEX name_surfaces_project_label_hashes_idx;
+DROP INDEX name_surfaces_project_node_idx;
 SQL
     render_phase_migration "$label_hash_install"
 } | run_psql >/dev/null
@@ -3906,22 +4148,28 @@ assert_migration_refusal validate-index-on-another-table \
 DROP INDEX name_surfaces_project_node_idx;
 CREATE INDEX name_surfaces_project_node_idx ON discovery_edges (chain_id);
 SQL
-# Upgrade a database from main's shape, without this release's five Project
+# Upgrade a database from the shape before that release, without its five Project
 # indexes or label_hashes, holding both long-label shapes the mirror tests use:
 # a 34-label array of about 4 KiB and a single 2,880-character label. A
 # whole-array btree or GIN entry for either row exceeds the index entry limit,
 # so any step that builds one fails here. The installer and both validators
-# run first, as on a live deployment, then the whole pending chain
-# 20260922010000 -> 20260922010100 -> 20260923140000 through the ordinary
-# schema-migration path. It must leave the fresh baseline's five indexes and
-# no legacy label-array index after every step, and an installer rerun must
-# change nothing.
+# run first, as on a live deployment. The installer builds the three indexes the
+# baseline still defines. Then the whole pending chain
+# 20260922010000 -> 20260922010100 -> 20260923140000 runs through the ordinary
+# schema-migration path and must leave all five indexes and label_hashes, with
+# no legacy label-array index after any step. 20261012130000_drop_unread_indexes.sql
+# then drops the two unread indexes and the function, which leaves the three, and
+# an installer rerun must change nothing.
 label_chain_migrations=(
     "$ROOT/migrations/20260922010000_project_node_history_idx.sql"
     "$ROOT/migrations/20260922010100_project_mirror_scope_indexes.sql"
     "$label_hash_migration"
 )
-label_chain_matches_baseline="DO \$\$
+# Emit SQL that fails unless exactly this many of the five captured indexes exist
+# with their captured definitions, and label_hashes exists only when all five do.
+label_chain_matches() {
+    cat <<SQL
+DO \$\$
 BEGIN
     IF (
         SELECT count(*)
@@ -3931,10 +4179,15 @@ BEGIN
         WHERE pg_index.indrelid = expected.table_oid
           AND pg_index.indisvalid AND pg_index.indisready
           AND pg_get_indexdef(pg_index.indexrelid) = expected.definition
-    ) <> 5 THEN
-        RAISE EXCEPTION 'Project label upgrade chain does not match the fresh baseline';
+    ) <> $1
+        OR (to_regclass('normalized_events_project_v1_pointer_node_idx') IS NOT NULL) <> ($1 = 5)
+        OR (to_regclass('name_surfaces_project_label_hashes_idx') IS NOT NULL) <> ($1 = 5)
+        OR (to_regprocedure('label_hashes(text[])') IS NOT NULL) <> ($1 = 5) THEN
+        RAISE EXCEPTION 'Project label upgrade chain does not hold the expected $1 indexes';
     END IF;
-END \$\$;"
+END \$\$;
+SQL
+}
 label_chain_no_legacy="DO \$\$
 BEGIN
     IF to_regclass('$scratch_schema.name_surfaces_project_labels_idx') IS NOT NULL
@@ -3957,6 +4210,10 @@ label_chain_foreign_schema="${scratch_schema}_foreign"
 } | run_psql >/dev/null
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    # The earlier label-hash proof left label_hashes and its GIN index in place. The
+    # older pointer index is the third object the drop removed, so build it as the
+    # baseline defined it.
+    printf '%s\n' "$unread_pointer_node_index_sql"
     cat <<'SQL'
 CREATE TEMP TABLE expected_label_chain_indexes AS
 SELECT index_class.relname AS index_name,
@@ -3975,7 +4232,7 @@ WHERE index_class.relname IN (
 DO $$
 BEGIN
     IF (SELECT count(*) FROM expected_label_chain_indexes) <> 5 THEN
-        RAISE EXCEPTION 'fresh baseline does not define all five Project progressive indexes';
+        RAISE EXCEPTION 'the schema does not hold all five Project progressive indexes';
     END IF;
 END $$;
 DROP INDEX
@@ -4019,16 +4276,20 @@ SQL
     render_phase_migration "$label_hash_install"
     render_phase_migration "$label_hash_validate"
     render_phase_migration "$label_hash_validate_after_switch"
-    printf '%s\n' "$label_chain_matches_baseline" "$label_chain_no_legacy"
+    label_chain_matches 3
+    printf '%s\n' "$label_chain_no_legacy"
     for label_chain_migration in "${label_chain_migrations[@]}"; do
         emit_phase_migration "$label_chain_migration" preceding-shape
         printf '%s\n' "$label_chain_no_legacy"
     done
-    printf '%s\n' "$label_chain_matches_baseline"
+    label_chain_matches 5
+    emit_phase_migration "$unread_index_migration" preceding-shape
+    label_chain_matches 3
     render_phase_migration "$label_hash_validate"
     render_phase_migration "$label_hash_validate_after_switch"
     render_phase_migration "$label_hash_install"
-    printf '%s\n' "$label_chain_matches_baseline" "$label_chain_no_legacy"
+    label_chain_matches 3
+    printf '%s\n' "$label_chain_no_legacy"
     cat <<'SQL'
 DELETE FROM name_surfaces WHERE chain_id = 'label-chain';
 DELETE FROM chain_lineage WHERE chain_id = 'label-chain';
@@ -4054,6 +4315,7 @@ SQL
 assert_migration_context_count "${label_chain_migrations[0]}" preceding-shape 1
 assert_migration_context_count "${label_chain_migrations[1]}" preceding-shape 1
 assert_migration_context_count "$label_hash_migration" preceding-shape 2
+assert_migration_context_count "$unread_index_migration" preceding-shape 3
 # A deployment that recorded the earlier 20260922010100 updates its recorded
 # checksum to the one sqlx stores for the current file: the SHA-384 of the file
 # bytes. Both documents that carry the UPDATE must name exactly that value.
@@ -6291,8 +6553,7 @@ BEGIN
                 ('surface_bindings_name_idx'),
                 ('surface_bindings_resource_idx'),
                 ('normalized_events_name_history_idx'),
-                ('normalized_events_resource_history_idx'),
-                ('normalized_events_subregistry_registration_history_idx')
+                ('normalized_events_resource_history_idx')
         ) AS required(index_name)
         UNION ALL
         SELECT
@@ -6341,11 +6602,8 @@ BEGIN
                                 key.ordinal,
                                 'desc'
                             ) IS DISTINCT FROM (
-                                required.index_name IN (
-                                    'normalized_events_resolver_alias_history_idx',
-                                    'normalized_events_resolver_upgrade_history_idx',
-                                    'normalized_events_subregistry_registration_history_idx'
-                                )
+                                required.index_name =
+                                    'normalized_events_resolver_upgrade_history_idx'
                                 AND key.ordinal IN (3, 4)
                             )
                   )
@@ -6412,20 +6670,6 @@ BEGIN
                     ]
                 ),
                 (
-                    'normalized_events_resolver_alias_history_idx',
-                    'normalized_events',
-                    ARRAY[
-                        'chain_id',
-                        '%lower%COALESCE%after_state%resolver%before_state%resolver%raw_fact_ref%emitting_address%',
-                        'block_number',
-                        'normalized_event_id'
-                    ],
-                    ARRAY[
-                        '%event_kind%AliasChanged%',
-                        '%canonicality_state%canonical%safe%finalized%'
-                    ]
-                ),
-                (
                     'normalized_events_resolver_upgrade_history_idx',
                     'normalized_events',
                     ARRAY[
@@ -6437,24 +6681,6 @@ BEGIN
                     ARRAY[
                         '%event_kind%Upgraded%',
                         '%canonicality_state%canonical%safe%finalized%'
-                    ]
-                ),
-                (
-                    'normalized_events_subregistry_registration_history_idx',
-                    'normalized_events',
-                    ARRAY[
-                        'chain_id',
-                        '%after_state%registry_contract_instance_id%',
-                        'block_number',
-                        'normalized_event_id',
-                        'logical_name_id'
-                    ],
-                    ARRAY[
-                        '%event_kind%RegistrationGranted%RegistrationReserved%RegistrationRenewed%RegistrationReleased%',
-                        '%source_family%ens_v2_root_l1%ens_v2_registry_l1%',
-                        '%canonicality_state%canonical%safe%finalized%',
-                        '%logical_name_id%IS NOT NULL%',
-                        '%after_state%registry_contract_instance_id%IS NOT NULL%'
                     ]
                 ),
                 (

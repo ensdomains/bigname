@@ -1,48 +1,48 @@
-# Project history lookups for changed names and primary names
+# Registry handoff history indexes
 
-Project rebuilds current reading tables from normalized event history. Two
-incremental selections previously scanned whole historical event classes before
-matching changed names or address tuples. Their replacement starts with each
-changed key and uses four correlated index lookups. `OFFSET 0` preserves the
-correlation instead of allowing the planner to flatten it into a broad join.
-Before selection, Project analyzes the completed name, child, and primary-name
-temporary scopes. These tables have no automatic statistics collection; default
-estimates can otherwise multiply a handful of indexed probes into a large plan
-cost and trigger unnecessary JIT compilation. JIT settings remain unchanged.
+This package builds two indexes on `bigname_phase.normalized_events`:
 
-The selected event IDs remain identical. Name-node keys retain their existing
-lowercasing; explicit alias targets retain exact string matching. Primary-name
-addresses are lowercased, while coin types and namespaces retain exact matching.
-Before-state references, all readable canonicality states, and the upper block
-boundary remain intact. Candidate visibility is intentionally not restricted in
-these evidence selections; the later serving filter still decides which events
-can populate reading tables. Non-null index predicates add no exclusion because
-the existing equality matches already reject null keys.
+- `normalized_events_project_name_node_idx`, keyed by chain and the name key built from
+  `after_state ->> 'node'`.
+- `normalized_events_project_name_child_idx`, keyed by chain and the name key built from
+  `after_state ->> 'child_node'`.
 
-The eight expression indexes cover the four name-key forms and four primary
-address-tuple forms separately. They are limited to the relevant event kinds and
-non-null keys. Ordinary text records without a primary address tuple do not
-populate the four primary-name indexes. Index storage and additional write work
-should be recorded with the installation receipt.
+The name key is the namespace, a colon, and the lowercased node.
+
+History's registry handoff read (`load_history_registry_handoffs` in
+`crates/storage/src/history/registry_handoffs.rs`) is their reader. For one ENSv1 name it
+looks up the registry owner observations of that name: `Transfer` events by node and
+`NewOwner` events by child node. Each lookup gives the chain and the name key, so it reads
+one index range instead of every owner event of the chain.
+[`docs/storage.md`](../../docs/storage.md#table-ownership) lists both indexes with that
+reader.
+
+Neither index restricts `consumer_visibility`. Both are limited to the relevant event kinds,
+to readable canonicality states and to non-null keys.
+
+The package first built eight indexes, for two Project selections that no longer exist.
+No statement reads the other six. The schema-migration
+`20261012130000_drop_unread_indexes.sql` drops them, and this installer no longer builds
+them.
 
 ## Install
 
 On an initialized database, prebuild the indexes with `psql -X -v ON_ERROR_STOP=1
 -f ops/project-scoped-history/install.sql`, outside a transaction, before applying
-the versioned schema-migrations or starting the changed Project binary.
+the versioned schema-migrations.
 [The production runbook](../../docs/runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
 places this in step 3 of an upgrade. The concurrent builds permit writes but can
 wait for an existing transaction. Inspect `pg_stat_progress_create_index`; do not
 restart an indexing batch to satisfy the build. The script bounds each build to
 thirty minutes. Record its output.
 
-The script checks the eight names twice and fails, with a non-zero `psql` exit,
+The script checks the two names twice and fails, with a non-zero `psql` exit,
 instead of reporting success over an index the lookups cannot use. Before it
 builds anything, it refuses a name that is already taken by an index that is not
 both `indisvalid` and `indisready`, an index on another table, an index whose
 definition is not the reviewed one, or a table, view, or other relation that is
 not an index. Names that resolve to nothing pass this first check. After the
-builds it makes the same check and also requires all eight indexes to exist. It
+builds it makes the same check and also requires both indexes to exist. It
 prints the index rows before the last check, so the receipt shows the flags and
 definitions either way. The definition is compared exactly as `pg_get_indexdef`
 prints it, read with `search_path` set to `pg_catalog` and `quote_all_identifiers` off, so every schema name is
@@ -64,66 +64,33 @@ the definition check the same way. If the name belongs to a table, view, or
 another table's index, remove or rename that relation first. Never drop a valid
 index with the reviewed definition, and preserve the existing access paths.
 
-The schema-migration `20260917131000_project_scoped_history_indexes.sql` uses the
-same definitions for initialized databases and is a no-op before the phase schema
-exists. After a prebuild it adopts the indexes through `IF NOT EXISTS`, by name
-alone. The later schema-migration
-`20260917161000_project_scoped_history_index_validity_check.sql` therefore makes
-the script's final check again: the SQLx run fails, without recording that
-version, if `bigname_phase.normalized_events` exists and any of the eight names
-is missing, is not an index on that table, is not valid and ready, or does not
-have the reviewed definition. It changes nothing; recover as described above,
-then run the schema-migrations again. `scripts/check-schema` proves each
-refusal for the script and for the schema-migration, and that the fresh baseline,
-the schema-migration, and the script build the same definitions.
+This recovery covers the two indexes the script builds. The validity
+schema-migration below can also name one of the other six. Drop that index the
+same way, then build it with its statement from
+`20260917131000_project_scoped_history_indexes.sql`. The script does not
+build it.
 
-This is an access-path change, with no new event or replay semantics. However,
-Project Rust and SQL sources are inputs to the shared interpreter content hash.
-The changed binary therefore rotates that fingerprint; use the normal release
-and redo requirements. Preinstalling indexes alone does not rotate the running
-binary's fingerprint. Do not bypass the hash guard based on an equality test.
+## Schema-migrations
 
-## Validate
+Three schema-migrations name these indexes. They apply in this order.
 
-Run the focused tests against the normal isolated test database:
+- `20260917131000_project_scoped_history_indexes.sql` builds all eight of the first
+  package's indexes on an initialized database. It is a no-op before the phase schema
+  exists. After a prebuild it adopts an index through `IF NOT EXISTS`, by name alone.
+- `20260917161000_project_scoped_history_index_validity_check.sql` makes the script's final
+  check, for all eight names. The SQLx run fails, without recording that version, if
+  `bigname_phase.normalized_events` exists and one of them is missing, is not an index on
+  that table, is not valid and ready, or does not have the reviewed definition. It changes
+  nothing. Its error names `install.sql` for every one of the eight. For the six, use the
+  statement in the first schema-migration instead, as [Install](#install) describes.
+- `20261012130000_drop_unread_indexes.sql` drops the six that no statement reads.
 
-```sh
-scripts/test-db -- cargo test -p bigname-project --lib stage::history::tests -- --nocapture
-```
+A database that already recorded the first two applies only the third. A database that
+applies all three in one run builds the six in the first and drops them in the third.
 
-The tests compare complete old/new selection multisets, independently expected
-IDs, final UNION deduplication, empty scope, another chain, and target-boundary
-changes. They exercise candidate events, observed/orphaned history, before/after
-references, missing/null/empty keys, mixed address tuples, and case sensitivity.
-They verify the migration recreates the baseline indexes exactly and is
-repeatable. For each index they also show that migration succeeding over an
-invalid index and over one with other keys, and the later validity check then
-refusing both and a missing index. Actual production SQL is used in both tests.
-
-The scale test grows unrelated event history from 50,000 to 200,000 rows with the
-changed keys fixed. Competing scans remain enabled. It requires all eight
-correlated indexes and bounds examined event rows, rather than imposing a
-machine-dependent time limit. Set `BIGNAME_PROJECT_HISTORY_EVIDENCE_DIR` to save
-the complete executed plans and counts to `project-history-plans.json`.
-Selected occurrence counts are exact. The examined-row aggregate comes from
-PostgreSQL's rounded per-loop plan counters, so it is an approximation; the
-index conditions show whether unrelated keys were excluded during each probe.
-
-For a scratch PostgreSQL server without a Rust build, the following emits a SQL
-check using the same production queries, fixtures, and baseline:
-
-```sh
-python3 ops/project-scoped-history/validate.py > /tmp/project-history-validation.sql
-psql -XAtq -v ON_ERROR_STOP=1 "$SCRATCH_DATABASE_URL" -f /tmp/project-history-validation.sql
-```
-
-It refuses a database where `bigname_phase` exists, runs inside one transaction,
-and rolls back all fixture/schema writes. Its output contains JSON execution
-plans for each scale. Larger cumulative scales can be requested with
-`--scales 100000 500000`. These artificial unrelated-history measurements prove
-the access path; separately measure an actual complete Project pass and retain
-full/incremental/redo output checks before claiming end-to-end throughput.
-
-Relevant existing integration coverage includes `primary_names_reverse_node`,
-`record_attribution_pointer_history`, `issue_360_children_nameability`, and
-`record_id_resolver` in `crates/project/tests`.
+`scripts/check-schema` proves each refusal for the script and for the validity
+schema-migration. It also proves that the first schema-migration and the script build the
+same definitions for the two indexes.
+`handoff_probes_are_indexed_by_chain_and_exact_node` in
+`crates/storage/src/history/registry_handoffs_tests.rs` proves that each lookup reads its
+index.

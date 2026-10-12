@@ -511,16 +511,15 @@ schema-migration to perform the first build against a populated production
 `normalized_events` table.
 
 The release containing
-`20260831150000_normalized_events_v2_expiry_scope_idx.sql` adds the bounded
-ENSv2 expiry lookup used to select affected names during replay. On an
-initialized production namespace, build both
-`normalized_events_v2_expiry_scope_idx` and the widened
-`normalized_events_subregistry_registration_history_idx` concurrently in step
-3 with the reviewed statements below, and validate that both are ready and
-valid. Then apply the schema-migration in step 4; its index builds are no-ops
-when the concurrent indexes are already valid. Do not allow the versioned
-schema-migration to perform either first build against a populated production
-`normalized_events` table.
+`20260831150000_normalized_events_v2_expiry_scope_idx.sql` added
+`normalized_events_v2_expiry_scope_idx` and widened
+`normalized_events_subregistry_registration_history_idx`. No statement reads
+either index any longer, and `20261012130000_drop_unread_indexes.sql` drops
+both. This runbook therefore carries no prebuild statement or readiness check
+for them. Apply the schema-migration in step 4. On a database that has not
+recorded it, that file builds both indexes itself, with ordinary index builds
+that block writes on a populated table, and
+`20261012130000_drop_unread_indexes.sql` drops them later in the same step.
 
 The release containing
 `20260902140000_project_redo_expiry_roots.sql` adds the bounded
@@ -642,18 +641,19 @@ fails, follow the recovery steps above or in the matching index runbook, then
 run `sqlx migrate run` again.
 
 The release containing `20260917131000_project_scoped_history_indexes.sql` adds
-the eight indexes Project uses to look up the history of changed names and
-primary names. On an initialized production namespace, build them in step 3 by
-running
+eight indexes that looked up the history of changed names and primary names.
+Two are still read, by history's registry handoff read. No statement reads the
+other six, and `20261012130000_drop_unread_indexes.sql` drops them. On an
+initialized production namespace, build the two in step 3 by running
 [`ops/project-scoped-history/install.sql`](../../ops/project-scoped-history/install.sql)
 as [its runbook](../../ops/project-scoped-history/README.md) describes. This
-runbook carries no copy of the eight statements; `install.sql` is the only
+runbook carries no copy of the statements. `install.sql` is the only
 source, and `scripts/check-schema` proves it builds what the fresh baseline
 and the schema-migration build. The builds are concurrent and permit writes, so
 they can finish while the existing runner is still processing, before the
 stop/start window opens; step 3 then only runs `install.sql` again as the check.
 
-`install.sql` is its own readiness check. It exits non-zero unless all eight
+`install.sql` is its own readiness check. It exits non-zero unless both
 names are valid and ready indexes on `bigname_phase.normalized_events` with the
 reviewed definition, and it refuses before building anything when one of the
 names is already taken by an invalid index, an index with another definition,
@@ -665,15 +665,19 @@ with the reviewed definition.
 
 Keep the `install.sql` output with its start and end times in the release
 record. Then apply the schema-migrations in step 4. The `IF NOT EXISTS` builds
-in `20260917131000_project_scoped_history_indexes.sql` are no-ops when the
-indexes already exist; do not allow them to perform the first build against a
-populated production `normalized_events` table, because an ordinary index build
-blocks writes. That file adopts an index by name alone, so the later
+in `20260917131000_project_scoped_history_indexes.sql` are no-ops for the two
+prebuilt indexes. That file builds the other six itself, with ordinary index
+builds that block writes, and `20261012130000_drop_unread_indexes.sql` drops
+them later in the same step. That file adopts an index by name alone, so the later
 `20260917161000_project_scoped_history_index_validity_check.sql` makes the same
 check as `install.sql`: `sqlx migrate run` stops without recording it if any of
 the eight indexes is missing, invalid, not ready, on another table, not an
 index, or has another definition. It never drops or rebuilds an index. If it
-fails, recover as above, then run `sqlx migrate run` again.
+fails, recover as above, then run `sqlx migrate run` again. That recovery
+covers the two indexes `install.sql` builds. If the error names one of the
+other six, drop that index the same way, then build it with its statement from
+`20260917131000_project_scoped_history_indexes.sql` before running
+`sqlx migrate run` again.
 
 The release containing
 `20260917150000_normalized_events_v1_lookahead_indexes.sql` adds the two
@@ -699,25 +703,29 @@ invalid, not ready, on another table, not an index, or has another definition.
 
 The release containing `20260922010000_project_node_history_idx.sql`,
 `20260922010100_project_mirror_scope_indexes.sql` and
-`20260923140000_project_name_surfaces_label_indexes.sql` adds the five indexes
-Project's scoped node history and progressive mirror dependency traversal read.
-On an initialized production namespace, build them in step 3 by running
+`20260923140000_project_name_surfaces_label_indexes.sql` adds five indexes
+for Project's scoped node history and progressive mirror dependency traversal.
+No statement reads two of them any longer,
+`name_surfaces_project_label_hashes_idx` and
+`normalized_events_project_v1_pointer_node_idx`, and
+`20261012130000_drop_unread_indexes.sql` drops both with the `label_hashes`
+function. On an initialized production namespace, build the other three in step 3 by running
 [`ops/project-progressive/install.sql`](../../ops/project-progressive/install.sql)
 through `psql -X -v ON_ERROR_STOP=1`, then
 [`ops/project-progressive/validate.sql`](../../ops/project-progressive/validate.sql),
 as [their runbook](../../ops/project-progressive/README.md) describes. This
-runbook carries no copy of the five statements; `install.sql` is the only
+runbook carries no copy of the three statements. `install.sql` is the only
 source. The builds are concurrent and permit writes, so they can finish while
 the existing runner is still processing, before the stop/start window opens;
 step 3 then only runs `install.sql` again as the check. `install.sql` refuses
 before building anything when a name is taken by an invalid index, an index on
-another table, a relation that is not an index, or, for the two label-hash
-indexes and their `label_hashes` function, another definition. It never drops
+another table, a relation that is not an index, or, for the label-hash
+index, another definition. It never drops
 an index, and it ends with `ANALYZE bigname_phase.name_surfaces`, because
-expression indexes have no statistics until the table is analyzed and the
-mirror lookups depend on them. `validate.sql` fails unless all five names are
-valid and ready indexes on their own tables and the label-hash indexes and function have their
-reviewed definitions; compare the other three `pg_get_indexdef` outputs with
+expression indexes have no statistics until the table is analyzed.
+`validate.sql` fails unless all three names are
+valid and ready indexes on their own tables and the label-hash index has its
+reviewed definition. Compare the other two `pg_get_indexdef` outputs with
 `install.sql`. It allows the earlier `name_surfaces_project_labels_idx` and
 `name_surfaces_project_suffix_idx` label-array indexes to exist, because the
 running binary's lookups can only use those. An interrupted build leaves an
@@ -726,11 +734,13 @@ still running, drop only the index the error names with
 `DROP INDEX CONCURRENTLY`, and rerun `install.sql`. Keep all outputs with their
 start and end times in the release record. Then apply the schema-migrations in
 step 4: `20260923140000_project_name_surfaces_label_indexes.sql` drops the two
-earlier label-array indexes inside the stop window, its `IF NOT EXISTS` builds
-are no-ops when the indexes already exist, and it refuses a function or index
-under a reviewed name with another definition. The schema-migrations must not
-perform the first build against a populated production table, because an
-ordinary index build blocks writes. After the new binary starts in step 9, run
+earlier label-array indexes inside the stop window, its `IF NOT EXISTS` build
+is a no-op for the prebuilt label-hash index, and it refuses a function or index
+under a reviewed name with another definition. It and
+`20260922010100_project_mirror_scope_indexes.sql` build the two indexes that
+`install.sql` no longer prebuilds, with ordinary index builds that block
+writes, and `20261012130000_drop_unread_indexes.sql` drops them later in the
+same step. After the new binary starts in step 9, run
 `validate.sql` again and then
 [`ops/project-progressive/validate-after-switch.sql`](../../ops/project-progressive/validate-after-switch.sql),
 which fails while either earlier label-array index still exists.
@@ -854,27 +864,6 @@ SELECT EXISTS (
     FROM pg_class index_relation
     JOIN pg_index index_state ON index_state.indexrelid = index_relation.oid
     WHERE index_relation.oid =
-          to_regclass('bigname_phase.normalized_events_v2_expiry_scope_idx')
-      AND index_state.indisvalid
-      AND index_state.indisready
-) AS normalized_events_v2_expiry_scope_index_ready,
-EXISTS (
-    SELECT 1
-    FROM pg_class index_relation
-    JOIN pg_index index_state ON index_state.indexrelid = index_relation.oid
-    WHERE index_relation.oid = to_regclass(
-              'bigname_phase.normalized_events_subregistry_registration_history_idx'
-          )
-      AND index_state.indisvalid
-      AND index_state.indisready
-      AND pg_get_expr(index_state.indpred, index_state.indrelid, true)
-          LIKE '%RegistrationReserved%'
-) AS normalized_events_reserved_registration_history_index_ready,
-EXISTS (
-    SELECT 1
-    FROM pg_class index_relation
-    JOIN pg_index index_state ON index_state.indexrelid = index_relation.oid
-    WHERE index_relation.oid =
           to_regclass('bigname_phase.normalized_events_emitter_history_idx')
       AND index_state.indisvalid
       AND index_state.indisready
@@ -962,14 +951,6 @@ reviewed statement before proceeding.
 ```sql
 CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_chain_block_number_idx
     ON bigname_phase.normalized_events (chain_id, block_number);
-CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_resolver_alias_history_idx
-    ON bigname_phase.normalized_events
-       (chain_id,
-        lower(COALESCE(after_state ->> 'resolver', before_state ->> 'resolver',
-                       raw_fact_ref ->> 'emitting_address')),
-        block_number DESC, normalized_event_id DESC)
-    WHERE event_kind = 'AliasChanged'
-      AND canonicality_state IN ('canonical', 'safe', 'finalized');
 CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_resolver_upgrade_history_idx
     ON bigname_phase.normalized_events
        (chain_id, lower(after_state ->> 'proxy_address'),
@@ -990,37 +971,6 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_pointer_before_resolve
     WHERE event_kind = 'ResolverChanged'
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
-CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_permission_after_resolver_history_idx
-    ON bigname_phase.normalized_events
-       (chain_id, lower(after_state #>> '{scope,resolver_address}'),
-        block_number, block_hash) INCLUDE (resource_id)
-    WHERE event_kind = 'PermissionChanged'
-      AND consumer_visibility = 'activated'
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND after_state #>> '{scope,kind}' = 'resolver'
-      AND resource_id IS NOT NULL;
-CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_permission_before_resolver_history_idx
-    ON bigname_phase.normalized_events
-       (chain_id, lower(before_state #>> '{scope,resolver_address}'),
-        block_number, block_hash) INCLUDE (resource_id)
-    WHERE event_kind = 'PermissionChanged'
-      AND consumer_visibility = 'activated'
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND before_state #>> '{scope,kind}' = 'resolver'
-      AND resource_id IS NOT NULL;
-DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_subregistry_registration_history_idx;
-CREATE INDEX CONCURRENTLY normalized_events_subregistry_registration_history_idx
-    ON bigname_phase.normalized_events
-       (chain_id, (after_state ->> 'registry_contract_instance_id'),
-        block_number DESC, normalized_event_id DESC, logical_name_id)
-    WHERE event_kind IN (
-              'RegistrationGranted', 'RegistrationReserved',
-              'RegistrationRenewed', 'RegistrationReleased'
-          )
-      AND source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND logical_name_id IS NOT NULL
-      AND after_state ->> 'registry_contract_instance_id' IS NOT NULL;
 CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_ens_v1_record_node_resolver_idx
     ON bigname_phase.normalized_events
        (chain_id, lower(after_state ->> 'node'),
@@ -1032,18 +982,6 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_ens_v1_record_node_res
       AND event_kind IN ('RecordChanged', 'RecordVersionChanged')
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
-CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_v2_expiry_scope_idx
-    ON bigname_phase.normalized_events
-       (chain_id, ((after_state ->> 'expiry')::numeric),
-        block_number, logical_name_id)
-    WHERE logical_name_id IS NOT NULL
-      AND source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
-      AND event_kind IN (
-          'RegistrationGranted', 'RegistrationReserved',
-          'RegistrationRenewed', 'RegistrationReleased', 'ExpiryChanged'
-      )
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND jsonb_typeof(after_state -> 'expiry') = 'number';
 CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_basenames_record_node_resolver_idx
     ON bigname_phase.normalized_events
        (chain_id, lower(after_state ->> 'node'),
@@ -1091,7 +1029,11 @@ Record this manual index step, its start/end times, validity check, and the
 pre/post published-head Project re-apply measurements in the release record for
 the shared re-derivation boundary, alongside the complete artifact set. These
 indexes are additive; rollback may leave them in place. The block no longer prebuilds
-indexes on the old serving tables: an older namespace still gets them from their
+the five `normalized_events` indexes that `20261012130000_drop_unread_indexes.sql`
+drops: the resolver alias history index, the two permission resolver history
+indexes, the ENSv2 expiry scope index and the subregistry registration history
+index. It no longer prebuilds
+indexes on the old serving tables either: an older namespace still gets them from their
 schema-migrations in step 4, on tables the removal schema-migration drops later
 in the same step.
 
@@ -1115,7 +1057,6 @@ in the same step.
    rollout section](../deployment.md#owner-ratified-sepolia-source-role-rollout)
    at step 9;
 3. for the release containing Issue #400, Issue #591, or
-   `20260831150000_normalized_events_v2_expiry_scope_idx.sql`, or
    `20260902120000_normalized_events_basenames_record_node_resolver_idx.sql`,
    or `20260911120000_normalized_events_emitter_history_idx.sql`,
    or `20260917120000_discovery_edges_observation_history_idx.sql`,

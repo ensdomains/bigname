@@ -112,15 +112,15 @@ because replay must also find orphaned and closed observations. Follow its
 [online index runbook](../ops/discovery-reopen-index/README.md) before applying
 the matching schema-migration on a large initialized database.
 
-Project's history lookups for changed names and primary names use eight indexes
-on `normalized_events`. Prebuild them concurrently on a large initialized
+History's registry handoff read uses two indexes on `normalized_events`.
+Prebuild them concurrently on a large initialized
 database following [their index runbook](../ops/project-scoped-history/README.md)
-before applying the matching schema-migrations. The script fails unless all eight
+before applying the matching schema-migrations. The script fails unless both
 are valid, ready, and have the reviewed definition, and the later validity-check
 schema-migration refuses the same shapes.
 
 Project's scoped node history and progressive mirror dependency traversal read
-`normalized_events` and `name_surfaces` through five indexes. Prebuild them
+`normalized_events` and `name_surfaces` through three indexes. Prebuild them
 concurrently on a large initialized database following
 [their index runbook](../ops/project-progressive/README.md) before applying the
 matching schema-migrations, and run its `validate.sql` before recording the
@@ -4006,3 +4006,106 @@ While the runner follows the chain, Interpret keeps adding to the list, so the
 selection can meet a full one. At 100,000 synthetic surfaces, a publication that
 touched 130 names took 176 ms with a full list and 13 ms with an empty one. One
 that also changed 140 ENSv2 entries took 553 ms and 41 ms.
+
+## Unread indexes on name surfaces and normalized events
+
+The build that drops sixteen indexes no statement reads changes no stored row
+and no answer. Every insert into `name_surfaces` or `normalized_events`
+maintained them, so Interpret and live following write less per row.
+
+- Schema-migration `20261012130000_drop_unread_indexes.sql` drops one index on
+  `name_surfaces`, fifteen on `normalized_events`, and the function
+  `bigname_phase.label_hashes(text[])`, which only the first of them used. The
+  [preflight](#preflight-for-the-unread-indexes) query lists the sixteen names.
+- It changes no table, column, row or comment, and no manifest or setting.
+- Neither the [interpreter content hash](glossary.md#interpreter-content-hash)
+  nor the [projection content hash](glossary.md#projection-content-hash)
+  rotates. No redo is needed.
+- The manifest-authority fingerprint and the compiled watch plan are unchanged,
+  so stamp no Ingest redo.
+- The previous build reads none of the sixteen. It runs against the migrated
+  schema, so a rollback of the binaries needs no schema step.
+- The [walk index set](glossary.md#walk-index-set) scripts now drop and rebuild
+  30 indexes, not 45 (see [walk index set](storage.md#walk-index-set)). On a
+  database where this schema-migration has not run they leave the fifteen in
+  place.
+
+### Preflight for the unread indexes
+
+Before the release, check that PostgreSQL has counted no scan of any of the
+sixteen. Run this on every server that answers queries, a serving standby
+included: each server keeps its own counters.
+
+```sql
+SELECT indexrelname, idx_scan
+FROM pg_stat_user_indexes
+WHERE schemaname = 'bigname_phase'
+  AND indexrelname IN (
+      'name_surfaces_project_label_hashes_idx',
+      'normalized_events_v1_subregistry_after_node_scope_idx',
+      'normalized_events_v1_subregistry_before_node_scope_idx',
+      'normalized_events_v1_subregistry_before_child_scope_idx',
+      'normalized_events_v2_expiry_scope_idx',
+      'normalized_events_resolver_alias_history_idx',
+      'normalized_events_permission_after_resolver_history_idx',
+      'normalized_events_permission_before_resolver_history_idx',
+      'normalized_events_subregistry_registration_history_idx',
+      'normalized_events_project_name_after_target_idx',
+      'normalized_events_project_name_before_target_idx',
+      'normalized_events_project_primary_after_idx',
+      'normalized_events_project_primary_before_idx',
+      'normalized_events_project_primary_after_source_idx',
+      'normalized_events_project_primary_before_source_idx',
+      'normalized_events_project_v1_pointer_node_idx'
+  )
+ORDER BY indexrelname;
+```
+
+Every `idx_scan` must be 0. The count is only evidence on a database that has
+served API traffic and run Project since its counters were last reset.
+`stats_reset` in `pg_stat_database` gives that time. An index that is already
+absent returns no row. If a count is not 0, some statement read that index: do
+not apply the schema-migration, and report the index.
+
+### Applying the drop
+
+The [planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
+applies schema-migrations while the API and the phase runner are stopped.
+Nothing then holds either table, and the drop takes moments whatever the index
+sizes.
+
+Applied while they run, the schema-migration behaves as follows.
+
+- Each `DROP INDEX` takes an `ACCESS EXCLUSIVE` lock on its table and keeps it
+  until the schema-migration commits. It locks `name_surfaces` first, then
+  `normalized_events`.
+- It waits behind every open transaction that holds the table. While it waits,
+  new statements on that table wait behind it.
+- It sets a five-second `lock_timeout` for itself. If a lock is not granted in
+  that time it fails, records nothing and changes nothing. Run
+  `sqlx migrate run` again.
+- A transaction that holds one of the two tables and then asks for the other
+  can deadlock with it. PostgreSQL then cancels one of the two transactions.
+- It is safe for the data while an Interpret or Project redo runs, because no
+  statement reads these indexes. It still waits for the batch in flight.
+
+A database that cannot take that lock drops the indexes by hand first. Run one
+statement per index, outside a transaction, for each name in the preflight
+query:
+
+```sql
+DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.<index name>;
+```
+
+- A concurrent drop blocks no read and no write. It waits for every open
+  transaction that could still use the index, so a long transaction delays it.
+- A concurrent drop that is cancelled leaves the index invalid. Run the same
+  statement again.
+- Record the step in the release record, then apply the schema-migration. It
+  finds none of the indexes, drops the function, which takes no table lock, and
+  records itself.
+
+Run `install.sql` from `ops/walk-index-set`, `ops/project-progressive` and
+`ops/project-scoped-history` only from the deployed commit. A copy from an
+earlier build builds some of the sixteen again. Nothing reads them. Drop them
+again with the statement above.

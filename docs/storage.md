@@ -825,6 +825,19 @@ require the retained account scope and operator relation. The phase baseline and
 populated upgrades require the [concurrent prebuild and verifier](../ops/history-direct-account-indexes/README.md).
 They change no rows, hash inputs, catalogue encoding or phase markers and require no replay.
 
+History's registry handoff read (`load_history_registry_handoffs` in
+`crates/storage/src/history/registry_handoffs.rs`) reads two indexes on `normalized_events`.
+The normalized-events baseline and `20260917131000_project_scoped_history_indexes.sql`
+install them:
+
+| Index | Serves |
+| --- | --- |
+| `normalized_events_project_name_child_idx` | the `SubregistryChanged` arm of `owner_probe`: the ENSv1 registry `NewOwner` observations of one name, by chain and name key, the namespace joined by `:` to `lower(after_state ->> 'child_node')` |
+| `normalized_events_project_name_node_idx` | the `AuthorityTransferred` arm of `owner_probe`: the ENSv1 registry `Transfer` observations of one name, by chain and name key, the namespace joined by `:` to `lower(after_state ->> 'node')` |
+
+Neither index restricts `consumer_visibility`. The statement filters it.
+`history/registry_handoffs_tests.rs` checks that each arm reads its index.
+
 When an ENSv1 BaseRegistrar manifest admits ordinary numeric registration and renewal,
 Interpret retains the registrar resource, token lineage, owner and expiry independently of
 registrar-controller logs. Before an admitted plaintext label is known, these lifecycle rows
@@ -2932,41 +2945,25 @@ The 17 kept indexes and the statements that read them:
 | `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |
 | `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows |
 
-The other 45 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
-these: `normalized_events_history_account_owner_idx`, `normalized_events_history_account_subject_idx`, `normalized_events_history_reverse_address_idx`,
+The other 30 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
+these: `normalized_events_history_account_owner_idx`,
+`normalized_events_history_account_subject_idx`, `normalized_events_history_reverse_address_idx`,
 `normalized_events_history_registrar_lease_idx`, `normalized_events_registry_token_idx`,
-`normalized_events_v1_subregistry_after_node_scope_idx`,
 `normalized_events_v1_subregistry_after_child_scope_idx`,
-`normalized_events_v1_subregistry_before_node_scope_idx`,
-`normalized_events_v2_subregistry_pointer_scope_idx`,
-`normalized_events_v1_subregistry_before_child_scope_idx`, `normalized_events_block_idx`,
-`normalized_events_emitter_history_idx`, `normalized_events_v2_expiry_scope_idx`,
-`normalized_events_ens_v1_record_node_resolver_idx`,
-`normalized_events_basenames_record_node_resolver_idx`,
-`normalized_events_record_id_write_idx`, `normalized_events_record_id_link_idx`,
-`normalized_events_history_discovery_name_idx`, `normalized_events_history_discovery_resource_idx`,
-`normalized_events_resolver_alias_history_idx`,
-`normalized_events_resolver_upgrade_history_idx`,
-`normalized_events_registry_origin_idx`,
-`normalized_events_registry_announcement_idx`,
-`normalized_events_wrapper_departure_idx`,
+`normalized_events_v2_subregistry_pointer_scope_idx`, `normalized_events_block_idx`,
+`normalized_events_emitter_history_idx`, `normalized_events_ens_v1_record_node_resolver_idx`,
+`normalized_events_basenames_record_node_resolver_idx`, `normalized_events_record_id_write_idx`,
+`normalized_events_record_id_link_idx`, `normalized_events_history_discovery_name_idx`,
+`normalized_events_history_discovery_resource_idx`,
+`normalized_events_resolver_upgrade_history_idx`, `normalized_events_registry_origin_idx`,
+`normalized_events_registry_announcement_idx`, `normalized_events_wrapper_departure_idx`,
 `normalized_events_user_registry_departure_idx`,
 `normalized_events_pointer_after_resolver_history_idx`,
-`normalized_events_pointer_before_resolver_history_idx`,
-`normalized_events_permission_after_resolver_history_idx`,
-`normalized_events_permission_before_resolver_history_idx`,
-`normalized_events_subregistry_registration_history_idx`,
-`normalized_events_project_name_node_idx`, `normalized_events_project_name_child_idx`,
-`normalized_events_project_name_after_target_idx`,
-`normalized_events_project_name_before_target_idx`,
-`normalized_events_project_primary_after_idx`, `normalized_events_project_primary_before_idx`,
-`normalized_events_project_primary_after_source_idx`,
-`normalized_events_project_primary_before_source_idx`,
-`normalized_events_address_registrant_match_idx`,
+`normalized_events_pointer_before_resolver_history_idx`, `normalized_events_project_name_node_idx`,
+`normalized_events_project_name_child_idx`, `normalized_events_address_registrant_match_idx`,
 `normalized_events_address_token_holder_match_idx`,
 `normalized_events_address_registry_owner_match_idx`,
-`normalized_events_address_root_permission_idx`,
-`normalized_events_project_node_history_idx`, `normalized_events_project_v1_pointer_node_idx`
+`normalized_events_address_root_permission_idx`, `normalized_events_project_node_history_idx`
 and `normalized_events_project_v1_pointer_addressed_node_idx`.
 
 A new index on `normalized_events` joins one list in the change that adds it: the drop list
@@ -3250,6 +3247,11 @@ manifest drift, watch plans, or execution traces.
   build procedure documented for that release. The step must be named in
   deployment preflight and recorded outside `_sqlx_migrations`; it does not
   establish a general manual schema-change path.
+- An index that a reviewed schema-migration drops may be dropped by hand first,
+  with the concurrent procedure documented for that release. The
+  schema-migration still applies afterwards and records itself. The step is
+  recorded in the release record. It does not establish a general manual
+  schema-change path either.
 - A schema-migration that changes identity, manifest authority, canonicality,
   projection meaning, or replay behavior updates the corresponding contract
   docs in the same change.
