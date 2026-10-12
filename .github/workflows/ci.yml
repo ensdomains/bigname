@@ -278,7 +278,7 @@ jobs:
               -p bigname-manifests
               -p bigname-adapters
               -p bigname-test-support
-            postgres_initdb_args: "--set=jit=off"
+            postgres_initdb_args: "--set=jit=off --set=log_lock_waits=on"
     services:
       postgres:
         image: postgres:16-alpine
@@ -319,9 +319,31 @@ jobs:
         if: matrix.name == 'core'
         uses: ./.github/actions/sync-refs
 
+      - name: cargo test (build)
+        if: github.event_name != 'push'
+        run: cargo test --no-run ${{ matrix.packages }} --features bigname-adapters/test-activation,bigname-storage/test-support
+
+      - name: Watch for stalled test databases
+        if: github.event_name != 'push'
+        run: nohup scripts/ci-pg-hang-watch "${{ job.services.postgres.id }}" "$RUNNER_TEMP/pg-hang-report.txt" >/dev/null 2>&1 &
+
+      # `cargo test` has no per-test time limit. In the log of a run cut off here,
+      # a test that never finished has a "has been running for over 60 seconds"
+      # line and no result line.
       - name: cargo test
         if: github.event_name != 'push'
+        timeout-minutes: 20
         run: cargo test ${{ matrix.packages }} --features bigname-adapters/test-activation,bigname-storage/test-support
+
+      - name: Report stalled test databases
+        if: always() && github.event_name != 'push'
+        run: |
+          cat "$RUNNER_TEMP/pg-hang-report.txt" 2>/dev/null || echo "scripts/ci-pg-hang-watch wrote no report."
+          if pgrep -f scripts/ci-pg-hang-watch >/dev/null; then
+            echo "scripts/ci-pg-hang-watch is still running."
+          else
+            echo "scripts/ci-pg-hang-watch is not running."
+          fi
 
       - name: Warm core test dependencies
         if: github.event_name == 'push' && steps.cargo_cache.outputs.cache-hit != 'true'
@@ -344,7 +366,7 @@ jobs:
           POSTGRES_USER: bigname
           POSTGRES_PASSWORD: bigname
           # Preserve the production-like JIT setting used by the API suite.
-          POSTGRES_INITDB_ARGS: ""
+          POSTGRES_INITDB_ARGS: "--set=log_lock_waits=on"
         ports:
           - 5432:5432
         options: >-
@@ -379,6 +401,10 @@ jobs:
         with:
           tool: cargo-nextest@0.9.143
 
+      - name: Watch for stalled test databases
+        if: github.event_name != 'push'
+        run: nohup scripts/ci-pg-hang-watch "${{ job.services.postgres.id }}" "$RUNNER_TEMP/pg-hang-report.txt" >/dev/null 2>&1 &
+
       # The ci profile (.config/nextest.toml) writes each test's time to a JUnit report.
       - name: cargo nextest (API partition)
         if: github.event_name != 'push'
@@ -390,6 +416,16 @@ jobs:
           --profile ci
           --partition hash:${{ matrix.shard }}/5
           2>&1 | tee nextest.log
+
+      - name: Report stalled test databases
+        if: always() && github.event_name != 'push'
+        run: |
+          cat "$RUNNER_TEMP/pg-hang-report.txt" 2>/dev/null || echo "scripts/ci-pg-hang-watch wrote no report."
+          if pgrep -f scripts/ci-pg-hang-watch >/dev/null; then
+            echo "scripts/ci-pg-hang-watch is still running."
+          else
+            echo "scripts/ci-pg-hang-watch is not running."
+          fi
 
       - name: Check the API partition's JUnit report
         if: github.event_name != 'push'
@@ -448,7 +484,7 @@ jobs:
           POSTGRES_PASSWORD: bigname
           # These small correctness fixtures trigger expensive JIT compilation;
           # production and the separate benchmark gates retain their own settings.
-          POSTGRES_INITDB_ARGS: "--set=max_connections=300 --set=jit=off"
+          POSTGRES_INITDB_ARGS: "--set=max_connections=300 --set=jit=off --set=log_lock_waits=on"
         ports:
           - 5432:5432
         options: >-
@@ -516,6 +552,9 @@ jobs:
             echo "- Exact hit: \`$CACHE_HIT\`"
           } >>"$GITHUB_STEP_SUMMARY"
 
+      - name: Watch for stalled test databases
+        run: nohup scripts/ci-pg-hang-watch "${{ job.services.postgres.id }}" "$RUNNER_TEMP/pg-hang-report.txt" >/dev/null 2>&1 &
+
       - name: cargo nextest (slice ${{ matrix.slice }}/5)
         run: >-
           ./scripts/test-db -- cargo nextest run
@@ -530,6 +569,16 @@ jobs:
           --features bigname-adapters/test-activation,bigname-storage/test-support
           --no-fail-fast
           --partition slice:${{ matrix.slice }}/5
+
+      - name: Report stalled test databases
+        if: always()
+        run: |
+          cat "$RUNNER_TEMP/pg-hang-report.txt" 2>/dev/null || echo "scripts/ci-pg-hang-watch wrote no report."
+          if pgrep -f scripts/ci-pg-hang-watch >/dev/null; then
+            echo "scripts/ci-pg-hang-watch is still running."
+          else
+            echo "scripts/ci-pg-hang-watch is not running."
+          fi
 
       - name: cargo test (doctests)
         if: matrix.slice == 1
