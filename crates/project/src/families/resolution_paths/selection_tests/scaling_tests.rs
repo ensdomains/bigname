@@ -6,8 +6,8 @@
 //! observed ENS surface by design and are not measured here:
 //!
 //! - A registry created, upgraded or announced in the publication.
-//! - A touched name that is, or sits under, a name whose retained migration evidence holds a
-//!   created registry, whatever block the migration was in.
+//! - A touched name that is, or sits under, a name whose retained ENSv1→ENSv2 migration
+//!   evidence holds a created registry, whatever block that ENSv1→ENSv2 migration was in.
 //! - A change of the fallback resolver's classification.
 //! - A changed path of zero labels (the root registry itself).
 //!

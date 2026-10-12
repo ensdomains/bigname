@@ -2114,8 +2114,9 @@ rows and not which names it selects.
 Four cases still read every observed ENS surface:
 
 - A registry is created, upgraded or announced in the publication.
-- A touched name is, or sits under, a name whose retained migration evidence
-  holds a created registry. The migration can be in any earlier block.
+- A touched name is, or sits under, a name whose retained ENSv1→ENSv2 migration
+  evidence holds a created registry. The ENSv1→ENSv2 migration can be in any
+  earlier block.
 - The classification of the
   [v1 fallback resolver](glossary.md#v1-fallback-resolver-ensv1resolver-exposed-as-v1_resolver)
   changes.

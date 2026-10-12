@@ -116,7 +116,7 @@ pub(super) fn statement(normal_work: &str) -> String {
           AND event.after_state->>'registry' ~ '^0x[0-9a-fA-F]{{40}}$'
         UNION
         -- An original wrapper child's owner/fuses can affect a registry now mounted at another
-        -- logical parent. Read retained activated migration evidence, never discovery diagnostics.
+        -- logical parent. Read retained activated ENSv1→ENSv2 migration evidence, never discovery diagnostics.
         SELECT lower(created.after_state->>'registry')
         FROM source_ancestors ancestor
         JOIN normalized_events migration ON migration.logical_name_id=ancestor.logical_name_id

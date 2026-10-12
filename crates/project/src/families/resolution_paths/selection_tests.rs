@@ -516,7 +516,8 @@ async fn a_mount_from_an_earlier_block_carries_a_later_entry_change_to_its_desce
 // a redo writes what the live run wrote. The publication at block 5 touches three names.
 // `a.foo.eth` has a descendant first observed at block 9. `p.eth`'s own surface is first
 // observed at block 9, and its child's at block 0. `t.mig.eth`'s parent is first observed at
-// block 9, and the parent's migration, at block 3, names the registry mounted at `m.eth`.
+// block 9, and the parent's ENSv1→ENSv2 migration, at block 3, names the registry mounted at
+// `m.eth`.
 #[tokio::test]
 async fn a_redo_reads_later_surfaces_as_path_members_and_never_selects_them() -> Result<()> {
     let mut world = World::new().await?;
@@ -557,7 +558,7 @@ async fn a_redo_reads_later_surfaces_as_path_members_and_never_selects_them() ->
 // A replay after a reorg publishes the rows the first run published. An orphaned surface is
 // still a path member and never an output. `foo.eth` is orphaned and holds the changed entry's
 // label beside its canonical child. `mig.eth` is orphaned, and it alone links the touched
-// `t.mig.eth` to the migration that names the registry mounted at `m.eth`.
+// `t.mig.eth` to the ENSv1→ENSv2 migration that names the registry mounted at `m.eth`.
 #[tokio::test]
 async fn an_orphaned_surface_is_a_path_member_and_never_an_output() -> Result<()> {
     let mut world = World::new().await?;
@@ -652,9 +653,10 @@ async fn a_touched_name_selects_its_descendants_only() -> Result<()> {
     world.cleanup().await
 }
 
-// A touched name reaches the migration evidence of each of its ancestors of two labels or
-// more, itself included, and the ancestor is found by its whole ordered path. `a.foo.eth` is
-// touched. Its own migration names the registry at `n.eth` and `foo.eth`'s the one at `m.eth`.
+// A touched name reaches the ENSv1→ENSv2 migration evidence of each of its ancestors of two
+// labels or more, itself included, and the ancestor is found by its whole ordered path.
+// `a.foo.eth` is touched. Its own migration names the registry at `n.eth` and `foo.eth`'s the
+// one at `m.eth`.
 // `eth` has one label, and `eth.foo` holds `foo.eth`'s labels in another order: their
 // migrations, of the registries at `o.eth` and `z.eth`, are not reached.
 #[tokio::test]
@@ -749,8 +751,8 @@ async fn labels_sharing_an_entry_key_are_candidates_and_only_exact_suffixes_are_
 
 // Entry keys compare lower-cased label hashes. Paths compare the stored text. `FOO.eth` and
 // `x.FOO.eth` hold `foo`'s label hash in upper case. A change of `foo`'s entry selects both
-// spellings. A touched `x.FOO.eth` selects itself and reaches the migration of `FOO.eth`, whose
-// registry is mounted at `n.eth`, and not that of `foo.eth`, mounted at `m.eth`.
+// spellings. A touched `x.FOO.eth` selects itself and reaches the ENSv1→ENSv2 migration of
+// `FOO.eth`, whose registry is mounted at `n.eth`, and not that of `foo.eth`, mounted at `m.eth`.
 #[tokio::test]
 async fn a_mixed_case_label_hash_matches_by_key_and_not_by_suffix() -> Result<()> {
     let mut world = World::new().await?;
@@ -798,7 +800,7 @@ async fn a_mixed_case_label_hash_matches_by_key_and_not_by_suffix() -> Result<()
 // Nothing forbids a null element in `labelhashes`, and array equality treats two nulls as
 // equal. `null.foo.eth` holds a null first label and `bar.null.eth` a null second label. Both
 // are touched and select the names below them. `null.foo.eth` is also its own ancestor, and its
-// migration names the registry mounted at `m.eth`.
+// ENSv1→ENSv2 migration names the registry mounted at `m.eth`.
 #[tokio::test]
 async fn a_null_label_hash_element_keeps_the_scan_result() -> Result<()> {
     let mut world = World::new().await?;
@@ -950,7 +952,7 @@ async fn a_global_change_selects_every_eth_name() -> Result<()> {
 // The indexes carry no chain, and the probes keep the chain and namespace tests. A surface
 // of another namespace and one of another chain spell `x.a.foo.eth`'s path. Neither is selected
 // with the touched `a.foo.eth`. A surface of another namespace spells `foo.eth`'s path, and its
-// migration, of the registry mounted at `z.eth`, is not reached.
+// ENSv1→ENSv2 migration, of the registry mounted at `z.eth`, is not reached.
 #[tokio::test]
 async fn a_surface_of_another_namespace_with_the_same_path_is_never_selected() -> Result<()> {
     const OTHER_CHAIN: &str = "base-sepolia";
