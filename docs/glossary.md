@@ -1589,8 +1589,6 @@ incremental Project batch has in scope, or of a node whose ENSv1 registry
 resolver pointer is in scope; every name whose labels end with the seed's labels
 (the seed itself and its descendants) may have a walk that consults it, so those
 names are rechecked.
-Both lookups use label-hash indexes and then compare the labels themselves; see
-[the Project scope index runbook](../ops/project-progressive/README.md).
 
 ## Exact-name profile (`exact_name_profile`)
 
