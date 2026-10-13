@@ -87,9 +87,9 @@ async fn with_fixture(
             INSERT INTO name_surfaces (logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
                 namehash, labelhashes, normalizer_version, visibility_state, chain_id, block_hash,
                 block_number, canonicality_state)
-            SELECT name, 'ens', name, ARRAY[name], '\x00'::bytea, name, ARRAY[name], 'test', 'active',
+            SELECT name, 'ens', name, ARRAY[name], '\x00'::bytea, split_part(name, ':', 2), ARRAY[name], 'test', 'active',
                 'ethereum-mainnet', 'block-1', 1, 'canonical'::canonicality_state
-            FROM (VALUES ('ens:wanted'), ('ens:other'), ('ens:')) names(name);
+            FROM (VALUES ('ens:wanted'), ('ens:other'), ('ens:empty')) names(name);
             INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state)
             SELECT lpad(to_hex(n), 32, '0')::uuid, 'ethereum-mainnet', 'block-1', 1, 'canonical'::canonicality_state
             FROM generate_series(1, 9) n;
@@ -130,7 +130,7 @@ async fn evidence_arms_keep_name_resource_nameless_and_repeated_keys() -> Result
     with_fixture("publication_membership_arms", async |c| {
         let cases = [("both", Some(NAME), Some(1)), ("resource", Some(OTHER_NAME), Some(2)),
                      ("nameless", None, Some(3)), ("name", Some(NAME), Some(4)),
-                     ("empty-name", Some("ens:"), Some(5))];
+                     ("empty-name", Some("ens:empty"), Some(5))];
         for (id, name, res) in cases {
             event(c, id, name, res, "TokenControlTransferred", Some(2), json!({"to": id.to_uppercase()})).await?;
         }
@@ -143,7 +143,7 @@ async fn evidence_arms_keep_name_resource_nameless_and_repeated_keys() -> Result
         let names = vec![NAME.into()]; let resources = vec![resource(1), resource(2), resource(3), resource(5), resource(12)];
         let all = vec![holding("both", Some(NAME), Some(1), 1), holding("resource", Some(OTHER_NAME), Some(2), 1),
             holding("nameless", None, Some(3), 1), holding("name", Some(NAME), Some(4), 1),
-            holding("empty-name", Some("ens:"), Some(5), 1)];
+            holding("empty-name", Some("ens:empty"), Some(5), 1)];
         assert_holdings(c, &names, &resources, all.clone()).await?;
         assert_holdings(c, &[NAME.into(), NAME.into()], &resources.repeat(2), all.clone()).await?;
         let mut reversed = resources.clone(); reversed.reverse();
@@ -152,7 +152,7 @@ async fn evidence_arms_keep_name_resource_nameless_and_repeated_keys() -> Result
         assert_holdings(c, &[String::new()], &[], vec![]).await?;
         assert_holdings(c, &names, &[], vec![holding("both", Some(NAME), Some(1), 1), holding("name", Some(NAME), Some(4), 1)]).await?;
         assert_holdings(c, &[], &resources, vec![holding("both", Some(NAME), Some(1), 1), holding("resource", Some(OTHER_NAME), Some(2), 1),
-            holding("nameless", None, Some(3), 1), holding("empty-name", Some("ens:"), Some(5), 1)]).await?;
+            holding("nameless", None, Some(3), 1), holding("empty-name", Some("ens:empty"), Some(5), 1)]).await?;
         Ok(())
     }).await
 }
@@ -199,7 +199,7 @@ async fn positional_handoff_removes_owner_but_keeps_controller() -> Result<()> {
             INSERT INTO project_binding_candidate (surface_binding_id, logical_name_id, namespace, chain_id,
                 authority_arm, resource_id, binding_kind, canonicality_state, block_number, transaction_index, log_index,
                 event_identity, registry_only, lease_resource_id)
-            VALUES ('handoff', 'ens:wanted', 'ens', 'ethereum-mainnet', 'test',
+            VALUES ('00000000-0000-0000-0000-0000000000f0', 'ens:wanted', 'ens', 'ethereum-mainnet', 'test',
                 '00000000-0000-0000-0000-000000000001', 'test', 'canonical', 3, 1, 1,
                 'handoff', true, '00000000-0000-0000-0000-000000000002');
         "#).execute(&mut *c).await?;
