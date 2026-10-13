@@ -15,8 +15,8 @@
 //! which the name history (`project_name_history`) never backdates. Above the cap it reads every
 //! candidate, still with a null total. Registry children sort by the name they serve and have no timestamp.
 //! Postgres orders the keys, so the order is the page statement's under the database
-//! collation. The walk composes the candidates in that order, in batches that double up to
-//! `MAX_WALK_BATCH`, and runs
+//! collation. For name grouping the walk starts with about a page and grows its steps
+//! (`batch`). Registration grouping retains the old four-page first step and doubling. It runs
 //! the unchanged page statement over the rows gathered so far. A group whose first member the
 //! walk has not reached sorts at or after the walk position, so the page is final once its
 //! last row is a group the walk passed, with one more row after it, or once every candidate is
@@ -35,6 +35,7 @@ use serde_json::Value;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
+mod batch;
 mod order;
 
 use order::{WalkOrder, timestamps_agree, walk_order};
@@ -169,10 +170,6 @@ pub async fn load_family_address_names_capped_page(
     })
 }
 
-/// The most candidates one walk step composes before it drops the rows the filters reject, so
-/// a filter that matches little holds at most this many names' rows at a time.
-const MAX_WALK_BATCH: usize = 1024;
-
 /// A walk candidate: a name to compose on its index chain, or a registry child's prebuilt rows.
 enum Candidate {
     Name(String),
@@ -303,11 +300,17 @@ async fn walk_page(
         return Ok(None);
     }
     let registration = request.dedupe_by == AddressNamesCurrentDedupe::Resource;
-    let mut batch = (4 * usize::try_from(request.page_size)?.saturating_add(1)).max(32);
+    // Registration closure depends on the partitions, so preserve its complete old sequence.
+    let old_batches = registration || seams::legacy_walk_batches();
+    let mut steps = batch::Steps::first(
+        usize::try_from(request.page_size)?,
+        request.cursor.is_some(),
+        old_batches,
+    );
     let mut position = order.start;
     let mut gathered = Gathered::default();
     loop {
-        let end = position.saturating_add(batch).min(order.ids.len());
+        let end = position.saturating_add(steps.size()).min(order.ids.len());
         let mut step = Step::default();
         let mut names: BTreeMap<&str, Vec<String>> = BTreeMap::new();
         for id in &order.ids[position..end] {
@@ -354,7 +357,6 @@ async fn walk_page(
         gathered.rows.append(&mut step.rows);
         gathered.names.append(&mut step.names);
         position = end;
-        batch = batch.saturating_mul(2).min(MAX_WALK_BATCH);
         let rows = Value::Array(std::mem::take(&mut gathered.rows));
         let names = Value::Array(std::mem::take(&mut gathered.names));
         let page = load_address_names_page_entries_from(
@@ -397,6 +399,8 @@ async fn walk_page(
         if position >= order.ids.len() || (next_cursor.is_some() && passed) {
             return Ok(Some((entries, next_cursor)));
         }
+        let found = entries.len() + usize::from(next_cursor.is_some());
+        steps.grow(position - order.start, found);
     }
 }
 

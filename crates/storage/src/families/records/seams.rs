@@ -16,6 +16,7 @@ mod scoped {
         static COMPOSED_NAME_BATCHES: Arc<Mutex<Vec<usize>>>;
         static EXACT_TOTAL_CAP: usize;
         static ADDRESS_NAME_PATHS: Arc<Mutex<Vec<&'static str>>>;
+        static LEGACY_WALK_BATCHES: ();
     }
 
     /// Passive work/stage observations for one caller. No selection or write behavior changes.
@@ -49,6 +50,17 @@ mod scoped {
         EXACT_TOTAL_CAP
             .try_with(|cap| *cap)
             .unwrap_or(super::EXACT_TOTAL_CAP)
+    }
+
+    /// Runs `future` with an address-names walk sizing its steps as it first did: four pages
+    /// of candidates, at least 32, then doubling. Tests compare its pages with the current
+    /// step sizes'.
+    pub async fn with_legacy_walk_batches<F: Future>(future: F) -> F::Output {
+        LEGACY_WALK_BATCHES.scope((), future).await
+    }
+
+    pub(crate) fn legacy_walk_batches() -> bool {
+        LEGACY_WALK_BATCHES.try_with(|_| ()).is_ok()
     }
 
     /// Runs `future` appending to `paths` how each capped address-names page was read:
@@ -143,12 +155,14 @@ const COMPOSE_CHUNK: usize = 256;
 const EXACT_TOTAL_CAP: usize = 1_000;
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use scoped::{compose_chunk, exact_total_cap, note_address_name_path};
+pub(crate) use scoped::{
+    compose_chunk, exact_total_cap, legacy_walk_batches, note_address_name_path,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use scoped::{
     lookup_work_timer, note_lookup_work, with_address_name_paths, with_compose_chunk,
     with_composed_name_batches, with_exact_total_cap, with_inventory_read_counter,
-    with_lookup_work, with_role_read_counter,
+    with_legacy_walk_batches, with_lookup_work, with_role_read_counter,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub(super) use scoped::{note_composed_batch, note_inventory_read, note_role_read};
@@ -160,6 +174,11 @@ pub(crate) fn exact_total_cap() -> usize {
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(crate) fn note_address_name_path(_path: &'static str) {}
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) fn legacy_walk_batches() -> bool {
+    false
+}
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(crate) fn compose_chunk() -> usize {

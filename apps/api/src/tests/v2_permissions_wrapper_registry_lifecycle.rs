@@ -448,3 +448,211 @@ async fn self_parent_combines_token_and_root_operator_powers_under_one_account_k
     assert_eq!(rows, *page["data"].as_array().unwrap());
     database.cleanup().await
 }
+
+/// A moved registry leaves its old name in the owner's candidate history. Reusing that name
+/// for another registry gives a current positive result with a different registration.
+#[tokio::test]
+async fn admitted_name_move_and_rebind_preserve_registration_composition_inputs() -> Result<()> {
+    use bigname_storage::families::records::seams::with_legacy_walk_batches;
+
+    fn mount(logs: &mut Logs, offset: i64, label: &str, registry: &str) {
+        logs.push(
+            offset,
+            ETH,
+            SubregistryUpdated {
+                tokenId: id(label),
+                subregistry: address(registry),
+                sender: address(ADMIN),
+            }
+            .encode_log_data(),
+        )
+        .parent(offset, registry, ETH, label, ADMIN);
+    }
+    fn transfer(logs: &mut Logs, offset: i64, registry: &str, label: &str) {
+        logs.push(
+            offset,
+            registry,
+            TransferSingle {
+                operator: address(ALICE),
+                from: address(ALICE),
+                to: address(BOB),
+                id: id(label),
+                value: U256::from(1),
+            }
+            .encode_log_data(),
+        )
+        .roles(offset, registry, id(label), ALICE, bit(156), U256::ZERO)
+        .roles(offset, registry, id(label), BOB, U256::ZERO, bit(156));
+    }
+    let expiry = (TIME + 100) as u64;
+    let mut logs = Logs::default();
+    logs.roles(0, ETH, U256::ZERO, ADMIN, U256::ZERO, parent_admin())
+        .user(0, PARENT)
+        .user(0, EMPTY_PARENT)
+        .register(1, ETH, "b", BOB, expiry, U256::ZERO)
+        .register(1, ETH, "z", BOB, expiry, U256::ZERO);
+    mount(&mut logs, 1, "b", PARENT);
+    logs.register(2, PARENT, "leaf", ALICE, expiry, bit(156));
+    logs.push(
+        3,
+        ETH,
+        SubregistryUpdated {
+            tokenId: id("b"),
+            subregistry: address(ZERO),
+            sender: address(ADMIN),
+        }
+        .encode_log_data(),
+    );
+    mount(&mut logs, 3, "z", PARENT);
+    mount(&mut logs, 4, "b", EMPTY_PARENT);
+    logs.register(5, EMPTY_PARENT, "leaf", ALICE, expiry, bit(156));
+    // These former-owner names lie strictly between leaf.z.eth and leaf.b.eth.
+    for index in 0..30 {
+        let registry = format!("0x{:040x}", 0xe000 + index);
+        let label = format!("m{index:02}");
+        logs.user(0, &registry)
+            .register(6, ETH, &label, BOB, expiry, U256::ZERO);
+        mount(&mut logs, 6, &label, &registry);
+        logs.register(7, &registry, "leaf", ALICE, expiry, bit(156));
+        transfer(&mut logs, 8, &registry, "leaf");
+    }
+    for index in 0..969 {
+        let label = format!("aa{index:04}");
+        logs.register(7, ETH, &label, ALICE, expiry, bit(156));
+        transfer(&mut logs, 8, ETH, &label);
+    }
+    let database = setup(&logs).await?;
+    interpret(&database, false, false).await?;
+    publish(&database, 10).await?;
+    let resources: Vec<(String, Uuid)> = sqlx::query_as(
+        "SELECT registry, resource_id FROM project_ens_v2_entry_owner
+         WHERE chain_id = $1 AND registry IN ($2, $3) AND entry_key = $4
+           AND owner = $5 AND status = 'registered' AND expiry > $6 ORDER BY registry",
+    )
+    .bind(CHAIN)
+    .bind(PARENT)
+    .bind(EMPTY_PARENT)
+    .bind(format!("0x{:064x}", id("leaf")))
+    .bind(ALICE)
+    .bind(TIME + 10)
+    .fetch_all(&database.pool)
+    .await?;
+    assert_eq!(
+        resources.len(),
+        2,
+        "both live leaf owners must be published"
+    );
+    let ra = resources.iter().find(|row| row.0 == PARENT).unwrap().1;
+    let rb = resources
+        .iter()
+        .find(|row| row.0 == EMPTY_PARENT)
+        .unwrap()
+        .1;
+    assert_ne!(ra, rb);
+    let candidate_count: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT logical_name_id) FROM project_address_name_index
+         WHERE address = $1 AND chain_id = $2",
+    )
+    .bind(ALICE)
+    .bind(CHAIN)
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(
+        candidate_count, 1001,
+        "all actual owner candidates, before joining surfaces"
+    );
+    let ranked: Vec<(String, String)> = sqlx::query_as(
+        "SELECT candidate.logical_name_id, surface.raw_name FROM
+          (SELECT DISTINCT logical_name_id FROM project_address_name_index
+           WHERE address = $1 AND chain_id = $2) candidate
+         JOIN name_surfaces surface USING (logical_name_id)
+         ORDER BY surface.raw_name DESC, candidate.logical_name_id ASC",
+    )
+    .bind(ALICE)
+    .bind(CHAIN)
+    .fetch_all(&database.pool)
+    .await?;
+    assert_eq!(
+        ranked.len(),
+        1001,
+        "actual candidate cap must select the walk"
+    );
+    assert_eq!(ranked[0].1, "leaf.z.eth");
+    assert_eq!(ranked[31].1, "leaf.b.eth");
+    let a = &ranked[0].0;
+    let b = &ranked[31].0;
+    let historical: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM project_binding_candidate
+         WHERE logical_name_id = $1 AND resource_id = $2 AND chain_id = $3)",
+    )
+    .bind(b)
+    .bind(ra)
+    .bind(CHAIN)
+    .fetch_one(&database.pool)
+    .await?;
+    assert!(historical, "RA's old B binding must remain a candidate");
+    let released: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM surface_bindings
+         WHERE logical_name_id = $1 AND resource_id = $2 AND chain_id = $3
+           AND active_to IS NOT NULL)",
+    )
+    .bind(b)
+    .bind(ra)
+    .bind(CHAIN)
+    .fetch_one(&database.pool)
+    .await?;
+    assert!(released, "RA's old B binding must be closed after the move");
+
+    for (name, resource) in [(a, ra), (b, rb)] {
+        let current: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM surface_bindings
+             WHERE logical_name_id = $1 AND resource_id = $2 AND chain_id = $3
+               AND active_to IS NULL AND canonicality_state IN ('canonical','safe','finalized'))",
+        )
+        .bind(name)
+        .bind(resource)
+        .bind(CHAIN)
+        .fetch_one(&database.pool)
+        .await?;
+        assert!(current, "{name} must have the expected current binding");
+    }
+    let b_body = payload(
+        &database,
+        &format!("/v1/addresses/{ALICE}/names?namespace=ens&relation=owner&q=leaf.b.eth"),
+    )
+    .await?;
+    assert_eq!(b_body["data"].as_array().unwrap().len(), 1, "{b_body}");
+    assert_eq!(b_body["data"][0]["name"], json!("leaf.b.eth"), "{b_body}");
+    assert_eq!(b_body["data"][0]["owner"], json!(ALICE), "{b_body}");
+    for dedupe in ["registration", "name"] {
+        let uri = format!(
+            "/v1/addresses/{ALICE}/names?namespace=ens&relation=owner&dedupe={dedupe}&sort=name&order=desc&page_size=1"
+        );
+        let read = || with_paths(with_batches(response(&database, &uri)));
+        let ((old, old_batches), old_paths) = with_legacy_walk_batches(read()).await;
+        let ((current, current_batches), current_paths) = read().await;
+        let old = old?;
+        let current = current?;
+        assert_eq!(old.0, StatusCode::OK, "{}", old.1);
+        assert_eq!(old, current, "{uri}");
+        assert_eq!(old_paths, ["walk"]);
+        assert_eq!(current_paths, ["walk"]);
+        assert_eq!(current.1["data"][0]["name"], json!("leaf.z.eth"));
+        assert_eq!(current.1["page"]["has_more"], json!(true));
+        assert!(current.1["page"]["total_count"].is_null());
+        assert_eq!(old_batches, [32]);
+        if dedupe == "registration" {
+            // Count every composer input before relation filtering, including discarded
+            // closure results. A scratch smaller registration policy must fail 33 vs 32 here.
+            assert_eq!(
+                current_batches.iter().sum::<usize>(),
+                old_batches.iter().sum::<usize>()
+            );
+            assert_eq!(current_batches, [32]);
+        } else {
+            assert_eq!(current_batches, [8, 16, 8]);
+            assert!(current_batches.iter().sum::<usize>() <= old_batches.iter().sum());
+        }
+    }
+    database.cleanup().await
+}
