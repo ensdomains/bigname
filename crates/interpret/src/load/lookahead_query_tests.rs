@@ -1287,6 +1287,152 @@ async fn ensv2_key_arm_probes_the_inverted_index_per_key() -> Result {
     Ok(())
 }
 
+/// The key arm tests the key array row by row, as a filter, and nowhere as a condition of the
+/// inverted index.
+fn filters_rows_by_key_array(plan: &Value) -> bool {
+    let Some(arm) = key_arm(plan) else {
+        return false;
+    };
+    let (mut filtered, mut probed) = (false, false);
+    let mut pending = vec![arm];
+    while let Some(node) = pending.pop() {
+        let tests_array = |part: &str| node[part].as_str().unwrap_or("").contains("array_remove(");
+        filtered |= tests_array("Filter");
+        probed |= node["Index Name"] == KEY_PROBE_INDEX && tests_array("Index Cond");
+        pending.extend(node["Plans"].as_array().into_iter().flatten());
+    }
+    filtered && !probed
+}
+
+/// `pg_class.reltuples` of two of the ENSv2 partial indexes: the rows the planner believes
+/// each holds.
+async fn v2_index_rows(connection: &mut PgConnection) -> Result<Vec<f32>> {
+    Ok(sqlx::query_scalar(
+        "SELECT reltuples FROM pg_class
+         WHERE relname IN ($1, 'normalized_events_v2_direct_node_probe_idx') ORDER BY relname",
+    )
+    .bind(KEY_PROBE_INDEX)
+    .fetch_all(connection)
+    .await?)
+}
+
+/// An Interpret redo deletes the chain's events and writes them again. An `ANALYZE` that runs
+/// in between, while no ENSv2 event is live, records the ENSv2 partial indexes as holding no
+/// rows although their pages stay allocated. Once the events are back the planner still
+/// believes those indexes are empty, so it reads every row of one of them for each requested
+/// key and tests the key array as a filter. The refresh the runner makes after a batch puts
+/// the probe back, also for statements prepared before it.
+#[tokio::test]
+async fn ensv2_key_arm_recovers_its_probe_after_a_refresh() -> Result {
+    let db = database().await?;
+    sqlx::raw_sql(
+        "ALTER TABLE normalized_events SET (autovacuum_enabled = false);
+         INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state)
+         SELECT 'lookahead-test','block-'||n,n,to_timestamp(n),'canonical'
+         FROM generate_series(0,1000) n ON CONFLICT DO NOTHING",
+    )
+    .execute(db.pool())
+    .await?;
+    // ENSv1 events the redo has already written again. Without them the whole table reads
+    // as empty and the planner makes a different choice.
+    sqlx::query(
+        "INSERT INTO normalized_events
+         (event_identity,namespace,event_kind,source_family,manifest_version,chain_id,
+          block_number,block_hash,transaction_hash,raw_fact_ref,derivation_kind,
+          canonicality_state,after_state)
+         SELECT 'v1-'||n,'ens','RegistrationGranted','ens_v1_registrar_l1',1,$1,
+                n % 1000,'block-'||(n % 1000),'tx',
+                jsonb_build_object($2::text,'v1:'||n),
+                'ens_v1_unwrapped_authority','canonical','{}'
+         FROM generate_series(0,19999) n",
+    )
+    .bind(CHAIN)
+    .bind(INTERPRETER_STATE_KEY)
+    .execute(db.pool())
+    .await?;
+    seed_key_population(db.pool(), 0..3_000).await?;
+    let mut connection = db.pool().acquire().await?;
+    sqlx::raw_sql("ANALYZE normalized_events; ANALYZE chain_lineage;")
+        .execute(&mut *connection)
+        .await?;
+    // The redo's clear, then the automatic ANALYZE that lands before the events are back.
+    sqlx::raw_sql(
+        r"DELETE FROM normalized_events WHERE source_family LIKE 'ens\_v2\_%';
+          ANALYZE normalized_events;",
+    )
+    .execute(&mut *connection)
+    .await?;
+    seed_key_population(db.pool(), 0..3_000).await?;
+    assert_eq!(
+        v2_index_rows(&mut connection).await?,
+        [0.0, 0.0],
+        "the fixture no longer reaches the stale-statistics plan: the ENSv2 indexes are \
+         not recorded as empty"
+    );
+    let requested: Vec<String> = sqlx::query_scalar(
+        "SELECT lower(split_part(raw_fact_ref ->> $1, ':', 1)) || ':'
+             || left(split_part(raw_fact_ref ->> $1, ':', 3), 58) || '00000000'
+         FROM normalized_events
+         WHERE block_number < 500 AND source_family = 'ens_v2_registry_l1'
+         ORDER BY md5(event_identity) LIMIT 1200",
+    )
+    .bind(super::STATE_SCOPE_KEY)
+    .fetch_all(&mut *connection)
+    .await?;
+    assert_eq!(requested.len(), 1200);
+    let mut most = requested.clone();
+    most.extend((0..48_800).map(|n| v2_key("0xff", &token(n, 0))));
+    let table_indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT indexname::text FROM pg_indexes WHERE tablename = 'normalized_events'",
+    )
+    .fetch_all(&mut *connection)
+    .await?;
+    let per_key = statement(super::EVENTS);
+    for mode in ["force_custom_plan", "force_generic_plan"] {
+        sqlx::raw_sql(&format!(
+            "SET plan_cache_mode={mode}; PREPARE redo_{mode}(text,bigint,text[],uuid[],text[]) AS {per_key}"
+        ))
+        .execute(&mut *connection)
+        .await?;
+    }
+    let engine = crate::Engine::new(db.pool().clone());
+    engine.record_completed_redo(CHAIN);
+    for refreshed in [false, true] {
+        if refreshed {
+            assert!(engine.refresh_statistics(CHAIN).await);
+            let rows = v2_index_rows(&mut connection).await?;
+            assert!(rows.iter().all(|rows| *rows > 0.0), "{rows:?}");
+        }
+        for mode in ["force_custom_plan", "force_generic_plan"] {
+            sqlx::raw_sql(&format!("SET plan_cache_mode={mode}"))
+                .execute(&mut *connection)
+                .await?;
+            for keys in [&requested, &most] {
+                let plan: Value = sqlx::query_scalar(&format!(
+                    "EXPLAIN (FORMAT JSON) EXECUTE redo_{mode}('{CHAIN}',500,'{{}}'::text[],'{{}}'::uuid[],{})",
+                    text_array(keys)
+                ))
+                .fetch_one(&mut *connection)
+                .await?;
+                let (plan, context) = (&plan[0]["Plan"], format!("{mode}, {} keys", keys.len()));
+                if refreshed {
+                    assert_probes_per_key(plan, &table_indexes, &format!("refreshed, {context}"));
+                } else {
+                    assert!(
+                        filters_rows_by_key_array(plan),
+                        "the fixture no longer reaches the stale-statistics plan ({context}): \
+                         before a refresh the ENSv2 key arm must test the key array as a \
+                         filter and not in {KEY_PROBE_INDEX}: {plan}"
+                    );
+                }
+            }
+        }
+    }
+    drop((connection, engine));
+    db.cleanup().await?;
+    Ok(())
+}
+
 /// An event filed under several requested keys has its lineage checked once.
 #[tokio::test]
 async fn ensv2_key_arm_probes_lineage_once_per_event() -> Result {

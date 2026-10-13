@@ -1186,6 +1186,14 @@ in the same step.
    Interpret's last batches run, stop the command, confirm the `interpret` row still shows
    `redo_in_progress`, run `ops/walk-index-set/install.sql`, then rerun the same command,
    which resumes Interpret from its recorded block. Record both outputs.
+   During the redo the runner refreshes the planner statistics of
+   `normalized_events` itself and logs
+   `interpret refreshed normalized_events statistics`: after the first batch
+   that writes ENSv2 events, again as they grow, and when the redo completes.
+   Run `ANALYZE bigname_phase.normalized_events` by hand only if it logs
+   `interpret could not refresh normalized_events statistics`. While
+   `install.sql` builds an index that warning is expected, and the script ends
+   with its own `ANALYZE`.
    If the previous release had started a Project redo and left it unfinished,
    for example killed mid-way before this deploy, the Interpret redo that starts
    the new interpreter content hash supersedes it: that Project redo's progress
@@ -1340,10 +1348,17 @@ needs is described under
 [Interpret process memory](../storage.md#interpret-process-memory). The read
 uses `normalized_events_v2_key_probe_idx`, whose array also files an event under
 the registry its `subregistry` value names. It probes the index once per
-requested key, and stale statistics do not change that. After a redo has
-rewritten much of `normalized_events`, still run
-`ANALYZE bigname_phase.normalized_events`, because the loader's other reads plan
-from those statistics.
+requested key while the planner statistics of `normalized_events` are current.
+A redo can leave them stale. An automatic `ANALYZE` that runs after the redo
+has deleted the chain's events and before it has written the ENSv2 events
+again records the ENSv2 indexes as empty. The read then scans one of those
+indexes once per requested key, and a batch takes minutes. The runner refreshes
+the statistics itself between Interpret batches, as
+[The runner refreshes `normalized_events` statistics](../deployment.md#the-runner-refreshes-normalized_events-statistics)
+describes, and logs `interpret refreshed normalized_events statistics` each
+time. If it logs `interpret could not refresh normalized_events statistics`
+more than once, or a batch in the chain's ENSv2 range stalls, run
+`ANALYZE bigname_phase.normalized_events` by hand.
 
 ## Pause and resume indexing
 
@@ -1423,7 +1438,10 @@ range — `rerun \`phase-runner redo --chain <chain> --phase <phase>
 --from-block <n> --to-block <n>\` with the chain's configured sources as --source
 options …` — because the stamp records neither the sources nor the verifier URL:
 add back the `--source` options the chain runs with and
-`--verification-database-url` when the phase is Verify or `all`. A rerun of an
+`--verification-database-url` when the phase is Verify or `all`. An Interpret
+redo can report this after its last batch, when the stop arrived while the
+runner's refresh of the `normalized_events` statistics was still waiting: the
+rerun then has no block left to interpret, completes the redo and refreshes. A rerun of an
 interrupted Project redo with the same range under the same binary can resume an
 unfinished family rebuild from its family marker, under the conditions in step 8
 of the [planned boundary](#planned-migration-and-fingerprint-boundary).
@@ -1621,6 +1639,10 @@ error while another chain continues running.
    redo logs a warning at start naming both ranges. Unless `BIGNAME_LOG_JSON`
    selects JSON logs, the one-shot command also prints that line on stderr.
    Plan the redo's duration from `<from>` through the recorded head.
+   The redo refreshes the planner statistics of `normalized_events` itself and
+   logs `interpret refreshed normalized_events statistics`. If it logs
+   `interpret could not refresh normalized_events statistics`, run
+   `ANALYZE bigname_phase.normalized_events` by hand.
 
 7. If the mismatch reproduces during the redo, keep the phase runner stopped
    and perform the full re-walk at the [planned re-derivation

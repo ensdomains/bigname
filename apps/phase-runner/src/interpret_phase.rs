@@ -7,7 +7,8 @@ use crate::{
     error::{ErrorKind, RunnerError, RunnerResult},
     heads::BlockMarker,
     phase::{
-        Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName, PhaseProgress, RunMode,
+        AfterProgress, AfterProgressFuture, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture,
+        PhaseName, PhaseProgress, RunMode,
     },
 };
 
@@ -96,6 +97,20 @@ impl Phase for InterpretPhase {
                 Ok(PhaseBatchOutcome::Continue(progress))
             }
         })
+    }
+
+    /// Interpret refreshes the planner statistics of `normalized_events` here, between
+    /// batches. A failed refresh is logged by the engine and never fails the phase run.
+    fn after_progress_recorded(&self, chain_id: &str) -> AfterProgressFuture<'_> {
+        let chain_id = chain_id.to_owned();
+        Box::pin(async move {
+            self.engine.refresh_statistics(&chain_id).await;
+            Ok(AfterProgress::Done)
+        })
+    }
+
+    fn has_after_progress_work(&self, chain_id: &str) -> bool {
+        self.engine.statistics_refresh_due(chain_id)
     }
 }
 

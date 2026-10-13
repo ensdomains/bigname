@@ -23,6 +23,8 @@ mod family_reads;
 use family_reads::*;
 #[path = "production_interpret/sepolia_redeploy.rs"]
 mod sepolia_redeploy;
+#[path = "production_interpret/statistics.rs"]
+mod statistics;
 use phase_runner::{
     INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH,
     capacity::CapacityGuard,
