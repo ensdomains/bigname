@@ -631,7 +631,8 @@ async fn capped_pages(
             None => uri.to_owned(),
         };
         let request = async {
-            let request = with_paths(with_batches(bulk_payload(database, &page_uri)));
+            // Box the observed child to limit temporary stack use in debug polls.
+            let request = Box::pin(with_paths(with_batches(bulk_payload(database, &page_uri))));
             match cap {
                 Some(cap) => with_exact_total_cap(cap, request).await,
                 None => request.await,

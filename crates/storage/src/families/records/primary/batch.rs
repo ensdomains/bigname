@@ -99,7 +99,7 @@ pub(crate) async fn load(
             row.try_get("coin_type")?,
         );
         if let Some(claim) = claims.get_mut(&key) {
-            claim.claim_value_empty = apply_hydration(&key.0, &mut claim.snapshot, &row)?;
+            apply_hydration(&key.0, &mut claim.snapshot, &row)?;
         }
     }
     let mut tuples = BTreeMap::new();
@@ -112,25 +112,20 @@ pub(crate) async fn load(
         let mut group = BTreeMap::new();
         for namespace in namespaces {
             let loaded = tuples.get(&(address.clone(), namespace.clone(), input.coin_type.clone()));
-            let addr_has_resolver = loaded.is_some_and(|claim| has_resolver(&claim.snapshot));
-            let names_addr_reverse =
-                addr_has_resolver && loaded.is_some_and(|claim| !claim.claim_value_empty);
             let mut claim = loaded.map(|claim| claim.snapshot.clone());
             if input.coin_type == "60"
-                && !names_addr_reverse
+                && !claim.as_ref().is_some_and(has_resolver)
                 && let Some(fallback) = tuples.get(&(
                     address.clone(),
                     namespace.clone(),
                     DEFAULT_COIN_TYPE.to_owned(),
                 ))
+                && (loaded.is_some()
+                    || !addr_reverse_has_resolver(conn, &fallback.snapshot, &address, namespace)
+                        .await?)
             {
                 let mut fallback = fallback.snapshot.clone();
                 fallback.row.coin_type = input.coin_type.clone();
-                fallback.default_past_resolver = if loaded.is_some() {
-                    addr_has_resolver
-                } else {
-                    addr_reverse_has_resolver(conn, &fallback, &address, namespace).await?
-                };
                 claim = Some(fallback);
             }
             if let Some(claim) = claim {

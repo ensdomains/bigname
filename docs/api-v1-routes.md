@@ -4023,52 +4023,49 @@ introduces it rebuilds Project from full history before serving the option; see
   admitted against to be unchanged, and returns `409 stale` if it moved. Live results never change
   the indexed answer. Basenames verified primary-name lookup is unsupported;
   indexed Basenames responses remain Base-scoped.
-- ENSIP-19 default name: for ENS `coin_type=60`, both sources follow the read
-  order of ENS's ETH reverse resolver for the sources the Mainnet and Sepolia
-  profiles declare. The `addr.reverse` name wins when the reverse node
-  `<address>.addr.reverse` has a nonzero registry resolver and that resolver's
-  `name` returns at least one byte. The answer is the name the
-  `default.reverse` registrar stores for the address (coin type `2147483648`)
-  only when that resolver is zero or its `name` call succeeds with an empty
-  string. Emptiness is byte length, not normalization: a whitespace-only name
-  stops the fallback and then answers `not_found`, and a nonempty text name
-  that does not normalize stops it with `invalid_name`. On the indexed source a
-  nonempty name whose bytes are not text (not valid UTF-8, or containing a NUL
-  byte) is retained as bytes and stops the fallback with `unsupported`; the
+- ENSIP-19 default name: for ENS `coin_type=60`, both sources follow the
+  reverse order of the ENSv2 Universal Resolver. When the reverse node
+  `<address>.addr.reverse` has a nonzero registry resolver, that resolver
+  answers alone: its `name` is the reverse claim, and an empty name is
+  `not_found`. The name the `default.reverse` registrar stores for the address
+  (coin type `2147483648`) is the answer only when the reverse node has no
+  resolver. A whitespace-only name on the node's resolver answers `not_found`,
+  and a nonempty text name that does not normalize answers `invalid_name`. On
+  the indexed source a nonempty name whose bytes are not text (not valid UTF-8,
+  or containing a NUL byte) is retained as bytes and answers `unsupported`. The
   verified source's handling of a non-UTF-8 return is described below.
-  (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L15-L19 @ ens_v1@91c966f)
-  (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f)
+  The Universal Resolver's `reverse` calls `name` on the resolver of the
+  reverse name and returns an empty name as no primary name. A reverse name
+  resolves through `ENSV1Resolver`, which passes the call to the resolver the
+  ENSv1 registry lookup finds, and that lookup takes the node's own resolver
+  whenever it is nonzero and an ancestor's only when it is zero.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L388-L398 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L247-L249 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ReverseMirror.ts:L31-L42 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/AbstractMirrorResolver.sol:L67-L69 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L33-L37 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L10 @ ens_v1@91c966f)
-  Upstream's first source, a standalone `addr.reverse` registrar, has no
-  declared deployment in either profile and is not read. The Universal
-  Resolver's own ENSIP-19 `reverse` does not fall back past an empty name on
-  the reverse node's own resolver
-  ([divergence](upstream.md#default-reverse-fallback-past-a-reverse-node-resolver)).
   The indexed source applies this to the projected claims
-  ([projections](projections.md#primary-names)): an `addr.reverse` claim whose
-  projected or hydrated name has no bytes, or whose reverse node has no nonzero
-  resolver, gives way to the projected `default.reverse` claim when one exists,
-  which keeps its own status. A reverse node whose resolver is not admitted, or
-  is event-silent with no hydrated name, has no projected name and falls back
-  too, while the chain answers that resolver's name
-  ([divergence](upstream.md#known-divergences)). The verified source's reverse
-  leg calls the registry's `resolver`, then that resolver's `name` with the call
-  gas set so the resolver gets the 100,000 gas ENS's reverse resolver allows it
-  ([execution](execution.md)); the call is not static and comes from the zero
-  address ([divergence](upstream.md#verified-reverse-name-call-context)), and when the resolver is zero or `name`
-  succeeds with an empty string calls `nameForAddr(address)` on the
-  `default.reverse` registrar the `ens_v1_reverse_l1` manifest declares. A
-  `name` call that reverts or runs out of gas ends the lookup with
-  `failed` and no default read; upstream returns an empty name there,
-  so the status differs while neither falls back. Upstream decodes the return
-  by checking only that the encoded byte array fits inside the return data. A
-  return that fails that check is an empty name upstream and `failed`
-  (`resolver_return_data_malformed`) here. A nonempty byte string that is not
-  valid UTF-8 passes upstream's check and is returned as the name, while the
-  verified source's string decoder rejects it as `failed`
-  (`resolver_return_data_malformed`). Neither case falls back to the default.
-  (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L54-L69 @ ens_v1@91c966f)
-  (upstream: .refs/ens_v1/contracts/utils/LibABI.sol:L8-L27 @ ens_v1@91c966f)
+  ([projections](projections.md#primary-names)): the `addr.reverse` claim is
+  served with its own status whenever its reverse node has a nonzero resolver,
+  and gives way to the projected `default.reverse` claim, which keeps its own
+  status, only when the node has no resolver and that claim exists. A reverse
+  node whose resolver is not admitted, or is event-silent with no hydrated
+  name, has no projected name and answers `not_found`, while the chain answers
+  that resolver's name ([divergence](upstream.md#known-divergences)). The same
+  holds for a reverse node claimed through a reverse registrar no manifest
+  admits, where only the registry projection shows the resolver. The verified
+  source's reverse leg calls the registry's `resolver`, then that resolver's
+  `name` with the call gas set so the resolver gets 100,000 gas
+  ([execution](execution.md)). The call is not static and comes from the zero
+  address ([divergence](upstream.md#verified-reverse-name-call-context)). Only
+  when the registry's resolver is zero does it call `nameForAddr(address)` on
+  the `default.reverse` registrar the `ens_v1_reverse_l1` manifest declares. A
+  `name` call that reverts or runs out of gas ends the lookup with `failed`,
+  as does a return that does not decode as a string, including a nonempty byte
+  string that is not valid UTF-8 (`resolver_return_data_malformed`). None of
+  these reads the default.
   The forward check calls the Universal Resolver for the name's `addr` record
   on coin type `60`. When that call reverts with `ResolverNotFound(bytes)`
   carrying the claimed name's own DNS encoding, the Universal Resolver found
@@ -4245,14 +4242,11 @@ introduces it rebuilds Project from full history before serving the option; see
   refusal such as `current_authority_not_projected` makes the name unsupported
   and sends the claim to the first case. None of the
   three cases dispatches a forward resolver call. The projected claim is
-  checked before any provider call, except a `default.reverse` name served
-  past a nonzero `addr.reverse` resolver, including one the registry projection
-  holds for a reverse node claimed through a reverse registrar no manifest
-  admits: the projection may not hold that resolver's name, so the check runs
-  only on the name the live reverse leg returns. A live reverse claim has
-  already used its reverse-leg provider calls (two, or three with the
-  `default.reverse` read) before the name-level refusal
-  is known. A consumer reads `unsupported_reason` to distinguish a projected
+  checked before any provider call. An address with no projected name has no
+  claim to check, so the check runs on the name the live reverse leg returns. A
+  live reverse claim has already used its two reverse-leg provider calls (the
+  registry's `resolver`, then `name` or the `default.reverse` read) before the
+  name-level refusal is known. A consumer reads `unsupported_reason` to distinguish a projected
   coverage refusal from the shared authority-not-verifiable refusal.
 - Replaces (v1): `GET /v1/primary-names/{address}`.
 
@@ -4970,7 +4964,8 @@ For a registrar lease first identified by a later readable observation, registra
 | `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `source` | query | enum `indexed` | no | `indexed` | Answer origin. Only indexed answers are served. |
-| `keys` | query | array [0, 200] of string | no | none | Comma-separated record selectors: addr:<decimal>, text:<key>, contenthash or avatar; omitted/blank uses the inventory-derived default keys. At most 200 keys. |
+| `keys` | query | array [0, 200] of string | no | none | Comma-separated record selectors: addr:<decimal>, text:<key>, contenthash or avatar; omitted/blank uses the inventory-derived default keys when values is true; keys must be omitted or blank when values is false. At most 200 value keys. |
+| `values` | query | boolean | no | `true` | False returns the full inventory and records: {}, without per-key answers or the 200-value-key limit. Omitted, true or blank preserves value answers. Nonblank keys conflict with false before key parsing. Only this route accepts the flag. |
 | `include` | query | array of enum `inventory` | no | none | Comma-separated expansion names; unlisted values are invalid. |
 | `If-None-Match` | header | string | no | none | ETag validator from an earlier response, a comma-separated validator list, or *; evaluated only for a cacheable indexed read. |
 
@@ -4984,7 +4979,7 @@ For a registrar lease first identified by a later readable observation, registra
 | 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
 | 409 | object ErrorEnvelope | `conflict` | none | The explicit snapshot selector cannot form a canonical snapshot or, for lookup, its selected positions cannot be combined. |
 | 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
-| 422 | object ErrorEnvelope | `unsupported` | none | The inventory-derived default record-key set exceeds the 200-key limit. |
+| 422 | object ErrorEnvelope | `unsupported` | none | In value mode, the inventory-derived default record-key set exceeds the 200-key limit. |
 | 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure. |
 | 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling is exhausted. |
 
@@ -5004,7 +4999,7 @@ For a registrar lease first identified by a later readable observation, registra
   (TYR-288), the name records route withholds the records and this route
   still answers what that resolver holds for the node.
 - Request parameters: path `chain_id`, `address`; query `name`, `namespace`,
-  `at`, `finality`, `source`, `keys`, `include`. Other query parameters return
+  `at`, `finality`, `source`, `keys`, `values`, `include`. Other query parameters return
   `400 invalid_input`.
   - `name` is required. A missing or blank `name` returns `400 invalid_input`
     with `name is required`. It is normalized as on the name routes, bracketed
@@ -5016,7 +5011,21 @@ For a registrar lease first identified by a later readable observation, registra
   - The route serves `source=indexed` only. `verified` and `auto` are rejected
     with `400 invalid_input` and `source must be indexed` until a later change
     adds a direct resolver read.
-  - `keys` and `include=inventory` follow the name records route.
+  - With `values` omitted, `true`, empty or whitespace, `keys` and
+    `include=inventory` follow the name records route, including the 200-key
+    limits for explicit and inventory-derived value answers.
+  - `values=false` returns inventory only: `records: {}` and the full existing
+    `inventory`, including when it holds more than 200 product keys. It implies
+    inventory; redundant `include=inventory` is accepted. Omitted, empty or
+    whitespace `keys` is accepted. After identity and source validation, any
+    nonblank `keys` conflicts before key parsing with `400 invalid_input` and
+    `keys must be omitted when values=false`, even for malformed or oversized
+    key lists. Invalid `include` remains an error. Boolean spelling is `true`
+    or `false`, with surrounding whitespace trimmed; other spellings or duplicate
+    `values` fields return `400 invalid_input`. Other routes reject `values`.
+    For example: `GET /v1/resolvers/1/0x0000000000000000000000000000000000000abc/records?name=alice.eth&values=false`.
+    The mode skips per-key answer construction; full inventory still reads
+    stored record facts and makes no claim of avoiding value-column reads.
 - Response shape: `RecordsResponse`, as on the name records route. `data` is
   `{namespace, resolver, records, inventory?}`. `data.resolver` is always the
   path resolver as `{chain_id, address}`. `records` answers each requested key,
@@ -5024,7 +5033,10 @@ For a registrar lease first identified by a later readable observation, registra
   the same per-key answers as `source=indexed` on the name records route:
   `ok`, `not_found`, the derived ENSIP-19 answers, and `unsupported` with the
   inventory's reason when the resolver is not an admitted profile.
-  `include=inventory` returns the same container.
+  `include=inventory` returns the same container. With `values=false`,
+  `records` is `{}` and `inventory` is always present, without requested-key
+  augmentation; known, unset, unsupported and ABI availability retain their
+  existing meanings.
 - Which records are read: the writes the resolver emitted for the name's node,
   under the record-version and link rules of the name records route. For a
   declared [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)

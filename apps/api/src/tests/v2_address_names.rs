@@ -387,6 +387,68 @@ async fn v2_get_address_names_non_success_primary_claim_does_not_mark_primary() 
     Ok(())
 }
 
+// The reverse node keeps a nonzero resolver whose name is empty, so the `default.reverse` name is
+// not the address's primary name and marks no row.
+#[tokio::test]
+async fn v2_get_address_names_default_name_is_not_primary_past_an_empty_reverse_name() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    publish_primary_claim(&database.pool, "ens", V2_ADDRESS, b"").await?;
+    publish_primary_claim(&database.pool, ENS_DEFAULT_REVERSE, V2_ADDRESS, b"alpha.eth").await?;
+
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names"),
+    )
+    .await?;
+    let rows = payload["data"]
+        .as_array()
+        .expect("address names data must be an array");
+    assert!(rows.iter().any(|row| row["name"] == json!("alpha.eth")));
+    assert!(
+        rows.iter().all(|row| row["is_primary"] == json!(false)),
+        "{rows:#?}"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+// With the reverse node's resolver cleared to zero, the `default.reverse` name is the address's
+// primary name and marks its row.
+#[tokio::test]
+async fn v2_get_address_names_marks_primary_from_the_default_name_without_a_reverse_resolver()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    publish_primary_claim(&database.pool, ENS_CLEARED_REVERSE_RESOLVER, V2_ADDRESS, b"").await?;
+    publish_primary_claim(&database.pool, ENS_DEFAULT_REVERSE, V2_ADDRESS, b"beta.eth").await?;
+
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names"),
+    )
+    .await?;
+    let rows = payload["data"]
+        .as_array()
+        .expect("address names data must be an array");
+    let beta = rows
+        .iter()
+        .find(|row| row["name"] == json!("beta.eth"))
+        .expect("beta.eth row must be present");
+    assert_eq!(beta["is_primary"], json!(true));
+    assert!(
+        rows.iter()
+            .filter(|row| row["name"] != json!("beta.eth"))
+            .all(|row| row["is_primary"] == json!(false)),
+        "{rows:#?}"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn v2_get_address_names_scopes_primary_claim_by_row_namespace() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

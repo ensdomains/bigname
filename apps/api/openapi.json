@@ -4973,7 +4973,7 @@
             "name": "keys",
             "in": "query",
             "required": false,
-            "description": "Comma-separated record selectors: addr:<decimal>, text:<key>, contenthash or avatar; omitted/blank uses the inventory-derived default keys. At most 200 keys.",
+            "description": "Comma-separated record selectors: addr:<decimal>, text:<key>, contenthash or avatar; omitted/blank uses the inventory-derived default keys when values is true; keys must be omitted or blank when values is false. At most 200 value keys.",
             "schema": {
               "type": "array",
               "items": {
@@ -4984,6 +4984,16 @@
             },
             "style": "form",
             "explode": false
+          },
+          {
+            "name": "values",
+            "in": "query",
+            "required": false,
+            "description": "False returns the full inventory and records: {}, without per-key answers or the 200-value-key limit. Omitted, true or blank preserves value answers. Nonblank keys conflict with false before key parsing. Only this route accepts the flag.",
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
           },
           {
             "name": "include",
@@ -5160,7 +5170,7 @@
             }
           },
           "422": {
-            "description": "`unsupported`: The inventory-derived default record-key set exceeds the 200-key limit.",
+            "description": "`unsupported`: In value mode, the inventory-derived default record-key set exceeds the 200-key limit.",
             "content": {
               "application/json": {
                 "schema": {
@@ -7926,11 +7936,11 @@
             "additionalProperties": {
               "$ref": "#/components/schemas/RecordAnswer"
             },
-            "description": "Resolver records or reverse result rows in the route-specific shape."
+            "description": "Per-key resolver answers; empty with values=false on the resolver-anchored records route."
           },
           "inventory": {
             "$ref": "#/components/schemas/RecordInventory",
-            "description": "Optional record inventory requested with `include=inventory`."
+            "description": "Record inventory requested with `include=inventory`, or implied by `values=false` on the resolver-anchored records route."
           }
         },
         "additionalProperties": false,

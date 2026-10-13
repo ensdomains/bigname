@@ -1020,6 +1020,14 @@ than 200 inventory-derived selectors still returns the same error.
 `GET /v1/addresses/{address}/primary-name` keeps its documented `answers` and
 typed `verification` shapes. Indexed answers read the reverse-claim families
 at their publication. The request's `source` parameter narrows the answer list.
+For ENS `coin_type=60`, a nonzero resolver on the address's reverse node
+answers alone on both sources, and its empty name is `not_found`. The
+address's `default.reverse` name is the answer only when the reverse node has
+no resolver
+([primary-name route](api-v1-routes.md#get-v1addressesaddressprimary-name)).
+`is_primary` on `GET /v1/addresses/{address}/names` and on reverse results of
+`POST /v1/lookup`, and that route's primary-first order, follow the same
+indexed answer.
 A successful stored raw claim is normalized for the indexed product name even when its raw
 spelling was not already normalized. The verified producer is a fresh ENS/60
 lookup whose reverse and forward calls execute at the block of the Ethereum
@@ -3323,8 +3331,8 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | `namespace` | string | always | Resolved public namespace slug. |
 | `canonical_name` | string | optional | The served path of the ENSv2 token an alias path reaches. Present only when the request named an [alias path](#alias-paths). |
 | `resolver` | nullable object ContractRef | always | Resolver contract for this answer. On `GET /v1/resolvers/{chain_id}/{address}/records` it is always the path resolver. |
-| `records` | map of string to object RecordAnswer | always | Resolver records or reverse result rows in the route-specific shape. |
-| `inventory` | object RecordInventory | optional | Optional record inventory requested with `include=inventory`. |
+| `records` | map of string to object RecordAnswer | always | Per-key resolver answers; empty with values=false on the resolver-anchored records route. |
+| `inventory` | object RecordInventory | optional | Record inventory requested with `include=inventory`, or implied by `values=false` on the resolver-anchored records route. |
 
 ### RecordAnswer
 

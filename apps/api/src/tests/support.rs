@@ -146,6 +146,13 @@ const ENS_DEFAULT_REVERSE: &str = "ens-default";
 /// registrar no manifest admits: only the registry's `NewResolver` for the node is projected, so
 /// no coin type 60 tuple exists.
 const ENS_UNADMITTED_REVERSE: &str = "ens-unadmitted";
+/// The `source` of [`publish_primary_claim`] for a reverse node whose resolver emitted no name
+/// event for it: the reverse registrar's claim and the registry's `NewResolver` are projected,
+/// with no name record.
+const ENS_SILENT_REVERSE_RESOLVER: &str = "ens-silent-resolver";
+/// The `source` of [`publish_primary_claim`] for the registry clearing the reverse node's resolver
+/// to the zero address.
+const ENS_CLEARED_REVERSE_RESOLVER: &str = "ens-cleared-resolver";
 const ENS_REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
 const ENS_REVERSE_RESOLVER: &str = "0x231b0ee14048e9dccd1d247744d114a4eb5e8e63";
 
@@ -197,7 +204,10 @@ fn primary_claim_events(
     let address = address.to_ascii_lowercase();
     let label = address.strip_prefix("0x").unwrap_or(&address).to_owned();
     let (namespace, family, role, registrar, coin_type, suffix) = match source {
-        "ens" | ENS_UNADMITTED_REVERSE => (
+        "ens"
+        | ENS_UNADMITTED_REVERSE
+        | ENS_SILENT_REVERSE_RESOLVER
+        | ENS_CLEARED_REVERSE_RESOLVER => (
             "ens",
             "ens_v1_reverse_l1",
             "reverse_registrar",
@@ -244,7 +254,7 @@ fn primary_claim_events(
             "claim_provenance": claim_provenance,
         })
     };
-    if source != "ens" && source != ENS_UNADMITTED_REVERSE {
+    if matches!(source, ENS_DEFAULT_REVERSE | "basenames") {
         let mut claim = json!({
             "source_event": "NameForAddrChanged",
             "address": address,
@@ -288,10 +298,27 @@ fn primary_claim_events(
         emitter: ENS_REGISTRY,
         log: 1,
         after: json!({"source_event": "NewResolver", "node": node,
-            "resolver": ENS_REVERSE_RESOLVER, "emitter_role": "registry"}),
+            "resolver": if source == ENS_CLEARED_REVERSE_RESOLVER {
+                "0x0000000000000000000000000000000000000000"
+            } else {
+                ENS_REVERSE_RESOLVER
+            },
+            "emitter_role": "registry"}),
     };
-    if source == ENS_UNADMITTED_REVERSE {
+    if matches!(source, ENS_UNADMITTED_REVERSE | ENS_CLEARED_REVERSE_RESOLVER) {
         return Ok(vec![resolver_changed]);
+    }
+    if source == ENS_SILENT_REVERSE_RESOLVER {
+        return Ok(vec![
+            PrimaryClaimEvent {
+                kind: "ReverseChanged",
+                family,
+                emitter: registrar,
+                log: 0,
+                after: reverse("ReverseClaimed"),
+            },
+            resolver_changed,
+        ]);
     }
     Ok(vec![
         PrimaryClaimEvent {
@@ -342,11 +369,7 @@ async fn publish_primary_claim(
     address: &str,
     name: &[u8],
 ) -> Result<()> {
-    let namespace = if source == ENS_DEFAULT_REVERSE || source == ENS_UNADMITTED_REVERSE {
-        "ens"
-    } else {
-        source
-    };
+    let namespace = if source == "basenames" { source } else { "ens" };
     let chain = if namespace == "basenames" {
         "base-mainnet"
     } else {

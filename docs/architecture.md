@@ -1412,11 +1412,12 @@ and support at the family publication. It does not store verified output.
 For ENS, declared claim precedence is reverse-only through
 `ens_v1_reverse_l1`.[^v1-revreg-deploy][^v1-revreg-l74][^v1-revreg-l83][^v1-revreg-l84]
 The family has two sources: the `addr.reverse` claim and the `default.reverse`
-name (coin type `2147483648`). For coin type `60` the `addr.reverse` name wins
-when the reverse node has a nonzero resolver and that name has at least one byte;
-otherwise the `default.reverse` name applies, the ENSIP-19 order of ENS's ETH
-reverse resolver
-(upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f).
+name (coin type `2147483648`). For coin type `60` a nonzero resolver on the
+reverse node answers alone, and an empty name there is no primary name. The
+`default.reverse` name applies only when the reverse node has no resolver, the
+reverse order of the ENSv2 Universal Resolver
+(upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L33-L37 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L247-L249 @ ens_v2_sepolia_20261001@07e55a05).
 Project may refresh an existing ENS/60 tuple through the configured
 [event-silent](glossary.md) reverse resolver at the exact published head. It
 retains the raw spelling and whether that spelling byte-equals its ENSIP-15
