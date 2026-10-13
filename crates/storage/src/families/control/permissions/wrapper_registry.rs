@@ -38,16 +38,31 @@ const PARENT_ROOT: &str = "JOIN bigname_phase.project_ens_v2_registry_parent par
      AND virtual_grant.scope_detail ->> 'registry_address' = parent.registry
     JOIN bigname_phase.project_family_marker marker ON marker.chain_id = entry.chain_id
     WHERE entry.status = 'registered' AND entry.owner IS NOT NULL
-      AND entry.expiry > extract(epoch FROM marker.block_timestamp)
-      AND ($9::text IS NULL OR entry.chain_id = $9)
+      AND entry.expiry > extract(epoch FROM marker.block_timestamp)";
+/// A read of any resource, or of the one resource `$2`. With the registry root `$8` of a token
+/// resource, the root's keys are listed under the token.
+const ONE_RESOURCE: &str = "AND ($9::text IS NULL OR entry.chain_id = $9)
       AND ($2::uuid IS NULL OR virtual_grant.resource_id = COALESCE($8::uuid, $2::uuid))";
 const ROOT_RESOURCE: &str = "CASE WHEN $8::uuid = virtual_grant.resource_id
         THEN $2::uuid ELSE virtual_grant.resource_id END";
+/// Page sources retain the chain; the outer page builder bounds the projected resource id.
+/// Applying that same array predicate here again can misestimate the selected root grants.
+const PAGE_CHAIN: &str = "AND entry.chain_id = $9";
+const OPERATOR_SCOPE: &str = "concat('account:', approval.chain_id, ':ens_v2_registry:',
+            approval.authority_contract, ':', approval.owner) AS scope
+        FROM bigname_phase.project_account_approval approval
+        JOIN bigname_phase.project_ens_v2_entry_owner entry
+          ON entry.chain_id = approval.chain_id AND entry.registry = approval.authority_contract
+         AND entry.owner = approval.owner";
+const APPROVED_OPERATOR: &str = "AND approval.authority_kind = 'ens_v2_registry'
+          AND approval.relation_kind = 'operator' AND approval.approved
+          AND approval.subject <> approval.owner";
 
 pub(super) fn owner_candidates() -> String {
     format!(
         "SELECT entry.owner AS subject, {ROOT_RESOURCE} AS resource_id, 'root'::text AS scope
         FROM bigname_phase.project_ens_v2_entry_owner entry {PARENT_ROOT}
+      {ONE_RESOURCE}
           AND ($1::text IS NULL OR entry.owner = $1)"
     )
 }
@@ -55,17 +70,31 @@ pub(super) fn owner_candidates() -> String {
 pub(super) fn operator_candidates() -> String {
     format!(
         "SELECT approval.subject, {ROOT_RESOURCE} AS resource_id,
-        concat('account:', approval.chain_id, ':ens_v2_registry:',
-            approval.authority_contract, ':', approval.owner) AS scope
-        FROM bigname_phase.project_account_approval approval
-        JOIN bigname_phase.project_ens_v2_entry_owner entry
-          ON entry.chain_id = approval.chain_id AND entry.registry = approval.authority_contract
-         AND entry.owner = approval.owner
+        {OPERATOR_SCOPE}
         {PARENT_ROOT}
-          AND approval.authority_kind = 'ens_v2_registry'
-          AND approval.relation_kind = 'operator' AND approval.approved
-          AND approval.subject <> approval.owner
+      {ONE_RESOURCE}
+          {APPROVED_OPERATOR}
           AND ($1::text IS NULL OR approval.subject = $1)"
+    )
+}
+
+/// [`owner_candidates`] for the resources of a page.
+pub(super) fn page_owner_candidates() -> String {
+    format!(
+        "SELECT entry.owner AS subject, virtual_grant.resource_id, 'root'::text AS scope
+        FROM bigname_phase.project_ens_v2_entry_owner entry {PARENT_ROOT}
+      {PAGE_CHAIN}"
+    )
+}
+
+/// [`operator_candidates`] for the resources of a page.
+pub(super) fn page_operator_candidates() -> String {
+    format!(
+        "SELECT approval.subject, virtual_grant.resource_id,
+        {OPERATOR_SCOPE}
+        {PARENT_ROOT}
+      {PAGE_CHAIN}
+          {APPROVED_OPERATOR}"
     )
 }
 

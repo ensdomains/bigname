@@ -250,7 +250,8 @@ async fn publish(database: &TestDatabase, output: &Output, block: i64) -> Result
     database.seed_snapshot_selector_chain_positions(&json!({CHAIN: {
         "chain_id": CHAIN, "block_number": block, "block_hash": format!("0xhistory{block}"),
         "timestamp": bigname_storage::UnixSeconds::from(timestamp(1_700_000_000 + block)).internal_string(),
-    }})).await
+    }})).await?;
+    assert_permission_fixture_reads_agree(database).await
 }
 
 /// The registry's contract instance. `declared` puts it in an active ENSv2 registry manifest, as
@@ -707,6 +708,88 @@ async fn operator_rows_page_across_candidate_batches_and_need_a_stated_expiry() 
             vec![ALICE.to_owned(), ROOT_HOLDER.to_owned(), LAST_ROOT_HOLDER.to_owned()],
             "page_size {page_size}"
         );
+    }
+    database.cleanup().await
+}
+
+/// An address page's grant read over a token resource with 70 operators and its registry's root
+/// resource, against the read of one resource at a time it replaced. The operator keys are
+/// derived from the entry's owner and the registry's approvals, and the root grant is a key of
+/// the root resource with the scope `root`. A token lists no root holders on this read.
+#[tokio::test]
+async fn bounded_permissions_match_the_loop_for_ens_v2_operator_and_root_keys() -> Result<()> {
+    use bigname_storage::{
+        EffectivePermissionScope, families::control::permissions::page, load_bounded_effective_permissions_by_resource_ids,
+    };
+    const FAR: u64 = 1_800_000_000;
+    let database = TestDatabase::new_migrated().await?;
+    let operator = |index: usize| format!("0x00000000000000000000000000000000000c{index:04x}");
+    let mut logs = Logs::default();
+    logs.roles(120, U256::ZERO, ROOT_HOLDER, U256::ZERO, bit(0) | bit(128))
+        .register(121, FAR);
+    for index in 0..70 {
+        logs.approve(122, ALICE, &operator(index), true);
+    }
+    let (token, output) = seed(&database, logs, true).await?;
+    publish(&database, &output, 123).await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT resource_id FROM bigname_phase.resources")
+        .fetch_all(&database.pool)
+        .await?;
+    anyhow::ensure!(ids.len() >= 2 && ids.contains(&token), "{ids:?}");
+
+    let pool = &database.lookup_pool;
+    let mut complete = Vec::new();
+    for namespace in [Some("ens"), None] {
+        // 64 and 65 are on either side of the batch the per-resource read composes at a time.
+        for budget in [1, 2, 10, 64, 65, 1001] {
+            let served =
+                load_bounded_effective_permissions_by_resource_ids(pool, &ids, namespace, budget)
+                    .await?;
+            let looped =
+                page::load_family_bounded_permissions_per_resource(pool, &ids, namespace, budget)
+                    .await?;
+            assert_eq!(served, looped, "namespace {namespace:?}, budget {budget}");
+            complete = served;
+        }
+    }
+    let operators = complete
+        .iter()
+        .filter(|row| {
+            row.resource_id == token
+                && matches!(&row.scope, EffectivePermissionScope::Account { authority_kind, .. }
+                    if authority_kind == "ens_v2_registry")
+        })
+        .count();
+    assert_eq!(operators, 70, "{complete:#?}");
+    let root_scoped: Vec<Uuid> = complete
+        .iter()
+        .filter(|row| row.scope.storage_key() == "root")
+        .map(|row| row.resource_id)
+        .collect();
+    assert!(
+        !root_scoped.is_empty() && !root_scoped.contains(&token),
+        "the root grant is a row of the root resource only: {complete:#?}"
+    );
+
+    // One statement seeks every key, one reads the operators, and the root key's registry
+    // facts are read once.
+    let counter = bigname_test_support::StatementCounter::connect(pool).await?;
+    let (rows, sent) = counter
+        .count(load_bounded_effective_permissions_by_resource_ids(
+            counter.pool(),
+            &ids,
+            None,
+            1001,
+        ))
+        .await;
+    counter.close().await;
+    assert_eq!(rows?, complete);
+    for (tag, count) in [
+        ("families.control.permissions.resource_candidate_page", 1),
+        ("families.control.permissions.ens_v2_operators", 1),
+        ("families.control.permissions.authority_facts", 1),
+    ] {
+        assert_eq!(sent.tagged(tag), count, "{tag}: {:?}", sent.by_tag());
     }
     database.cleanup().await
 }

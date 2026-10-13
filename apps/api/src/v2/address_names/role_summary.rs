@@ -12,15 +12,35 @@ pub(super) async fn load_rows(
     returned_resources: impl Iterator<Item = sqlx::types::Uuid>,
 ) -> V2Result<Vec<EffectivePermissionRow>> {
     #[cfg(test)]
-    grant_read_test_hooks::run(&state.pool).await?;
+    let per_resource = grant_read_test_hooks::run(&state.pool).await?;
+    let conn = snapshot.conn().await?;
+    #[cfg(test)]
+    let rows = if per_resource {
+        bigname_storage::families::control::permissions::page::load_family_bounded_permissions_per_resource(
+            conn,
+            ids,
+            namespace,
+            MAX_INLINE_GRANT_ROWS,
+        )
+        .await
+    } else {
+        bigname_storage::load_bounded_effective_permissions_by_resource_ids(
+            conn,
+            ids,
+            namespace,
+            MAX_INLINE_GRANT_ROWS,
+        )
+        .await
+    };
+    #[cfg(not(test))]
     let rows = bigname_storage::load_bounded_effective_permissions_by_resource_ids(
-        snapshot.conn().await?,
+        conn,
         ids,
         namespace,
         MAX_INLINE_GRANT_ROWS,
     )
-    .await
-    .map_err(crate::v2::name_rows_error(
+    .await;
+    let rows = rows.map_err(crate::v2::name_rows_error(
         crate::v2::SnapshotReadResource::Resource,
         |_| V2Error::internal_error("failed to load address-name role summaries"),
     ))?;
@@ -40,8 +60,9 @@ pub(super) async fn load_rows(
     Ok(rows)
 }
 
-/// Pauses a request after membership selection and before the grant read. Finding the hook takes
-/// a second pool connection while the read snapshot holds one.
+/// Pauses a request after membership selection and before the grant read, or makes the grant
+/// read the one that reads a resource at a time. Finding a hook takes a second pool connection
+/// while the read snapshot holds one.
 #[cfg(test)]
 pub(crate) mod grant_read_test_hooks {
     use std::sync::Arc;
@@ -94,7 +115,18 @@ pub(crate) mod grant_read_test_hooks {
         Ok((guard, GrantReadControl { reached, resume }))
     }
 
-    pub(super) async fn run(pool: &PgPool) -> V2Result<()> {
+    static PER_RESOURCE: ScopedTestHookRegistry<String, ()> = ScopedTestHookRegistry::new();
+
+    /// While the guard lives, role summaries of this database come from the read that takes
+    /// one resource at a time, which tests compare the served read with.
+    pub(crate) async fn read_per_resource(
+        pool: &PgPool,
+    ) -> Result<ScopedTestHookGuard<String, ()>> {
+        Ok(PER_RESOURCE.install(current_test_database(pool).await?, ()))
+    }
+
+    /// Runs the pause, and returns whether the grant read is the per-resource one.
+    pub(super) async fn run(pool: &PgPool) -> V2Result<bool> {
         let database = current_test_database(pool)
             .await
             .map_err(|_| V2Error::internal_error("failed to run role-summary read test hook"))?;
@@ -102,6 +134,6 @@ pub(crate) mod grant_read_test_hooks {
             hook.reached.wait().await;
             hook.resume.wait().await;
         }
-        Ok(())
+        Ok(PER_RESOURCE.get_cloned(&database).is_some())
     }
 }

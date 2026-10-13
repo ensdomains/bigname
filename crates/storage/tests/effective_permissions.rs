@@ -5,10 +5,16 @@ mod families_support;
 use anyhow::{Result, ensure};
 use bigname_project::families::{FamilyMode, FamilyOptions};
 use bigname_storage::{
-    EffectivePermissionScope, PermissionGrantRelation, PermissionsCurrentAccountResourceCursor,
+    EffectivePermissionRow, EffectivePermissionScope, PermissionGrantRelation,
+    PermissionsCurrentAccountResourceCursor,
+    families::{
+        control::permissions::page::load_family_bounded_permissions_per_resource as per_resource_loop,
+        name::FamilyPublicationUnavailable,
+    },
     load_bounded_effective_permissions_by_resource_ids, load_serving_effective_permissions_page,
 };
-use families_support::{CHAIN, CONTENT_HASH, Event, Fixture};
+use bigname_test_support::{StatementCounter, StatementCounts};
+use families_support::{CHAIN, CONTENT_HASH, Event, Fixture, hash};
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -388,5 +394,483 @@ async fn effective_permissions_grant_pages_match_bounded_relation() -> Result<()
     rebuild(&fixture).await?;
     assert_page_equivalence(&fixture.pool, &ids, None).await?;
     assert_page_equivalence(&fixture.pool, &ids, Some("ens")).await?;
+    fixture.cleanup().await
+}
+
+// The bounded read of an address page's grants against the read it replaced, which took one
+// resource at a time. A read with a budget of n returns up to n + 1 rows: the extra row tells
+// the caller the budget was passed. Each test also counts the statements the bounded read sends: the count
+// must not depend on how many resources the page has.
+
+const BASE: &str = "base-mainnet";
+const CANDIDATES: &str = "families.control.permissions.resource_candidate_page";
+const PUBLICATION: &str = "families.name.publication";
+
+fn subject(n: u128) -> String {
+    format!("0x{:040x}", 0x5b00 + n)
+}
+
+/// What a bounded read answers: its rows, or the chain whose publication it refused on.
+fn answer(
+    read: Result<Vec<EffectivePermissionRow>>,
+) -> Result<std::result::Result<Vec<EffectivePermissionRow>, String>> {
+    match read {
+        Ok(rows) => Ok(Ok(rows)),
+        Err(error) => match error.downcast_ref::<FamilyPublicationUnavailable>() {
+            Some(unavailable) => Ok(Err(unavailable.chain_id.clone())),
+            None => Err(error),
+        },
+    }
+}
+
+/// The bounded read's answer at `budget`, which must be the per-resource loop's.
+async fn matching_answer(
+    pool: &PgPool,
+    ids: &[Uuid],
+    namespace: Option<&str>,
+    budget: u64,
+) -> Result<std::result::Result<Vec<EffectivePermissionRow>, String>> {
+    let served = answer(
+        load_bounded_effective_permissions_by_resource_ids(pool, ids, namespace, budget).await,
+    )?;
+    let looped = answer(per_resource_loop(pool, ids, namespace, budget).await)?;
+    assert_eq!(
+        served, looped,
+        "budget {budget}, namespace {namespace:?}: the read differs from the per-resource loop"
+    );
+    Ok(served)
+}
+
+/// The statements one bounded read of `ids` sends, on connections of its own.
+async fn statements(
+    pool: &PgPool,
+    ids: &[Uuid],
+    namespace: Option<&str>,
+    budget: u64,
+) -> Result<StatementCounts> {
+    let counter = StatementCounter::connect(pool).await?;
+    let (_, sent) = counter
+        .count(load_bounded_effective_permissions_by_resource_ids(
+            counter.pool(),
+            ids,
+            namespace,
+            budget,
+        ))
+        .await;
+    counter.close().await;
+    Ok(sent)
+}
+
+async fn grant_to(
+    fixture: &Fixture,
+    chain: &str,
+    resource: Uuid,
+    subject: &str,
+    resolver: &str,
+    log: i64,
+) -> Result<()> {
+    let identity = format!("grant:{chain}:{log}");
+    let resource = resource.to_string();
+    fixture
+        .event(
+            Event::new(&identity, 2, log, "PermissionChanged", "ens_v2_resolver_l1")
+                .on(chain)
+                .resource(&resource)
+                .after(json!({"subject":subject,
+                    "scope":{"kind":"resolver","chain_id":chain,"resolver_address":resolver},
+                    "effective_powers":["set_text"],
+                    "grant_source":{"kind":"raw_log","source_event":"EACRolesChanged"},
+                    "revocation_source":null,"inheritance_path":[],"transfer_behavior":{}}))
+                .raw(json!({"emitting_address": resolver})),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn approval_of(fixture: &Fixture, owner: &str, operator: &str, log: i64) -> Result<()> {
+    let identity = format!("approval:{log}");
+    fixture
+        .event(
+            Event::new(
+                &identity,
+                2,
+                log,
+                "AccountPermissionChanged",
+                "ens_v1_registry_l1",
+            )
+            .after(
+                json!({"subject":operator,"relation_kind":"operator","approved":true,
+                    "scope":{"kind":"account","chain_id":CHAIN,"authority_kind":"registry",
+                        "authority_contract":REGISTRY,"owner":owner},
+                    "effective_powers":["registry_control"],
+                    "grant_source":{"kind":"raw_log","source_event":"ApprovalForAll"},
+                    "revocation_source":null,"inheritance_path":[],"transfer_behavior":{}}),
+            )
+            .raw(json!({"emitting_address": REGISTRY})),
+        )
+        .await?;
+    Ok(())
+}
+
+/// Four registry owners, each with an approved operator and twelve bound resources, every third
+/// of which also has a direct grant: 48 resources and 64 rows.
+async fn page_fixture(prefix: &str) -> Result<(Fixture, Vec<Uuid>)> {
+    let fixture = Fixture::new(prefix, 2).await?;
+    let mut ids = Vec::new();
+    for group in 1..=4_u128 {
+        let owner = format!("0x{group:040x}");
+        approval(&fixture, &owner, group as i64).await?;
+        for number in 1..=12 {
+            let resource = Uuid::from_u128(group * 100 + number);
+            let log = (group * 100 + number) as i64;
+            binding(&fixture, resource, &owner, REGISTRY, log).await?;
+            if number % 3 == 0 {
+                grant(&fixture, resource, log).await?;
+            }
+            ids.push(resource);
+        }
+    }
+    rebuild(&fixture).await?;
+    Ok((fixture, ids))
+}
+
+#[tokio::test]
+async fn bounded_permissions_match_the_per_resource_loop() -> Result<()> {
+    let (fixture, ids) = page_fixture("bounded_permissions_loop").await?;
+    // The ids as a page gives them: not in id order, one repeated, one with no rows.
+    let mut page: Vec<Uuid> = ids.iter().rev().copied().collect();
+    page.extend([ids[7], Uuid::from_u128(0xdead)]);
+    for namespace in [None, Some("ens"), Some("basenames")] {
+        for budget in [1, 2, 10, 1001] {
+            let rows = matching_answer(&fixture.pool, &page, namespace, budget)
+                .await?
+                .expect("the chain is published");
+            let all = if namespace == Some("basenames") {
+                0
+            } else {
+                64
+            };
+            assert_eq!(
+                rows.len(),
+                all.min(budget as usize + 1),
+                "{namespace:?} {budget}"
+            );
+        }
+    }
+    // The count for five resources is the count for all of them.
+    let few = statements(&fixture.pool, &ids[..5], None, 1001).await?;
+    let many = statements(&fixture.pool, &page, None, 1001).await?;
+    assert_eq!(
+        few.without_transaction_control(),
+        many.without_transaction_control(),
+        "{:?}\n{:?}",
+        few.by_tag(),
+        many.by_tag()
+    );
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn bounded_permissions_read_each_publication_a_fixed_number_of_times() -> Result<()> {
+    let (fixture, ids) = page_fixture("bounded_permissions_statements").await?;
+    let sent = statements(&fixture.pool, &ids, Some("ens"), 1001).await?;
+    // One read before the keys are sought and one when their rows are composed.
+    for (tag, count) in [
+        ("families.control.permissions.in_namespace", 1),
+        ("families.control.permissions.readable_resources", 2),
+        (PUBLICATION, 2),
+        (CANDIDATES, 1),
+        ("families.control.permissions.grants", 1),
+        ("families.control.permissions.key_states", 1),
+        ("families.control.permissions.wrapper_approvals", 1),
+        ("families.control.permissions.binding_observations", 1),
+        ("families.control.permissions.registry_approvals", 1),
+    ] {
+        assert_eq!(sent.tagged(tag), count, "{tag}: {:?}", sent.by_tag());
+    }
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn bounded_permissions_cut_mid_resource_matches_the_loop() -> Result<()> {
+    let fixture = Fixture::new("bounded_permissions_cut", 2).await?;
+    let ids: Vec<Uuid> = (1..=3).map(|n| Uuid::from_u128(0x7100 + n)).collect();
+    for (index, resource) in ids.iter().enumerate() {
+        binding(&fixture, *resource, OWNER, REGISTRY, index as i64).await?;
+    }
+    // Three operators on every resource. The first resource also has two resolver scopes for
+    // each of four subjects, one of them an operator as well, and the second one grant.
+    for n in 1..=3 {
+        approval_of(&fixture, OWNER, &subject(n), n as i64).await?;
+    }
+    for n in 1..=4 {
+        for (scope, resolver) in [REGISTRY, OTHER].into_iter().enumerate() {
+            let log = 100 + n as i64 * 2 + scope as i64;
+            grant_to(&fixture, CHAIN, ids[0], &subject(n + 2), resolver, log).await?;
+        }
+    }
+    grant_to(&fixture, CHAIN, ids[1], &subject(9), REGISTRY, 200).await?;
+    rebuild(&fixture).await?;
+    for budget in 1..=19 {
+        let rows = matching_answer(&fixture.pool, &ids, None, budget)
+            .await?
+            .expect("the chain is published");
+        assert_eq!(rows.len(), 18.min(budget as usize + 1), "budget {budget}");
+    }
+    let one = statements(&fixture.pool, &ids[..1], None, 1001).await?;
+    let all = statements(&fixture.pool, &ids, None, 1001).await?;
+    assert_eq!(
+        one.without_transaction_control(),
+        all.without_transaction_control(),
+        "{:?}\n{:?}",
+        one.by_tag(),
+        all.by_tag()
+    );
+    fixture.cleanup().await
+}
+
+/// Two resources on each of two published chains, alternating in id order, each with two
+/// grants. The other chain's events are in the `basenames` namespace.
+async fn two_chain_fixture(prefix: &str) -> Result<(Fixture, Vec<Uuid>)> {
+    let fixture = Fixture::new(prefix, 2).await?;
+    fixture.lineage(BASE, 2).await?;
+    let ids: Vec<Uuid> = (1..=4).map(|n| Uuid::from_u128(0x7200 + n)).collect();
+    for (index, resource) in ids.iter().enumerate() {
+        let chain = if index % 2 == 0 { CHAIN } else { BASE };
+        sqlx::query(
+            "INSERT INTO resources (resource_id, chain_id, block_hash, block_number,
+                 canonicality_state)
+             VALUES ($1, $2, $3, 0, 'canonical')",
+        )
+        .bind(resource)
+        .bind(chain)
+        .bind(hash(0))
+        .execute(&fixture.pool)
+        .await?;
+        for n in 1..=2 {
+            let log = index as i64 * 10 + n as i64;
+            grant_to(&fixture, chain, *resource, &subject(n), REGISTRY, log).await?;
+        }
+    }
+    sqlx::query("UPDATE normalized_events SET namespace = 'basenames' WHERE chain_id = $1")
+        .bind(BASE)
+        .execute(&fixture.pool)
+        .await?;
+    rebuild(&fixture).await?;
+    let outcome = fixture.apply_on(BASE, 2).await?;
+    ensure!(outcome.marker.as_ref().map(|marker| marker.number) == Some(2));
+    Ok((fixture, ids))
+}
+
+/// A rebuild in flight on the other chain: it has no servable publication.
+async fn unpublish_base(fixture: &Fixture) -> Result<()> {
+    sqlx::query("UPDATE project_family_marker SET state = 'bootstrap_pending' WHERE chain_id = $1")
+        .bind(BASE)
+        .execute(&fixture.pool)
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn bounded_permissions_cut_inside_the_second_chain_matches_the_loop() -> Result<()> {
+    let (fixture, ids) = two_chain_fixture("bounded_permissions_two_chains").await?;
+    for budget in 1..=9 {
+        let rows = matching_answer(&fixture.pool, &ids, None, budget)
+            .await?
+            .expect("both chains are published");
+        assert_eq!(rows.len(), 8.min(budget as usize + 1), "budget {budget}");
+        // Resources stay in id order across the chains.
+        assert!(
+            rows.is_sorted_by_key(|row| row.resource_id),
+            "budget {budget}"
+        );
+    }
+    // One resource of each chain costs what two of each cost.
+    let two = statements(&fixture.pool, &ids[..2], None, 1001).await?;
+    let four = statements(&fixture.pool, &ids, None, 1001).await?;
+    assert_eq!(
+        two.without_transaction_control(),
+        four.without_transaction_control(),
+        "{:?}\n{:?}",
+        two.by_tag(),
+        four.by_tag()
+    );
+    assert_eq!(four.tagged(CANDIDATES), 2, "{:?}", four.by_tag());
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn bounded_permissions_refuse_an_unpublished_chain_only_before_the_budget_fills() -> Result<()>
+{
+    let (fixture, ids) = two_chain_fixture("bounded_permissions_unpublished").await?;
+    unpublish_base(&fixture).await?;
+    // In id order: a published resource with two rows, then one on the unpublished chain. With
+    // a budget of one the first resource's two rows end the read before the unpublished chain
+    // is reached. A page with a name on an unpublished chain never gets this far through the
+    // API: composing the page's names refuses it before the grant read runs.
+    let rows = matching_answer(&fixture.pool, &ids, None, 1)
+        .await?
+        .expect("the rows before the unpublished chain fill the budget");
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.resource_id == ids[0]));
+    for budget in [2, 3, 1001] {
+        assert_eq!(
+            matching_answer(&fixture.pool, &ids, None, budget).await?,
+            Err(BASE.to_owned()),
+            "budget {budget}: the budget is not full when the unpublished chain is reached"
+        );
+    }
+    // The unpublished chain's resource first: no budget is full before it.
+    assert_eq!(
+        matching_answer(&fixture.pool, &ids[1..], None, 1).await?,
+        Err(BASE.to_owned())
+    );
+    // Two published resources, then the unpublished chain: its publication is read once, and
+    // the published chain's as often as for one resource.
+    let page = [ids[0], ids[2], ids[3]];
+    assert_eq!(
+        matching_answer(&fixture.pool, &page, None, 1001).await?,
+        Err(BASE.to_owned())
+    );
+    let sent = statements(&fixture.pool, &page, None, 1001).await?;
+    assert_eq!(sent.tagged(PUBLICATION), 3, "{:?}", sent.by_tag());
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn bounded_permissions_check_the_namespace_before_any_publication() -> Result<()> {
+    let (fixture, ids) = two_chain_fixture("bounded_permissions_namespace").await?;
+    unpublish_base(&fixture).await?;
+    // The unpublished chain's resources are not in the namespace, so its publication is not
+    // read and the read is not refused.
+    for budget in [1, 3, 4, 1001] {
+        let rows = matching_answer(&fixture.pool, &ids, Some("ens"), budget)
+            .await?
+            .expect("no resource of the namespace is on the unpublished chain");
+        assert_eq!(rows.len(), 4.min(budget as usize + 1), "budget {budget}");
+    }
+    assert_eq!(
+        matching_answer(&fixture.pool, &ids, Some("basenames"), 1001).await?,
+        Err(BASE.to_owned())
+    );
+    let sent = statements(&fixture.pool, &ids, Some("ens"), 1001).await?;
+    assert_eq!(
+        sent.tagged("families.control.permissions.in_namespace"),
+        1,
+        "{:?}",
+        sent.by_tag()
+    );
+    assert_eq!(sent.tagged(PUBLICATION), 2, "{:?}", sent.by_tag());
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn bounded_permissions_compose_attribution_names_once() -> Result<()> {
+    // Each name's registry transfer was observed on the resource the name was bound to then.
+    // The name has since been bound to another resource, so the observation reaches that one.
+    // The page holds both resources of every name.
+    let fixture = Fixture::new("bounded_permissions_moved", 2).await?;
+    let mut ids = Vec::new();
+    for n in 1..=6_u128 {
+        let name = format!("ens:0x{:064x}", 0xabc000 + n);
+        let (first, second) = (Uuid::from_u128(0x7300 + n), Uuid::from_u128(0x7400 + n));
+        let log = n as i64;
+        fixture
+            .binding(
+                &Uuid::from_u128(0x7500 + n).to_string(),
+                &name,
+                &first.to_string(),
+                "ens_v1",
+                1,
+                log,
+                Some(2),
+            )
+            .await?;
+        fixture
+            .write(
+                1,
+                100 + log,
+                "AuthorityTransferred",
+                "ens_v1_registry_l1",
+                Some(&name),
+                Some(&first.to_string()),
+                json!({"source_event":"Transfer", "owner":OWNER, "owner_getter":OWNER,
+                    "authority_kind":"registry_only"}),
+                REGISTRY,
+            )
+            .await?;
+        fixture
+            .binding(
+                &Uuid::from_u128(0x7600 + n).to_string(),
+                &name,
+                &second.to_string(),
+                "ens_v1",
+                2,
+                log,
+                None,
+            )
+            .await?;
+        ids.extend([first, second]);
+    }
+    approval(&fixture, OWNER, 0).await?;
+    rebuild(&fixture).await?;
+    let moved: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM project_registry_binding_observation
+         WHERE attributed_via = 'name' AND target_resource_id <> resource_id",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        moved, 6,
+        "every observation must reach its name's later resource"
+    );
+
+    for budget in [1, 5, 6, 7, 1001] {
+        let rows = matching_answer(&fixture.pool, &ids, None, budget)
+            .await?
+            .expect("the chain is published");
+        assert_eq!(rows.len(), 6.min(budget as usize + 1), "budget {budget}");
+        // The operator's row is on the resource the name is bound to now.
+        assert!(
+            rows.iter()
+                .all(|row| row.resource_id.as_u128() >> 8 == 0x74 && row.subject == SUBJECT),
+            "{rows:?}"
+        );
+    }
+    // The attribution reads each name's current resource and authority arm from the composed
+    // row before its name is rendered and its topology attached. Both compositions agree.
+    let names: Vec<String> = sqlx::query_scalar("SELECT logical_name_id FROM name_surfaces")
+        .fetch_all(&fixture.pool)
+        .await?;
+    let [full, base] =
+        bigname_storage::families::control::permissions::name_attributions_by_both_compositions(
+            &fixture.pool,
+            &names,
+        )
+        .await?;
+    assert_eq!(full, base);
+    assert_eq!(base.len(), 6, "{base:?}");
+    assert!(
+        base.values().all(|(resource, arm)| {
+            resource.is_some_and(|id| id.as_u128() >> 8 == 0x74) && arm.as_deref() == Some("ens_v1")
+        }),
+        "{base:?}"
+    );
+    // One name or six: the names are composed in one read.
+    let one = statements(&fixture.pool, &ids[..2], None, 1001).await?;
+    let all = statements(&fixture.pool, &ids, None, 1001).await?;
+    assert_eq!(
+        all.tagged("families.name.surfaces"),
+        1,
+        "{:?}",
+        all.by_tag()
+    );
+    assert_eq!(
+        one.without_transaction_control(),
+        all.without_transaction_control(),
+        "{:?}\n{:?}",
+        one.by_tag(),
+        all.by_tag()
+    );
     fixture.cleanup().await
 }

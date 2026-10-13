@@ -1,6 +1,8 @@
 //! Seek permission keys before composing grants, wrapper operators or registry bindings.
 //! Each source returns only a bounded batch. Registry observations over-select; composition
 //! decides whether the approval still applies to the selected resource.
+use std::collections::BTreeMap;
+
 use anyhow::Result;
 use serde::Serialize;
 use sqlx::{FromRow, PgConnection};
@@ -97,6 +99,51 @@ fn resource_registry_sources() -> [String; 3] {
               AND observation.logical_name_id = candidate.logical_name_id
              {OBSERVED} AND {APPROVED} AND observation.attributed_via = 'name'
                AND candidate.chain_id = $9 AND candidate.resource_id = $2"
+        ),
+    ]
+}
+
+/// [`resource_registry_sources`] for the resources `$2` of a page on chain `$9`, with the same
+/// conditions. Each source reads the page's observations in a subquery of its own and joins the
+/// approvals to them. `OFFSET 0` keeps the planner from merging the subquery into the join. Left
+/// to merge it, the planner starts from every approved operator of the chain and walks each
+/// owner's observations: it expects a few observations per owner, and the owners who approve
+/// operators are the ones with many.
+fn page_registry_sources() -> [String; 3] {
+    let observed = |resource: &str, from: &str| {
+        format!(
+            "SELECT approval.subject, observation.resource_id, {ACCOUNT_SCOPE}
+             FROM (SELECT {resource} AS resource_id, observation.chain_id,
+                          observation.registry_contract, observation.registry_owner
+                   {from} AND observation.chain_id = $9 AND observation.applicable
+                   OFFSET 0) observation
+             JOIN bigname_phase.project_account_approval approval
+               ON approval.chain_id = observation.chain_id
+              AND approval.authority_contract = observation.registry_contract
+              AND approval.owner = observation.registry_owner
+             WHERE {APPROVED}"
+        )
+    };
+    [
+        observed(
+            "observation.target_resource_id",
+            "FROM bigname_phase.project_registry_binding_observation observation
+             WHERE observation.target_resource_id = ANY($2::uuid[])",
+        ),
+        observed(
+            "observation.resource_id",
+            "FROM bigname_phase.project_registry_binding_observation observation
+             WHERE observation.resource_id = ANY($2::uuid[])",
+        ),
+        observed(
+            "candidate.resource_id",
+            "FROM bigname_phase.project_binding_candidate candidate
+             JOIN bigname_phase.project_registry_binding_observation observation
+               ON observation.chain_id = candidate.chain_id
+              AND observation.observation_identity = candidate.logical_name_id
+              AND observation.logical_name_id = candidate.logical_name_id
+             WHERE candidate.chain_id = $9 AND candidate.resource_id = ANY($2::uuid[])
+               AND observation.attributed_via = 'name'",
         ),
     ]
 }
@@ -199,6 +246,109 @@ pub(super) async fn page(
         .bind(limit)
         .bind(token.and_then(|token| token.root))
         .bind(token.map(|token| token.chain_id.as_str()))
+        .fetch_all(conn)
+        .await
+        .map_err(Into::into)
+}
+
+/// The candidate-key statement of [`resource_page`]: the sources of [`statement`] for the
+/// resources `$2` of chain `$9`, each cut to the limit `$7` before the union, in resource,
+/// subject and scope order after the key `($5, $4, $6)`.
+///
+/// The parameter numbers are those of [`statement`], whose direct, wrapper and ENSv2 operator
+/// sources it shares, so `$1`, `$3` and `$8` are bound and not read. It has no root-holder source: the read it serves lists no
+/// root holders. It has no namespace source either, because its caller keeps only the
+/// resources of the namespace before it seeks.
+pub(super) fn resource_page_statement() -> String {
+    let [registry_target, registry_resource, registry_name] = page_registry_sources();
+    let wrapper_owners = super::wrapper_registry::page_owner_candidates();
+    let wrapper_operators = super::wrapper_registry::page_operator_candidates();
+    let arms = [
+        DIRECT,
+        WRAPPER,
+        &registry_target,
+        &registry_resource,
+        &registry_name,
+        super::ens_v2::OPERATOR_CANDIDATES,
+        &wrapper_owners,
+        &wrapper_operators,
+    ]
+    .into_iter()
+    .map(|source| {
+        format!(
+            "(SELECT DISTINCT candidate.resource_id, candidate.subject COLLATE \"C\" AS subject,
+                    candidate.scope COLLATE \"C\" AS scope
+              FROM ({source}) candidate
+              WHERE candidate.resource_id = ANY($2::uuid[])
+                AND ($4::text IS NULL OR
+                    (candidate.resource_id, candidate.subject COLLATE \"C\", candidate.scope COLLATE \"C\")
+                        > ($5::uuid, $4 COLLATE \"C\", $6 COLLATE \"C\"))
+              ORDER BY resource_id, subject, scope LIMIT $7)"
+        )
+    })
+    .collect::<Vec<_>>()
+    .join(" UNION ");
+    format!(
+        "/* storage:families.control.permissions.resource_candidate_page */
+         SELECT subject, resource_id, scope FROM ({arms}) candidates
+         ORDER BY resource_id, subject COLLATE \"C\", scope COLLATE \"C\" LIMIT $7"
+    )
+}
+
+/// The next `limit` candidate keys of the resources of every chain of `chains`, in resource,
+/// subject and scope order: one statement per chain, each asked for `limit` keys, merged. Fewer
+/// than `limit` keys means no key is left.
+pub(super) async fn resource_pages(
+    conn: &mut PgConnection,
+    chains: &BTreeMap<&str, Vec<Uuid>>,
+    after: Option<&Key>,
+    limit: usize,
+) -> Result<Vec<Key>> {
+    let mut keys = Vec::new();
+    for (chain_id, resources) in chains {
+        keys.extend(resource_page(conn, chain_id, resources, after, limit as i64).await?);
+    }
+    keys.sort_by(|left, right| {
+        (left.resource_id, &left.subject, &left.scope).cmp(&(
+            right.resource_id,
+            &right.subject,
+            &right.scope,
+        ))
+    });
+    // The merge can hold keys past the cut. The next read finds them again after it.
+    keys.truncate(limit);
+    Ok(keys)
+}
+
+/// The next candidate keys of `resources`, all on `chain_id`, ordered by resource, then subject
+/// and scope as bytes. One statement reads the keys of every resource, where [`page`] reads
+/// those of one. `after` continues past a key: no resource before its own is read again.
+async fn resource_page(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    resources: &[Uuid],
+    after: Option<&Key>,
+    limit: i64,
+) -> Result<Vec<Key>> {
+    let resources: Vec<Uuid> = resources
+        .iter()
+        .copied()
+        .filter(|resource| after.is_none_or(|key| *resource >= key.resource_id))
+        .collect();
+    if resources.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as(&resource_page_statement())
+        .persistent(false)
+        .bind(None::<&str>)
+        .bind(&resources)
+        .bind(None::<&str>)
+        .bind(after.map(|key| key.subject.as_str()))
+        .bind(after.map(|key| key.resource_id))
+        .bind(after.map(|key| key.scope.as_str()))
+        .bind(limit)
+        .bind(None::<Uuid>)
+        .bind(chain_id)
         .fetch_all(conn)
         .await
         .map_err(Into::into)

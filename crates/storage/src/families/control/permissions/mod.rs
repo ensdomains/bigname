@@ -23,6 +23,8 @@ pub use grants::{
 pub use summary::{admin_powers, locked_roles, resource_restrictions, wrapper_unwrapped};
 
 pub(crate) use facts::resolver_grant_evidence;
+#[cfg(any(test, feature = "test-support"))]
+pub use operators::name_attributions_by_both_compositions;
 
 use super::{
     lifecycle::{Clock, view::registration_lapsed},

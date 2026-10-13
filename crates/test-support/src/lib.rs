@@ -10,6 +10,7 @@ use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 
+mod statement_count;
 mod test_hook_registry;
 #[cfg(test)]
 mod tests;
@@ -22,6 +23,7 @@ pub use bigname_content_hash::{
     INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH, interpreter_content_hash,
     projection_content_hash,
 };
+pub use statement_count::{StatementCounter, StatementCounts};
 pub use test_hook_registry::{ScopedTestHookGuard, ScopedTestHookRegistry};
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);

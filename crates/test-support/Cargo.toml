@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 sqlx.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
 
 bigname-storage = { workspace = true, features = ["test-support"] }
 bigname-content-hash.workspace = true

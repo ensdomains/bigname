@@ -476,7 +476,8 @@ async fn publish(database: &TestDatabase, offset: i64) -> Result<()> {
         .bind(bigname_content_hash::PROJECTION_CONTENT_HASH)
         .execute(&database.pool).await?;
     publish_test_families_on(&database.pool, CHAIN, block).await?;
-    head(database, offset).await
+    head(database, offset).await?;
+    assert_permission_fixture_reads_agree(database).await
 }
 
 async fn head(database: &TestDatabase, offset: i64) -> Result<()> {

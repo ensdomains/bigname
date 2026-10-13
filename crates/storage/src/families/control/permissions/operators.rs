@@ -11,13 +11,13 @@ use serde_json::Value;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
-use super::ServedApproval;
+use super::{ServedApproval, candidates::Key};
 use crate::families::{
     control::{
         lifecycle::AuthoritySelection,
         registry::{NameAttribution, Observation, RegistryBinding, registry_bindings},
     },
-    name::{CoverageShape, load_names_on},
+    name::{CoverageShape, load_composed_base},
 };
 
 /// The observations on chain `$1` that can reach one of the resources `$2`. Each arm is a keyed
@@ -80,7 +80,9 @@ pub(super) async fn bindings_for(
 }
 
 /// The current resource and authority arm of every name a name-attributed observation carries,
-/// from its composed row; a name with no composed row keeps the observation's stored target.
+/// from its composed row. A name with no composed row keeps the observation's stored target.
+/// Both fields are settled before a row's name is rendered and its topology and record
+/// inventory are attached, so the read stops there.
 async fn attributions(
     conn: &mut PgConnection,
     observations: &[Observation],
@@ -92,7 +94,7 @@ async fn attributions(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let rows = load_names_on(conn, &names, CoverageShape::Plain).await?;
+    let rows = load_composed_base(conn, &names, CoverageShape::Plain).await?;
     Ok(rows
         .into_iter()
         .map(|(name, row)| {
@@ -108,31 +110,119 @@ async fn attributions(
         .collect())
 }
 
-/// The registry approvals of `(authority_contract, owner)` on `chain_id` with relation operator.
+/// What [`attributions`] reads of each of `names` that has a composed row, its current resource
+/// and authority arm, from the full composition and from the base composition it reads. Tests
+/// check that the two agree on a fixture's names.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn name_attributions_by_both_compositions(
+    db: impl Into<crate::ReadDb<'_>>,
+    names: &[String],
+) -> Result<[BTreeMap<String, (Option<Uuid>, Option<String>)>; 2]> {
+    let read = |rows: BTreeMap<String, crate::NameCurrentRow>| {
+        rows.into_iter()
+            .map(|(name, row)| {
+                let arm = AuthoritySelection::from_provenance(&row.provenance).authority_arm;
+                (name, (row.resource_id, arm))
+            })
+            .collect()
+    };
+    let mut snapshot = db.into().snapshot().await?;
+    let full =
+        crate::families::name::load_names_on(&mut snapshot, names, CoverageShape::Plain).await?;
+    let base = load_composed_base(&mut snapshot, names, CoverageShape::Plain).await?;
+    snapshot.close().await?;
+    Ok([read(full), read(base)])
+}
+
+/// The operator approvals on chain `$1` of the registry contracts `$2` by the owners `$3`, paired
+/// by position, to one of the subjects `$4`. Each pair is a lookup by the leading columns of the
+/// approvals' primary key. With many pairs the planner may read the subjects' approvals through
+/// the subject index instead.
+pub(super) const REGISTRY_APPROVALS_SQL: &str =
+    "/* storage:families.control.permissions.registry_approvals */
+     SELECT to_jsonb(approval)
+     FROM unnest($2::text[], $3::text[]) AS binding (authority_contract, owner)
+     JOIN bigname_phase.project_account_approval approval
+       ON approval.chain_id = $1 AND approval.authority_kind = 'registry'
+      AND approval.authority_contract = binding.authority_contract
+      AND approval.owner = binding.owner
+      AND approval.relation_kind = 'operator'
+     WHERE approval.subject = ANY($4::text[])";
+
+/// A text column of a stored row, as the database compares it.
+fn stored<'a>(row: &'a Value, column: &str) -> Option<&'a str> {
+    row.get(column).and_then(Value::as_str)
+}
+
+/// The operator approvals of each bound resource's registry contract and owner on `chain_id`,
+/// to the subjects `keys` select for that resource. One statement reads the approvals of every
+/// binding. A resource keeps the rows a read of its own binding and subjects would return.
 pub(super) async fn registry_approvals(
     conn: &mut PgConnection,
     chain_id: &str,
-    authority_contract: &str,
-    owner: &str,
-    subjects: &[String],
-) -> Result<Vec<ServedApproval>> {
-    let rows: Vec<Value> = sqlx::query_scalar(
-        "/* storage:families.control.permissions.registry_approvals */
-         SELECT to_jsonb(approval)
-         FROM bigname_phase.project_account_approval approval
-         WHERE approval.chain_id = $1 AND approval.authority_kind = 'registry'
-           AND approval.authority_contract = $2 AND approval.owner = $3
-           AND approval.relation_kind = 'operator'
-           AND approval.subject = ANY($4::text[])",
-    )
-    .bind(chain_id)
-    .bind(authority_contract)
-    .bind(owner)
-    .bind(subjects)
-    .fetch_all(&mut *conn)
-    .await
-    .context("failed to load the registry operator approvals")?;
-    Ok(rows.iter().filter_map(ServedApproval::from_row).collect())
+    bindings: &BTreeMap<Uuid, RegistryBinding>,
+    keys: &[Key],
+) -> Result<BTreeMap<Uuid, Vec<ServedApproval>>> {
+    let bound: BTreeMap<Uuid, (&str, &str)> = bindings
+        .iter()
+        .filter_map(|(resource, binding)| {
+            Some((
+                *resource,
+                (
+                    binding.registry_contract.as_deref()?,
+                    binding.registry_owner.as_deref()?,
+                ),
+            ))
+        })
+        .collect();
+    if bound.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let mut subjects: BTreeMap<Uuid, BTreeSet<&str>> = BTreeMap::new();
+    for key in keys
+        .iter()
+        .filter(|key| bound.contains_key(&key.resource_id))
+    {
+        subjects
+            .entry(key.resource_id)
+            .or_default()
+            .insert(&key.subject);
+    }
+    let pairs: BTreeSet<(&str, &str)> = bound.values().copied().collect();
+    let (contracts, owners): (Vec<&str>, Vec<&str>) = pairs.into_iter().unzip();
+    let wanted: Vec<&str> = subjects
+        .values()
+        .flatten()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let rows: Vec<Value> = sqlx::query_scalar(REGISTRY_APPROVALS_SQL)
+        .bind(chain_id)
+        .bind(&contracts)
+        .bind(&owners)
+        .bind(&wanted)
+        .fetch_all(&mut *conn)
+        .await
+        .context("failed to load the registry operator approvals")?;
+    Ok(bound
+        .into_iter()
+        .map(|(resource, (contract, owner))| {
+            let subjects = subjects.get(&resource);
+            let approvals = rows
+                .iter()
+                .filter(|row| {
+                    stored(row, "authority_contract") == Some(contract)
+                        && stored(row, "owner") == Some(owner)
+                        && stored(row, "subject").is_some_and(|subject| {
+                            subjects.is_some_and(|set| set.contains(subject))
+                        })
+                })
+                .filter_map(ServedApproval::from_row)
+                .collect();
+            (resource, approvals)
+        })
+        .collect())
 }
 
 #[cfg(test)]

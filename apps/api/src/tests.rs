@@ -510,6 +510,7 @@ include!("tests/v2_address_names_budget.rs");
 include!("tests/v2_address_names_budget_fence.rs");
 include!("tests/v2_address_names_roles.rs");
 include!("tests/v2_address_names_bounded.rs");
+include!("tests/v2_address_names_role_summary_batch.rs");
 include!("tests/v2_address_names_memory.rs");
 include!("tests/v2_history_permission_changes.rs");
 include!("tests/v2_address_resolves_to.rs");

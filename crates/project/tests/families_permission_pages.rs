@@ -48,6 +48,72 @@ async fn read(
     ))
 }
 
+/// The bounded read an address page's `role_summary` uses must answer as the read it replaced,
+/// which took one resource at a time: the same rows in the same order, or a refusal on the same
+/// chain. Checked over every resource of the fixture, in each namespace and at budgets that cut
+/// inside the rows.
+async fn assert_bounded_reads_match_the_loop(fixture: &Fixture) -> Result<()> {
+    use bigname_storage::families::{
+        control::permissions::page::load_family_bounded_permissions_per_resource,
+        name::FamilyPublicationUnavailable,
+    };
+    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT resource_id FROM resources")
+        .fetch_all(&fixture.pool)
+        .await?;
+    type Rows = Vec<bigname_storage::EffectivePermissionRow>;
+    let answer = |read: Result<Rows>| -> Result<std::result::Result<Rows, String>> {
+        match read {
+            Ok(rows) => Ok(Ok(rows)),
+            Err(error) => match error.downcast_ref::<FamilyPublicationUnavailable>() {
+                Some(unavailable) => Ok(Err(unavailable.chain_id.clone())),
+                None => Err(error),
+            },
+        }
+    };
+    for namespace in [None, Some("ens"), Some("basenames")] {
+        for budget in [1, 2, 10, 1001] {
+            let served = answer(
+                bigname_storage::load_bounded_effective_permissions_by_resource_ids(
+                    &fixture.pool,
+                    &ids,
+                    namespace,
+                    budget,
+                )
+                .await,
+            )?;
+            let looped = answer(
+                load_family_bounded_permissions_per_resource(
+                    &fixture.pool,
+                    &ids,
+                    namespace,
+                    budget,
+                )
+                .await,
+            )?;
+            assert_eq!(served, looped, "namespace {namespace:?}, budget {budget}");
+        }
+    }
+    // The registry binding of a resource reads each observed name's current resource and
+    // authority arm from the name's composed row before its name is rendered and its topology
+    // attached. Both compositions must give the same two fields for every name.
+    let names: Vec<String> = sqlx::query_scalar("SELECT logical_name_id FROM name_surfaces")
+        .fetch_all(&fixture.pool)
+        .await?;
+    match bigname_storage::families::control::permissions::name_attributions_by_both_compositions(
+        &fixture.pool,
+        &names,
+    )
+    .await
+    {
+        Ok([full, base]) => assert_eq!(full, base),
+        Err(error) => anyhow::ensure!(
+            bigname_storage::families::name::is_publication_unavailable(&error),
+            "{error:#}"
+        ),
+    }
+    Ok(())
+}
+
 fn without(powers: &[&str], dropped: &[&str]) -> Value {
     json!(
         powers
@@ -115,6 +181,7 @@ async fn a_fuse_burn_between_two_publications_moves_the_page() -> Result<()> {
                     "expiry_seconds": expiry})
         )
     );
+    assert_bounded_reads_match_the_loop(&fixture).await?;
     fixture.cleanup().await
 }
 
@@ -146,6 +213,7 @@ async fn a_role_change_crossing_the_clock_moves_the_page() -> Result<()> {
         ],
         "at 15"
     );
+    assert_bounded_reads_match_the_loop(&fixture).await?;
     fixture.cleanup().await
 }
 
@@ -179,6 +247,7 @@ async fn a_permission_read_refuses_while_the_families_rebuild() -> Result<()> {
             "{read}: {error:?}"
         );
     }
+    assert_bounded_reads_match_the_loop(&fixture).await?;
     fixture.cleanup().await
 }
 
@@ -247,6 +316,7 @@ async fn namespace_filters_permission_resources_before_their_publication() -> Re
             .err()
             .is_some_and(bigname_storage::families::name::is_publication_unavailable)
     );
+    assert_bounded_reads_match_the_loop(&fixture).await?;
     fixture.cleanup().await
 }
 
@@ -380,6 +450,7 @@ async fn account_pages_walk_direct_and_registry_permissions_without_skips() -> R
         inline_answers.push(keys);
     }
     assert_eq!(inline_answers[0].len(), 24);
+    assert_bounded_reads_match_the_loop(&fixture).await?;
     fixture.cleanup().await
 }
 
@@ -390,6 +461,7 @@ async fn wrapper_summary_does_not_expand_operator_approvals() -> Result<()> {
     let fixture = Fixture::new("permission_summary_without_approval_scan", 20).await?;
     let resource = wrapped(&fixture, PARENT_CANNOT_CONTROL, timestamp(40)).await?;
     read_support::publish(&fixture, 12).await?;
+    assert_bounded_reads_match_the_loop(&fixture).await?;
     let ids = [resource.parse()?];
     let before = load_serving_permission_summaries(&fixture.pool, &ids).await?;
     sqlx::query("ALTER TABLE project_account_approval RENAME TO approvals_not_read_by_summary")

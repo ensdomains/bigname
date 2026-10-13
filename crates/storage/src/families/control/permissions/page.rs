@@ -93,17 +93,36 @@ pub async fn load_family_effective_permissions_page(
 /// It leaves out the registry root holders a permissions read of one ENSv2 registration lists:
 /// they are the same for every name of a registry, and repeating them per name would spend the
 /// grant budget on rows that say nothing about the name.
+///
+/// The rows are those of each resource in id order, each resource's by subject then scope, cut
+/// to `max_rows + 1`. The extra row lets the caller detect budget overflow. Each round reads
+/// candidate keys per chain and composes the selected resources together.
 pub async fn load_family_bounded_permissions(
     db: impl Into<crate::ReadDb<'_>>,
     resource_ids: &[Uuid],
     namespace: Option<&str>,
     max_rows: u64,
 ) -> Result<Vec<EffectivePermissionRow>> {
-    let limit = checked_page_limit_i64(
-        max_rows,
-        "positive grant budget required",
-        "grant budget too large",
-    )? as usize;
+    let limit = grant_budget(max_rows)?;
+    if resource_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut snapshot = db.into().snapshot().await?;
+    let rows = bounded_rows(&mut snapshot, resource_ids, namespace, limit).await?;
+    snapshot.close().await?;
+    Ok(rows)
+}
+
+/// The read [`load_family_bounded_permissions`] replaced, which reads one resource at a time.
+/// Tests compare the two.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn load_family_bounded_permissions_per_resource(
+    db: impl Into<crate::ReadDb<'_>>,
+    resource_ids: &[Uuid],
+    namespace: Option<&str>,
+    max_rows: u64,
+) -> Result<Vec<EffectivePermissionRow>> {
+    let limit = grant_budget(max_rows)?;
     if resource_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -128,6 +147,96 @@ pub async fn load_family_bounded_permissions(
     }
     snapshot.close().await?;
     Ok(rows)
+}
+
+fn grant_budget(max_rows: u64) -> Result<usize> {
+    Ok(checked_page_limit_i64(
+        max_rows,
+        "positive grant budget required",
+        "grant budget too large",
+    )? as usize)
+}
+
+/// The first `limit` rows of `resource_ids` in resource, subject and scope order.
+///
+/// A read of one resource at a time checks each resource in id order: its namespace, then
+/// whether it is readable, then its chain's publication. It stops at the first resource whose
+/// chain has no servable publication, unless the rows before it already fill `limit`. This read
+/// keeps that answer. It composes the resources before that one, and fails only when their rows
+/// leave room.
+async fn bounded_rows(
+    conn: &mut PgConnection,
+    resource_ids: &[Uuid],
+    namespace: Option<&str>,
+    limit: usize,
+) -> Result<Vec<EffectivePermissionRow>> {
+    let mut resources: Vec<Uuid> = resource_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if let Some(namespace) = namespace {
+        let members = in_namespace(conn, &resources, namespace).await?;
+        resources.retain(|resource| members.contains(resource));
+    }
+    let readable = readable_resources(conn, &resources).await?;
+    let mut publications: BTreeMap<&str, Option<FamilyPublication>> = BTreeMap::new();
+    let mut chains: BTreeMap<&str, Vec<Uuid>> = BTreeMap::new();
+    let mut chain_of: BTreeMap<Uuid, &str> = BTreeMap::new();
+    let mut unpublished = None;
+    for resource in &resources {
+        let Some(fact) = readable.get(resource) else {
+            continue;
+        };
+        let chain_id = fact.chain_id.as_str();
+        if !publications.contains_key(chain_id) {
+            publications.insert(chain_id, publication_on(conn, chain_id).await?);
+        }
+        let Some(publication) = &publications[chain_id] else {
+            unpublished = Some(chain_id);
+            break;
+        };
+        if fact.block_number <= publication.block_number {
+            chains.entry(chain_id).or_default().push(*resource);
+            chain_of.insert(*resource, chain_id);
+        }
+    }
+    let mut rows = Vec::new();
+    let mut after: Option<super::candidates::Key> = None;
+    while rows.len() < limit {
+        // The whole remaining budget in one round: a key gives at most one row.
+        let batch_size = limit - rows.len();
+        let keys =
+            super::candidates::resource_pages(conn, &chains, after.as_ref(), batch_size).await?;
+        let exhausted = keys.len() < batch_size;
+        after = keys.last().cloned();
+        let mut round = Vec::new();
+        for chain_id in chains.keys() {
+            // One chain at a time, as a read of one resource composes.
+            let keys: Vec<super::candidates::Key> = keys
+                .iter()
+                .filter(|key| chain_of.get(&key.resource_id) == Some(chain_id))
+                .cloned()
+                .collect();
+            if !keys.is_empty() {
+                round.extend(effective_rows(conn, &keys, false).await?);
+            }
+        }
+        // A stable sort: `effective_rows` already ordered each resource's rows.
+        round.sort_by_key(|row| row.resource_id);
+        rows.extend(round);
+        if exhausted {
+            break;
+        }
+    }
+    match unpublished {
+        Some(chain_id) if rows.len() < limit => Err(FamilyPublicationUnavailable {
+            chain_id: chain_id.to_owned(),
+        }
+        .into()),
+        _ => Ok(rows),
+    }
 }
 
 async fn page_rows(
@@ -376,24 +485,13 @@ async fn effective_rows(
             super::wrapper_registry::compose(conn, &publication, &clock, keys, &mut rows).await?;
         }
         let bindings = bindings_for(conn, &publication.chain_id, &resources).await?;
-        for (resource, binding) in bindings {
-            let (Some(contract), Some(owner)) =
-                (&binding.registry_contract, &binding.registry_owner)
-            else {
-                continue;
-            };
-            let subjects: Vec<String> = keys
-                .iter()
-                .filter(|key| key.resource_id == resource)
-                .map(|key| key.subject.clone())
-                .collect();
-            let approvals =
-                registry_approvals(conn, &publication.chain_id, contract, owner, &subjects).await?;
+        let approvals = registry_approvals(conn, &publication.chain_id, &bindings, keys).await?;
+        for (resource, approvals) in &approvals {
             for row in effective_operator_rows(
                 &publication.chain_id,
                 &resource.to_string(),
-                &binding,
-                &approvals,
+                &bindings[resource],
+                approvals,
             ) {
                 rows.push(operator_row(&row, &publication)?);
             }

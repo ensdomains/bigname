@@ -1,6 +1,10 @@
 //! The candidate-key statement of a permission page: which indexes a read bound to one resource
 //! probes, and that starting its registry sources from the resource drops no served key.
 //!
+//! The statement for the resources of an address page is checked the same way: which indexes it
+//! probes at 200 resources, and that it returns the keys the reads of one resource return, in
+//! resource order, however the page is cut.
+//!
 //! The plan test sets `plan_cache_mode` to force the custom plan, which is how the unprepared
 //! statement is planned, and the schema install turns `jit` off. No `enable_*` switch is set.
 //! Sequential scans stay enabled, so a plan that reads a table whole or walks an index without
@@ -9,11 +13,13 @@
 //! approvals, 330 of them approved registry operators of 148 owners. Another chain adds 2,000
 //! observations and 2,000 binding candidates.
 
+use std::collections::BTreeMap;
+
 use anyhow::{Result, ensure};
 use sqlx::{PgConnection, raw_sql};
 use uuid::Uuid;
 
-use super::{Key, TokenRead, page, statement};
+use super::{Key, TokenRead, page, resource_page_statement, resource_pages, statement};
 use crate::{
     PermissionsCurrentAccountResourceCursor as Cursor,
     families::id_index_plan_tests::{Probe, explain_execute, missing_probes, with_database},
@@ -386,6 +392,244 @@ async fn resource_bound_candidate_page_drops_no_served_key() -> Result<()> {
             keys.len() == 1 && keys[0].scope.starts_with("account:"),
             "one subject through the name: {keys:?}"
         );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn page_candidates_probe_an_index_in_every_arm_at_200_resources() -> Result<()> {
+    with_database("resource_candidate_page_plan", async |connection| {
+        install_plan_fixture(connection).await?;
+        // 160 resources with an observation and a name of their own, 20 second resources of a
+        // name, and 20 resources a named observation reaches.
+        let resources: Vec<String> = (1..=160)
+            .map(resource)
+            .chain((1..=20).map(alias))
+            .chain((1..=20).map(|n| moved(n * 10)))
+            .map(|id| id.to_string())
+            .collect();
+        let resources = format!("'{{{}}}'", resources.join(","));
+        raw_sql(&format!(
+            "PREPARE resource_candidates (text, uuid[], text, text, uuid, text, bigint, uuid, text)
+             AS {}",
+            resource_page_statement()
+        ))
+        .execute(&mut *connection)
+        .await?;
+        let probes = [
+            Probe {
+                index: "project_registry_binding_observation_target_idx",
+                conditions: &[ON_CHAIN, "(target_resource_id = ANY "],
+            },
+            Probe {
+                index: "project_registry_binding_observation_resource_idx",
+                conditions: &[ON_CHAIN, "(resource_id = ANY "],
+            },
+            Probe {
+                index: "project_binding_candidate_resource_idx",
+                conditions: &[ON_CHAIN, "(resource_id = ANY "],
+            },
+            Probe {
+                index: "project_registry_binding_observation_pkey",
+                conditions: &["chain_id = ", "(observation_identity = "],
+            },
+        ];
+        // The first read of a page, and one that continues after a key.
+        let after = format!("'{}', '{}', 'owner'", account(80), resource(80));
+        let mut failures = Vec::new();
+        for (label, after) in [
+            ("first read", "NULL, NULL, NULL"),
+            ("after a key", after.as_str()),
+        ] {
+            let values = format!("NULL, {resources}, NULL, {after}, 1001, NULL, '{CHAIN}'");
+            // The reader sends the statement unprepared, so it is planned with its values.
+            let plan = explain_execute(
+                connection,
+                "force_custom_plan",
+                "resource_candidates",
+                &values,
+            )
+            .await?;
+            // The bound ids make the lines long. A failure needs the node and the head of its
+            // condition.
+            let plan: Vec<String> = plan
+                .iter()
+                .map(|line| line.chars().take(160).collect())
+                .collect();
+            let rendered = plan.join("\n");
+            for table in [
+                "project_registry_binding_observation",
+                "project_binding_candidate",
+                "project_grant",
+            ] {
+                if plan
+                    .iter()
+                    .any(|line| line.contains(&format!("Seq Scan on {table}")))
+                {
+                    failures.push(format!("{label}: reads {table} whole\n{rendered}"));
+                }
+            }
+            failures.extend(
+                chainless_index_scans(&plan)
+                    .into_iter()
+                    .map(|scan| format!("{label}: no chain in the condition of{scan}\n{rendered}")),
+            );
+            failures.extend(missing_probes(label, &plan, &probes));
+        }
+        ensure!(failures.is_empty(), "{}", failures.join("\n\n"));
+        Ok(())
+    })
+    .await
+}
+
+/// The resources of the row fixture on each chain.
+fn fixture_chains() -> BTreeMap<&'static str, Vec<Uuid>> {
+    let main: Vec<Uuid> = (1..=NAMES + 5)
+        .map(resource)
+        .chain((5..=NAMES).step_by(5).map(alias))
+        .chain((10..=NAMES).step_by(10).map(moved))
+        .collect();
+    BTreeMap::from([(CHAIN, main), (OTHER_CHAIN, (1..=6).map(other).collect())])
+}
+
+/// The keys a read of one resource at a time returns for every resource of `chains`, in
+/// resource order: what the statement for a page's resources must return.
+async fn keys_per_resource(
+    connection: &mut PgConnection,
+    chains: &BTreeMap<&str, Vec<Uuid>>,
+) -> Result<Vec<Key>> {
+    let mut resources: Vec<(Uuid, &str)> = chains
+        .iter()
+        .flat_map(|(chain, resources)| resources.iter().map(|resource| (*resource, *chain)))
+        .collect();
+    resources.sort();
+    let mut all = Vec::new();
+    for (resource, chain) in resources {
+        let token = TokenRead {
+            chain_id: chain.to_owned(),
+            root: None,
+        };
+        let mut after: Option<Cursor> = None;
+        loop {
+            let keys = page(
+                connection,
+                None,
+                Some(resource),
+                None,
+                after.as_ref(),
+                64,
+                Some(&token),
+            )
+            .await?;
+            let last = keys.len() < 64;
+            after = keys.last().map(Cursor::from);
+            all.extend(keys);
+            if last {
+                break;
+            }
+        }
+    }
+    Ok(all)
+}
+
+/// Every key of `chains`, read `limit` at a time, each read continuing after the last key.
+async fn keys_by_page(
+    connection: &mut PgConnection,
+    chains: &BTreeMap<&str, Vec<Uuid>>,
+    limit: usize,
+) -> Result<Vec<Key>> {
+    let mut all: Vec<Key> = Vec::new();
+    loop {
+        let keys = resource_pages(connection, chains, all.last(), limit).await?;
+        ensure!(
+            keys.len() <= limit,
+            "{} keys for a limit of {limit}",
+            keys.len()
+        );
+        let last = keys.len() < limit;
+        all.extend(keys);
+        if last {
+            return Ok(all);
+        }
+    }
+}
+
+#[tokio::test]
+async fn page_candidates_match_the_per_resource_keys() -> Result<()> {
+    with_database("resource_candidate_page_rows", async |connection| {
+        install_row_fixture(connection).await?;
+        let both = fixture_chains();
+        let main = BTreeMap::from([(CHAIN, both[CHAIN].clone())]);
+        // Every third resource: the statement must not return a key of a resource left out.
+        let some = BTreeMap::from([(CHAIN, both[CHAIN].iter().copied().step_by(3).collect())]);
+        for (label, chains) in [
+            ("one chain", &main),
+            ("a subset", &some),
+            ("two chains", &both),
+        ] {
+            let expected = keys_per_resource(connection, chains).await?;
+            ensure!(expected.len() > 20, "{label}: only {} keys", expected.len());
+            // 1,001 is the reader's first read, which here takes every key at once.
+            let keys = keys_by_page(connection, chains, 1001).await?;
+            ensure!(
+                keys == expected,
+                "{label}: keys differ from the per-resource reads\n{keys:?}\n{expected:?}"
+            );
+        }
+        // The fixture reaches a resource through each source: a direct grant, a wrapper
+        // holder's operator, and an observation's target, own resource and name.
+        let expected = keys_per_resource(connection, &main).await?;
+        for (label, id, subject, scope) in [
+            ("a direct grant", resource(1), account(1), "owner"),
+            ("a wrapper operator", resource(7), account(4), "wrapped"),
+            ("an observation's target", moved(20), account(1), "account:"),
+            (
+                "a second resource of a name",
+                alias(20),
+                account(1),
+                "account:",
+            ),
+            (
+                "an observation's own resource",
+                resource(2),
+                account(3),
+                "account:",
+            ),
+        ] {
+            ensure!(
+                expected.iter().any(|key| {
+                    key.resource_id == id && key.subject == subject && key.scope.starts_with(scope)
+                }),
+                "{label}: the fixture has no such key"
+            );
+        }
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn page_candidates_seek_continues_in_resource_order() -> Result<()> {
+    with_database("resource_candidate_page_seek", async |connection| {
+        install_row_fixture(connection).await?;
+        let chains = fixture_chains();
+        let expected = keys_per_resource(connection, &chains).await?;
+        // Each limit cuts inside a resource's keys, and the small ones inside the other chain's.
+        for limit in [1, 2, 7, 64] {
+            let keys = keys_by_page(connection, &chains, limit).await?;
+            ensure!(
+                keys.windows(2).all(|pair| {
+                    (pair[0].resource_id, &pair[0].subject, &pair[0].scope)
+                        < (pair[1].resource_id, &pair[1].subject, &pair[1].scope)
+                }),
+                "limit {limit}: keys are not in resource, subject and scope order\n{keys:?}"
+            );
+            ensure!(
+                keys == expected,
+                "limit {limit}: keys differ from the per-resource reads\n{keys:?}\n{expected:?}"
+            );
+        }
         Ok(())
     })
     .await

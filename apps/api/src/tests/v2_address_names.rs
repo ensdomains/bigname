@@ -1164,7 +1164,38 @@ async fn v2_address_names_payload_for_database(
     Ok(payload)
 }
 
+/// The response to `uri`. A request that includes `role_summary` is also answered from the
+/// grant read that takes one resource at a time, and the two answers must be the same bytes, so
+/// every role-summary fixture compares the served read with the one it replaced.
 async fn v2_address_names_response_for_database(
+    database: &TestDatabase,
+    uri: &str,
+) -> Result<Response> {
+    let response = v2_address_names_response_once(database, uri).await?;
+    if !uri.contains("role_summary") {
+        return Ok(response);
+    }
+    let (parts, body) = response.into_parts();
+    let body = to_bytes(body, usize::MAX).await?;
+    let per_resource = {
+        let _guard =
+            crate::v2::address_names_grant_read_test_hooks::read_per_resource(&database.lookup_pool)
+                .await?;
+        let response = v2_address_names_response_once(database, uri).await?;
+        (
+            response.status(),
+            to_bytes(response.into_body(), usize::MAX).await?,
+        )
+    };
+    assert_eq!(
+        (parts.status, String::from_utf8_lossy(&body)),
+        (per_resource.0, String::from_utf8_lossy(&per_resource.1)),
+        "{uri}: the grant read and the read of one resource at a time answer differently"
+    );
+    Ok(Response::from_parts(parts, Body::from(body)))
+}
+
+async fn v2_address_names_response_once(
     database: &TestDatabase,
     uri: &str,
 ) -> Result<Response> {
