@@ -263,17 +263,21 @@ async fn narrow_publication_evidence_reduces_spilled_temp_work() -> Result<()> {
             let baseline = capture(c, &names, &resources, true, &literal).await?;
             save_pair(&json!({"completed_modes":captures,"current_mode":mode,"baseline":baseline,
                 "literal_holdings":literal,"state":"baseline captured before comparison"}))?;
+            let baseline_report = evidence_plan_report(&baseline, false)?;
+            save_pair(&json!({"completed_modes":captures,"current_mode":mode,"baseline":baseline,
+                "baseline_report":baseline_report,"literal_holdings":literal,
+                "state":"baseline attribution saved before candidate execution"}))?;
+            ensure!(baseline_report["wide_evidence_spills"].as_array().is_some_and(|v| !v.is_empty()),
+                "baseline wide-evidence spill did not reproduce in {mode}; STOP without tuning: {baseline}");
             let new = sorted(historical_history_relations(c, CHAIN, 5, &names, &resources).await?);
             ensure!(new == literal, "candidate production literal holdings: {new:?} != {literal:?}");
             let candidate = capture(c, &names, &resources, false, &literal).await?;
             let mut pair = json!({"mode":mode,"baseline":baseline,"candidate":candidate,
-                "literal_holdings":literal,"state":"both captures saved before cost acceptance"});
+                "baseline_report":baseline_report,"literal_holdings":literal,
+                "state":"candidate capture saved before candidate cost acceptance"});
             save_pair(&json!({"completed_modes":captures,"current_pair":pair}))?;
-            pair["baseline_report"] = evidence_plan_report(&pair["baseline"], false)?;
             pair["candidate_report"] = evidence_plan_report(&pair["candidate"], true)?;
             save_pair(&json!({"completed_modes":captures,"current_pair":pair}))?;
-            ensure!(pair["baseline_report"]["wide_evidence_spills"].as_array().is_some_and(|v| !v.is_empty()),
-                "baseline wide-evidence spill did not reproduce in {mode}; STOP without tuning: {pair}");
             ensure!(pair["candidate_report"]["wide_evidence_dedupes"].as_array().is_some_and(Vec::is_empty),
                 "candidate still deduplicates wide evidence in {mode}; STOP: {pair}");
             for counter in ["Temp Read Blocks", "Temp Written Blocks"] {
@@ -544,7 +548,7 @@ fn evidence_plan_report(capture: &Value, candidate: bool) -> Result<Value> {
         .collect();
     Ok(
         json!({"evidence_append_path":append,"roles":roles,"wide_evidence_dedupes":wide,
-        "wide_evidence_spills":spills,"operators":operators,
+        "wide_evidence_spills":spills,"main_plan_operators":operators,
         "column_proof":if candidate {"actual four 14-column SQL projections; no Materialize Output/heap-fetch claim"} else {"actual whole-event SQL and event-column dedupe keys"}}),
     )
 }
