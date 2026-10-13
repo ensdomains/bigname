@@ -120,7 +120,9 @@ pub(crate) type NameRecordsQuery = StrictQueryParams<NameRecordsQueryParams>;
 
 /// The records route's response data. `records` is its only value shape: one answer per
 /// requested key, or per inventory-derived default key when `keys` is omitted, serialized in
-/// record-key byte order. The flat value maps live on name detail and lookup only.
+/// record-key byte order. The resolver-anchored route with `values=false` returns an empty
+/// records map and the full inventory instead. The flat value maps live on name detail and
+/// lookup only.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct NameRecords {
     pub(crate) namespace: String,

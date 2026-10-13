@@ -44,6 +44,7 @@ impl QueryParamAllowlist for ResolverRecordsQueryParams {
         "finality",
         "source",
         "keys",
+        "values",
         "include",
     ];
 }
@@ -77,8 +78,14 @@ pub(crate) async fn get_resolver_records(
     if params.source != RequestSource::Indexed {
         return Err(V2Error::invalid_input("source must be indexed"));
     }
+    let inventory_only = params.values == Some(false);
+    if inventory_only && params.keys.is_some() {
+        return Err(V2Error::invalid_input(
+            "keys must be omitted when values=false",
+        ));
+    }
     let explicit_records = parse_record_keys(params.keys.as_deref())?;
-    let include_inventory = records_include_inventory(&params.include)?;
+    let include_inventory = records_include_inventory(&params.include)? || inventory_only;
     // The inventory container describes the whole row, so only a keyed read without it is
     // narrowed to its keys.
     let storage_keys = explicit_records
@@ -154,25 +161,39 @@ pub(crate) async fn get_resolver_records(
     .ok_or_else(read_error)?;
     publication.finish(&state).await?;
 
-    let default_records;
-    let selection = match explicit_records.as_deref() {
-        Some(records) => RecordSelection::requested(records),
-        None => {
-            default_records = default_requested_records(Some(&inventory));
-            ensure_default_record_limit(&default_records)?;
-            RecordSelection::inventory_default(&default_records)
-        }
+    let (records, record_inventory) = if inventory_only {
+        // Inventory is the whole stored row, with no requested-key augmentation or value
+        // selection. In particular, inventories above the value-key limit remain servable.
+        (
+            BTreeMap::new(),
+            Some(inventory_summary(Some(&inventory), None)),
+        )
+    } else {
+        let default_records;
+        let selection = match explicit_records.as_deref() {
+            Some(records) => RecordSelection::requested(records),
+            None => {
+                default_records = default_requested_records(Some(&inventory));
+                ensure_default_record_limit(&default_records)?;
+                RecordSelection::inventory_default(&default_records)
+            }
+        };
+        let records = selection
+            .records
+            .iter()
+            .map(|record| {
+                Ok((
+                    record.record_key.clone(),
+                    indexed_record_answer(Some(&inventory), record)?,
+                ))
+            })
+            .collect::<V2Result<BTreeMap<String, RecordAnswer>>>()?;
+        (
+            records,
+            include_inventory
+                .then(|| inventory_summary(Some(&inventory), selection.inventory_request())),
+        )
     };
-    let records = selection
-        .records
-        .iter()
-        .map(|record| {
-            Ok((
-                record.record_key.clone(),
-                indexed_record_answer(Some(&inventory), record)?,
-            ))
-        })
-        .collect::<V2Result<BTreeMap<String, RecordAnswer>>>()?;
     let mut data = NameRecords {
         namespace,
         canonical_name: None,
@@ -181,8 +202,7 @@ pub(crate) async fn get_resolver_records(
             address,
         }),
         records,
-        inventory: include_inventory
-            .then(|| inventory_summary(Some(&inventory), selection.inventory_request())),
+        inventory: record_inventory,
     };
     fill_records_route_abi_content_types(&state.pool, data.inventory.as_mut(), Some(&inventory))
         .await?;

@@ -3331,8 +3331,8 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | `namespace` | string | always | Resolved public namespace slug. |
 | `canonical_name` | string | optional | The served path of the ENSv2 token an alias path reaches. Present only when the request named an [alias path](#alias-paths). |
 | `resolver` | nullable object ContractRef | always | Resolver contract for this answer. On `GET /v1/resolvers/{chain_id}/{address}/records` it is always the path resolver. |
-| `records` | map of string to object RecordAnswer | always | Resolver records or reverse result rows in the route-specific shape. |
-| `inventory` | object RecordInventory | optional | Optional record inventory requested with `include=inventory`. |
+| `records` | map of string to object RecordAnswer | always | Per-key resolver answers; empty with values=false on the resolver-anchored records route. |
+| `inventory` | object RecordInventory | optional | Record inventory requested with `include=inventory`, or implied by `values=false` on the resolver-anchored records route. |
 
 ### RecordAnswer
 

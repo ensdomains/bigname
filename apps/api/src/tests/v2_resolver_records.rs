@@ -617,18 +617,20 @@ async fn answers_not_found_without_an_overview_row() -> Result<()> {
 async fn answers_empty_records_for_a_node_with_no_inventory() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_alice_name_inputs(&database).await?;
-    let body = ok(&database, &alice_route("nobody.eth", "include=inventory")).await?;
-    assert_eq!(
-        body["data"],
-        json!({
-            "namespace": "ens",
-            "resolver": {"chain_id": 1, "address": ALICE_RESOLVER},
-            "records": {},
-            "inventory": {"known_keys": [], "unset_keys": [], "unsupported_keys": [],
-                          "abi_content_types": []},
-        }),
-        "{body:#}"
-    );
+    for query in ["include=inventory", "values=false"] {
+        let body = ok(&database, &alice_route("nobody.eth", query)).await?;
+        assert_eq!(
+            body["data"],
+            json!({
+                "namespace": "ens",
+                "resolver": {"chain_id": 1, "address": ALICE_RESOLVER},
+                "records": {},
+                "inventory": {"known_keys": [], "unset_keys": [], "unsupported_keys": [],
+                              "abi_content_types": []},
+            }),
+            "{body:#}"
+        );
+    }
     let keyed = ok(&database, &alice_route("nobody.eth", "keys=text:avatar")).await?;
     assert_eq!(
         keyed["data"]["records"],
@@ -731,23 +733,24 @@ async fn rejects_bad_input() -> Result<()> {
 async fn answers_stale_off_the_current_publication() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_alice_name_inputs(&database).await?;
-    // A time before the publication.
-    let uri = alice_route("alice.eth", "at=2024-01-02T03:04:05Z");
-    let (status, _, body) = read(&database, &uri).await?;
-    assert_eq!(status, StatusCode::CONFLICT, "{uri}: {body:#}");
-    assert_eq!(body["error"]["code"], json!("stale"), "{uri}: {body:#}");
-    // The publication itself is servable under an explicit `at`.
-    let body = ok(&database, &alice_route("alice.eth", ALICE_KEYS)).await?;
-    let token = body["meta"]["as_of_token"]
-        .as_str()
-        .expect("token")
-        .to_owned();
-    let pinned = ok(
-        &database,
-        &alice_route("alice.eth", &format!("{ALICE_KEYS}&at={token}")),
-    )
-    .await?;
-    assert_eq!(pinned["data"], body["data"], "{pinned:#}");
+    for query in ["", "values=false"] {
+        // A time before the publication.
+        let uri = alice_route("alice.eth", &format!("at=2024-01-02T03:04:05Z&{query}"));
+        let (status, headers, body) = read(&database, &uri).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{uri}: {body:#}");
+        assert_eq!(body["error"]["code"], json!("stale"), "{uri}: {body:#}");
+        assert!(headers.get(header::ETAG).is_none(), "{uri}");
+        // The publication itself is servable under an explicit `at`.
+        let body = ok(&database, &alice_route("alice.eth", query)).await?;
+        let token = body["meta"]["as_of_token"].as_str().expect("token");
+        let pinned = ok(
+            &database,
+            &alice_route("alice.eth", &format!("{query}&at={token}")),
+        )
+        .await?;
+        assert_eq!(pinned["data"], body["data"], "{pinned:#}");
+        assert_eq!(pinned["meta"], body["meta"], "{pinned:#}");
+    }
     database.cleanup().await
 }
 
@@ -758,7 +761,7 @@ async fn answers_stale_off_the_current_publication() -> Result<()> {
 async fn serves_guarded_ens_v2_records_by_resolver_and_node() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_alice_name_inputs(&database).await?;
-    seed_abi_public_resolver_v2_name(&database, "v2only.eth", &[]).await?;
+    seed_abi_public_resolver_v2_name(&database, "v2only.eth", &["32", "1"]).await?;
     let query = "keys=text:url&include=inventory";
     let name = ok(&database, &format!("/v1/names/v2only.eth/records?{query}")).await?;
     let body = ok(
@@ -776,6 +779,23 @@ async fn serves_guarded_ens_v2_records_by_resolver_and_node() -> Result<()> {
         body["data"]["inventory"], name["data"]["inventory"],
         "{name:#}"
     );
+    let (_abi_guard, abi_calls) =
+        crate::v2::abi_content_types_test_hooks::install(&database.pool).await?;
+    let inventory_only = ok(
+        &database,
+        &route(1, PUBLIC_RESOLVER_V2, "v2only.eth", "values=false"),
+    )
+    .await?;
+    assert_eq!(inventory_only["data"]["records"], json!({}));
+    assert_eq!(
+        inventory_only["data"]["inventory"],
+        body["data"]["inventory"]
+    );
+    assert_eq!(
+        inventory_only["data"]["inventory"]["abi_content_types"],
+        json!(["1", "32"])
+    );
+    assert_eq!(*abi_calls.lock().expect("ABI calls"), vec![1]);
     database.cleanup().await
 }
 
@@ -936,6 +956,7 @@ async fn carries_indexed_cache_headers() -> Result<()> {
     for uri in [
         alice_route("alice.eth", ALICE_KEYS),
         alice_route("alice.eth", &format!("{ALICE_KEYS}&source=indexed")),
+        alice_route("alice.eth", "values=false"),
     ] {
         let (status, headers, _) = read(&database, &uri).await?;
         assert_eq!(status, StatusCode::OK, "{uri}");
@@ -969,6 +990,20 @@ async fn carries_indexed_cache_headers() -> Result<()> {
             "{uri}"
         );
     }
+    let (_, value_headers, _) =
+        read(&database, &alice_route("alice.eth", "include=inventory")).await?;
+    let value_etag = value_headers.get(header::ETAG).expect("value ETag");
+    let (status, headers, body) = read_with(
+        &database,
+        Request::builder()
+            .uri(alice_route("alice.eth", "values=false"))
+            .header(header::IF_NONE_MATCH, value_etag)
+            .body(Body::empty())?,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert_eq!(body["data"]["records"], json!({}));
+    assert_ne!(headers.get(header::ETAG), Some(value_etag));
     let unknown = route(
         1,
         "0x00000000000000000000000000000000000dead2",
@@ -980,6 +1015,289 @@ async fn carries_indexed_cache_headers() -> Result<()> {
         assert!(status.is_client_error(), "{uri}");
         assert!(headers.get(header::ETAG).is_none(), "{uri}");
         assert!(headers.get(header::CACHE_CONTROL).is_none(), "{uri}");
+    }
+    database.cleanup().await
+}
+
+/// Inventory-only uses the whole published row, retaining unavailable values as unsupported
+/// keys without constructing answers or augmenting the inventory with requested keys.
+#[tokio::test]
+async fn inventory_only_preserves_inventory_without_value_answers() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_alice_name_inputs_with_writes(
+        &database,
+        &[
+            family_fixture_record_write(
+                "addr:60",
+                Some(json!("0x0000000000000000000000000000000000000def")),
+            ),
+            family_fixture_record_write("text:description", Some(json!("Alice profile"))),
+            family_fixture_record_write("avatar", None),
+        ],
+    )
+    .await?;
+    let full = ok(&database, &alice_route("alice.eth", "include=inventory")).await?;
+    let expected = json!({
+        "known_keys": ["addr:60", "text:description"],
+        "unset_keys": [], "unsupported_keys": ["text:avatar"], "abi_content_types": []
+    });
+    assert_eq!(full["data"]["inventory"], expected, "{full:#}");
+    assert_eq!(
+        full["data"]["records"]["text:description"],
+        json!({"status":"ok", "value":"Alice profile"})
+    );
+    assert_eq!(
+        full["data"]["records"]["text:avatar"],
+        json!({"status":"unsupported", "unsupported_reason":"value_not_retained"})
+    );
+    for query in [
+        "values=false",
+        "values=false&include=inventory",
+        "values=false&keys=",
+        "values=%20false%20&keys=%20%20",
+    ] {
+        let observations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (_abi_guard, abi_calls) =
+            crate::v2::abi_content_types_test_hooks::install(&database.pool).await?;
+        let body = bigname_storage::families::records::seams::with_lookup_work(
+            observations.clone(),
+            ok(&database, &alice_route("alice.eth", query)),
+        )
+        .await?;
+        assert_eq!(body["data"]["records"], json!({}), "{query}: {body:#}");
+        assert_eq!(body["data"]["inventory"], expected, "{query}: {body:#}");
+        assert_eq!(body["data"]["resolver"], full["data"]["resolver"]);
+        assert_eq!(body["meta"], full["meta"]);
+        assert!(body["data"].get("canonical_name").is_none());
+        let rows = observations
+            .lock()
+            .expect("observations")
+            .iter()
+            .filter(|observation| observation["stage"] == "partition_sources")
+            .map(|observation| {
+                (
+                    observation["key_only"].as_bool(),
+                    observation["candidate_rows_loaded"].as_u64(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![(Some(false), Some(3))], "{query}");
+        assert_eq!(*abi_calls.lock().expect("ABI calls"), vec![1], "{query}");
+    }
+    for query in [
+        "include=inventory&values=true",
+        "include=inventory&values=",
+        "include=inventory&values=%20",
+        "include=inventory&keys=",
+    ] {
+        let body = ok(&database, &alice_route("alice.eth", query)).await?;
+        assert_eq!(body, full, "{query}");
+    }
+    let missing = "keys=text:missing&include=inventory";
+    let keyed = ok(&database, &alice_route("alice.eth", missing)).await?;
+    assert_eq!(
+        keyed["data"]["records"],
+        json!({"text:missing":{"status":"not_found"}})
+    );
+    for flag in ["true", "", "%20"] {
+        let body = ok(
+            &database,
+            &alice_route("alice.eth", &format!("{missing}&values={flag}")),
+        )
+        .await?;
+        assert_eq!(body, keyed, "{flag}");
+    }
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn inventory_only_keeps_unsupported_and_abi_unavailable_meanings() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_unknown_resolver_inputs(&database, &unknown_resolver_record_writes()).await?;
+    let body = ok(&database, &alice_route("alice.eth", "values=false")).await?;
+    assert_eq!(body["data"]["records"], json!({}));
+    assert_eq!(
+        body["data"]["inventory"],
+        json!({
+            "known_keys": [], "unset_keys": [], "unsupported_keys": ["addr:60", "text:description"],
+            "abi_content_types": null, "abi_unsupported_reason": "inventory_not_authoritative"
+        }),
+        "{body:#}"
+    );
+    let full = ok(&database, &alice_route("alice.eth", "include=inventory")).await?;
+    assert_eq!(body["data"]["inventory"], full["data"]["inventory"]);
+    let unseen = ok(&database, &alice_route("nobody.eth", "values=false")).await?;
+    assert_eq!(unseen["data"]["records"], json!({}));
+    assert_eq!(
+        unseen["data"]["inventory"],
+        json!({
+            "known_keys": [], "unset_keys": [], "unsupported_keys": [],
+            "abi_content_types": null, "abi_unsupported_reason": "inventory_not_authoritative"
+        }),
+        "{unseen:#}"
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn inventory_only_serves_above_the_value_limit_and_preserves_value_limits() -> Result<()> {
+    for count in [200, 201] {
+        let database = TestDatabase::new_with_schemas(false, true).await?;
+        let writes = (0..count)
+            .map(|index| family_fixture_record_write(&format!("text:key-{index}"), Some(json!(""))))
+            .collect::<Vec<_>>();
+        seed_alice_name_inputs_with_writes(&database, &writes).await?;
+        let expected = (0..count)
+            .map(|index| format!("text:key-{index}"))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let observations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (_abi_guard, abi_calls) =
+            crate::v2::abi_content_types_test_hooks::install(&database.pool).await?;
+        let body = bigname_storage::families::records::seams::with_lookup_work(
+            observations.clone(),
+            ok(&database, &alice_route("alice.eth", "values=false")),
+        )
+        .await?;
+        assert_eq!(body["data"]["records"], json!({}));
+        assert_eq!(
+            body["data"]["inventory"],
+            json!({"known_keys":expected,"unset_keys":[],"unsupported_keys":[],"abi_content_types":[]})
+        );
+        let rows = observations
+            .lock()
+            .expect("observations")
+            .iter()
+            .filter(|observation| observation["stage"] == "partition_sources")
+            .map(|observation| {
+                (
+                    observation["key_only"].as_bool(),
+                    observation["candidate_rows_loaded"].as_u64(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![(Some(false), Some(count))]);
+        assert_eq!(*abi_calls.lock().expect("ABI calls"), vec![1]);
+        drop(_abi_guard);
+        for values in ["", "&values=true", "&values=", "&values=%20"] {
+            for keys in ["", "&keys=", "&keys=%20%20"] {
+                let query = format!("include=inventory{values}{keys}");
+                let (status, _, body) = read(&database, &alice_route("alice.eth", &query)).await?;
+                if count == 200 {
+                    assert_eq!(status, StatusCode::OK, "{query}: {body:#}");
+                    assert_eq!(
+                        body["data"]["records"].as_object().expect("records").len(),
+                        200
+                    );
+                } else {
+                    assert_eq!(
+                        status,
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "{query}: {body:#}"
+                    );
+                    assert_eq!(body["error"]["code"], json!("unsupported"));
+                }
+            }
+        }
+        let one = ok(&database, &alice_route("alice.eth", "keys=text:key-0")).await?;
+        assert_eq!(
+            one["data"]["records"],
+            json!({"text:key-0":{"status":"ok","value":""}})
+        );
+        let explicit = (0..count)
+            .map(|index| format!("text:key-{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let (status, _, body) = read(
+            &database,
+            &alice_route("alice.eth", &format!("keys={explicit}")),
+        )
+        .await?;
+        assert_eq!(
+            status,
+            if count == 200 {
+                StatusCode::OK
+            } else {
+                StatusCode::BAD_REQUEST
+            },
+            "{body:#}"
+        );
+        database.cleanup().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn inventory_only_rejects_conflicts_and_invalid_flags_on_the_owning_route() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_alice_name_inputs(&database).await?;
+    let oversized = (0..201)
+        .map(|index| format!("text:key-{index}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut cases = vec![
+        (
+            "values=false&keys=text:description".to_owned(),
+            "keys must be omitted when values=false",
+        ),
+        (
+            "values=false&keys=abi:1".to_owned(),
+            "keys must be omitted when values=false",
+        ),
+        (
+            format!("values=false&keys={oversized}"),
+            "keys must be omitted when values=false",
+        ),
+        (
+            "values=false&include=counts".to_owned(),
+            "include must contain only inventory",
+        ),
+        (
+            "values=false&source=verified&keys=abi:1".to_owned(),
+            "source must be indexed",
+        ),
+        (
+            "values=false&source=auto&keys=abi:1".to_owned(),
+            "source must be indexed",
+        ),
+        (
+            "values=false&namespace=basenames&keys=abi:1".to_owned(),
+            "namespace must be ens for a resolver on chain 1",
+        ),
+        (
+            "values=false&values=false".to_owned(),
+            "query parameters are invalid",
+        ),
+    ];
+    for invalid in ["0", "FALSE", "none", "true,false"] {
+        cases.push((format!("values={invalid}"), "values is invalid"));
+    }
+    for (query, message) in cases {
+        let uri = alice_route("alice.eth", &query);
+        let (status, headers, body) = read(&database, &uri).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body:#}");
+        assert_eq!(
+            body["error"],
+            json!({"code":"invalid_input","details":{},"message":message}),
+            "{uri}"
+        );
+        assert!(headers.get(header::ETAG).is_none());
+    }
+    let (status, _, body) = read(&database, &alice_route("", "values=false&keys=abi:1")).await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+    assert_eq!(body["error"]["message"], json!("name is required"));
+    for uri in [
+        "/v1/names/alice.eth/records?values=false",
+        "/v1/names/alice.eth?values=false",
+        "/v1/diagnostics/names/alice.eth/records?values=false",
+    ] {
+        let (status, _, body) = read(&database, uri).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body:#}");
+        assert_eq!(
+            body["error"]["message"],
+            json!("unknown query parameter: values")
+        );
     }
     database.cleanup().await
 }
