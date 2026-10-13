@@ -38,7 +38,7 @@ pub struct EnsPrimaryNameLookup {
     pub name: Option<String>,
     pub normalized_name: Option<String>,
     /// The contract that returned `name`: the reverse node's resolver, or the `default.reverse`
-    /// registrar when the fallback answered.
+    /// registrar when the node has no resolver.
     pub reverse_resolver_address: Option<String>,
     pub forward_address: Option<String>,
     pub ccip_read: bool,
@@ -73,7 +73,13 @@ where
     let reverse_node = reverse_node(request.normalized_address)?;
     let rpc = primary_name_rpc(request.chain_rpc_urls, &request.position.chain_id)?;
     let block_selector = hash_pinned_block_selector(&request.position.block_hash);
-    let addr_reverse = match registry_resolver(
+    // The ENSv2 Universal Resolver's reverse order. A nonzero resolver on the reverse node answers
+    // alone: its empty name is no primary name, and a failed name call, out of gas included, ends
+    // the lookup. `default.reverse` is read only when the node has no resolver. A whitespace name
+    // normalizes to not_found below.
+    // (upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L33-L37 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L247-L249 @ ens_v2_sepolia_20261001@07e55a05)
+    let (resolver_address, raw_name) = match registry_resolver(
         &rpc,
         request.registry_address,
         reverse_node,
@@ -83,38 +89,25 @@ where
     {
         Ok(Some(resolver)) => {
             match reverse_name(&rpc, &resolver, reverse_node, &block_selector).await {
-                Ok(name) => name.map(|name| (resolver, name)),
+                Ok(Some(name)) => (resolver, name),
+                Ok(None) => return Ok(not_found(request.position)),
                 Err(error) => return primary_call_error(error, Some(&resolver), request.position),
             }
         }
-        Ok(None) => None,
+        Ok(None) => {
+            let Some(registrar) = request.default_reverse_registrar_address else {
+                return Ok(not_found(request.position));
+            };
+            match default_reverse_name(&rpc, registrar, request.normalized_address, &block_selector)
+                .await
+            {
+                Ok(Some(name)) => (registrar.to_owned(), name),
+                Ok(None) => return Ok(not_found(request.position)),
+                Err(error) => return primary_call_error(error, Some(registrar), request.position),
+            }
+        }
         Err(error) => return primary_call_error(error, None, request.position),
     };
-    // ENS's ETH reverse resolver reads `default.reverse` when the reverse node has no resolver or
-    // its name has no bytes; a failed name call, out of gas included, ends the lookup instead.
-    // A whitespace name takes the addr.reverse branch and normalizes to not_found.
-    // (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f)
-    let (resolver_address, raw_name) =
-        match (addr_reverse, request.default_reverse_registrar_address) {
-            (Some(claim), _) => claim,
-            (None, None) => return Ok(not_found(request.position)),
-            (None, Some(registrar)) => {
-                match default_reverse_name(
-                    &rpc,
-                    registrar,
-                    request.normalized_address,
-                    &block_selector,
-                )
-                .await
-                {
-                    Ok(Some(name)) => (registrar.to_owned(), name),
-                    Ok(None) => return Ok(not_found(request.position)),
-                    Err(error) => {
-                        return primary_call_error(error, Some(registrar), request.position);
-                    }
-                }
-            }
-        };
     let normalized_name = match normalized_reverse_claim(&raw_name) {
         ReverseClaimNormalization::Ready(name) => name,
         ReverseClaimNormalization::NotFound => return Ok(not_found(request.position)),

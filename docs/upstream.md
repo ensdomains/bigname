@@ -356,29 +356,38 @@ to the applicable entries below.
 > answers aligned without changing retained normalized bytes.
 > **Since**: `2026-09-05`
 
-> **Indexed `default.reverse` fallback reads projected names only**: for an ENS
-> `coin_type=60` primary name, the indexed answer serves the address's
-> `default.reverse` name whenever the projected `addr.reverse` name has no
-> bytes or its reverse node has no nonzero resolver. A reverse node that points
-> at a resolver bigname does not admit, or at an event-silent resolver with no
-> hydrated name, has no projected name, so the indexed answer falls back to
-> `default.reverse` there too.
-> **Upstream**: ENS's ETH reverse resolver first reads a standalone
-> `addr.reverse` registrar, then calls `name()` with a 100,000 gas stipend on
-> any nonzero registry resolver of the reverse node, and falls back to the
-> `default.reverse` registrar only when that call returns an empty name; a
-> revert, out-of-gas, or undecodable result ends the lookup with an empty name
-> `(upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f)`.
+> **Indexed primary name answers no name past a reverse resolver it holds no
+> name for**: for an ENS `coin_type=60` primary name, a nonzero resolver on the
+> reverse node `<address>.addr.reverse` answers alone on both sources, and the
+> address's `default.reverse` name is read only when that node has no resolver.
+> The indexed source knows a resolver's name only from that resolver's admitted
+> events or from hydration. When the reverse node points at a resolver bigname
+> does not admit, or at an [event-silent](glossary.md) resolver with no hydrated
+> name, the indexed answer is `not_found`. The same holds when the node was
+> claimed through a reverse registrar no manifest admits and only the registry
+> projection shows its resolver. The chain answers whatever name that resolver
+> holds.
+> **Upstream**: the ENSv2 Universal Resolver's `reverse` calls `name` on the
+> resolver of the reverse name
+> `(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L388-L398 @ ens_v2_sepolia_20261001@07e55a05)`
+> and returns an empty name as no primary name
+> `(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L247-L249 @ ens_v2_sepolia_20261001@07e55a05)`.
+> The deployment registers `reverse` on the root registry with `ENSV1Resolver`
+> `(upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ReverseMirror.ts:L31-L42 @ ens_v2_sepolia_20261001@07e55a05)`,
+> which finds the name's resolver in the ENSv1 registry and passes the call to it
+> `(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20261001@07e55a05)`
+> `(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/AbstractMirrorResolver.sol:L67-L69 @ ens_v2_sepolia_20261001@07e55a05)`.
+> That registry lookup takes the node's own resolver whenever it is nonzero and
+> an ancestor's only when it is zero
+> `(upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L33-L37 @ ens_v1@91c966f)`.
 > **Our rule**: `docs/projections.md` § Primary names and `docs/api-v1-routes.md`
-> § `GET /v1/addresses/{address}/primary-name`. The verified source follows the
-> upstream order with live calls and gives `name()` the same gas. It skips the
-> standalone registrar, which the Mainnet and Sepolia profiles do not declare,
-> and a failed `name()` call ends it with `failed` instead of an
-> empty name; neither reads the default.
+> § `GET /v1/addresses/{address}/primary-name`. The verified source reads the
+> reverse node's resolver with a live call, so it answers that resolver's name.
+> A failed `name` call ends it with `failed`.
 > **Why**: the projection holds names only from admitted resolver events and
-> hydration, and unlisted emitters are unsupported; the verified source reads
-> the resolver itself.
-> **Since**: `2026-10-01`
+> hydration, and unlisted emitters are unsupported. Serving the default name
+> there would answer a name the chain never returns for that address.
+> **Since**: `2026-10-12`
 
 <a id="verified-reverse-name-call-context"></a>
 > **Verified reverse `name()` call is not a static call from the reverse
@@ -389,10 +398,9 @@ to the applicable entries below.
 > reproduces. Two differences follow, both reachable only through a resolver an
 > address installs on its own reverse node through the admitted
 > `ReverseRegistrar`, and both affecting only that address's own primary name:
-> (1) a `name` that writes storage and then returns an empty string fails
-> upstream's static call, which ends the lookup with no name, while bigname's
-> call succeeds, sees the empty string and falls back to the `default.reverse`
-> name; (2) a `name` whose answer depends on its caller can return one name to
+> (1) a `name` that writes storage fails upstream's static call, which ends the
+> lookup with no name, while bigname's call succeeds and reads the name it
+> returns; (2) a `name` whose answer depends on its caller can return one name to
 > ETHReverseResolver and another to bigname. ETHReverseResolver has no
 > deployment in either profile today: neither profile declares it and the
 > pinned Sepolia and Mainnet deployment artifacts include none, so this
@@ -408,50 +416,6 @@ to the applicable entries below.
 > caller identity to reproduce, and a direct call keeps the reverse leg to plain
 > hash-pinned `eth_call`s. Revisit if ETHReverseResolver ships.
 > **Since**: `2026-10-01`
-
-<a id="default-reverse-fallback-past-a-reverse-node-resolver"></a>
-> **`default.reverse` fallback past an empty name on the reverse node's own
-> resolver**: when `<address>.addr.reverse` has its own nonzero registry
-> resolver whose `name` returns an empty string, both bigname sources follow
-> ETHReverseResolver's order and take the address's `default.reverse` name as
-> its reverse claim. The verified answer for that claim still depends on
-> normalization, authority admission and the forward check.
-> The Universal Resolver's ENSIP-19 `reverse` answers no primary name there: it
-> uses the reverse node's own resolver, sees the empty name and stops. On
-> Sepolia on 2026-10-02, near block `11826770`, an `eth_call` to
-> `reverse(0x69420f05a11f617b4b74ffe2e04b2d300dfa556f, 60)` returned an empty
-> name, while bigname's reverse leg read `hcathgq2e.eth` from
-> `default.reverse`. That call's resolver lookup returned
-> `0x322b…9cb0`, the 2026-10-01 redeploy's `ENSV1Resolver`
-> `(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ENSV1Resolver.json:L2 @ ens_v2_sepolia_20261001@07e55a05)`,
-> behind the redeploy's Universal Resolver, which the managed proxy has served
-> since block `11821680`. Which order is canonical on Sepolia after the ENSv2
-> cutover is an open question, and this entry records it without changing either
-> source.
-> **Upstream**: ETHReverseResolver falls back to `default.reverse` when the
-> reverse node's resolver returns an empty name
-> `(upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f)`,
-> but the Universal Resolver reaches it only as an ancestor resolver, because a
-> reverse node's own nonzero resolver wins the resolver lookup
-> `(upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L33-L37 @ ens_v1@91c966f)`.
-> The ENSv1 Universal Resolver's `reverse` calls `name` on that resolver and
-> returns an empty name as no primary name
-> `(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L200-L225 @ ens_v1@91c966f)`.
-> The ENSv2 Universal Resolver does the same
-> `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L377-L399 @ ens_v2_sepolia_20260916@366de741)`
-> `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L240-L249 @ ens_v2_sepolia_20260916@366de741)`;
-> its deployment gives `reverse` the `ENSV1Resolver`
-> `(upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ReverseMirror.ts:L30-L42 @ ens_v2_sepolia_20261001@07e55a05)`,
-> which finds the reverse node's ENSv1 resolver and passes `name` to it with no
-> `default.reverse` read
-> `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)`
-> `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/AbstractMirrorResolver.sol:L67-L69 @ ens_v2_sepolia_20260916@366de741)`.
-> **Our rule**: `docs/api-v1-routes.md` § `GET /v1/addresses/{address}/primary-name`
-> (ENSIP-19 default name).
-> **Why**: bigname adopted ETHReverseResolver's order for `default.reverse`
-> names; the live Universal Resolver does not run that order for a reverse node
-> with its own resolver. Revisit once the canonical Sepolia order is settled.
-> **Since**: `2026-10-02`
 
 <a id="retained-child-resolution-path"></a>
 > **Retained ENSv1 child resolution after migration** — after cutover, indexed
