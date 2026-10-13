@@ -233,17 +233,25 @@ async fn wrapper_exclusion_matches_only_the_grants_transaction() -> Result<()> {
     }).await
 }
 
-/// A finite synthetic guard, not a production cost claim. Unique wanted keys make probe
-/// counts meaningful; duplicate keys are exercised by the semantic test above. The frozen
-/// fixture has 1,350 matching wide rows (at least 2.7 MB of raw/before payload) against a
-/// 512 kB hash budget, and only 36 output tuples. Wrapper and resource-join costs are not
-/// isolated. Baseline failure stops evaluation rather than resizing this fixture.
+/// One frozen, low-memory synthetic comparison. The old wide UNION must spill; the
+/// narrow candidate must reduce both total temp counters, including independent joins.
+/// Access paths may differ. Source work is attributed to wanted-key arms, not index names.
+/// Calls and EXECUTE warm the fixture before each EXPLAIN; timings are descriptive only.
 #[tokio::test]
-async fn long_key_histories_keep_one_probe_per_key_without_temp_blocks() -> Result<()> {
+async fn narrow_publication_evidence_reduces_spilled_temp_work() -> Result<()> {
     with_fixture("publication_membership_plans", async |c| {
         install_plan_fixture(c).await?;
         let names: Vec<_> = (0..3).map(|n| format!("ens:plan-{n}")).collect();
         let resources: Vec<_> = (100..109).map(resource).collect();
+        let mut literal = Vec::new();
+        for n in 100..109 {
+            for address in ["holder-0", "holder-1"] {
+                for mask in [1,2] {
+                    literal.push(holding(address, Some(&format!("ens:plan-{}", (n-100)/3)), Some(n), mask));
+                }
+            }
+        }
+        literal.sort();
         sqlx::raw_sql("ANALYZE; BEGIN; SET LOCAL work_mem='256kB'; SET LOCAL hash_mem_multiplier=2; SET LOCAL jit=off")
             .execute(&mut *c).await?;
         let mut captures = Vec::new();
@@ -251,65 +259,296 @@ async fn long_key_histories_keep_one_probe_per_key_without_temp_blocks() -> Resu
             sqlx::raw_sql(&format!("SET LOCAL plan_cache_mode={mode}"))
                 .execute(&mut *c).await?;
             let old = sorted(baseline_relations(c, CHAIN, 5, &names, &resources).await?);
-            let baseline = capture(c, &names, &resources, true, &old).await?;
-            if let Some(path) = std::env::var_os("BIGNAME_MEMBERSHIP_PLANS") {
-                std::fs::write(path, serde_json::to_vec_pretty(&json!({
-                    "completed_modes":captures,"current_mode":mode,"baseline":baseline,
-                    "state":"baseline captured before comparison"}))?)?;
-            }
-            let mut nodes = Vec::new(); plan_nodes(&baseline["plan"][0]["Plan"], &mut nodes);
-            let spill = nodes.iter().any(|n| n["Disk Usage"].as_u64().unwrap_or(0) > 0
-                || n["Sort Space Type"] == "Disk");
-            ensure!(spill && baseline["plan"][0]["Plan"]["Temp Written Blocks"].as_u64().unwrap_or(0) > 0,
-                "baseline spill did not reproduce in {mode}; STOP without fixture tuning: {baseline}");
-            ensure!(probe_loops(&nodes, "normalized_events_name_history_idx") == 6.0
-                && probe_loops(&nodes, "normalized_events_resource_history_idx") == 18.0,
-                "baseline doubled probes did not reproduce in {mode}; STOP: {baseline}");
-            let mut literal = Vec::new();
-            for n in 100..109 {
-                for address in ["holder-0", "holder-1"] {
-                    for mask in [1,2] {
-                        literal.push(holding(address, Some(&format!("ens:plan-{}", (n-100)/3)), Some(n), mask));
-                    }
-                }
-            }
-            literal.sort();
-            ensure!(old == literal, "baseline plan fixture literal holdings: {old:?} != {literal:?}");
+            ensure!(old == literal, "baseline production literal holdings: {old:?} != {literal:?}");
+            let baseline = capture(c, &names, &resources, true, &literal).await?;
+            save_pair(&json!({"completed_modes":captures,"current_mode":mode,"baseline":baseline,
+                "literal_holdings":literal,"state":"baseline captured before comparison"}))?;
             let new = sorted(historical_history_relations(c, CHAIN, 5, &names, &resources).await?);
-            ensure!(new == literal, "candidate plan fixture complete holdings: {new:?} != {literal:?}");
-            let candidate = capture(c, &names, &resources, false, &new).await?;
-            let mut nodes = Vec::new(); plan_nodes(&candidate["plan"][0]["Plan"], &mut nodes);
-            ensure!(probe_loops(&nodes, "normalized_events_name_history_idx") == 3.0
-                && probe_loops(&nodes, "normalized_events_resource_history_idx") == 9.0,
-                "candidate did not probe each key once in {mode}: {candidate}");
-            let plan = &candidate["plan"][0]["Plan"];
-            ensure!(plan["Temp Written Blocks"].as_u64() == Some(0)
-                && plan["Temp Read Blocks"].as_u64() == Some(0),
-                "candidate wrote/read temp blocks in {mode}: {candidate}");
-            captures.push(json!({"mode":mode,"baseline":baseline,"candidate":candidate,
-                "literal_holdings":literal,"actual_holdings":new}));
+            ensure!(new == literal, "candidate production literal holdings: {new:?} != {literal:?}");
+            let candidate = capture(c, &names, &resources, false, &literal).await?;
+            let mut pair = json!({"mode":mode,"baseline":baseline,"candidate":candidate,
+                "literal_holdings":literal,"state":"both captures saved before cost acceptance"});
+            save_pair(&json!({"completed_modes":captures,"current_pair":pair}))?;
+            pair["baseline_report"] = evidence_plan_report(&pair["baseline"], false)?;
+            pair["candidate_report"] = evidence_plan_report(&pair["candidate"], true)?;
+            save_pair(&json!({"completed_modes":captures,"current_pair":pair}))?;
+            ensure!(pair["baseline_report"]["wide_evidence_spills"].as_array().is_some_and(|v| !v.is_empty()),
+                "baseline wide-evidence spill did not reproduce in {mode}; STOP without tuning: {pair}");
+            ensure!(pair["candidate_report"]["wide_evidence_dedupes"].as_array().is_some_and(Vec::is_empty),
+                "candidate still deduplicates wide evidence in {mode}; STOP: {pair}");
+            for counter in ["Temp Read Blocks", "Temp Written Blocks"] {
+                let old = pair["baseline"]["plan"][0]["Plan"][counter].as_u64();
+                let new = pair["candidate"]["plan"][0]["Plan"][counter].as_u64();
+                ensure!(old.zip(new).is_some_and(|(old,new)| new < old),
+                    "candidate {counter} is not strictly lower in {mode}; STOP: {pair}");
+            }
+            pair["state"] = json!("paired finite acceptance passed");
+            captures.push(pair);
+            save_pair(&json!({"completed_modes":captures}))?;
         }
         sqlx::raw_sql("ROLLBACK").execute(&mut *c).await?;
-        if let Some(path) = std::env::var_os("BIGNAME_MEMBERSHIP_PLANS") {
-            std::fs::write(path, serde_json::to_vec_pretty(&captures)?)?;
-        }
         Ok(())
     }).await
 }
 
-fn plan_nodes<'a>(node: &'a Value, output: &mut Vec<&'a Value>) {
-    output.push(node);
-    for child in node["Plans"].as_array().into_iter().flatten() {
-        plan_nodes(child, output);
+fn save_pair(value: &Value) -> Result<()> {
+    if let Some(path) = std::env::var_os("BIGNAME_MEMBERSHIP_PLANS") {
+        std::fs::write(path, serde_json::to_vec_pretty(value)?)?;
+    }
+    Ok(())
+}
+
+/// Paths/counters over the existing main plan only. Matcher SubPlans are not evidence arms.
+fn plan_nodes<'a>(node: &'a Value, path: String, output: &mut Vec<(String, &'a Value)>) {
+    if node["Parent Relationship"] == "SubPlan" {
+        return;
+    }
+    output.push((path.clone(), node));
+    for (index, child) in node["Plans"].as_array().into_iter().flatten().enumerate() {
+        plan_nodes(child, format!("{path}.Plans[{index}]"), output);
     }
 }
-fn probe_loops(nodes: &[&Value], index: &str) -> f64 {
-    nodes
-        .iter()
-        .filter(|n| n["Index Name"] == index)
-        .map(|n| n["Actual Loops"].as_f64().unwrap_or(0.0))
-        .sum()
+fn below(path: &str, ancestor: &str) -> bool {
+    path == ancestor || path.starts_with(&format!("{ancestor}.Plans["))
 }
+
+fn evidence_plan_report(capture: &Value, candidate: bool) -> Result<Value> {
+    let sql = capture["statement"].as_str().unwrap_or("");
+    let compact = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    ensure!(
+        compact.contains("wanted(name)")
+            && compact.contains("wanted(resource)")
+            && compact.contains("ne.logical_name_id = wanted.name AND ne.chain_id =")
+            && compact.contains("ne.resource_id = wanted.resource AND ne.chain_id =")
+            && compact.matches("AND ne.block_number <=").count() == 2,
+        "UNPROVEN: emitted SQL does not establish the wanted key/chain/block arms"
+    );
+    if candidate {
+        let evidence = compact
+            .split("SELECT DISTINCT matched_address.address")
+            .next()
+            .unwrap_or("");
+        let columns = [
+            "ne.namespace",
+            "ne.logical_name_id",
+            "ne.resource_id",
+            "ne.event_kind",
+            "ne.source_family",
+            "ne.chain_id",
+            "ne.block_number",
+            "ne.block_hash",
+            "ne.transaction_index",
+            "ne.log_index",
+            "ne.derivation_kind",
+            "ne.canonicality_state",
+            "ne.consumer_visibility",
+            "ne.after_state",
+        ];
+        let projections: Vec<_> = evidence
+            .split("SELECT ")
+            .skip(1)
+            .map(|select| {
+                select
+                    .split(" FROM ")
+                    .next()
+                    .unwrap_or("")
+                    .split(',')
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        ensure!(
+            projections.len() == 4
+                && projections.iter().all(|p| p == &columns)
+                && evidence.contains("UNION ALL")
+                && evidence.contains("ne.logical_name_id IS NULL OR ne.logical_name_id <> ALL("),
+            "UNPROVEN: actual candidate evidence projection is not the frozen disjoint 14-column SQL"
+        );
+    }
+    let mut nodes = Vec::new();
+    plan_nodes(&capture["plan"][0]["Plan"], "Plan".into(), &mut nodes);
+    let appends: Vec<_> = nodes
+        .iter()
+        .filter(|(path, node)| {
+            node["Node Type"] == "Append"
+                && nodes
+                    .iter()
+                    .filter(|(p, n)| {
+                        below(p, path)
+                            && n["Node Type"] == "Function Scan"
+                            && n["Function Name"] == "unnest"
+                    })
+                    .count()
+                    == 2
+        })
+        .collect();
+    ensure!(
+        appends.len() == 1,
+        "UNPROVEN: evidence Append ancestry is erased or ambiguous"
+    );
+    let append = &appends[0].0;
+    let mut roles = Vec::new();
+    for (arm_index, arm) in appends[0].1["Plans"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let branch = format!("{append}.Plans[{arm_index}]");
+        let subtree: Vec<_> = nodes.iter().filter(|(p, _)| below(p, &branch)).collect();
+        let functions: Vec<_> = subtree
+            .iter()
+            .filter(|(_, n)| n["Node Type"] == "Function Scan" && n["Function Name"] == "unnest")
+            .collect();
+        ensure!(
+            functions.len() == 1,
+            "UNPROVEN: wanted function is missing/ambiguous in {branch}"
+        );
+        let (function_path, function) = functions[0];
+        let alias = function["Alias"].as_str().unwrap_or("");
+        ensure!(
+            !alias.is_empty(),
+            "UNPROVEN: wanted function alias is absent"
+        );
+        let roots: Vec<_> = subtree
+            .iter()
+            .filter(|(_, n)| {
+                n["Relation Name"] == "normalized_events"
+                    && matches!(
+                        n["Node Type"].as_str(),
+                        Some(
+                            "Seq Scan"
+                                | "Index Scan"
+                                | "Index Only Scan"
+                                | "Bitmap Heap Scan"
+                                | "Tid Scan"
+                                | "Tid Range Scan"
+                        )
+                    )
+            })
+            .collect();
+        ensure!(
+            !roots.is_empty(),
+            "UNPROVEN: physical source root was pruned without role markers in {branch}"
+        );
+        let mut role = None;
+        let mut scans = Vec::new();
+        let mut loops = 0.0;
+        for (path, node) in roots {
+            let conditions: Vec<_> = subtree
+                .iter()
+                .filter(|(p, _)| below(p, path))
+                .flat_map(|(_, n)| {
+                    ["Filter", "Index Cond", "Recheck Cond"]
+                        .into_iter()
+                        .filter_map(|k| n[k].as_str())
+                })
+                .collect();
+            let joined = conditions.join(" ");
+            let name =
+                joined.contains("logical_name_id") && joined.contains(&format!("{alias}.name"));
+            let resource =
+                joined.contains("resource_id") && joined.contains(&format!("{alias}.resource"));
+            ensure!(
+                name != resource && joined.contains("chain_id") && joined.contains("block_number"),
+                "UNPROVEN: key/chain/block source correlation in {path}: {conditions:?}"
+            );
+            let current = if name { "name" } else { "resource" };
+            ensure!(
+                role.is_none_or(|role| role == current),
+                "UNPROVEN: mixed roles in {branch}"
+            );
+            role = Some(current);
+            let actual = node["Actual Loops"]
+                .as_f64()
+                .ok_or_else(|| anyhow::anyhow!("UNPROVEN: loops absent at {path}"))?;
+            loops += actual;
+            scans.push(json!({"path":path,"node":node,"conditions":conditions}));
+        }
+        let role = role.ok_or_else(|| anyhow::anyhow!("UNPROVEN: source role absent"))?;
+        let limit = if role == "name" { 3.0 } else { 9.0 };
+        ensure!(
+            !candidate || loops <= limit,
+            "candidate {role} source scans {loops} exceed {limit}"
+        );
+        let ancestry: Vec<_> = nodes
+            .iter()
+            .filter(|(p, _)| below(&branch, p) || below(p, &branch))
+            .filter(|(_, n)| {
+                matches!(
+                    n["Node Type"].as_str(),
+                    Some(
+                        "Materialize"
+                            | "Sort"
+                            | "Unique"
+                            | "Aggregate"
+                            | "Append"
+                            | "Subquery Scan"
+                    )
+                )
+            })
+            .map(|(p, n)| json!({"path":p,"node":n}))
+            .collect();
+        roles.push(
+            json!({"role":role,"branch_path":branch,"branch_loops":arm["Actual Loops"],
+            "wanted_function_path":function_path,"wanted_function":function,"source_scans":scans,
+            "source_loops":loops,"source_limit":limit,"ancestry":ancestry}),
+        );
+    }
+    ensure!(
+        roles.len() == 2
+            && roles.iter().filter(|r| r["role"] == "name").count() == 1
+            && roles.iter().filter(|r| r["role"] == "resource").count() == 1,
+        "UNPROVEN: both wanted source roles are not positively accounted for"
+    );
+    let wide: Vec<_> = nodes
+        .iter()
+        .filter(|(path, node)| {
+            below(append, path)
+                && matches!(node["Node Type"].as_str(), Some("Sort" | "Aggregate"))
+                && ["Sort Key", "Group Key"].iter().any(|key| {
+                    node[key].as_array().is_some_and(|keys| {
+                        [
+                            "raw_fact_ref",
+                            "before_state",
+                            "event_identity",
+                            "manifest_version",
+                        ]
+                        .iter()
+                        .all(|column| {
+                            keys.iter().any(|k| {
+                                k.as_str()
+                                    .is_some_and(|k| k.ends_with(&format!(".{column}")))
+                            })
+                        })
+                    })
+                })
+        })
+        .map(|(path, node)| json!({"path":path,"node":node}))
+        .collect();
+    let spills: Vec<_> = wide
+        .iter()
+        .filter(|v| {
+            v["node"]["Temp Written Blocks"]
+                .as_u64()
+                .is_some_and(|v| v > 0)
+                && (v["node"]["Sort Space Type"] == "Disk"
+                    || v["node"]["Disk Usage"].as_u64().is_some_and(|v| v > 0)
+                    || v["node"]["HashAgg Batches"].as_u64().is_some_and(|v| v > 1))
+        })
+        .cloned()
+        .collect();
+    let operators: Vec<_> = nodes
+        .iter()
+        .map(|(path, node)| json!({"path":path,"node":node}))
+        .collect();
+    Ok(
+        json!({"evidence_append_path":append,"roles":roles,"wide_evidence_dedupes":wide,
+        "wide_evidence_spills":spills,"operators":operators,
+        "column_proof":if candidate {"actual four 14-column SQL projections; no Materialize Output/heap-fetch claim"} else {"actual whole-event SQL and event-column dedupe keys"}}),
+    )
+}
+
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
@@ -423,7 +662,7 @@ async fn capture(
         .fetch_all(&mut *c).await?;
     Ok(
         json!({"statement":statement,"parameter_types":types,"parameter_count":types.len(),
-        "arguments":args,"execute_holdings":actual,"plan":plan,"environment":environment,
+        "arguments":args,"production_holdings":expected,"execute_holdings":actual,"plan":plan,"environment":environment,
         "indexes":indexes,"fixture":fixture,"statistics":statistics}),
     )
 }
