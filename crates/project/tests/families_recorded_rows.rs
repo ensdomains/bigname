@@ -121,6 +121,15 @@ async fn rebuilt(blocks: u64) -> Result<()> {
         "the rebuild in ranges of {blocks} blocks stopped at {:?}",
         outcome.marker
     );
+    let covered: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM project_address_history_anchor WHERE historical_mask <> 0)",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    ensure!(
+        covered,
+        "the recorded digest must cover historical address membership"
+    );
     let (digest, tables) = digest(&fixture, &names.sub).await?;
     ensure!(
         digest == RECORDED,
