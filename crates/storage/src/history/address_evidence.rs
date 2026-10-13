@@ -321,6 +321,7 @@ pub struct HistoricalHistoryRelation {
 /// Re-evaluate the complete historical evidence of affected names/resources at publication.
 /// Each source is probed by its existing leading key before the shared matcher runs; the
 /// isolated changed event alone cannot decide custody or later lease-handoff exclusions.
+/// Carry only the matcher columns and evaluate both masks before advancing the evidence.
 pub async fn historical_history_relations(
     connection: &mut sqlx::PgConnection,
     chain_id: &str,
@@ -331,11 +332,17 @@ pub async fn historical_history_relations(
     use anyhow::Context;
     let mut query = QueryBuilder::<Postgres>::new(
         "/* storage:history.publication_memberships */ WITH evidence AS (
-        SELECT ne.* FROM unnest(",
+        SELECT ne.namespace, ne.logical_name_id, ne.resource_id, ne.event_kind,
+            ne.source_family, ne.chain_id, ne.block_number, ne.block_hash,
+            ne.transaction_index, ne.log_index, ne.derivation_kind,
+            ne.canonicality_state, ne.consumer_visibility, ne.after_state FROM unnest(",
     );
     query.push_bind(names).push(
         "::text[]) wanted(name)
-        CROSS JOIN LATERAL (SELECT ne.* FROM normalized_events ne
+        CROSS JOIN LATERAL (SELECT ne.namespace, ne.logical_name_id, ne.resource_id, ne.event_kind,
+            ne.source_family, ne.chain_id, ne.block_number, ne.block_hash,
+            ne.transaction_index, ne.log_index, ne.derivation_kind,
+            ne.canonicality_state, ne.consumer_visibility, ne.after_state FROM normalized_events ne
             WHERE ne.logical_name_id = wanted.name AND ne.chain_id = ",
     );
     query
@@ -348,13 +355,19 @@ pub async fn historical_history_relations(
                 'canonical'::bigname_phase.canonicality_state,
                 'safe'::bigname_phase.canonicality_state,
                 'finalized'::bigname_phase.canonicality_state
-              ) OFFSET 0) ne UNION
-        SELECT ne.* FROM unnest(",
+              ) OFFSET 0) ne UNION ALL
+        SELECT ne.namespace, ne.logical_name_id, ne.resource_id, ne.event_kind,
+            ne.source_family, ne.chain_id, ne.block_number, ne.block_hash,
+            ne.transaction_index, ne.log_index, ne.derivation_kind,
+            ne.canonicality_state, ne.consumer_visibility, ne.after_state FROM unnest(",
         )
         .push_bind(resources)
         .push(
             "::uuid[]) wanted(resource)
-        CROSS JOIN LATERAL (SELECT ne.* FROM normalized_events ne
+        CROSS JOIN LATERAL (SELECT ne.namespace, ne.logical_name_id, ne.resource_id, ne.event_kind,
+            ne.source_family, ne.chain_id, ne.block_number, ne.block_hash,
+            ne.transaction_index, ne.log_index, ne.derivation_kind,
+            ne.canonicality_state, ne.consumer_visibility, ne.after_state FROM normalized_events ne
             WHERE ne.resource_id = wanted.resource AND ne.chain_id = ",
         );
     query
@@ -366,7 +379,12 @@ pub async fn historical_history_relations(
             'canonical'::bigname_phase.canonicality_state,
             'safe'::bigname_phase.canonicality_state,
             'finalized'::bigname_phase.canonicality_state
-          ) OFFSET 0) ne)
+          ) OFFSET 0) ne
+        WHERE (ne.logical_name_id IS NULL OR ne.logical_name_id <> ALL(",
+    );
+    query.push_bind(names);
+    query.push(
+        "::text[])))
         SELECT DISTINCT matched_address.address, ne.namespace, ne.logical_name_id,
                ne.resource_id, relation.mask AS relation_mask
         FROM evidence ne
@@ -376,14 +394,16 @@ pub async fn historical_history_relations(
                 (ne.after_state ->> 'owner')) candidate(address)
             WHERE address IS NOT NULL
         ) matched_address
-        CROSS JOIN (VALUES (1::smallint), (2::smallint)) relation(mask)
         LEFT JOIN resources r ON r.resource_id = ne.resource_id
         LEFT JOIN bigname_phase.chain_lineage resource_lineage
           ON resource_lineage.chain_id = r.chain_id
          AND resource_lineage.block_hash = r.block_hash ",
     );
-    push_evidence_eligibility(&mut query, true, false);
-    query.push(" AND ((relation.mask = 1 AND ");
+    query.push(
+        " CROSS JOIN LATERAL (
+        SELECT relation.mask FROM (VALUES (1::smallint), (2::smallint)) relation(mask)
+        WHERE (relation.mask = 1 AND ",
+    );
     push_address_match_filter(
         &mut query,
         Address::Candidate,
@@ -395,10 +415,15 @@ pub async fn historical_history_relations(
         Address::Candidate,
         Some(&[AddressNameRelation::EffectiveController]),
     );
-    query.push("))");
+    query.push(") OFFSET 0) relation ");
+    push_evidence_eligibility(&mut query, true, false);
     query
         .build_query_as()
         .fetch_all(connection)
         .await
         .context("failed to derive historical history membership")
 }
+
+#[cfg(test)]
+#[path = "publication_membership_tests.rs"]
+mod publication_membership_tests;
