@@ -41,13 +41,21 @@ async fn executed_plan(
     resources: &[Uuid],
 ) -> Result<Value> {
     let expected = holdings(connection, names, resources).await?;
-    let (statement_name, statement, parameter_count): (String, String, i32) = sqlx::query_as(
-        "SELECT name, statement, cardinality(parameter_types) FROM pg_prepared_statements
+    let (statement_name, statement, parameter_types): (String, String, Vec<String>) =
+        sqlx::query_as(
+            "SELECT name, statement, parameter_types::text[] FROM pg_prepared_statements
          WHERE statement LIKE '/* storage:history.publication_memberships */%'",
-    )
-    .fetch_one(&mut *connection)
-    .await?;
-    assert_eq!(parameter_count, 17);
+        )
+        .fetch_one(&mut *connection)
+        .await?;
+    let mut expected_types: Vec<_> = [
+        "text[]", "text", "bigint", "uuid[]", "text", "bigint", "text[]",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    expected_types.extend(std::iter::repeat_n("text".to_owned(), 11));
+    assert_eq!(parameter_types, expected_types);
     let name_array = names.iter().map(|n| quote(n)).collect::<Vec<_>>().join(",");
     let resource_array = resources
         .iter()
@@ -55,12 +63,12 @@ async fn executed_plan(
         .collect::<Vec<_>>()
         .join(",");
     let arguments = format!(
-        "ARRAY[{name_array}]::text[], {}, 133, ARRAY[{resource_array}]::uuid[], {}, 133,
+        "ARRAY[{name_array}]::text[], {}, 133, ARRAY[{resource_array}]::uuid[], {}, 133, ARRAY[{name_array}]::text[],
+         'basenames', 'ens_v2_registry_resource_surface',
+         'basenames', 'ens_v2_registry_resource_surface',
+         'ens_v2_registry_resource_surface', 'ens_v2_registry_resource_surface',
          'ens_v1_unwrapped_authority', 'ens_v2_registry_resource_surface',
-         'RegistrationGranted', 'TokenControlTransferred', 'AuthorityTransferred',
-         'basenames', 'ens_v2_registry_resource_surface',
-         'basenames', 'ens_v2_registry_resource_surface',
-         'ens_v2_registry_resource_surface', 'ens_v2_registry_resource_surface'",
+         'RegistrationGranted', 'TokenControlTransferred', 'AuthorityTransferred'",
         quote(CHAIN),
         quote(CHAIN),
     );
@@ -76,7 +84,9 @@ async fn executed_plan(
     ))
     .fetch_one(&mut *connection)
     .await?;
-    Ok(json!({"statement": statement, "arguments": arguments, "plan": plan}))
+    Ok(
+        json!({"statement": statement, "arguments": arguments, "parameter_types": parameter_types, "parameter_count": parameter_types.len(), "plan": plan}),
+    )
 }
 
 fn quote(value: &str) -> String {

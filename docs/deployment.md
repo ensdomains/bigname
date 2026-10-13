@@ -4184,3 +4184,12 @@ Run `install.sql` from `ops/walk-index-set`, `ops/project-progressive` and
 `ops/project-scoped-history` only from the deployed commit. A copy from an
 earlier build builds some of the sixteen again. Nothing reads them. Drop them
 again with the statement above.
+
+## Address-history membership query
+
+The publication membership query changes how it reads historical evidence without
+changing the rows Project publishes. Its Project content hash changes; the
+Interpret content hash and manifest-authority fingerprint remain unchanged. A
+release containing this change requires a full-range Project redo, with no
+Interpret or Ingest redo and no schema-migration. An already running Project pass
+uses its deployed query and does not cover a later release's changed hash.
