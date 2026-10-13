@@ -1,3 +1,4 @@
+use alloy_primitives::Address;
 use anyhow::Result;
 use serde_json::Value;
 
@@ -54,8 +55,10 @@ async fn assert_generic_name_record(run: &support::PipelineRun, raw_name: &str) 
 
 /// Project follows the current reverse-node resolver across name set, change,
 /// and clear operations, without rewriting node records into tuple-keyed events.
-/// A `default.reverse` name written first stays behind a nonempty `addr.reverse`
-/// name, answers coin type 60 once that name is cleared, and clears in turn.
+/// A `default.reverse` name written first stays behind the reverse node's resolver:
+/// it is not served while that resolver holds a name or after the name is cleared.
+/// It answers coin type 60 once the registry clears the node's resolver, and
+/// clears in turn.
 #[tokio::test]
 async fn reverse_node_name_set_changed_then_cleared_updates_declared_claim() -> Result<()> {
     let anvil = Anvil::spawn().await?;
@@ -123,8 +126,28 @@ async fn reverse_node_name_set_changed_then_cleared_updates_declared_claim() -> 
     .await?;
     assert_generic_name_record(&cleared, "").await?;
     let cleared_body = primary_name(&cleared.api, "ens", 60, &alice_path, "declared").await?;
-    assert_declared_name(&cleared_body, "carol.eth");
+    assert_declared_not_found(&cleared_body);
     cleared.db.cleanup().await?;
+
+    let reverse_name = format!("{}.addr.reverse", alice_path.trim_start_matches("0x"));
+    ens_v1::set_resolver(&rpc, &deployment, alice, &reverse_name, Address::ZERO).await?;
+    let resolver_cleared = support::ingest_and_serve(
+        &anvil,
+        &deployment,
+        Some(
+            "SELECT EXISTS (
+                 SELECT 1 FROM normalized_events
+                 WHERE event_kind = 'ResolverChanged'
+                   AND canonicality_state = 'canonical'
+                   AND after_state->>'resolver' = '0x0000000000000000000000000000000000000000'
+             )",
+        ),
+    )
+    .await?;
+    let resolver_cleared_body =
+        primary_name(&resolver_cleared.api, "ens", 60, &alice_path, "declared").await?;
+    assert_declared_name(&resolver_cleared_body, "carol.eth");
+    resolver_cleared.db.cleanup().await?;
 
     ens_v1::set_default_reverse_name(&rpc, &deployment, alice, "").await?;
     let default_cleared = support::ingest_and_serve(
