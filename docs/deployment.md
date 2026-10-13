@@ -3567,6 +3567,81 @@ whose `reason` field is `filter_position_cap` mean the provider's cap is below
 the limit, so lower the limit. A provider with no per-position cap can take a
 higher limit to avoid split queries.
 
+### The runner refreshes `normalized_events` statistics
+
+An Interpret redo deletes a chain's events in the redo range and writes them
+again, batch by batch. When PostgreSQL analyzes `normalized_events` in between,
+while none of the chain's ENSv2 events is live, it records the ENSv2 partial
+indexes as holding no rows (`pg_class.reltuples` is 0) although their pages
+stay allocated. Once the events are back the planner still believes those
+indexes are empty. The [lookahead loader](glossary.md#lookahead-loader)'s read
+of [ENSv2 state keys](glossary.md#ensv2-state-key) then stops probing
+`normalized_events_v2_key_probe_idx`. For each requested key it reads every row
+of another ENSv2 index and tests the key array as a filter. The plan stays
+that way until the next `ANALYZE` of the table. The test
+`ensv2_key_arm_recovers_its_probe_after_a_refresh` in
+`crates/interpret/src/load/lookahead_query_tests.rs` reproduces both the plan
+and its repair. On Sepolia, redo batches under that plan took minutes per
+batch.
+
+The phase runner now runs `ANALYZE normalized_events` itself between Interpret
+batches, in a normal run and in a redo:
+
+- after the first batch of the process that writes an ENSv2 event on the chain;
+- again each time the ENSv2 events written since the last refresh reach the
+  number the process had written before it, and at least 1,000;
+- once when an Interpret redo completes, whatever it wrote.
+
+A redo's first batch, which deletes the redo range, causes no refresh unless it
+also writes ENSv2 events. The counts are per chain and kept in memory, so a
+restarted runner refreshes again after its first batch that writes an ENSv2
+event. A chain with no ENSv2 events is refreshed only when a redo completes.
+That refresh sees the ENSv2 indexes empty, so it does not count as the first
+one: the chain's first ENSv2 events in the same process still cause a refresh.
+
+Each refresh runs after the batch's progress is recorded, in a transaction of
+its own with a `lock_timeout` of 10 seconds and a `statement_timeout` of 120
+seconds. `ANALYZE` blocks no read and no write. It waits behind another
+`ANALYZE`, a `VACUUM` or an index build on the table. PostgreSQL cancels an
+ordinary autovacuum worker that holds the conflicting lock. A worker that runs
+to prevent transaction-id wraparound is not cancelled, and then the refresh
+gives up at its 10-second lock timeout and logs the warning below.
+
+The runner logs `interpret refreshed normalized_events statistics` for each
+refresh, with `chain_id`, `mode`, `ensv2_events_since_last_refresh` and
+`duration_ms`. A refresh that fails, for example on its lock wait, logs the
+warning `interpret could not refresh normalized_events statistics`. The batch
+and the phase run are not affected. The runner tries again after a later
+batch, no sooner than 60 seconds after the failed refresh returns. If the
+warning repeats, or the process that logged it was a one-shot redo that has ended, run
+`ANALYZE bigname_phase.normalized_events` by hand. There is no setting and no
+metric for the refresh.
+
+A stop that arrives while a refresh is running drops the call and does not
+wait for it. The statement completes on the server or ends at its 120-second
+timeout. The schedule is in memory, so the next process starts again from its
+first batch that writes an ENSv2 event.
+
+A stop that arrives while a refresh is waiting skips it. When that happens
+after the last batch of a `phase-runner redo`, the command reports the redo as
+incomplete. Rerun it: the rerun finds no block left, completes the redo and
+refreshes.
+
+The refresh has a limit. `ANALYZE` reads a sample of the table, 30,000 rows at
+the default statistics target, and records an ENSv2 index as non-empty only
+when the sample holds an ENSv2 event. On a very large table a refresh therefore
+helps only once ENSv2 events are a large enough share of the table to be
+sampled. With 2 million rows a few thousand ENSv2 events are enough. With
+hundreds of millions of rows it takes tens of thousands, and until then neither
+the runner's refresh nor a manual `ANALYZE` repairs the plan.
+
+No schema-migration, index, manifest or watch-plan change is included. The
+product-code change is to `crates/interpret/src/engine.rs`,
+`crates/interpret/src/engine/statistics.rs` and
+`apps/phase-runner/src/interpret_phase.rs`. None is an input of the
+[interpreter content hash](glossary.md#interpreter-content-hash) or the
+projection content hash, so neither rotates and no redo is needed.
+
 ## Published lookup state
 
 Apply `20261007120000_project_lookup_precomputation.sql` before deploying the

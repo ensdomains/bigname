@@ -87,6 +87,11 @@ writes but waits for transactions already running, such as an Interpret batch; i
 `pg_stat_progress_create_index` rather than restarting it. A rerun accepts the indexes already
 built and builds only the missing ones.
 
+While a build runs, a phase runner that is interpreting cannot take the lock for its own
+`ANALYZE` of the table and logs the warning
+`interpret could not refresh normalized_events statistics`. That is expected: the script's
+final `ANALYZE` covers it.
+
 ## Sequence
 
 For a full-history Interpret redo run with the one-shot `phase-runner redo` command (the

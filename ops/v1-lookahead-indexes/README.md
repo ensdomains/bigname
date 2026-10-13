@@ -124,6 +124,9 @@ confirm autovacuum has analyzed the table since). The loader's queries depend on
 the table's column statistics, which exist only once the table is analyzed: in a
 test database without them, reading the history of 100,000 names did not finish
 in several minutes, and took under four seconds after `ANALYZE`.
+The phase runner also runs that `ANALYZE` itself between Interpret batches once a chain
+writes ENSv2 events, and when an Interpret redo completes. It does not replace this one
+after the builds.
 
 The matching versioned schema-migrations
 `20260917150000_normalized_events_v1_lookahead_indexes.sql` (ENSv1),

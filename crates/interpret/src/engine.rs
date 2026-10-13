@@ -47,6 +47,7 @@ pub struct Engine {
     force_full_state_loader: bool,
     loader_choices: loader_choice::LoaderChoices,
     prior_sessions: prior_sessions::PriorSessions,
+    statistics: statistics::Schedule,
 }
 
 impl Engine {
@@ -63,6 +64,7 @@ impl Engine {
             force_full_state_loader: false,
             loader_choices: loader_choice::LoaderChoices::default(),
             prior_sessions: prior_sessions::PriorSessions::default(),
+            statistics: statistics::Schedule::default(),
         }
     }
 
@@ -117,6 +119,8 @@ impl Engine {
                     &request.chain_id,
                 )
                 .await?;
+                self.statistics
+                    .record(&request.chain_id, request.mode, true, 0);
             }
             return Ok(BatchOutcome {
                 current: target.clone(),
@@ -302,6 +306,11 @@ impl Engine {
             &output,
         )
         .await?;
+        let ensv2_events = statistics::ensv2_events(
+            (output.normalized_events.iter()).map(|event| event.source_family.as_str()),
+        );
+        self.statistics
+            .record(&request.chain_id, request.mode, complete, ensv2_events);
         profile_phase(profile, "write_batch", phase_started, None);
         let phase_started = Instant::now();
         // Lookahead restores each batch from the database, so it keeps no session.
@@ -408,6 +417,8 @@ fn validate_loaded_lineage(
 mod loader_choice;
 #[path = "engine/prior_sessions.rs"]
 mod prior_sessions;
+#[path = "engine/statistics.rs"]
+mod statistics;
 pub use loader_choice::{FullStateReason, StateLoader};
 
 #[cfg(test)]
