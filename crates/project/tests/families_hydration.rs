@@ -592,16 +592,8 @@ async fn another_chains_shared_tuple_write_and_undo_update_mainnet_work() -> Res
     fixture.cleanup().await
 }
 
-// A hydrated name is tested by its byte length for the `default.reverse` fallback, as upstream
-// tests the resolver's return: whitespace stops it, an empty answer falls back.
-// (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L53-L69 @ ens_v1@91c966f)
-#[tokio::test]
-async fn hydrated_whitespace_stops_the_default_reverse_fallback() -> Result<()> {
-    let fixture = Fixture::new("family_reverse_hydration_default", 3).await?;
-    fixture.lineage(CHAIN, 3).await?;
-    let rpc = rpc::Rpc::new().await?;
-    run(&fixture, 0, FamilyMode::Normal, &rpc).await?;
-    seed(&fixture, 1, 1).await?;
+/// Write the `default.reverse` name `evers.eth` for `ADDRESS` in block 1 and return its node.
+async fn default_name(fixture: &Fixture) -> Result<String> {
     let default_node = {
         let labels = [
             format!("{:040x}", 1),
@@ -645,6 +637,19 @@ async fn hydrated_whitespace_stops_the_default_reverse_fallback() -> Result<()> 
             )
             .await?;
     }
+    Ok(default_node)
+}
+
+// A hydrated whitespace name is the reverse resolver's answer: no primary name, and the
+// `default.reverse` name is not served.
+#[tokio::test]
+async fn hydrated_whitespace_stops_the_default_reverse_fallback() -> Result<()> {
+    let fixture = Fixture::new("family_reverse_hydration_default", 3).await?;
+    fixture.lineage(CHAIN, 3).await?;
+    let rpc = rpc::Rpc::new().await?;
+    run(&fixture, 0, FamilyMode::Normal, &rpc).await?;
+    seed(&fixture, 1, 1).await?;
+    default_name(&fixture).await?;
     rpc.answer(1, Some(" "));
     run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
     let hydrated: Option<String> = sqlx::query_scalar(
@@ -657,11 +662,31 @@ async fn hydrated_whitespace_stops_the_default_reverse_fallback() -> Result<()> 
     let served = claim(&fixture).await?;
     assert_eq!(served.row.claim_status.as_str(), "not_found");
     assert_eq!(served.row.claim_provenance["reverse_node"], node(1));
+    fixture.cleanup().await
+}
 
-    rpc.answer(2, Some(""));
-    run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
+// A resolver that emits no events answers an empty name when hydrated. That is the reverse node's
+// answer, so the `default.reverse` name is not served.
+#[tokio::test]
+async fn hydrated_empty_name_serves_no_default() -> Result<()> {
+    let fixture = Fixture::new("family_reverse_hydration_empty", 3).await?;
+    fixture.lineage(CHAIN, 3).await?;
+    let rpc = rpc::Rpc::new().await?;
+    run(&fixture, 0, FamilyMode::Normal, &rpc).await?;
+    seed(&fixture, 1, 1).await?;
+    default_name(&fixture).await?;
+    rpc.answer(1, Some(""));
+    run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
+    let hydrated: Option<String> = sqlx::query_scalar(
+        "SELECT hydrated_name FROM project_reverse_tuple WHERE address = $1 AND coin_type = '60'",
+    )
+    .bind(ADDRESS)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(hydrated.as_deref(), Some(""));
     let served = claim(&fixture).await?;
-    assert_eq!(served.row.raw_claim_name.as_deref(), Some("evers.eth"));
-    assert_eq!(served.row.claim_provenance["reverse_node"], default_node);
+    assert_eq!(served.row.claim_status.as_str(), "not_found");
+    assert_eq!(served.row.raw_claim_name, None);
+    assert_eq!(served.row.claim_provenance["reverse_node"], node(1));
     fixture.cleanup().await
 }

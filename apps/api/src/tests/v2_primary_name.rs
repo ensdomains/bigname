@@ -411,10 +411,12 @@ async fn v2_get_primary_name_normalizes_schema_v2_successful_claim() -> Result<(
     database.cleanup().await
 }
 
-// TYR-120. With an empty `addr.reverse` name, coin type 60 serves the `default.reverse` name, as
-// ENS's ETH reverse resolver does; coin type 2147483648 reads the default name itself.
+// Coin type 60 serves the `default.reverse` name only while the `addr.reverse` node has no
+// resolver. A nonzero resolver answers alone, so its empty name is no primary name. Coin type
+// 2147483648 reads the default name itself.
 #[tokio::test]
-async fn v2_get_primary_name_falls_back_to_the_default_reverse_name() -> Result<()> {
+async fn v2_get_primary_name_serves_the_default_reverse_name_only_without_a_reverse_resolver()
+-> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database
         .seed_snapshot_selector_chain_positions(&json!({
@@ -431,13 +433,9 @@ async fn v2_get_primary_name_falls_back_to_the_default_reverse_name() -> Result<
             "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?coin_type={coin_type}&source=indexed"
         )
     };
-    publish_primary_claim(
-        &database.lookup_pool,
-        "ens",
-        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
-        b"",
-    )
-    .await?;
+    let default_name = json!([{"source": "indexed", "status": "ok", "name": "evers.eth"}]);
+
+    // No reverse node claim at all.
     publish_primary_claim(
         &database.lookup_pool,
         ENS_DEFAULT_REVERSE,
@@ -447,14 +445,26 @@ async fn v2_get_primary_name_falls_back_to_the_default_reverse_name() -> Result<
     .await?;
     for coin_type in ["60", "2147483648"] {
         let payload = v2_primary_name_payload_for_database(&database, &indexed(coin_type)).await?;
-        assert_eq!(
-            payload["data"]["answers"],
-            json!([{"source": "indexed", "status": "ok", "name": "evers.eth"}]),
-            "coin type {coin_type}"
-        );
+        assert_eq!(payload["data"]["answers"], default_name, "coin type {coin_type}");
     }
 
-    // A non-empty addr.reverse name on the reverse node's resolver wins.
+    // The reverse node takes a resolver whose name is empty.
+    publish_primary_claim(
+        &database.lookup_pool,
+        "ens",
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"",
+    )
+    .await?;
+    let payload = v2_primary_name_payload_for_database(&database, &indexed("60")).await?;
+    assert_eq!(
+        payload["data"]["answers"],
+        json!([{"source": "indexed", "status": "not_found"}])
+    );
+    let payload = v2_primary_name_payload_for_database(&database, &indexed("2147483648")).await?;
+    assert_eq!(payload["data"]["answers"], default_name);
+
+    // A non-empty addr.reverse name on the reverse node's resolver is served.
     publish_primary_claim(
         &database.lookup_pool,
         "ens",
@@ -467,6 +477,64 @@ async fn v2_get_primary_name_falls_back_to_the_default_reverse_name() -> Result<
         payload["data"]["answers"],
         json!([{"source": "indexed", "status": "ok", "name": "taytems.eth"}])
     );
+
+    // The registry clears the reverse node's resolver.
+    publish_primary_claim(
+        &database.lookup_pool,
+        ENS_CLEARED_REVERSE_RESOLVER,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"",
+    )
+    .await?;
+    let payload = v2_primary_name_payload_for_database(&database, &indexed("60")).await?;
+    assert_eq!(payload["data"]["answers"], default_name);
+
+    database.cleanup().await
+}
+
+// The reverse node has a resolver the projection holds no name for: one that emitted no name
+// event for the node, and one seen only through the registry because the node was claimed through
+// a registrar no manifest admits. The indexed answer is the same before and after a
+// `default.reverse` name is written.
+#[tokio::test]
+async fn v2_get_primary_name_indexed_answer_ignores_a_default_name_past_an_unindexed_resolver()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_005,
+                "block_hash": "0xprimary-unindexed-resolver",
+                "timestamp": "2026-04-17T00:00:05Z"
+            }
+        }))
+        .await?;
+    let (mut before, mut after) = (Vec::new(), Vec::new());
+    for (source, address) in [
+        (ENS_SILENT_REVERSE_RESOLVER, V2_ON_DEMAND_PRIMARY_NAME_ADDRESS),
+        (ENS_UNADMITTED_REVERSE, V2_PRIMARY_NAME_ADDRESS),
+    ] {
+        let uri = format!("/v1/addresses/{address}/primary-name?source=indexed");
+        publish_primary_claim(&database.lookup_pool, source, address, b"").await?;
+        let payload = v2_primary_name_payload_for_database(&database, &uri).await?;
+        assert_eq!(
+            payload["data"],
+            json!({
+                "address": address,
+                "namespace": "ens",
+                "coin_type": 60,
+                "answers": [{"source": "indexed", "status": "not_found"}]
+            }),
+            "{source}"
+        );
+        before.push(payload["data"].clone());
+        publish_primary_claim(&database.lookup_pool, ENS_DEFAULT_REVERSE, address, b"evers.eth")
+            .await?;
+        let payload = v2_primary_name_payload_for_database(&database, &uri).await?;
+        after.push(payload["data"].clone());
+    }
+    assert_eq!(after, before);
 
     database.cleanup().await
 }
@@ -1108,13 +1176,12 @@ async fn v2_get_primary_name_refuses_a_supported_ens_v2_arm_claim_without_provid
     Ok(())
 }
 
-// TYR-120 review. The projected `addr.reverse` name is empty but the reverse node keeps a nonzero
-// resolver, so the indexed snapshot serves the `default.reverse` name. The chain may still answer a
-// name from that resolver (an unadmitted or event-silent one), so the refused authority of the
-// substituted default name must not decide the verified answer: the live name, on an admitted
-// arm, is verified.
+// The projected `addr.reverse` name is empty on a nonzero resolver, so the indexed answer is no
+// primary name and the `default.reverse` name is not served. The chain may still answer a name
+// from that resolver, one whose change the projection has not seen. The live name decides the
+// verified answer on its own admitted arm; the default name, on a refused arm, takes no part.
 #[tokio::test]
-async fn v2_get_primary_name_gates_the_live_name_when_the_default_was_substituted() -> Result<()> {
+async fn v2_get_primary_name_verifies_the_live_name_past_an_empty_projected_reverse_name() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database.initialize_lookup_schema().await?;
     database
@@ -1128,7 +1195,13 @@ async fn v2_get_primary_name_gates_the_live_name_when_the_default_was_substitute
         "2026-04-17T00:00:03Z",
     )
     .await?;
-    publish_primary_claim(&database.pool, "ens", V2_ON_DEMAND_PRIMARY_NAME_ADDRESS, b"").await?;
+    publish_primary_claim(
+        &database.pool,
+        "ens",
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"",
+    )
+    .await?;
     publish_primary_claim(
         &database.pool,
         ENS_DEFAULT_REVERSE,
@@ -1156,19 +1229,22 @@ async fn v2_get_primary_name_gates_the_live_name_when_the_default_was_substitute
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
         .await
-        .context("v2 substituted-default primary-name request failed")?;
+        .context("v2 empty-projected-name primary-name request failed")?;
     let status = response.status();
     let payload: Value = read_json(response).await?;
     assert_eq!(status, StatusCode::OK, "{payload}");
     assert_eq!(
         payload["data"]["answers"],
-        json!([{"source": "verified", "status": "ok", "name": "taytems.eth"}]),
+        json!([
+            {"source": "indexed", "status": "not_found"},
+            {"source": "verified", "status": "ok", "name": "taytems.eth"}
+        ]),
         "{payload}"
     );
     assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 3);
@@ -1178,11 +1254,11 @@ async fn v2_get_primary_name_gates_the_live_name_when_the_default_was_substitute
     Ok(())
 }
 
-// TYR-120 review. The reverse node was claimed through a registrar no manifest admits, so no
-// coin type 60 tuple exists, but the registry projection holds its nonzero resolver. The served
-// `default.reverse` name must not decide the verified answer either.
+// The reverse node was claimed through a registrar no manifest admits, so no coin type 60 tuple
+// exists, but the registry projection holds its nonzero resolver. The indexed answer is no primary
+// name, not the `default.reverse` name, and the live name decides the verified answer.
 #[tokio::test]
-async fn v2_get_primary_name_gates_the_live_name_without_a_projected_reverse_tuple() -> Result<()> {
+async fn v2_get_primary_name_indexed_serves_no_default_past_a_registry_resolver_without_a_tuple() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database.initialize_lookup_schema().await?;
     database
@@ -1230,22 +1306,95 @@ async fn v2_get_primary_name_gates_the_live_name_without_a_projected_reverse_tup
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
         .await
-        .context("v2 tuple-less substituted-default primary-name request failed")?;
+        .context("v2 tuple-less reverse resolver primary-name request failed")?;
     let status = response.status();
     let payload: Value = read_json(response).await?;
     assert_eq!(status, StatusCode::OK, "{payload}");
     assert_eq!(
         payload["data"]["answers"],
-        json!([{"source": "verified", "status": "ok", "name": "taytems.eth"}]),
+        json!([
+            {"source": "indexed", "status": "not_found"},
+            {"source": "verified", "status": "ok", "name": "taytems.eth"}
+        ]),
         "{payload}"
     );
     assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 3);
+
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+// Both sources stop at the reverse node's resolver: the projected name and the live name are
+// empty, so neither reads the `default.reverse` name and no registrar call is made.
+#[tokio::test]
+async fn v2_get_primary_name_answers_not_found_on_both_sources_past_an_empty_reverse_name()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let lookup_pool = database.lookup_pool().await?;
+    seed_schema_v2_ens_primary_name_authority(
+        &lookup_pool,
+        21_000_003,
+        "0xbinding",
+        "2026-04-17T00:00:03Z",
+    )
+    .await?;
+    publish_primary_claim(&database.pool, "ens", V2_ON_DEMAND_PRIMARY_NAME_ADDRESS, b"").await?;
+    publish_primary_claim(
+        &database.pool,
+        ENS_DEFAULT_REVERSE,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"evers.eth",
+    )
+    .await?;
+    seed_schema_v2_claimed_name(&lookup_pool, "ens", "evers.eth", None, "ens_v1").await?;
+
+    // The registry's resolver for the reverse node, then that resolver's empty name.
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response(""),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
+
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 empty-reverse-name primary-name request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{payload}");
+    assert_eq!(
+        payload["data"]["answers"],
+        json!([
+            {"source": "indexed", "status": "not_found"},
+            {"source": "verified", "status": "not_found"}
+        ]),
+        "{payload}"
+    );
+    assert!(payload["data"].get("verification").is_none(), "{payload}");
+    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 2);
 
     lookup_pool.close().await;
     database.cleanup().await?;

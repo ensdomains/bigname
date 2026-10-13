@@ -1817,25 +1817,23 @@ remains request-scoped.
 The ENSIP-19 `default.reverse` registrar's `NameForAddrChanged` keys its own
 tuple at coin type `2147483648`, with `<address>.default.reverse` as its
 reverse name; the tuple's claim is the latest such write. The reader applies
-ENS's ETH reverse resolver order to a coin type `60` read: the `addr.reverse`
-claim, after any hydration overlay, wins when the reverse node's current
-resolver is nonzero and the claim's source name has at least one byte. The
-test is the retained or hydrated value, not the claim status: a whitespace-only
-name is `not_found` yet still wins, as a nonempty text name that does not
-normalize wins with its `invalid_name` status and a nonempty name retained only
-as bytes wins with its `unsupported` status. Otherwise the reader
-serves the same namespace's `default.reverse` claim, under the requested coin
-type, when that tuple exists, and the `addr.reverse` claim (or no tuple)
-when it does not. A served `default.reverse` claim keeps its own status, so an
-empty default name is `not_found`
-(upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L15-L19 @ ens_v1@91c966f)
-(upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f).
+the ENSv2 Universal Resolver's reverse order to a coin type `60` read. When the
+reverse node's current resolver is nonzero, the `addr.reverse` claim, after any
+hydration overlay, is served with its own status, whatever name it holds: an
+empty name, a cleared record version and a resolver with no projected name are
+all `not_found`. The reader serves the same namespace's `default.reverse`
+claim, under the requested coin type, only when the reverse node has no nonzero
+resolver and that tuple exists. With no `addr.reverse` tuple, the reader checks
+the registry projection for the node's resolver first, so a node claimed
+through a reverse registrar no manifest admits also stops the default. A served
+`default.reverse` claim keeps its own status, so an empty default name is
+`not_found`
+(upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L33-L37 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L247-L249 @ ens_v2_sepolia_20261001@07e55a05).
 The projection knows a resolver's name only from that resolver's admitted
 events or hydration, so a reverse node pointing at an unadmitted resolver
-falls back here while the chain would return that resolver's name; see
-[upstream divergences](upstream.md#known-divergences). The first source in the
-upstream order, a standalone `addr.reverse` registrar, has no admitted
-deployment and is not read.
+answers `not_found` here while the chain would return that resolver's name. See
+[upstream divergences](upstream.md#known-divergences).
 
 A configured mainnet head block prepares reverse hydration
 before opening the publication transaction. A short preparation transaction uses

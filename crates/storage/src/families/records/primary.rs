@@ -9,8 +9,9 @@
 //! current claim and its attempt block remains canonical. Replay can preserve hydration
 //! columns while changing a pointer, so attempt lineage alone does not establish that match.
 //!
-//! A coin type 60 read whose `addr.reverse` claim has no nonzero resolver or no name serves the
-//! namespace's `default.reverse` claim (coin type 2147483648) when that tuple exists.
+//! A coin type 60 read whose `addr.reverse` node has no nonzero resolver serves the namespace's
+//! `default.reverse` claim (coin type 2147483648) when that tuple exists. A nonzero resolver
+//! answers alone, whatever name the projection holds for it.
 //!
 //! The public tuple has no chain; the stored family tuple has one. A namespace's tuples live on one
 //! chain, which the read takes from the family rows.
@@ -87,18 +88,13 @@ pub(crate) async fn load_family_primary_name_snapshots_on(
             selected_chains,
         )
         .await?;
-        // ENS's ETH reverse resolver: the `addr.reverse` name when the reverse node has a nonzero
-        // resolver whose name has any bytes, else the `default.reverse` name. The test is the
-        // stored value's length, not its classification: a whitespace name stops the fallback.
-        // (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L53-L69 @ ens_v1@91c966f)
+        // The ENSv2 Universal Resolver's reverse order: a nonzero resolver on the `addr.reverse`
+        // node answers alone, so the `default.reverse` name is served only without one.
+        // (upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L33-L37 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L247-L249 @ ens_v2_sepolia_20261001@07e55a05)
         let addr_tuple = loaded.is_some();
-        let addr_has_resolver = loaded
-            .as_ref()
-            .is_some_and(|(claim, _)| has_resolver(claim));
-        let names_addr_reverse =
-            addr_has_resolver && loaded.as_ref().is_some_and(|(_, value_empty)| !value_empty);
-        let mut claim = loaded.map(|(claim, _)| claim);
-        if coin_type == "60" && !names_addr_reverse {
+        let mut claim = loaded;
+        if coin_type == "60" && !claim.as_ref().is_some_and(has_resolver) {
             let fallback = load_tuple(
                 conn,
                 &mut publications,
@@ -108,15 +104,13 @@ pub(crate) async fn load_family_primary_name_snapshots_on(
                 selected_chains,
             )
             .await?;
-            if let Some((mut fallback, _)) = fallback {
+            // Without a projected tuple (a node claimed through a registrar no manifest
+            // admits), the registry projection still holds the node's resolver.
+            if let Some(mut fallback) = fallback
+                && (addr_tuple
+                    || !addr_reverse_has_resolver(conn, &fallback, &address, namespace).await?)
+            {
                 fallback.row.coin_type = coin_type.clone();
-                // Without a projected tuple (a node claimed through a registrar no manifest
-                // admits), the registry projection still holds the node's resolver.
-                fallback.default_past_resolver = if addr_tuple {
-                    addr_has_resolver
-                } else {
-                    addr_reverse_has_resolver(conn, &fallback, &address, namespace).await?
-                };
                 claim = Some(fallback);
             }
         }
@@ -127,8 +121,7 @@ pub(crate) async fn load_family_primary_name_snapshots_on(
     Ok(out)
 }
 
-/// The claim of one stored tuple, stamped and hydrated, and whether its stored or hydrated name
-/// value is empty; `None` when the tuple is absent.
+/// The claim of one stored tuple, stamped and hydrated. `None` when the tuple is absent.
 async fn load_tuple(
     conn: &mut PgConnection,
     publications: &mut BTreeMap<String, FamilyPublication>,
@@ -136,7 +129,7 @@ async fn load_tuple(
     namespace: &str,
     coin_type: &str,
     selected_chains: Option<&[String]>,
-) -> Result<Option<(PrimaryNameCurrentSnapshot, bool)>> {
+) -> Result<Option<PrimaryNameCurrentSnapshot>> {
     let chains: Vec<String> = sqlx::query_scalar(
         "/* storage:families.records.primary_tuple_chains */
          SELECT chain_id FROM bigname_phase.project_reverse_tuple
@@ -166,13 +159,10 @@ async fn load_tuple(
     else {
         return Ok(None);
     };
-    let mut value_empty = claim.claim_value_empty;
     let mut claim = claim.snapshot;
     stamp(&mut claim, &publications[chain_id]);
-    if let Some(hydrated_empty) = hydrate(&mut *conn, chain_id, &mut claim).await? {
-        value_empty = hydrated_empty;
-    }
-    Ok(Some((claim, value_empty)))
+    hydrate(&mut *conn, chain_id, &mut claim).await?;
+    Ok(Some(claim))
 }
 
 /// Whether the projected registry or resource pointer of `<address>.addr.reverse`, on the chain of
@@ -222,13 +212,12 @@ fn stamp(claim: &mut PrimaryNameCurrentSnapshot, publication: &FamilyPublication
     }
 }
 
-/// Overlay the tuple's hydrated name when its attempt block is on canonical lineage. Returns
-/// whether the hydrated name is empty when an overlay applies.
+/// Overlay the tuple's hydrated name when its attempt block is on canonical lineage.
 async fn hydrate(
     conn: &mut PgConnection,
     chain_id: &str,
     claim: &mut PrimaryNameCurrentSnapshot,
-) -> Result<Option<bool>> {
+) -> Result<()> {
     let row = sqlx::query(
         "/* storage:families.records.primary_hydration */
          SELECT tuple.hydrated_name, tuple.attempt_block, tuple.attempt_hash, tuple.baseline
@@ -267,19 +256,18 @@ async fn hydrate(
     .fetch_optional(&mut *conn)
     .await
     .context("failed to load the reverse tuple hydration")?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    Ok(Some(apply_hydration(chain_id, claim, &row)?))
+    match row {
+        Some(row) => apply_hydration(chain_id, claim, &row),
+        None => Ok(()),
+    }
 }
 
 fn apply_hydration(
     chain_id: &str,
     claim: &mut PrimaryNameCurrentSnapshot,
     row: &sqlx::postgres::PgRow,
-) -> Result<bool> {
+) -> Result<()> {
     let name: String = row.try_get("hydrated_name")?;
-    let name_empty = name.is_empty();
     let block: i64 = row.try_get("attempt_block")?;
     let hash: String = row.try_get("attempt_hash")?;
     let prepared_baseline: Value = row.try_get("baseline")?;
@@ -320,5 +308,5 @@ fn apply_hydration(
             }),
         );
     }
-    Ok(name_empty)
+    Ok(())
 }

@@ -481,6 +481,95 @@ async fn v2_lookup_reverse_resolves_to_returns_records_with_resolution() -> Resu
     Ok(())
 }
 
+/// The `any` input (read through the batched primary-name reader) and the `resolves_to` input
+/// (read through the single one) of one reverse lookup for `address`.
+async fn v2_lookup_reverse_any_and_resolves_to(
+    database: &TestDatabase,
+    address: &str,
+) -> Result<(Vec<Value>, Vec<Value>)> {
+    let payload = v2_lookup_json(
+        database,
+        json!({
+            "profile": "detail",
+            "inputs": [
+                {"id": "any", "address": address, "relation": "any"},
+                {"id": "resolves", "address": address, "relation": "resolves_to"}
+            ]
+        }),
+    )
+    .await?;
+    let records = |index: usize| {
+        payload["data"][index]["records"]
+            .as_array()
+            .expect("records must be an array")
+            .clone()
+    };
+    Ok((records(0), records(1)))
+}
+
+// The reverse node keeps a nonzero resolver whose name is empty, so the `default.reverse` name is
+// not the address's primary name: no record is flagged and none is ordered first for it.
+#[tokio::test]
+async fn v2_lookup_reverse_default_name_is_not_primary_past_an_empty_reverse_name() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    seed_v2_lookup_resolves_to_records(&database, address).await?;
+    publish_primary_claim(&database.pool, "ens", address, b"").await?;
+    for default_name in ["alice.eth", "bob.eth"] {
+        publish_primary_claim(
+            &database.pool,
+            ENS_DEFAULT_REVERSE,
+            address,
+            default_name.as_bytes(),
+        )
+        .await?;
+        let (any, resolves) = v2_lookup_reverse_any_and_resolves_to(&database, address).await?;
+        assert_eq!(names(&any), vec!["alice.eth", "bob.eth"], "{default_name}");
+        assert_eq!(names(&resolves), vec!["alice.eth"], "{default_name}");
+        assert!(
+            any.iter()
+                .chain(&resolves)
+                .all(|record| record["is_primary"] == json!(false)),
+            "{default_name}: {any:#?} {resolves:#?}"
+        );
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+// With the reverse node's resolver cleared to zero, the `default.reverse` name is the address's
+// primary name: its record is flagged and ordered first.
+#[tokio::test]
+async fn v2_lookup_reverse_marks_primary_from_the_default_name_without_a_reverse_resolver()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    seed_v2_lookup_resolves_to_records(&database, address).await?;
+    publish_primary_claim(&database.pool, ENS_CLEARED_REVERSE_RESOLVER, address, b"").await?;
+
+    publish_primary_claim(&database.pool, ENS_DEFAULT_REVERSE, address, b"bob.eth").await?;
+    let (any, resolves) = v2_lookup_reverse_any_and_resolves_to(&database, address).await?;
+    assert_eq!(names(&any), vec!["bob.eth", "alice.eth"]);
+    assert_eq!(any[0]["is_primary"], json!(true));
+    assert_eq!(any[1]["is_primary"], json!(false));
+    assert_eq!(names(&resolves), vec!["alice.eth"]);
+    assert_eq!(resolves[0]["is_primary"], json!(false));
+
+    publish_primary_claim(&database.pool, ENS_DEFAULT_REVERSE, address, b"alice.eth").await?;
+    let (any, resolves) = v2_lookup_reverse_any_and_resolves_to(&database, address).await?;
+    assert_eq!(names(&any), vec!["alice.eth", "bob.eth"]);
+    assert_eq!(any[0]["is_primary"], json!(true));
+    assert_eq!(any[1]["is_primary"], json!(false));
+    assert_eq!(names(&resolves), vec!["alice.eth"]);
+    assert_eq!(resolves[0]["is_primary"], json!(true));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn v2_lookup_reverse_resolves_to_paginates_with_a_bound_cursor() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
