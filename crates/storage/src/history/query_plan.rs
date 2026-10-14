@@ -65,8 +65,8 @@ pub(super) async fn explain_history_filter_for_test(
         .join("\n");
 
     let mut builder = QueryBuilder::<Postgres>::new("EXPLAIN (COSTS OFF) ");
-    push_history_select(&mut builder, &filter, canonical_only, false, false);
-    push_history_filters(&mut builder, &filter, canonical_only);
+    let resolver_source = push_history_select(&mut builder, &filter, canonical_only, false, false);
+    push_history_filters(&mut builder, &filter, canonical_only, resolver_source);
     push_product_history_duplicate_filter(&mut builder, &filter, canonical_only);
     push_history_order(&mut builder, filter.order);
     let plan = builder

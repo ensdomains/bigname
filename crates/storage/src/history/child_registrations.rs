@@ -23,6 +23,7 @@ use super::{
     keyset::{history_cursor_from_row, push_history_cursor_after, push_history_cursor_cte},
     paging::{push_history_filters, push_history_order, push_history_order_terms},
     redo::{InterpretRedoFence, ensure_interpret_redo_fence},
+    resolver_source::ResolverSource,
     selectors::{HistorySelector, name_history_selector},
     source::push_history_source_for_filter,
 };
@@ -288,7 +289,7 @@ fn push_name_arm_filters<'a>(
     filter: &'a EventHistoryReadFilter,
     arm: Option<&'a ChildArm>,
 ) {
-    push_history_filters(builder, filter, true);
+    push_history_filters(builder, filter, true, ResolverSource::Condition);
     push_product_history_duplicate_filter(builder, filter, true);
     if let Some(arm) = arm {
         push_not_child_arm_row(builder, arm);
@@ -390,7 +391,12 @@ async fn ensure_cursor_in_collection(
     let arm = ChildArm::resolve(&mut *connection, parent, &cursor_filter).await?;
     let mut builder = QueryBuilder::<Postgres>::new("SELECT EXISTS (SELECT 1");
     push_history_source_for_filter(&mut builder, &cursor_filter, true, false, false);
-    push_history_filters(&mut builder, &cursor_filter, true);
+    push_history_filters(
+        &mut builder,
+        &cursor_filter,
+        true,
+        ResolverSource::Condition,
+    );
     push_product_history_duplicate_filter(&mut builder, &cursor_filter, true);
     builder.push(" AND ne.event_identity = ");
     builder.push_bind(&cursor.event_identity);

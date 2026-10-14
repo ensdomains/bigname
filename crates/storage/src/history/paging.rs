@@ -14,8 +14,9 @@ use super::{
         push_history_cursor_after, push_history_cursor_block_bound, push_history_cursor_cte,
     },
     registration_identity::push_registration_filter,
+    resolver_source::{ResolverPageBound, ResolverSource},
     selectors::HistorySelector,
-    source::{ResolverPageBound, push_history_canonicality_filter},
+    source::push_history_canonicality_filter,
     summary::load_history_summary,
 };
 use crate::projection_helpers::{
@@ -199,27 +200,21 @@ pub(super) fn push_history_page_query<'a>(
     if let Some(keyset) = keyset {
         push_history_cursor_cte(builder, keyset.cursor);
     }
-    // The arm bound is sound only when every condition that can still drop a
-    // row after the source is also pushed inside each arm before its limit
-    // (`push_resolver_bounded_filters`). A selector or a registration can
-    // still drop rows there and cannot be pushed that way, so a read with
-    // either keeps the unbounded source.
-    let resolver_page_bound = (filter.selectors.is_empty() && filter.registration_id.is_none())
-        .then_some(ResolverPageBound {
-            order: filter.order,
-            limit: page_limit,
-            has_cursor: keyset.is_some(),
-            cursor_block: keyset.and_then(|keyset| history_cursor_block_number(filter, keyset)),
-        });
-    push_history_select_for_page(
+    let resolver_page_bound = ResolverPageBound {
+        order: filter.order,
+        limit: page_limit,
+        has_cursor: keyset.is_some(),
+        cursor_block: keyset.and_then(|keyset| history_cursor_block_number(filter, keyset)),
+    };
+    let resolver_source = push_history_select_for_page(
         builder,
         filter,
         canonical_only,
         keyset.is_some(),
         include_candidates,
-        resolver_page_bound,
+        Some(resolver_page_bound),
     );
-    push_history_filters(builder, filter, canonical_only);
+    push_history_filters(builder, filter, canonical_only, resolver_source);
     if !include_candidates {
         push_product_history_duplicate_filter(builder, filter, canonical_only);
     }
@@ -254,8 +249,8 @@ async fn load_history_internal(
     let filter = filter.with_attributed_records(&mut transaction).await?;
 
     let mut builder = QueryBuilder::<Postgres>::new("");
-    push_history_select(&mut builder, &filter, canonical_only, false, false);
-    push_history_filters(&mut builder, &filter, canonical_only);
+    let resolver_source = push_history_select(&mut builder, &filter, canonical_only, false, false);
+    push_history_filters(&mut builder, &filter, canonical_only, resolver_source);
     push_product_history_duplicate_filter(&mut builder, &filter, canonical_only);
     push_history_order(&mut builder, filter.order);
 
@@ -295,10 +290,13 @@ pub(super) async fn begin_history_snapshot(
     Ok(transaction)
 }
 
+/// The read's conditions over `ne`. `resolver_source` is what the statement's
+/// source returned, so the resolver is applied by exactly one of the two.
 pub(super) fn push_history_filters<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a EventHistoryReadFilter,
     canonical_only: bool,
+    resolver_source: ResolverSource,
 ) {
     for selector in &filter.selectors {
         builder.push(" AND ");
@@ -351,11 +349,9 @@ pub(super) fn push_history_filters<'a>(
         push_history_block_window(builder, window);
     }
 
-    // A resolver read with no registration scope draws its rows from the resolver
-    // candidate set in `push_history_source_for_filter`, so it needs no condition here.
-    // A registration-scoped read keeps its bounded source, so the resolver condition
-    // still narrows it here.
-    if filter.product_registration().is_some()
+    // A source that took the resolver arms holds only the resolver's rows.
+    // Every other resolver read is narrowed by this condition.
+    if resolver_source == ResolverSource::Condition
         && let Some(resolver) = filter.resolver.as_ref()
     {
         builder.push(" AND ne.chain_id = ");
@@ -384,7 +380,10 @@ pub(super) async fn load_history_events_by_ids(
     let mut conn = db.into().acquire().await?;
     let filter = EventHistoryReadFilter::default();
     let mut builder = QueryBuilder::<Postgres>::new("");
-    push_history_select(&mut builder, &filter, true, false, false);
+    let resolver_source = push_history_select(&mut builder, &filter, true, false, false);
+    // The default filter carries no resolver, so the select is never the resolver arms and
+    // no resolver condition is owed.
+    debug_assert!(resolver_source == ResolverSource::Condition);
     builder.push(" AND ne.normalized_event_id = ANY(");
     builder.push_bind(ids);
     builder.push("::bigint[])");

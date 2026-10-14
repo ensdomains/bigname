@@ -5,7 +5,10 @@ use sqlx::{Postgres, QueryBuilder};
 use super::{
     EventHistoryReadFilter,
     registration_identity::push_product_registration_id,
-    source::{ResolverPageBound, push_history_source_for_filter, push_history_source_for_page},
+    resolver_source::{
+        ResolverPageBound, ResolverSource, push_history_source_for_filter,
+        push_history_source_for_page,
+    },
 };
 
 /// Push the history row columns and the read's `FROM … WHERE <visibility>`.
@@ -15,7 +18,7 @@ pub(super) fn push_history_select<'a>(
     canonical_only: bool,
     include_cursor_row: bool,
     include_candidates: bool,
-) {
+) -> ResolverSource {
     push_history_columns(builder, canonical_only, include_candidates);
     push_history_source_for_filter(
         builder,
@@ -23,11 +26,12 @@ pub(super) fn push_history_select<'a>(
         canonical_only,
         include_cursor_row,
         include_candidates,
-    );
+    )
 }
 
 /// The same select, with a resolver page bound for the candidate arms. Only a
-/// page read passes a bound. Other reads keep the unbounded candidate set.
+/// page read passes a bound. Every other read keeps an unbounded source, the
+/// arms without a limit or the plain source.
 pub(super) fn push_history_select_for_page<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a EventHistoryReadFilter,
@@ -35,7 +39,7 @@ pub(super) fn push_history_select_for_page<'a>(
     include_cursor_row: bool,
     include_candidates: bool,
     resolver_page_bound: Option<ResolverPageBound>,
-) {
+) -> ResolverSource {
     push_history_columns(builder, canonical_only, include_candidates);
     push_history_source_for_page(
         builder,
@@ -44,7 +48,7 @@ pub(super) fn push_history_select_for_page<'a>(
         include_cursor_row,
         include_candidates,
         resolver_page_bound,
-    );
+    )
 }
 
 /// Push `SELECT <history row columns>` over a normalized event aliased `ne` and its block's

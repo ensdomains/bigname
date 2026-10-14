@@ -224,6 +224,9 @@ enum PlanMode {
     Unprepared,
     /// A prepared statement on its generic plan, which does not see the bound values.
     Generic,
+    /// A prepared statement on a custom plan, planned with its bound values, as a cached
+    /// statement's first executions are.
+    Custom,
 }
 
 #[tokio::test]
@@ -374,8 +377,9 @@ async fn order_index_plan_failures(
 }
 
 /// `EXPLAIN ANALYZE` the page query. A bound `EXPLAIN` plans with the values as constants
-/// whatever `plan_cache_mode` says, so the generic mode forces a generic prepared execution,
-/// verifies PostgreSQL's plan counters, and restores the caller's session setting.
+/// whatever `plan_cache_mode` says, so the prepared modes force a generic or a custom
+/// prepared execution, verify PostgreSQL's plan counters, and restore the caller's session
+/// setting.
 async fn explain_page(
     connection: &mut PgConnection,
     mut query: QueryBuilder<'_, Postgres>,
@@ -394,11 +398,15 @@ async fn explain_page(
                 .fetch_one(&mut *connection)
                 .await?)
         }
-        PlanMode::Generic => {
+        PlanMode::Generic | PlanMode::Custom => {
+            let (setting, expected) = match mode {
+                PlanMode::Generic => ("force_generic_plan", (1, 0)),
+                _ => ("force_custom_plan", (0, 1)),
+            };
             let previous: String = sqlx::query_scalar("SHOW plan_cache_mode")
                 .fetch_one(&mut *connection)
                 .await?;
-            sqlx::query("SET plan_cache_mode = force_generic_plan")
+            sqlx::query(&format!("SET plan_cache_mode = {setting}"))
                 .execute(&mut *connection)
                 .await?;
             let mut prepared = false;
@@ -437,8 +445,8 @@ async fn explain_page(
                 )
                 .fetch_one(&mut *connection)
                 .await?;
-                ensure!(generic == 1 && custom == 0,
-                    "expected one generic execution, found generic_plans={generic}, custom_plans={custom}");
+                ensure!((generic, custom) == expected,
+                    "expected {setting} plan counts {expected:?}, found generic_plans={generic}, custom_plans={custom}");
                 eprintln!("verified history_page: generic_plans={generic}; custom_plans={custom}");
                 Ok(plan)
             }.await;
@@ -1402,3 +1410,9 @@ async fn capped_resolver_count_stops_after_the_cap() -> Result<()> {
 
 #[path = "contract_count_tests.rs"]
 mod contract_count_tests;
+
+#[path = "resolver_mode_plan_tests.rs"]
+mod resolver_mode_plan_tests;
+
+#[path = "resolver_arm_equivalence_tests.rs"]
+mod resolver_arm_equivalence_tests;

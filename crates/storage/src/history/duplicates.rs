@@ -1,7 +1,8 @@
 use sqlx::{Postgres, QueryBuilder};
 
 use super::{
-    EventHistoryReadFilter, paging::push_history_filters, source::push_history_source_for_filter,
+    EventHistoryReadFilter, paging::push_history_filters,
+    resolver_source::push_history_source_for_filter,
 };
 
 pub(super) fn push_product_history_duplicate_filter<'a>(
@@ -40,7 +41,8 @@ pub(super) fn push_product_history_duplicate_filter_for_alias<'a>(
     ));
     // Handoffs come from RawLogInput, whose chain and block number are required.
     // Equality bounds use the existing chain/block index before matching origin.
-    push_history_source_for_filter(builder, filter, canonical_only, false, false);
+    let resolver_source =
+        push_history_source_for_filter(builder, filter, canonical_only, false, false);
     builder.push(
         r#"
         AND ne.event_kind = 'ResolverChanged'
@@ -53,7 +55,7 @@ pub(super) fn push_product_history_duplicate_filter_for_alias<'a>(
             = (SELECT origin FROM handoff)
         "#,
     );
-    push_history_filters(builder, filter, canonical_only);
+    push_history_filters(builder, filter, canonical_only, resolver_source);
     builder.push("))");
 }
 

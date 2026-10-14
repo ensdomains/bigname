@@ -9,7 +9,7 @@ use sqlx::{PgConnection, Postgres, QueryBuilder};
 use super::{
     EventHistoryReadFilter, HistoryCursor, HistoryEvent, HistoryOrder, HistoryPosition,
     InvalidHistoryCursor, duplicates::push_product_history_duplicate_filter,
-    paging::push_history_filters, source::push_history_source_for_filter,
+    paging::push_history_filters, resolver_source::push_history_source_for_filter,
 };
 
 /// A validated continuation point: the cursor and the block number of its row.
@@ -38,14 +38,19 @@ pub(super) async fn load_history_keyset<'a>(
     if !cursor_filter.bind_cursor_anchor_to_event_kinds {
         cursor_filter.event_kinds.clear();
     }
-    push_history_source_for_filter(
+    let resolver_source = push_history_source_for_filter(
         &mut builder,
         &cursor_filter,
         canonical_only,
         false,
         include_candidates,
     );
-    push_history_filters(&mut builder, &cursor_filter, canonical_only);
+    push_history_filters(
+        &mut builder,
+        &cursor_filter,
+        canonical_only,
+        resolver_source,
+    );
     if !include_candidates {
         push_product_history_duplicate_filter(&mut builder, &cursor_filter, canonical_only);
     }
@@ -105,6 +110,17 @@ pub(super) fn push_history_cursor_cte<'a>(
     builder.push(") ");
 }
 
+/// The cursor's block, when [`push_history_cursor_block_bound`] bounds the page by it: the
+/// filter excludes rows without a block and the cursor has a block. Otherwise `None`.
+pub(super) fn history_cursor_block_number(
+    filter: &EventHistoryReadFilter,
+    keyset: &HistoryKeyset<'_>,
+) -> Option<i64> {
+    let requires_block =
+        filter.block_window.is_some() || filter.from_block.is_some() || filter.to_block.is_some();
+    keyset.block_number.filter(|_| requires_block)
+}
+
 /// A plain bound at the cursor's block, implied by [`push_history_cursor_after`]: newest-first
 /// pages continue at or below the cursor block, oldest-first pages at or above it. The nested
 /// continuation predicate compares whole rows and cannot bound an index scan, so without this
@@ -115,16 +131,6 @@ pub(super) fn push_history_cursor_cte<'a>(
 /// It is added only when the filter already excludes rows without a block, as every block
 /// window and block bound does, and the cursor has a block. A row without a block sorts after
 /// every block newest first, and the comparison would drop it.
-/// The cursor block bound [`push_history_cursor_block_bound`] pushes, when it pushes one.
-pub(super) fn history_cursor_block_number(
-    filter: &EventHistoryReadFilter,
-    keyset: &HistoryKeyset<'_>,
-) -> Option<i64> {
-    let requires_block =
-        filter.block_window.is_some() || filter.from_block.is_some() || filter.to_block.is_some();
-    keyset.block_number.filter(|_| requires_block)
-}
-
 pub(super) fn push_history_cursor_block_bound(
     builder: &mut QueryBuilder<'_, Postgres>,
     filter: &EventHistoryReadFilter,
