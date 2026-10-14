@@ -799,10 +799,7 @@ async fn a_resource_pointer_resolver_change_selects_the_subtree_but_a_position_o
         root: Some(ROOT),
     };
     world
-        .assert_selects(
-            resolver_changed,
-            &["foo.eth", "a.foo.eth", "x.a.foo.eth"],
-        )
+        .assert_selects(resolver_changed, &["foo.eth", "a.foo.eth", "x.a.foo.eth"])
         .await?;
 
     world
