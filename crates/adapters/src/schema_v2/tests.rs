@@ -42,8 +42,8 @@ mod wrapper_permissions;
 #[path = "tests/wrapper_registry_write.rs"]
 mod wrapper_registry_write;
 
-#[path = "tests/tyr334_unwrapped_child.rs"]
-mod tyr334_unwrapped_child;
+#[path = "tests/unwrapped_child_under_wrapped_parent.rs"]
+mod unwrapped_child_under_wrapped_parent;
 
 const CHAIN: &str = "adapter-test";
 const CONTRACT: &str = "0x0000000000000000000000000000000000000042";

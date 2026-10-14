@@ -1,9 +1,9 @@
-//! TYR-334 reproduction: an unwrapped ENSv1 subname (registry `NewOwner` to an EOA) whose
+//! An unwrapped ENSv1 subname (registry `NewOwner` to an EOA) whose
 //! parent is NameWrapper-owned must still receive a registry-only surface binding, in either
 //! creation order. Without a binding the composed row has no `surface_binding_id`,
 //! `resource_id` or `binding_kind`, its lifecycle status composes as `unregistered`, and
 //! `relations()` (crates/storage/src/families/records/address_relations.rs) serves no
-//! relations for its owner; the surface-less registry-children fallback cannot rescue it
+//! relations for its owner. The surface-less registry-children fallback cannot rescue it
 //! once a surface exists. Wrapped siblings bind through `NameWrapped` and serve `active`.
 //!
 //! A child created before its parent's label path was ever observed gets no
@@ -507,7 +507,7 @@ fn wrapped_child_unwrap_binds_registry_only_across_restore() -> anyhow::Result<(
 /// keep it across the parent's wrap. The parent is made known the way
 /// `v1_node_identity` seeds nested paths: the root node has an empty path, so
 /// `NewOwner(root, "eth")` seeds `eth`, then `NewOwner(eth, "parent")` seeds the
-/// parent; without the `eth` step `observe_identity` finds no parent path.
+/// parent. Without the `eth` step `observe_identity` finds no parent path.
 #[test]
 fn unwrapped_child_created_under_known_unwrapped_parent_keeps_registry_binding()
 -> anyhow::Result<()> {
@@ -553,7 +553,7 @@ fn unwrapped_child_created_under_known_unwrapped_parent_keeps_registry_binding()
     Ok(())
 }
 
-/// After-block-3 boundary (TYR-334 restore blocker): the unwrap has already completed
+/// After-block-3 boundary, across a restore: the unwrap has already completed
 /// in an earlier batch, so the registry-only successor exists only as folded/restored
 /// prior state. Re-wrapping the child in the next block must behave exactly as in
 /// the live incremental session and in the single-batch run: the restored successor
@@ -644,7 +644,7 @@ fn wrapped_child_unwrap_registry_only_survives_restore_after_unwrap() -> anyhow:
     Ok(())
 }
 
-/// Lease boundary (TYR-334 restore fix): when the unwrap DOES reactivate a registrar
+/// Lease boundary, live and restored: when the unwrap DOES reactivate a registrar
 /// lease, the successor is the registrar authority. The registry-only restore branch
 /// must not fire for that shape, live or restored: the binding stays on the
 /// registrar resource and no `registry_only` successor is minted.

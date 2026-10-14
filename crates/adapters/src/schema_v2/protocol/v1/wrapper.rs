@@ -395,7 +395,11 @@ fn name_unwrapped(
     // A wrapped .eth name with wrapper-derived registrar expiry but no
     // materialized registrar identity yet is taken over by the BaseRegistrar
     // transfer that follows the unwrap in the same transaction, from the
-    // unwrap moment. Opening a registry-only interval first would be spurious.
+    // unwrap moment. `unwrapETH2LD` runs `_unwrap`, which emits NameUnwrapped,
+    // and only then transfers the registrar token to the registrant.
+    // Opening a registry-only interval first would be spurious.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L390-L395 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1031 @ ens_v1@91c966f)
     let registrar_transfer_may_follow = state
         .v1_registrar(&selected.source.namespace, &namehash)
         .is_none()

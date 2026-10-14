@@ -6,6 +6,10 @@ pub(super) fn interpret_loaded(
     raw_logs: Vec<crate::schema_v2::RawLogInput>,
     state: &mut State,
 ) -> anyhow::Result<BatchOutput> {
+    // A pass admits and retires discovered contracts as it reads the batch.
+    // Each re-run below starts from the admissions the batch began with, so
+    // a later admission cannot hide an emitter's earlier logs.
+    let initial_catalog = catalog.clone();
     let output = interpret_once(catalog, blocks, raw_logs.clone(), state)?;
     let crossed = output
         .migration_authority_transitions
@@ -25,7 +29,7 @@ pub(super) fn interpret_loaded(
     // Locked boundaries are only activated after batch assembly, but an
     // original child unwrapped later in the same batch must already see
     // them. Re-run once with each activated locked boundary recorded at
-    // its own position; the unwrap gate orders against that position, so
+    // its own position. The unwrap gate orders against that position, so
     // a boundary proved later in the batch changes nothing earlier.
     let locked_boundaries = output
         .normalized_events
@@ -57,6 +61,7 @@ pub(super) fn interpret_loaded(
         for (name, position) in &locked_boundaries {
             seeded.note_live_locked_migration(name, *position);
         }
+        *catalog = initial_catalog.clone();
         let corrected = interpret_once(catalog, blocks, raw_logs.clone(), &mut seeded)?;
         anyhow::ensure!(
             corrected.migration_authority_transitions == output.migration_authority_transitions,
@@ -65,10 +70,10 @@ pub(super) fn interpret_loaded(
         if crossed.is_empty() {
             return Ok(corrected);
         }
-        // Both reconciliations apply: carry the locked proof into the
-        // expiry re-run below by returning the locked-corrected output's
-        // state basis. The expiry re-run starts from `state`, so seed it
-        // the same way before it runs.
+        // Both reconciliations apply. The locked re-run's output is only
+        // checked above and then discarded. The expiry re-run starts again
+        // from `state`, seeded with the same locked boundaries and with the
+        // crossed migrations.
         let mut expiry_state = state.clone();
         for (name, position) in &locked_boundaries {
             expiry_state.note_live_locked_migration(name, *position);
@@ -84,6 +89,7 @@ pub(super) fn interpret_loaded(
                 block.block_timestamp.unix_timestamp(),
             );
         }
+        *catalog = initial_catalog;
         let corrected = interpret_once(catalog, blocks, raw_logs, &mut reconciled)?;
         anyhow::ensure!(
             corrected.migration_authority_transitions == output.migration_authority_transitions,
@@ -109,6 +115,7 @@ pub(super) fn interpret_loaded(
             block.block_timestamp.unix_timestamp(),
         );
     }
+    *catalog = initial_catalog;
     let corrected = interpret_once(catalog, blocks, raw_logs, &mut reconciled)?;
     anyhow::ensure!(
         corrected.migration_authority_transitions == output.migration_authority_transitions,

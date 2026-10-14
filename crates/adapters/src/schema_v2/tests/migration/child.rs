@@ -1614,14 +1614,6 @@ fn without_registry_evidence(level: &Value) -> Value {
     level
 }
 
-/// Upstream pairs each child branch with its own receiver shape: the locked branch parks the
-/// wrapper token in the Graveyard *and* deploys the child's registry, while the emancipated branch
-/// unwraps into the Graveyard and deploys nothing. There is no third branch.
-/// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58)
-/// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2_sepolia_20260629@ccaeb58)
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L190 @ ens_v2@a971bd64)
-/// So a parked wrapper token with no registry evidence is an incomplete chain, not an emancipated
-/// child — classifying it by registry presence alone would silently relabel it.
 const GATE_V1_REGISTRY: &str = "0x0000000000000000000000000000000000000099";
 const GATE_RESOLVER: &str = "0x00000000000000000000000000000000000000d1";
 const GATE_OWNER: &str = "0x00000000000000000000000000000000000000b1";
@@ -1782,7 +1774,7 @@ fn gate_unwrap_tail(block: i64, node: &str, owner: &str, wrapper: &str) -> Vec<R
 /// An original child unwrapped after its parent's locked migration in
 /// the same batch must not regain a registry-only successor. The split
 /// history (migration in an earlier batch, restored) already suppresses
-/// it; the combined history must agree.
+/// it. The combined history must agree.
 #[test]
 fn original_child_unwrap_after_same_batch_locked_parent_migration_opens_no_successor()
 -> anyhow::Result<()> {
@@ -1865,7 +1857,7 @@ fn original_child_unwrap_after_same_batch_locked_parent_migration_opens_no_succe
     }
     // Restore splits for the same history: before the migration, between
     // the migration and the unwrap, and after the unwrap. The between
-    // split is the `split_tail` run above; the other two must agree with
+    // split is the `split_tail` run above. The other two must agree with
     // the single-batch run as well.
     let full_logs = {
         let mut logs = wrap_logs.clone();
@@ -2045,6 +2037,158 @@ fn original_child_unwrap_scoped_restore_without_parent_link_opens_no_successor()
     Ok(())
 }
 
+/// The locked migration of
+/// `original_child_unwrap_after_same_batch_locked_parent_migration_opens_no_successor` re-runs
+/// the batch, because its first pass opened a registry-only successor for the original child.
+/// A resolver proxy in that batch, admitted by an earlier batch and announced again after its
+/// own role and record changes, must keep both.
+#[test]
+fn locked_migration_rerun_keeps_a_role_change_before_a_resolver_reannouncement()
+-> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["C-01"];
+    let addresses = &fixture["addresses"];
+    let wrapper = addresses["name_wrapper"].as_str().unwrap();
+    let parent_node = scenario["parent"]["namehash"].as_str().unwrap();
+    let parent_label = scenario["parent"]["label"].as_str().unwrap();
+    let orig_node = namehash_under(&scenario["parent"]["namehash"], "orig")?;
+    let orig_id = format!("ens:{orig_node}");
+    let migration_block = scenario["parent"]["migration_block"].as_i64().unwrap();
+    let mut logs = vec![
+        gate_new_owner(230, 0, parent_node, "orig", wrapper),
+        gate_wrap(
+            230,
+            1,
+            &orig_node,
+            &["orig", parent_label, "eth"],
+            GATE_OWNER,
+            wrapper,
+        ),
+        gate_new_resolver(230, 2, &orig_node),
+    ];
+    logs.extend(level_logs(&scenario["parent"], addresses)?);
+    let without_unwrap =
+        super::announced_resolver::with_announced_resolver(gate_batch(logs.clone(), &fixture))?;
+    let single = interpret_test_batch(without_unwrap)?;
+    assert!(
+        super::announced_resolver::kept_record_change(&single)
+            && super::announced_resolver::kept_roles_change(&single),
+        "a single pass keeps the record and role changes"
+    );
+    logs.extend(gate_unwrap_tail(
+        migration_block + 1,
+        &orig_node,
+        GATE_OWNER,
+        wrapper,
+    ));
+    let output = interpret_test_batch(super::announced_resolver::with_announced_resolver(
+        gate_batch(logs, &fixture),
+    )?)?;
+    assert!(
+        output.normalized_events.iter().any(|event| {
+            event.event_kind == "MigrationApplied"
+                && event.after_state["migration_path"] == "locked_wrapped"
+                && event.consumer_visibility == "activated"
+        }),
+        "the batch proves the parent's locked migration"
+    );
+    assert!(
+        !gate_successor_open(&output, &orig_id),
+        "the re-run keeps the successor closed"
+    );
+    assert!(
+        super::announced_resolver::kept_record_change(&output),
+        "the locked-migration re-run dropped the resolver's record change"
+    );
+    assert!(
+        super::announced_resolver::kept_roles_change(&output),
+        "the locked-migration re-run dropped the resolver's role change"
+    );
+    Ok(())
+}
+
+/// One batch that takes both re-runs: the locked migration of
+/// `original_child_unwrap_after_same_batch_locked_parent_migration_opens_no_successor` and the
+/// old-lease expiry crossing of `migrated_v1_lease_expiry_does_not_reopen_in_one_batch`. The
+/// expiry scenario's migration moves to its own later transaction in the shared block. Both
+/// proofs must hold, and the resolver's role and record changes before its re-announcement
+/// must survive.
+#[test]
+fn locked_and_expiry_reruns_together_keep_a_role_change_before_a_resolver_reannouncement()
+-> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["C-01"];
+    let addresses = &fixture["addresses"];
+    let wrapper = addresses["name_wrapper"].as_str().unwrap();
+    let parent_node = scenario["parent"]["namehash"].as_str().unwrap();
+    let parent_label = scenario["parent"]["label"].as_str().unwrap();
+    let orig_node = namehash_under(&scenario["parent"]["namehash"], "orig")?;
+    let orig_id = format!("ens:{orig_node}");
+    let migration_block = scenario["parent"]["migration_block"].as_i64().unwrap();
+    let mut input = super::expiry::migration_and_old_lease_expiry()?;
+    let expiry_block = input.blocks.last().unwrap().block_number;
+    for raw in &mut input.raw_logs {
+        if raw.block_number == migration_block {
+            raw.transaction_index = 2;
+            raw.transaction_hash = format!("transaction-{migration_block}-2");
+            raw.log_index += 50;
+        }
+    }
+    let mut logs = vec![
+        gate_new_owner(230, 0, parent_node, "orig", wrapper),
+        gate_wrap(
+            230,
+            1,
+            &orig_node,
+            &["orig", parent_label, "eth"],
+            GATE_OWNER,
+            wrapper,
+        ),
+        gate_new_resolver(230, 2, &orig_node),
+    ];
+    logs.extend(level_logs(&scenario["parent"], addresses)?);
+    logs.extend(gate_unwrap_tail(
+        migration_block + 1,
+        &orig_node,
+        GATE_OWNER,
+        wrapper,
+    ));
+    input.blocks.extend(logs.iter().map(|raw| RawBlockInput {
+        chain_id: raw.chain_id.clone(),
+        block_hash: raw.block_hash.clone(),
+        block_number: raw.block_number,
+        block_timestamp: raw.block_timestamp,
+        canonicality_state: raw.canonicality_state.clone(),
+    }));
+    input.blocks.sort_by_key(|block| block.block_number);
+    input.blocks.dedup_by_key(|block| block.block_number);
+    input.raw_logs.extend(logs);
+    input.raw_logs = ordered(std::mem::take(&mut input.raw_logs));
+    let output = interpret_test_batch(super::announced_resolver::with_announced_resolver(input)?)?;
+    super::expiry::assert_old_lease_does_not_reopen(&output, expiry_block);
+    assert!(
+        output.normalized_events.iter().any(|event| {
+            event.event_kind == "MigrationApplied"
+                && event.after_state["migration_path"] == "locked_wrapped"
+                && event.consumer_visibility == "activated"
+        }),
+        "the batch proves the parent's locked migration"
+    );
+    assert!(
+        !gate_successor_open(&output, &orig_id),
+        "the re-runs keep the successor closed"
+    );
+    assert!(
+        super::announced_resolver::kept_record_change(&output),
+        "the combined re-runs dropped the resolver's record change"
+    );
+    assert!(
+        super::announced_resolver::kept_roles_change(&output),
+        "the combined re-runs dropped the resolver's role change"
+    );
+    Ok(())
+}
+
 fn gate_successor_open(output: &BatchOutput, logical_name_id: &str) -> bool {
     output.surface_bindings.iter().any(|binding| {
         binding.logical_name_id == logical_name_id && binding.authority_arm == "ens_v1"
@@ -2055,6 +2199,14 @@ fn gate_successor_open(output: &BatchOutput, logical_name_id: &str) -> bool {
     })
 }
 
+/// Upstream pairs each child branch with its own receiver shape: the locked branch parks the
+/// wrapper token in the Graveyard *and* deploys the child's registry, while the emancipated branch
+/// unwraps into the Graveyard and deploys nothing. There is no third branch.
+/// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58)
+/// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2_sepolia_20260629@ccaeb58)
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L190 @ ens_v2@a971bd64)
+/// So a parked wrapper token with no registry evidence is an incomplete chain, not an emancipated
+/// child — classifying it by registry presence alone would silently relabel it.
 #[test]
 fn locked_cleanup_without_registry_evidence_derives_nothing() -> anyhow::Result<()> {
     let fixture = fixture()?;

@@ -1,6 +1,6 @@
 use super::*;
 
-fn migration_and_old_lease_expiry() -> anyhow::Result<BatchInput> {
+pub(super) fn migration_and_old_lease_expiry() -> anyhow::Result<BatchInput> {
     let mut input = plain_unwrapped_input()?;
     let migration_block = input.raw_logs.last().unwrap().block_number;
     let fixture = fixture()?;
@@ -42,7 +42,7 @@ fn migration_and_old_lease_expiry() -> anyhow::Result<BatchInput> {
     Ok(input)
 }
 
-fn assert_old_lease_does_not_reopen(output: &BatchOutput, expiry_block: i64) {
+pub(super) fn assert_old_lease_does_not_reopen(output: &BatchOutput, expiry_block: i64) {
     assert!(
         output.normalized_events.iter().any(|event| {
             event.block_number == Some(expiry_block)
@@ -81,6 +81,36 @@ fn migrated_v1_lease_expiry_does_not_reopen_in_one_batch() -> anyhow::Result<()>
                 && event.source_family.starts_with("ens_v2_")
         }),
         "the renewed ENSv2 registration remains live"
+    );
+    Ok(())
+}
+
+/// The migration and old-lease expiry in one batch re-run the batch with the proven migration
+/// boundary. A resolver proxy in that batch, admitted by an earlier batch and announced again
+/// after its own role and record changes, must keep both.
+#[test]
+fn expiry_rerun_keeps_a_role_change_before_a_resolver_reannouncement() -> anyhow::Result<()> {
+    let input =
+        super::announced_resolver::with_announced_resolver(migration_and_old_lease_expiry()?)?;
+    let block = input.blocks.last().unwrap().block_number;
+    let mut before_expiry = input.clone();
+    before_expiry.blocks.pop();
+    let single = interpret_test_batch(before_expiry)?;
+    assert!(
+        super::announced_resolver::kept_record_change(&single)
+            && super::announced_resolver::kept_roles_change(&single),
+        "a single pass keeps the record and role changes"
+    );
+    let output = interpret_test_batch(input)?;
+    assert_eq!(output.migration_authority_transitions.len(), 1);
+    assert_old_lease_does_not_reopen(&output, block);
+    assert!(
+        super::announced_resolver::kept_record_change(&output),
+        "the expiry re-run dropped the resolver's record change"
+    );
+    assert!(
+        super::announced_resolver::kept_roles_change(&output),
+        "the expiry re-run dropped the resolver's role change"
     );
     Ok(())
 }
