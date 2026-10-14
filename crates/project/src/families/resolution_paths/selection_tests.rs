@@ -290,6 +290,8 @@ impl World {
              ON CONFLICT (chain_id, resource_id)
              DO UPDATE SET resolver_address = EXCLUDED.resolver_address,
                            pointer_position = EXCLUDED.pointer_position,
+                           namespace = EXCLUDED.namespace,
+                           namehash = EXCLUDED.namehash,
                            nonzero_resolver_address = EXCLUDED.nonzero_resolver_address,
                            boundary_kind = EXCLUDED.boundary_kind",
         )
@@ -308,6 +310,131 @@ impl World {
             "project_resource_pointer",
             json!([CHAIN, resource]),
             Some(before),
+        )
+        .await
+    }
+
+    /// The publication at `block` changed the registry node state of `name`.
+    /// Each side is `(owner, owner_getter, owner_getter_reason, owner_word_unmasked)`.
+    /// A missing side means no row on that side.
+    #[allow(clippy::type_complexity)]
+    async fn registry_node_state_changed(
+        &self,
+        block: i64,
+        name: &str,
+        before: Option<(Option<&str>, Option<&str>, Option<&str>, bool)>,
+        current: Option<(Option<&str>, Option<&str>, Option<&str>, bool)>,
+    ) -> Result<()> {
+        if let Some((owner, getter, reason, unmasked)) = current {
+            sqlx::query(
+                "INSERT INTO project_registry_node_state (chain_id, namespace, node,
+                     block_number, event_identity, owner, owner_getter,
+                     owner_getter_reason, owner_word_unmasked, has_old_record)
+                 VALUES ($1, 'ens', $2, $3, 'node:foo', $4, $5, $6, $7, false)
+                 ON CONFLICT (chain_id, namespace, node)
+                 DO UPDATE SET owner = EXCLUDED.owner,
+                               owner_getter = EXCLUDED.owner_getter,
+                               owner_getter_reason = EXCLUDED.owner_getter_reason,
+                               owner_word_unmasked = EXCLUDED.owner_word_unmasked",
+            )
+            .bind(CHAIN)
+            .bind(node(name))
+            .bind(block)
+            .bind(owner)
+            .bind(getter)
+            .bind(reason)
+            .bind(unmasked)
+            .execute(&self.pool)
+            .await?;
+        }
+        let before_image = before.map(|(owner, getter, reason, unmasked)| {
+            json!({
+                "namespace": "ens", "node": node(name), "owner": owner,
+                "owner_getter": getter, "owner_getter_reason": reason,
+                "owner_word_unmasked": unmasked
+            })
+        });
+        self.journal(
+            block,
+            "project_registry_node_state",
+            json!([CHAIN, "ens", node(name)]),
+            before_image,
+        )
+        .await
+    }
+
+    /// The publication at `block` changed the wrapper state of `resource`.
+    /// Each side names its wrapped name, fuses, whether it has a modifier,
+    /// its stored expiry text, its wrapper state text and its unwrapped flag.
+    /// A missing side means no row on that side.
+    #[allow(clippy::type_complexity)]
+    async fn wrapper_state_changed(
+        &self,
+        block: i64,
+        resource: &str,
+        before: Option<(
+            Option<&str>,
+            Option<i64>,
+            bool,
+            Option<&str>,
+            Option<&str>,
+            Option<bool>,
+        )>,
+        current: Option<(
+            Option<&str>,
+            Option<i64>,
+            bool,
+            Option<&str>,
+            Option<&str>,
+            Option<bool>,
+        )>,
+    ) -> Result<()> {
+        let position = json!({"block_number": block, "event_identity": "wrapper:foo"});
+        if let Some((name, fuses, has_modifier, expiry, state, unwrapped)) = current {
+            sqlx::query(
+                "INSERT INTO project_wrapper_state (chain_id, resource_id, logical_name_id,
+                     block_number, event_identity, wrapper_state, fuses,
+                     wrapper_state_position, expiry_seconds, expiry_position,
+                     lifecycle_unwrapped)
+                 VALUES ($1, $2::uuid, $3, $4, 'wrapper:foo', $5, $6, $7, $8::numeric, $9, $10)
+                 ON CONFLICT (chain_id, resource_id)
+                 DO UPDATE SET logical_name_id = EXCLUDED.logical_name_id,
+                               wrapper_state = EXCLUDED.wrapper_state,
+                               fuses = EXCLUDED.fuses,
+                               wrapper_state_position = EXCLUDED.wrapper_state_position,
+                               expiry_seconds = EXCLUDED.expiry_seconds,
+                               expiry_position = EXCLUDED.expiry_position,
+                               lifecycle_unwrapped = EXCLUDED.lifecycle_unwrapped",
+            )
+            .bind(CHAIN)
+            .bind(resource)
+            .bind(name.map(id))
+            .bind(block)
+            .bind(state)
+            .bind(fuses)
+            .bind(has_modifier.then(|| position.clone()))
+            .bind(expiry)
+            .bind(Some(position.clone()))
+            .bind(unwrapped)
+            .execute(&self.pool)
+            .await?;
+        }
+        let before_image = before.map(|(name, fuses, has_modifier, expiry, state, unwrapped)| {
+            json!({
+                "logical_name_id": name.map(id), "fuses": fuses,
+                "wrapper_state_position": has_modifier.then(|| position.clone()),
+                "expiry_seconds": expiry.map(|text| {
+                    serde_json::from_str::<Value>(text).unwrap_or(Value::String(text.to_owned()))
+                }),
+                "expiry_position": position.clone(),
+                "wrapper_state": state, "lifecycle_unwrapped": unwrapped
+            })
+        });
+        self.journal(
+            block,
+            "project_wrapper_state",
+            json!([CHAIN, resource]),
+            before_image,
         )
         .await
     }
@@ -1199,5 +1326,309 @@ async fn a_surface_of_another_namespace_with_the_same_path_is_never_selected() -
         root: Some(ROOT),
     };
     world.assert_selects(call, &["a.foo.eth"]).await?;
+    world.cleanup().await
+}
+
+const HOLDER_ADDR: &str = "0x00000000000000000000000000000000000000aa";
+const OTHER_ADDR: &str = "0x00000000000000000000000000000000000000ab";
+const ZERO_ADDR: &str = "0x0000000000000000000000000000000000000000";
+const REGISTRY_ADDR: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
+
+/// A world where `child.foo.eth` is the original child, `foo.eth` holds its
+/// migration to the registry mounted at `rebound.eth`, and
+/// `child.rebound.eth` sits under that mount.
+async fn rebound_world() -> Result<World> {
+    let mut world = World::new().await?;
+    world
+        .surfaces(&[
+            "eth",
+            "foo.eth",
+            "child.foo.eth",
+            "rebound.eth",
+            "child.rebound.eth",
+        ])
+        .await?;
+    world.eth().await?;
+    world
+        .mount(ETH, &labelhash("rebound"), &registry(1))
+        .await?;
+    world.migrated("foo.eth", &registry(1), 3).await?;
+    Ok(world)
+}
+
+// The original child's owner getter is withdrawn by setting its owner to the
+// registry itself. The getter reads as zero. The rebound name reads the
+// original node through wrapper eligibility, so it is recomposed with the
+// names under its migration registry mount.
+#[tokio::test]
+async fn an_original_child_owner_getter_withdrawal_selects_the_rebound_name_in_its_migration_registry()
+-> Result<()> {
+    let world = rebound_world().await?;
+    world
+        .registry_node_state_changed(
+            5,
+            "child.foo.eth",
+            Some((Some(HOLDER_ADDR), Some(HOLDER_ADDR), None, false)),
+            Some((
+                Some(REGISTRY_ADDR),
+                Some(ZERO_ADDR),
+                Some("registry_self"),
+                false,
+            )),
+        )
+        .await?;
+    let call = Call {
+        block: 5,
+        after: 4,
+        root: Some(ROOT),
+    };
+    world
+        .assert_selects(call, &["child.foo.eth", "rebound.eth", "child.rebound.eth"])
+        .await?;
+    world.cleanup().await
+}
+
+// The same withdrawal with a literal zero owner. The stored reason differs.
+// The getter class is zero in both cases, so the rebound name is selected.
+#[tokio::test]
+async fn an_original_child_owner_getter_withdrawal_to_zero_selects_the_rebound_name_in_its_migration_registry()
+-> Result<()> {
+    let world = rebound_world().await?;
+    world
+        .registry_node_state_changed(
+            5,
+            "child.foo.eth",
+            Some((Some(HOLDER_ADDR), Some(HOLDER_ADDR), None, false)),
+            Some((Some(ZERO_ADDR), Some(ZERO_ADDR), Some("zero"), false)),
+        )
+        .await?;
+    let call = Call {
+        block: 5,
+        after: 4,
+        root: Some(ROOT),
+    };
+    world
+        .assert_selects(call, &["child.foo.eth", "rebound.eth", "child.rebound.eth"])
+        .await?;
+    world.cleanup().await
+}
+
+// A nonzero owner changes to another nonzero owner on a parent. The getter
+// class does not change. The parent recomposes alone.
+#[tokio::test]
+async fn a_nonzero_to_nonzero_getter_change_on_a_parent_selects_that_parent_alone() -> Result<()> {
+    let mut world = World::new().await?;
+    world
+        .surfaces(&["eth", "foo.eth", "a.foo.eth", "x.a.foo.eth"])
+        .await?;
+    world.eth().await?;
+    world
+        .registry_node_state_changed(
+            5,
+            "foo.eth",
+            Some((Some(HOLDER_ADDR), Some(HOLDER_ADDR), None, false)),
+            Some((Some(OTHER_ADDR), Some(OTHER_ADDR), None, false)),
+        )
+        .await?;
+    let call = Call {
+        block: 5,
+        after: 4,
+        root: Some(ROOT),
+    };
+    world.assert_selects(call, &["foo.eth"]).await?;
+    world.cleanup().await
+}
+
+// The parent-can-create fuse bit flips on the original child's wrapper row.
+// Wrapper eligibility can move, so the rebound name is recomposed.
+#[tokio::test]
+async fn a_parent_can_create_fuse_flip_selects_the_rebound_name() -> Result<()> {
+    const RESOURCE: &str = "00000000-0000-0000-0000-000000000011";
+    let world = rebound_world().await?;
+    world
+        .wrapper_state_changed(
+            5,
+            RESOURCE,
+            Some((
+                Some("child.foo.eth"),
+                Some(0),
+                true,
+                Some("1907776000"),
+                Some("wrapped"),
+                Some(false),
+            )),
+            Some((
+                Some("child.foo.eth"),
+                Some(65536),
+                true,
+                Some("1907776000"),
+                Some("wrapped"),
+                Some(false),
+            )),
+        )
+        .await?;
+    let call = Call {
+        block: 5,
+        after: 4,
+        root: Some(ROOT),
+    };
+    world
+        .assert_selects(call, &["child.foo.eth", "rebound.eth", "child.rebound.eth"])
+        .await?;
+    world.cleanup().await
+}
+
+// The stored expiry changes on the original child's wrapper row. Wrapper
+// eligibility can move, so the rebound name is recomposed.
+#[tokio::test]
+async fn a_stored_expiry_change_selects_the_rebound_name() -> Result<()> {
+    const RESOURCE: &str = "00000000-0000-0000-0000-000000000012";
+    let world = rebound_world().await?;
+    world
+        .wrapper_state_changed(
+            5,
+            RESOURCE,
+            Some((
+                Some("child.foo.eth"),
+                Some(65536),
+                true,
+                Some("1907776000"),
+                Some("wrapped"),
+                Some(false),
+            )),
+            Some((
+                Some("child.foo.eth"),
+                Some(65536),
+                true,
+                Some("1907777000"),
+                Some("wrapped"),
+                Some(false),
+            )),
+        )
+        .await?;
+    let call = Call {
+        block: 5,
+        after: 4,
+        root: Some(ROOT),
+    };
+    world
+        .assert_selects(call, &["child.foo.eth", "rebound.eth", "child.rebound.eth"])
+        .await?;
+    world.cleanup().await
+}
+
+// Another fuse bit changes alone. The parent-can-create bit, the stored
+// expiry, the name and the modifier stay the same. The rebound name is not
+// selected.
+#[tokio::test]
+async fn a_change_to_another_fuse_bit_alone_does_not_expand() -> Result<()> {
+    const RESOURCE: &str = "00000000-0000-0000-0000-000000000013";
+    let world = rebound_world().await?;
+    world
+        .wrapper_state_changed(
+            5,
+            RESOURCE,
+            Some((
+                Some("child.foo.eth"),
+                Some(65536),
+                true,
+                Some("1907776000"),
+                Some("wrapped"),
+                Some(false),
+            )),
+            Some((
+                Some("child.foo.eth"),
+                Some(65538),
+                true,
+                Some("1907776000"),
+                Some("wrapped"),
+                Some(false),
+            )),
+        )
+        .await?;
+    let call = Call {
+        block: 5,
+        after: 4,
+        root: Some(ROOT),
+    };
+    world.assert_selects(call, &["child.foo.eth"]).await?;
+    world.cleanup().await
+}
+
+// A resource pointer moves from one name to another. The move is
+// path-bearing for both names. Each name and the names under it are
+// recomposed.
+#[tokio::test]
+async fn a_resource_pointer_move_selects_the_old_and_new_names_and_the_names_under_both()
+-> Result<()> {
+    const RESOURCE: &str = "00000000-0000-0000-0000-000000000014";
+    const RESOLVER: &str = "0x00000000000000000000000000000000000000c1";
+    let mut world = World::new().await?;
+    world
+        .surfaces(&["eth", "foo.eth", "a.foo.eth", "bar.eth", "a.bar.eth"])
+        .await?;
+    world
+        .resource_pointer_changed(
+            5,
+            "bar.eth",
+            RESOURCE,
+            RESOLVER,
+            RESOLVER,
+            "ResolverChanged",
+            json!({"block_number": 5, "event_identity": "pointer:foo"}),
+            json!({
+                "namespace": "ens", "namehash": node("foo.eth"),
+                "resolver_address": RESOLVER,
+                "nonzero_resolver_address": RESOLVER,
+                "boundary_kind": "ResolverChanged",
+                "pointer_position": {"block_number": 3, "event_identity": "pointer:foo"}
+            }),
+        )
+        .await?;
+    let call = Call {
+        block: 5,
+        after: 4,
+        root: Some(ROOT),
+    };
+    world
+        .assert_selects(call, &["foo.eth", "a.foo.eth", "bar.eth", "a.bar.eth"])
+        .await?;
+    world.cleanup().await
+}
+
+// Only the boundary kind changes on a resource pointer. No resolver, no
+// nonzero resolver and no name change. The name recomposes alone.
+#[tokio::test]
+async fn a_boundary_kind_only_change_selects_the_name_itself_alone() -> Result<()> {
+    const RESOURCE: &str = "00000000-0000-0000-0000-000000000015";
+    const RESOLVER: &str = "0x00000000000000000000000000000000000000c1";
+    let mut world = World::new().await?;
+    world
+        .surfaces(&["eth", "foo.eth", "a.foo.eth", "x.a.foo.eth"])
+        .await?;
+    world
+        .resource_pointer_changed(
+            5,
+            "foo.eth",
+            RESOURCE,
+            RESOLVER,
+            RESOLVER,
+            "SubregistryChanged",
+            json!({"block_number": 5, "event_identity": "pointer:foo"}),
+            json!({
+                "namespace": "ens", "namehash": node("foo.eth"),
+                "resolver_address": RESOLVER,
+                "nonzero_resolver_address": RESOLVER,
+                "boundary_kind": "ResolverChanged",
+                "pointer_position": {"block_number": 5, "event_identity": "pointer:foo"}
+            }),
+        )
+        .await?;
+    let call = Call {
+        block: 5,
+        after: 4,
+        root: Some(ROOT),
+    };
+    world.assert_selects(call, &["foo.eth"]).await?;
     world.cleanup().await
 }
