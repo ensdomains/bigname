@@ -124,6 +124,8 @@ fn mode_cases() -> Vec<ModeCase> {
         namespace: Some("ens".to_owned()),
         relations: None,
     }];
+    let mut contract = mode_filter(NAMED_RESOLVER);
+    contract.contract_address = Some(SELECTOR_ADDRESS.to_owned());
     let mut candidates = mode_filter(QUIET_RESOLVER);
     candidates.diagnostics = true;
     let registration_id = uuid::Uuid::from_u128(1);
@@ -144,6 +146,13 @@ fn mode_cases() -> Vec<ModeCase> {
         ModeCase {
             name: "resolver plus address",
             filter: address,
+            canonical_only: true,
+            include_candidates: false,
+            plain_scan: true,
+        },
+        ModeCase {
+            name: "resolver plus contract",
+            filter: contract,
             canonical_only: true,
             include_candidates: false,
             plain_scan: true,

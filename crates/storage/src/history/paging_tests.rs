@@ -1416,3 +1416,6 @@ mod resolver_mode_plan_tests;
 
 #[path = "resolver_arm_equivalence_tests.rs"]
 mod resolver_arm_equivalence_tests;
+
+#[path = "resolver_cost_tests.rs"]
+mod resolver_cost_tests;

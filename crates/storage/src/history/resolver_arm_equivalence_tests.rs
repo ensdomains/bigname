@@ -1,6 +1,7 @@
 //! Every request the resolver arms serve returns the rows, order and counts of the plain
 //! statement: `source.rs`'s source with the resolver condition.
 use super::super::super::{
+    HistorySummary,
     duplicates::push_product_history_duplicate_filter,
     paging::{push_history_filters, push_history_order},
     resolver_source::ResolverSource,
@@ -149,12 +150,31 @@ const ARM_ORDER_FIXTURE: &str = r#"
     ANALYZE chain_lineage;
 "#;
 
+/// Only the pointer-set arm tests a `candidate` row's new resolver for equality.
+const ARM_MARKER: &str = "lower(candidate.after_state ->> 'resolver') = ";
+
+async fn full_summary(pool: &PgPool, filter: &EventHistoryReadFilter) -> Result<HistorySummary> {
+    load_history_page(
+        pool,
+        filter.clone(),
+        true,
+        None,
+        1,
+        HistorySummaryMode::Full,
+        false,
+        None,
+    )
+    .await?
+    .summary
+    .context("a full summary must be returned")
+}
+
 /// The arm-shape variants an events request can send: with and without a namespace, with no
 /// kinds, a block window per chain with both bounds (what a timestamp range resolves to), a
 /// window over several chains, a window that leaves the resolver's chain out, an empty window,
 /// an open range, block bounds, a lower block bound alone, a record key with and without
-/// kinds, record kinds only, the resolver as contract, the contract of the older pointer rows,
-/// and no matching kinds. The bounded windows cut through the fixture's matches, which lie in blocks 20 to 1,656, 3,000
+/// kinds, record kinds only, and no matching kinds. A contract filter is not in the arm shape
+/// (`resolver_arm_source`), so it is not here. The bounded windows cut through the fixture's matches, which lie in blocks 20 to 1,656, 3,000
 /// to 6,700 and 9,941 to 9,981.
 fn arm_shape_variants(address: &str) -> Vec<(&'static str, EventHistoryReadFilter)> {
     let base = |order| resolver_filter(order, address);
@@ -194,9 +214,6 @@ fn arm_shape_variants(address: &str) -> Vec<(&'static str, EventHistoryReadFilte
         filter.record_key = Some("addr:60".to_owned());
         variants.push(("record key", filter));
         let mut filter = base(order);
-        filter.contract_address = Some(address.to_owned());
-        variants.push(("contract address", filter));
-        let mut filter = base(order);
         filter.match_no_events = true;
         variants.push(("no matching kinds", filter));
         let mut filter = base(order);
@@ -207,17 +224,11 @@ fn arm_shape_variants(address: &str) -> Vec<(&'static str, EventHistoryReadFilte
         filter.event_kinds = vec!["RecordChanged".to_owned()];
         variants.push(("record kinds only", filter));
         let mut filter = base(order);
-        filter.contract_address = Some(OLDER_CONTRACT.to_owned());
-        variants.push(("contract of older pointer rows", filter));
-        let mut filter = base(order);
         filter.from_block = Some(6_000);
         variants.push(("from block", filter));
     }
     variants
 }
-
-/// The contract that emitted the older pointer rows in [`ARM_ORDER_FIXTURE`].
-const OLDER_CONTRACT: &str = "0x00000000000000000000000000000000000000c2";
 
 /// Variants that match no row by design. Every other variant must return rows, so that it
 /// can fail.
@@ -242,6 +253,11 @@ async fn arm_shape_requests_match_the_plain_statement() -> Result<()> {
         for address in [RESOLVER_A, RESOLVER_B] {
             for (name, filter) in arm_shape_variants(address) {
                 let label = format!("{address} {name} {:?}", filter.order);
+                let mut probe = QueryBuilder::<Postgres>::new("");
+                push_history_page_query(&mut probe, &filter, true, None, false, 2);
+                if !probe.sql().contains(ARM_MARKER) {
+                    failures.push(format!("{label}: the request does not take the arms"));
+                }
                 let expected = plain_identities(pool, &filter).await?;
                 if expected.is_empty() && !EMPTY_VARIANTS.contains(&name) {
                     failures.push(format!("{label}: the fixture gives no rows, so it cannot fail"));
@@ -257,45 +273,47 @@ async fn arm_shape_requests_match_the_plain_statement() -> Result<()> {
                     }
                 }
                 // A cursor without its position resumes through the cursor-check statement.
-                let mut unpositioned = Vec::new();
-                let mut cursor: Option<HistoryCursor> = None;
-                loop {
-                    let (rows, next) = page_identities(pool, &filter, cursor.as_ref(), 3).await?;
-                    unpositioned.extend(rows);
-                    match next {
-                        Some(mut next) => {
-                            next.position = None;
-                            cursor = Some(next);
+                for page_size in [1u64, 3, 50] {
+                    let mut unpositioned = Vec::new();
+                    let mut cursor: Option<HistoryCursor> = None;
+                    loop {
+                        let (rows, next) =
+                            page_identities(pool, &filter, cursor.as_ref(), page_size).await?;
+                        unpositioned.extend(rows);
+                        match next {
+                            Some(mut next) => {
+                                next.position = None;
+                                cursor = Some(next);
+                            }
+                            None => break,
                         }
-                        None => break,
+                    }
+                    if unpositioned != expected {
+                        failures.push(format!(
+                            "{label}: pages of {page_size} through cursors without a position \
+                             gave {} rows, the plain statement gives {}",
+                            unpositioned.len(),
+                            expected.len()
+                        ));
                     }
                 }
-                if unpositioned != expected {
-                    failures.push(format!(
-                        "{label}: pages through cursors without a position gave {} rows, \
-                         the plain statement gives {}",
-                        unpositioned.len(),
-                        expected.len()
-                    ));
-                }
-                let full = load_history_page(
-                    pool,
-                    filter.clone(),
-                    true,
-                    None,
-                    1,
-                    HistorySummaryMode::Full,
-                    false,
-                    None,
-                )
-                .await?
-                .summary
-                .context("a full summary must be returned")?;
+                let full = full_summary(pool, &filter).await?;
+                // The same request with `diagnostics` set falls outside the arm shape and reads
+                // the plain source with the resolver condition. With no selector, `diagnostics`
+                // changes nothing else, so its summary is the plain statement's.
+                let mut plain_filter = filter.clone();
+                plain_filter.diagnostics = true;
+                let plain_full = full_summary(pool, &plain_filter).await?;
                 if full.total_count != u64::try_from(expected.len())? {
                     failures.push(format!(
                         "{label}: the full summary counted {}, the plain statement gives {}",
                         full.total_count,
                         expected.len()
+                    ));
+                }
+                if full != plain_full {
+                    failures.push(format!(
+                        "{label}: the full summary differs from the plain statement's"
                     ));
                 }
                 let total = i64::try_from(expected.len())?;

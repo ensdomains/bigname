@@ -5,7 +5,8 @@
 use sqlx::{Postgres, QueryBuilder};
 
 use super::{
-    EventHistoryReadFilter, EventHistoryResolverFilter, HistoryOrder,
+    ChainBlockRange, EventHistoryReadFilter, EventHistoryResolverFilter, HistoryBlockWindow,
+    HistoryOrder,
     duplicates::push_product_history_duplicate_filter_for_alias,
     filters::push_string_filter,
     keyset::push_history_cursor_after_for_alias,
@@ -46,11 +47,20 @@ pub(super) enum ResolverSource {
 
 /// The resolver whose own rows every statement of a request draws from, when
 /// the request takes the arms. Only a canonical, activated-only request with no
-/// selector and no registration does. The pointer indexes hold only canonical,
-/// activated rows and the emitter index only canonical ones, so in another mode
-/// an arm has no index to read. A selector cannot be pushed inside an arm before
-/// its limit, so with one the arms would take no page bound, and each arm would
-/// have to finish its match against the selector before the page could stop.
+/// selector, no registration and no contract does. An arm may serve a request
+/// only when its index delivers the page order under the request's filters, and
+/// no filter gives the plain statement an ordered, selective index that the arms
+/// cannot use.
+///
+/// The pointer indexes hold only canonical, activated rows and the emitter index
+/// only canonical ones, so in another mode an arm has no index to read. A
+/// selector cannot be pushed inside an arm before its limit, so with one the
+/// arms would take no page bound, and each arm would have to finish its match
+/// against the selector before the page could stop. A contract filter gives the
+/// plain statement the emitter index for that contract, in page order. The
+/// pointer arms order the block with the other null placement, so that index
+/// cannot serve them, and they would sort all of the contract's rows or walk
+/// the resolver's rows from every other contract.
 /// `event_history_read_filter` sets `filter.diagnostics` for a request that
 /// includes candidate rows. So a statement such as the summary count, which
 /// reads activated rows whatever the request, still follows the request.
@@ -65,6 +75,7 @@ fn resolver_arm_source(
             && !filter.diagnostics
             && filter.selectors.is_empty()
             && filter.registration_id.is_none()
+            && filter.contract_address.is_none()
     })
 }
 
@@ -275,7 +286,7 @@ fn push_resolver_candidate_select<'a>(
     let Some(bound) = page_bound else {
         return;
     };
-    push_resolver_bounded_filters(builder, filter);
+    push_resolver_bounded_filters(builder, filter, resolver);
     if let Some(block_number) = bound.cursor_block {
         builder.push(match bound.order {
             HistoryOrder::Desc => " AND candidate.block_number <= ",
@@ -380,21 +391,23 @@ fn push_resolver_arm_order_terms(
 }
 
 /// Every outer page condition that can drop a `candidate` row, pushed before
-/// the arm limit. The arms serve no read with a selector or a registration
-/// ([`resolver_arm_source`]), the two conditions that cannot be pushed here.
+/// the arm limit. The arms serve no read with a selector, a registration or a
+/// contract ([`resolver_arm_source`]), the conditions that are not pushed here.
 /// So no row that this part drops could have passed the outer page, and no
 /// passing row is cut by the limit in favour of a dropped one.
 fn push_resolver_bounded_filters<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a EventHistoryReadFilter,
+    resolver: &'a EventHistoryResolverFilter,
 ) {
+    debug_assert!(
+        filter.selectors.is_empty()
+            && filter.registration_id.is_none()
+            && filter.contract_address.is_none()
+    );
     if let Some(namespace) = filter.namespace.as_ref() {
         builder.push(" AND candidate.namespace = ");
         builder.push_bind(namespace);
-    }
-    if let Some(contract_address) = filter.contract_address.as_ref() {
-        builder.push(" AND lower(candidate.raw_fact_ref ->> 'emitting_address') = ");
-        builder.push_bind(contract_address);
     }
     if filter.match_no_events {
         builder.push(" AND FALSE");
@@ -446,6 +459,7 @@ fn push_resolver_bounded_filters<'a>(
             }
             builder.push(")");
         }
+        push_resolver_window_bounds(builder, window, resolver);
     }
     builder.push(
         " AND (candidate.block_hash IS NULL \
@@ -456,4 +470,44 @@ fn push_resolver_bounded_filters<'a>(
          ))",
     );
     push_product_history_duplicate_filter_for_alias(builder, filter, true, "candidate");
+}
+
+/// The window's outer block bounds on the resolver's chain, as plain bounds on the arm's
+/// block key. An arm reads only the resolver's chain, so only that chain's ranges can pass,
+/// and the condition above still decides each row. As plain bounds they bound the arm's index
+/// scan, so a window below the resolver's newest rows starts at the window in page order,
+/// instead of reading down to it or sorting all of its rows. A bound is left out when a range
+/// on the chain is open on that side.
+fn push_resolver_window_bounds<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    window: &HistoryBlockWindow,
+    resolver: &EventHistoryResolverFilter,
+) {
+    let ranges: Vec<&ChainBlockRange> = window
+        .ranges
+        .iter()
+        .filter(|range| range.chain_id == resolver.chain_id)
+        .collect();
+    if ranges.is_empty() {
+        builder.push(" AND FALSE");
+        return;
+    }
+    let lowest = ranges
+        .iter()
+        .map(|range| range.from_block)
+        .collect::<Option<Vec<i64>>>()
+        .and_then(|bounds| bounds.into_iter().min());
+    let highest = ranges
+        .iter()
+        .map(|range| range.to_block)
+        .collect::<Option<Vec<i64>>>()
+        .and_then(|bounds| bounds.into_iter().max());
+    if let Some(lowest) = lowest {
+        builder.push(" AND candidate.block_number >= ");
+        builder.push_bind(lowest);
+    }
+    if let Some(highest) = highest {
+        builder.push(" AND candidate.block_number <= ");
+        builder.push_bind(highest);
+    }
 }
