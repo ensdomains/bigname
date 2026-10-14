@@ -36,6 +36,12 @@ mod same_transaction_pointer;
 #[path = "tests/v1_wrapped_registration_resolver.rs"]
 mod v1_wrapped_registration_resolver;
 
+#[path = "tests/wrap_registry_interval.rs"]
+mod wrap_registry_interval;
+
+#[path = "tests/output_pins.rs"]
+mod output_pins;
+
 #[path = "tests/wrapper_permissions.rs"]
 mod wrapper_permissions;
 

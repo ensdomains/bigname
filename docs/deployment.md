@@ -4368,3 +4368,37 @@ rows ready under the new hash.
 
 It adds no schema-migration, table, manifest or setting. The manifest-authority
 fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## Wrapping a `.eth` name opens no registry-only interval
+
+The build that keeps a `.eth` lease bound while `wrapETH2LD`, or a direct token send to the
+NameWrapper, moves it into the NameWrapper changes the BaseRegistrar transfer path in
+`crates/adapters/src`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain. The
+[projection content hash](glossary.md#projection-content-hash) moves with it.
+
+What changes for names:
+
+- `GET /v1/events?type=permission` no longer serves a grant and a revoke of
+  `registration_control` to the holder on a registry-only resource, with
+  `registration_id: null`, for each such wrap.
+- The name's history and the holder's and the NameWrapper's address histories lose the
+  NameWrapper's second `registration_control` grant on the lease at the reclaim log. A wrap's
+  permission history in name history goes from 7 rows to 6. The latest state is unchanged.
+- When the registry already has a resolver, `resolver_control` on the lease moves from the
+  holder to the NameWrapper at the transfer log. Before, the holder held it on a registry-only
+  resource between the two logs, and the NameWrapper got it at the reclaim log.
+- A transfer to the NameWrapper without the reclaim in its own transaction, such as a plain
+  `transferFrom`, still opens the registry-only authority, as does any transfer to another
+  holder ([upstream divergences](upstream.md#known-divergences)). A wrap while the registry
+  already names an owner other than the holder is unchanged too.
+
+These rows arrive through re-derivation, not through an in-place change. Every chain needs a
+full-history Interpret redo, then the Project redo it installs, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+binaries. The change rides the next re-derivation release and shares that release's one
+Interpret and Project redo pair with its other hash-rotating changes. Do not mark old rows
+ready under the new hash.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
+and the compiled watch plan are unchanged, so stamp no Ingest redo.

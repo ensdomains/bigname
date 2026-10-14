@@ -31,16 +31,22 @@ pub(in crate::schema_v2) struct WrapperCustody {
     pub(in crate::schema_v2) name_wrapper: Option<Address>,
     /// A `NameUnwrapped` for the log's node follows it in its transaction.
     pub(in crate::schema_v2) unwrap_follows: bool,
+    /// The log is a BaseRegistrar transfer to the admitted NameWrapper, and the next registry
+    /// owner write for its node in the transaction is a `NewOwner` naming the NameWrapper.
+    pub(in crate::schema_v2) reclaim_follows: bool,
 }
 
-/// The admitted NameWrapper a current ENSv1 registry log can name as a node's owner: the
-/// wrapper manifest's `name_wrapper` role on the same chain and namespace.
+/// The admitted NameWrapper on the same chain and namespace as a current ENSv1 registry log,
+/// which can name it as a node's owner, or as a BaseRegistrar log, whose token it can receive:
+/// the wrapper manifest's `name_wrapper` role.
 pub(in crate::schema_v2) fn admitted(
     catalog: &Catalog,
     selected: &Selected,
 ) -> anyhow::Result<Option<Address>> {
-    if selected.source.source_family != "ens_v1_registry_l1"
-        || selected.emitter_role.as_deref() != Some("registry")
+    if (selected.source.source_family != "ens_v1_registry_l1"
+        || selected.emitter_role.as_deref() != Some("registry"))
+        && (selected.source.source_family != "ens_v1_registrar_l1"
+            || selected.emitter_role.as_deref() != Some("registrar"))
     {
         return Ok(None);
     }

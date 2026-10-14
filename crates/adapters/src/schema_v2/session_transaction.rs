@@ -1,12 +1,15 @@
 use std::collections::BTreeMap;
 
-use alloy_primitives::B256;
+use alloy_primitives::{Address, B256};
 
 use crate::schema_v2::{
     RawLogInput,
     catalog::{Catalog, Selected},
     migration::RegistrarContext,
-    protocol::v1::{registrar_registration_namehash, registry_registration_setup_namehash},
+    protocol::v1::{
+        registrar_registration_namehash, registrar_token_transfer,
+        registry_registration_setup_namehash,
+    },
 };
 
 /// (namespace, block hash, transaction hash, node)
@@ -18,6 +21,8 @@ type TransactionNodeKey = (String, String, String, String);
 pub(super) struct TransactionIndex {
     wrapper_completions: super::wrapper::WrapperCompletions,
     registry_setups: BTreeMap<TransactionNodeKey, Vec<(i64, String)>>,
+    /// The log indexes of the `registry_setups` writes that are `NewOwner`.
+    registry_new_owners: BTreeMap<TransactionNodeKey, Vec<i64>>,
     name_unwraps: BTreeMap<TransactionNodeKey, Vec<i64>>,
 }
 
@@ -45,9 +50,17 @@ impl TransactionIndex {
                     if let Some((namehash, owner)) =
                         registry_registration_setup_namehash(&selected, raw)?
                     {
+                        let node = key(&selected, raw, namehash);
+                        if selected.event.name == "NewOwner" {
+                            index
+                                .registry_new_owners
+                                .entry(node.clone())
+                                .or_default()
+                                .push(raw.log_index);
+                        }
                         index
                             .registry_setups
-                            .entry(key(&selected, raw, namehash))
+                            .entry(node)
                             .or_default()
                             .push((raw.log_index, owner));
                     }
@@ -111,6 +124,25 @@ impl TransactionIndex {
                                     .any(|(write, _)| (raw.log_index + 1..unwrap).contains(write))
                             })
                     })
+                });
+        }
+        if let Some((namehash, to)) = registrar_token_transfer(selected, raw)
+            && context.wrapper_custody.name_wrapper == Some(to)
+        {
+            let node = key(selected, raw, namehash);
+            let next_write = self.registry_setups.get(&node).and_then(|writes| {
+                writes
+                    .iter()
+                    .filter(|(log_index, _)| *log_index > raw.log_index)
+                    .min_by_key(|(log_index, _)| *log_index)
+            });
+            context.wrapper_custody.reclaim_follows =
+                next_write.is_some_and(|(log_index, owner)| {
+                    owner.parse::<Address>().ok() == Some(to)
+                        && self
+                            .registry_new_owners
+                            .get(&node)
+                            .is_some_and(|new_owners| new_owners.contains(log_index))
                 });
         }
         Ok(())
