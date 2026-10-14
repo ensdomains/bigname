@@ -4199,7 +4199,9 @@ uses its deployed query and does not cover a later release's changed hash.
 The build that recomposes the names under a touched name only when its change
 can move their resolution paths (see
 [owned key families](projections.md#owned-key-families)) changes one Project
-statement, `project:families.resolution_paths.prepare`.
+statement, `project:families.resolution_paths.prepare`. It also bounds the
+ENSv1 mirror walk's surface reads by the publication's block
+([projections](projections.md#records-shared-through-resolver-links)).
 
 - A touched name still recomposes itself. It recomposes the `.eth` names under
   it only for the changes that
@@ -4209,9 +4211,16 @@ statement, `project:families.resolution_paths.prepare`.
 - A name whose [name surface](glossary.md#surface-name-surface) appeared since
   the [family marker](glossary.md#family-marker)'s block also recomposes the
   `.eth` names under it.
-- What names serve does not change. Only which names Project recomposes in each
-  batch changes. Stored rows and API responses are the same.
-- The statement is in `crates/project/src`, an input of the
+- Which names Project recomposes in each batch changes, not what they serve.
+- The mirror walk no longer reads a name surface that Interpret wrote above the
+  block Project publishes. While Interpret runs ahead, three results that read
+  a new surface through a mirror now change at that surface's block, not
+  earlier: a name below `.eth`, the record inventory of a resource whose
+  resolver is a mirror, and `GET /v1/resolvers/{chain_id}/{address}/records`
+  for a mirror resolver, which walks at the servable publication. Once Project
+  publishes that block, stored rows and API responses are the same as before.
+- The statement is in `crates/project/src` and the mirror walk is in
+  `crates/storage/src/families/records/mirror.rs`. Both are inputs of the
   [projection content hash](glossary.md#projection-content-hash) only. That hash
   rotates for every chain. The
   [interpreter content hash](glossary.md#interpreter-content-hash) does not.

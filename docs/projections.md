@@ -1704,7 +1704,10 @@ observation, whose `node` is the parent and whose `child_node` is the child, so
 it is the child's pointer, not the parent's. Pointer reduction and the history reader use this same node identity. The consulted
 nodes are the queried name's surface and each proper ancestor surface below the
 root, matched by label suffix in the same namespace; the nearest consulted node
-with a nonzero resolver is selected. A suffix is matched on raw labels when the
+with a nonzero resolver is selected. The walk reads only canonical surfaces
+anchored at or below the publication's block, as the name summary does. A
+surface Interpret wrote ahead of Project is not consulted until Project
+publishes its block. A suffix is matched on raw labels when the
 queried surface and the candidate both store them, and on the label hashes of
 the suffix when either stores none.
 When the selected resolver is a supported, same-namespace `ens_v1_resolver_l1`
@@ -2100,11 +2103,17 @@ says which names it expands.
 - An ENSv2 entry row is new or deleted, or its expiry, status, registry,
   resource or token changes. The registry is the one that emitted the entry
   (`registry_contract_instance_id`). This expands the name at that entry and the
-  names mounted below it.
+  names mounted below it. A registry returns no subregistry and no resolver for
+  an expired entry
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L280-L289 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L671-L673 @ ens_v2_sepolia_20261001@07e55a05).
 - An ENSv2 `ResolverChanged` or `SubregistryChanged` event for an entry falls
   after the family marker's block, up to the publication's block. This expands
   the name at that entry and the names mounted below it, whatever the event
-  changed.
+  changed. These are the normalized `ResolverUpdated` and `SubregistryUpdated`
+  logs a registry emits when it sets an entry's resolver or subregistry
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/interfaces/IRegistryEvents.sol:L56-L70 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L148-L161 @ ens_v2_sepolia_20261001@07e55a05).
 - A registry pointer or resource pointer row is new, or its resolver address
   changes. For a resource pointer, a change of its last nonzero resolver address
   counts too. This expands the name the pointer names and the names under it.
@@ -2134,6 +2143,50 @@ says which names it expands.
   any node can be an original child. This expands the node's name and the names
   under it. A wrapper row that moves to another name expands both names.
 
+These inputs follow the migration registry's own test. The registry returns the
+v1 fallback resolver for a label whose original child is still migratable
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L189-L197 @ ens_v2_sepolia_20261001@07e55a05).
+The original child is the node with that label under the node the registry was
+created for
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L125-L134 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L312-L327 @ ens_v2_sepolia_20261001@07e55a05).
+
+- The test requires a nonzero ENSv1 registry owner of that node. The ENSv1
+  registry reports zero for a node it owns itself
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f).
+- It requires the node's `PARENT_CANNOT_CONTROL` fuse burned and its
+  `IS_DOT_ETH` fuse clear
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/libraries/LibMigration.sol:L85-L89 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L18-L19 @ ens_v1@91c966f).
+- It reads the fuses through NameWrapper's `getData`, which clears them once the
+  node's expiry passes
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L143-L154 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f).
+  NameWrapper reports the fuses and expiry it sets in its `NameWrapped`,
+  `FusesSet` and `ExpiryExtended` events
+  (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27-L38 @ ens_v1@91c966f).
+- A positive ENSv2 entry expiry for the label ends the fallback, which the ENSv2
+  entry item covers
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L316-L318 @ ens_v2_sepolia_20261001@07e55a05).
+- `IS_DOT_ETH` is not an input, because it never changes on an original child.
+  NameWrapper burns it only when it wraps a direct child of `eth`, and no other
+  call can set it
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L996-L1015 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L358-L360 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L421-L436 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L524 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L575 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L608 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1069-L1074 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L23-L24 @ ens_v1@91c966f).
+  A migration registry is created for a name migrated under `eth` or under
+  another migration registry, so its children sit at least two labels below
+  `eth`
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/LockedMigrationController.sol:L81-L83 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L210-L217 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/LockedWrapperReceiver.sol:L111-L121 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/LockedWrapperReceiver.sol:L148-L164 @ ens_v2_sepolia_20261001@07e55a05).
+
 The pointer, classification and wrapper eligibility items expand names by name.
 Each such name also reads the retained ENSv1→ENSv2 migration evidence of itself
 and of its ancestors. When that evidence holds a created registry, the names
@@ -2146,13 +2199,18 @@ any other field of a pointer row alone does not expand either. For a resource
 pointer, those fields include its position and its boundary kind, the kind of
 the latest `ResolverChanged` or `RecordVersionChanged` on its resource. A fuse
 other than `PARENT_CANNOT_CONTROL` does not expand. An ENSv2 `ResolverChanged`
-or `SubregistryChanged` event for an entry still expands through the second item
-above.
+or `SubregistryChanged` event for an entry still expands through the ENSv2 event
+item above.
 
 A name whose [name surface](glossary.md#surface-name-surface) appeared since
 the [family marker](glossary.md#family-marker)'s block, up to the publication's
-block, always expands. The names under it could not read it as an ancestor
-before.
+block, always expands. Interpret can write a surface before Project publishes
+its block, but no composition result depends on a surface anchored above the
+publication's block. The mirror walk
+([records shared through resolver links](#records-shared-through-resolver-links))
+reads only surfaces at or below that block. So no name under the new surface read
+it as an ancestor before its block, and from its block the names under it are
+recomposed.
 
 The capture is one statement, `project:families.resolution_paths.prepare`. It
 looks names up in `name_surfaces` through two indexes Project owns there
