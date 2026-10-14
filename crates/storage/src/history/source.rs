@@ -230,6 +230,7 @@ fn push_resolver_candidate_arm<'a>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_resolver_candidate_select<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a EventHistoryReadFilter,
