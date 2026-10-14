@@ -148,8 +148,8 @@ async fn check_selector_plans(connection: &mut PgConnection) -> Result<()> {
     ensure!(total == TARGET_ROWS, "count returned {total}");
 
     let push_page = |builder: &mut _| {
-        push_history_select(builder, &filter, true, false, false);
-        push_history_filters(builder, &filter, true);
+        let resolver_source = push_history_select(builder, &filter, true, false, false);
+        push_history_filters(builder, &filter, true, resolver_source);
         push_product_history_duplicate_filter(builder, &filter, true);
         push_history_order(builder, filter.order);
         builder.push(" LIMIT ");
@@ -241,8 +241,8 @@ async fn check_root_role_plans(connection: &mut PgConnection) -> Result<()> {
             push_history_count_query(builder, &filter, true, Some(10_001));
         };
         let push_page = |builder: &mut _| {
-            push_history_select(builder, &filter, true, false, false);
-            push_history_filters(builder, &filter, true);
+            let resolver_source = push_history_select(builder, &filter, true, false, false);
+            push_history_filters(builder, &filter, true, resolver_source);
             push_product_history_duplicate_filter(builder, &filter, true);
             push_history_order(builder, filter.order);
             builder.push(" LIMIT ");
