@@ -1779,10 +1779,10 @@ fn gate_unwrap_tail(block: i64, node: &str, owner: &str, wrapper: &str) -> Vec<R
     logs
 }
 
-/// TYR-334 gate, Finding 1: an original child unwrapped after its parent's
-/// locked migration in the same batch must not regain a registry-only
-/// successor. The split history (migration in an earlier batch, restored)
-/// already suppresses it; the combined history must agree.
+/// An original child unwrapped after its parent's locked migration in
+/// the same batch must not regain a registry-only successor. The split
+/// history (migration in an earlier batch, restored) already suppresses
+/// it; the combined history must agree.
 #[test]
 fn original_child_unwrap_after_same_batch_locked_parent_migration_opens_no_successor()
 -> anyhow::Result<()> {
@@ -1949,9 +1949,9 @@ fn original_child_unwrap_after_same_batch_locked_parent_migration_opens_no_succe
     Ok(())
 }
 
-/// TYR-334 gate, Finding 2: a locked child establishes its own
-/// migration-created WrapperRegistry, so an original grandchild unwrapping
-/// under it must not regain a registry-only successor either.
+/// A locked child establishes its own migration-created
+/// WrapperRegistry, so an original grandchild unwrapping under it must
+/// not regain a registry-only successor either.
 #[test]
 fn original_grandchild_unwrap_under_locked_child_parent_opens_no_successor() -> anyhow::Result<()> {
     let fixture = fixture()?;
@@ -2002,10 +2002,11 @@ fn original_grandchild_unwrap_under_locked_child_parent_opens_no_successor() -> 
     Ok(())
 }
 
-/// Codex scoped-restore case: the child's retained history names only the
-/// child (a wrap with no registry `NewOwner` linking it to its parent), so a
-/// child-only scoped restore has no link that pulls the parent's
-/// `MigrationApplied` in. The gate must still load that boundary.
+/// Scoped restore with no parent link: the child's retained history
+/// names only the child (a wrap with no registry `NewOwner` linking it
+/// to its parent), so a child-only scoped restore has no link that
+/// pulls the parent's `MigrationApplied` in. The gate must still load
+/// that boundary before it answers.
 #[test]
 fn original_child_unwrap_scoped_restore_without_parent_link_opens_no_successor()
 -> anyhow::Result<()> {
