@@ -338,7 +338,13 @@ pub(super) fn push_history_filters<'a>(
         push_history_block_window(builder, window);
     }
 
-    if let Some(resolver) = filter.resolver.as_ref() {
+    // A resolver read with no registration scope draws its rows from the resolver
+    // candidate set in `push_history_source_for_filter`, so it needs no condition here.
+    // A registration-scoped read keeps its bounded source, so the resolver condition
+    // still narrows it here.
+    if filter.product_registration().is_some()
+        && let Some(resolver) = filter.resolver.as_ref()
+    {
         builder.push(" AND ne.chain_id = ");
         builder.push_bind(&resolver.chain_id);
         builder.push(" AND (lower(ne.raw_fact_ref ->> 'emitting_address') = ");

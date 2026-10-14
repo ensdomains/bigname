@@ -7,8 +7,9 @@ use super::{
 
 /// Push `FROM … WHERE <visibility>` for a history read. A registration-scoped product read
 /// draws its rows from a bounded candidate set (the registration's names, its resources, and
-/// the record writes attributed to those resources) so each arm keeps an index-keyed scan;
-/// every other read draws from `normalized_events` directly.
+/// the record writes attributed to those resources) so each arm keeps an index-keyed scan.
+/// A resolver read does the same from its three arms below. Every other read draws from
+/// `normalized_events` directly.
 pub(super) fn push_history_source_for_filter<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a EventHistoryReadFilter,
@@ -55,6 +56,48 @@ pub(super) fn push_history_source_for_filter<'a>(
         push_bounded_candidate_canonicality(builder, canonical_only);
         push_not_in_name_arm(builder, logical_name_ids);
         builder.push(") ne ");
+    } else if let Some(resolver) = filter.resolver.as_ref() {
+        // The resolver's own rows only: what it emitted, the pointers set to it, and the
+        // pointers cleared from it. `UNION` keeps a row that more than one arm matches
+        // once, as the old `OR` did. Each arm carries the chain, visibility, and
+        // canonicality conditions, so each reads through its own index.
+        builder.push(" FROM (");
+        builder.push(
+            "SELECT candidate.*\n\
+             FROM bigname_phase.normalized_events candidate\n\
+             WHERE candidate.chain_id = ",
+        );
+        builder.push_bind(&resolver.chain_id);
+        builder.push(" AND lower(candidate.raw_fact_ref ->> 'emitting_address') = ");
+        builder.push_bind(&resolver.address);
+        push_resolver_candidate_conditions(builder, canonical_only, include_candidates);
+        builder.push(
+            "\nUNION\n\
+             SELECT candidate.*\n\
+             FROM bigname_phase.normalized_events candidate\n\
+             WHERE candidate.chain_id = ",
+        );
+        builder.push_bind(&resolver.chain_id);
+        builder.push(
+            " AND candidate.event_kind = 'ResolverChanged' \
+             AND lower(candidate.after_state ->> 'resolver') = ",
+        );
+        builder.push_bind(&resolver.address);
+        push_resolver_candidate_conditions(builder, canonical_only, include_candidates);
+        builder.push(
+            "\nUNION\n\
+             SELECT candidate.*\n\
+             FROM bigname_phase.normalized_events candidate\n\
+             WHERE candidate.chain_id = ",
+        );
+        builder.push_bind(&resolver.chain_id);
+        builder.push(
+            " AND candidate.event_kind = 'ResolverChanged' \
+             AND lower(candidate.before_state ->> 'resolver') = ",
+        );
+        builder.push_bind(&resolver.address);
+        push_resolver_candidate_conditions(builder, canonical_only, include_candidates);
+        builder.push(") ne ");
     } else {
         builder.push(" FROM normalized_events ne ");
     }
@@ -67,6 +110,17 @@ pub(super) fn push_history_source_for_filter<'a>(
     } else {
         builder.push(" WHERE ne.consumer_visibility = 'activated' ");
     }
+}
+
+fn push_resolver_candidate_conditions(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    canonical_only: bool,
+    include_candidates: bool,
+) {
+    if !include_candidates {
+        builder.push(" AND candidate.consumer_visibility = 'activated'");
+    }
+    push_bounded_candidate_canonicality(builder, canonical_only);
 }
 
 fn push_not_in_name_arm<'a>(

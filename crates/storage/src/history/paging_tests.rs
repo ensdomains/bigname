@@ -5,8 +5,8 @@ use sqlx::{Arguments, Execute, PgConnection, PgPool, Postgres, QueryBuilder};
 
 use super::super::keyset::load_history_keyset;
 use super::super::{
-    ChainBlockRange, EventHistoryReadFilter, HistoryBlockWindow, HistoryCursor, HistoryOrder,
-    HistorySummaryMode,
+    ChainBlockRange, EventHistoryReadFilter, EventHistoryResolverFilter, HistoryBlockWindow,
+    HistoryCursor, HistoryOrder, HistorySummaryMode,
 };
 use super::{load_history_page, order_index_drives_page, push_history_page_query};
 
@@ -501,6 +501,331 @@ fn page_scans<'a>(node: &'a Value, output: &mut Vec<&'a Value>) {
     if let Some(children) = node["Plans"].as_array() {
         for child in children {
             page_scans(child, output);
+        }
+    }
+}
+
+const RESOLVER_A: &str = "0x00000000000000000000000000000000000000a1";
+const RESOLVER_B: &str = "0x00000000000000000000000000000000000000b1";
+const RESOLVER_CHAIN: &str = "ethereum-sepolia";
+
+fn resolver_filter(order: HistoryOrder, address: &str) -> EventHistoryReadFilter {
+    EventHistoryReadFilter {
+        namespace: Some("ens".to_owned()),
+        event_kinds: vec!["RecordChanged".to_owned(), "ResolverChanged".to_owned()],
+        order,
+        resolver: Some(EventHistoryResolverFilter {
+            chain_id: RESOLVER_CHAIN.to_owned(),
+            address: address.to_owned(),
+        }),
+        ..EventHistoryReadFilter::default()
+    }
+}
+
+/// Noise on two chains plus resolver matches on one chain. Resolver A has 35 matches
+/// (14 emitted, 10 set to it, 10 cleared from it, 1 emitted pointer set to itself) and
+/// resolver B has 89 (40 emitted, 25 set to it, 23 cleared from it, 1 overlap). A few
+/// same-address rows on the other chain, non-canonical rows, and candidate rows must
+/// never match.
+const RESOLVER_FIXTURE: &str = r#"
+    INSERT INTO chain_lineage
+        (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+    SELECT chain, chain || '-block-' || n, n, to_timestamp(n), 'canonical'
+    FROM unnest(ARRAY['ethereum-sepolia', 'other-chain']) chain
+    CROSS JOIN generate_series(1, 150000) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, event_kind, source_family, manifest_version,
+         chain_id, block_hash, block_number, transaction_hash, transaction_index,
+         log_index, derivation_kind, canonicality_state, after_state, raw_fact_ref)
+    SELECT 'noise:' || chain || ':' || n || ':' || e,
+           'ens',
+           CASE WHEN e = 0 THEN 'ResolverChanged' ELSE 'RecordChanged' END,
+           'ens_v1_registry_l1', 1, chain, chain || '-block-' || n, n,
+           'tx-' || n, 0, e,
+           'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('node', 'node-' || n), '{}'::jsonb
+    FROM unnest(ARRAY['ethereum-sepolia', 'other-chain']) chain
+    CROSS JOIN generate_series(1, 150000) n
+    CROSS JOIN generate_series(0, 1) e;
+    INSERT INTO normalized_events
+        (event_identity, namespace, event_kind, source_family, manifest_version,
+         chain_id, block_hash, block_number, transaction_hash, transaction_index,
+         log_index, derivation_kind, canonicality_state, after_state, before_state, raw_fact_ref)
+    SELECT 'match:a:emit:' || n, 'ens', 'RecordChanged', 'ens_v1_resolver_l1', 1,
+           'ethereum-sepolia', 'ethereum-sepolia-block-' || (100 * n), 100 * n,
+           'tx-a-emit-' || n, 0, 0, 'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('node', 'node-a'), '{}'::jsonb,
+           jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000a1')
+    FROM generate_series(1, 14) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, event_kind, source_family, manifest_version,
+         chain_id, block_hash, block_number, transaction_hash, transaction_index,
+         log_index, derivation_kind, canonicality_state, after_state, before_state, raw_fact_ref)
+    SELECT 'match:a:after:' || n, 'ens', 'ResolverChanged', 'ens_v1_registry_l1', 1,
+           'ethereum-sepolia', 'ethereum-sepolia-block-' || (100 * n + 30), 100 * n + 30,
+           'tx-a-after-' || n, 0, 0, 'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('node', 'node-a', 'resolver', '0x00000000000000000000000000000000000000a1'),
+           jsonb_build_object('resolver', '0x0000000000000000000000000000000000000099'),
+           '{}'::jsonb
+    FROM generate_series(1, 10) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, event_kind, source_family, manifest_version,
+         chain_id, block_hash, block_number, transaction_hash, transaction_index,
+         log_index, derivation_kind, canonicality_state, after_state, before_state, raw_fact_ref)
+    SELECT 'match:a:before:' || n, 'ens', 'ResolverChanged', 'ens_v1_registry_l1', 1,
+           'ethereum-sepolia', 'ethereum-sepolia-block-' || (100 * n + 60), 100 * n + 60,
+           'tx-a-before-' || n, 0, 0, 'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('node', 'node-a', 'resolver', '0x0000000000000000000000000000000000000099'),
+           jsonb_build_object('resolver', '0x00000000000000000000000000000000000000a1'),
+           '{}'::jsonb
+    FROM generate_series(1, 10) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, event_kind, source_family, manifest_version,
+         chain_id, block_hash, block_number, transaction_hash, transaction_index,
+         log_index, derivation_kind, canonicality_state, after_state, before_state, raw_fact_ref)
+    SELECT 'match:b:emit:' || n, 'ens', 'RecordChanged', 'ens_v1_resolver_l1', 1,
+           'ethereum-sepolia', 'ethereum-sepolia-block-' || (37 * n + 11), 37 * n + 11,
+           'tx-b-emit-' || n, 0, 1, 'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('node', 'node-b'), '{}'::jsonb,
+           jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000b1')
+    FROM generate_series(1, 40) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, event_kind, source_family, manifest_version,
+         chain_id, block_hash, block_number, transaction_hash, transaction_index,
+         log_index, derivation_kind, canonicality_state, after_state, before_state, raw_fact_ref)
+    SELECT 'match:b:after:' || n, 'ens', 'ResolverChanged', 'ens_v1_registry_l1', 1,
+           'ethereum-sepolia', 'ethereum-sepolia-block-' || (53 * n + 17), 53 * n + 17,
+           'tx-b-after-' || n, 0, 1, 'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('node', 'node-b', 'resolver', '0x00000000000000000000000000000000000000b1'),
+           jsonb_build_object('resolver', '0x0000000000000000000000000000000000000099'),
+           '{}'::jsonb
+    FROM generate_series(1, 25) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, event_kind, source_family, manifest_version,
+         chain_id, block_hash, block_number, transaction_hash, transaction_index,
+         log_index, derivation_kind, canonicality_state, after_state, before_state, raw_fact_ref)
+    SELECT 'match:b:before:' || n, 'ens', 'ResolverChanged', 'ens_v1_registry_l1', 1,
+           'ethereum-sepolia', 'ethereum-sepolia-block-' || (71 * n + 23), 71 * n + 23,
+           'tx-b-before-' || n, 0, 1, 'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('node', 'node-b', 'resolver', '0x0000000000000000000000000000000000000099'),
+           jsonb_build_object('resolver', '0x00000000000000000000000000000000000000b1'),
+           '{}'::jsonb
+    FROM generate_series(1, 23) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, event_kind, source_family, manifest_version,
+         chain_id, block_hash, block_number, transaction_hash, transaction_index,
+         log_index, derivation_kind, canonicality_state, after_state, before_state, raw_fact_ref)
+    VALUES
+        ('match:a:overlap', 'ens', 'ResolverChanged', 'ens_v1_registry_l1', 1,
+         'ethereum-sepolia', 'ethereum-sepolia-block-9950', 9950, 'tx-a-overlap', 0, 0,
+         'ens_v1_unwrapped_authority', 'canonical',
+         jsonb_build_object('node', 'node-a', 'resolver', '0x00000000000000000000000000000000000000a1'),
+         jsonb_build_object('resolver', '0x0000000000000000000000000000000000000099'),
+         jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000a1')),
+        ('match:b:overlap', 'ens', 'ResolverChanged', 'ens_v1_registry_l1', 1,
+         'ethereum-sepolia', 'ethereum-sepolia-block-9960', 9960, 'tx-b-overlap', 0, 1,
+         'ens_v1_unwrapped_authority', 'canonical',
+         jsonb_build_object('node', 'node-b', 'resolver', '0x00000000000000000000000000000000000000b1'),
+         jsonb_build_object('resolver', '0x0000000000000000000000000000000000000099'),
+         jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000b1')),
+        ('excluded:a:other-chain', 'ens', 'RecordChanged', 'ens_v1_resolver_l1', 1,
+         'other-chain', 'other-chain-block-9000', 9000, 'tx-x1', 0, 0,
+         'ens_v1_unwrapped_authority', 'canonical',
+         jsonb_build_object('node', 'node-a'), '{}'::jsonb,
+         jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000a1')),
+        ('excluded:a:noncanonical', 'ens', 'RecordChanged', 'ens_v1_resolver_l1', 1,
+         'ethereum-sepolia', 'ethereum-sepolia-block-9001', 9001, 'tx-x2', 0, 0,
+         'ens_v1_unwrapped_authority', 'orphaned',
+         jsonb_build_object('node', 'node-a'), '{}'::jsonb,
+         jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000a1'));
+    INSERT INTO normalized_events
+        (event_identity, namespace, event_kind, source_family, manifest_version,
+         chain_id, block_hash, block_number, transaction_hash, transaction_index,
+         log_index, derivation_kind, canonicality_state, consumer_visibility,
+         migration_correlation_ids, after_state, before_state, raw_fact_ref)
+    VALUES
+        ('excluded:a:candidate', 'ens', 'RecordChanged', 'ens_v1_resolver_l1', 1,
+         'ethereum-sepolia', 'ethereum-sepolia-block-9002', 9002, 'tx-x3', 0, 0,
+         'ens_v1_unwrapped_authority', 'canonical', 'candidate', ARRAY['candidate-1'],
+         jsonb_build_object('node', 'node-a'), '{}'::jsonb,
+         jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000a1'));
+    ANALYZE normalized_events;
+    ANALYZE chain_lineage;
+"#;
+
+/// The old resolver condition, written out in full, as the reference the new pages must
+/// match row for row. The fixture rows trigger none of the product duplicate rules, so
+/// those rules cannot hide a difference here.
+async fn resolver_reference_identities(
+    pool: &PgPool,
+    address: &str,
+    order: HistoryOrder,
+) -> Result<Vec<String>> {
+    let order_sql = match order {
+        HistoryOrder::Desc => {
+            "ne.block_number DESC NULLS LAST, ne.chain_id ASC NULLS LAST, \
+             ne.block_hash DESC NULLS LAST, ne.transaction_index DESC NULLS LAST, \
+             ne.log_index DESC NULLS LAST, ne.event_identity DESC"
+        }
+        HistoryOrder::Asc => {
+            "ne.block_number ASC NULLS FIRST, ne.chain_id DESC NULLS FIRST, \
+             ne.block_hash ASC NULLS FIRST, ne.transaction_index ASC NULLS FIRST, \
+             ne.log_index ASC NULLS FIRST, ne.event_identity ASC"
+        }
+    };
+    let identities: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT ne.event_identity FROM normalized_events ne \
+         LEFT JOIN chain_lineage rb ON rb.chain_id = ne.chain_id AND rb.block_hash = ne.block_hash \
+         WHERE ne.consumer_visibility = 'activated' AND ne.namespace = 'ens' \
+           AND ne.event_kind IN ('RecordChanged', 'ResolverChanged') \
+           AND ne.chain_id = $1 \
+           AND (lower(ne.raw_fact_ref ->> 'emitting_address') = $2 \
+                OR (ne.event_kind = 'ResolverChanged' \
+                    AND (lower(ne.after_state ->> 'resolver') = $2 \
+                         OR lower(ne.before_state ->> 'resolver') = $2))) \
+           AND ne.canonicality_state IN ('canonical', 'safe', 'finalized') \
+           AND (ne.block_hash IS NULL OR rb.canonicality_state IN ('canonical', 'safe', 'finalized')) \
+         ORDER BY {order_sql}"
+    ))
+    .bind(RESOLVER_CHAIN)
+    .bind(address)
+    .fetch_all(pool)
+    .await?;
+    Ok(identities)
+}
+
+#[tokio::test]
+async fn resolver_pages_match_the_old_condition_row_for_row() -> Result<()> {
+    let database = phase_database("history_resolver_equivalence", RESOLVER_FIXTURE).await?;
+    let result = async {
+        for (address, matches) in [(RESOLVER_A, 35usize), (RESOLVER_B, 89usize)] {
+            for order in [HistoryOrder::Desc, HistoryOrder::Asc] {
+                let expected =
+                    resolver_reference_identities(database.pool(), address, order).await?;
+                ensure!(
+                    expected.len() == matches,
+                    "fixture must give {matches} matches for {address} {order:?}, gave {}",
+                    expected.len()
+                );
+                let filter = resolver_filter(order, address);
+                let (unpaged, no_more) =
+                    page_identities(database.pool(), &filter, None, 10_000).await?;
+                ensure!(
+                    no_more.is_none(),
+                    "unpaged resolver read must fit on one page"
+                );
+                ensure!(
+                    unpaged == expected,
+                    "unpaged resolver page differs from the old condition for {address} {order:?}"
+                );
+                for page_size in [2u64, 7, 20, 50, 100] {
+                    let mut paged = Vec::new();
+                    let mut cursor = None;
+                    loop {
+                        let (rows, next) =
+                            page_identities(database.pool(), &filter, cursor.as_ref(), page_size)
+                                .await?;
+                        paged.extend(rows);
+                        match next {
+                            Some(next) => cursor = Some(next),
+                            None => break,
+                        }
+                    }
+                    ensure!(
+                        paged == expected,
+                        "resolver pages of {page_size} differ from the old condition \
+                         for {address} {order:?}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+async fn resolver_pages_do_not_walk_the_chain_order_index() -> Result<()> {
+    let database = phase_database("history_resolver_plan", RESOLVER_FIXTURE).await?;
+    let result = async {
+        let mut connection = database.pool().acquire().await?;
+        let mut failures = Vec::new();
+        for (address, matches) in [(RESOLVER_A, 35.0f64), (RESOLVER_B, 89.0f64)] {
+            for order in [HistoryOrder::Desc, HistoryOrder::Asc] {
+                for limit in [21i64, 41, 51, 101, 151, 201] {
+                    let filter = resolver_filter(order, address);
+                    let mut query = QueryBuilder::<Postgres>::new("");
+                    push_history_page_query(&mut query, &filter, true, None, false, limit);
+                    let plan = explain_page(&mut connection, query, PlanMode::Unprepared).await?;
+                    let mut scans = Vec::new();
+                    resolver_page_scans(&plan[0]["Plan"], &mut scans);
+                    ensure!(
+                        !scans.is_empty(),
+                        "resolver page found no events scan: {plan}"
+                    );
+                    let visited: f64 = scans
+                        .iter()
+                        .map(|scan| {
+                            (scan["Actual Rows"].as_f64().unwrap_or(0.0)
+                                + scan["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
+                                * scan["Actual Loops"].as_f64().unwrap_or(1.0)
+                        })
+                        .sum();
+                    eprintln!(
+                        "resolver {address} {order:?} limit {limit}: visited {visited} \
+                         across {} scans",
+                        scans.len()
+                    );
+                    for scan in &scans {
+                        if scan["Index Name"] == ORDER_INDEX {
+                            failures.push(format!(
+                                "resolver {address} {order:?} limit {limit}: \
+                                 the page must not read {ORDER_INDEX}"
+                            ));
+                        }
+                        if scan["Node Type"] == "Seq Scan" {
+                            failures.push(format!(
+                                "resolver {address} {order:?} limit {limit}: \
+                                 the page must not sequentially scan normalized_events"
+                            ));
+                        }
+                    }
+                    let ceiling = matches * 4.0 + 64.0;
+                    if visited > ceiling {
+                        failures.push(format!(
+                            "resolver {address} {order:?} limit {limit}: \
+                             the page visited {visited} events, over the ceiling {ceiling} \
+                             for {matches} matches"
+                        ));
+                    }
+                }
+            }
+        }
+        ensure!(failures.is_empty(), "{}", failures.join("\n"));
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+/// Every scan of `normalized_events` that produces page rows, whatever alias it uses,
+/// not the per-row subqueries.
+fn resolver_page_scans<'a>(node: &'a Value, output: &mut Vec<&'a Value>) {
+    if matches!(
+        node["Parent Relationship"].as_str(),
+        Some("SubPlan" | "InitPlan")
+    ) {
+        return;
+    }
+    if node["Relation Name"] == "normalized_events" {
+        output.push(node);
+    }
+    if let Some(children) = node["Plans"].as_array() {
+        for child in children {
+            resolver_page_scans(child, output);
         }
     }
 }
