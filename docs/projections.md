@@ -2084,22 +2084,82 @@ Before consuming due summary clocks, the publication captures affected resolutio
 names in a transaction-local SQL work table. The set includes full label-hash
 suffix descendants at arbitrary supported depth, hash-only names and names that
 have never served a resolver. Changed physical registries expand their current
-and just-replaced mounts; original wrapper eligibility changes also expand the
-registry's current mounts. Resolver classification, pointer, entry, owner/fuse
-and cutover changes and due clocks are dependencies. Ordinary record values,
-record links and version-only pointer updates do not expand descendants. The
-writer composes at most 1,000 affected names at a time, journals the first
-summary before-image and retires active direct-divergence evidence for withheld
-resolvers. It creates no persistent path cache or new schema family. Normal
-publication and rebuild use the same decision; undo restores the journalled
-summary rows.
+and just-replaced mounts. Original wrapper eligibility changes also expand the
+registry's current mounts. Cutover changes and due clocks are dependencies.
+Ordinary record values, record links and version-only pointer updates do not
+expand descendants. The writer composes at most 1,000 affected names at a time,
+journals the first summary before-image and retires active direct-divergence
+evidence for withheld resolvers. It creates no persistent path cache or new
+schema family. Normal publication and rebuild use the same decision. Undo
+restores the journalled summary rows.
+
+A touched name always recomposes itself. The `.eth` names under a name also
+recompose when one of these changes can move their resolution paths. Each item
+says which names it expands.
+
+- An ENSv2 entry row is new or deleted, or its expiry, status, registry,
+  resource or token changes. The registry is the one that emitted the entry
+  (`registry_contract_instance_id`). This expands the name at that entry and the
+  names mounted below it.
+- An ENSv2 `ResolverChanged` or `SubregistryChanged` event for an entry falls
+  after the family marker's block, up to the publication's block. This expands
+  the name at that entry and the names mounted below it, whatever the event
+  changed.
+- A registry pointer or resource pointer row is new, or its resolver address
+  changes. For a resource pointer, a change of its last nonzero resolver address
+  counts too. This expands the name the pointer names and the names under it.
+- A resource pointer is deleted or moves to another name. This expands the name
+  it named before and the names under it. After a move it also expands the name
+  it names now and the names under that.
+- A resolver's classification changes. This expands the names whose registry or
+  resource pointer names that resolver, and the names under each. When an ENSv2
+  event set such a resource pointer, the name at that event's entry and the
+  names mounted below it expand too. An ENSv2 resource pointer cleared when its
+  canonical name was retired can still have that resolver as its last nonzero
+  resolver. It expands the name at the entry of its resource's latest physical
+  pointer event, and the names mounted below it, when that event still sets the
+  resolver ([published lookup state](#published-lookup-state)). A
+  classification change of the
+  [v1 fallback resolver](glossary.md#v1-fallback-resolver-ensv1resolver-exposed-as-v1_resolver)
+  expands every `.eth` name.
+- An input of wrapper eligibility changes. A name mounted in a [migration
+  registry](glossary.md#migration-registry-wrapperregistry) reads it from its
+  original child, the ENSv1 node with the same label under the wrapped name the
+  registry was created for. The inputs are the class of that node's
+  [getter-visible owner](glossary.md#getter-visible-owner) (unknown, zero or
+  nonzero) and the node's NameWrapper row. For the row, they are the row
+  appearing or going, the name it names, whether it has a modifier (a recorded
+  NameWrapper event that last set its state), its `PARENT_CANNOT_CONTROL` fuse
+  (fuses & 65536) and its stored expiry. They count for every ENSv1 node, since
+  any node can be an original child. This expands the node's name and the names
+  under it. A wrapper row that moves to another name expands both names.
+
+The pointer, classification and wrapper eligibility items expand names by name.
+Each such name also reads the retained ENSv1→ENSv2 migration evidence of itself
+and of its ancestors. When that evidence holds a created registry, the names
+mounted in that registry expand too. This is how a rebound name follows a change
+of its original child.
+
+A getter-visible owner that changes from one nonzero address to another does not
+expand, and neither does a change of an ENSv2 entry's owner alone. A change to
+any other field of a pointer row alone does not expand either. For a resource
+pointer, those fields include its position and its boundary kind, the kind of
+the latest `ResolverChanged` or `RecordVersionChanged` on its resource. A fuse
+other than `PARENT_CANNOT_CONTROL` does not expand. An ENSv2 `ResolverChanged`
+or `SubregistryChanged` event for an entry still expands through the second item
+above.
+
+A name whose [name surface](glossary.md#surface-name-surface) appeared since
+the [family marker](glossary.md#family-marker)'s block, up to the publication's
+block, always expands. The names under it could not read it as an ancestor
+before.
 
 The capture is one statement, `project:families.resolution_paths.prepare`. It
 looks names up in `name_surfaces` through two indexes Project owns there
 ([storage](storage.md#table-ownership)).
 
-- It finds the ancestors of a touched name by the hash of each suffix of its
-  label hash path.
+- It finds the ancestors of each name an item expands by name, by the hash of
+  each suffix of that name's label hash path.
 - It finds the names that hold a changed entry's label, and the names under a
   changed path, by the hash of the label's entry key. The entry key is the
   label hash with its low 32 bits cleared, as
@@ -2112,9 +2172,9 @@ rows and not which names it selects.
 Four cases still read every observed ENS surface:
 
 - A registry is created, upgraded or announced in the publication.
-- A touched name is, or sits under, a name whose retained ENSv1→ENSv2 migration
-  evidence holds a created registry. The ENSv1→ENSv2 migration can be in any
-  earlier block.
+- A name an item expands by name is, or sits under, a name whose retained
+  ENSv1→ENSv2 migration evidence holds a created registry. The ENSv1→ENSv2
+  migration can be in any earlier block.
 - The classification of the
   [v1 fallback resolver](glossary.md#v1-fallback-resolver-ensv1resolver-exposed-as-v1_resolver)
   changes.

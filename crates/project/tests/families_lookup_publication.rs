@@ -159,8 +159,9 @@ async fn shared_lookup_publication_matches_name_selection_and_inventory() -> Res
     fixture.cleanup().await
 }
 
-// A resolver-pointer change on an ancestor resource is path-bearing: every name whose
-// lookup depends on that pointer, the descendant included, is captured as lookup work
+// A resolver-pointer change on an ancestor resource can move other names'
+// resolution paths: every name whose lookup depends on that pointer, the descendant
+// included, is captured as lookup work
 // and recomposed, not just the ancestor itself.
 #[tokio::test]
 async fn an_ancestor_resolver_pointer_change_recomposes_descendant_lookup_work() -> Result<()> {

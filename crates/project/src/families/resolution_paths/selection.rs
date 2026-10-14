@@ -18,37 +18,50 @@
 //! SourceManifestUpdated has no block position. Supported manifest sync invalidates phase hashes
 //! and requires a complete Interpret/Project redo; it is not an incremental event-range trigger.
 //!
-//! Only a path-bearing change turns a touched name into a prefix that recomposes its whole
-//! subtree; every touched name still recomposes itself. A journal row is path-bearing only
-//! when one of the fields a descendant's composition reads through its ancestors changed,
-//! judged against the row's before-image: `project_ens_v2_entry_owner` on `expiry`, `status`,
-//! `registry_contract_instance_id`, `resource_id` or `token_id`; `project_registry_pointer`
-//! on `resolver_address`; `project_resource_pointer` on `resolver_address`,
-//! `nonzero_resolver_address`, or a move of its `namespace` or `namehash`, which is
-//! path-bearing for the name before the move and the name after it. A change of
-//! `boundary_kind` alone is not path-bearing. `project_resolver_classification` is
-//! already field-exact in `changed_resolvers`.
+//! Every touched name recomposes itself. A touched name also becomes a prefix whose whole
+//! subtree recomposes, but only when its change can move other names' resolution paths.
+//! A journal row is such a change only when a field that a descendant's composition reads
+//! through its ancestors changed, judged against the row's before-image:
+//!
+//! - `project_ens_v2_entry_owner`: `expiry`, `status`, `registry_contract_instance_id`,
+//!   `resource_id` or `token_id`.
+//! - `project_registry_pointer`: `resolver_address`.
+//! - `project_resource_pointer`: `resolver_address`, `nonzero_resolver_address`, or a move
+//!   of its `namespace` or `namehash`. A move counts for the name before it and the name
+//!   after it. A change of `boundary_kind` alone does not count.
+//!
+//! `project_resolver_classification` is already field-exact in `changed_resolvers`.
+//!
+//! A name whose surface is anchored in the publication's window also becomes a prefix. The
+//! window is every block after the family marker's block, up to the publication's block,
+//! the window the summary work list uses for new surfaces. The ENSv1 mirror lookup reads an
+//! ancestor's registry pointer only through the ancestor's surface. So the names under a
+//! newly surfaced name can compose to a different result even when no checked field of a
+//! pointer row changed.
 //!
 //! A rebound name reads the original node across branches through wrapper eligibility.
 //! The rebound name is mounted in a migration registry. Its composition does not read
 //! the original name as an ancestor. It reads the original node through wrapper
-//! eligibility instead. That read uses two inputs of the original node. The first is
-//! the class of its latest owner getter: unknown when there is no row, the owner word
-//! is unmasked, or the getter is missing or does not parse as an address; zero when the
-//! getter is the zero address; and nonzero for any other address. The stored reason
-//! does not change the class. Setting the owner to the registry itself and setting it
-//! to the zero address both read as zero. The second input is the wrapper row of the
-//! original node: whether the row is present, the name it names, whether it has a
-//! modifier, the parent-can-create fuse bit (fuses & 65536), and the parsed stored
-//! expiry. A change
-//! in any of those can change the eligibility answer, so `project_registry_node_state`
-//! is path-bearing when the getter class changes, and `project_wrapper_state` is
-//! path-bearing when the row appears or goes away, its name changes, its modifier
-//! presence changes, that fuse bit changes, or its parsed expiry changes. When a
-//! wrapper row or a resource pointer moves to another name, both the old name and the
-//! new name are path-bearing. Every other journalled family —
-//! `project_parent_subregistry`, `project_binding_candidate`, `project_name_state` and
-//! `project_lifecycle_event` — moves only the name it names, never its descendants.
+//! eligibility instead. That read uses two inputs of the original node.
+//!
+//! The first is the class of its latest owner getter. The class is unknown when there is
+//! no row, the owner word is unmasked, or the getter is missing or does not parse as an
+//! address. It is zero when the getter is the zero address, and nonzero for any other
+//! address. The stored reason does not change the class. Setting the owner to the
+//! registry itself and setting it to the zero address both read as zero.
+//!
+//! The second input is the wrapper row of the original node: whether the row is present,
+//! the name it names, whether it has a modifier, its `PARENT_CANNOT_CONTROL` fuse
+//! (fuses & 65536), and the parsed stored expiry.
+//!
+//! A change in any of those can change the eligibility answer. So
+//! `project_registry_node_state` can move other names' resolution paths when the getter
+//! class changes. `project_wrapper_state` can move them when the row appears or goes away,
+//! its name changes, its modifier presence changes, that fuse bit changes, or its parsed
+//! expiry changes. When a wrapper row or a resource pointer moves to another name, the
+//! change counts for both the old name and the new name. Every other journalled family
+//! (`project_parent_subregistry`, `project_binding_candidate`, `project_name_state` and
+//! `project_lifecycle_event`) moves only the name it names, never its descendants.
 use bigname_storage::families::name::PHYSICAL_POINTER_EVENT_SQL;
 
 pub(super) fn statement(normal_work: &str) -> String {
@@ -69,7 +82,7 @@ pub(super) fn statement(normal_work: &str) -> String {
           AND family IN ('project_ens_v2_entry_owner', 'project_registry_pointer',
             'project_resource_pointer', 'project_resolver_classification',
             'project_registry_node_state', 'project_wrapper_state')
-    ), path_bearing_names AS MATERIALIZED (
+    ), names_whose_change_can_move_descendants AS MATERIALIZED (
         SELECT pointer.namespace || ':' || lower(pointer.node) AS logical_name_id
         FROM journal JOIN project_registry_pointer pointer
           ON journal.family='project_registry_pointer' AND pointer.chain_id=$1
@@ -184,7 +197,7 @@ pub(super) fn statement(normal_work: &str) -> String {
         SELECT 1 FROM changed_resolvers WHERE resolver='0x322b7581ca210a69c6d0e0d7c88a7688d2789cb0'
     ), source_names AS MATERIALIZED (
         SELECT logical_name_id FROM normal
-        WHERE logical_name_id IN (SELECT logical_name_id FROM path_bearing_names)
+        WHERE logical_name_id IN (SELECT logical_name_id FROM names_whose_change_can_move_descendants)
         UNION
         SELECT pointer.namespace || ':' || lower(pointer.namehash)
         FROM changed_resolvers changed JOIN project_resource_pointer pointer
@@ -293,6 +306,12 @@ pub(super) fn statement(normal_work: &str) -> String {
     ), logical_prefixes AS MATERIALIZED (
         SELECT DISTINCT surface.labelhashes FROM source_names name JOIN name_surfaces surface
           ON surface.logical_name_id=name.logical_name_id AND surface.chain_id=$1 AND surface.namespace='ens'
+        UNION
+        -- A surface anchored in the publication's window is a prefix too (see the module docs).
+        -- The summary work list holds every such name, so its surfaces are read by key.
+        SELECT DISTINCT surface.labelhashes FROM normal name JOIN name_surfaces surface
+          ON surface.logical_name_id=name.logical_name_id AND surface.chain_id=$1 AND surface.namespace='ens'
+        WHERE surface.block_number>$4 AND surface.block_number<=$2
     ), candidates AS MATERIALIZED (
         -- A changed registry can sit below any name, so every surface is a candidate.
         SELECT surface.labelhashes FROM name_surfaces surface
@@ -384,7 +403,8 @@ pub(super) fn statement(normal_work: &str) -> String {
         SELECT summary.logical_name_id FROM project_name_summary summary
         WHERE summary.chain_id=$1 AND summary.recompose_at<=$3
         UNION
-        -- Every touched name recomposes itself, path-bearing or not.
+        -- Every touched name recomposes itself, whether or not its change can move
+        -- other names' resolution paths.
         SELECT logical_name_id FROM normal
     )
     SELECT DISTINCT surface.logical_name_id FROM affected

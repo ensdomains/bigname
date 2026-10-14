@@ -314,6 +314,54 @@ impl World {
         .await
     }
 
+    /// The resource pointer of `resource` came from an ENSv1 registry `ResolverChanged` for
+    /// `name` at `block`, with event identity `identity`. The event is stored and the pointer
+    /// row takes its source family, so no ENSv2 event of the window names the pointer.
+    async fn set_by_ens_v1(
+        &self,
+        identity: &str,
+        block: i64,
+        name: &str,
+        resource: &str,
+        resolver: &str,
+    ) -> Result<()> {
+        self.event(
+            identity,
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            block,
+            Some(&id(name)),
+            Some(resource),
+            json!({"node": node(name), "resolver": resolver}),
+            "0x00000000000000000000000000000000000000e1",
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE project_resource_pointer SET source_family = 'ens_v1_registry_l1'
+             WHERE chain_id = $1 AND resource_id = $2::uuid",
+        )
+        .bind(CHAIN)
+        .bind(resource)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The journal row of the publication at `block` for `family` has no before-image: the
+    /// publication wrote a new row.
+    async fn new_row(&self, block: i64, family: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE project_family_undo SET before_image = NULL
+             WHERE chain_id = $1 AND block_number = $2 AND family = $3",
+        )
+        .bind(CHAIN)
+        .bind(block)
+        .bind(family)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// The publication at `block` changed the registry node state of `name`.
     /// Each side is `(owner, owner_getter, owner_getter_reason, owner_word_unmasked)`.
     /// A missing side means no row on that side.
@@ -439,7 +487,8 @@ impl World {
         .await
     }
 
-    /// An activated canonical event at `block`, with no transaction position.
+    /// An activated canonical event at `block`, with no transaction position. A resource the
+    /// event names gets its `resources` row first, unless it has one.
     #[allow(clippy::too_many_arguments)]
     async fn event(
         &self,
@@ -452,6 +501,19 @@ impl World {
         after: Value,
         emitter: &str,
     ) -> Result<()> {
+        if let Some(resource) = resource {
+            sqlx::query(
+                "INSERT INTO resources (resource_id, chain_id, block_hash, block_number,
+                     canonicality_state)
+                 VALUES ($1::uuid, $2, $3, 0, 'canonical')
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(resource)
+            .bind(CHAIN)
+            .bind(hash(0))
+            .execute(&self.pool)
+            .await?;
+        }
         sqlx::query(
             "INSERT INTO normalized_events (event_identity, namespace, logical_name_id,
                  resource_id, event_kind, source_family, manifest_version, chain_id,
@@ -891,7 +953,9 @@ async fn an_owner_only_parent_change_selects_the_parent_only() -> Result<()> {
 // resolver, so the before-image's `resolver_address` is null and only a distinct-from
 // comparison sees it. A later pointer row that only moves `pointer_position`, with
 // `resolver_address`, `nonzero_resolver_address` and `boundary_kind` unchanged, recomposes
-// the parent alone.
+// the parent alone. That later row comes from an ENSv1 registry `ResolverChanged` that sets
+// the same resolver again. The same event from an ENSv2 registry expands through its entry
+// (`an_ensv2_pointer_event_in_the_window_selects_the_names_under_its_entry`).
 #[tokio::test]
 async fn a_resource_pointer_resolver_change_selects_the_subtree_but_a_position_only_change_selects_the_parent_only()
 -> Result<()> {
@@ -937,7 +1001,7 @@ async fn a_resource_pointer_resolver_change_selects_the_subtree_but_a_position_o
             RESOLVER,
             RESOLVER,
             "ResolverChanged",
-            json!({"block_number": 7, "event_identity": "pointer:foo"}),
+            json!({"block_number": 7, "event_identity": "pointer:foo:7"}),
             json!({
                 "namespace": "ens", "namehash": node("foo.eth"),
                 "resolver_address": RESOLVER,
@@ -946,6 +1010,9 @@ async fn a_resource_pointer_resolver_change_selects_the_subtree_but_a_position_o
                 "pointer_position": at_five
             }),
         )
+        .await?;
+    world
+        .set_by_ens_v1("pointer:foo:7", 7, "foo.eth", RESOURCE, RESOLVER)
         .await?;
     let position_only = Call {
         block: 7,
@@ -956,9 +1023,97 @@ async fn a_resource_pointer_resolver_change_selects_the_subtree_but_a_position_o
     world.cleanup().await
 }
 
+// The ancestor of `a.foo.eth` and `x.a.foo.eth` had no surface, so their composition could
+// not read a resolver through it. The ancestor's surface appears at block 5, after the
+// family marker's block 4. Its resource pointer row is the same on every field the
+// selection checks, with only its position moved by an ENSv1 registry `ResolverChanged`
+// that sets the same resolver again, so no checked field expands it. The
+// pointer row touches the ancestor, which recomposes itself, and the new surface expands
+// it to both names under it. With the surface at block 4, the window's lower edge, the
+// surface is not new and the pointer row selects the ancestor alone.
+#[tokio::test]
+async fn a_first_surface_on_an_ancestor_selects_its_descendants() -> Result<()> {
+    const RESOURCE: &str = "00000000-0000-0000-0000-000000000021";
+    const RESOLVER: &str = "0x00000000000000000000000000000000000000c1";
+    for (anchor, expected) in [
+        (5, &["foo.eth", "a.foo.eth", "x.a.foo.eth"][..]),
+        (4, &["foo.eth"][..]),
+    ] {
+        let mut world = World::new().await?;
+        world.surfaces(&["eth", "a.foo.eth", "x.a.foo.eth"]).await?;
+        world.surface(Surface::of("foo.eth").block(anchor)).await?;
+        world
+            .resource_pointer_changed(
+                5,
+                "foo.eth",
+                RESOURCE,
+                RESOLVER,
+                RESOLVER,
+                "ResolverChanged",
+                json!({"block_number": 5, "event_identity": "pointer:foo"}),
+                json!({
+                    "namespace": "ens", "namehash": node("foo.eth"),
+                    "resolver_address": RESOLVER,
+                    "nonzero_resolver_address": RESOLVER,
+                    "boundary_kind": "ResolverChanged",
+                    "pointer_position": {"block_number": 3, "event_identity": "pointer:foo:3"}
+                }),
+            )
+            .await?;
+        world
+            .set_by_ens_v1("pointer:foo", 5, "foo.eth", RESOURCE, RESOLVER)
+            .await?;
+        let call = Call {
+            block: 5,
+            after: 4,
+            root: Some(ROOT),
+        };
+        world.assert_selects(call, expected).await?;
+        world.cleanup().await?;
+    }
+    Ok(())
+}
+
+// Many names get their first surface in one block. Each new name recomposes the names
+// under it, and no other name: a name that is not under a new name is not selected.
+#[tokio::test]
+async fn first_surfaces_on_new_names_select_only_the_names_under_each() -> Result<()> {
+    let mut world = World::new().await?;
+    world
+        .surfaces(&[
+            "eth",
+            "a.foo.eth",
+            "x.a.foo.eth",
+            "a.bar.eth",
+            "qux.eth",
+            "a.qux.eth",
+        ])
+        .await?;
+    world.surface(Surface::of("foo.eth").block(5)).await?;
+    world.surface(Surface::of("bar.eth").block(5)).await?;
+    let call = Call {
+        block: 5,
+        after: 4,
+        root: Some(ROOT),
+    };
+    world
+        .assert_selects(
+            call,
+            &[
+                "foo.eth",
+                "a.foo.eth",
+                "x.a.foo.eth",
+                "bar.eth",
+                "a.bar.eth",
+            ],
+        )
+        .await?;
+    world.cleanup().await
+}
+
 // A lifecycle event retained for an ancestor recomposes the ancestor and no descendant:
 // no lifecycle kind writes a row naming another name (see the module docs), so the event
-// is not path-bearing.
+// does not move any other name's resolution path.
 #[tokio::test]
 async fn an_ancestor_lifecycle_insert_selects_the_ancestor_only() -> Result<()> {
     let mut world = World::new().await?;
@@ -993,8 +1148,9 @@ async fn an_ancestor_lifecycle_insert_selects_the_ancestor_only() -> Result<()> 
     world.cleanup().await
 }
 
-// A name with a path-bearing change reaches the ENSv1→ENSv2 migration evidence of each of
-// its ancestors of two labels or more, itself included, and the ancestor is found by its
+// A name whose change can move other names' resolution paths reaches the
+// ENSv1→ENSv2 migration evidence of each of its ancestors of two labels or more,
+// itself included, and the ancestor is found by its
 // whole ordered path. `a.foo.eth`'s registry pointer changed. Its own migration names the
 // registry at `n.eth` and `foo.eth`'s the one at `m.eth`.
 // `eth` has one label, and `eth.foo` holds `foo.eth`'s labels in another order: their
@@ -1141,7 +1297,7 @@ async fn a_mixed_case_label_hash_matches_by_key_and_not_by_suffix() -> Result<()
 
 // Nothing forbids a null element in `labelhashes`, and array equality treats two nulls as
 // equal. `null.foo.eth` holds a null first label and `bar.null.eth` a null second label. Both
-// are touched and select only themselves; the names below them are not selected.
+// are touched and select only themselves. The names below them are not selected.
 #[tokio::test]
 async fn a_null_label_hash_element_keeps_the_scan_result() -> Result<()> {
     let mut world = World::new().await?;
@@ -1318,7 +1474,7 @@ async fn a_surface_of_another_namespace_with_the_same_path_is_never_selected() -
         .migrated("other namespace foo.eth", &registry(1), 3)
         .await?;
     world.touch(5, "a.foo.eth").await?;
-    // Only `a.foo.eth` itself is selected; the surfaces above spell its descendant's path
+    // Only `a.foo.eth` itself is selected. The surfaces above spell its descendant's path
     // in another namespace and on another chain.
     let call = Call {
         block: 5,
@@ -1439,10 +1595,10 @@ async fn a_nonzero_to_nonzero_getter_change_on_a_parent_selects_that_parent_alon
     world.cleanup().await
 }
 
-// The parent-can-create fuse bit flips on the original child's wrapper row.
+// The `PARENT_CANNOT_CONTROL` fuse (fuses & 65536) flips on the original child's wrapper row.
 // Wrapper eligibility can move, so the rebound name is recomposed.
 #[tokio::test]
-async fn a_parent_can_create_fuse_flip_selects_the_rebound_name() -> Result<()> {
+async fn a_parent_cannot_control_fuse_flip_selects_the_rebound_name() -> Result<()> {
     const RESOURCE: &str = "00000000-0000-0000-0000-000000000011";
     let world = rebound_world().await?;
     world
@@ -1517,7 +1673,7 @@ async fn a_stored_expiry_change_selects_the_rebound_name() -> Result<()> {
     world.cleanup().await
 }
 
-// Another fuse bit changes alone. The parent-can-create bit, the stored
+// Another fuse bit changes alone. The `PARENT_CANNOT_CONTROL` fuse, the stored
 // expiry, the name and the modifier stay the same. The rebound name is not
 // selected.
 #[tokio::test]
@@ -1555,9 +1711,8 @@ async fn a_change_to_another_fuse_bit_alone_does_not_expand() -> Result<()> {
     world.cleanup().await
 }
 
-// A resource pointer moves from one name to another. The move is
-// path-bearing for both names. Each name and the names under it are
-// recomposed.
+// A resource pointer moves from one name to another. The move counts for both
+// names: each name and the names under it are recomposed.
 #[tokio::test]
 async fn a_resource_pointer_move_selects_the_old_and_new_names_and_the_names_under_both()
 -> Result<()> {
@@ -1596,8 +1751,10 @@ async fn a_resource_pointer_move_selects_the_old_and_new_names_and_the_names_und
     world.cleanup().await
 }
 
-// Only the boundary kind changes on a resource pointer. No resolver, no
-// nonzero resolver and no name change. The name recomposes alone.
+// Only the boundary kind changes on a resource pointer. A resolver's
+// `RecordVersionChanged` follows the pointer's `ResolverChanged` from an earlier block.
+// No resolver, no nonzero resolver, no position and no name change, and no ENSv2
+// `ResolverChanged` or `SubregistryChanged` falls in the window. The name recomposes alone.
 #[tokio::test]
 async fn a_boundary_kind_only_change_selects_the_name_itself_alone() -> Result<()> {
     const RESOURCE: &str = "00000000-0000-0000-0000-000000000015";
@@ -1606,6 +1763,8 @@ async fn a_boundary_kind_only_change_selects_the_name_itself_alone() -> Result<(
     world
         .surfaces(&["eth", "foo.eth", "a.foo.eth", "x.a.foo.eth"])
         .await?;
+    world.eth().await?;
+    let at_three = json!({"block_number": 3, "event_identity": "pointer:foo"});
     world
         .resource_pointer_changed(
             5,
@@ -1613,15 +1772,27 @@ async fn a_boundary_kind_only_change_selects_the_name_itself_alone() -> Result<(
             RESOURCE,
             RESOLVER,
             RESOLVER,
-            "SubregistryChanged",
-            json!({"block_number": 5, "event_identity": "pointer:foo"}),
+            "RecordVersionChanged",
+            at_three.clone(),
             json!({
                 "namespace": "ens", "namehash": node("foo.eth"),
                 "resolver_address": RESOLVER,
                 "nonzero_resolver_address": RESOLVER,
                 "boundary_kind": "ResolverChanged",
-                "pointer_position": {"block_number": 5, "event_identity": "pointer:foo"}
+                "pointer_position": at_three
             }),
+        )
+        .await?;
+    world
+        .event(
+            "version:foo",
+            "RecordVersionChanged",
+            "ens_v1_resolver_l1",
+            5,
+            Some(&id("foo.eth")),
+            Some(RESOURCE),
+            json!({"node": node("foo.eth"), "version": 1}),
+            RESOLVER,
         )
         .await?;
     let call = Call {
@@ -1631,4 +1802,645 @@ async fn a_boundary_kind_only_change_selects_the_name_itself_alone() -> Result<(
     };
     world.assert_selects(call, &["foo.eth"]).await?;
     world.cleanup().await
+}
+
+// Each field of an ENSv2 entry that a descendant reads through it selects the names at the
+// entry and under it when it changes alone: status, expiry, the emitting registry
+// (`registry_contract_instance_id`), resource and token. A deleted entry row selects them
+// too. A journal row whose before-image equals the current row selects nothing.
+#[tokio::test]
+async fn each_checked_entry_field_change_selects_the_names_under_the_entry() -> Result<()> {
+    let token = labelhash("foo");
+    let current = json!({
+        "status": "registered", "expiry": 100, "registry_contract_instance_id": "instance:1",
+        "resource_id": null, "token_id": token
+    });
+    let under: &[&str] = &["foo.eth", "a.foo.eth"];
+    let mut cases = vec![("unchanged", current.clone(), true, &[][..])];
+    for (field, before) in [
+        ("status", json!("reserved")),
+        ("expiry", json!(99)),
+        ("registry_contract_instance_id", json!("instance:0")),
+        ("resource_id", json!("00000000-0000-0000-0000-000000000031")),
+        ("token_id", json!(labelhash("other"))),
+    ] {
+        let mut image = current.clone();
+        image[field] = before;
+        cases.push((field, image, true, under));
+    }
+    cases.push(("deleted", current.clone(), false, under));
+    for (case, before, kept, expected) in cases {
+        let mut world = World::new().await?;
+        world
+            .surfaces(&["eth", "foo.eth", "a.foo.eth", "bar.eth"])
+            .await?;
+        world.eth().await?;
+        if kept {
+            sqlx::query(
+                "INSERT INTO project_ens_v2_entry_owner (chain_id, registry, entry_key, token_id,
+                     status, expiry, registry_contract_instance_id, block_number, event_identity)
+                 VALUES ($1, $2, $3, $4, 'registered', 100, 'instance:1', 5, 'entry:foo')",
+            )
+            .bind(CHAIN)
+            .bind(ETH)
+            .bind(entry_key(&token))
+            .bind(&token)
+            .execute(&world.pool)
+            .await?;
+        }
+        world
+            .journal(
+                5,
+                "project_ens_v2_entry_owner",
+                json!([CHAIN, ETH, entry_key(&token)]),
+                Some(before),
+            )
+            .await?;
+        let call = Call {
+            block: 5,
+            after: 4,
+            root: Some(ROOT),
+        };
+        world
+            .assert_selects(call, expected)
+            .await
+            .with_context(|| format!("entry case {case}"))?;
+        world.cleanup().await?;
+    }
+    Ok(())
+}
+
+// An ENSv2 `ResolverChanged` or `SubregistryChanged` event after the family marker's block,
+// up to the publication's block, selects the names at its entry and under it, whatever it
+// changed. No journal row names the entry. The root registry's event for `eth` selects every
+// `.eth` name. An event at the marker's block, or the same event from an ENSv1 family,
+// selects nothing.
+#[tokio::test]
+async fn an_ensv2_pointer_event_in_the_window_selects_the_names_under_its_entry() -> Result<()> {
+    let under_foo: &[&str] = &["foo.eth", "a.foo.eth"];
+    let under_eth: &[&str] = &["eth", "foo.eth", "a.foo.eth", "bar.eth"];
+    for (kind, family, emitter, label, block, expected) in [
+        (
+            "ResolverChanged",
+            "ens_v2_registry_l1",
+            ETH,
+            "foo",
+            5,
+            under_foo,
+        ),
+        (
+            "SubregistryChanged",
+            "ens_v2_registry_l1",
+            ETH,
+            "foo",
+            5,
+            under_foo,
+        ),
+        (
+            "ResolverChanged",
+            "ens_v2_root_l1",
+            ROOT,
+            "eth",
+            5,
+            under_eth,
+        ),
+        (
+            "ResolverChanged",
+            "ens_v2_registry_l1",
+            ETH,
+            "foo",
+            4,
+            &[][..],
+        ),
+        (
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            ETH,
+            "foo",
+            5,
+            &[][..],
+        ),
+    ] {
+        let mut world = World::new().await?;
+        world
+            .surfaces(&["eth", "foo.eth", "a.foo.eth", "bar.eth"])
+            .await?;
+        world.eth().await?;
+        world
+            .event(
+                "pointer:event",
+                kind,
+                family,
+                block,
+                None,
+                None,
+                json!({
+                    "resolver": "0x00000000000000000000000000000000000000c1",
+                    "token_id": labelhash(label)
+                }),
+                emitter,
+            )
+            .await?;
+        let call = Call {
+            block: 5,
+            after: 4,
+            root: Some(ROOT),
+        };
+        world
+            .assert_selects(call, expected)
+            .await
+            .with_context(|| format!("{kind} from {family} at block {block}"))?;
+        world.cleanup().await?;
+    }
+    Ok(())
+}
+
+// A resource pointer row that is new, that changes only its last nonzero resolver, or that is
+// deleted selects the name it named and the names under it.
+#[tokio::test]
+async fn a_new_deleted_or_last_nonzero_only_resource_pointer_selects_the_names_under_its_name()
+-> Result<()> {
+    const RESOURCE: &str = "00000000-0000-0000-0000-000000000032";
+    const RESOLVER: &str = "0x00000000000000000000000000000000000000c1";
+    const LATER: &str = "0x00000000000000000000000000000000000000c2";
+    for case in ["new", "last nonzero only", "deleted"] {
+        let mut world = World::new().await?;
+        world
+            .surfaces(&["eth", "foo.eth", "a.foo.eth", "bar.eth"])
+            .await?;
+        let image = json!({
+            "namespace": "ens", "namehash": node("foo.eth"),
+            "resolver_address": ZERO_ADDR,
+            "nonzero_resolver_address": RESOLVER,
+            "boundary_kind": "ResolverChanged",
+            "pointer_position": {"block_number": 3, "event_identity": "pointer:foo"}
+        });
+        let at_five = json!({"block_number": 5, "event_identity": "pointer:foo:5"});
+        match case {
+            "new" => {
+                world
+                    .resource_pointer_changed(
+                        5,
+                        "foo.eth",
+                        RESOURCE,
+                        RESOLVER,
+                        RESOLVER,
+                        "ResolverChanged",
+                        at_five,
+                        image,
+                    )
+                    .await?;
+                world.new_row(5, "project_resource_pointer").await?;
+            }
+            "last nonzero only" => {
+                world
+                    .resource_pointer_changed(
+                        5,
+                        "foo.eth",
+                        RESOURCE,
+                        ZERO_ADDR,
+                        LATER,
+                        "ResolverChanged",
+                        at_five,
+                        image,
+                    )
+                    .await?;
+            }
+            _ => {
+                world
+                    .journal(
+                        5,
+                        "project_resource_pointer",
+                        json!([CHAIN, RESOURCE]),
+                        Some(image),
+                    )
+                    .await?;
+            }
+        }
+        let call = Call {
+            block: 5,
+            after: 4,
+            root: Some(ROOT),
+        };
+        world
+            .assert_selects(call, &["foo.eth", "a.foo.eth"])
+            .await
+            .with_context(|| format!("resource pointer case {case}"))?;
+        world.cleanup().await?;
+    }
+    Ok(())
+}
+
+// A new registry pointer row selects the names under its node. A journal row whose resolver
+// is the same, as when the ENSv1 registry sets a node's resolver again, selects the node
+// alone.
+#[tokio::test]
+async fn a_new_registry_pointer_selects_the_names_under_its_node_and_a_repeated_one_its_node_alone()
+-> Result<()> {
+    const RESOLVER: &str = "0x00000000000000000000000000000000000000c1";
+    for (case, new, expected) in [
+        ("new", true, &["foo.eth", "a.foo.eth"][..]),
+        ("same resolver", false, &["foo.eth"][..]),
+    ] {
+        let mut world = World::new().await?;
+        world
+            .surfaces(&["eth", "foo.eth", "a.foo.eth", "bar.eth"])
+            .await?;
+        world
+            .registry_pointer_changed(5, "foo.eth", RESOLVER, RESOLVER)
+            .await?;
+        if new {
+            world.new_row(5, "project_registry_pointer").await?;
+        }
+        let call = Call {
+            block: 5,
+            after: 4,
+            root: Some(ROOT),
+        };
+        world
+            .assert_selects(call, expected)
+            .await
+            .with_context(|| format!("registry pointer case {case}"))?;
+        world.cleanup().await?;
+    }
+    Ok(())
+}
+
+// Each change of the original child's getter class selects the rebound name: a row that
+// appears or goes, an owner word that becomes unmasked and a getter that does not parse as an
+// address. The before-image is classed the same way, so an unmasked or unparsed getter before a
+// holder is a change too. Unknown to unknown, and a reason-only change within the zero class,
+// select the original child alone.
+#[tokio::test]
+async fn each_owner_getter_class_change_selects_the_rebound_name() -> Result<()> {
+    let rebound: &[&str] = &["child.foo.eth", "rebound.eth", "child.rebound.eth"];
+    let alone: &[&str] = &["child.foo.eth"];
+    let holder = (Some(HOLDER_ADDR), Some(HOLDER_ADDR), None, false);
+    let unmasked = (Some(HOLDER_ADDR), Some(HOLDER_ADDR), None, true);
+    let unparsed = (Some(HOLDER_ADDR), Some("0x1234"), Some("unparsed"), false);
+    let zero = (Some(ZERO_ADDR), Some(ZERO_ADDR), Some("zero"), false);
+    let registry_self = (
+        Some(REGISTRY_ADDR),
+        Some(ZERO_ADDR),
+        Some("registry_self"),
+        false,
+    );
+    for (case, before, current, expected) in [
+        ("appears", None, Some(holder), rebound),
+        ("goes", Some(holder), None, rebound),
+        ("unmasked", Some(holder), Some(unmasked), rebound),
+        ("unparsed getter", Some(holder), Some(unparsed), rebound),
+        ("unmasked to holder", Some(unmasked), Some(holder), rebound),
+        ("unparsed to holder", Some(unparsed), Some(holder), rebound),
+        ("unknown to unknown", None, Some(unmasked), alone),
+        ("reason only", Some(zero), Some(registry_self), alone),
+    ] {
+        let world = rebound_world().await?;
+        world
+            .registry_node_state_changed(5, "child.foo.eth", before, current)
+            .await?;
+        let call = Call {
+            block: 5,
+            after: 4,
+            root: Some(ROOT),
+        };
+        world
+            .assert_selects(call, expected)
+            .await
+            .with_context(|| format!("getter case {case}"))?;
+        world.cleanup().await?;
+    }
+    Ok(())
+}
+
+// Each wrapper row change that eligibility reads selects the rebound name: a row that
+// appears, a row that goes and a change of modifier presence. A row that moves from
+// `foo.eth` to the original child selects both names and the names under each.
+#[tokio::test]
+async fn each_wrapper_row_change_selects_the_rebound_name() -> Result<()> {
+    const RESOURCE: &str = "00000000-0000-0000-0000-000000000033";
+    let rebound: &[&str] = &["child.foo.eth", "rebound.eth", "child.rebound.eth"];
+    let wrapped = (
+        Some("child.foo.eth"),
+        Some(65536),
+        true,
+        Some("1907776000"),
+        Some("wrapped"),
+        Some(false),
+    );
+    let no_modifier = (wrapped.0, wrapped.1, false, wrapped.3, wrapped.4, wrapped.5);
+    let on_parent = (
+        Some("foo.eth"),
+        wrapped.1,
+        wrapped.2,
+        wrapped.3,
+        wrapped.4,
+        wrapped.5,
+    );
+    for (case, before, current, expected) in [
+        ("appears", None, Some(wrapped), rebound),
+        ("goes", Some(wrapped), None, rebound),
+        ("modifier", Some(no_modifier), Some(wrapped), rebound),
+        (
+            "moves",
+            Some(on_parent),
+            Some(wrapped),
+            &[
+                "foo.eth",
+                "child.foo.eth",
+                "rebound.eth",
+                "child.rebound.eth",
+            ][..],
+        ),
+    ] {
+        let world = rebound_world().await?;
+        world
+            .wrapper_state_changed(5, RESOURCE, before, current)
+            .await?;
+        let call = Call {
+            block: 5,
+            after: 4,
+            root: Some(ROOT),
+        };
+        world
+            .assert_selects(call, expected)
+            .await
+            .with_context(|| format!("wrapper case {case}"))?;
+        world.cleanup().await?;
+    }
+    Ok(())
+}
+
+// A classification change of a resolver other than the v1 fallback resolver selects the
+// names whose pointers name it and the names under each:
+// - `foo.eth`'s resource pointer and `bar.eth`'s registry pointer name it.
+// - An unnamed resource pointer was set by an ENSv2 `ResolverChanged` at `baz`'s entry.
+// - An unnamed resource pointer at `qux`'s entry was cleared when its canonical name was
+//   retired. Its last nonzero resolver is the changed one, and so is the resolver of its
+//   resource's latest physical pointer event.
+// `vex`'s pointer has the same shape, but its latest physical pointer event sets the zero
+// address. `other.eth`'s pointer names another resolver. Neither is selected. Each checked
+// field of the classification row counts alone, and a row with none of them changed selects
+// nothing.
+#[tokio::test]
+async fn a_resolver_classification_change_selects_the_names_that_read_the_resolver() -> Result<()> {
+    const CHANGED: &str = "0x00000000000000000000000000000000000000c7";
+    const OTHER: &str = "0x00000000000000000000000000000000000000c8";
+    let current = json!({
+        "classification": {"kind": "a"}, "support_status": "supported",
+        "unsupported_reason": null, "manifest_id": 1
+    });
+    let readers: &[&str] = &[
+        "foo.eth",
+        "a.foo.eth",
+        "bar.eth",
+        "a.bar.eth",
+        "baz.eth",
+        "a.baz.eth",
+        "qux.eth",
+        "a.qux.eth",
+    ];
+    let mut cases = vec![("unchanged", current.clone(), &[][..])];
+    for (field, before) in [
+        ("classification", json!({"kind": "b"})),
+        ("support_status", json!("unsupported")),
+        ("unsupported_reason", json!("reason")),
+        ("manifest_id", json!(2)),
+    ] {
+        let mut image = current.clone();
+        image[field] = before;
+        cases.push((field, image, readers));
+    }
+    let retired = json!({
+        "resolver": null, "source_event": "RegistryPathExpired",
+        "derived_from": "interpreter_state", "terminal_reason": "registry_name_binding_expired"
+    });
+    for (case, before, expected) in cases {
+        let mut world = World::new().await?;
+        world
+            .surfaces(&[
+                "eth",
+                "foo.eth",
+                "a.foo.eth",
+                "bar.eth",
+                "a.bar.eth",
+                "baz.eth",
+                "a.baz.eth",
+                "qux.eth",
+                "a.qux.eth",
+                "vex.eth",
+                "a.vex.eth",
+                "other.eth",
+                "a.other.eth",
+            ])
+            .await?;
+        world.eth().await?;
+        let position = |identity: &str| json!({"block_number": 2, "event_identity": identity});
+        for (name, resource, resolver) in [
+            ("foo.eth", "00000000-0000-0000-0000-000000000041", CHANGED),
+            ("other.eth", "00000000-0000-0000-0000-000000000042", OTHER),
+            ("baz.eth", "00000000-0000-0000-0000-000000000043", CHANGED),
+            ("qux.eth", "00000000-0000-0000-0000-000000000044", CHANGED),
+            ("vex.eth", "00000000-0000-0000-0000-000000000045", CHANGED),
+        ] {
+            let label = &name[..3];
+            world
+                .resource_pointer_changed(
+                    2,
+                    name,
+                    resource,
+                    resolver,
+                    resolver,
+                    "ResolverChanged",
+                    position(&format!("set:{label}")),
+                    json!({}),
+                )
+                .await?;
+            if matches!(label, "baz" | "qux" | "vex") {
+                world
+                    .event(
+                        &format!("set:{label}"),
+                        "ResolverChanged",
+                        "ens_v2_registry_l1",
+                        2,
+                        None,
+                        Some(resource),
+                        json!({"resolver": resolver, "token_id": labelhash(label)}),
+                        ETH,
+                    )
+                    .await?;
+                sqlx::query(
+                    "UPDATE project_resource_pointer SET namespace = NULL, namehash = NULL
+                     WHERE chain_id = $1 AND resource_id = $2::uuid",
+                )
+                .bind(CHAIN)
+                .bind(resource)
+                .execute(&world.pool)
+                .await?;
+            }
+            if matches!(label, "qux" | "vex") {
+                if label == "vex" {
+                    world
+                        .event(
+                            "zero:vex",
+                            "ResolverChanged",
+                            "ens_v2_registry_l1",
+                            3,
+                            None,
+                            Some(resource),
+                            json!({"resolver": ZERO_ADDR, "token_id": labelhash(label)}),
+                            ETH,
+                        )
+                        .await?;
+                }
+                let cleared = format!("retired:{label}");
+                world
+                    .event(
+                        &cleared,
+                        "ResolverChanged",
+                        "ens_v2_registry_l1",
+                        4,
+                        None,
+                        Some(resource),
+                        retired.clone(),
+                        ETH,
+                    )
+                    .await?;
+                sqlx::query(
+                    "UPDATE project_resource_pointer SET resolver_address = NULL,
+                         pointer_position = jsonb_build_object('block_number', 4,
+                             'event_identity', $3::text)
+                     WHERE chain_id = $1 AND resource_id = $2::uuid",
+                )
+                .bind(CHAIN)
+                .bind(resource)
+                .bind(&cleared)
+                .execute(&world.pool)
+                .await?;
+            }
+        }
+        world
+            .registry_pointer_changed(2, "bar.eth", ZERO_ADDR, CHANGED)
+            .await?;
+        sqlx::query(
+            "INSERT INTO project_resolver_classification (chain_id, resolver_address,
+                 block_number, event_identity, classification, support_status, manifest_id)
+             VALUES ($1, $2, 5, 'classified', '{\"kind\": \"a\"}', 'supported', 1)",
+        )
+        .bind(CHAIN)
+        .bind(CHANGED)
+        .execute(&world.pool)
+        .await?;
+        world
+            .journal(
+                5,
+                "project_resolver_classification",
+                json!([CHAIN, CHANGED]),
+                Some(before),
+            )
+            .await?;
+        let call = Call {
+            block: 5,
+            after: 4,
+            root: Some(ROOT),
+        };
+        world
+            .assert_selects(call, expected)
+            .await
+            .with_context(|| format!("classification case {case}"))?;
+        world.cleanup().await?;
+    }
+    Ok(())
+}
+
+// Each kind of registry change in the window keeps the whole walk: an upgrade or a discovery
+// from the ENSv2 registry or migration family. The registry mounted at `foo.eth` changes, and
+// the names under that mount are selected. The same upgrade at the marker's block selects
+// nothing.
+#[tokio::test]
+async fn each_registry_change_kind_keeps_the_whole_walk() -> Result<()> {
+    let under: &[&str] = &["foo.eth", "a.foo.eth", "x.a.foo.eth"];
+    for (kind, family, block, expected) in [
+        ("Upgraded", "ens_v2_registry_l1", 5, under),
+        ("Upgraded", "ens_v2_migration_l1", 5, under),
+        ("ContractDiscovered", "ens_v2_registry_l1", 5, under),
+        ("ContractDiscovered", "ens_v2_migration_l1", 5, under),
+        ("Upgraded", "ens_v2_registry_l1", 4, &[][..]),
+    ] {
+        let mut world = World::new().await?;
+        world
+            .surfaces(&["eth", "foo.eth", "a.foo.eth", "x.a.foo.eth", "bar.eth"])
+            .await?;
+        world.eth().await?;
+        world.mount(ETH, &labelhash("foo"), &registry(1)).await?;
+        world
+            .event(
+                "registry:change",
+                kind,
+                family,
+                block,
+                None,
+                None,
+                json!({"proxy_address": registry(1)}),
+                &registry(1),
+            )
+            .await?;
+        let call = Call {
+            block: 5,
+            after: 4,
+            root: Some(ROOT),
+        };
+        world
+            .assert_selects(call, expected)
+            .await
+            .with_context(|| format!("{kind} from {family} at block {block}"))?;
+        world.cleanup().await?;
+    }
+    Ok(())
+}
+
+// Each touched name is judged by its own change, not by the other changes of its batch. In one
+// block `bar.eth`'s registry pointer changes resolver, so `bar.eth` and the name under it are
+// selected. `foo.eth` is touched in the same block by a change that cannot move the names under
+// it: a write of its own state, or an owner getter that moves from one nonzero address to
+// another. `foo.eth` recomposes alone and `a.foo.eth` is not selected.
+#[tokio::test]
+async fn in_a_mixed_batch_a_touched_name_expands_only_for_its_own_change() -> Result<()> {
+    for case in ["own state", "nonzero to nonzero owner"] {
+        let mut world = World::new().await?;
+        world
+            .surfaces(&["eth", "foo.eth", "a.foo.eth", "bar.eth", "a.bar.eth"])
+            .await?;
+        world
+            .registry_pointer_changed(
+                5,
+                "bar.eth",
+                "0x00000000000000000000000000000000000000c0",
+                "0x00000000000000000000000000000000000000c1",
+            )
+            .await?;
+        if case == "own state" {
+            world.touch(5, "foo.eth").await?;
+        } else {
+            world
+                .registry_node_state_changed(
+                    5,
+                    "foo.eth",
+                    Some((Some(HOLDER_ADDR), Some(HOLDER_ADDR), None, false)),
+                    Some((Some(OTHER_ADDR), Some(OTHER_ADDR), None, false)),
+                )
+                .await?;
+        }
+        let call = Call {
+            block: 5,
+            after: 4,
+            root: Some(ROOT),
+        };
+        world
+            .assert_selects(call, &["bar.eth", "a.bar.eth", "foo.eth"])
+            .await
+            .with_context(|| format!("mixed batch case {case}"))?;
+        world.cleanup().await?;
+    }
+    Ok(())
 }
