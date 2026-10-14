@@ -625,6 +625,9 @@ mod v2_canonical_association;
 #[path = "tests/v2_continuing_lease.rs"]
 mod v2_continuing_lease;
 
+#[path = "tests/v2_wrap_registry_interval.rs"]
+mod v2_wrap_registry_interval;
+
 #[path = "tests/v2_resolver_records.rs"]
 mod v2_resolver_records;
 

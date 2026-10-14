@@ -240,6 +240,13 @@ pub(in crate::schema_v2) fn registrar_registration_namehash(
     registrar::base::registration_namehash(selected, raw)
 }
 
+pub(in crate::schema_v2) fn registrar_token_transfer(
+    selected: &Selected,
+    raw: &RawLogInput,
+) -> Option<(String, alloy_primitives::Address)> {
+    registrar::token_transfer_target(selected, raw)
+}
+
 pub(in crate::schema_v2) fn registry_registration_setup_namehash(
     selected: &Selected,
     raw: &RawLogInput,
