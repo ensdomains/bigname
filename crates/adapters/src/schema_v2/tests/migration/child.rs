@@ -1622,6 +1622,438 @@ fn without_registry_evidence(level: &Value) -> Value {
 /// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L190 @ ens_v2@a971bd64)
 /// So a parked wrapper token with no registry evidence is an incomplete chain, not an emancipated
 /// child — classifying it by registry presence alone would silently relabel it.
+const GATE_V1_REGISTRY: &str = "0x0000000000000000000000000000000000000099";
+const GATE_RESOLVER: &str = "0x00000000000000000000000000000000000000d1";
+const GATE_OWNER: &str = "0x00000000000000000000000000000000000000b1";
+
+fn gate_batch(logs: Vec<RawLogInput>, fixture: &Value) -> BatchInput {
+    let mut input = batch(ordered(logs), fixture, true);
+    input.manifests.push(manifest_with_events(
+        V1_REGISTRY_MANIFEST_ID,
+        "ens",
+        "ens_v1_registry_l1",
+        &[
+            (
+                "NewOwner",
+                "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+                &["registry"],
+                &["SubregistryChanged", "AuthorityTransferred"],
+            ),
+            (
+                "Transfer",
+                "event Transfer(bytes32 indexed node, address owner)",
+                &["registry"],
+                &["AuthorityTransferred"],
+            ),
+            (
+                "NewResolver",
+                "event NewResolver(bytes32 indexed node, address resolver)",
+                &["registry"],
+                &["ResolverChanged", "PermissionChanged"],
+            ),
+        ],
+    ));
+    input.admissions.push(admission_at(
+        V1_REGISTRY_MANIFEST_ID,
+        "registry",
+        GATE_V1_REGISTRY,
+        102,
+    ));
+    input
+}
+
+fn gate_dns(labels: &[&str]) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    for label in labels {
+        encoded.push(u8::try_from(label.len()).expect("label fits"));
+        encoded.extend_from_slice(label.as_bytes());
+    }
+    encoded.push(0);
+    encoded
+}
+
+fn gate_wrap(
+    block: i64,
+    log_index: i64,
+    node: &str,
+    labels: &[&str],
+    owner: &str,
+    wrapper: &str,
+) -> RawLogInput {
+    raw_at_transaction(
+        super::super::NameWrapped {
+            node: node.parse().expect("node parses"),
+            name: gate_dns(labels).into(),
+            owner: owner.parse().expect("owner parses"),
+            fuses: 65_536,
+            expiry: 4_000_000_000,
+        }
+        .encode_log_data(),
+        block,
+        0,
+        log_index,
+        wrapper,
+    )
+}
+
+fn gate_new_owner(
+    block: i64,
+    log_index: i64,
+    parent_node: &str,
+    label: &str,
+    owner: &str,
+) -> RawLogInput {
+    raw_at_transaction(
+        super::super::v1_registry::NewOwner {
+            node: parent_node.parse().expect("parent parses"),
+            label: keccak256(label.as_bytes()),
+            owner: owner.parse().expect("owner parses"),
+        }
+        .encode_log_data(),
+        block,
+        0,
+        log_index,
+        GATE_V1_REGISTRY,
+    )
+}
+
+fn gate_new_resolver(block: i64, log_index: i64, node: &str) -> RawLogInput {
+    raw_at_transaction(
+        super::super::v1_registry::NewResolver {
+            node: node.parse().expect("node parses"),
+            resolver: GATE_RESOLVER.parse().expect("resolver parses"),
+        }
+        .encode_log_data(),
+        block,
+        0,
+        log_index,
+        GATE_V1_REGISTRY,
+    )
+}
+
+fn gate_unwrap_tail(block: i64, node: &str, owner: &str, wrapper: &str) -> Vec<RawLogInput> {
+    let node_b256: B256 = node.parse().expect("node parses");
+    let owner_addr: Address = owner.parse().expect("owner parses");
+    let mut logs = vec![
+        raw_at_transaction(
+            super::super::v2_registry::TransferSingle {
+                operator: owner_addr,
+                from: owner_addr,
+                to: Address::ZERO,
+                id: U256::from_be_bytes(node_b256.0),
+                value: U256::from(1),
+            }
+            .encode_log_data(),
+            block,
+            1,
+            0,
+            wrapper,
+        ),
+        raw_at_transaction(
+            super::super::v1_registry::Transfer {
+                node: node_b256,
+                owner: owner_addr,
+            }
+            .encode_log_data(),
+            block,
+            1,
+            1,
+            GATE_V1_REGISTRY,
+        ),
+        raw_at_transaction(
+            super::super::NameUnwrapped {
+                node: node_b256,
+                owner: owner_addr,
+            }
+            .encode_log_data(),
+            block,
+            1,
+            2,
+            wrapper,
+        ),
+    ];
+    for log in &mut logs {
+        log.block_hash = format!("block-{block}");
+        log.transaction_hash = format!("transaction-{block}-1");
+    }
+    logs
+}
+
+/// TYR-334 gate, Finding 1: an original child unwrapped after its parent's
+/// locked migration in the same batch must not regain a registry-only
+/// successor. The split history (migration in an earlier batch, restored)
+/// already suppresses it; the combined history must agree.
+#[test]
+fn original_child_unwrap_after_same_batch_locked_parent_migration_opens_no_successor()
+-> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["C-01"];
+    let addresses = &fixture["addresses"];
+    let wrapper = addresses["name_wrapper"].as_str().unwrap();
+    let parent_node = scenario["parent"]["namehash"].as_str().unwrap();
+    let parent_label = scenario["parent"]["label"].as_str().unwrap();
+    let orig_node = namehash_under(&scenario["parent"]["namehash"], "orig")?;
+    let orig_id = format!("ens:{orig_node}");
+    let migration_block = scenario["parent"]["migration_block"].as_i64().unwrap();
+    let wrap_logs = vec![
+        gate_new_owner(230, 0, parent_node, "orig", wrapper),
+        gate_wrap(
+            230,
+            1,
+            &orig_node,
+            &["orig", parent_label, "eth"],
+            GATE_OWNER,
+            wrapper,
+        ),
+        gate_new_resolver(230, 2, &orig_node),
+    ];
+    let parent_logs = level_logs(&scenario["parent"], addresses)?;
+    // Split history: parent migration restored, then the unwrap alone.
+    let split_head = {
+        let mut logs = wrap_logs.clone();
+        logs.extend(parent_logs.clone());
+        interpret_test_batch(gate_batch(logs, &fixture))?
+    };
+    assert!(
+        split_head
+            .normalized_events
+            .iter()
+            .any(|event| event.event_kind == "MigrationApplied"
+                && event.after_state["migration_path"] == "locked_wrapped"),
+        "parent locked migration is proven in the split head"
+    );
+    let mut split_input = gate_batch(
+        gate_unwrap_tail(migration_block + 4, &orig_node, GATE_OWNER, wrapper),
+        &fixture,
+    );
+    split_input.prior_events = split_head
+        .normalized_events
+        .iter()
+        .map(prior_event)
+        .collect();
+    carry_admissions(&split_head, &mut split_input.admissions);
+    let split_tail = interpret_test_batch(split_input)?;
+    assert!(
+        !gate_successor_open(&split_tail, &orig_id),
+        "split history must not open the successor"
+    );
+    // Combined histories: migration and unwrap in one batch, same block and
+    // migration block then unwrap block.
+    for unwrap_block in [migration_block, migration_block + 1] {
+        let mut logs = wrap_logs.clone();
+        logs.extend(parent_logs.clone());
+        logs.extend(gate_unwrap_tail(
+            unwrap_block,
+            &orig_node,
+            GATE_OWNER,
+            wrapper,
+        ));
+        let combined = interpret_test_batch(gate_batch(logs, &fixture))?;
+        assert!(
+            combined
+                .normalized_events
+                .iter()
+                .any(|event| event.event_kind == "MigrationApplied"
+                    && event.after_state["migration_path"] == "locked_wrapped"
+                    && event.consumer_visibility == "activated"),
+            "combined batch at unwrap block {unwrap_block} proves the parent boundary"
+        );
+        assert!(
+            !gate_successor_open(&combined, &orig_id),
+            "combined batch at unwrap block {unwrap_block} opened the registry-only successor"
+        );
+    }
+    // Restore splits for the same history: before the migration, between
+    // the migration and the unwrap, and after the unwrap. The between
+    // split is the `split_tail` run above; the other two must agree with
+    // the single-batch run as well.
+    let full_logs = {
+        let mut logs = wrap_logs.clone();
+        logs.extend(parent_logs.clone());
+        logs.extend(gate_unwrap_tail(
+            migration_block + 1,
+            &orig_node,
+            GATE_OWNER,
+            wrapper,
+        ));
+        logs
+    };
+    let full = interpret_test_batch(gate_batch(full_logs.clone(), &fixture))?;
+    let before_head = interpret_test_batch(gate_batch(wrap_logs.clone(), &fixture))?;
+    let before_tail_logs = {
+        let mut logs = parent_logs.clone();
+        logs.extend(gate_unwrap_tail(
+            migration_block + 1,
+            &orig_node,
+            GATE_OWNER,
+            wrapper,
+        ));
+        logs
+    };
+    let (before_live, _) =
+        interpret_test_batch_incremental(gate_batch(wrap_logs.clone(), &fixture), None).and_then(
+            |(_, session)| {
+                interpret_test_batch_incremental(
+                    gate_batch(before_tail_logs.clone(), &fixture),
+                    Some(session),
+                )
+            },
+        )?;
+    assert!(
+        !gate_successor_open(&before_live, &orig_id),
+        "split before the migration opened the successor"
+    );
+    let mut before_cold = gate_batch(before_tail_logs, &fixture);
+    before_cold.prior_events = before_head
+        .normalized_events
+        .iter()
+        .map(prior_event)
+        .collect();
+    carry_admissions(&before_head, &mut before_cold.admissions);
+    let before_cold = interpret_test_batch(before_cold)?;
+    assert_eq!(before_cold.normalized_events, before_live.normalized_events);
+    // After the unwrap: re-wrapping must not transition from a
+    // registry-only successor that was never opened.
+    let probe = vec![gate_wrap(
+        migration_block + 5,
+        0,
+        &orig_node,
+        &["orig", parent_label, "eth"],
+        GATE_OWNER,
+        wrapper,
+    )];
+    let (full_probe_live, _) =
+        interpret_test_batch_incremental(gate_batch(full_logs.clone(), &fixture), None).and_then(
+            |(_, session)| {
+                interpret_test_batch_incremental(gate_batch(probe.clone(), &fixture), Some(session))
+            },
+        )?;
+    let history = interpret_test_batch(gate_batch(full_logs, &fixture))?;
+    let mut probe_cold = gate_batch(probe, &fixture);
+    probe_cold.prior_events = history.normalized_events.iter().map(prior_event).collect();
+    carry_admissions(&history, &mut probe_cold.admissions);
+    let probe_cold = interpret_test_batch(probe_cold)?;
+    assert_eq!(
+        probe_cold.normalized_events,
+        full_probe_live.normalized_events
+    );
+    assert!(
+        !probe_cold.normalized_events.iter().any(|event| {
+            event.event_kind == "SurfaceUnbound"
+                && event.logical_name_id.as_deref() == Some(orig_id.as_str())
+                && event.before_state["authority_kind"] == "registry_only"
+        }),
+        "restored history kept a registry-only successor to close"
+    );
+    let _ = full;
+    Ok(())
+}
+
+/// TYR-334 gate, Finding 2: a locked child establishes its own
+/// migration-created WrapperRegistry, so an original grandchild unwrapping
+/// under it must not regain a registry-only successor either.
+#[test]
+fn original_grandchild_unwrap_under_locked_child_parent_opens_no_successor() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["C-04"];
+    let addresses = &fixture["addresses"];
+    let wrapper = addresses["name_wrapper"].as_str().unwrap();
+    let child_node = scenario["child"]["namehash"].as_str().unwrap();
+    let child_label = scenario["child"]["label"].as_str().unwrap();
+    let parent_label = scenario["parent"]["label"].as_str().unwrap();
+    let grand_node = namehash_under(&scenario["child"]["namehash"], "orig")?;
+    let grand_id = format!("ens:{grand_node}");
+    let head_logs = {
+        let mut logs = vec![
+            gate_new_owner(229, 0, child_node, "orig", wrapper),
+            gate_wrap(
+                229,
+                1,
+                &grand_node,
+                &["orig", child_label, parent_label, "eth"],
+                GATE_OWNER,
+                wrapper,
+            ),
+            gate_new_resolver(229, 2, &grand_node),
+        ];
+        logs.extend(scenario_logs(scenario, addresses, &["parent", "child"])?);
+        logs
+    };
+    let head = interpret_test_batch(gate_batch(head_logs, &fixture))?;
+    assert!(
+        head.normalized_events.iter().any(|event| {
+            event.event_kind == "MigrationApplied"
+                && event.after_state["migration_path"] == "locked_child"
+                && event.after_state["namehash"] == scenario["child"]["namehash"]
+        }),
+        "the immediate parent migrated as locked_child"
+    );
+    let mut tail_input = gate_batch(
+        gate_unwrap_tail(250, &grand_node, GATE_OWNER, wrapper),
+        &fixture,
+    );
+    tail_input.prior_events = head.normalized_events.iter().map(prior_event).collect();
+    carry_admissions(&head, &mut tail_input.admissions);
+    let tail = interpret_test_batch(tail_input)?;
+    assert!(
+        !gate_successor_open(&tail, &grand_id),
+        "grandchild under a locked_child parent opened the registry-only successor"
+    );
+    Ok(())
+}
+
+/// Codex scoped-restore case: the child's retained history names only the
+/// child (a wrap with no registry `NewOwner` linking it to its parent), so a
+/// child-only scoped restore has no link that pulls the parent's
+/// `MigrationApplied` in. The gate must still load that boundary.
+#[test]
+fn original_child_unwrap_scoped_restore_without_parent_link_opens_no_successor()
+-> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["C-01"];
+    let addresses = &fixture["addresses"];
+    let wrapper = addresses["name_wrapper"].as_str().unwrap();
+    let parent_label = scenario["parent"]["label"].as_str().unwrap();
+    let orig_node = namehash_under(&scenario["parent"]["namehash"], "orig")?;
+    let orig_id = format!("ens:{orig_node}");
+    let migration_block = scenario["parent"]["migration_block"].as_i64().unwrap();
+    let mut head_logs = vec![
+        gate_wrap(
+            230,
+            1,
+            &orig_node,
+            &["orig", parent_label, "eth"],
+            GATE_OWNER,
+            wrapper,
+        ),
+        gate_new_resolver(230, 2, &orig_node),
+    ];
+    head_logs.extend(level_logs(&scenario["parent"], addresses)?);
+    let head = interpret_test_batch(gate_batch(head_logs, &fixture))?;
+    let mut tail_input = gate_batch(
+        gate_unwrap_tail(migration_block + 4, &orig_node, GATE_OWNER, wrapper),
+        &fixture,
+    );
+    tail_input.prior_events = head.normalized_events.iter().map(prior_event).collect();
+    carry_admissions(&head, &mut tail_input.admissions);
+    let tail = interpret_test_batch(tail_input)?;
+    assert!(
+        !gate_successor_open(&tail, &orig_id),
+        "scoped restore without a parent link opened the registry-only successor"
+    );
+    Ok(())
+}
+
+fn gate_successor_open(output: &BatchOutput, logical_name_id: &str) -> bool {
+    output.surface_bindings.iter().any(|binding| {
+        binding.logical_name_id == logical_name_id && binding.authority_arm == "ens_v1"
+    }) && output.normalized_events.iter().any(|event| {
+        event.event_kind == "SurfaceBound"
+            && event.logical_name_id.as_deref() == Some(logical_name_id)
+            && event.after_state["authority_kind"] == "registry_only"
+    })
+}
+
 #[test]
 fn locked_cleanup_without_registry_evidence_derives_nothing() -> anyhow::Result<()> {
     let fixture = fixture()?;

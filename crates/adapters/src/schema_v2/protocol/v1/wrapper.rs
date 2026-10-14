@@ -376,8 +376,15 @@ fn name_unwrapped(
     // covers keeps its old wrapper-bound pointer selection. A registry-only
     // successor would re-project that pointer onto a new resource, which the
     // published rule does not do.
-    let locked_migrated_original_child =
-        state.v1_is_locked_migrated_original_child(&selected.source.namespace, &namehash);
+    let locked_migrated_original_child = state.v1_is_locked_migrated_original_child(
+        &selected.source.namespace,
+        &namehash,
+        crate::schema_v2::model::PriorWritePosition {
+            block_number: raw.block_number,
+            transaction_index: raw.transaction_index,
+            log_index: raw.log_index,
+        },
+    );
     // A retained registry owner that is the admitted Graveyard is a burned
     // record, not a live registry-only owner, even when it equals the unwrap
     // owner from a migration cleanup.

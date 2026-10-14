@@ -123,6 +123,7 @@ pub(super) struct State {
     v1_expiries: OrdSet<(i64, String)>,
     v2_migration_times: OrdMap<String, i64>,
     v2_locked_migration_names: OrdSet<String>,
+    v2_locked_migration_positions: OrdMap<String, crate::schema_v2::model::PriorWritePosition>,
     v1_registry_authorities: OrdMap<String, V1NameState>,
     v1_registry_owners: OrdMap<String, String>,
     v1_registry_owner_words: OrdMap<String, String>,

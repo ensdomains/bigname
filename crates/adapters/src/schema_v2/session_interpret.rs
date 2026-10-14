@@ -22,6 +22,75 @@ pub(super) fn interpret_loaded(
             })
         })
         .collect::<Vec<_>>();
+    // Locked boundaries are only activated after batch assembly, but an
+    // original child unwrapped later in the same batch must already see
+    // them. Re-run once with each activated locked boundary recorded at
+    // its own position; the unwrap gate orders against that position, so
+    // a boundary proved later in the batch changes nothing earlier.
+    let locked_boundaries = output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.event_kind == "MigrationApplied"
+                && event.consumer_visibility == "activated"
+                && matches!(
+                    event.after_state["migration_path"].as_str(),
+                    Some("locked_wrapped" | "locked_child")
+                )
+        })
+        .filter_map(|event| {
+            Some((
+                event.logical_name_id.clone()?,
+                crate::schema_v2::model::PriorWritePosition::from_parts(
+                    event.block_number,
+                    event.transaction_index,
+                    event.log_index,
+                )?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let successor_opened = output.normalized_events.iter().any(|event| {
+        event.event_kind == "SurfaceBound" && event.after_state["authority_kind"] == "registry_only"
+    });
+    if !locked_boundaries.is_empty() && successor_opened {
+        let mut seeded = state.clone();
+        for (name, position) in &locked_boundaries {
+            seeded.note_live_locked_migration(name, *position);
+        }
+        let corrected = interpret_once(catalog, blocks, raw_logs.clone(), &mut seeded)?;
+        anyhow::ensure!(
+            corrected.migration_authority_transitions == output.migration_authority_transitions,
+            "locked-boundary reconciliation changed its proving migration boundaries"
+        );
+        if crossed.is_empty() {
+            return Ok(corrected);
+        }
+        // Both reconciliations apply: carry the locked proof into the
+        // expiry re-run below by returning the locked-corrected output's
+        // state basis. The expiry re-run starts from `state`, so seed it
+        // the same way before it runs.
+        let mut expiry_state = state.clone();
+        for (name, position) in &locked_boundaries {
+            expiry_state.note_live_locked_migration(name, *position);
+        }
+        let mut reconciled = expiry_state;
+        for transition in crossed {
+            let block = blocks
+                .iter()
+                .find(|block| block.block_number == transition.block_number)
+                .expect("migration boundary belongs to a loaded block");
+            reconciled.remember_v2_migration(
+                &transition.logical_name_id,
+                block.block_timestamp.unix_timestamp(),
+            );
+        }
+        let corrected = interpret_once(catalog, blocks, raw_logs, &mut reconciled)?;
+        anyhow::ensure!(
+            corrected.migration_authority_transitions == output.migration_authority_transitions,
+            "expiry reconciliation changed its proving migration boundaries"
+        );
+        return Ok(corrected);
+    }
     if crossed.is_empty() {
         return Ok(output);
     }

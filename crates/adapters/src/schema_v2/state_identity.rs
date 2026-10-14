@@ -152,20 +152,47 @@ impl State {
         Some(format!("{node:#x}"))
     }
 
+    /// Record a locked boundary proven earlier in the current batch, with
+    /// the position that proves it. Restored boundaries need no position:
+    /// they belong to an earlier batch, so they precede every read here.
+    pub(in crate::schema_v2) fn note_live_locked_migration(
+        &mut self,
+        logical_name_id: &str,
+        position: crate::schema_v2::model::PriorWritePosition,
+    ) {
+        self.v2_locked_migration_names
+            .insert(logical_name_id.to_owned());
+        self.v2_locked_migration_positions
+            .insert(logical_name_id.to_owned(), position);
+    }
+
     /// Whether the name is a direct child of a parent that an activated
     /// locked-wrapper migration covers. A locked migration only runs when a
     /// migration-created WrapperRegistry claims that parent as its original
-    /// node, so the restored locked-migration name is the proof.
+    /// node, so the restored locked-migration name is the proof
+    /// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2_sepolia_20260629@ccaeb58)
+    /// (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L32 @ ens_v2@a971bd64).
+    /// The parent is reported as a lookahead read before the test, so a
+    /// scoped restore that loaded only the child fails and retries with the
+    /// parent's boundary loaded.
     pub(in crate::schema_v2) fn v1_is_locked_migrated_original_child(
         &self,
         namespace: &str,
         namehash: &str,
+        at: crate::schema_v2::model::PriorWritePosition,
     ) -> bool {
-        self.v1_parent_namehash(namespace, namehash)
-            .is_some_and(|parent| {
-                self.v2_locked_migration_names
-                    .contains(&format!("{namespace}:{parent}"))
-            })
+        let Some(parent) = self.v1_parent_namehash(namespace, namehash) else {
+            return false;
+        };
+        let key = format!("{namespace}:{parent}");
+        crate::schema_v2::lookahead::observe_node(&key);
+        if !self.v2_locked_migration_names.contains(&key) {
+            return false;
+        }
+        match self.v2_locked_migration_positions.get(&key) {
+            Some(boundary) => *boundary < at,
+            None => true,
+        }
     }
 
     pub(in crate::schema_v2) fn v1_surface_is_shadow(
