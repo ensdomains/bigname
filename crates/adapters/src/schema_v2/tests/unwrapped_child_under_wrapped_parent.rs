@@ -7,7 +7,7 @@
 //! owner. The surface-less registry-children fallback cannot rescue it once a surface exists.
 //!
 //! A child created before its parent's label path was ever observed gets no
-//! surface. That shape is tracked separately as TYR-335 and is not covered here.
+//! surface. That shape is out of scope here and is not covered.
 
 use super::*;
 
@@ -17,6 +17,7 @@ const REGISTRAR_MANIFEST: i64 = 7403;
 const REGISTRY: &str = "0x00000000000000000000000000000000000000c1";
 const NAME_WRAPPER: &str = "0x00000000000000000000000000000000000000c2";
 const HOLDER: &str = "0x00000000000000000000000000000000000000a1";
+const TLD_OWNER: &str = "0x00000000000000000000000000000000000000a2";
 const CHILD_OWNER: &str = "0x00000000000000000000000000000000000000b1";
 const RESOLVER: &str = "0x00000000000000000000000000000000000000d1";
 const ZERO: &str = "0x0000000000000000000000000000000000000000";
@@ -89,6 +90,18 @@ fn manifests() -> Vec<ManifestInput> {
                         "ResolverChanged",
                         "PermissionChanged",
                     ],
+                ),
+                (
+                    "FusesSet",
+                    "event FusesSet(bytes32 indexed node, uint32 fuses)",
+                    &["name_wrapper"],
+                    &["PermissionScopeChanged"],
+                ),
+                (
+                    "ExpiryExtended",
+                    "event ExpiryExtended(bytes32 indexed node, uint64 expiry)",
+                    &["name_wrapper"],
+                    &["ExpiryChanged"],
                 ),
             ],
         ),
@@ -825,6 +838,79 @@ fn wrapped_second_level_non_eth_unwrapped_without_a_lease_binds_registry_only() 
         })
         .expect("the unwrapped non-eth name has a SurfaceBound");
     assert_eq!(bound.after_state["authority_kind"], "registry_only");
+    Ok(())
+}
+
+/// The `.eth` prediction is limited to names under eth, and a non-eth second-level name can
+/// carry a live wrapper expiry. The registry owner of a top-level name wraps it, which stores
+/// expiry 0. For a child of the root, `setChildFuses` checks the name's own owner, and the
+/// root's stored expiry is the maximum, so that owner raises its own expiry. It then creates a
+/// wrapped second-level name with a live expiry, capped at its own. With no registrar identity,
+/// the unwrap of that name must still activate the registry-only successor.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L76-L81 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L372-L374 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L532-L545 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1041-L1045 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L577-L581 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1028-L1031 @ ens_v1@91c966f)
+#[test]
+fn non_eth_second_level_name_with_a_live_wrapper_expiry_unwraps_to_registry_only()
+-> anyhow::Result<()> {
+    const LIVE_EXPIRY: u64 = 4_000_000_000;
+    let tld = node(&["xyz"]);
+    let wrapped = node(&["direct", "xyz"]);
+    let wrapped_id = format!("ens:{wrapped:#x}");
+    let logs = vec![
+        registry_transfer(1, 0, tld, NAME_WRAPPER),
+        transfer_single(1, 1, TLD_OWNER, ZERO, TLD_OWNER, tld),
+        name_wrapped(1, 2, tld, b"\x03xyz\0", TLD_OWNER),
+        raw_at(
+            FusesSet {
+                node: tld,
+                fuses: 0,
+            }
+            .encode_log_data(),
+            2,
+            0,
+            NAME_WRAPPER,
+        ),
+        raw_at(
+            ExpiryExtended {
+                node: tld,
+                expiry: LIVE_EXPIRY,
+            }
+            .encode_log_data(),
+            2,
+            1,
+            NAME_WRAPPER,
+        ),
+        new_owner_under(tld, 3, 0, "direct", NAME_WRAPPER),
+        transfer_single(3, 1, TLD_OWNER, ZERO, HOLDER, wrapped),
+        name_wrapped_with(
+            3,
+            2,
+            wrapped,
+            b"\x06direct\x03xyz\0",
+            HOLDER,
+            (0, LIVE_EXPIRY),
+        ),
+        transfer_single(4, 0, HOLDER, HOLDER, ZERO, wrapped),
+        registry_transfer(4, 1, wrapped, HOLDER),
+        name_unwrapped(4, 2, wrapped, HOLDER),
+    ];
+    let output = interpret(logs)?;
+
+    assert_bound(&output, &wrapped_id);
+    assert!(
+        output.normalized_events.iter().any(|event| {
+            event.event_kind == "SurfaceBound"
+                && event.block_number == Some(4)
+                && event.logical_name_id.as_deref() == Some(wrapped_id.as_str())
+                && event.after_state["authority_kind"] == "registry_only"
+        }),
+        "the unwrap of a non-eth name with a live wrapper expiry opened no registry-only successor: {:?}",
+        output.normalized_events
+    );
     Ok(())
 }
 

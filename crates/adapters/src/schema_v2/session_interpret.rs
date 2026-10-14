@@ -31,6 +31,9 @@ pub(super) fn interpret_loaded(
     // them. Re-run once with each activated locked boundary recorded at
     // its own position. The unwrap gate orders against that position, so
     // a boundary proved later in the batch changes nothing earlier.
+    // Any activated boundary triggers the re-run. An unwrap the boundary
+    // changes need not leave a first-pass event that shows it: one that
+    // keeps an already-selected registry-only authority binds nothing.
     let locked_boundaries = output
         .normalized_events
         .iter()
@@ -53,10 +56,7 @@ pub(super) fn interpret_loaded(
             ))
         })
         .collect::<Vec<_>>();
-    let successor_opened = output.normalized_events.iter().any(|event| {
-        event.event_kind == "SurfaceBound" && event.after_state["authority_kind"] == "registry_only"
-    });
-    if !locked_boundaries.is_empty() && successor_opened {
+    if !locked_boundaries.is_empty() {
         let mut seeded = state.clone();
         for (name, position) in &locked_boundaries {
             seeded.note_live_locked_migration(name, *position);
@@ -100,6 +100,7 @@ pub(super) fn interpret_loaded(
     if crossed.is_empty() {
         return Ok(output);
     }
+    // No locked boundary is activated here, so the expiry re-run needs none.
     // Migration groups are confirmed after batch assembly. If this same batch
     // also crosses an old lease's expiry, interpret it once more with those
     // proven boundaries. The timestamp prevents a future proof affecting an

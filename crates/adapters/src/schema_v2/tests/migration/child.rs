@@ -2421,9 +2421,10 @@ fn assert_gate_unwrap_keeps_registry_authority(
 }
 
 /// The locked re-run trigger: the C-01 parent's locked migration, and an original child
-/// "orig" unwrapped after it in the same batch. The first pass opens a registry-only successor
-/// for "orig", so Interpret re-runs the batch with the locked boundary at its position, and
-/// that re-run closes the successor again. Returns the logs and the child's logical name id.
+/// "orig" unwrapped after it in the same batch. The batch activates the parent's locked
+/// boundary, so Interpret re-runs it with the boundary at its position. The first pass opens
+/// a registry-only successor for "orig", and the re-run closes it again. Returns the logs and
+/// the child's logical name id.
 fn gate_locked_rerun_logs(fixture: &Value) -> anyhow::Result<(Vec<RawLogInput>, String)> {
     let scenario = &fixture["scenarios"]["C-01"];
     let addresses = &fixture["addresses"];
@@ -2585,23 +2586,24 @@ fn unwrap_into_the_graveyard_keeps_no_registry_only_authority() -> anyhow::Resul
     Ok(())
 }
 
-/// The locked guard with a registry-only predecessor. The child's record left the NameWrapper
-/// and came back while the parent was unwrapped, so the registry-only authority is selected,
-/// and the parent was then wrapped and locked again before its migration. The child's unwrap
-/// after that migration in the same batch keeps the locked rule: the authority is released and
-/// no registry-only successor opens.
-#[test]
-fn registry_only_original_child_unwrap_after_same_batch_locked_parent_migration_releases()
--> anyhow::Result<()> {
-    let fixture = fixture()?;
+/// The locked guard with a registry-only predecessor. "lockaway" is created wrapped with fuses
+/// 0 at block 210. Its record leaves the NameWrapper at 211 and comes back at 212 while the
+/// parent is unwrapped, so the registry-only authority is selected. The parent's locked
+/// migration follows at its migration block, and the child's unwrap at `unwrap_block`. With
+/// `expiry`, the old-lease expiry crossing of `migration_and_old_lease_expiry` joins the same
+/// history, with that scenario's migration in its own later transaction of the shared block.
+/// Returns the input, the child's node and its logical name id.
+fn gate_lockaway_history(
+    fixture: &Value,
+    unwrap_block: i64,
+    expiry: bool,
+) -> anyhow::Result<(BatchInput, String, String)> {
     let scenario = &fixture["scenarios"]["C-01"];
-    let addresses = &fixture["addresses"];
-    let wrapper = addresses["name_wrapper"].as_str().unwrap();
+    let wrapper = fixture["addresses"]["name_wrapper"].as_str().unwrap();
     let parent_node = scenario["parent"]["namehash"].as_str().unwrap();
     let node = namehash_under(&scenario["parent"]["namehash"], "lockaway")?;
-    let id = format!("ens:{node}");
     let migration_block = scenario["parent"]["migration_block"].as_i64().unwrap();
-    let mut logs = gate_create_wrapped(210, 0, "lockaway", 0, &fixture)?;
+    let mut logs = gate_create_wrapped(210, 0, "lockaway", 0, fixture)?;
     logs.push(gate_new_owner(
         211,
         0,
@@ -2610,38 +2612,355 @@ fn registry_only_original_child_unwrap_after_same_batch_locked_parent_migration_
         GATE_AWAY_OWNER,
     ));
     logs.push(gate_new_owner(212, 0, parent_node, "lockaway", wrapper));
-    logs.extend(level_logs(&scenario["parent"], addresses)?);
-    logs.extend(gate_unwrap_tail(
-        migration_block + 1,
-        &node,
-        GATE_OWNER,
-        wrapper,
-    ));
-    let output = interpret_test_batch(gate_batch(logs, &fixture))?;
+    logs.extend(level_logs(&scenario["parent"], &fixture["addresses"])?);
+    logs.extend(gate_unwrap_tail(unwrap_block, &node, GATE_OWNER, wrapper));
+    if !expiry {
+        let id = format!("ens:{node}");
+        return Ok((gate_batch(logs, fixture), node, id));
+    }
+    let mut input = super::expiry::migration_and_old_lease_expiry()?;
+    for raw in &mut input.raw_logs {
+        if raw.block_number == migration_block {
+            raw.transaction_index = 2;
+            raw.transaction_hash = format!("transaction-{migration_block}-2");
+            raw.log_index += 50;
+        }
+    }
+    input.blocks.extend(logs.iter().map(|raw| RawBlockInput {
+        chain_id: raw.chain_id.clone(),
+        block_hash: raw.block_hash.clone(),
+        block_number: raw.block_number,
+        block_timestamp: raw.block_timestamp,
+        canonicality_state: raw.canonicality_state.clone(),
+    }));
+    input.blocks.sort_by_key(|block| block.block_number);
+    input.blocks.dedup_by_key(|block| block.block_number);
+    input.raw_logs.extend(logs);
+    input.raw_logs = ordered(std::mem::take(&mut input.raw_logs));
+    let id = format!("ens:{node}");
+    Ok((input, node, id))
+}
+
+/// `template` with only the blocks and logs from `first_block` up to, not including,
+/// `end_block`.
+fn gate_slice(template: &BatchInput, first_block: i64, end_block: i64) -> BatchInput {
+    let mut input = template.clone();
+    let within = |block: i64| first_block <= block && block < end_block;
+    input.blocks.retain(|block| within(block.block_number));
+    input.raw_logs.retain(|raw| within(raw.block_number));
+    input
+}
+
+/// A registry owner change on the child after the whole history, in a block of its own that
+/// follows every block of `history`.
+fn gate_lockaway_probe(history: &BatchInput, node: &str) -> BatchInput {
+    let last = history
+        .blocks
+        .iter()
+        .map(|block| (block.block_number, block.block_timestamp))
+        .chain(
+            history
+                .raw_logs
+                .iter()
+                .map(|raw| (raw.block_number, raw.block_timestamp)),
+        )
+        .max()
+        .expect("the history has blocks");
+    let mut raw = gate_registry_transfer(last.0 + 2, 0, node, GATE_PROBE_OWNER);
+    raw.block_timestamp = last.1 + time::Duration::seconds(24);
+    let mut probe = history.clone();
+    probe.blocks = vec![RawBlockInput {
+        chain_id: raw.chain_id.clone(),
+        block_hash: raw.block_hash.clone(),
+        block_number: raw.block_number,
+        block_timestamp: raw.block_timestamp,
+        canonicality_state: raw.canonicality_state.clone(),
+    }];
+    probe.raw_logs = vec![raw];
+    probe
+}
+
+/// A child's normalized events, its bindings and the positions of its binding closures.
+type GateChildView = (Vec<NormalizedEvent>, Vec<String>, Vec<(i64, i64, i64)>);
+
+/// What the layout table compares for the child: its normalized events, bindings and binding
+/// closures from `first_block` on.
+fn gate_child_from(output: &BatchOutput, id: &str, first_block: i64) -> GateChildView {
+    let events = output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.logical_name_id.as_deref() == Some(id)
+                && event.block_number.is_some_and(|block| block >= first_block)
+        })
+        .cloned()
+        .collect();
+    let bindings = output
+        .surface_bindings
+        .iter()
+        .filter(|binding| binding.logical_name_id == id && binding.block_number >= first_block)
+        .map(|binding| format!("{binding:?}"))
+        .collect();
+    let closures = output
+        .binding_closures
+        .iter()
+        .filter(|closure| closure.logical_name_id == id && closure.block_number >= first_block)
+        .map(|closure| {
+            (
+                closure.block_number,
+                closure.transaction_index,
+                closure.log_index,
+            )
+        })
+        .collect();
+    (events, bindings, closures)
+}
+
+/// Whether the child's binding is closed at `unwrap_block` and stays closed through the end
+/// of `outputs`, read in order.
+fn gate_released_at(outputs: &[&BatchOutput], id: &str, unwrap_block: i64) -> bool {
+    let mut released = false;
+    for event in outputs
+        .iter()
+        .flat_map(|output| output.normalized_events.iter())
+        .filter(|event| event.logical_name_id.as_deref() == Some(id))
+    {
+        match event.event_kind.as_str() {
+            "SurfaceUnbound" if event.block_number == Some(unwrap_block) => released = true,
+            "SurfaceBound" if released => released = false,
+            _ => {}
+        }
+    }
+    released
+}
+
+/// Whether the child's last binding event across `outputs`, read in order, binds its
+/// registry-only authority on the declared registry path, and that binding is among the
+/// outputs' bindings.
+fn gate_holds_registry_binding(outputs: &[&BatchOutput], id: &str) -> bool {
+    let last = outputs
+        .iter()
+        .flat_map(|output| output.normalized_events.iter())
+        .rfind(|event| {
+            event.logical_name_id.as_deref() == Some(id)
+                && matches!(event.event_kind.as_str(), "SurfaceBound" | "SurfaceUnbound")
+        });
+    last.is_some_and(|event| {
+        event.event_kind == "SurfaceBound"
+            && event.after_state["authority_kind"] == "registry_only"
+            && event.after_state["binding_kind"] == "declared_registry_path"
+            && outputs
+                .iter()
+                .flat_map(|output| output.surface_bindings.iter())
+                .any(|binding| {
+                    binding.logical_name_id == id
+                        && binding.binding_kind == "declared_registry_path"
+                        && Some(binding.resource_id) == event.resource_id
+                })
+    })
+}
+
+/// The child's binding events as (block, kind, authority kind), for failure messages.
+fn gate_binding_trace(output: &BatchOutput, id: &str) -> Vec<(Option<i64>, String, Value)> {
+    output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.logical_name_id.as_deref() == Some(id)
+                && matches!(event.event_kind.as_str(), "SurfaceBound" | "SurfaceUnbound")
+        })
+        .map(|event| {
+            let state = if event.event_kind == "SurfaceBound" {
+                &event.after_state
+            } else {
+                &event.before_state
+            };
+            (
+                event.block_number,
+                event.event_kind.clone(),
+                state["authority_kind"].clone(),
+            )
+        })
+        .collect()
+}
+
+/// The invariant behind the locked re-run trigger: a batch's output must not depend on where
+/// the batch boundaries fall relative to a locked migration and an unwrap. Each row cuts the
+/// same history at one of `cuts`, resumes the tail warm and restores it cold, and checks it
+/// against the one-batch run: whether the child is released at its unwrap, the child's events,
+/// bindings and closures from the cut on, and the child's events in a later registry owner
+/// change. A forward tail's output carries no registry-only binding of its own. Every row is
+/// checked, and the failing rows are reported together.
+fn assert_gate_lockaway_layouts(
+    fixture: &Value,
+    unwrap_block: i64,
+    expiry: bool,
+    cuts: &[i64],
+) -> anyhow::Result<()> {
+    let migration_block = fixture["scenarios"]["C-01"]["parent"]["migration_block"]
+        .as_i64()
+        .unwrap();
+    let forward = unwrap_block > migration_block;
+    let (input, node, id) = gate_lockaway_history(fixture, unwrap_block, expiry)?;
+    let probe = gate_lockaway_probe(&input, &node);
+    let probe_block = probe.raw_logs[0].block_number;
+    let variant = format!(
+        "{} unwrap{}",
+        if forward { "later" } else { "earlier" },
+        if expiry {
+            " with the expiry crossing"
+        } else {
+            ""
+        }
+    );
+    let mut failures = Vec::new();
+    let (whole, session) = interpret_test_batch_incremental(input.clone(), None)?;
     assert!(
-        output.normalized_events.iter().any(|event| {
+        whole.normalized_events.iter().any(|event| {
             event.event_kind == "MigrationApplied"
                 && event.after_state["migration_path"] == "locked_wrapped"
                 && event.consumer_visibility == "activated"
         }),
-        "the batch proves the parent's locked migration"
+        "{variant}, one batch: the parent's locked migration is proven"
     );
-    let at_unwrap = output
-        .normalized_events
-        .iter()
-        .filter(|event| {
-            event.block_number == Some(migration_block + 1)
-                && event.logical_name_id.as_deref() == Some(id.as_str())
-                && matches!(event.event_kind.as_str(), "SurfaceBound" | "SurfaceUnbound")
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        at_unwrap
-            .last()
-            .is_some_and(|event| event.event_kind == "SurfaceUnbound"),
-        "the unwrap after the locked migration kept the registry-only authority: {at_unwrap:?}"
-    );
+    if expiry {
+        let expiry_block = input.blocks.iter().map(|block| block.block_number).max();
+        super::expiry::assert_old_lease_does_not_reopen(&whole, expiry_block.unwrap());
+    }
+    if gate_released_at(&[&whole], &id, unwrap_block) != forward {
+        failures.push(format!(
+            "{variant}, one batch: released at the unwrap is not {forward}: {:?}",
+            gate_binding_trace(&whole, &id)
+        ));
+    }
+    if !forward && !gate_holds_registry_binding(&[&whole], &id) {
+        failures.push(format!(
+            "{variant}, one batch: the child lost its registry-only binding: {:?}",
+            gate_binding_trace(&whole, &id)
+        ));
+    }
+    let (whole_probe, _) = interpret_test_batch_incremental(probe.clone(), Some(session))?;
+    for &cut in cuts {
+        let head_input = gate_slice(&input, i64::MIN, cut);
+        let tail_input = gate_slice(&input, cut, i64::MAX);
+        let (head, session) = interpret_test_batch_incremental(head_input, None)?;
+        let (warm, session) = interpret_test_batch_incremental(tail_input.clone(), Some(session))?;
+        let (warm_probe, _) = interpret_test_batch_incremental(probe.clone(), Some(session))?;
+        let mut cold_input = tail_input;
+        cold_input.prior_events = head.normalized_events.iter().map(prior_event).collect();
+        carry_admissions(&head, &mut cold_input.admissions);
+        let cold = interpret_test_batch(cold_input)?;
+        let mut cold_probe_input = probe.clone();
+        cold_probe_input.prior_events = head
+            .normalized_events
+            .iter()
+            .chain(cold.normalized_events.iter())
+            .map(prior_event)
+            .collect();
+        carry_admissions(&head, &mut cold_probe_input.admissions);
+        carry_admissions(&cold, &mut cold_probe_input.admissions);
+        let cold_probe = interpret_test_batch(cold_probe_input)?;
+        for (resume, tail, tail_probe) in
+            [("warm", &warm, &warm_probe), ("cold", &cold, &cold_probe)]
+        {
+            let context = format!("{variant}, cut before block {cut}, {resume}");
+            if forward
+                && tail.normalized_events.iter().any(|event| {
+                    event.event_kind == "SurfaceBound"
+                        && event.after_state["authority_kind"] == "registry_only"
+                })
+            {
+                failures.push(format!(
+                    "{context}: the tail binds a registry-only authority of its own"
+                ));
+            }
+            if gate_released_at(&[&head, tail], &id, unwrap_block) != forward {
+                failures.push(format!(
+                    "{context}: released at the unwrap is not {forward}: {:?}",
+                    gate_binding_trace(tail, &id)
+                ));
+            }
+            if !forward && !gate_holds_registry_binding(&[&head, tail], &id) {
+                failures.push(format!(
+                    "{context}: the child lost its registry-only binding: {:?} then {:?}",
+                    gate_binding_trace(&head, &id),
+                    gate_binding_trace(tail, &id)
+                ));
+            }
+            if gate_child_from(tail, &id, cut) != gate_child_from(&whole, &id, cut) {
+                failures.push(format!(
+                    "{context}: the tail differs from the one-batch run: {:?} against {:?}",
+                    gate_binding_trace(tail, &id),
+                    gate_binding_trace(&whole, &id)
+                ));
+            }
+            if gate_child_from(tail_probe, &id, probe_block)
+                != gate_child_from(&whole_probe, &id, probe_block)
+            {
+                failures.push(format!(
+                    "{context}: the later registry owner change differs from the one-batch run: \
+                     {:?} against {:?}",
+                    gate_binding_trace(tail_probe, &id),
+                    gate_binding_trace(&whole_probe, &id)
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
     Ok(())
+}
+
+/// The batch-layout table for the locked guard with a registry-only predecessor. The child's
+/// unwrap after the parent's locked migration releases it in every layout: the whole history
+/// in one batch, cut before the migration's block so the migration and the unwrap share the
+/// tail, and cut after the migration's block. The unwrap keeps the already-selected
+/// registry-only authority, so the first pass of a tail holding the migration and the unwrap
+/// binds nothing that could stand in for the locked boundary.
+#[test]
+fn registry_only_original_child_unwrap_after_locked_parent_migration_releases_in_every_layout()
+-> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let migration_block = fixture["scenarios"]["C-01"]["parent"]["migration_block"]
+        .as_i64()
+        .unwrap();
+    let unwrap_block = migration_block + 1;
+    let cuts = [migration_block, unwrap_block];
+    assert_gate_lockaway_layouts(&fixture, unwrap_block, false, &cuts)
+}
+
+/// The same table with the old-lease expiry crossing in the history, so a tail that holds the
+/// migration also takes the expiry reconciliation. The unlocked migration leaves that name's
+/// registry record with the Graveyard, so before the reconciliation its lease release binds a
+/// registry-only authority of its own. The table checks the final outputs, where the
+/// reconciliation has removed it.
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/UnlockedMigrationController.sol:L111-L118 @ ens_v2_sepolia_20261001@07e55a05)
+#[test]
+fn registry_only_original_child_unwrap_after_locked_parent_migration_releases_with_an_expiry_crossing()
+-> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let migration_block = fixture["scenarios"]["C-01"]["parent"]["migration_block"]
+        .as_i64()
+        .unwrap();
+    let unwrap_block = migration_block + 1;
+    let cuts = [migration_block, unwrap_block];
+    assert_gate_lockaway_layouts(&fixture, unwrap_block, true, &cuts)
+}
+
+/// The reverse order: the child's unwrap comes before the parent's locked migration, so the
+/// migration's position suppresses nothing and the child keeps its registry-only authority in
+/// every layout. Each layout also checks that the child still holds that binding after the
+/// unwrap, so a binding dropped earlier fails too. The cuts put the unwrap and the migration in one tail, then the unwrap in the
+/// head and the migration alone in the tail.
+#[test]
+fn registry_only_original_child_unwrap_before_locked_parent_migration_keeps_its_binding_in_every_layout()
+-> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let migration_block = fixture["scenarios"]["C-01"]["parent"]["migration_block"]
+        .as_i64()
+        .unwrap();
+    let unwrap_block = migration_block - 2;
+    let cuts = [unwrap_block, migration_block];
+    assert_gate_lockaway_layouts(&fixture, unwrap_block, false, &cuts)
 }
 
 /// An original child unwrapped before its parent's locked migration later in the same batch
