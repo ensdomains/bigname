@@ -541,6 +541,15 @@ pub(super) fn interpret(
                 .as_ref()
                 .map(|state| (&state.owner, state.resource_id))
     {
+        wrapper_custody::revoke_delegate(
+            &mut output,
+            state,
+            (&selected.source.namespace, &affected_node),
+            previous.as_ref(),
+            linked.as_ref(),
+            context,
+            raw,
+        );
         append_authority_permissions(
             &mut output,
             previous.as_ref(),

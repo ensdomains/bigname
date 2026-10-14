@@ -4402,3 +4402,34 @@ ready under the new hash.
 
 It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
 and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## A registry write that ends a wrapped name revokes its token approval
+
+The build that ends the NameWrapper's per-token approval where a registry owner write ends the
+NameWrapper authority changes the ENSv1 registry path in `crates/adapters/src`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain. The
+[projection content hash](glossary.md#projection-content-hash) moves with it.
+
+What changes for names:
+
+- When a parent's registry write gives a wrapped child to a new owner or to zero, the address
+  the holder approved on the NameWrapper loses its NameWrapper powers at that write, before the
+  holder's revoke. `GET /v1/events?type=permission` serves that revoke once.
+- `GET /v1/permissions` no longer serves the approved address on the old NameWrapper resource
+  after that write. Before, the row stayed until the old token moved or burned.
+- The same holds for the Sepolia Graveyard's clear of a wrapped child. A lapsed wrapped
+  `.eth` name registered again without the NameWrapper is unchanged, since the read already
+  masks the lapsed approval.
+- A registry write that names the NameWrapper, the holder's own unwrap and owner-wide operators
+  are unchanged. An operator's NameWrapper rows are copied from the holder's served rows, which
+  the same write already revoked.
+
+These rows arrive through re-derivation, not through an in-place change. Every chain needs a
+full-history Interpret redo, then the Project redo it installs, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+binaries. The change rides the next re-derivation release and shares that release's one
+Interpret and Project redo pair with its other hash-rotating changes. Do not mark old rows
+ready under the new hash.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
+and the compiled watch plan are unchanged, so stamp no Ingest redo.

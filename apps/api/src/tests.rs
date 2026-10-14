@@ -631,6 +631,9 @@ mod v2_continuing_lease;
 #[path = "tests/v2_wrap_registry_interval.rs"]
 mod v2_wrap_registry_interval;
 
+#[path = "tests/v2_wrapped_child_approval.rs"]
+mod v2_wrapped_child_approval;
+
 #[path = "tests/v2_resolver_records.rs"]
 mod v2_resolver_records;
 
