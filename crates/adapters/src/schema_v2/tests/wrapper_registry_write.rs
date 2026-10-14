@@ -1551,4 +1551,119 @@ mod token_approval {
             Ok(())
         }
     }
+
+    /// The delegate a cold restore builds straight from the rows, with no live session to compare
+    /// against.
+    mod delegate_restore {
+        use super::super::super::v1_pre_surface_resolver::compact_prior;
+        use super::*;
+        use crate::schema_v2::state::State;
+
+        /// The delegate of the child after a cold restore from `rows`, in the namespace of its
+        /// approval rows.
+        fn delegate(rows: Vec<PriorEventInput>) -> Option<String> {
+            let namespace = rows
+                .iter()
+                .find(|row| row.source_family == "ens_v1_wrapper_l1")
+                .map(|row| row.namespace.clone())
+                .expect("a wrapper row");
+            State::new(rows, Vec::new()).v1_wrapper_delegate(&namespace, &format!("{:#x}", team()))
+        }
+
+        /// The newest of `rows` per retained-state key, in their order.
+        fn newest_per_key(rows: Vec<PriorEventInput>) -> Vec<PriorEventInput> {
+            let newest = rows
+                .iter()
+                .enumerate()
+                .map(|(index, row)| (row.retained_state_key.clone(), index))
+                .collect::<std::collections::HashMap<_, _>>();
+            rows.into_iter()
+                .enumerate()
+                .filter(|(index, row)| newest[&row.retained_state_key] == *index)
+                .map(|(_, row)| row)
+                .collect()
+        }
+
+        /// The rows of `events` in output order, all of them and the newest per retained-state
+        /// key.
+        fn both_forms(events: &[NormalizedEvent]) -> [(&'static str, Vec<PriorEventInput>); 2] {
+            [
+                ("all rows", events.iter().map(prior_event).collect()),
+                ("compacted rows", compact_prior(events)),
+            ]
+        }
+
+        /// The wrapper's grant to the approved address restores it as the delegate, and the
+        /// registry's revoke at the parent's write to a new owner or to zero restores none.
+        #[test]
+        fn the_registry_revoke_ends_the_restored_delegate() -> anyhow::Result<()> {
+            for owner in [NEW_OWNER, ZERO_ADDRESS] {
+                let fixture = Fixture::new()?;
+                let calls = Calls { fixture: &fixture };
+                let mut steps = calls.approved_child();
+                steps.push(vec![calls.parent_write(WRITTEN, 0, owner)]);
+                let output = fixture.run(steps)?;
+                let events = &output.normalized_events;
+                let before = events
+                    .iter()
+                    .filter(|event| event.block_number < Some(WRITTEN))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for (form, rows) in both_forms(&before) {
+                    assert_eq!(delegate(rows), Some(DELEGATE.to_owned()), "{owner} {form}");
+                }
+                for (form, rows) in both_forms(events) {
+                    let registry_revoke = |row: &PriorEventInput| {
+                        row.source_family == "ens_v1_registry_l1"
+                            && row.after_state["subject"] == DELEGATE
+                            && row.after_state.pointer("/revocation_source/relation_kind")
+                                == Some(&json!("token_approval"))
+                    };
+                    assert!(
+                        rows.iter().any(registry_revoke),
+                        "{owner} {form} keeps the registry revoke"
+                    );
+                    assert_eq!(delegate(rows), None, "{owner} {form}");
+                }
+            }
+            Ok(())
+        }
+
+        /// A later grant to another address, between the old delegate's grant and the registry's
+        /// revoke of that old delegate, survives the revoke, from all rows and compacted.
+        #[test]
+        fn an_older_subjects_revoke_leaves_a_later_delegate() -> anyhow::Result<()> {
+            let fixture = Fixture::new()?;
+            let calls = Calls { fixture: &fixture };
+            let mut steps = calls.approved_child();
+            steps.push(vec![calls.parent_write(WRITTEN, 0, NEW_OWNER)]);
+            let output = fixture.run(steps)?;
+            let approval = |family: &str, block: i64| {
+                output
+                    .normalized_events
+                    .iter()
+                    .find(|event| {
+                        event.source_family == family
+                            && event.block_number == Some(block)
+                            && relation(event) == Some("token_approval")
+                    })
+                    .map(prior_event)
+                    .expect("the approval row")
+            };
+            let grant = approval("ens_v1_wrapper_l1", APPROVED);
+            let revoke = approval("ens_v1_registry_l1", WRITTEN);
+            let mut later = grant.clone();
+            later.after_state["subject"] = json!(NEXT_DELEGATE);
+            later.retained_state_key = grant.retained_state_key.replace(DELEGATE, NEXT_DELEGATE);
+            assert_ne!(later.retained_state_key, grant.retained_state_key);
+            let rows = vec![grant, later, revoke];
+            for (form, rows) in [
+                ("all rows", rows.clone()),
+                ("compacted rows", newest_per_key(rows)),
+            ] {
+                assert_eq!(delegate(rows), Some(NEXT_DELEGATE.to_owned()), "{form}");
+            }
+            Ok(())
+        }
+    }
 }
