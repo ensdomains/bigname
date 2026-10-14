@@ -409,26 +409,38 @@ fn name_unwrapped(
         && state
             .v1_registrar_expiry_from_wrapper(&selected.source.namespace, &namehash)
             .is_some_and(|expiry| expiry > raw.block_timestamp.unix_timestamp());
+    // The successor follows the authority selected at the unwrap, not its source family.
+    // When registry custody left the NameWrapper, whether or not it came back through the
+    // registry, the registry writes already selected the registry-only authority, and the
+    // unwrap keeps it unchanged.
     let mut registry_only_successor = false;
     if reactivated.is_none()
         && registry_settled_to_unwrapped_owner
         && !locked_migrated_original_child
         && !graveyard_retained
         && !registrar_transfer_may_follow
-        && let Some(previous) = linked.as_ref().filter(|name| {
-            name.surface_known && name.authority_source_family == selected.source.source_family
-        })
+        && let Some(previous) = linked.as_ref().filter(|name| name.surface_known)
     {
-        registry_only_fallback::activate_registry_only_authority(
-            selected,
-            raw,
-            state,
-            &namehash,
-            previous.labelhash.clone(),
-            previous,
-            &mut reactivated,
-        );
-        registry_only_successor = reactivated.is_some();
+        if previous.authority_source_family == selected.source.source_family {
+            registry_only_fallback::activate_registry_only_authority(
+                selected,
+                raw,
+                state,
+                &namehash,
+                previous.labelhash.clone(),
+                previous,
+                &mut reactivated,
+            );
+            registry_only_successor = reactivated.is_some();
+        } else if previous.token_lineage_id.is_none() && authority_kind(previous) == "registry_only"
+        {
+            state.activate_v1_authority(
+                &selected.source.namespace,
+                &namehash,
+                Some(previous.clone()),
+            );
+            reactivated = Some(previous.clone());
+        }
     }
     let resolver = state.v1_resolver_for_activation(
         &selected.source.namespace,

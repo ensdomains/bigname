@@ -614,6 +614,9 @@ include!("tests/v2_search_lean.rs");
 #[path = "tests/v2_wrapper_callback.rs"]
 mod v2_wrapper_callback;
 
+#[path = "tests/v2_unwrapped_registry_only_child.rs"]
+mod v2_unwrapped_registry_only_child;
+
 #[path = "tests/v2_canonical_association.rs"]
 mod v2_canonical_association;
 

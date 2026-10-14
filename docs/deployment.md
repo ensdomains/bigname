@@ -4205,8 +4205,9 @@ successor (TYR-334) changes the unwrap and restore paths and the batch re-run in
 What changes for names:
 
 - A wrapped ENSv1 name unwrapped with no registrar lease to reactivate serves as
-  active with its registry owner on `GET /v1/names/{name}`. It also appears in that
-  owner's address names. Before, it served as `status: unregistered`.
+  active with its registry owner on `GET /v1/names/{name}`. This includes a name whose
+  registry record left the NameWrapper before the unwrap, whether or not it came back. It
+  also appears in that owner's address names. Before, it served as `status: unregistered`.
 - Every log an ENSv2 resolver emitted earlier in a batch is kept when Interpret re-runs
   that batch, even after a later announcement in the batch replaced its
   [resolver announcement admission](glossary.md#resolver-announcement-admission). A role

@@ -1664,21 +1664,23 @@ fn gate_dns(labels: &[&str]) -> Vec<u8> {
     encoded
 }
 
-fn gate_wrap(
+/// `NameWrapped` with the given fuses and expiry.
+fn gate_wrap_with(
     block: i64,
     log_index: i64,
     node: &str,
     labels: &[&str],
     owner: &str,
     wrapper: &str,
+    (fuses, expiry): (u32, u64),
 ) -> RawLogInput {
     raw_at_transaction(
         super::super::NameWrapped {
             node: node.parse().expect("node parses"),
             name: gate_dns(labels).into(),
             owner: owner.parse().expect("owner parses"),
-            fuses: 65_536,
-            expiry: 4_000_000_000,
+            fuses,
+            expiry,
         }
         .encode_log_data(),
         block,
@@ -1782,23 +1784,12 @@ fn original_child_unwrap_after_same_batch_locked_parent_migration_opens_no_succe
     let scenario = &fixture["scenarios"]["C-01"];
     let addresses = &fixture["addresses"];
     let wrapper = addresses["name_wrapper"].as_str().unwrap();
-    let parent_node = scenario["parent"]["namehash"].as_str().unwrap();
     let parent_label = scenario["parent"]["label"].as_str().unwrap();
     let orig_node = namehash_under(&scenario["parent"]["namehash"], "orig")?;
     let orig_id = format!("ens:{orig_node}");
     let migration_block = scenario["parent"]["migration_block"].as_i64().unwrap();
-    let wrap_logs = vec![
-        gate_new_owner(230, 0, parent_node, "orig", wrapper),
-        gate_wrap(
-            230,
-            1,
-            &orig_node,
-            &["orig", parent_label, "eth"],
-            GATE_OWNER,
-            wrapper,
-        ),
-        gate_new_resolver(230, 2, &orig_node),
-    ];
+    let mut wrap_logs = gate_create_wrapped(230, 0, "orig", 65_536, &fixture)?;
+    wrap_logs.push(gate_new_resolver(230, 3, &orig_node));
     let parent_logs = level_logs(&scenario["parent"], addresses)?;
     // Split history: parent migration restored, then the unwrap alone.
     let split_head = {
@@ -1906,14 +1897,13 @@ fn original_child_unwrap_after_same_batch_locked_parent_migration_opens_no_succe
     assert_eq!(before_cold.normalized_events, before_live.normalized_events);
     // After the unwrap: re-wrapping must not transition from a
     // registry-only successor that was never opened.
-    let probe = vec![gate_wrap(
+    let probe = gate_wrap_existing(
         migration_block + 5,
         0,
         &orig_node,
         &["orig", parent_label, "eth"],
-        GATE_OWNER,
         wrapper,
-    )];
+    );
     let (full_probe_live, _) =
         interpret_test_batch_incremental(gate_batch(full_logs.clone(), &fixture), None).and_then(
             |(_, session)| {
@@ -1929,14 +1919,28 @@ fn original_child_unwrap_after_same_batch_locked_parent_migration_opens_no_succe
         probe_cold.normalized_events,
         full_probe_live.normalized_events
     );
-    assert!(
-        !probe_cold.normalized_events.iter().any(|event| {
-            event.event_kind == "SurfaceUnbound"
-                && event.logical_name_id.as_deref() == Some(orig_id.as_str())
-                && event.before_state["authority_kind"] == "registry_only"
-        }),
-        "restored history kept a registry-only successor to close"
-    );
+    // The re-wrap's own registry write to the NameWrapper may open a registry-only authority
+    // that its `NameWrapped` closes in the same block. A registry-only authority it closes
+    // without opening it first would have survived from the unwrap.
+    let mut opened_in_probe = false;
+    for event in probe_cold
+        .normalized_events
+        .iter()
+        .filter(|event| event.logical_name_id.as_deref() == Some(orig_id.as_str()))
+    {
+        if event.event_kind == "SurfaceBound"
+            && event.after_state["authority_kind"] == "registry_only"
+        {
+            opened_in_probe = true;
+        }
+        assert!(
+            event.event_kind != "SurfaceUnbound"
+                || event.before_state["authority_kind"] != "registry_only"
+                || opened_in_probe,
+            "restored history kept a registry-only successor to close: {:?}",
+            probe_cold.normalized_events
+        );
+    }
     let _ = full;
     Ok(())
 }
@@ -1950,24 +1954,19 @@ fn original_grandchild_unwrap_under_locked_child_parent_opens_no_successor() -> 
     let scenario = &fixture["scenarios"]["C-04"];
     let addresses = &fixture["addresses"];
     let wrapper = addresses["name_wrapper"].as_str().unwrap();
-    let child_node = scenario["child"]["namehash"].as_str().unwrap();
     let child_label = scenario["child"]["label"].as_str().unwrap();
     let parent_label = scenario["parent"]["label"].as_str().unwrap();
     let grand_node = namehash_under(&scenario["child"]["namehash"], "orig")?;
     let grand_id = format!("ens:{grand_node}");
     let head_logs = {
-        let mut logs = vec![
-            gate_new_owner(229, 0, child_node, "orig", wrapper),
-            gate_wrap(
-                229,
-                1,
-                &grand_node,
-                &["orig", child_label, parent_label, "eth"],
-                GATE_OWNER,
-                wrapper,
-            ),
-            gate_new_resolver(229, 2, &grand_node),
-        ];
+        let mut logs = gate_create_wrapped_under(
+            (229, 0),
+            &scenario["child"],
+            &["orig", child_label, parent_label, "eth"],
+            65_536,
+            &fixture,
+        )?;
+        logs.push(gate_new_resolver(229, 3, &grand_node));
         logs.extend(scenario_logs(scenario, addresses, &["parent", "child"])?);
         logs
     };
@@ -1995,9 +1994,10 @@ fn original_grandchild_unwrap_under_locked_child_parent_opens_no_successor() -> 
 }
 
 /// Scoped restore with no parent link: the child's retained history
-/// names only the child (a wrap with no registry `NewOwner` linking it
-/// to its parent), so a child-only scoped restore has no link that
-/// pulls the parent's `MigrationApplied` in. The gate must still load
+/// names only the child. Its record was created before the batch, and its
+/// holder's `wrap` writes the registry with `Transfer`, not a `NewOwner`
+/// linking it to its parent. So a child-only scoped restore has no link
+/// that pulls the parent's `MigrationApplied` in. The gate must still load
 /// that boundary before it answers.
 #[test]
 fn original_child_unwrap_scoped_restore_without_parent_link_opens_no_successor()
@@ -2010,17 +2010,9 @@ fn original_child_unwrap_scoped_restore_without_parent_link_opens_no_successor()
     let orig_node = namehash_under(&scenario["parent"]["namehash"], "orig")?;
     let orig_id = format!("ens:{orig_node}");
     let migration_block = scenario["parent"]["migration_block"].as_i64().unwrap();
-    let mut head_logs = vec![
-        gate_wrap(
-            230,
-            1,
-            &orig_node,
-            &["orig", parent_label, "eth"],
-            GATE_OWNER,
-            wrapper,
-        ),
-        gate_new_resolver(230, 2, &orig_node),
-    ];
+    let mut head_logs =
+        gate_wrap_existing(230, 0, &orig_node, &["orig", parent_label, "eth"], wrapper);
+    head_logs.push(gate_new_resolver(230, 3, &orig_node));
     head_logs.extend(level_logs(&scenario["parent"], addresses)?);
     let head = interpret_test_batch(gate_batch(head_logs, &fixture))?;
     let mut tail_input = gate_batch(
@@ -2049,23 +2041,11 @@ fn locked_migration_rerun_keeps_a_role_change_before_a_resolver_reannouncement()
     let scenario = &fixture["scenarios"]["C-01"];
     let addresses = &fixture["addresses"];
     let wrapper = addresses["name_wrapper"].as_str().unwrap();
-    let parent_node = scenario["parent"]["namehash"].as_str().unwrap();
-    let parent_label = scenario["parent"]["label"].as_str().unwrap();
     let orig_node = namehash_under(&scenario["parent"]["namehash"], "orig")?;
     let orig_id = format!("ens:{orig_node}");
     let migration_block = scenario["parent"]["migration_block"].as_i64().unwrap();
-    let mut logs = vec![
-        gate_new_owner(230, 0, parent_node, "orig", wrapper),
-        gate_wrap(
-            230,
-            1,
-            &orig_node,
-            &["orig", parent_label, "eth"],
-            GATE_OWNER,
-            wrapper,
-        ),
-        gate_new_resolver(230, 2, &orig_node),
-    ];
+    let mut logs = gate_create_wrapped(230, 0, "orig", 65_536, &fixture)?;
+    logs.push(gate_new_resolver(230, 3, &orig_node));
     logs.extend(level_logs(&scenario["parent"], addresses)?);
     let without_unwrap =
         super::announced_resolver::with_announced_resolver(gate_batch(logs.clone(), &fixture))?;
@@ -2120,8 +2100,6 @@ fn locked_and_expiry_reruns_together_keep_a_role_change_before_a_resolver_reanno
     let scenario = &fixture["scenarios"]["C-01"];
     let addresses = &fixture["addresses"];
     let wrapper = addresses["name_wrapper"].as_str().unwrap();
-    let parent_node = scenario["parent"]["namehash"].as_str().unwrap();
-    let parent_label = scenario["parent"]["label"].as_str().unwrap();
     let orig_node = namehash_under(&scenario["parent"]["namehash"], "orig")?;
     let orig_id = format!("ens:{orig_node}");
     let migration_block = scenario["parent"]["migration_block"].as_i64().unwrap();
@@ -2134,18 +2112,8 @@ fn locked_and_expiry_reruns_together_keep_a_role_change_before_a_resolver_reanno
             raw.log_index += 50;
         }
     }
-    let mut logs = vec![
-        gate_new_owner(230, 0, parent_node, "orig", wrapper),
-        gate_wrap(
-            230,
-            1,
-            &orig_node,
-            &["orig", parent_label, "eth"],
-            GATE_OWNER,
-            wrapper,
-        ),
-        gate_new_resolver(230, 2, &orig_node),
-    ];
+    let mut logs = gate_create_wrapped(230, 0, "orig", 65_536, &fixture)?;
+    logs.push(gate_new_resolver(230, 3, &orig_node));
     logs.extend(level_logs(&scenario["parent"], addresses)?);
     logs.extend(gate_unwrap_tail(
         migration_block + 1,
@@ -2185,6 +2153,537 @@ fn locked_and_expiry_reruns_together_keep_a_role_change_before_a_resolver_reanno
     assert!(
         super::announced_resolver::kept_roles_change(&output),
         "the combined re-runs dropped the resolver's role change"
+    );
+    Ok(())
+}
+
+const GATE_AWAY_OWNER: &str = "0x00000000000000000000000000000000000000e1";
+const GATE_TRANSFEREE: &str = "0x00000000000000000000000000000000000000e2";
+const GATE_PROBE_OWNER: &str = "0x00000000000000000000000000000000000000e3";
+
+fn gate_registry_transfer(block: i64, log_index: i64, node: &str, owner: &str) -> RawLogInput {
+    raw_at_transaction(
+        super::super::v1_registry::Transfer {
+            node: node.parse().expect("node parses"),
+            owner: owner.parse().expect("owner parses"),
+        }
+        .encode_log_data(),
+        block,
+        0,
+        log_index,
+        GATE_V1_REGISTRY,
+    )
+}
+
+fn gate_token_move(block: i64, node: &str, from: &str, to: &str, wrapper: &str) -> RawLogInput {
+    let from: Address = from.parse().expect("from parses");
+    raw_at_transaction(
+        super::super::v2_registry::TransferSingle {
+            operator: from,
+            from,
+            to: to.parse().expect("to parses"),
+            id: U256::from_be_bytes(node.parse::<B256>().expect("node parses").0),
+            value: U256::from(1),
+        }
+        .encode_log_data(),
+        block,
+        0,
+        0,
+        wrapper,
+    )
+}
+
+/// A custody-path child: its logical name id, unwrap block and probe block.
+type GateCustodyChild = (String, i64, i64);
+
+/// The NameWrapper's mint of a child token to GATE_OWNER, called by `operator`.
+fn gate_mint(block: i64, log_index: i64, node: &str, operator: &str, wrapper: &str) -> RawLogInput {
+    let owner: Address = GATE_OWNER.parse().expect("owner parses");
+    raw_at_transaction(
+        super::super::v2_registry::TransferSingle {
+            operator: operator.parse().expect("operator parses"),
+            from: Address::ZERO,
+            to: owner,
+            id: U256::from_be_bytes(node.parse::<B256>().expect("node parses").0),
+            value: U256::from(1),
+        }
+        .encode_log_data(),
+        block,
+        0,
+        log_index,
+        wrapper,
+    )
+}
+
+/// GATE_OWNER, as the holder of the wrapped C-01 parent, creates a child for itself through
+/// the NameWrapper's `setSubnodeOwner`: the registry write to the NameWrapper, the mint, then
+/// `NameWrapped`. The logs take `log_index` and the two after it in transaction 0.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f)
+fn gate_create_wrapped(
+    block: i64,
+    log_index: i64,
+    label: &str,
+    fuses: u32,
+    fixture: &Value,
+) -> anyhow::Result<Vec<RawLogInput>> {
+    let parent = &fixture["scenarios"]["C-01"]["parent"];
+    let parent_label = parent["label"].as_str().unwrap();
+    gate_create_wrapped_under(
+        (block, log_index),
+        parent,
+        &[label, parent_label, "eth"],
+        fuses,
+        fixture,
+    )
+}
+
+/// `gate_create_wrapped` under the catalog `parent` level, for the child whose DNS labels are
+/// `labels`, the child's own label first. The holder of the parent's token calls
+/// `setSubnodeOwner`, so it is the mint's operator: the level's `wrapped_owner`, else
+/// GATE_OWNER. The NameWrapper caps the child's expiry at the parent's, so a level with a
+/// `wrap_expiry` caps it there.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L958-L960 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L985-L987 @ ens_v1@91c966f)
+fn gate_create_wrapped_under(
+    (block, log_index): (i64, i64),
+    parent: &Value,
+    labels: &[&str],
+    fuses: u32,
+    fixture: &Value,
+) -> anyhow::Result<Vec<RawLogInput>> {
+    let wrapper = fixture["addresses"]["name_wrapper"].as_str().unwrap();
+    let parent_node = parent["namehash"].as_str().unwrap();
+    let node = namehash_under(&parent["namehash"], labels[0])?;
+    let operator = parent["wrapped_owner"].as_str().unwrap_or(GATE_OWNER);
+    let expiry = parent["wrap_expiry"]
+        .as_u64()
+        .map_or(4_000_000_000, |parent_expiry| {
+            parent_expiry.min(4_000_000_000)
+        });
+    Ok(vec![
+        gate_new_owner(block, log_index, parent_node, labels[0], wrapper),
+        gate_mint(block, log_index + 1, &node, operator, wrapper),
+        gate_wrap_with(
+            block,
+            log_index + 2,
+            &node,
+            labels,
+            GATE_OWNER,
+            wrapper,
+            (fuses, expiry),
+        ),
+    ])
+}
+
+/// GATE_OWNER's `wrap` of a child it holds in the registry: the registry write to the
+/// NameWrapper, the mint, then `NameWrapped` with fuses 0 and expiry 0, as `wrap` passes them.
+/// The logs take `log_index` and the two after it in transaction 0.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L372-L374 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L902 @ ens_v1@91c966f)
+fn gate_wrap_existing(
+    block: i64,
+    log_index: i64,
+    node: &str,
+    labels: &[&str],
+    wrapper: &str,
+) -> Vec<RawLogInput> {
+    vec![
+        gate_registry_transfer(block, log_index, node, wrapper),
+        gate_mint(block, log_index + 1, node, GATE_OWNER, wrapper),
+        gate_wrap_with(
+            block,
+            log_index + 2,
+            node,
+            labels,
+            GATE_OWNER,
+            wrapper,
+            (0, 0),
+        ),
+    ]
+}
+
+/// One child of the C-01 parent per custody path, created at block 210 and unwrapped at its own
+/// block, followed by a registry owner change. Returns the logs and the children.
+///
+/// The record of a child leaves the NameWrapper through the registry only while the parent is
+/// unwrapped, because the NameWrapper's `setSubnodeOwner` writes only itself as the child's
+/// registry owner. A parent that can be unwrapped has not burned CANNOT_UNWRAP, so its children
+/// carry no parent-controlled fuses, and every child here has fuses 0. The C-01 parent's own
+/// ENSv1 history, which these fixtures leave out, is unwrapped at 211-212 and wrapped and
+/// locked again before its migration.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L580 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L963-L975 @ ens_v1@91c966f)
+fn gate_custody_paths(
+    fixture: &Value,
+) -> anyhow::Result<(Vec<RawLogInput>, Vec<GateCustodyChild>)> {
+    let scenario = &fixture["scenarios"]["C-01"];
+    let wrapper = fixture["addresses"]["name_wrapper"].as_str().unwrap();
+    let parent_node = scenario["parent"]["namehash"].as_str().unwrap();
+    let parent_label = scenario["parent"]["label"].as_str().unwrap();
+    let mut logs = Vec::new();
+    let mut names = Vec::new();
+    for (index, label) in ["away", "held", "rewrap", "moved", "plain"]
+        .into_iter()
+        .enumerate()
+    {
+        let index = i64::try_from(index)?;
+        let node = namehash_under(&scenario["parent"]["namehash"], label)?;
+        logs.extend(gate_create_wrapped(210, 3 * index, label, 0, fixture)?);
+        let mut owner = GATE_OWNER;
+        match label {
+            "away" => {
+                logs.push(gate_new_owner(211, 0, parent_node, label, GATE_AWAY_OWNER));
+                logs.push(gate_new_owner(212, 0, parent_node, label, wrapper));
+            }
+            // The parent owner hands the record to the holder through the registry, and the
+            // holder unwraps while it is away. The unwrap's registry write passes through the
+            // holder's registry operator approval for the NameWrapper.
+            // (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L21 @ ens_v1@91c966f)
+            "held" => {
+                logs.push(gate_new_owner(211, 1, parent_node, label, GATE_OWNER));
+            }
+            "rewrap" => {
+                logs.extend(gate_unwrap_tail(211, &node, GATE_OWNER, wrapper));
+                logs.extend(gate_wrap_existing(
+                    212,
+                    1,
+                    &node,
+                    &[label, parent_label, "eth"],
+                    wrapper,
+                ));
+            }
+            "moved" => {
+                logs.push(gate_token_move(
+                    213,
+                    &node,
+                    GATE_OWNER,
+                    GATE_TRANSFEREE,
+                    wrapper,
+                ));
+                owner = GATE_TRANSFEREE;
+            }
+            _ => {}
+        }
+        let unwrap_block = 214 + index;
+        let probe_block = 220 + index;
+        logs.extend(gate_unwrap_tail(unwrap_block, &node, owner, wrapper));
+        logs.push(gate_registry_transfer(
+            probe_block,
+            0,
+            &node,
+            GATE_PROBE_OWNER,
+        ));
+        names.push((format!("ens:{node}"), unwrap_block, probe_block));
+    }
+    Ok((logs, names))
+}
+
+/// The unwrap keeps the child bound to a registry-only authority, and the later registry
+/// owner change transfers that authority instead of binding the child again.
+fn assert_gate_unwrap_keeps_registry_authority(
+    output: &BatchOutput,
+    context: &str,
+    logical_name_id: &str,
+    unwrap_block: i64,
+    probe_block: i64,
+) {
+    let binding_events = |block: i64| {
+        output
+            .normalized_events
+            .iter()
+            .filter(|event| {
+                event.block_number == Some(block)
+                    && event.logical_name_id.as_deref() == Some(logical_name_id)
+                    && matches!(event.event_kind.as_str(), "SurfaceBound" | "SurfaceUnbound")
+            })
+            .collect::<Vec<_>>()
+    };
+    let at_unwrap = binding_events(unwrap_block);
+    if let Some(last) = at_unwrap.last() {
+        assert!(
+            last.event_kind == "SurfaceBound"
+                && last.after_state["authority_kind"] == "registry_only",
+            "{context}: the unwrap left the child unbound: {at_unwrap:?}"
+        );
+    }
+    assert!(
+        binding_events(probe_block).is_empty(),
+        "{context}: the registry owner change bound the child again: {:?}",
+        binding_events(probe_block)
+    );
+    assert!(
+        output.surface_bindings.iter().any(|binding| {
+            binding.logical_name_id == logical_name_id
+                && binding.binding_kind == "declared_registry_path"
+        }),
+        "{context}: no registry binding"
+    );
+}
+
+/// The locked re-run trigger: the C-01 parent's locked migration, and an original child
+/// "orig" unwrapped after it in the same batch. The first pass opens a registry-only successor
+/// for "orig", so Interpret re-runs the batch with the locked boundary at its position, and
+/// that re-run closes the successor again. Returns the logs and the child's logical name id.
+fn gate_locked_rerun_logs(fixture: &Value) -> anyhow::Result<(Vec<RawLogInput>, String)> {
+    let scenario = &fixture["scenarios"]["C-01"];
+    let addresses = &fixture["addresses"];
+    let wrapper = addresses["name_wrapper"].as_str().unwrap();
+    let orig_node = namehash_under(&scenario["parent"]["namehash"], "orig")?;
+    let migration_block = scenario["parent"]["migration_block"].as_i64().unwrap();
+    let mut logs = gate_create_wrapped(230, 0, "orig", 65_536, fixture)?;
+    logs.push(gate_new_resolver(230, 3, &orig_node));
+    logs.extend(level_logs(&scenario["parent"], addresses)?);
+    logs.extend(gate_unwrap_tail(
+        migration_block + 1,
+        &orig_node,
+        GATE_OWNER,
+        wrapper,
+    ));
+    Ok((logs, format!("ens:{orig_node}")))
+}
+
+/// The re-run variants of the custody paths. The expiry variant crosses an old lease's expiry
+/// after a migration. The locked variant adds the locked re-run trigger of
+/// `gate_locked_rerun_logs`. The custody unwraps come before that migration, so its position
+/// suppresses none of them. The last variant takes both re-runs in one batch, with the expiry
+/// scenario's migration in its own later transaction of the shared block.
+#[test]
+fn every_custody_path_into_a_no_lease_unwrap_keeps_the_registry_authority_on_a_rerun()
+-> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let migration_block = fixture["scenarios"]["C-01"]["parent"]["migration_block"]
+        .as_i64()
+        .unwrap();
+    for (variant, locked, expiry) in [
+        ("expiry", false, true),
+        ("locked", true, false),
+        ("locked and expiry", true, true),
+    ] {
+        let (mut logs, names) = gate_custody_paths(&fixture)?;
+        let orig = if locked {
+            let (locked_logs, orig) = gate_locked_rerun_logs(&fixture)?;
+            logs.extend(locked_logs);
+            Some(orig)
+        } else {
+            None
+        };
+        let mut expiry_block = None;
+        let input = if expiry {
+            let mut input = super::expiry::migration_and_old_lease_expiry()?;
+            expiry_block = input.blocks.last().map(|block| block.block_number);
+            if locked {
+                for raw in &mut input.raw_logs {
+                    if raw.block_number == migration_block {
+                        raw.transaction_index = 2;
+                        raw.transaction_hash = format!("transaction-{migration_block}-2");
+                        raw.log_index += 50;
+                    }
+                }
+            }
+            input.blocks.extend(logs.iter().map(|raw| RawBlockInput {
+                chain_id: raw.chain_id.clone(),
+                block_hash: raw.block_hash.clone(),
+                block_number: raw.block_number,
+                block_timestamp: raw.block_timestamp,
+                canonicality_state: raw.canonicality_state.clone(),
+            }));
+            input.blocks.sort_by_key(|block| block.block_number);
+            input.blocks.dedup_by_key(|block| block.block_number);
+            input.raw_logs.extend(logs);
+            input.raw_logs = ordered(std::mem::take(&mut input.raw_logs));
+            input
+        } else {
+            gate_batch(logs, &fixture)
+        };
+        let output = interpret_test_batch(input)?;
+        if let Some(expiry_block) = expiry_block {
+            super::expiry::assert_old_lease_does_not_reopen(&output, expiry_block);
+        }
+        if let Some(orig) = orig {
+            assert!(
+                output.normalized_events.iter().any(|event| {
+                    event.event_kind == "MigrationApplied"
+                        && event.after_state["migration_path"] == "locked_wrapped"
+                        && event.consumer_visibility == "activated"
+                }),
+                "{variant}: the batch proves the parent's locked migration"
+            );
+            assert!(
+                !gate_successor_open(&output, &orig),
+                "{variant}: the locked re-run kept the trigger's successor open"
+            );
+        }
+        for (logical_name_id, unwrap_block, probe_block) in names {
+            assert_gate_unwrap_keeps_registry_authority(
+                &output,
+                &format!("{variant}: {logical_name_id}"),
+                &logical_name_id,
+                unwrap_block,
+                probe_block,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The holder's `unwrap` names the admitted Graveyard as controller, so the registry owner
+/// the unwrap leaves is the Graveyard. That is a burned record, not a live registry owner, so
+/// no registry-only successor opens. The emancipated-branch migration cleanup makes the same
+/// unwrap from the receiver. "grave" is a child of a locked parent with PARENT_CANNOT_CONTROL,
+/// the shape that cleanup meets, and the wrapper is selected at its unwrap. "graveaway" has
+/// fuses 0, and its record left the NameWrapper and came back while the parent was unwrapped,
+/// so the registry-only authority is selected at its unwrap.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L403-L414 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2@a971bd64)
+#[test]
+fn unwrap_into_the_graveyard_keeps_no_registry_only_authority() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["C-01"];
+    let wrapper = fixture["addresses"]["name_wrapper"].as_str().unwrap();
+    let graveyard = fixture["addresses"]["graveyard"].as_str().unwrap();
+    let parent_node = scenario["parent"]["namehash"].as_str().unwrap();
+    for (label, away) in [("grave", false), ("graveaway", true)] {
+        let node = namehash_under(&scenario["parent"]["namehash"], label)?;
+        let id = format!("ens:{node}");
+        let fuses = if away { 0 } else { 65_536 };
+        let mut logs = gate_create_wrapped(210, 0, label, fuses, &fixture)?;
+        if away {
+            logs.push(gate_new_owner(211, 0, parent_node, label, GATE_AWAY_OWNER));
+            logs.push(gate_new_owner(212, 0, parent_node, label, wrapper));
+        }
+        let mut unwrap = gate_unwrap_tail(214, &node, graveyard, wrapper);
+        unwrap[0] = gate_token_move(214, &node, GATE_OWNER, ZERO_ADDRESS, wrapper);
+        unwrap[0].transaction_index = 1;
+        unwrap[0].transaction_hash = "transaction-214-1".to_owned();
+        logs.extend(unwrap);
+        let output = interpret_test_batch(gate_batch(logs, &fixture))?;
+        let after_unwrap = output
+            .normalized_events
+            .iter()
+            .filter(|event| {
+                event.block_number == Some(214)
+                    && event.logical_name_id.as_deref() == Some(id.as_str())
+                    && matches!(event.event_kind.as_str(), "SurfaceBound" | "SurfaceUnbound")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            after_unwrap
+                .last()
+                .is_some_and(|event| event.event_kind == "SurfaceUnbound"),
+            "{label}: the unwrap into the Graveyard left the child bound: {after_unwrap:?}"
+        );
+        assert!(
+            !output.normalized_events.iter().any(|event| {
+                event.block_number == Some(214)
+                    && event.logical_name_id.as_deref() == Some(id.as_str())
+                    && event.event_kind == "SurfaceBound"
+                    && event.after_state["authority_kind"] == "registry_only"
+            }),
+            "{label}: a registry-only authority was bound for the Graveyard"
+        );
+    }
+    Ok(())
+}
+
+/// The locked guard with a registry-only predecessor. The child's record left the NameWrapper
+/// and came back while the parent was unwrapped, so the registry-only authority is selected,
+/// and the parent was then wrapped and locked again before its migration. The child's unwrap
+/// after that migration in the same batch keeps the locked rule: the authority is released and
+/// no registry-only successor opens.
+#[test]
+fn registry_only_original_child_unwrap_after_same_batch_locked_parent_migration_releases()
+-> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["C-01"];
+    let addresses = &fixture["addresses"];
+    let wrapper = addresses["name_wrapper"].as_str().unwrap();
+    let parent_node = scenario["parent"]["namehash"].as_str().unwrap();
+    let node = namehash_under(&scenario["parent"]["namehash"], "lockaway")?;
+    let id = format!("ens:{node}");
+    let migration_block = scenario["parent"]["migration_block"].as_i64().unwrap();
+    let mut logs = gate_create_wrapped(210, 0, "lockaway", 0, &fixture)?;
+    logs.push(gate_new_owner(
+        211,
+        0,
+        parent_node,
+        "lockaway",
+        GATE_AWAY_OWNER,
+    ));
+    logs.push(gate_new_owner(212, 0, parent_node, "lockaway", wrapper));
+    logs.extend(level_logs(&scenario["parent"], addresses)?);
+    logs.extend(gate_unwrap_tail(
+        migration_block + 1,
+        &node,
+        GATE_OWNER,
+        wrapper,
+    ));
+    let output = interpret_test_batch(gate_batch(logs, &fixture))?;
+    assert!(
+        output.normalized_events.iter().any(|event| {
+            event.event_kind == "MigrationApplied"
+                && event.after_state["migration_path"] == "locked_wrapped"
+                && event.consumer_visibility == "activated"
+        }),
+        "the batch proves the parent's locked migration"
+    );
+    let at_unwrap = output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.block_number == Some(migration_block + 1)
+                && event.logical_name_id.as_deref() == Some(id.as_str())
+                && matches!(event.event_kind.as_str(), "SurfaceBound" | "SurfaceUnbound")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        at_unwrap
+            .last()
+            .is_some_and(|event| event.event_kind == "SurfaceUnbound"),
+        "the unwrap after the locked migration kept the registry-only authority: {at_unwrap:?}"
+    );
+    Ok(())
+}
+
+/// An original child unwrapped before its parent's locked migration later in the same batch
+/// opens the registry-only successor. The migration's position is after the unwrap, so it
+/// suppresses nothing earlier, in the first pass and in the locked re-run alike.
+#[test]
+fn original_child_unwrap_before_same_batch_locked_parent_migration_opens_the_successor()
+-> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["C-01"];
+    let addresses = &fixture["addresses"];
+    let wrapper = addresses["name_wrapper"].as_str().unwrap();
+    let orig_node = namehash_under(&scenario["parent"]["namehash"], "orig")?;
+    let orig_id = format!("ens:{orig_node}");
+    let migration_block = scenario["parent"]["migration_block"].as_i64().unwrap();
+    let mut logs = gate_create_wrapped(230, 0, "orig", 65_536, &fixture)?;
+    logs.push(gate_new_resolver(230, 3, &orig_node));
+    logs.extend(gate_unwrap_tail(
+        migration_block - 1,
+        &orig_node,
+        GATE_OWNER,
+        wrapper,
+    ));
+    logs.extend(level_logs(&scenario["parent"], addresses)?);
+    let output = interpret_test_batch(gate_batch(logs, &fixture))?;
+    assert!(
+        output.normalized_events.iter().any(|event| {
+            event.event_kind == "MigrationApplied"
+                && event.after_state["migration_path"] == "locked_wrapped"
+                && event.consumer_visibility == "activated"
+        }),
+        "the batch proves the parent's later locked migration"
+    );
+    assert!(
+        output.normalized_events.iter().any(|event| {
+            event.event_kind == "SurfaceBound"
+                && event.block_number == Some(migration_block - 1)
+                && event.logical_name_id.as_deref() == Some(orig_id.as_str())
+                && event.after_state["authority_kind"] == "registry_only"
+        }),
+        "the unwrap before the migration opened no registry-only successor: {:?}",
+        output.normalized_events
     );
     Ok(())
 }
