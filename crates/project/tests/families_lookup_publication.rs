@@ -158,3 +158,100 @@ async fn shared_lookup_publication_matches_name_selection_and_inventory() -> Res
     fixture.assert_rebuild_equal(14).await?;
     fixture.cleanup().await
 }
+
+// A resolver-pointer change on an ancestor resource is path-bearing: every name whose
+// lookup depends on that pointer, the descendant included, is captured as lookup work
+// and recomposed, not just the ancestor itself.
+#[tokio::test]
+async fn an_ancestor_resolver_pointer_change_recomposes_descendant_lookup_work() -> Result<()> {
+    let fixture = Fixture::new("lookup_publication_descendant_pointer", 20).await?;
+    let ancestor = format!("ens:0x{:064x}", 1);
+    let descendant = format!("ens:0x{:064x}", 2);
+    let resource = uuid(1);
+    let first = "0x00000000000000000000000000000000000000a1";
+    let second = "0x00000000000000000000000000000000000000a2";
+    fixture
+        .binding(&uuid(100), &ancestor, &resource, "ens_v1", 9, 0, None)
+        .await?;
+    fixture
+        .binding(&uuid(101), &descendant, &resource, "ens_v1", 9, 0, None)
+        .await?;
+    fixture.write(10, 1, "RegistrationGranted", "ens_v1_registrar_l1", Some(&ancestor), Some(&resource),
+        json!({"authority_kind":"registrar", "status":"registered", "registrant":"0x00000000000000000000000000000000000000aa", "expiry":2_000_000_000u64}),
+        "0x00000000000000000000000000000000000000e3").await?;
+    fixture
+        .write(
+            10,
+            2,
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            Some(&ancestor),
+            Some(&resource),
+            json!({"node":format!("0x{:064x}",1), "resolver":first}),
+            "0x00000000000000000000000000000000000000e1",
+        )
+        .await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    fixture
+        .write(
+            13,
+            1,
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            Some(&ancestor),
+            Some(&resource),
+            json!({"node":format!("0x{:064x}",1), "resolver":second}),
+            "0x00000000000000000000000000000000000000e1",
+        )
+        .await?;
+    fixture.apply(13, FamilyMode::Normal).await?;
+    // The ancestor itself is name work again, and the inventory every name bound to
+    // its resource serves from — the descendant included — is recomposed against the
+    // new resolver: its dependency now links the second resolver.
+    let lookup_names: Vec<String> = sqlx::query_scalar(
+        "SELECT key::jsonb ->> 1 FROM project_family_undo
+        WHERE chain_id=$1 AND block_number=13 AND family='project_lookup_name'",
+    )
+    .bind(CHAIN)
+    .fetch_all(&fixture.pool)
+    .await?;
+    ensure!(
+        lookup_names.contains(&ancestor),
+        "the ancestor is lookup work after its pointer change: {lookup_names:?}"
+    );
+    let inventories: Vec<String> = sqlx::query_scalar(
+        "SELECT key::jsonb ->> 1 FROM project_family_undo
+        WHERE chain_id=$1 AND block_number=13 AND family='project_lookup_inventory'",
+    )
+    .bind(CHAIN)
+    .fetch_all(&fixture.pool)
+    .await?;
+    ensure!(
+        inventories.contains(&resource),
+        "the shared inventory is lookup work after the ancestor pointer change: {inventories:?}"
+    );
+    let publication = load_family_publication(&fixture.pool, CHAIN)
+        .await?
+        .expect("published");
+    let resource_id: Uuid = resource.parse()?;
+    let mut conn = fixture.pool.acquire().await?;
+    let names =
+        compose_lookup_names_at(&mut conn, &publication, std::slice::from_ref(&descendant)).await?;
+    let selected = names[&descendant]
+        .core
+        .as_ref()
+        .expect("descendant lookup name");
+    assert_eq!(selected.resource_id, Some(resource_id));
+    let composed = compose_lookup_inventories_at(&mut conn, &publication, &[resource_id]).await?;
+    ensure!(
+        composed[&resource_id]
+            .dependencies
+            .contains(&LookupInventoryDependency::Link {
+                resolver_address: second.into(),
+                node: bigname_storage::families::records::DEFAULT_RECORD_NODE.into(),
+            }),
+        "the descendant inventory follows the ancestor's new resolver"
+    );
+    drop(conn);
+    fixture.cleanup().await
+}

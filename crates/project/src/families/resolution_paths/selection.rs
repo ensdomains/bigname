@@ -17,6 +17,18 @@
 //! Missing/current/former membership and divergence evidence never restrict this candidate set.
 //! SourceManifestUpdated has no block position. Supported manifest sync invalidates phase hashes
 //! and requires a complete Interpret/Project redo; it is not an incremental event-range trigger.
+//!
+//! Only a path-bearing change turns a touched name into a prefix that recomposes its whole
+//! subtree; every touched name still recomposes itself. A journal row is path-bearing only
+//! when one of the fields a descendant's composition reads through its ancestors changed,
+//! judged against the row's before-image: `project_ens_v2_entry_owner` on `expiry`, `status`,
+//! `registry_contract_instance_id`, `resource_id` or `token_id`; `project_registry_pointer`
+//! on `resolver_address`; `project_resource_pointer` on `resolver_address`,
+//! `nonzero_resolver_address` or `boundary_kind`. `project_resolver_classification` is
+//! already field-exact in `changed_resolvers`. Every other journalled family —
+//! `project_parent_subregistry`, `project_wrapper_state`, `project_registry_node_state`,
+//! `project_binding_candidate`, `project_name_state` and `project_lifecycle_event` — moves
+//! only the name it names, never its descendants.
 use bigname_storage::families::name::PHYSICAL_POINTER_EVENT_SQL;
 
 pub(super) fn statement(normal_work: &str) -> String {
@@ -34,24 +46,26 @@ pub(super) fn statement(normal_work: &str) -> String {
     WITH RECURSIVE journal AS MATERIALIZED (
         SELECT family, key::jsonb AS key, before_image FROM project_family_undo
         WHERE chain_id=$1 AND block_number=$2
-          AND family IN ('project_parent_subregistry', 'project_ens_v2_entry_owner',
-            'project_wrapper_state', 'project_registry_node_state', 'project_registry_pointer',
-            'project_resource_pointer', 'project_resolver_classification',
-            'project_lifecycle_event', 'project_binding_candidate', 'project_name_state')
-    ), path_change AS MATERIALIZED (
-        SELECT 1 FROM journal WHERE family NOT IN ('project_resource_pointer', 'project_resolver_classification')
-        UNION ALL
-        SELECT 1 FROM journal JOIN project_resource_pointer pointer
+          AND family IN ('project_ens_v2_entry_owner', 'project_registry_pointer',
+            'project_resource_pointer', 'project_resolver_classification')
+    ), path_bearing_names AS MATERIALIZED (
+        SELECT pointer.namespace || ':' || lower(pointer.node) AS logical_name_id
+        FROM journal JOIN project_registry_pointer pointer
+          ON journal.family='project_registry_pointer' AND pointer.chain_id=$1
+         AND pointer.namespace=journal.key->>1 AND pointer.node=journal.key->>2
+        WHERE journal.before_image IS NULL
+           OR pointer.resolver_address IS DISTINCT FROM journal.before_image->>'resolver_address'
+        UNION
+        SELECT COALESCE(pointer.namespace, journal.before_image->>'namespace')
+                 || ':' || lower(COALESCE(pointer.namehash, journal.before_image->>'namehash'))
+        FROM journal LEFT JOIN project_resource_pointer pointer
           ON journal.family='project_resource_pointer' AND pointer.chain_id=$1
          AND pointer.resource_id=(journal.key->>1)::uuid
-        WHERE pointer.pointer_position IS DISTINCT FROM journal.before_image->'pointer_position'
-        UNION ALL
-        SELECT 1 FROM normalized_events event WHERE event.chain_id=$1
-          AND event.block_number>$4 AND event.block_number<=$2
-          AND event.event_kind IN ('Upgraded','ContractDiscovered','RegistryCreated')
-          AND event.source_family IN ('ens_v2_root_l1','ens_v2_registry_l1','ens_v2_migration_l1')
-          AND event.consumer_visibility='activated'
-          AND event.canonicality_state IN ('canonical','safe','finalized')
+        WHERE journal.family='project_resource_pointer'
+          AND (journal.before_image IS NULL
+           OR pointer.resolver_address IS DISTINCT FROM journal.before_image->>'resolver_address'
+           OR pointer.nonzero_resolver_address IS DISTINCT FROM journal.before_image->>'nonzero_resolver_address'
+           OR pointer.boundary_kind IS DISTINCT FROM journal.before_image->>'boundary_kind')
     ), normal AS MATERIALIZED ({normal_work}),
     changed_resolvers AS MATERIALIZED (
         SELECT journal.key->>1 AS resolver FROM journal
@@ -64,7 +78,8 @@ pub(super) fn statement(normal_work: &str) -> String {
     ), global_change AS MATERIALIZED (
         SELECT 1 FROM changed_resolvers WHERE resolver='0x322b7581ca210a69c6d0e0d7c88a7688d2789cb0'
     ), source_names AS MATERIALIZED (
-        SELECT logical_name_id FROM normal WHERE EXISTS (SELECT 1 FROM path_change)
+        SELECT logical_name_id FROM normal
+        WHERE logical_name_id IN (SELECT logical_name_id FROM path_bearing_names)
         UNION
         SELECT pointer.namespace || ':' || lower(pointer.namehash)
         FROM changed_resolvers changed JOIN project_resource_pointer pointer
@@ -90,7 +105,19 @@ pub(super) fn statement(normal_work: &str) -> String {
         ) probe
         WHERE EXISTS (SELECT 1 FROM source_names)
     ), changed_entries AS MATERIALIZED (
-        SELECT key->>1 AS registry, key->>2 AS entry_key FROM journal WHERE family='project_ens_v2_entry_owner'
+        SELECT journal.key->>1 AS registry, journal.key->>2 AS entry_key FROM journal
+        LEFT JOIN project_ens_v2_entry_owner entry ON entry.chain_id=$1
+          AND journal.family='project_ens_v2_entry_owner' AND entry.registry=journal.key->>1
+          AND entry.entry_key=journal.key->>2
+        WHERE journal.family='project_ens_v2_entry_owner'
+          AND (journal.before_image IS NULL
+           OR entry.status IS DISTINCT FROM journal.before_image->>'status'
+           OR COALESCE(to_jsonb(entry.expiry), 'null'::jsonb)
+                IS DISTINCT FROM COALESCE(journal.before_image->'expiry', 'null'::jsonb)
+           OR entry.registry_contract_instance_id IS DISTINCT FROM journal.before_image->>'registry_contract_instance_id'
+           OR COALESCE(to_jsonb(entry.resource_id), 'null'::jsonb)
+                IS DISTINCT FROM COALESCE(journal.before_image->'resource_id', 'null'::jsonb)
+           OR entry.token_id IS DISTINCT FROM journal.before_image->>'token_id')
         UNION
         SELECT lower(event.raw_fact_ref->>'emitting_address'), left(lower(event.after_state->>'token_id'),58)||'00000000'
         FROM normalized_events event WHERE event.chain_id=$1 AND event.block_number>$4 AND event.block_number<=$2
@@ -251,6 +278,9 @@ pub(super) fn statement(normal_work: &str) -> String {
         UNION
         SELECT summary.logical_name_id FROM project_name_summary summary
         WHERE summary.chain_id=$1 AND summary.recompose_at<=$3
+        UNION
+        -- Every touched name recomposes itself, path-bearing or not.
+        SELECT logical_name_id FROM normal
     )
     SELECT DISTINCT surface.logical_name_id FROM affected
     JOIN name_surfaces surface ON surface.logical_name_id=affected.logical_name_id AND surface.chain_id=$1
