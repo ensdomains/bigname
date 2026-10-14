@@ -9,7 +9,7 @@ use super::support::{events_linked, single_event};
 use crate::evm_abi::{address_hex, decode_event_log, hex_string};
 use crate::schema_v2::{
     catalog::Selected,
-    common::{decode_dns_labels, namehash_raw, stable_uuid, surface_labels},
+    common::{decode_dns_labels, hash_hex, namehash_raw, stable_uuid, surface_labels},
     model::RawLogInput,
     state::State,
 };
@@ -394,7 +394,7 @@ fn name_unwrapped(
         .is_none()
         && state
             .v1_node_path(&selected.source.namespace, &namehash)
-            .is_some_and(|path| path.len() == 2)
+            .is_some_and(|path| path.len() == 2 && path[1] == hash_hex(b"eth"))
         && state
             .v1_registrar_expiry_from_wrapper(&selected.source.namespace, &namehash)
             .is_some_and(|expiry| expiry > raw.block_timestamp.unix_timestamp());

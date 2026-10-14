@@ -220,13 +220,24 @@ fn registry_transfer(block: i64, log_index: i64, node: B256, owner: &str) -> Raw
 }
 
 fn name_wrapped(block: i64, log_index: i64, node: B256, dns: &[u8], owner: &str) -> RawLogInput {
+    name_wrapped_with_expiry(block, log_index, node, dns, owner, 0)
+}
+
+fn name_wrapped_with_expiry(
+    block: i64,
+    log_index: i64,
+    node: B256,
+    dns: &[u8],
+    owner: &str,
+    expiry: u64,
+) -> RawLogInput {
     raw_at(
         NameWrapped {
             node,
             name: dns.to_vec().into(),
             owner: addr(owner),
             fuses: 0,
-            expiry: 0,
+            expiry,
         }
         .encode_log_data(),
         block,
@@ -763,5 +774,41 @@ fn wrapped_name_unwrapped_with_a_live_lease_reactivates_registrar_not_registry_o
         assert_eq!(cold.normalized_events, full_tail_events, "restored tail");
         assert_lease_successor(&cold);
     }
+    Ok(())
+}
+
+/// A wrapped second-level name under a non-eth suffix has no BaseRegistrar
+/// and no following registrar transfer. With no registrar identity and a
+/// live wrapper-derived expiry, its unwrap must still activate the
+/// registry-only successor instead of deferring to a transfer that cannot
+/// follow.
+#[test]
+fn wrapped_second_level_non_eth_unwrapped_without_a_lease_binds_registry_only() -> anyhow::Result<()>
+{
+    let wrapped = node(&["direct", "xyz"]);
+    let wrapped_id = format!("ens:{wrapped:#x}");
+    let logs = vec![
+        name_wrapped_with_expiry(1, 0, wrapped, b"\x06direct\x03xyz\0", HOLDER, 1_000_000_000),
+        registry_transfer(2, 0, wrapped, HOLDER),
+        name_unwrapped(2, 1, wrapped, HOLDER),
+    ];
+    let output = interpret(logs)?;
+
+    assert_bound(&output, &wrapped_id);
+    let binding = output
+        .surface_bindings
+        .iter()
+        .find(|binding| binding.logical_name_id == wrapped_id)
+        .expect("the unwrapped non-eth name keeps a surface binding");
+    assert_eq!(binding.binding_kind, "declared_registry_path");
+    let bound = output
+        .normalized_events
+        .iter()
+        .rfind(|event| {
+            event.event_kind == "SurfaceBound"
+                && event.logical_name_id.as_deref() == Some(wrapped_id.as_str())
+        })
+        .expect("the unwrapped non-eth name has a SurfaceBound");
+    assert_eq!(bound.after_state["authority_kind"], "registry_only");
     Ok(())
 }
