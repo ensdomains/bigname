@@ -23,6 +23,9 @@ impl State {
             && let (Some(name), Some(timestamp)) = (&event.logical_name_id, event.block_timestamp)
         {
             self.remember_v2_migration(name, timestamp.unix_timestamp());
+            if event.after_state["migration_path"] == "locked_wrapped" {
+                self.v2_locked_migration_names.insert(name.clone());
+            }
         }
     }
 

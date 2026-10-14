@@ -55,6 +55,42 @@ pub(in crate::schema_v2::protocol::v1) fn push_permission_change(
     });
 }
 
+/// Only the successor grants of an authority handoff, for a predecessor whose
+/// revocations another step in the same transition already emits.
+pub(in crate::schema_v2::protocol::v1) fn append_authority_grants(
+    output: &mut Interpreted,
+    current: Option<&V1NameState>,
+    resolver: Option<String>,
+    raw: &RawLogInput,
+) {
+    if let Some(current) = current
+        && let Some(subject) = current.owner.as_deref()
+    {
+        push_permission_change(
+            output,
+            current,
+            subject,
+            json!({"kind":"resource"}),
+            "resource_control",
+            true,
+            "AuthorityTransferred",
+            "resource-grant",
+        );
+        if let Some(resolver) = resolver {
+            push_permission_change(
+                output,
+                current,
+                subject,
+                json!({"kind":"resolver","chain_id":raw.chain_id,"resolver_address":resolver}),
+                "resolver_control",
+                true,
+                "AuthorityTransferred",
+                "resolver-grant",
+            );
+        }
+    }
+}
+
 pub(in crate::schema_v2::protocol::v1) fn append_authority_permissions(
     output: &mut Interpreted,
     previous: Option<&V1NameState>,

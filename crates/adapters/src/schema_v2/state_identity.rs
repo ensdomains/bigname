@@ -130,6 +130,44 @@ impl State {
         }
     }
 
+    /// The parent node of a name whose full label-hash path is known, if any.
+    pub(in crate::schema_v2) fn v1_parent_namehash(
+        &self,
+        namespace: &str,
+        namehash: &str,
+    ) -> Option<String> {
+        let path = self.v1_node_path(namespace, namehash)?;
+        if path.is_empty() {
+            return None;
+        }
+        let parent_path = &path[1..];
+        let mut node = B256::ZERO;
+        for label in parent_path.iter().rev() {
+            let hash: B256 = label.parse().ok()?;
+            let mut input = [0_u8; 64];
+            input[..32].copy_from_slice(node.as_slice());
+            input[32..].copy_from_slice(hash.as_slice());
+            node = keccak256(input);
+        }
+        Some(format!("{node:#x}"))
+    }
+
+    /// Whether the name is a direct child of a parent that an activated
+    /// locked-wrapper migration covers. A locked migration only runs when a
+    /// migration-created WrapperRegistry claims that parent as its original
+    /// node, so the restored locked-migration name is the proof.
+    pub(in crate::schema_v2) fn v1_is_locked_migrated_original_child(
+        &self,
+        namespace: &str,
+        namehash: &str,
+    ) -> bool {
+        self.v1_parent_namehash(namespace, namehash)
+            .is_some_and(|parent| {
+                self.v2_locked_migration_names
+                    .contains(&format!("{namespace}:{parent}"))
+            })
+    }
+
     pub(in crate::schema_v2) fn v1_surface_is_shadow(
         &self,
         namespace: &str,

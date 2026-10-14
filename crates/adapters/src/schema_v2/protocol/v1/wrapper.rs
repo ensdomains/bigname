@@ -4,7 +4,7 @@ use serde_json::json;
 
 use super::super::{Interpreted, NameDraft, ResourceDraft, ShadowNameDraft, ensure_declared};
 use super::registrar::registry_only_fallback;
-use super::registry::{append_authority_permissions, append_authority_transition, authority_kind};
+use super::registry::{append_authority_grants, append_authority_transition, authority_kind};
 use super::support::{events_linked, single_event};
 use crate::evm_abi::{address_hex, decode_event_log, hex_string};
 use crate::schema_v2::{
@@ -372,9 +372,38 @@ fn name_unwrapped(
     let registry_settled_to_unwrapped_owner = state
         .v1_registry_owner(&selected.source.namespace, &namehash)
         .is_some_and(|owner| owner.eq_ignore_ascii_case(&address_hex(event.owner)));
+    // An original child of a parent an activated locked-wrapper migration
+    // covers keeps its old wrapper-bound pointer selection. A registry-only
+    // successor would re-project that pointer onto a new resource, which the
+    // published rule does not do.
+    let locked_migrated_original_child =
+        state.v1_is_locked_migrated_original_child(&selected.source.namespace, &namehash);
+    // A retained registry owner that is the admitted Graveyard is a burned
+    // record, not a live registry-only owner, even when it equals the unwrap
+    // owner from a migration cleanup.
+    let graveyard_retained = state
+        .v1_registry_owner_reason(&selected.source.namespace, &namehash)
+        .as_deref()
+        == Some("graveyard");
+    // A wrapped .eth name with wrapper-derived registrar expiry but no
+    // materialized registrar identity yet is taken over by the BaseRegistrar
+    // transfer that follows the unwrap in the same transaction, from the
+    // unwrap moment. Opening a registry-only interval first would be spurious.
+    let registrar_transfer_may_follow = state
+        .v1_registrar(&selected.source.namespace, &namehash)
+        .is_none()
+        && state
+            .v1_node_path(&selected.source.namespace, &namehash)
+            .is_some_and(|path| path.len() == 2)
+        && state
+            .v1_registrar_expiry_from_wrapper(&selected.source.namespace, &namehash)
+            .is_some_and(|expiry| expiry > raw.block_timestamp.unix_timestamp());
     let mut registry_only_successor = false;
     if reactivated.is_none()
         && registry_settled_to_unwrapped_owner
+        && !locked_migrated_original_child
+        && !graveyard_retained
+        && !registrar_transfer_may_follow
         && let Some(previous) = linked.as_ref().filter(|name| {
             name.surface_known && name.authority_source_family == selected.source.source_family
         })
@@ -417,12 +446,13 @@ fn name_unwrapped(
     );
     // The registry write that precedes this event kept the wrapper authority, so
     // it emitted no registry-resource grant. The registry-only successor therefore
-    // needs the same authority permission handoff a registry `NewOwner`/`Transfer`
-    // emits, in this same transition and after the authority transition.
+    // needs the successor grants a registry `NewOwner`/`Transfer` emits, in this
+    // same transition and after the authority transition. The predecessor
+    // revocations are not repeated here: the burn, or the holder step below,
+    // already revoked the wrapper holder powers on the old resource.
     if registry_only_successor {
-        append_authority_permissions(
+        append_authority_grants(
             &mut output,
-            linked.as_ref(),
             reactivated.as_ref(),
             state.v1_resolver(&selected.source.namespace, &namehash),
             raw,
