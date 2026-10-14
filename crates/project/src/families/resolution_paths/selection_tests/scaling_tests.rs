@@ -536,9 +536,11 @@ async fn a_publication_that_changes_nothing_visits_only_due_names() -> Result<()
         // Names 0 and 1 are due at block 10. Name 2 is due one second later.
         raw_sql(&format!(
             "INSERT INTO project_name_summary (chain_id, logical_name_id, namespace, serving,
-                 zero_owner, recompose_at, expiry_listable, search_supported)
+                 zero_owner, recompose_at, expiry_listable, search_supported,
+                 resolver_listing_eligible, resolver_support_exempt, namehash)
              SELECT '{CHAIN}', 'ens:0x' || md5('n2' || n) || md5(n || 'n2'), 'ens', false, false,
-                    1800000000 + 10 * 12 + CASE WHEN n = 2 THEN 1 ELSE 0 END, false, false
+                    1800000000 + 10 * 12 + CASE WHEN n = 2 THEN 1 ELSE 0 END, false, false,
+                    false, false, '0x' || md5('n2' || n) || md5(n || 'n2')
              FROM generate_series(0, 2) n;
              ANALYZE"
         ))

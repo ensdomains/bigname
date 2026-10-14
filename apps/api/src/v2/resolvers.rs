@@ -49,8 +49,8 @@ use snapshot_checks::{
 use super::{
     Envelope, NameRecord, PRODUCT_PIPELINE_TERMS, Page, QueryParamAllowlist, SnapshotReadResource,
     StrictQueryParams, V2Error, V2Result, api_error_to_v2, build_name_record,
-    contains_boundary_vocabulary, encode_at_token, name_record, numeric_to_slug,
-    resolve_v2_snapshot_for, snapshot_meta, snapshot_slot_for_slug,
+    contains_boundary_vocabulary, encode_at_token, numeric_to_slug, resolve_v2_snapshot_for,
+    snapshot_meta, snapshot_slot_for_slug,
     vocab::{Resolver, Status},
 };
 
@@ -59,7 +59,7 @@ const BOUND_NAMES_SORT_TOKEN: &str = "name_asc";
 pub(crate) struct ResolverQueryParams;
 
 impl QueryParamAllowlist for ResolverQueryParams {
-    const ALLOWED: &'static [&'static str] = &["at", "finality", "cursor", "page_size"];
+    const ALLOWED: &'static [&'static str] = &["at", "finality", "cursor", "page_size", "include"];
 }
 
 pub(crate) type ResolverQuery = StrictQueryParams<ResolverQueryParams>;
@@ -96,6 +96,7 @@ pub(crate) async fn get_resolver(
 ) -> V2Result<Json<Envelope<ResolverOverview>>> {
     let params = params.into_inner();
     let (numeric_chain_id, chain_id_slug) = parse_numeric_chain_id(&chain_id)?;
+    let total_count = bound_names_include(&params.include)?;
     let normalized_address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     // A cursor this list could not have written is refused before anything is read; only its
     // `at` pin, which needs the selected snapshot, is compared once the snapshot is selected.
@@ -204,7 +205,7 @@ pub(crate) async fn get_resolver(
         )));
     };
     require_phase_target_snapshot(&row.chain_positions, &row.chain_id, &selected_snapshot)?;
-    let (bound_name_rows, storage_next_cursor) = load_bound_name_rows(
+    let (bound_name_rows, storage_next_cursor, bound_names_total) = load_bound_name_rows(
         publication.conn().await?,
         chain_id_slug,
         params.namespace.as_deref(),
@@ -212,6 +213,7 @@ pub(crate) async fn get_resolver(
         params.page_size,
         numeric_chain_id,
         &normalized_address,
+        total_count,
     )
     .await?;
     for bound_name_row in &bound_name_rows {
@@ -245,7 +247,7 @@ pub(crate) async fn get_resolver(
             cursor: params.cursor.clone(),
             next_cursor,
             page_size: params.page_size,
-            total_count: None,
+            total_count: bound_names_total,
             has_more,
         },
     };
@@ -305,6 +307,23 @@ pub(crate) fn build_bound_name_record(
     build_name_record(&row.row, None, Some(chain_id), Status::Ok)
 }
 
+/// Whether the request asks for `page.total_count`, the only expansion the overview serves.
+fn bound_names_include(include: &[String]) -> V2Result<bool> {
+    let mut total_count = false;
+    for value in include {
+        match value.as_str() {
+            "total_count" => total_count = true,
+            _ => {
+                return Err(V2Error::invalid_input(
+                    "include must contain only total_count",
+                ));
+            }
+        }
+    }
+    Ok(total_count)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn load_bound_name_rows(
     conn: &mut sqlx::PgConnection,
     chain_id_slug: &str,
@@ -313,7 +332,12 @@ async fn load_bound_name_rows(
     page_size: u64,
     chain_id: u64,
     resolver_address: &str,
-) -> V2Result<(Vec<NameCurrentListRow>, Option<NameCurrentListCursor>)> {
+    total_count: bool,
+) -> V2Result<(
+    Vec<NameCurrentListRow>,
+    Option<NameCurrentListCursor>,
+    Option<u64>,
+)> {
     let limit = page_size.saturating_add(1) as i64;
     let loaded = bigname_storage::families::name::load_family_bound_names(
         conn,
@@ -322,6 +346,7 @@ async fn load_bound_name_rows(
         namespace,
         cursor,
         limit,
+        total_count,
     )
     .await
     .map_err(crate::v2::name_rows_error(
@@ -332,34 +357,48 @@ async fn load_bound_name_rows(
             ))
         },
     ))?;
+    let total = loaded.total_count;
     let mut rows = loaded
+        .rows
         .into_iter()
-        .map(|row| NameCurrentListRow {
-            row,
-            labelhash: None,
-            token_id: None,
-            owner: None,
-            created_at: None,
-            registration_date: None,
-            expiry_date: None,
-            resolver_address: Some(resolver_address.to_owned()),
+        .map(|bound| {
+            let order_name = bound.order_name;
+            let row = NameCurrentListRow {
+                row: bound.row,
+                labelhash: None,
+                token_id: None,
+                owner: None,
+                created_at: None,
+                registration_date: None,
+                expiry_date: None,
+                resolver_address: Some(resolver_address.to_owned()),
+            };
+            (row, order_name)
         })
-        .filter(|row| bound_name_row_matches_chain(row, chain_id))
         .collect::<Vec<_>>();
     let target_len = page_size as usize;
     let has_more = rows.len() > target_len;
     rows.truncate(target_len);
     let next_cursor = has_more
-        .then(|| rows.last().map(bound_name_cursor_from_row))
+        .then(|| {
+            rows.last()
+                .map(|(row, order_name)| bound_name_cursor_after(row, order_name))
+        })
         .flatten();
-    Ok((rows, next_cursor))
+    Ok((
+        rows.into_iter().map(|(row, _)| row).collect(),
+        next_cursor,
+        total,
+    ))
 }
 
-fn bound_name_cursor_from_row(row: &NameCurrentListRow) -> NameCurrentListCursor {
+/// The cursor after `row`: the listing continues from its order name, which can differ from
+/// the name it is shown under.
+fn bound_name_cursor_after(row: &NameCurrentListRow, order_name: &str) -> NameCurrentListCursor {
     NameCurrentListCursor {
         sort_value: NameCurrentListCursorValue::Name(row.row.canonical_display_name.clone()),
         namespace: row.row.namespace.clone(),
-        normalized_name: row.row.normalized_name.clone(),
+        normalized_name: order_name.to_owned(),
         namehash: row.row.namehash.clone(),
     }
 }
@@ -429,9 +468,4 @@ fn product_resolver_reason(reason: &str) -> V2Result<String> {
         }
         _ => Ok(reason.to_owned()),
     }
-}
-
-fn bound_name_row_matches_chain(row: &NameCurrentListRow, chain_id: u64) -> bool {
-    name_record::resolver(&row.row.declared_summary)
-        .is_some_and(|resolver| resolver.chain_id == chain_id)
 }

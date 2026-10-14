@@ -1989,13 +1989,12 @@ composed reader still applies its binding and reachability rules. Both reducers
 use the same canonical event order and before-image journal as every family.
 
 The composed name reader fetches named pointers by exact resource/name pairs.
-Bound-name discovery uses `project_named_resource_pointer_resolver_idx` to find
-retained named pointer keys at the requested resolver, alongside the existing
-resource and registry-node pointer paths. It does not scan the resolver's
-`ResolverChanged` history. This bounds that input to retained pointer keys, not
-to page size: the candidate walk and sort can still visit the resolver's retained
-keys on each batch. Candidate enumeration and sorting can exceed page size; realistic-scale
-latency remains a rollout acceptance check.
+The bound-name list reads no pointer key at request time. The family step stores
+each name's served resolver and order name on its name summary, and a block that
+writes a named pointer composes the name it names again. A page reads one range
+of one of the summary's two order indexes, the one the resolver's binding support picks,
+from its cursor and stops one name past its last
+([storage](storage.md#table-ownership)).
 
 Schema-migration `20260929140000_named_resource_pointer.sql` adds the named key
 table to an existing phase schema and atomically clears all family rows, the
@@ -2045,10 +2044,21 @@ expiry selector of the names-by-expiry listing: `expiry_listable`, whether the
 name composes a lifecycle-eligible row whose registration carries a finite expiry, and
 `public_authority`, the public `authority` that row serves; for a listable name
 the stored expiry is the expiry the listing serves, and the listing selects its
-page's names by these fields before it composes any. Every name with a
+page's names by these fields before it composes any. It also holds the
+bound-name selector of the resolver overview's `bound_names`: the resolver the
+name row serves (`resolver_chain_id`, `resolver_address`), whether the row passes
+every bound-name rule except the resolver match and the binding-enumeration
+capability gate (`resolver_listing_eligible`), whether the row is exempt from
+that gate (`resolver_support_exempt`), the surface's raw name (`raw_name`,
+null when the surface stores no raw bytes), and the page order key: the name
+rendered from chain data alone (`order_name`: the raw name, else each label as
+`[<labelhash>]` cut to its first 2000 bytes), namespace and namehash. The listing selects its page's names
+by these fields and reads the capability from the resolver's classification at
+request time. Every name with a
 surface has a row, including one whose surface stores no raw label bytes. The
-summary holds no name text and its composition reads no label preimage, so an
-imported preimage never changes a stored summary. The selected arm remains available when an unreadable token
+summary holds no name text built from label preimages, only the raw name its
+surface stores, and its composition reads no label preimage, so an imported
+preimage never changes a stored summary. The selected arm remains available when an unreadable token
 lineage withholds the composed name row: child relations still use that selection,
 while optional name fields remain absent. A list cannot compose those at read for every child of a parent, so
 the name row is composed at read except for this summary, which is
@@ -2061,8 +2071,16 @@ row, owner events or pointer read it, every name a registry event carries on a
 resource that a registry event of a block since the family marker's carries
 (such an event can move the resource's unnamed Transfers to another name, and a
 rebuild range composes once for all its blocks), every name whose surface
-appeared since the family marker's block, and every name whose stored
-`recompose_at` the block's time has reached. Finite lifecycle expiry and
+appeared since the family marker's block, every name whose own retained resolver
+pointer (`project_named_resource_pointer`) the block changed, every name a
+`PreimageObserved` event since the family marker's block names (an observed
+preimage gives an earlier surface its raw bytes in place), and every name whose
+stored `recompose_at` the block's time has reached. On its first block after a
+change of its input revision (a completed Interpret redo attempt or a new
+interpreter hash), the family step also composes again every name whose summary
+stores a raw name its surface no longer stores: a redo that releases a
+surface's preimage witness clears the surface's raw bytes in place, at a block
+the family step may not replay. Finite lifecycle expiry and
 the summary expiry used for ordering are exact numeric Unix seconds, including
 the full finite ENSv2 `uint64` range. Family readers, expiry indexes, retained
 keys and undo journals preserve the integer without calendar conversion or

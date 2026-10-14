@@ -573,6 +573,7 @@ include!("tests/v2_family_reverse_page.rs");
 include!("tests/v2_family_lookup.rs");
 include!("tests/v2_family_lookup_cutover.rs");
 include!("tests/v2_ens_v1_object.rs");
+include!("tests/v2_bound_names_clock.rs");
 include!("tests/v2_admission_manifest_sync.rs");
 #[path = "tests/v2_family_lookup_redo.rs"]
 mod lookup_redo;
@@ -597,6 +598,7 @@ include!("tests/v2_address_names_parent.rs");
 include!("tests/v2_bracketed_labelhash_names.rs");
 include!("tests/v2_textless_surface.rs");
 include!("tests/v2_textless_surface_lookup.rs");
+include!("tests/v2_bound_names_paging.rs");
 include!("tests/v2_textless_surface_expiry.rs");
 include!("tests/v2_textless_address_history.rs");
 include!("tests/v2_family_name_publication_changes.rs");

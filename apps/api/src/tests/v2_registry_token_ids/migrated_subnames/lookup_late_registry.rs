@@ -284,10 +284,15 @@ async fn lookup_precomputation_late_registry_initialization_refreshes_stored_unk
         .bind(PATH_CHAIN).bind(REGISTRY).fetch_one(&database.pool).await?;
     assert_eq!(announcement, (BASE + 122, None, None));
     let evidence = assert_retained(&database, resolver).await?;
+    // The name now serves the resolver its pointer names, and its stored bound-name fields
+    // follow. No other byte or clock changes.
+    let mut served_summary = before_summary.clone();
+    served_summary["resolver_chain_id"] = json!(PATH_CHAIN);
+    served_summary["resolver_address"] = json!(format!("{resolver:#x}"));
     assert_eq!(
         summary(&database).await?,
-        before_summary,
-        "105 summary bytes and clocks do not change for this reason-only support transition"
+        served_summary,
+        "only the served resolver changes in the summary, and no clock moves"
     );
     assert_eq!(core(&database, UNRELATED).await?, unrelated);
     let after_components = lookup_publication::components(&database).await?;

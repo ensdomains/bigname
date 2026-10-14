@@ -57,6 +57,7 @@ pub(super) async fn refresh(
     chain_id: &str,
     number: i64,
     after: i64,
+    raw_name_sweep: bool,
     composition: &super::super::marker::Composition,
 ) -> Result<Refreshed> {
     let block = input::read_block(transaction, chain_id, number)
@@ -66,7 +67,7 @@ pub(super) async fn refresh(
                 "family block {number} of chain {chain_id} is not readable for its name summaries"
             ))
         })?;
-    let names: Vec<String> = sqlx::query_scalar(WORK_LIST)
+    let mut names: Vec<String> = sqlx::query_scalar(WORK_LIST)
         .bind(chain_id)
         .bind(number)
         .bind(block.timestamp_seconds)
@@ -76,6 +77,18 @@ pub(super) async fn refresh(
         .map_err(|error| {
             ProjectError::database("failed to read the names a family block touched", error)
         })?;
+    if raw_name_sweep {
+        let swept: Vec<String> = sqlx::query_scalar(RAW_NAME_SWEEP)
+            .bind(chain_id)
+            .fetch_all(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to sweep the stored raw names", error)
+            })?;
+        names.extend(swept);
+        names.sort_unstable();
+        names.dedup();
+    }
     if names.is_empty() {
         return Ok(Refreshed::default());
     }
@@ -182,6 +195,33 @@ pub(crate) async fn replace_chunk(
     Ok((rows, undo_rows))
 }
 
+/// The names of chain `$1` whose stored raw name (`project_name_summary.raw_name`, the
+/// bound-name page order) their surface no longer carries. An Interpret redo that releases a
+/// surface's preimage witness and observes none again clears the surface's raw bytes in place,
+/// at the surface's own block, which can lie below every block the redo makes Project replay or
+/// below Project's marker (a redo above Project's marker stamps no Project redo). Raw bytes are
+/// fixed by the namehash, so the only change a stored raw name can miss is that clearing, which
+/// leaves a surface with no raw bytes: those surfaces are read through
+/// `name_surfaces_project_suffix_hash_idx`, one namespace at a time. A block runs it once per
+/// input revision (block.rs, `raw_name_sweep`).
+pub(crate) const RAW_NAME_SWEEP: &str = "/* project:families.derived.summary_raw_name_sweep */
+    SELECT summary.logical_name_id
+    FROM name_surfaces surface
+    JOIN project_name_summary summary
+      ON summary.chain_id = surface.chain_id AND summary.logical_name_id = surface.logical_name_id
+    WHERE surface.namespace = ANY (ARRAY(
+              WITH RECURSIVE step(namespace) AS (
+                  (SELECT head.namespace FROM name_surfaces head ORDER BY head.namespace LIMIT 1)
+                  UNION ALL
+                  SELECT (SELECT following.namespace FROM name_surfaces following
+                          WHERE following.namespace > step.namespace
+                          ORDER BY following.namespace LIMIT 1)
+                  FROM step WHERE step.namespace IS NOT NULL)
+              SELECT step.namespace FROM step WHERE step.namespace IS NOT NULL))
+      AND hash_array_extended(surface.raw_labels, 0) IS NULL
+      AND surface.chain_id = $1 AND surface.raw_name IS NULL
+      AND summary.raw_name IS NOT NULL";
+
 /// The names block `$2` (at time `$3`, in seconds) of chain `$1` touched, read from its journal (each changed row's
 /// before-image and key) and the changed rows as they now stand, with the names of the surfaces
 /// and registry events of the blocks after `$4`, the family marker's block (-1 with none), up to
@@ -262,6 +302,11 @@ pub(crate) const WORK_LIST: &str = r#"/* project:families.derived.summary_names 
         SELECT touched.key ->> 1 FROM touched
         WHERE touched.family IN ('project_lifecycle_triple_summary',
                                  'project_lifecycle_association', 'project_name_history')
+        UNION
+        -- A name's own retained pointer on a resource: the served resolver reads it when the
+        -- resource's latest pointer names another name.
+        SELECT touched.key ->> 2 FROM touched
+        WHERE touched.family = 'project_named_resource_pointer'
         UNION
         SELECT (touched.key ->> 1) || ':' || lower(touched.key ->> 2) FROM touched
         WHERE touched.family IN ('project_registry_node_state', 'project_registry_owner_event',
@@ -394,6 +439,26 @@ pub(crate) const WORK_LIST: &str = r#"/* project:families.derived.summary_names 
         FROM name_surfaces surface
         WHERE surface.chain_id = $1
           AND surface.block_number > $4 AND surface.block_number <= $2
+    ),
+    -- A preimage observed since the marker's block can give an earlier surface its raw bytes
+    -- in place, which moves the name's stored raw name, the bound-name page order. The states
+    -- are those of the events Project reads. Each is probed on its own, so the
+    -- `normalized_events_projection_idx` key (event_kind, canonicality_state, chain_id,
+    -- block_number) bounds the range to the blocks: PostgreSQL 16 does not bound a plain index
+    -- scan by a list on a column after the first, and would filter a scan of every observation.
+    -- OFFSET 0 keeps each probe parameterized by its state.
+    revealed AS (
+        SELECT revealed_event.logical_name_id
+        FROM unnest('{canonical,safe,finalized}'::canonicality_state[]) AS state(canonicality_state)
+        CROSS JOIN LATERAL (
+            SELECT observed.logical_name_id
+            FROM normalized_events observed
+            WHERE observed.event_kind = 'PreimageObserved'
+              AND observed.canonicality_state = state.canonicality_state
+              AND observed.chain_id = $1
+              AND observed.block_number > $4 AND observed.block_number <= $2
+            OFFSET 0
+        ) revealed_event
     )
     SELECT logical_name_id FROM (
         SELECT logical_name_id FROM named
@@ -401,6 +466,7 @@ pub(crate) const WORK_LIST: &str = r#"/* project:families.derived.summary_names 
         UNION SELECT logical_name_id FROM linked
         UNION SELECT logical_name_id FROM clocked
         UNION SELECT logical_name_id FROM surfaced
+        UNION SELECT logical_name_id FROM revealed
     ) every
     WHERE logical_name_id IS NOT NULL AND logical_name_id <> ''
     ORDER BY logical_name_id"#;

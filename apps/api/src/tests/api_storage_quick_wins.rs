@@ -167,6 +167,9 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
         "column: bigname_phase.project_name_summary.search_supported",
         "column: bigname_phase.project_name_summary.search_fields",
         "column: bigname_phase.project_name_summary.search_creation_transport_resource_id",
+        "column: bigname_phase.project_name_summary.resolver_address",
+        "column: bigname_phase.project_name_summary.resolver_listing_eligible",
+        "column: bigname_phase.project_name_summary.raw_name",
         "function: bigname_phase.revalidate_resolution_lookup_state_read_only(text,bigint,text,jsonb,jsonb,uuid,text,text)",
         "relation: bigname_phase.chain_header_audit",
         "relation: bigname_phase.chain_heads",
@@ -241,7 +244,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
     .map(str::to_owned));
 
     assert_eq!(actual, expected);
-    assert_eq!(actual.len(), 73);
+    assert_eq!(actual.len(), 76);
     database.cleanup().await
 }
 

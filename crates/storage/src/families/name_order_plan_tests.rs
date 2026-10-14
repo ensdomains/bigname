@@ -1,7 +1,8 @@
-//! Plan-shape tests for the readers that walk readable name surfaces in name order: the search
-//! candidates and a resolver's bound-name candidates.
+//! Plan-shape tests for the reader that walks readable name surfaces in name order: the search
+//! candidates. (The bound-name listing reads the name summary instead,
+//! `bound_page_plan_tests.rs`.)
 //!
-//! Search and bound names must be able to read `name_surfaces_name_order_idx` in page order, with
+//! Search must be able to read `name_surfaces_name_order_idx` in page order, with
 //! the keyset cursor as its index condition and no Sort, under either plan. The fixture is small,
 //! so `enable_sort` is off to stand in for a large table: the assertions are about which access
 //! paths the planner can use at all, not about costs. A `LIKE` prefix becomes an index range only
@@ -11,7 +12,7 @@
 //! 2000 bytes, and none returns the name longer than 2000 bytes, which inserts although the index
 //! leaves it out.
 //!
-//! The readers run those statements as the first arm of a two-arm statement whose second arm
+//! The reader runs that statement as the first arm of a two-arm statement whose second arm
 //! walks the surfaces that store no raw bytes. Inside it the first arm keeps the plan it has by
 //! itself, and the merged walk is in served-name order. The second arm first asks whether any
 //! such surface exists, through `name_surfaces_project_suffix_hash_idx`, and is not executed
@@ -22,11 +23,7 @@ use sqlx::{PgConnection, raw_sql};
 
 use super::{
     id_index_plan_tests::{PLAN_MODES, Probe, explain_execute, missing_probes, with_database},
-    name::{
-        BOUND_CANDIDATES_SQL, SEARCH_CANDIDATES_SQL,
-        rendered::rendered_name_sql,
-        seams::{bound_candidates_sql, search_candidates_sql},
-    },
+    name::{SEARCH_CANDIDATES_SQL, rendered::rendered_name_sql, seams::search_candidates_sql},
     topology::textless_surfaces_exist_sql,
 };
 
@@ -63,7 +60,7 @@ async fn name_ordered_walks_read_the_name_order_index() -> Result<()> {
 }
 
 async fn prepare(connection: &mut PgConnection) -> Result<()> {
-    let (search, bound) = (search_candidates_sql(), bound_candidates_sql());
+    let search = search_candidates_sql();
     for (label, types, sql) in [
         (
             "search_candidates",
@@ -71,19 +68,9 @@ async fn prepare(connection: &mut PgConnection) -> Result<()> {
             SEARCH_CANDIDATES_SQL,
         ),
         (
-            "bound_candidates",
-            "text, text, text, text, text, text, bigint",
-            BOUND_CANDIDATES_SQL,
-        ),
-        (
             "search_both",
             "text[], text, text, text, text, text, bigint",
             search.as_str(),
-        ),
-        (
-            "bound_both",
-            "text, text, text, text, text, text, bigint",
-            bound.as_str(),
         ),
     ] {
         raw_sql(&format!("PREPARE {label} ({types}) AS {sql}"))
@@ -94,16 +81,9 @@ async fn prepare(connection: &mut PgConnection) -> Result<()> {
     Ok(())
 }
 
-fn walks() -> [Walk; 6] {
+fn walks() -> [Walk; 4] {
     let prefix = "'{ens}', NULL, 'a%', {after}, {limit}".to_owned();
     let contains = "'{ens,basenames}', NULL, '%a%', {after}, {limit}".to_owned();
-    let bound = format!("'{CHAIN}', '{}', NULL, {{after}}, {{limit}}", address('a'));
-    let reached = format!(
-        "EXISTS (SELECT 1 FROM project_named_resource_pointer pointer
-                 WHERE pointer.logical_name_id = surface.logical_name_id
-                   AND pointer.resolver_address = '{}')",
-        address('a')
-    );
     [
         Walk {
             label: "search_candidates",
@@ -111,18 +91,12 @@ fn walks() -> [Walk; 6] {
             values: prefix.clone(),
             arms: None,
         },
-        // The long name contains an `a` and is reached by resolver 0xaa..; only the length bound
-        // keeps it out of these two walks. The 2000-byte name is in all three.
+        // The long name contains an `a`. Only the length bound keeps it out of these two walks.
+        // The 2000-byte name is in both.
         Walk {
             label: "search_candidates",
             statement: "search contains",
             values: contains.clone(),
-            arms: None,
-        },
-        Walk {
-            label: "bound_candidates",
-            statement: "bound names",
-            values: bound.clone(),
             arms: None,
         },
         Walk {
@@ -139,12 +113,6 @@ fn walks() -> [Walk; 6] {
             statement: "search contains, both arms",
             values: contains,
             arms: Some(("search_candidates", "name LIKE '%a%'".to_owned())),
-        },
-        Walk {
-            label: "bound_both",
-            statement: "bound names, both arms",
-            values: bound,
-            arms: Some(("bound_candidates", reached)),
         },
     ]
 }
@@ -422,10 +390,6 @@ fn values(walk: &Walk, after: Option<(&str, &str, &str)>, limit: i64) -> String 
         .replace("{limit}", &limit.to_string())
 }
 
-fn address(fill: char) -> String {
-    format!("0x{}", fill.to_string().repeat(40))
-}
-
 async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
     raw_sql(include_str!("../../schema/baseline/07_labels.sql"))
         .execute(&mut *connection)
@@ -433,7 +397,6 @@ async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
     // Name n is active unless n is a multiple of 50 and readable unless its block, every 70th, is
     // orphaned; even names are ens and odd names basenames. Name ROWS + 1 is about 6.6 KB of
     // incompressible labels, past the btree entry limit, and name ROWS + 2 is exactly 2000 bytes.
-    // Resolver 0xbb.. names the first three names and 0xaa.. all others.
     raw_sql(&format!(
         "INSERT INTO chain_lineage
              (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
@@ -493,14 +456,6 @@ async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
                 'v1', true, 'fixture', 0
          FROM generate_series({ROWS} + 3, {ROWS} + 2 + {TEXTLESS}, 3) n,
          LATERAL (SELECT 'a' || substr(md5(n::text), 1, 7) AS label) preimage;
-
-         INSERT INTO project_named_resource_pointer (chain_id, resource_id, logical_name_id,
-             block_number, event_identity, resolver_address, source_family)
-         SELECT chain_id, lpad(to_hex(block_number), 32, '0')::uuid, logical_name_id,
-                block_number, 'pointer:' || block_number,
-                '0x' || repeat(CASE WHEN block_number <= 3 THEN 'b' ELSE 'a' END, 40),
-                'ens_v1_registry_l1'
-         FROM name_surfaces;
 
          ANALYZE"
     ))
