@@ -347,6 +347,15 @@ impl State {
         Some(authority)
     }
 
+    /// The node's remembered registry-only authority with its current nonzero registry owner.
+    pub(super) fn v1_current_registry_authority(
+        &self,
+        namespace: &str,
+        namehash: &str,
+    ) -> Option<V1NameState> {
+        self.v1_registry_authority_if_authentic(&v1_key(namespace, namehash))
+    }
+
     pub(super) fn set_v1_registry_owner_views(
         &mut self,
         namespace: &str,

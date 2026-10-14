@@ -614,6 +614,8 @@ include!("tests/v2_search_lean.rs");
 #[path = "tests/v2_wrapper_callback.rs"]
 mod v2_wrapper_callback;
 
+#[path = "tests/v2_registry_only_wrap_grants.rs"]
+mod v2_registry_only_wrap_grants;
 #[path = "tests/v2_unwrapped_registry_only_child.rs"]
 mod v2_unwrapped_registry_only_child;
 

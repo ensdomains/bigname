@@ -17,11 +17,12 @@ use anyhow::Context;
 
 use crate::schema_v2::{
     catalog::{Catalog, Selected},
+    common::hash_hex,
     migration::RegistrarContext,
-    state::V1NameState,
+    state::{State, V1NameState},
 };
 
-const WRAPPER_FAMILY: &str = "ens_v1_wrapper_l1";
+pub(super) const WRAPPER_FAMILY: &str = "ens_v1_wrapper_l1";
 
 /// What a registry owner log needs to decide whether it keeps the NameWrapper authority.
 #[derive(Clone, Copy, Debug, Default)]
@@ -86,4 +87,27 @@ pub(super) fn zero_write_closes(
             || (authority.authority_source_family == WRAPPER_FAMILY
                 && !context.wrapper_custody.unwrap_follows)
     })
+}
+
+/// Whether the BaseRegistrar transfer that follows an unwrap of `node` in its transaction takes
+/// the name over: a wrapped `.eth` second-level name with a wrapper-derived registrar expiry
+/// and no materialized registrar identity yet. `unwrap` refuses a `.eth` second-level name, and
+/// `unwrapETH2LD` runs `_unwrap`, which writes the registry and emits `NameUnwrapped`, and only
+/// then transfers the registrar token to the registrant. That transfer's fallback registrar
+/// identity needs only the derived expiry, so this check needs no more.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L381-L395 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L403-L414 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
+pub(in crate::schema_v2::protocol::v1) fn registrar_transfer_may_follow(
+    state: &State,
+    namespace: &str,
+    node: &str,
+) -> bool {
+    state.v1_registrar(namespace, node).is_none()
+        && state
+            .v1_node_path(namespace, node)
+            .is_some_and(|path| path.len() == 2 && path[1] == hash_hex(b"eth"))
+        && state
+            .v1_registrar_expiry_from_wrapper(namespace, node)
+            .is_some()
 }

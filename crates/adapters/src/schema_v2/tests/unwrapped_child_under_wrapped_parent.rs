@@ -841,6 +841,48 @@ fn wrapped_second_level_non_eth_unwrapped_without_a_lease_binds_registry_only() 
     Ok(())
 }
 
+/// The NameWrapper's wrap is the first registry write of `direct.xyz` seen, so the
+/// registry-only resource is remembered before the name's surface is known, and `NameWrapped`
+/// then makes it known. The unwrap's registry write grants HOLDER the registry-only resource,
+/// and those grant rows carry the name id, in one batch and cut after the wrap, resumed warm
+/// and restored cold, plain and folded.
+#[test]
+fn unwrap_grant_on_the_registry_only_resource_names_a_known_surface() -> anyhow::Result<()> {
+    let wrapped = node(&["direct", "xyz"]);
+    let wrapped_id = format!("ens:{wrapped:#x}");
+    let registry_only =
+        super::common::stable_uuid(&format!("resource:registry-only:{CHAIN}:{wrapped:#x}"));
+    let wrap = vec![
+        registry_transfer(1, 0, wrapped, NAME_WRAPPER),
+        transfer_single(1, 1, HOLDER, ZERO, HOLDER, wrapped),
+        name_wrapped(1, 2, wrapped, b"\x06direct\x03xyz\0", HOLDER),
+    ];
+    let unwrap = vec![
+        transfer_single(2, 0, HOLDER, HOLDER, ZERO, wrapped),
+        registry_transfer(2, 1, wrapped, HOLDER),
+        name_unwrapped(2, 2, wrapped, HOLDER),
+    ];
+    let mut failures = Vec::new();
+    for (layout, outputs) in every_layout(&batch, &wrap, &[unwrap])? {
+        let grants = permission_rows_at(&outputs, 2, |event| {
+            event.resource_id == Some(registry_only)
+                && event.after_state["subject"] == HOLDER
+                && event.after_state["effective_powers"]
+                    .as_array()
+                    .is_some_and(|powers| !powers.is_empty())
+        });
+        if grants.is_empty()
+            || grants
+                .iter()
+                .any(|event| event.logical_name_id.as_deref() != Some(wrapped_id.as_str()))
+        {
+            failures.push(format!("{layout}: {grants:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
 /// The `.eth` prediction is limited to names under eth, and a non-eth second-level name can
 /// carry a live wrapper expiry. The registry owner of a top-level name wraps it, which stores
 /// expiry 0. For a child of the root, `setChildFuses` checks the name's own owner, and the
@@ -1188,15 +1230,16 @@ fn eth_second_level_unwrap_without_a_registrar_identity_opens_no_registry_only_i
         name_unwrapped(2, 2, wrapped, HOLDER),
         registrar_transfer(2, 3, NAME_WRAPPER, HOLDER),
     ];
-    let output = interpret_test_batch(BatchInput {
+    let build = |raw_logs: Vec<RawLogInput>| BatchInput {
         chain_id: CHAIN.to_owned(),
-        manifests,
+        manifests: manifests.clone(),
         discovery_rules: Vec::new(),
-        admissions,
+        admissions: admissions.clone(),
         prior_events: Vec::new(),
         blocks: Vec::new(),
-        raw_logs: logs,
-    })?;
+        raw_logs,
+    };
+    let output = interpret_test_batch(build(logs.clone()))?;
     assert!(
         !output.normalized_events.iter().any(|event| {
             event.block_number == Some(2)
@@ -1216,5 +1259,713 @@ fn eth_second_level_unwrap_without_a_registrar_identity_opens_no_registry_only_i
         .expect("the unwrapped .eth name is bound after the registrar transfer");
     assert_eq!(bound.block_number, Some(2));
     assert_eq!(bound.after_state["authority_kind"], "registrar");
+    // The NameWrapper's block 1 registry write grants it the registry-only resource, since no
+    // registrar identity is selected yet. The unwrap's registry write ends those grants, and
+    // the registrar transfer selects the lease, so that resource holds nothing afterwards, in
+    // one batch and cut after the wrap, resumed warm and restored cold.
+    let registry_only =
+        super::common::stable_uuid(&format!("resource:registry-only:{CHAIN}:{wrapped:#x}"));
+    let mut failures = Vec::new();
+    for (layout, grants) in
+        grants_in_every_layout(&build, &logs[..4], &[logs[4..].to_vec()], registry_only)?
+    {
+        if !grants.is_empty() {
+            failures.push(format!("{layout}: {grants:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+/// Live direct grants on one resource, as (subject, scope kind, powers).
+type LiveGrants = std::collections::BTreeSet<(String, String, Vec<String>)>;
+
+/// The child's registry-only resource: the one its first registry write binds.
+fn registry_only_resource(output: &BatchOutput) -> uuid::Uuid {
+    output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "SurfaceBound"
+                && event.logical_name_id.as_deref() == Some(child_id().as_str())
+                && event.after_state["authority_kind"] == "registry_only"
+        })
+        .and_then(|event| event.resource_id)
+        .expect("the child's registry write binds a registry-only resource")
+}
+
+/// Every subject's live direct grants on `resource` after `outputs`, read in order, as
+/// (subject, scope kind, powers). The newest `PermissionChanged` row of each subject and
+/// scope wins, and an empty power list is a revocation.
+fn live_grants_on(outputs: &[&BatchOutput], resource: uuid::Uuid) -> LiveGrants {
+    let mut newest = std::collections::BTreeMap::new();
+    for event in outputs
+        .iter()
+        .flat_map(|output| output.normalized_events.iter())
+        .filter(|event| {
+            event.event_kind == "PermissionChanged" && event.resource_id == Some(resource)
+        })
+    {
+        let state = &event.after_state;
+        newest.insert(
+            (
+                state["subject"].as_str().unwrap_or_default().to_owned(),
+                state["scope"].to_string(),
+            ),
+            (
+                state["scope"]["kind"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                state["effective_powers"]
+                    .as_array()
+                    .map(|powers| {
+                        powers
+                            .iter()
+                            .filter_map(|power| power.as_str().map(str::to_owned))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+            ),
+        );
+    }
+    newest
+        .into_iter()
+        .filter(|(_, (_, powers))| !powers.is_empty())
+        .map(|((subject, _), (kind, powers))| (subject, kind, powers))
+        .collect()
+}
+
+/// `owner`'s registry-only grants on the child: control of the resource and of its resolver.
+fn registry_owner_grants(owner: &str) -> LiveGrants {
+    [
+        (
+            owner.to_owned(),
+            "resource".to_owned(),
+            vec!["resource_control".to_owned()],
+        ),
+        (
+            owner.to_owned(),
+            "resolver".to_owned(),
+            vec!["resolver_control".to_owned()],
+        ),
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// The child's setup without its wrap: the known unwrapped parent of HOLDER, and the child
+/// created for CHILD_OWNER with a resolver.
+fn unwrapped_child_setup() -> Vec<RawLogInput> {
+    custody_setup().into_iter().take(4).collect()
+}
+
+/// CHILD_OWNER's `wrap` of the child to itself at `block`: the registry write to the
+/// NameWrapper, the mint, then `NameWrapped`.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L364-L374 @ ens_v1@91c966f)
+fn wrap_child(block: i64) -> Vec<RawLogInput> {
+    vec![
+        registry_transfer(block, 0, child(), NAME_WRAPPER),
+        transfer_single(block, 1, CHILD_OWNER, ZERO, CHILD_OWNER, child()),
+        name_wrapped(
+            block,
+            2,
+            child(),
+            b"\x05child\x06parent\x03eth\0",
+            CHILD_OWNER,
+        ),
+    ]
+}
+
+/// `holder`'s `unwrap` of the child to `to` at `block`.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L403-L414 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
+fn unwrap_child(block: i64, holder: &str, to: &str) -> Vec<RawLogInput> {
+    vec![
+        transfer_single(block, 0, holder, holder, ZERO, child()),
+        registry_transfer(block, 1, child(), to),
+        name_unwrapped(block, 2, child(), to),
+    ]
+}
+
+/// The child's registry-only resource carries the grants of the child's ENSv1 registry owner,
+/// whichever authority is selected. `wrap` makes the NameWrapper the registry owner, so while
+/// the child is wrapped that resource holds the NameWrapper's grants and nobody else's.
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L16-L21 @ ens_v1@91c966f)
+#[test]
+fn wrap_moves_the_registry_only_grants_to_the_name_wrapper() -> anyhow::Result<()> {
+    let setup = interpret(unwrapped_child_setup())?;
+    let resource = registry_only_resource(&setup);
+    assert_eq!(
+        live_grants_on(&[&setup], resource),
+        registry_owner_grants(CHILD_OWNER),
+        "the unwrapped child's registry owner holds its resource"
+    );
+    let mut logs = unwrapped_child_setup();
+    logs.extend(wrap_child(3));
+    let wrapped = interpret(logs)?;
+    assert_eq!(
+        live_grants_on(&[&wrapped], resource),
+        registry_owner_grants(NAME_WRAPPER),
+        "while wrapped, the registry-only resource holds more than the registry owner's grants"
+    );
+    Ok(())
+}
+
+/// The same through a wrapped parent's `setSubnodeOwner` over the existing unwrapped child:
+/// the NameWrapper writes the registry to itself with `NewOwner`, then mints and wraps. The
+/// holder's later unwrap to TRANSFEREE leaves that resource with TRANSFEREE's grants only, in
+/// one batch and cut after the wrap, resumed warm and restored cold.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L577-L581 @ ens_v1@91c966f)
+#[test]
+fn set_subnode_owner_wrap_keeps_the_registry_only_grants_on_the_registry_owner()
+-> anyhow::Result<()> {
+    let mut logs = vec![
+        new_owner_under(B256::ZERO, 1, 0, "eth", CONTRACT),
+        new_owner_under(node(&["eth"]), 1, 1, "parent", HOLDER),
+        new_owner(2, 0, "child", CHILD_OWNER),
+        new_resolver(2, 1, child(), RESOLVER),
+    ];
+    logs.extend(wrap_parent(3));
+    let before = interpret(logs.clone())?;
+    let resource = registry_only_resource(&before);
+    logs.extend([
+        new_owner(4, 0, "child", NAME_WRAPPER),
+        transfer_single(4, 1, HOLDER, ZERO, CHILD_OWNER, child()),
+        name_wrapped(4, 2, child(), b"\x05child\x06parent\x03eth\0", CHILD_OWNER),
+    ]);
+    let wrapped = interpret(logs.clone())?;
+    assert_eq!(
+        live_grants_on(&[&wrapped], resource),
+        registry_owner_grants(NAME_WRAPPER),
+        "while wrapped, the registry-only resource holds more than the registry owner's grants"
+    );
+    let mut failures = Vec::new();
+    for (layout, grants) in grants_in_every_layout(
+        &batch,
+        &logs,
+        &[unwrap_child(5, CHILD_OWNER, TRANSFEREE)],
+        resource,
+    )? {
+        if grants != scoped_registry_owner_grants(TRANSFEREE, RESOLVER) {
+            failures.push(format!("{layout}: {grants:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+/// Ways authority leaves the registry-only resource that keep no grants behind: a registry
+/// owner change to another account, a zero-owner write, and a registrar registration taking
+/// over a registry-only `.eth` name. Each control ends with only the expected holder.
+#[test]
+fn registry_only_handoffs_without_a_wrap_keep_no_stale_grants() -> anyhow::Result<()> {
+    let setup = interpret(unwrapped_child_setup())?;
+    let resource = registry_only_resource(&setup);
+    let mut moved = unwrapped_child_setup();
+    moved.push(registry_transfer(3, 0, child(), AWAY_OWNER));
+    assert_eq!(
+        live_grants_on(&[&interpret(moved)?], resource),
+        registry_owner_grants(AWAY_OWNER),
+        "owner change"
+    );
+    let mut closed = unwrapped_child_setup();
+    closed.push(registry_transfer(3, 0, child(), ZERO));
+    assert_eq!(
+        live_grants_on(&[&interpret(closed.clone())?], resource),
+        std::collections::BTreeSet::new(),
+        "zero-owner close"
+    );
+    closed.push(new_owner(4, 0, "child", AWAY_OWNER));
+    assert_eq!(
+        live_grants_on(&[&interpret(closed)?], resource),
+        registry_owner_grants(AWAY_OWNER),
+        "reopened after a zero-owner close"
+    );
+    Ok(())
+}
+
+const NEXT_RESOLVER: &str = "0x00000000000000000000000000000000000000d3";
+
+/// Every subject's live direct grants on `resource` after `outputs`, as in `live_grants_on`,
+/// with a resolver grant's scope naming its resolver.
+fn scoped_grants_on(outputs: &[&BatchOutput], resource: uuid::Uuid) -> LiveGrants {
+    let mut newest = std::collections::BTreeMap::new();
+    for event in outputs
+        .iter()
+        .flat_map(|output| output.normalized_events.iter())
+        .filter(|event| {
+            event.event_kind == "PermissionChanged" && event.resource_id == Some(resource)
+        })
+    {
+        let state = &event.after_state;
+        let scope = match state["scope"]["resolver_address"].as_str() {
+            Some(resolver) => format!("resolver:{}", resolver.to_ascii_lowercase()),
+            None => state["scope"]["kind"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        };
+        let powers = state["effective_powers"]
+            .as_array()
+            .map(|powers| {
+                powers
+                    .iter()
+                    .filter_map(|power| power.as_str().map(str::to_owned))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        newest.insert(
+            (
+                state["subject"].as_str().unwrap_or_default().to_owned(),
+                scope,
+            ),
+            powers,
+        );
+    }
+    newest
+        .into_iter()
+        .filter(|(_, powers)| !powers.is_empty())
+        .map(|((subject, scope), powers)| (subject, scope, powers))
+        .collect()
+}
+
+/// `owner`'s registry-only grants on the child with `resolver` set, scoped as in
+/// `scoped_grants_on`.
+fn scoped_registry_owner_grants(owner: &str, resolver: &str) -> LiveGrants {
+    [
+        (
+            owner.to_owned(),
+            "resource".to_owned(),
+            vec!["resource_control".to_owned()],
+        ),
+        (
+            owner.to_owned(),
+            format!("resolver:{resolver}"),
+            vec!["resolver_control".to_owned()],
+        ),
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// The blocks of `logs`, once each, in log order.
+fn blocks_of(logs: &[RawLogInput]) -> Vec<RawBlockInput> {
+    let mut seen = std::collections::BTreeSet::new();
+    logs.iter()
+        .filter(|raw| seen.insert(raw.block_number))
+        .map(|raw| RawBlockInput {
+            chain_id: raw.chain_id.clone(),
+            block_hash: raw.block_hash.clone(),
+            block_number: raw.block_number,
+            block_timestamp: raw.block_timestamp,
+            canonicality_state: raw.canonicality_state.clone(),
+        })
+        .collect()
+}
+
+/// The outputs of every layout of `prefix` followed by `steps`, each batch built by `build`:
+/// one batch, and a cut after the prefix and after each step but the last, each resumed warm,
+/// restored cold from the head's rows, and restored cold from those rows folded as the
+/// retained state keeps them.
+fn every_layout(
+    build: &dyn Fn(Vec<RawLogInput>) -> BatchInput,
+    prefix: &[RawLogInput],
+    steps: &[Vec<RawLogInput>],
+) -> anyhow::Result<Vec<(String, Vec<BatchOutput>)>> {
+    let all = |range: std::ops::Range<usize>| -> Vec<RawLogInput> {
+        steps[range].iter().flatten().cloned().collect()
+    };
+    let mut whole = prefix.to_vec();
+    whole.extend(all(0..steps.len()));
+    let mut layouts = vec![(
+        "one batch".to_owned(),
+        vec![interpret_test_batch(build(whole))?],
+    )];
+    for cut in 0..steps.len() {
+        let point = if cut == 0 {
+            "the wrap".to_owned()
+        } else {
+            format!("step {cut}")
+        };
+        let mut head_logs = prefix.to_vec();
+        head_logs.extend(all(0..cut));
+        let tail_logs = all(cut..steps.len());
+        let (head, session) = interpret_test_batch_incremental(build(head_logs.clone()), None)?;
+        let (warm, _) = interpret_test_batch_incremental(build(tail_logs.clone()), Some(session))?;
+        let mut cold_input = build(tail_logs.clone());
+        cold_input.prior_events = head.normalized_events.iter().map(prior_event).collect();
+        let cold = interpret_test_batch(cold_input)?;
+        let mut folded_input = build(tail_logs);
+        folded_input.prior_events = crate::schema_v2::seam::fold_prior_events(
+            Vec::new(),
+            &head.normalized_events,
+            &blocks_of(&head_logs),
+        )?;
+        let folded = interpret_test_batch(folded_input)?;
+        layouts.push((format!("cut after {point}, warm"), vec![head.clone(), warm]));
+        layouts.push((format!("cut after {point}, cold"), vec![head.clone(), cold]));
+        layouts.push((format!("cut after {point}, folded"), vec![head, folded]));
+    }
+    Ok(layouts)
+}
+
+/// The grants on `resource` in every layout of `prefix` followed by `steps`, as in
+/// `every_layout`.
+fn grants_in_every_layout(
+    build: &dyn Fn(Vec<RawLogInput>) -> BatchInput,
+    prefix: &[RawLogInput],
+    steps: &[Vec<RawLogInput>],
+    resource: uuid::Uuid,
+) -> anyhow::Result<Vec<(String, LiveGrants)>> {
+    Ok(every_layout(build, prefix, steps)?
+        .into_iter()
+        .map(|(layout, outputs)| {
+            let outputs = outputs.iter().collect::<Vec<_>>();
+            (layout, scoped_grants_on(&outputs, resource))
+        })
+        .collect())
+}
+
+/// The `PermissionChanged` rows of `outputs` at `block` that `filter` selects.
+fn permission_rows_at(
+    outputs: &[BatchOutput],
+    block: i64,
+    filter: impl Fn(&NormalizedEvent) -> bool,
+) -> Vec<&NormalizedEvent> {
+    outputs
+        .iter()
+        .flat_map(|output| output.normalized_events.iter())
+        .filter(|event| {
+            event.event_kind == "PermissionChanged" && event.block_number == Some(block)
+        })
+        .filter(|event| filter(event))
+        .collect()
+}
+
+/// Every way the registry-only resource reopens after a wrap carries only its new owner's
+/// grants, because the registry record has left the NameWrapper: the holder's unwrap to
+/// another account or to itself, the parent's registry write handing the wrapped record to
+/// another account, the parent's zero-owner write followed by a new owner, and an unwrap after
+/// a resolver change made while wrapped. Each handoff is followed by the new owner's resolver
+/// change, so a cut after the handoff carries the moved grants into a later write. Every row
+/// runs in one batch and cut after the wrap and after each step, resumed warm and restored
+/// cold.
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L16-L21 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
+#[test]
+fn registry_only_resource_reopened_after_a_wrap_holds_only_its_new_owner() -> anyhow::Result<()> {
+    let setup = interpret(unwrapped_child_setup())?;
+    let resource = registry_only_resource(&setup);
+    let mut wrapped = unwrapped_child_setup();
+    wrapped.extend(wrap_child(3));
+    let rows = [
+        (
+            "unwrap to another account",
+            vec![
+                unwrap_child(4, CHILD_OWNER, TRANSFEREE),
+                vec![new_resolver(6, 0, child(), NEXT_RESOLVER)],
+            ],
+            TRANSFEREE,
+            NEXT_RESOLVER,
+        ),
+        (
+            "unwrap to the holder",
+            vec![
+                unwrap_child(4, CHILD_OWNER, CHILD_OWNER),
+                vec![new_resolver(6, 0, child(), NEXT_RESOLVER)],
+            ],
+            CHILD_OWNER,
+            NEXT_RESOLVER,
+        ),
+        (
+            "parent hands the wrapped record to another account",
+            vec![
+                vec![new_owner(4, 0, "child", AWAY_OWNER)],
+                vec![new_resolver(6, 0, child(), NEXT_RESOLVER)],
+            ],
+            AWAY_OWNER,
+            NEXT_RESOLVER,
+        ),
+        (
+            "parent zero-owner write, then a new owner",
+            vec![
+                vec![new_owner(4, 0, "child", ZERO)],
+                vec![new_owner(5, 0, "child", AWAY_OWNER)],
+                vec![new_resolver(6, 0, child(), NEXT_RESOLVER)],
+            ],
+            AWAY_OWNER,
+            NEXT_RESOLVER,
+        ),
+        (
+            "resolver change while wrapped, then an unwrap to another account",
+            vec![
+                vec![new_resolver(4, 0, child(), NEXT_RESOLVER)],
+                unwrap_child(5, CHILD_OWNER, TRANSFEREE),
+            ],
+            TRANSFEREE,
+            NEXT_RESOLVER,
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (row, steps, owner, resolver) in rows {
+        for (layout, grants) in grants_in_every_layout(&batch, &wrapped, &steps, resource)? {
+            if grants != scoped_registry_owner_grants(owner, resolver) {
+                failures.push(format!("{row}, {layout}: {grants:?}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+/// While the child stays wrapped, the registry-only resource follows the NameWrapper's own
+/// registry writes: a resolver change moves its resolver control to the new resolver, in
+/// every layout.
+#[test]
+fn resolver_change_while_wrapped_moves_the_name_wrappers_resolver_grant() -> anyhow::Result<()> {
+    let setup = interpret(unwrapped_child_setup())?;
+    let resource = registry_only_resource(&setup);
+    let mut wrapped = unwrapped_child_setup();
+    wrapped.extend(wrap_child(3));
+    let mut failures = Vec::new();
+    for (layout, grants) in grants_in_every_layout(
+        &batch,
+        &wrapped,
+        &[vec![new_resolver(4, 0, child(), NEXT_RESOLVER)]],
+        resource,
+    )? {
+        if grants != scoped_registry_owner_grants(NAME_WRAPPER, NEXT_RESOLVER) {
+            failures.push(format!("{layout}: {grants:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+/// The NameWrapper's `setRecord` rewrites the registry record to itself before it moves the
+/// token, so that write keeps the wrapper authority and the NameWrapper stays the registry
+/// owner. It emits no permission row at all, no token approval row among them, and the
+/// registry-only resource keeps the NameWrapper's grants, with resolver control moved to the
+/// new resolver by the resolver write. With the zero owner, `setRecord` then unwraps to the
+/// zero address, and that write ends the NameWrapper's grants on the registry-only resource.
+/// Every row runs in one batch and cut after the wrap, resumed warm and restored cold.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L637-L660 @ ens_v1@91c966f)
+#[test]
+fn name_wrapper_record_rewrite_keeps_the_registry_only_grants_on_the_name_wrapper()
+-> anyhow::Result<()> {
+    let setup = interpret(unwrapped_child_setup())?;
+    let resource = registry_only_resource(&setup);
+    let mut wrapped = unwrapped_child_setup();
+    wrapped.extend(wrap_child(3));
+    let rewrite = vec![
+        registry_transfer(4, 0, child(), NAME_WRAPPER),
+        new_resolver(4, 1, child(), NEXT_RESOLVER),
+    ];
+    let mut failures = Vec::new();
+    for (layout, outputs) in every_layout(&batch, &wrapped, &[rewrite])? {
+        let rewrite_rows = permission_rows_at(&outputs, 4, |event| {
+            event.log_index == Some(0)
+                || event.after_state["effective_powers"]
+                    .as_array()
+                    .is_some_and(|powers| powers.iter().any(|power| power == "token_approval"))
+        });
+        if !rewrite_rows.is_empty() {
+            failures.push(format!("rewrite, {layout}: {rewrite_rows:?}"));
+        }
+        let outputs = outputs.iter().collect::<Vec<_>>();
+        let grants = scoped_grants_on(&outputs, resource);
+        if grants != scoped_registry_owner_grants(NAME_WRAPPER, NEXT_RESOLVER) {
+            failures.push(format!("rewrite, {layout}: {grants:?}"));
+        }
+    }
+    let unwrap_to_zero = vec![
+        registry_transfer(4, 0, child(), NAME_WRAPPER),
+        transfer_single(4, 1, CHILD_OWNER, CHILD_OWNER, ZERO, child()),
+        registry_transfer(4, 2, child(), ZERO),
+        name_unwrapped(4, 3, child(), ZERO),
+    ];
+    for (layout, grants) in grants_in_every_layout(&batch, &wrapped, &[unwrap_to_zero], resource)? {
+        if !grants.is_empty() {
+            failures.push(format!("zero-owner setRecord, {layout}: {grants:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+/// A restore reads the registry owner the registry-only grants follow from the registry's
+/// owner rows, not from permission rows, so a registry-family `token_approval` row among the
+/// prior rows changes nothing: the cold unwrap after the wrap emits the same rows with and
+/// without it.
+#[test]
+fn restore_ignores_registry_family_token_approval_rows() -> anyhow::Result<()> {
+    let mut wrapped = unwrapped_child_setup();
+    wrapped.extend(wrap_child(3));
+    let head = interpret(wrapped)?;
+    let prior = head
+        .normalized_events
+        .iter()
+        .map(prior_event)
+        .collect::<Vec<_>>();
+    let mut approval = prior
+        .iter()
+        .find(|event| {
+            event.event_kind == "PermissionChanged" && event.source_family == "ens_v1_registry_l1"
+        })
+        .cloned()
+        .expect("the wrap's registry write emits a registry-family permission row");
+    approval.retained_state_key = format!("{}:token-approval", approval.retained_state_key);
+    approval.after_state["subject"] = json!(PROBE_OWNER);
+    approval.after_state["scope"] = json!({"kind":"token"});
+    approval.after_state["effective_powers"] = json!(["token_approval"]);
+    let cold = |prior_events: Vec<PriorEventInput>| {
+        let mut input = batch(unwrap_child(4, CHILD_OWNER, TRANSFEREE));
+        input.prior_events = prior_events;
+        interpret_test_batch(input)
+    };
+    let mut with_approval = prior.clone();
+    with_approval.push(approval);
+    assert_eq!(
+        cold(with_approval)?.normalized_events,
+        cold(prior)?.normalized_events,
+        "a registry-family token_approval row changed the restored registry-only grants"
+    );
+    Ok(())
+}
+
+/// The lease side of `wrapETH2LD`, as a control. The NameWrapper holds the BaseRegistrar
+/// token and, after `reclaim`, the registry record, so its grants on the lease match the chain
+/// while the name is wrapped. `unwrapETH2LD` moves both to the new owner, and the lease then
+/// holds only that owner's grants, in one batch and cut after the wrap, resumed warm and
+/// restored cold. The lease or the NameWrapper authority stays selected through every
+/// registry write of the wrap and the unwrap transactions, so none of them moves registry-only
+/// grants, and the registry-only resource holds no grants at the end, in any of them.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L278 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+#[test]
+fn wrap_eth2ld_lease_grants_follow_the_registrar_token() -> anyhow::Result<()> {
+    let leased = node(&["leased", "eth"]);
+    let registrar_logs = |logs: Vec<RawLogInput>| {
+        let mut input = batch(logs);
+        input.manifests.push(manifest_with_events(
+            REGISTRAR_MANIFEST,
+            "ens",
+            "ens_v1_registrar_l1",
+            &[
+                (
+                    "NameRegistered",
+                    "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+                    &["registrar"],
+                    &["RegistrationGranted"],
+                ),
+                (
+                    "Transfer",
+                    "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+                    &["registrar"],
+                    &[
+                        "TokenControlTransferred",
+                        "PermissionChanged",
+                        "SurfaceUnbound",
+                        "SurfaceBound",
+                        "AuthorityEpochChanged",
+                        "ResolverChanged",
+                    ],
+                ),
+            ],
+        ));
+        input
+            .admissions
+            .push(admission(REGISTRAR_MANIFEST, "registrar"));
+        input
+    };
+    let registrar_transfer = |block: i64, log_index: i64, from: &str, to: &str| {
+        raw_at(
+            v1_registrar::Transfer {
+                from: addr(from),
+                to: addr(to),
+                tokenId: U256::from_be_bytes(keccak256(b"leased").0),
+            }
+            .encode_log_data(),
+            block,
+            log_index,
+            CONTRACT,
+        )
+    };
+    let logs = vec![
+        new_owner_under(B256::ZERO, 1, 0, "eth", CONTRACT),
+        new_owner_under(node(&["eth"]), 1, 1, "leased", HOLDER),
+        raw_at(
+            NameRegistered {
+                name: "leased".to_owned(),
+                label: keccak256(b"leased"),
+                owner: addr(HOLDER),
+                expires: U256::from(4_000_000_000_u64),
+            }
+            .encode_log_data(),
+            1,
+            2,
+            CONTRACT,
+        ),
+        new_resolver(1, 3, leased, RESOLVER),
+        registrar_transfer(2, 0, HOLDER, NAME_WRAPPER),
+        new_owner_under(node(&["eth"]), 2, 1, "leased", NAME_WRAPPER),
+        transfer_single(2, 2, HOLDER, ZERO, HOLDER, leased),
+        name_wrapped_with(
+            2,
+            3,
+            leased,
+            b"\x06leased\x03eth\0",
+            HOLDER,
+            (DOT_ETH_FUSES, 4_000_000_000 + 90 * 86_400),
+        ),
+    ];
+    let wrapped = interpret_test_batch(registrar_logs(logs.clone()))?;
+    let lease = wrapped
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RegistrationGranted")
+        .and_then(|event| event.resource_id)
+        .expect("the registration has a lease resource");
+    assert_eq!(
+        live_grants_on(&[&wrapped], lease),
+        registry_owner_grants(NAME_WRAPPER),
+        "while wrapped, the lease's grants are the NameWrapper's"
+    );
+    let unwrap = vec![
+        transfer_single(3, 0, HOLDER, HOLDER, ZERO, leased),
+        registry_transfer(3, 1, leased, TRANSFEREE),
+        name_unwrapped(3, 2, leased, TRANSFEREE),
+        registrar_transfer(3, 3, NAME_WRAPPER, TRANSFEREE),
+    ];
+    let registry_only =
+        super::common::stable_uuid(&format!("resource:registry-only:{CHAIN}:{leased:#x}"));
+    let mut failures = Vec::new();
+    for (layout, grants) in
+        grants_in_every_layout(&registrar_logs, &logs, &[unwrap.clone()], lease)?
+    {
+        if grants != scoped_registry_owner_grants(TRANSFEREE, RESOLVER) {
+            failures.push(format!("lease, {layout}: {grants:?}"));
+        }
+    }
+    for (layout, outputs) in every_layout(&registrar_logs, &logs, &[unwrap])? {
+        for block in [2, 3] {
+            let rows = permission_rows_at(&outputs, block, |event| {
+                event.event_identity.contains(":registry-owner-")
+            });
+            if !rows.is_empty() {
+                failures.push(format!(
+                    "registry owner rows, block {block}, {layout}: {rows:?}"
+                ));
+            }
+        }
+        let outputs = outputs.iter().collect::<Vec<_>>();
+        let grants = scoped_grants_on(&outputs, registry_only);
+        if !grants.is_empty() {
+            failures.push(format!("registry-only resource, {layout}: {grants:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
     Ok(())
 }
