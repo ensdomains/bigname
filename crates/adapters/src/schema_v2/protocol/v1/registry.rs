@@ -29,8 +29,7 @@ pub(in crate::schema_v2) mod graveyard;
 pub(super) mod node;
 mod permissions;
 pub(super) mod surface;
-use permissions::append_authority_permissions;
-pub(super) use permissions::push_permission_change;
+pub(super) use permissions::{append_authority_permissions, push_permission_change};
 pub(in crate::schema_v2) mod wrapper_custody;
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 sol! {

@@ -6,9 +6,8 @@
 //! relations for its owner; the surface-less registry-children fallback cannot rescue it
 //! once a surface exists. Wrapped siblings bind through `NameWrapped` and serve `active`.
 //!
-//! The surfaceless shape — a child created while its parent's label path is still
-//! unknown — is a TYR-335 (split out under advisor ruling A-459); its failing
-//! reproduction was removed from this file and filed there.
+//! A child created before its parent's label path was ever observed gets no
+//! surface. That shape is tracked separately as TYR-335 and is not covered here.
 
 use super::*;
 
@@ -353,7 +352,7 @@ fn unwrapped_child_created_when_parent_already_wrapped_binds_registry_only() -> 
     Ok(())
 }
 
-/// Sepolia shape (advisor probe): the child is created wrapped through the NameWrapper
+/// Sepolia shape: the child is created wrapped through the NameWrapper
 /// under an already-wrapped parent, then unwrapped in the next block. The registry owner
 /// after the unwrap is a nonzero EOA and there is no registrar lease to reactivate, so the
 /// unwrap must hand the known surface to a registry-only authority instead of closing the
@@ -381,6 +380,48 @@ fn wrapped_child_unwrapped_without_a_lease_binds_registry_only() -> anyhow::Resu
         })
         .expect("the unwrapped child has a SurfaceBound");
     assert_eq!(child_bound.after_state["authority_kind"], "registry_only");
+    // The registry-only successor must carry the same authority permission
+    // handoff a plain registry-owned name gets: the registry owner holds
+    // `resource_control` (served as `registration_control`) and
+    // `resolver_control` on the registry-only resource.
+    let registry_resource = binding.resource_id;
+    for (power, scope_kind) in [
+        ("resource_control", "resource"),
+        ("resolver_control", "resolver"),
+    ] {
+        let grant = output
+            .normalized_events
+            .iter()
+            .filter(|event| event.block_number == Some(3))
+            .find(|event| {
+                event.event_kind == "PermissionChanged"
+                    && event.logical_name_id.as_deref() == Some(child_id().as_str())
+                    && event.resource_id == Some(registry_resource)
+                    && event.after_state["subject"] == CHILD_OWNER
+                    && event.after_state["scope"]["kind"] == scope_kind
+                    && event.after_state["effective_powers"]
+                        .as_array()
+                        .is_some_and(|powers| powers.iter().any(|held| held == power))
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "unwrapped child has no {power} grant on the registry-only resource: {:?}",
+                    output
+                        .normalized_events
+                        .iter()
+                        .filter(|event| event.event_kind == "PermissionChanged")
+                        .map(|event| &event.after_state)
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(
+            grant.after_state["grant_source"]["authority_kind"],
+            "registry_only"
+        );
+        if scope_kind == "resolver" {
+            assert_eq!(grant.after_state["scope"]["resolver_address"], RESOLVER);
+        }
+    }
     Ok(())
 }
 
@@ -449,7 +490,7 @@ fn wrapped_child_unwrap_binds_registry_only_across_restore() -> anyhow::Result<(
     Ok(())
 }
 
-/// Realistic created-before-wrapped shape (A-459): the parent is created and known
+/// Realistic created-before-wrapped shape: the parent is created and known
 /// while unwrapped, the child is created by `NewOwner` under it, and only then does
 /// the parent wrap. The child received a plain registry binding at creation and must
 /// keep it across the parent's wrap. The parent is made known the way

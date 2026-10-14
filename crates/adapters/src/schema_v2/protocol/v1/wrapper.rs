@@ -4,7 +4,7 @@ use serde_json::json;
 
 use super::super::{Interpreted, NameDraft, ResourceDraft, ShadowNameDraft, ensure_declared};
 use super::registrar::registry_only_fallback;
-use super::registry::{append_authority_transition, authority_kind};
+use super::registry::{append_authority_permissions, append_authority_transition, authority_kind};
 use super::support::{events_linked, single_event};
 use crate::evm_abi::{address_hex, decode_event_log, hex_string};
 use crate::schema_v2::{
@@ -368,9 +368,11 @@ fn name_unwrapped(
     // registry-only authority succeed the wrapped binding in this same transition
     // rather than leaving the known surface unbound. Otherwise a following
     // same-transaction registrar transfer owns the successor.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1029-L1031 @ ens_v1@91c966f)
     let registry_settled_to_unwrapped_owner = state
         .v1_registry_owner(&selected.source.namespace, &namehash)
         .is_some_and(|owner| owner.eq_ignore_ascii_case(&address_hex(event.owner)));
+    let mut registry_only_successor = false;
     if reactivated.is_none()
         && registry_settled_to_unwrapped_owner
         && let Some(previous) = linked.as_ref().filter(|name| {
@@ -386,6 +388,7 @@ fn name_unwrapped(
             previous,
             &mut reactivated,
         );
+        registry_only_successor = reactivated.is_some();
     }
     let resolver = state.v1_resolver_for_activation(
         &selected.source.namespace,
@@ -412,6 +415,19 @@ fn name_unwrapped(
         resolver,
         None,
     );
+    // The registry write that precedes this event kept the wrapper authority, so
+    // it emitted no registry-resource grant. The registry-only successor therefore
+    // needs the same authority permission handoff a registry `NewOwner`/`Transfer`
+    // emits, in this same transition and after the authority transition.
+    if registry_only_successor {
+        append_authority_permissions(
+            &mut output,
+            linked.as_ref(),
+            reactivated.as_ref(),
+            state.v1_resolver(&selected.source.namespace, &namehash),
+            raw,
+        );
+    }
     if let Some(name) = linked
         .as_ref()
         .filter(|name| name.authority_source_family == selected.source.source_family)
