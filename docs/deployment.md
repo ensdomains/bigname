@@ -4193,3 +4193,40 @@ Interpret content hash and manifest-authority fingerprint remain unchanged. A
 release containing this change requires a full-range Project redo, with no
 Interpret or Ingest redo and no schema-migration. An already running Project pass
 uses its deployed query and does not cover a later release's changed hash.
+
+## Hydration retry reset in rebuild ranges
+
+The build that makes each block of a
+[rebuild range](glossary.md#rebuild-range) find its hydration keys from its own
+changes reduces how much one Ethereum Mainnet rebuild reads. It does not change
+what the rebuild writes (see
+[follow-only hydration](projections.md#follow-only-hydration) and
+[owned key families](projections.md#owned-key-families)).
+
+- On every Ethereum Mainnet block, Project clears obsolete text and reverse-name
+  [hydration](glossary.md#hydration) retry scheduling for the keys the block
+  changed. Inside a rebuild range, each block read the keys of every earlier
+  block of the range as well, so a range's reads grew with the square of its
+  length. Each block now reads only the keys it changed. Those are the only
+  keys whose retry scheduling the block can clear.
+- `project:families.hydrate.text.keys` and
+  `project:families.hydrate.reverse.keys` keep their text. Inside a range they
+  now read the block's own changes instead of the range's.
+- `project:families.hydrate.text.select` and
+  `project:families.hydrate.reverse.select` keep their text and their change
+  inputs, which were already the block's own. Inside a range only their key
+  lists narrow, to the keys the block's own changes reach.
+- A block outside a range, including every live head block, gives all four
+  statements the same parameters as before.
+- Stored rows do not change. API responses do not change.
+- The change is in `crates/project/src`, an input of the
+  [projection content hash](glossary.md#projection-content-hash) only. That hash
+  rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, at a
+  planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+  matching runner and API binaries. The change rides the next re-derivation
+  release and shares that release's Project redo.
+- It adds no table, schema-migration, manifest or setting. The
+  manifest-authority fingerprint and the compiled watch plan are unchanged, so
+  stamp no Ingest redo.
