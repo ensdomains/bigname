@@ -144,6 +144,7 @@ fn addr(value: &str) -> Address {
 }
 
 /// The registry writes a subnode: `setSubnodeOwner(parent, label, owner)`.
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
 fn new_owner(block: i64, log_index: i64, label: &str, owner: &str) -> RawLogInput {
     new_owner_under(parent(), block, log_index, label, owner)
 }
@@ -232,6 +233,11 @@ fn registry_transfer(block: i64, log_index: i64, node: B256, owner: &str) -> Raw
 
 /// `NameWrapped` with fuses 0 and expiry 0, as `wrap` emits it, and as a fuse-0
 /// `setSubnodeOwner` or `setSubnodeRecord` emits it when the caller passes expiry 0.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L372-L374 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L577-L581 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L610-L619 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L903 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L978-L994 @ ens_v1@91c966f)
 fn name_wrapped(block: i64, log_index: i64, node: B256, dns: &[u8], owner: &str) -> RawLogInput {
     name_wrapped_with(block, log_index, node, dns, owner, (0, 0))
 }
@@ -963,6 +969,7 @@ const PROBE_OWNER: &str = "0x00000000000000000000000000000000000000e3";
 /// Blocks 1-2: a known unwrapped parent, and its child created for CHILD_OWNER and then
 /// wrapped by CHILD_OWNER through `wrap`, which moves the registry record to the NameWrapper
 /// and mints the token.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L364-L374 @ ens_v1@91c966f)
 fn custody_setup() -> Vec<RawLogInput> {
     vec![
         new_owner_under(B256::ZERO, 1, 0, "eth", CONTRACT),
@@ -1278,7 +1285,7 @@ fn eth_second_level_unwrap_without_a_registrar_identity_opens_no_registry_only_i
 }
 
 /// Live direct grants on one resource, as (subject, scope kind, powers).
-type LiveGrants = std::collections::BTreeSet<(String, String, Vec<String>)>;
+pub(super) type LiveGrants = std::collections::BTreeSet<(String, String, Vec<String>)>;
 
 /// The child's registry-only resource: the one its first registry write binds.
 fn registry_only_resource(output: &BatchOutput) -> uuid::Uuid {
@@ -1489,7 +1496,7 @@ const NEXT_RESOLVER: &str = "0x00000000000000000000000000000000000000d3";
 
 /// Every subject's live direct grants on `resource` after `outputs`, as in `live_grants_on`,
 /// with a resolver grant's scope naming its resolver.
-fn scoped_grants_on(outputs: &[&BatchOutput], resource: uuid::Uuid) -> LiveGrants {
+pub(super) fn scoped_grants_on(outputs: &[&BatchOutput], resource: uuid::Uuid) -> LiveGrants {
     let mut newest = std::collections::BTreeMap::new();
     for event in outputs
         .iter()
@@ -1568,7 +1575,7 @@ fn blocks_of(logs: &[RawLogInput]) -> Vec<RawBlockInput> {
 /// one batch, and a cut after the prefix and after each step but the last, each resumed warm,
 /// restored cold from the head's rows, and restored cold from those rows folded as the
 /// retained state keeps them.
-fn every_layout(
+pub(super) fn every_layout(
     build: &dyn Fn(Vec<RawLogInput>) -> BatchInput,
     prefix: &[RawLogInput],
     steps: &[Vec<RawLogInput>],
@@ -1722,6 +1729,7 @@ fn registry_only_resource_reopened_after_a_wrap_holds_only_its_new_owner() -> an
 /// While the child stays wrapped, the registry-only resource follows the NameWrapper's own
 /// registry writes: a resolver change moves its resolver control to the new resolver, in
 /// every layout.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L666-L671 @ ens_v1@91c966f)
 #[test]
 fn resolver_change_while_wrapped_moves_the_name_wrappers_resolver_grant() -> anyhow::Result<()> {
     let setup = interpret(unwrapped_child_setup())?;
@@ -1834,66 +1842,64 @@ fn restore_ignores_registry_family_token_approval_rows() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The lease side of `wrapETH2LD`, as a control. The NameWrapper holds the BaseRegistrar
-/// token and, after `reclaim`, the registry record, so its grants on the lease match the chain
-/// while the name is wrapped. `unwrapETH2LD` moves both to the new owner, and the lease then
-/// holds only that owner's grants, in one batch and cut after the wrap, resumed warm and
-/// restored cold. The lease or the NameWrapper authority stays selected through every
-/// registry write of the wrap and the unwrap transactions, so none of them moves registry-only
-/// grants, and the registry-only resource holds no grants at the end, in any of them.
+/// The batch for `logs`, with the BaseRegistrar watched as the lease tests watch it.
+fn lease_batch(logs: Vec<RawLogInput>) -> BatchInput {
+    let mut input = batch(logs);
+    input.manifests.push(manifest_with_events(
+        REGISTRAR_MANIFEST,
+        "ens",
+        "ens_v1_registrar_l1",
+        &[
+            (
+                "NameRegistered",
+                "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+                &["registrar"],
+                &["RegistrationGranted"],
+            ),
+            (
+                "Transfer",
+                "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+                &["registrar"],
+                &[
+                    "TokenControlTransferred",
+                    "PermissionChanged",
+                    "SurfaceUnbound",
+                    "SurfaceBound",
+                    "AuthorityEpochChanged",
+                    "ResolverChanged",
+                ],
+            ),
+        ],
+    ));
+    input
+        .admissions
+        .push(admission(REGISTRAR_MANIFEST, "registrar"));
+    input
+}
+
+/// The BaseRegistrar's `Transfer` of the `leased` token from `from` to `to`.
+fn lease_transfer(block: i64, log_index: i64, from: &str, to: &str) -> RawLogInput {
+    raw_at(
+        v1_registrar::Transfer {
+            from: addr(from),
+            to: addr(to),
+            tokenId: U256::from_be_bytes(keccak256(b"leased").0),
+        }
+        .encode_log_data(),
+        block,
+        log_index,
+        CONTRACT,
+    )
+}
+
+/// HOLDER's registration of `leased.eth` with a resolver at block 1, then its `wrapETH2LD` at
+/// block 2: the registrar token moves to the NameWrapper, `reclaim` points the registry at it,
+/// and the wrapped token is minted.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L152 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L278 @ ens_v1@91c966f)
-/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
-/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
-#[test]
-fn wrap_eth2ld_lease_grants_follow_the_registrar_token() -> anyhow::Result<()> {
+fn wrapped_lease_logs() -> Vec<RawLogInput> {
     let leased = node(&["leased", "eth"]);
-    let registrar_logs = |logs: Vec<RawLogInput>| {
-        let mut input = batch(logs);
-        input.manifests.push(manifest_with_events(
-            REGISTRAR_MANIFEST,
-            "ens",
-            "ens_v1_registrar_l1",
-            &[
-                (
-                    "NameRegistered",
-                    "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
-                    &["registrar"],
-                    &["RegistrationGranted"],
-                ),
-                (
-                    "Transfer",
-                    "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
-                    &["registrar"],
-                    &[
-                        "TokenControlTransferred",
-                        "PermissionChanged",
-                        "SurfaceUnbound",
-                        "SurfaceBound",
-                        "AuthorityEpochChanged",
-                        "ResolverChanged",
-                    ],
-                ),
-            ],
-        ));
-        input
-            .admissions
-            .push(admission(REGISTRAR_MANIFEST, "registrar"));
-        input
-    };
-    let registrar_transfer = |block: i64, log_index: i64, from: &str, to: &str| {
-        raw_at(
-            v1_registrar::Transfer {
-                from: addr(from),
-                to: addr(to),
-                tokenId: U256::from_be_bytes(keccak256(b"leased").0),
-            }
-            .encode_log_data(),
-            block,
-            log_index,
-            CONTRACT,
-        )
-    };
-    let logs = vec![
+    vec![
         new_owner_under(B256::ZERO, 1, 0, "eth", CONTRACT),
         new_owner_under(node(&["eth"]), 1, 1, "leased", HOLDER),
         raw_at(
@@ -1909,7 +1915,7 @@ fn wrap_eth2ld_lease_grants_follow_the_registrar_token() -> anyhow::Result<()> {
             CONTRACT,
         ),
         new_resolver(1, 3, leased, RESOLVER),
-        registrar_transfer(2, 0, HOLDER, NAME_WRAPPER),
+        lease_transfer(2, 0, HOLDER, NAME_WRAPPER),
         new_owner_under(node(&["eth"]), 2, 1, "leased", NAME_WRAPPER),
         transfer_single(2, 2, HOLDER, ZERO, HOLDER, leased),
         name_wrapped_with(
@@ -1920,8 +1926,24 @@ fn wrap_eth2ld_lease_grants_follow_the_registrar_token() -> anyhow::Result<()> {
             HOLDER,
             (DOT_ETH_FUSES, 4_000_000_000 + 90 * 86_400),
         ),
-    ];
-    let wrapped = interpret_test_batch(registrar_logs(logs.clone()))?;
+    ]
+}
+
+/// The lease side of `wrapETH2LD`, as a control. The NameWrapper holds the BaseRegistrar
+/// token and, after `reclaim`, the registry record, so its grants on the lease match the chain
+/// while the name is wrapped. `unwrapETH2LD` moves both to the new owner, and the lease then
+/// holds only that owner's grants, in one batch and cut after the wrap, resumed warm and
+/// restored cold. The lease or the NameWrapper authority stays selected through every
+/// registry write of the wrap and the unwrap transactions, so none of them moves registry-only
+/// grants, and the registry-only resource holds no grants at the end, in any of them.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L278 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+#[test]
+fn wrap_eth2ld_lease_grants_follow_the_registrar_token() -> anyhow::Result<()> {
+    let leased = node(&["leased", "eth"]);
+    let logs = wrapped_lease_logs();
+    let wrapped = interpret_test_batch(lease_batch(logs.clone()))?;
     let lease = wrapped
         .normalized_events
         .iter()
@@ -1937,19 +1959,121 @@ fn wrap_eth2ld_lease_grants_follow_the_registrar_token() -> anyhow::Result<()> {
         transfer_single(3, 0, HOLDER, HOLDER, ZERO, leased),
         registry_transfer(3, 1, leased, TRANSFEREE),
         name_unwrapped(3, 2, leased, TRANSFEREE),
-        registrar_transfer(3, 3, NAME_WRAPPER, TRANSFEREE),
+        lease_transfer(3, 3, NAME_WRAPPER, TRANSFEREE),
     ];
     let registry_only =
         super::common::stable_uuid(&format!("resource:registry-only:{CHAIN}:{leased:#x}"));
     let mut failures = Vec::new();
-    for (layout, grants) in
-        grants_in_every_layout(&registrar_logs, &logs, &[unwrap.clone()], lease)?
-    {
+    for (layout, grants) in grants_in_every_layout(&lease_batch, &logs, &[unwrap.clone()], lease)? {
         if grants != scoped_registry_owner_grants(TRANSFEREE, RESOLVER) {
             failures.push(format!("lease, {layout}: {grants:?}"));
         }
     }
-    for (layout, outputs) in every_layout(&registrar_logs, &logs, &[unwrap])? {
+    for (layout, outputs) in every_layout(&lease_batch, &logs, &[unwrap])? {
+        for block in [2, 3] {
+            let rows = permission_rows_at(&outputs, block, |event| {
+                event.event_identity.contains(":registry-owner-")
+            });
+            if !rows.is_empty() {
+                failures.push(format!(
+                    "registry owner rows, block {block}, {layout}: {rows:?}"
+                ));
+            }
+        }
+        let outputs = outputs.iter().collect::<Vec<_>>();
+        let grants = scoped_grants_on(&outputs, registry_only);
+        if !grants.is_empty() {
+            failures.push(format!("registry-only resource, {layout}: {grants:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+const MIGRATION_MANIFEST: i64 = 7404;
+const GRAVEYARD: &str = "0x00000000000000000000000000000000000000f7";
+
+/// `input` with an ENSv1→ENSv2 migration manifest that admits GRAVEYARD as its Graveyard, with
+/// the controller and factory declarations that ENSv1→ENSv2 migration correlation needs.
+fn with_graveyard(mut input: BatchInput) -> BatchInput {
+    let mut manifest = manifest(
+        MIGRATION_MANIFEST,
+        "ens_v2_migration_l1",
+        "ProxyDeployed",
+        "event ProxyDeployed(address indexed sender, address indexed proxyAddress, uint256 salt, address implementation)",
+        &["verifiable_factory"],
+        &["ContractDiscovered"],
+    );
+    let mut payload: serde_json::Value = serde_json::from_str(&manifest.payload_json).unwrap();
+    payload["correlation_addresses"] = serde_json::json!({
+        "ens_v1_name_wrapper": NAME_WRAPPER,
+        "ens_v1_base_registrar": CONTRACT,
+    });
+    manifest.payload_json = payload.to_string();
+    input.manifests.push(manifest);
+    input.admissions.extend(
+        [
+            ("graveyard", GRAVEYARD),
+            (
+                "unlocked_migration_controller",
+                "0x00000000000000000000000000000000000000f8",
+            ),
+            (
+                "locked_migration_controller",
+                "0x00000000000000000000000000000000000000f9",
+            ),
+            (
+                "verifiable_factory",
+                "0x00000000000000000000000000000000000000fa",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (role, address))| {
+            let mut value = admission(MIGRATION_MANIFEST, role);
+            value.address = address.to_owned();
+            value.contract_instance_id = uuid::Uuid::from_u128(0xf700 + index as u128);
+            value
+        }),
+    );
+    input
+}
+
+/// `unwrapETH2LD` of `leased.eth` into the admitted Graveyard after `setResolver` to zero, then
+/// the BaseRegistrar transfer to it, as the unlocked controller migrates a wrapped `.eth` name
+/// in an ENSv1→ENSv2 migration. The name has a registrar identity, so it has no retained
+/// registry owner: no write of the wrap or the unwrap makes a registry-owner reconcile row, and
+/// the registry-only resource holds no grants at the end, the Graveyard's among them. The
+/// registry write naming the Graveyard is marked with the Graveyard's getter reason, so the
+/// Graveyard is admitted. Every layout runs in one batch and cut after the wrap, resumed warm,
+/// restored cold and restored from folded rows.
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/UnlockedMigrationController.sol:L146-L147 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
+#[test]
+fn unwrap_eth2ld_into_the_graveyard_moves_no_registry_only_grants() -> anyhow::Result<()> {
+    let leased = node(&["leased", "eth"]);
+    let build = |logs: Vec<RawLogInput>| with_graveyard(lease_batch(logs));
+    let unwrap = vec![
+        new_resolver(3, 0, leased, ZERO),
+        transfer_single(3, 1, HOLDER, HOLDER, ZERO, leased),
+        registry_transfer(3, 2, leased, GRAVEYARD),
+        name_unwrapped(3, 3, leased, GRAVEYARD),
+        lease_transfer(3, 4, NAME_WRAPPER, GRAVEYARD),
+    ];
+    let registry_only =
+        super::common::stable_uuid(&format!("resource:registry-only:{CHAIN}:{leased:#x}"));
+    let mut failures = Vec::new();
+    for (layout, outputs) in every_layout(&build, &wrapped_lease_logs(), &[unwrap])? {
+        if !outputs
+            .iter()
+            .flat_map(|output| output.normalized_events.iter())
+            .any(|event| {
+                event.block_number == Some(3)
+                    && event.after_state["owner_getter_reason"] == "graveyard"
+            })
+        {
+            failures.push(format!("{layout}: the Graveyard is not admitted"));
+        }
         for block in [2, 3] {
             let rows = permission_rows_at(&outputs, block, |event| {
                 event.event_identity.contains(":registry-owner-")

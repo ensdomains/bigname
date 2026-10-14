@@ -20,7 +20,7 @@ const BATCH_REGISTRAR: &str = "0x4a4c8b7cdab6b19dc2cdb417cdb53a2ccbaf5322";
 const ENS_V1_RESOLVER: &str = "0x322b7581ca210a69c6d0e0d7c88a7688d2789cb0";
 const LEASE: u64 = 2_000_000_000;
 const GRACE_PERIOD: u64 = 90 * 86_400;
-/// Premigration's default bonus on top of the v1 expiry.
+/// The default bonus `preMigration.ts` adds on top of the v1 expiry.
 /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/script/preMigration.ts:L754 @ ens_v2_sepolia_20261001@07e55a05)
 const BONUS_PERIOD: u64 = 62 * 86_400;
 /// PARENT_CANNOT_CONTROL | IS_DOT_ETH, which `_wrapETH2LD` ORs into every `.eth` wrap.
@@ -54,11 +54,11 @@ fn token(node: B256) -> U256 {
     U256::from_be_bytes(node.0)
 }
 
-/// The ENSv1 registration of `vintagelabel.eth` to PARENT_OWNER, premigration's ownerless
-/// reservation of it, then PARENT_OWNER's `wrapETH2LD`: the registrar token moves to the
-/// NameWrapper, `reclaim` points the registry at it, and the wrapped token is minted.
-/// Premigration reserves through the BatchRegistrar with no subregistry and the ENSv1 resolver,
-/// so the reservation emits `LabelReserved` and `ResolverUpdated` with the BatchRegistrar as
+/// The ENSv1 registration of `vintagelabel.eth` to PARENT_OWNER, the ownerless reservation
+/// `preMigration.ts` makes for it, then PARENT_OWNER's `wrapETH2LD`: the registrar token moves
+/// to the NameWrapper, `reclaim` points the registry at it, and the wrapped token is minted.
+/// `preMigration.ts` reserves through the BatchRegistrar with no subregistry and the ENSv1
+/// resolver, so the reservation emits `LabelReserved` and `ResolverUpdated` with the BatchRegistrar as
 /// sender, and no `SubregistryUpdated`.
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L152 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/script/preMigration.ts:L1761-L1762 @ ens_v2_sepolia_20261001@07e55a05)
@@ -171,6 +171,8 @@ fn parent_registered_reserved_and_wrapped() -> Result<(Logs, Logs, Logs)> {
 
 /// PARENT_OWNER's NameWrapper `setSubnodeOwner` for CHILD_OWNER with fuses 0, then CHILD_OWNER's
 /// `unwrap` to itself: the burn, the registry owner write, then `NameUnwrapped`.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L577-L581 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
 fn child_created_then_unwrapped() -> Result<(Logs, Logs)> {
     let parent = under(eth_node(), "vintagelabel");
     let child = under(parent, "unwrapped");

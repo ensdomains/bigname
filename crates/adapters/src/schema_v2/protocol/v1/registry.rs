@@ -558,17 +558,25 @@ pub(super) fn interpret(
         if let Some(registry_owner) = registry_owner {
             // `unwrapETH2LD`'s registrar transfer, later in this transaction, selects the
             // name's successor and grants its owner, so this write only ends the old grants.
+            // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L390-L395 @ ens_v1@91c966f)
             let successor_grants_follow = context.wrapper_custody.unwrap_follows
                 && wrapper_custody::registrar_transfer_may_follow(
                     state,
                     &selected.source.namespace,
                     &affected_node,
                 );
+            // The admitted Graveyard is the ENSv1→ENSv2 migration's burn address for ENSv1
+            // names, so a write naming it grants it nothing, and the retained owner's grants
+            // still end.
+            // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/Graveyard.sol:L20-L23 @ ens_v2_sepolia_20261001@07e55a05)
+            let graveyard_owner = registry_owner.is_some_and(|owner| {
+                graveyard::owner_reason(context.registry_graveyard, owner).is_some()
+            });
             registry_owner_grants::reconcile_owner(
                 &mut output,
                 retained,
                 registry_owner,
-                !successor_grants_follow,
+                !successor_grants_follow && !graveyard_owner,
                 linked.as_ref(),
                 state
                     .v1_resolver(&selected.source.namespace, &affected_node)

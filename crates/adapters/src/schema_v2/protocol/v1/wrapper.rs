@@ -372,8 +372,8 @@ fn name_unwrapped(
     let registry_settled_to_unwrapped_owner = state
         .v1_registry_owner(&selected.source.namespace, &namehash)
         .is_some_and(|owner| owner.eq_ignore_ascii_case(&address_hex(event.owner)));
-    // An original child of a parent an activated locked-wrapper migration
-    // covers keeps its old wrapper-bound pointer selection. A registry-only
+    // An original child of a parent an activated locked-wrapper ENSv1→ENSv2
+    // migration covers keeps its old wrapper-bound pointer selection. A registry-only
     // successor would re-project that pointer onto a new resource, which the
     // published rule does not do.
     let locked_migrated_original_child = state.v1_is_locked_migrated_original_child(
@@ -387,7 +387,12 @@ fn name_unwrapped(
     );
     // A retained registry owner that is the admitted Graveyard is a burned
     // record, not a live registry-only owner, even when it equals the unwrap
-    // owner from a migration cleanup.
+    // owner. The Graveyard is the ENSv1→ENSv2 migration's burn address for
+    // ENSv1 names, and that migration's cleanups unwrap into it.
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/Graveyard.sol:L20-L23 @ ens_v2_sepolia_20261001@07e55a05)
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/Graveyard.sol:L199 @ ens_v2_sepolia_20261001@07e55a05)
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2_sepolia_20261001@07e55a05)
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/UnlockedMigrationController.sol:L147 @ ens_v2_sepolia_20261001@07e55a05)
     let graveyard_retained = state
         .v1_registry_owner_reason(&selected.source.namespace, &namehash)
         .as_deref()

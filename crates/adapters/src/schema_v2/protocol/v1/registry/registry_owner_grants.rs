@@ -44,9 +44,10 @@ pub(super) fn retained(
 }
 
 /// Moves the retained grants to the registry owner an owner write names, or ends them when it
-/// names none. A write that selects the registry-only authority grants its owner there itself,
-/// and when `grant` is false a successor later in the transaction does, so only the retained
-/// owner's grants are revoked then.
+/// names none. A write that selects the registry-only authority grants its owner there itself.
+/// `grant` is false when a successor later in the transaction grants the owner, or when the
+/// owner is the admitted Graveyard, which takes no grants. Only the retained owner's grants are
+/// revoked then.
 pub(super) fn reconcile_owner(
     output: &mut Interpreted,
     retained: &V1NameState,

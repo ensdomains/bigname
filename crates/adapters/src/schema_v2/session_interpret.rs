@@ -65,7 +65,7 @@ pub(super) fn interpret_loaded(
         let corrected = interpret_once(catalog, blocks, raw_logs.clone(), &mut seeded)?;
         anyhow::ensure!(
             corrected.migration_authority_transitions == output.migration_authority_transitions,
-            "locked-boundary reconciliation changed its proving migration boundaries"
+            "locked-boundary reconciliation changed its proving ENSv1→ENSv2 migration boundaries"
         );
         if crossed.is_empty() {
             return Ok(corrected);
@@ -73,7 +73,7 @@ pub(super) fn interpret_loaded(
         // Both reconciliations apply. The locked re-run's output is only
         // checked above and then discarded. The expiry re-run starts again
         // from `state`, seeded with the same locked boundaries and with the
-        // crossed migrations.
+        // crossed ENSv1→ENSv2 migrations.
         let mut expiry_state = state.clone();
         for (name, position) in &locked_boundaries {
             expiry_state.note_live_locked_migration(name, *position);
@@ -83,7 +83,7 @@ pub(super) fn interpret_loaded(
             let block = blocks
                 .iter()
                 .find(|block| block.block_number == transition.block_number)
-                .expect("migration boundary belongs to a loaded block");
+                .expect("ENSv1→ENSv2 migration boundary belongs to a loaded block");
             reconciled.remember_v2_migration(
                 &transition.logical_name_id,
                 block.block_timestamp.unix_timestamp(),
@@ -93,7 +93,7 @@ pub(super) fn interpret_loaded(
         let corrected = interpret_once(catalog, blocks, raw_logs, &mut reconciled)?;
         anyhow::ensure!(
             corrected.migration_authority_transitions == output.migration_authority_transitions,
-            "expiry reconciliation changed its proving migration boundaries"
+            "expiry reconciliation changed its proving ENSv1→ENSv2 migration boundaries"
         );
         return Ok(corrected);
     }

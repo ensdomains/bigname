@@ -21,7 +21,7 @@ const RESOLVER: &str = "0x0000000000000000000000000000000000000064";
 const BATCH_REGISTRAR: &str = "0x4a4c8b7cdab6b19dc2cdb417cdb53a2ccbaf5322";
 const ENS_V1_RESOLVER: &str = "0x322b7581ca210a69c6d0e0d7c88a7688d2789cb0";
 const LEASE: u64 = 2_000_000_000;
-/// Premigration's default bonus on top of the v1 expiry.
+/// The default bonus `preMigration.ts` adds on top of the v1 expiry.
 /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/script/preMigration.ts:L754 @ ens_v2_sepolia_20261001@07e55a05)
 const BONUS_PERIOD: u64 = 62 * 86_400;
 
@@ -52,8 +52,9 @@ fn child() -> B256 {
     under(parent(), "child")
 }
 
-/// The parent's ENSv1 registration, premigration's reservation of it, the child's creation
-/// with a resolver, FIRST_OWNER's `wrap` and its `unwrap` to SECOND_OWNER, one block each.
+/// The parent's ENSv1 registration, the reservation `preMigration.ts` makes for it, the
+/// child's creation with a resolver, FIRST_OWNER's `wrap` and its `unwrap` to SECOND_OWNER, one
+/// block each.
 /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/BatchRegistrar.sol:L61-L65 @ ens_v2_sepolia_20261001@07e55a05)
 /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L498-L513 @ ens_v2_sepolia_20261001@07e55a05)
 fn blocks() -> Result<Vec<Logs>> {
@@ -424,6 +425,72 @@ async fn registry_only_resource_reopened_after_a_parent_zero_write_serves_only_i
         &[NAME_WRAPPER, FIRST_OWNER],
     )
     .await?;
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    database.cleanup().await
+}
+
+/// The Sepolia Graveyard, which the ENSv1→ENSv2 migration manifest admits.
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/Graveyard.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
+const GRAVEYARD: &str = "0xb58a90a39d13cce1d0e192b5da5c47640855b04d";
+
+/// FIRST_OWNER's `unwrap` of the wrapped child into the admitted Graveyard, the ENSv1→ENSv2
+/// migration's burn address for ENSv1 names. The locked receiver makes the same unwrap when it
+/// cleans up an emancipated child in an ENSv1→ENSv2 migration. The unwrap ends the
+/// NameWrapper's grants on the child's registry-only resource and grants the Graveyard nothing
+/// there, so that resource serves nobody by registration, and neither the Graveyard nor the
+/// NameWrapper keeps a row on it by address.
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/Graveyard.sol:L20-L23 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/LockedWrapperReceiver.sol:L178-L180 @ ens_v2_sepolia_20261001@07e55a05)
+#[tokio::test]
+async fn an_unwrap_into_the_graveyard_leaves_the_registry_only_resource_serving_nobody()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let mut blocks = blocks()?;
+    let graveyard: Address = GRAVEYARD.parse()?;
+    let unwrapped = blocks.last_mut().expect("the unwrap block");
+    unwrapped[1].1 = ens_registry::Transfer {
+        node: child(),
+        owner: graveyard,
+    }
+    .encode_log_data();
+    unwrapped[2].1 = NameUnwrapped {
+        node: child(),
+        owner: graveyard,
+    }
+    .encode_log_data();
+    let resource = publish_child(&database, blocks).await?;
+    let mut failures = Vec::new();
+    let (status, by_registration) = get(
+        &database,
+        &format!("/v1/permissions?registration_id={resource}"),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{by_registration:#}");
+    let by_registration_served = served(&by_registration);
+    if !by_registration_served.is_empty() {
+        failures.push(format!(
+            "registration {resource} serves {by_registration_served:?}: {by_registration:#}"
+        ));
+    }
+    for subject in [GRAVEYARD, NAME_WRAPPER] {
+        let (status, by_address) =
+            get(&database, &format!("/v1/permissions?address={subject}")).await?;
+        assert_eq!(status, StatusCode::OK, "{by_address:#}");
+        let on_resource = by_address["data"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter(|row| row["registration_id"] == resource.to_string())
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !on_resource.is_empty() {
+            failures.push(format!(
+                "{subject} keeps rows on registration {resource}: {on_resource:#?}"
+            ));
+        }
+    }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     database.cleanup().await
 }

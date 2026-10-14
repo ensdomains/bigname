@@ -85,9 +85,9 @@ fn migrated_v1_lease_expiry_does_not_reopen_in_one_batch() -> anyhow::Result<()>
     Ok(())
 }
 
-/// The migration and old-lease expiry in one batch re-run the batch with the proven migration
-/// boundary. A resolver proxy in that batch, admitted by an earlier batch and announced again
-/// after its own role and record changes, must keep both.
+/// The ENSv1→ENSv2 migration and old-lease expiry in one batch re-run the batch with the
+/// proven ENSv1→ENSv2 migration boundary. A resolver proxy in that batch, admitted by an
+/// earlier batch and announced again after its own role and record changes, must keep both.
 #[test]
 fn expiry_rerun_keeps_a_role_change_before_a_resolver_reannouncement() -> anyhow::Result<()> {
     let input =

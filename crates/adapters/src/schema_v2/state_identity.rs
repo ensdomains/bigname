@@ -167,9 +167,10 @@ impl State {
     }
 
     /// Whether the name is a direct child of a parent that an activated
-    /// locked-wrapper migration covers. A locked migration only runs when a
-    /// migration-created WrapperRegistry claims that parent as its original
-    /// node, so the restored locked-migration name is the proof
+    /// locked-wrapper ENSv1→ENSv2 migration covers. Such a migration only
+    /// runs when the WrapperRegistry it creates claims that parent as its
+    /// original node, so the parent's restored locked ENSv1→ENSv2 migration
+    /// is the proof
     /// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2_sepolia_20260629@ccaeb58)
     /// (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L32 @ ens_v2@a971bd64).
     /// The parent is reported as a lookahead read before the test, so a
