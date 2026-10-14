@@ -3,6 +3,7 @@ use anyhow::bail;
 use serde_json::json;
 
 use super::super::{Interpreted, NameDraft, ResourceDraft, ShadowNameDraft, ensure_declared};
+use super::registrar::registry_only_fallback;
 use super::registry::{append_authority_transition, authority_kind};
 use super::support::{events_linked, single_event};
 use crate::evm_abi::{address_hex, decode_event_log, hex_string};
@@ -356,11 +357,36 @@ fn name_unwrapped(
         raw,
     );
     let linked = state.release_v1_name(&selected.source.namespace, &namehash);
-    let reactivated = state.reactivate_v1_registrar(
+    let mut reactivated = state.reactivate_v1_registrar(
         &selected.source.namespace,
         &namehash,
         raw.block_timestamp.unix_timestamp(),
     );
+    // An unwrapped subname with no lease to reactivate keeps the registry record its
+    // unwrap just wrote: `_unwrap` sets the registry owner to the unwrapped owner
+    // before emitting, so only when the registry already names that owner does the
+    // registry-only authority succeed the wrapped binding in this same transition
+    // rather than leaving the known surface unbound. Otherwise a following
+    // same-transaction registrar transfer owns the successor.
+    let registry_settled_to_unwrapped_owner = state
+        .v1_registry_owner(&selected.source.namespace, &namehash)
+        .is_some_and(|owner| owner.eq_ignore_ascii_case(&address_hex(event.owner)));
+    if reactivated.is_none()
+        && registry_settled_to_unwrapped_owner
+        && let Some(previous) = linked.as_ref().filter(|name| {
+            name.surface_known && name.authority_source_family == selected.source.source_family
+        })
+    {
+        registry_only_fallback::activate_registry_only_authority(
+            selected,
+            raw,
+            state,
+            &namehash,
+            previous.labelhash.clone(),
+            previous,
+            &mut reactivated,
+        );
+    }
     let resolver = state.v1_resolver_for_activation(
         &selected.source.namespace,
         &namehash,

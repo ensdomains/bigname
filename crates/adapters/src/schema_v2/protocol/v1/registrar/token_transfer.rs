@@ -66,7 +66,7 @@ pub(super) fn interpret(
         raw,
         state,
         &raw_namehash,
-        labelhash,
+        Some(format!("{labelhash:#x}")),
         &linked,
         &mut active_after,
     );
