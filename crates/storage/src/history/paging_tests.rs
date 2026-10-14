@@ -6,7 +6,8 @@ use sqlx::{Arguments, Execute, PgConnection, PgPool, Postgres, QueryBuilder};
 use super::super::keyset::load_history_keyset;
 use super::super::{
     ChainBlockRange, EventHistoryReadFilter, EventHistoryResolverFilter, HistoryBlockWindow,
-    HistoryCursor, HistoryOrder, HistorySummaryMode,
+    HistoryCursor, HistoryOrder, HistorySummaryMode, selectors::HistorySelector,
+    summary::push_history_count_query,
 };
 use super::{load_history_page, order_index_drives_page, push_history_page_query};
 
@@ -811,6 +812,230 @@ async fn resolver_pages_do_not_walk_the_chain_order_index() -> Result<()> {
     result
 }
 
+const RESOLVER_BUSY: &str = "0x00000000000000000000000000000000000000c1";
+const BUSY_MATCHES: usize = 30_003;
+
+fn busy_resolver_filter(order: HistoryOrder) -> EventHistoryReadFilter {
+    let mut filter = resolver_filter(order, RESOLVER_BUSY);
+    filter.block_window = Some(window(&[(RESOLVER_CHAIN, None, Some(40_000))]));
+    filter
+}
+
+/// A resolver with 30,003 matches spread over 40,000 blocks. 12,000 rows it emitted,
+/// 9,000 pointers set to it, 9,000 pointers cleared from it, one pointer it
+/// emitted that was also set to it, and two rows with no block. The small
+/// fixtures hold 35 and 89 matches, so a page whose work grows with the whole
+/// match count looks cheap there.
+const BUSY_RESOLVER_FIXTURE: &str = r#"
+    INSERT INTO chain_lineage
+        (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+    SELECT chain, chain || '-block-' || n, n, to_timestamp(n), 'canonical'
+    FROM unnest(ARRAY['ethereum-sepolia', 'other-chain']) chain
+    CROSS JOIN generate_series(1, 40000) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, event_kind, source_family, manifest_version,
+         chain_id, block_hash, block_number, transaction_hash, transaction_index,
+         log_index, derivation_kind, canonicality_state, after_state, raw_fact_ref)
+    SELECT 'busy-noise:' || n, 'ens', 'RecordChanged', 'ens_v1_registry_l1', 1,
+           'ethereum-sepolia', 'ethereum-sepolia-block-' || n, n,
+           'tx-noise-' || n, 0, 0, 'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('node', 'node-noise'), '{}'::jsonb
+    FROM generate_series(1, 40000) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, event_kind, source_family, manifest_version,
+         chain_id, block_hash, block_number, transaction_hash, transaction_index,
+         log_index, derivation_kind, canonicality_state, after_state, before_state, raw_fact_ref)
+    SELECT 'busy:emit:' || n, 'ens', 'RecordChanged', 'ens_v1_resolver_l1', 1,
+           'ethereum-sepolia', 'ethereum-sepolia-block-' || (3 * n), 3 * n,
+           'tx-busy-emit-' || n, 0, 0, 'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('node', 'node-busy'), '{}'::jsonb,
+           jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000c1')
+    FROM generate_series(1, 12000) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, event_kind, source_family, manifest_version,
+         chain_id, block_hash, block_number, transaction_hash, transaction_index,
+         log_index, derivation_kind, canonicality_state, after_state, before_state, raw_fact_ref)
+    SELECT 'busy:after:' || n, 'ens', 'ResolverChanged', 'ens_v1_registry_l1', 1,
+           'ethereum-sepolia', 'ethereum-sepolia-block-' || (4 * n + 1), 4 * n + 1,
+           'tx-busy-after-' || n, 0, 1, 'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('node', 'node-busy', 'resolver', '0x00000000000000000000000000000000000000c1'),
+           jsonb_build_object('resolver', '0x0000000000000000000000000000000000000099'),
+           '{}'::jsonb
+    FROM generate_series(1, 9000) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, event_kind, source_family, manifest_version,
+         chain_id, block_hash, block_number, transaction_hash, transaction_index,
+         log_index, derivation_kind, canonicality_state, after_state, before_state, raw_fact_ref)
+    SELECT 'busy:before:' || n, 'ens', 'ResolverChanged', 'ens_v1_registry_l1', 1,
+           'ethereum-sepolia', 'ethereum-sepolia-block-' || (4 * n + 2), 4 * n + 2,
+           'tx-busy-before-' || n, 0, 1, 'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('node', 'node-busy', 'resolver', '0x0000000000000000000000000000000000000099'),
+           jsonb_build_object('resolver', '0x00000000000000000000000000000000000000c1'),
+           '{}'::jsonb
+    FROM generate_series(1, 9000) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, event_kind, source_family, manifest_version,
+         chain_id, block_hash, block_number, transaction_hash, transaction_index,
+         log_index, derivation_kind, canonicality_state, after_state, before_state, raw_fact_ref)
+    VALUES
+        ('busy:overlap', 'ens', 'ResolverChanged', 'ens_v1_registry_l1', 1,
+         'ethereum-sepolia', 'ethereum-sepolia-block-39500', 39500, 'tx-busy-overlap', 0, 0,
+         'ens_v1_unwrapped_authority', 'canonical',
+         jsonb_build_object('node', 'node-busy', 'resolver', '0x00000000000000000000000000000000000000c1'),
+         jsonb_build_object('resolver', '0x0000000000000000000000000000000000000099'),
+         jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000c1')),
+        ('busy-excluded:other-chain', 'ens', 'RecordChanged', 'ens_v1_resolver_l1', 1,
+         'other-chain', 'other-chain-block-9000', 9000, 'tx-busy-x1', 0, 0,
+         'ens_v1_unwrapped_authority', 'canonical',
+         jsonb_build_object('node', 'node-busy'), '{}'::jsonb,
+         jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000c1')),
+        ('busy-excluded:noncanonical', 'ens', 'RecordChanged', 'ens_v1_resolver_l1', 1,
+         'ethereum-sepolia', 'ethereum-sepolia-block-39990', 39990, 'tx-busy-x2', 0, 0,
+         'ens_v1_unwrapped_authority', 'orphaned',
+         jsonb_build_object('node', 'node-busy'), '{}'::jsonb,
+         jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000c1'));
+    INSERT INTO normalized_events
+        (event_identity, namespace, event_kind, source_family, manifest_version,
+         chain_id, derivation_kind, canonicality_state, after_state, before_state, raw_fact_ref)
+    VALUES
+        ('busy:null:emit', 'ens', 'RecordChanged', 'ens_v1_resolver_l1', 1,
+         'ethereum-sepolia', 'ens_v1_unwrapped_authority', 'canonical',
+         jsonb_build_object('node', 'node-busy'), '{}'::jsonb,
+         jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000c1')),
+        ('busy:null:after', 'ens', 'ResolverChanged', 'ens_v1_registry_l1', 1,
+         'ethereum-sepolia', 'ens_v1_unwrapped_authority', 'canonical',
+         jsonb_build_object('node', 'node-busy', 'resolver', '0x00000000000000000000000000000000000000c1'),
+         jsonb_build_object('resolver', '0x0000000000000000000000000000000000000099'),
+         '{}'::jsonb);
+    ANALYZE normalized_events;
+    ANALYZE chain_lineage;
+"#;
+
+#[tokio::test]
+async fn busy_resolver_first_pages_match_the_old_condition() -> Result<()> {
+    let database =
+        phase_database("history_busy_resolver_equivalence", BUSY_RESOLVER_FIXTURE).await?;
+    let result = async {
+        for order in [HistoryOrder::Desc, HistoryOrder::Asc] {
+            let expected =
+                resolver_reference_identities(database.pool(), RESOLVER_BUSY, order).await?;
+            ensure!(
+                expected.len() == BUSY_MATCHES,
+                "busy fixture must give {BUSY_MATCHES} matches, gave {}",
+                expected.len()
+            );
+            let mut filter = busy_resolver_filter(order);
+            // No block window here. The reference has none, and rows without a
+            // block must page too.
+            filter.block_window = None;
+            let (first, next) = page_identities(database.pool(), &filter, None, 1).await?;
+            ensure!(next.is_some(), "busy resolver must have a second page");
+            ensure!(
+                first == expected[..1],
+                "busy resolver page of 1 differs from the old condition for {order:?}"
+            );
+            let mut paged = Vec::new();
+            let mut cursor = None;
+            for _ in 0..3 {
+                let (rows, next) =
+                    page_identities(database.pool(), &filter, cursor.as_ref(), 50).await?;
+                paged.extend(rows);
+                cursor = next;
+                ensure!(cursor.is_some(), "busy resolver must have more pages");
+            }
+            ensure!(
+                paged == expected[..150],
+                "busy resolver first pages of 50 differ from the old condition for {order:?}"
+            );
+        }
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+async fn busy_resolver_pages_stay_bounded_by_the_page_size() -> Result<()> {
+    let database = phase_database("history_busy_resolver_plan", BUSY_RESOLVER_FIXTURE).await?;
+    let result = async {
+        let mut connection = database.pool().acquire().await?;
+        let deep_cursor = cursor_at(&mut connection, "busy:emit:6000").await?;
+        let mut failures = Vec::new();
+        for order in [HistoryOrder::Desc, HistoryOrder::Asc] {
+            for (page_size, page_limit) in [(1i64, 2i64), (50, 51)] {
+                for (page, cursor) in [("first page", None), ("deep page", Some(&deep_cursor))] {
+                    let filter = busy_resolver_filter(order);
+                    let keyset = match cursor {
+                        Some(cursor) => Some(
+                            load_history_keyset(&mut connection, &filter, true, cursor, false)
+                                .await?,
+                        ),
+                        None => None,
+                    };
+                    let mut query = QueryBuilder::<Postgres>::new("");
+                    push_history_page_query(
+                        &mut query,
+                        &filter,
+                        true,
+                        keyset.as_ref(),
+                        false,
+                        page_limit,
+                    );
+                    let plan = explain_page(&mut connection, query, PlanMode::Unprepared).await?;
+                    let mut scans = Vec::new();
+                    resolver_page_scans(&plan[0]["Plan"], &mut scans);
+                    ensure!(
+                        !scans.is_empty(),
+                        "busy resolver page found no scan: {plan}"
+                    );
+                    let visited: f64 = scans
+                        .iter()
+                        .map(|scan| {
+                            (scan["Actual Rows"].as_f64().unwrap_or(0.0)
+                                + scan["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
+                                * scan["Actual Loops"].as_f64().unwrap_or(1.0)
+                        })
+                        .sum();
+                    let execution_ms = plan[0]["Execution Time"].as_f64().unwrap_or(0.0);
+                    eprintln!(
+                        "busy resolver {order:?} page_size {page_size} {page}: \
+                         visited {visited} in {execution_ms:.1} ms across {} scans",
+                        scans.len()
+                    );
+                    for scan in &scans {
+                        if scan["Index Name"] == ORDER_INDEX {
+                            failures.push(format!(
+                                "busy resolver {order:?} page_size {page_size} {page}: \
+                                 the page must not read {ORDER_INDEX}"
+                            ));
+                        }
+                        if scan["Node Type"] == "Seq Scan" {
+                            failures.push(format!(
+                                "busy resolver {order:?} page_size {page_size} {page}: \
+                                 the page must not sequentially scan normalized_events"
+                            ));
+                        }
+                    }
+                    let ceiling = (9 * page_limit + 128) as f64;
+                    if visited > ceiling {
+                        failures.push(format!(
+                            "busy resolver {order:?} page_size {page_size} {page}: \
+                             the page visited {visited} events, over the ceiling {ceiling} \
+                             for a page bound of {page_limit} against {BUSY_MATCHES} matches"
+                        ));
+                    }
+                }
+            }
+        }
+        ensure!(failures.is_empty(), "{}", failures.join("\n"));
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
 /// Every scan of `normalized_events` that produces page rows, whatever alias it uses,
 /// not the per-row subqueries.
 fn resolver_page_scans<'a>(node: &'a Value, output: &mut Vec<&'a Value>) {
@@ -828,6 +1053,351 @@ fn resolver_page_scans<'a>(node: &'a Value, output: &mut Vec<&'a Value>) {
             resolver_page_scans(child, output);
         }
     }
+}
+
+const RESOLVER_TO: &str = "0x00000000000000000000000000000000000000d1";
+const RESOLVER_NAME: &str = "0x00000000000000000000000000000000000000d2";
+const RESOLVER_CANON: &str = "0x00000000000000000000000000000000000000d3";
+const RESOLVER_DUP: &str = "0x00000000000000000000000000000000000000d4";
+const RESOLVER_HAND: &str = "0x00000000000000000000000000000000000000d5";
+const RESOLVER_OVER: &str = "0x00000000000000000000000000000000000000d6";
+
+/// One resolver per dropped-newest shape. Each has three newest rows a later
+/// condition drops and three older rows it keeps, on blocks 10, 20, and 30.
+const COUNTEREXAMPLE_FIXTURE: &str = r#"
+    INSERT INTO chain_lineage
+        (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+    SELECT 'ethereum-sepolia', 'ethereum-sepolia-block-' || n, n, to_timestamp(n),
+           CASE WHEN n IN (90, 91, 92) THEN 'orphaned'::canonicality_state
+                ELSE 'canonical'::canonicality_state END
+    FROM generate_series(1, 100) n;
+    INSERT INTO name_surfaces
+        (logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+         namehash, labelhashes, normalizer_version, visibility_state, chain_id,
+         block_hash, block_number, canonicality_state)
+    SELECT name, 'ens', name, ARRAY[name], '\x00'::bytea, split_part(name, ':', 2),
+           ARRAY[name], 'test', 'active', 'ethereum-sepolia',
+           'ethereum-sepolia-block-1', 1, 'canonical'::canonicality_state
+    FROM (VALUES ('ens:target'), ('ens:other')) names(name);
+    INSERT INTO normalized_events
+        (event_identity, namespace, logical_name_id, event_kind, source_family,
+         manifest_version, chain_id, block_hash, block_number, transaction_hash,
+         transaction_index, log_index, derivation_kind, canonicality_state,
+         after_state, before_state, raw_fact_ref)
+    SELECT 'shape:to:drop:' || n, 'ens', NULL, 'RecordChanged',
+           'ens_v1_resolver_l1', 1, 'ethereum-sepolia',
+           'ethereum-sepolia-block-' || n, n, 'tx-to-' || n, 0, 0,
+           'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('node', 'node-x'), '{}'::jsonb,
+           jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000d1')
+    FROM unnest(ARRAY[80, 81, 82]) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, logical_name_id, event_kind, source_family,
+         manifest_version, chain_id, block_hash, block_number, transaction_hash,
+         transaction_index, log_index, derivation_kind, canonicality_state,
+         after_state, before_state, raw_fact_ref)
+    SELECT 'shape:to:pass:' || n, 'ens', NULL, 'RecordChanged',
+           'ens_v1_resolver_l1', 1, 'ethereum-sepolia',
+           'ethereum-sepolia-block-' || n, n, 'tx-to-' || n, 0, 0,
+           'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('node', 'node-x'), '{}'::jsonb,
+           jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000d1')
+    FROM unnest(ARRAY[10, 20, 30]) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, logical_name_id, event_kind, source_family,
+         manifest_version, chain_id, block_hash, block_number, transaction_hash,
+         transaction_index, log_index, derivation_kind, canonicality_state,
+         after_state, before_state, raw_fact_ref)
+    SELECT 'shape:name:drop:' || n, 'ens', 'ens:other', 'RecordChanged',
+           'ens_v1_resolver_l1', 1, 'ethereum-sepolia',
+           'ethereum-sepolia-block-' || n, n, 'tx-name-' || n, 0, 0,
+           'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('node', 'node-x'), '{}'::jsonb,
+           jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000d2')
+    FROM unnest(ARRAY[70, 71, 72]) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, logical_name_id, event_kind, source_family,
+         manifest_version, chain_id, block_hash, block_number, transaction_hash,
+         transaction_index, log_index, derivation_kind, canonicality_state,
+         after_state, before_state, raw_fact_ref)
+    SELECT 'shape:name:pass:' || n, 'ens', 'ens:target', 'RecordChanged',
+           'ens_v1_resolver_l1', 1, 'ethereum-sepolia',
+           'ethereum-sepolia-block-' || n, n, 'tx-name-' || n, 0, 0,
+           'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('node', 'node-x'), '{}'::jsonb,
+           jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000d2')
+    FROM unnest(ARRAY[10, 20, 30]) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, logical_name_id, event_kind, source_family,
+         manifest_version, chain_id, block_hash, block_number, transaction_hash,
+         transaction_index, log_index, derivation_kind, canonicality_state,
+         after_state, before_state, raw_fact_ref)
+    SELECT 'shape:canon:drop:' || n, 'ens', NULL, 'RecordChanged',
+           'ens_v1_resolver_l1', 1, 'ethereum-sepolia',
+           'ethereum-sepolia-block-' || n, n, 'tx-canon-' || n, 0, 0,
+           'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('node', 'node-x'), '{}'::jsonb,
+           jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000d3')
+    FROM unnest(ARRAY[90, 91, 92]) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, logical_name_id, event_kind, source_family,
+         manifest_version, chain_id, block_hash, block_number, transaction_hash,
+         transaction_index, log_index, derivation_kind, canonicality_state,
+         after_state, before_state, raw_fact_ref)
+    SELECT 'shape:canon:pass:' || n, 'ens', NULL, 'RecordChanged',
+           'ens_v1_resolver_l1', 1, 'ethereum-sepolia',
+           'ethereum-sepolia-block-' || n, n, 'tx-canon-' || n, 0, 0,
+           'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('node', 'node-x'), '{}'::jsonb,
+           jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000d3')
+    FROM unnest(ARRAY[10, 20, 30]) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, logical_name_id, event_kind, source_family,
+         manifest_version, chain_id, block_hash, block_number, transaction_hash,
+         transaction_index, log_index, derivation_kind, canonicality_state,
+         after_state, before_state, raw_fact_ref)
+    SELECT 'shape:dup:' || n || ':ResolverChanged:registry-read:' || n, 'ens', NULL,
+           'RecordChanged', 'ens_v1_resolver_l1', 1, 'ethereum-sepolia',
+           'ethereum-sepolia-block-' || n, n, 'tx-dup-' || n, 0, 0,
+           'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('node', 'node-x'), '{}'::jsonb,
+           jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000d4')
+    FROM unnest(ARRAY[80, 81, 82]) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, logical_name_id, event_kind, source_family,
+         manifest_version, chain_id, block_hash, block_number, transaction_hash,
+         transaction_index, log_index, derivation_kind, canonicality_state,
+         after_state, before_state, raw_fact_ref)
+    SELECT 'shape:dup:pass:' || n, 'ens', NULL, 'RecordChanged',
+           'ens_v1_resolver_l1', 1, 'ethereum-sepolia',
+           'ethereum-sepolia-block-' || n, n, 'tx-dup-' || n, 0, 0,
+           'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('node', 'node-x'), '{}'::jsonb,
+           jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000d4')
+    FROM unnest(ARRAY[10, 20, 30]) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, logical_name_id, event_kind, source_family,
+         manifest_version, chain_id, block_hash, block_number, transaction_hash,
+         transaction_index, log_index, derivation_kind, canonicality_state,
+         after_state, before_state, raw_fact_ref)
+    VALUES
+        ('hand-origin:ResolverChanged:registry-fallback-handoff:a', 'ens', NULL,
+         'ResolverChanged', 'ens_v1_registry_l1', 1, 'ethereum-sepolia',
+         'ethereum-sepolia-block-85', 85, 'tx-hand', 0, 2,
+         'ens_v1_unwrapped_authority', 'canonical',
+         jsonb_build_object('node', 'node-hand', 'resolver', '0x00000000000000000000000000000000000000d5'),
+         jsonb_build_object('resolver', '0x0000000000000000000000000000000000000099'),
+         '{}'::jsonb),
+        ('hand-origin:ResolverChanged:registry-fallback-handoff:b', 'ens', NULL,
+         'ResolverChanged', 'ens_v1_registry_l1', 1, 'ethereum-sepolia',
+         'ethereum-sepolia-block-85', 85, 'tx-hand', 0, 1,
+         'ens_v1_unwrapped_authority', 'canonical',
+         jsonb_build_object('node', 'node-hand', 'resolver', '0x00000000000000000000000000000000000000d5'),
+         jsonb_build_object('resolver', '0x0000000000000000000000000000000000000099'),
+         '{}'::jsonb),
+        ('hand-origin:ResolverChanged:registry-fallback-handoff:c', 'ens', NULL,
+         'ResolverChanged', 'ens_v1_registry_l1', 1, 'ethereum-sepolia',
+         'ethereum-sepolia-block-85', 85, 'tx-hand', 0, 0,
+         'ens_v1_unwrapped_authority', 'canonical',
+         jsonb_build_object('node', 'node-hand', 'resolver', '0x00000000000000000000000000000000000000d5'),
+         jsonb_build_object('resolver', '0x0000000000000000000000000000000000000099'),
+         '{}'::jsonb);
+    INSERT INTO normalized_events
+        (event_identity, namespace, logical_name_id, event_kind, source_family,
+         manifest_version, chain_id, block_hash, block_number, transaction_hash,
+         transaction_index, log_index, derivation_kind, canonicality_state,
+         after_state, before_state, raw_fact_ref)
+    SELECT 'shape:hand:pass:' || n, 'ens', NULL, 'ResolverChanged',
+           'ens_v1_registry_l1', 1, 'ethereum-sepolia',
+           'ethereum-sepolia-block-' || n, n, 'tx-hand-' || n, 0, 0,
+           'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('node', 'node-hand', 'resolver', '0x00000000000000000000000000000000000000d5'),
+           jsonb_build_object('resolver', '0x0000000000000000000000000000000000000099'),
+           '{}'::jsonb
+    FROM unnest(ARRAY[10, 20, 30]) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, logical_name_id, event_kind, source_family,
+         manifest_version, chain_id, block_hash, block_number, transaction_hash,
+         transaction_index, log_index, derivation_kind, canonicality_state,
+         after_state, before_state, raw_fact_ref)
+    VALUES
+        ('shape:over:triple', 'ens', NULL, 'ResolverChanged',
+         'ens_v1_registry_l1', 1, 'ethereum-sepolia',
+         'ethereum-sepolia-block-50', 50, 'tx-over', 0, 0,
+         'ens_v1_unwrapped_authority', 'canonical',
+         jsonb_build_object('node', 'node-over', 'resolver', '0x00000000000000000000000000000000000000d6'),
+         jsonb_build_object('resolver', '0x00000000000000000000000000000000000000d6'),
+         jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000d6'));
+    INSERT INTO normalized_events
+        (event_identity, namespace, logical_name_id, event_kind, source_family,
+         manifest_version, chain_id, block_hash, block_number, transaction_hash,
+         transaction_index, log_index, derivation_kind, canonicality_state,
+         after_state, before_state, raw_fact_ref)
+    SELECT 'shape:over:pass:' || n, 'ens', NULL, 'RecordChanged',
+           'ens_v1_resolver_l1', 1, 'ethereum-sepolia',
+           'ethereum-sepolia-block-' || n, n, 'tx-over-' || n, 0, 0,
+           'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('node', 'node-over'), '{}'::jsonb,
+           jsonb_build_object('emitting_address', '0x00000000000000000000000000000000000000d6')
+    FROM unnest(ARRAY[10, 20]) n;
+    ANALYZE normalized_events;
+    ANALYZE chain_lineage;
+"#;
+
+async fn paged_identities(
+    pool: &PgPool,
+    filter: &EventHistoryReadFilter,
+    page_size: u64,
+) -> Result<Vec<String>> {
+    let mut paged = Vec::new();
+    let mut cursor = None;
+    loop {
+        let (rows, next) = page_identities(pool, filter, cursor.as_ref(), page_size).await?;
+        paged.extend(rows);
+        match next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    Ok(paged)
+}
+
+#[tokio::test]
+async fn resolver_pages_keep_rows_hidden_behind_dropped_newest_rows() -> Result<()> {
+    let database =
+        phase_database("history_resolver_dropped_newest", COUNTEREXAMPLE_FIXTURE).await?;
+    let result = async {
+        let pass = |shape: &str| {
+            vec![
+                format!("shape:{shape}:pass:30"),
+                format!("shape:{shape}:pass:20"),
+                format!("shape:{shape}:pass:10"),
+            ]
+        };
+        let mut to_filter = resolver_filter(HistoryOrder::Desc, RESOLVER_TO);
+        to_filter.to_block = Some(50);
+        let mut window_filter = resolver_filter(HistoryOrder::Desc, RESOLVER_TO);
+        window_filter.block_window = Some(window(&[(RESOLVER_CHAIN, None, Some(50))]));
+        let mut name_filter = resolver_filter(HistoryOrder::Desc, RESOLVER_NAME);
+        name_filter.selectors = vec![HistorySelector::LogicalNames(vec!["ens:target".to_owned()])];
+        let cases: Vec<(&str, EventHistoryReadFilter, Vec<String>)> = vec![
+            ("to_block", to_filter, pass("to")),
+            ("block_window", window_filter, pass("to")),
+            ("name_selector", name_filter, pass("name")),
+            (
+                "lineage",
+                resolver_filter(HistoryOrder::Desc, RESOLVER_CANON),
+                pass("canon"),
+            ),
+            (
+                "registry_read",
+                resolver_filter(HistoryOrder::Desc, RESOLVER_DUP),
+                pass("dup"),
+            ),
+            (
+                "handoff",
+                resolver_filter(HistoryOrder::Desc, RESOLVER_HAND),
+                vec![
+                    "hand-origin:ResolverChanged:registry-fallback-handoff:a".to_owned(),
+                    "shape:hand:pass:30".to_owned(),
+                    "shape:hand:pass:20".to_owned(),
+                    "shape:hand:pass:10".to_owned(),
+                ],
+            ),
+        ];
+        for (shape, filter, expected) in cases {
+            let paged = paged_identities(database.pool(), &filter, 2).await?;
+            ensure!(
+                paged == expected,
+                "{shape}: pages of 2 gave {paged:?}, expected {expected:?}"
+            );
+        }
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+async fn resolver_row_matching_three_arms_appears_once_in_page_and_count() -> Result<()> {
+    let database =
+        phase_database("history_resolver_triple_overlap", COUNTEREXAMPLE_FIXTURE).await?;
+    let result = async {
+        let filter = resolver_filter(HistoryOrder::Desc, RESOLVER_OVER);
+        let expected = vec![
+            "shape:over:triple".to_owned(),
+            "shape:over:pass:20".to_owned(),
+            "shape:over:pass:10".to_owned(),
+        ];
+        let paged = paged_identities(database.pool(), &filter, 2).await?;
+        ensure!(paged == expected, "triple-overlap page gave {paged:?}");
+        let mut connection = database.pool().acquire().await?;
+        for (limit, expected_count) in [(None, 3i64), (Some(2), 2), (Some(10), 3)] {
+            let mut query = QueryBuilder::<Postgres>::new("");
+            push_history_count_query(&mut query, &filter, true, limit);
+            let total: i64 = query
+                .build_query_scalar()
+                .fetch_one(&mut *connection)
+                .await?;
+            ensure!(
+                total == expected_count,
+                "triple-overlap count with limit {limit:?} gave {total}"
+            );
+        }
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+async fn capped_resolver_count_stops_after_the_cap() -> Result<()> {
+    let database =
+        phase_database("history_resolver_capped_count_plan", BUSY_RESOLVER_FIXTURE).await?;
+    let result = async {
+        let mut connection = database.pool().acquire().await?;
+        let filter = busy_resolver_filter(HistoryOrder::Desc);
+        let mut count = QueryBuilder::<Postgres>::new("");
+        push_history_count_query(&mut count, &filter, true, Some(101));
+        let total: i64 = count
+            .build_query_scalar()
+            .fetch_one(&mut *connection)
+            .await?;
+        ensure!(total == 101, "capped count gave {total}");
+        let mut query = QueryBuilder::<Postgres>::new("");
+        push_history_count_query(&mut query, &filter, true, Some(101));
+        let plan = explain_page(&mut connection, query, PlanMode::Unprepared).await?;
+        let mut scans = Vec::new();
+        resolver_page_scans(&plan[0]["Plan"], &mut scans);
+        ensure!(
+            !scans.is_empty(),
+            "capped count found no events scan: {plan}"
+        );
+        let visited: f64 = scans
+            .iter()
+            .map(|scan| {
+                (scan["Actual Rows"].as_f64().unwrap_or(0.0)
+                    + scan["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
+                    * scan["Actual Loops"].as_f64().unwrap_or(1.0)
+            })
+            .sum();
+        eprintln!(
+            "capped resolver count: visited {visited} across {} scans",
+            scans.len()
+        );
+        let ceiling = (9 * 101 + 128) as f64;
+        ensure!(
+            visited <= ceiling,
+            "capped count visited {visited} events, over the ceiling {ceiling} \
+             for a cap of 100 against {BUSY_MATCHES} matches"
+        );
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
 }
 
 #[path = "contract_count_tests.rs"]

@@ -115,14 +115,22 @@ pub(super) fn push_history_cursor_cte<'a>(
 /// It is added only when the filter already excludes rows without a block, as every block
 /// window and block bound does, and the cursor has a block. A row without a block sorts after
 /// every block newest first, and the comparison would drop it.
+/// The cursor block bound [`push_history_cursor_block_bound`] pushes, when it pushes one.
+pub(super) fn history_cursor_block_number(
+    filter: &EventHistoryReadFilter,
+    keyset: &HistoryKeyset<'_>,
+) -> Option<i64> {
+    let requires_block =
+        filter.block_window.is_some() || filter.from_block.is_some() || filter.to_block.is_some();
+    keyset.block_number.filter(|_| requires_block)
+}
+
 pub(super) fn push_history_cursor_block_bound(
     builder: &mut QueryBuilder<'_, Postgres>,
     filter: &EventHistoryReadFilter,
     keyset: &HistoryKeyset<'_>,
 ) {
-    let requires_block =
-        filter.block_window.is_some() || filter.from_block.is_some() || filter.to_block.is_some();
-    let Some(block_number) = keyset.block_number.filter(|_| requires_block) else {
+    let Some(block_number) = history_cursor_block_number(filter, keyset) else {
         return;
     };
     builder.push(match filter.order {
@@ -141,9 +149,19 @@ pub(super) fn push_history_cursor_after(
     builder: &mut QueryBuilder<'_, Postgres>,
     order: HistoryOrder,
 ) {
+    push_history_cursor_after_for_alias(builder, order, "ne");
+}
+
+/// The same predicate for a row alias other than `ne`, against the
+/// `history_cursor_row` CTE aliased `cursor_row` in that row's own query scope.
+pub(super) fn push_history_cursor_after_for_alias(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    order: HistoryOrder,
+    row_alias: &str,
+) {
     let (later, earlier) = match order {
-        HistoryOrder::Desc => ("ne", "cursor_row"),
-        HistoryOrder::Asc => ("cursor_row", "ne"),
+        HistoryOrder::Desc => (row_alias, "cursor_row"),
+        HistoryOrder::Asc => ("cursor_row", row_alias),
     };
     builder.push(format!(
         r#"

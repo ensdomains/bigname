@@ -5,17 +5,17 @@ use super::redo::{InterpretRedoFence, ensure_interpret_redo_fence};
 use super::{
     EventHistoryReadFilter, HistoryCursor, HistoryEvent, HistoryOrder, HistoryPage,
     HistorySummaryMode,
-    columns::push_history_select,
+    columns::{push_history_select, push_history_select_for_page},
     decoders::decode_history_event,
     duplicates::push_product_history_duplicate_filter,
     filters::{push_history_block_window, push_selector_filter, push_string_filter},
     keyset::{
-        HistoryKeyset, history_cursor_from_row, load_history_keyset, push_history_cursor_after,
-        push_history_cursor_block_bound, push_history_cursor_cte,
+        HistoryKeyset, history_cursor_block_number, history_cursor_from_row, load_history_keyset,
+        push_history_cursor_after, push_history_cursor_block_bound, push_history_cursor_cte,
     },
     registration_identity::push_registration_filter,
     selectors::HistorySelector,
-    source::push_history_canonicality_filter,
+    source::{ResolverPageBound, push_history_canonicality_filter},
     summary::load_history_summary,
 };
 use crate::projection_helpers::{
@@ -199,12 +199,25 @@ pub(super) fn push_history_page_query<'a>(
     if let Some(keyset) = keyset {
         push_history_cursor_cte(builder, keyset.cursor);
     }
-    push_history_select(
+    // The arm bound is sound only when every condition that can still drop a
+    // row after the source is also pushed inside each arm before its limit
+    // (`push_resolver_bounded_filters`). A selector or a registration can
+    // still drop rows there and cannot be pushed that way, so a read with
+    // either keeps the unbounded source.
+    let resolver_page_bound = (filter.selectors.is_empty() && filter.registration_id.is_none())
+        .then_some(ResolverPageBound {
+            order: filter.order,
+            limit: page_limit,
+            has_cursor: keyset.is_some(),
+            cursor_block: keyset.and_then(|keyset| history_cursor_block_number(filter, keyset)),
+        });
+    push_history_select_for_page(
         builder,
         filter,
         canonical_only,
         keyset.is_some(),
         include_candidates,
+        resolver_page_bound,
     );
     push_history_filters(builder, filter, canonical_only);
     if !include_candidates {
