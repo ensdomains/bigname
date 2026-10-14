@@ -539,7 +539,10 @@ fn wrapped_child_unwrap_registry_only_survives_restore_after_unwrap() -> anyhow:
     );
     let (history_output, session) = interpret_test_batch_incremental(batch(history.clone()), None)?;
     let (live, _) = interpret_test_batch_incremental(batch(probe.clone()), Some(session))?;
-    assert_eq!(live.normalized_events, full_probe_events, "incremental probe");
+    assert_eq!(
+        live.normalized_events, full_probe_events,
+        "incremental probe"
+    );
 
     for prior in [
         history_output
