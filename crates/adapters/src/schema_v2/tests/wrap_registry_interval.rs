@@ -9,7 +9,7 @@
 //! (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L996-L1020 @ ens_v1@91c966f)
 //! (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L175 @ ens_v1@91c966f)
 use super::node_record_events::{declared_address, profile};
-use super::output_pins::{assert_pinned, event_rows, output_rows, rows};
+use super::output_pins::{assert_pinned, event_rows, output_rows, pin_matches, rows};
 use super::v1_pre_surface_resolver::compact_prior;
 use super::*;
 
@@ -616,6 +616,48 @@ fn unwrapping_after_a_wrap_is_unchanged() -> anyhow::Result<()> {
         "unwrap-block",
         &unwrap_block,
         include_str!("../../../tests/fixtures/interpreters/wrap-rule-pins/unwrap-block.txt"),
+    );
+    Ok(())
+}
+
+/// The unwrap as its own final batch, after a warm session and after a cold restore of the
+/// compacted rows: every collection of its output, pinned on the tree before this rule.
+#[test]
+fn a_final_unwrap_batch_is_unchanged() -> anyhow::Result<()> {
+    let fixture = Fixture::new()?;
+    let mut session = None;
+    let mut events = Vec::new();
+    for logs in [
+        fixture.register(),
+        fixture.set_resolver(),
+        fixture.wrap_eth2ld(),
+    ] {
+        let (output, live) =
+            interpret_test_batch_incremental(fixture.batch(Vec::new(), logs), session)?;
+        events.extend(output.normalized_events);
+        session = Some(live);
+    }
+    let (_, restored) =
+        interpret_test_batch_incremental(fixture.batch(compact_prior(&events), Vec::new()), None)?;
+    let expected =
+        include_str!("../../../tests/fixtures/interpreters/wrap-rule-pins/final-unwrap-batch.txt");
+    let mut moved = Vec::new();
+    for (form, prefix) in [("warm", session), ("restored", Some(restored))] {
+        let (unwrap, _) = interpret_test_batch_incremental(
+            fixture.batch(Vec::new(), fixture.unwrap_eth2ld()),
+            prefix,
+        )?;
+        if !pin_matches(
+            &format!("final-unwrap-batch {form}"),
+            &output_rows(&unwrap),
+            expected,
+        ) {
+            moved.push(form);
+        }
+    }
+    assert!(
+        moved.is_empty(),
+        "pinned output final-unwrap-batch moved after {moved:?}: see the PIN lines above"
     );
     Ok(())
 }
