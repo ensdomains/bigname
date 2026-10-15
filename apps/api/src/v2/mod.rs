@@ -164,3 +164,7 @@ mod timestamps;
 #[cfg(test)]
 #[path = "../tests/openapi_vocabulary.rs"]
 mod openapi_vocabulary;
+
+#[cfg(test)]
+#[path = "../tests/openapi_vocabulary_powers.rs"]
+mod openapi_vocabulary_powers;

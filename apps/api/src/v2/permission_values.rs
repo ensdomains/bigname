@@ -232,7 +232,7 @@ fn record_resource_error() -> V2Error {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::collections::BTreeSet;
 
     use serde_json::json;
@@ -252,8 +252,6 @@ mod tests {
         include_str!("../../../../crates/storage/src/families/control/permissions/grants.rs");
     /// The only powers today's ENSv1 and Basenames interpreters emit.
     const V1_EMITTED_STORAGE_POWERS: &[&str] = &["resource_control", "resolver_control"];
-    /// The power a served registry `ApprovalForAll` operator row carries.
-    const V1_REGISTRY_OPERATOR_POWERS: &[&str] = &["registry_control"];
     const V1_STANDARD_APPROVALS: &str =
         include_str!("../../../../crates/adapters/src/schema_v2/protocol/standard_approvals.rs");
     const V1_WRAPPER_INTERPRETER: &str = include_str!(
@@ -337,11 +335,57 @@ mod tests {
         })
     }
 
-    fn code_powers() -> BTreeSet<String> {
+    /// The power of each `ApprovalForAll` operator arm: the middle element of every
+    /// `(authority_kind, power, owner_change)` tuple that `operator_event` matches on.
+    fn account_operator_powers() -> Vec<String> {
+        let start = V1_STANDARD_APPROVALS
+            .find("let (authority_kind, power, owner_change) = match (")
+            .expect("standard approvals interpreter must pick an operator power per arm");
+        let end = start
+            + V1_STANDARD_APPROVALS[start..]
+                .find("_ => return None")
+                .expect("operator arms must end in the unknown-emitter fallback");
+        let mut powers = Vec::new();
+        let mut arms = 0;
+        for body in V1_STANDARD_APPROVALS[start..end].split("=>").skip(1) {
+            let open = body.find('(').expect("an operator arm yields a tuple");
+            let mut depth = 0;
+            let close = open
+                + body[open..]
+                    .find(|c| {
+                        depth += match c {
+                            '(' => 1,
+                            ')' => -1,
+                            _ => 0,
+                        };
+                        depth == 0
+                    })
+                    .expect("an operator tuple closes");
+            let power = body[open + 1..close]
+                .split(',')
+                .nth(1)
+                .expect("an operator tuple names its power")
+                .trim();
+            arms += 1;
+            if power != "None" {
+                let literal = power
+                    .strip_prefix("Some(\"")
+                    .and_then(|power| power.strip_suffix("\")"))
+                    .unwrap_or_else(|| panic!("operator power {power} needs a reader"));
+                powers.push(literal.to_owned());
+            }
+        }
+        assert!(arms >= 3, "every operator arm must be read, got {arms}");
+        powers
+    }
+
+    /// The complete vocabulary the producing sources emit or the wrapper mask recognises, in
+    /// product spelling.
+    pub(in crate::v2) fn code_powers() -> BTreeSet<String> {
         V1_EMITTED_STORAGE_POWERS
             .iter()
-            .chain(V1_REGISTRY_OPERATOR_POWERS)
             .map(|power| (*power).to_owned())
+            .chain(account_operator_powers())
             .chain(wrapper_interpreter_powers())
             .chain(wrapper_mask_powers())
             .chain(role_table_powers(V2_ROLE_TABLES, "REGISTRY_ROLE_BITS"))
@@ -358,13 +402,15 @@ mod tests {
     }
 
     #[test]
+    fn standard_approvals_emit_registry_and_wrapper_operator_powers() {
+        assert_eq!(
+            account_operator_powers(),
+            ["registry_control", "wrapper_control"]
+        );
+    }
+
+    #[test]
     fn documented_powers_vocabulary_matches_code() {
-        for power in V1_REGISTRY_OPERATOR_POWERS {
-            assert!(
-                V1_STANDARD_APPROVALS.contains(&format!("\"{power}\"")),
-                "standard approvals interpreter must still emit {power}"
-            );
-        }
         let documented = documented_powers();
         let code = code_powers();
         assert!(
