@@ -594,8 +594,51 @@ Family indexes serve these concrete readers:
   to `name_surfaces` by its primary key for the name order within one expiry. A name is
   ordered, matched against `parent` and continued by its served name: its raw name, or for a
   surface that stores no raw bytes the name built from its label hashes, the same text its
-  composed row carries. The family step maintains both indexes. Resolver-bound names use `project_named_resource_pointer_resolver_idx`
-  and `project_registry_pointer_resolver_idx`.
+  composed row carries. The family step maintains both indexes.
+- A resolver's bound names (`GET /v1/resolvers/{chain_id}/{address}`) select from the name
+  summary's bound-name selector, `resolver_chain_id`, `resolver_address`,
+  `resolver_listing_eligible` and `resolver_support_exempt`, which the family step writes
+  from the same composition and rule text as the listing's own check
+  (`families/name/bound_rules.rs`). The page first reads the resolver's binding-enumeration
+  support from its classification row, on the page's snapshot. A supported resolver's page is
+  one range of `project_name_summary_bound_order_idx` from the cursor, by `order_name`,
+  `namespace` and `namehash`. An unsupported resolver lists only the names exempt from the
+  capability gate, and its page is one range of `project_name_summary_bound_exempt_order_idx`,
+  the same key over the exempt names alone. So a page reads at most one name past its last,
+  whatever share of the resolver's names the gate leaves out. `order_name` is the name rendered
+  from chain data alone: the raw name, else each label as `[<labelhash>]`, cut to its first
+  2000 bytes (`bound_rules::order_name`, from the surface alone). The index leaves out a raw name over 2000 bytes, as search does. The
+  surface fences run once for each summary row the range reads, as a scalar subquery, so
+  either plan stops after the page's last name and never joins every surface. Only the page's
+  names are composed, and the listing rules run again over them. The page shows each name as
+  served, imported preimages included. The capability gate is never stored, because a
+  classification can change while no name is composed again. `include=total_count` counts
+  the same names on the same snapshot, with the surface fences as one semi-join, so it reads
+  every listed name of the resolver. The count is sent unprepared, inside a savepoint that sets
+  `plan_cache_mode = force_custom_plan`, so PostgreSQL plans each count with the resolver's own
+  values even on a session set to `force_generic_plan`. A cached generic plan guesses a few hundred names and
+  probes every name's surfaces in a nested loop. On the plan test's 1.1 million names the
+  unprepared count takes about 0.4 s and that generic plan about 3.7 s. The unprepared count
+  hashes the surfaces in a parallel semi-join. On those 1.1 million names, with the default
+  `work_mem` and 2 parallel workers, it writes about 243 MB of temp files per count, an amount
+  that grows with the chain's surfaces. Interpret writes a surface's raw bytes and its shadow
+  state in place when it observes a preimage for it, and keeps the surface's block. The summary
+  writer reads them as the composed block does (`loaders::surfaces_at`): only when the surface's
+  preimage witness is a readable `PreimageObserved` at or below the block. Otherwise the surface
+  counts as active and without raw bytes. The family step composes the name again at the
+  witness's block, which its name selection reads (`PreimageObserved`). So the stored order
+  name, raw name, and exempt and textless selection depend only on evidence at or below the
+  composed block, wherever Interpret is. Every surface at or below the block has a summary row.
+  One the block does not compose, such as a shadow, stores only `zero_owner`, with no
+  bound-name selector, so no bound-name page or count reads it. A witness repair
+  inside an Interpret redo above the marker changes nothing Project published. One at or below
+  it stamps a Project redo, whose undo restores the rows it composed. A surface that stores raw
+  bytes and names no witness is read as stored. When an Interpret redo releases such a raw name,
+  the family step's first block sweeps the summaries whose stored `raw_name` their surface no
+  longer stores. Until the family step composes a name again it stays at its stored order name
+  and is shown as served. An imported label preimage changes no stored value.
+  `project_named_resource_pointer_resolver_idx` and `project_registry_pointer_resolver_idx`
+  remain, though the listing no longer reads them.
 - Name-summary recomposition uses `project_name_summary_recompose_idx`,
   `project_binding_candidate_predecessor_idx`, `project_binding_candidate_lease_idx`,
   `project_lifecycle_association_target_idx` and `project_registry_owner_event_resource_idx`;
@@ -615,23 +658,22 @@ Family indexes serve these concrete readers:
   chain and the child node, to tell whether its lease has been released and who holds it; the
   primary key leads with the lease's resource, which the child does not know. Children with an
   active named surface at the clock never probe, and the child counts read neither probe.
-- The name-ordered walks (`storage:families.name.search_candidates` and
-  `storage:families.name.bound_candidates`) can read `name_surfaces_name_order_idx` in page
-  order, `(raw_name, namespace, namehash, logical_name_id)` over active, readable surfaces, with
-  the keyset cursor as the index condition and no sort; the planner chooses it on cost. Its
-  predicate leaves out names longer than 2000 bytes, because a btree entry larger than about
-  2.7 KB fails the insert, and both walks carry the same bound, so those names are never listed
-  there. A `LIKE` prefix becomes an index range only on a database whose collation PostgreSQL
+- The name-ordered search walk (`storage:families.name.search_candidates`) can read
+  `name_surfaces_name_order_idx` in page order, `(raw_name, namespace, namehash,
+  logical_name_id)` over active, readable surfaces, with the keyset cursor as the index
+  condition and no sort. The planner chooses it on cost. Its predicate leaves out names longer
+  than 2000 bytes, because a btree entry larger than about 2.7 KB fails the insert, and the
+  walk carries the same bound, so those names are never listed there. A `LIKE` prefix becomes an index range only on a database whose collation PostgreSQL
   recognises as C (`C` or `POSIX`); under any other collation it filters the ordered scan. The
   reverse lookup candidates (`storage:families.records.reverse_candidates`) keep long names and
   start from `project_address_name_index`. They order and continue by name, namespace and
   namehash under `COLLATE "C"`, on any database: the reverse page then drops the names at or
   before its cursor by comparing the same keys as bytes, and the route builds its cursor the
   same way, so a database collation that orders names differently from their bytes would
-  otherwise skip names between pages. Search and bound names order, filter and continue in
-  SQL alone, under the database collation throughout.
-- Each of those three walks runs its statement for the surfaces with raw bytes as the first
-  arm of a `UNION ALL`; for search and bound names that statement's text is unchanged. The second arm walks the surfaces without raw bytes: it
+  otherwise skip names between pages. Search orders, filters and continues in SQL alone, under
+  the database collation throughout.
+- Each of those two walks runs its statement for the surfaces with raw bytes as the first arm
+  of a `UNION ALL`. For search that statement's text is unchanged. The second arm walks the surfaces without raw bytes: it
   computes each one's [rendered name](glossary.md#rendered-name) before its `LIMIT`, applies
   the same filters and keyset cursor to that name, and has no length bound. The two arms are
   merged in served-name order. The second arm is guarded by a test that any surface without
@@ -706,13 +748,16 @@ row:
 
 | Index | Serves |
 | --- | --- |
-| `name_surfaces_name_order_idx` | `storage:families.name.search_candidates` and `storage:families.name.bound_candidates`: readable surfaces in name order after the keyset cursor |
+| `name_surfaces_name_order_idx` | `storage:families.name.search_candidates`: readable surfaces in name order after the keyset cursor |
 
-The same readers, and `storage:families.records.reverse_candidates`, also read
+The same reader, `storage:families.records.reverse_candidates` and Project's raw-name sweep
+(`project:families.derived.summary_raw_name_sweep`) also read
 `name_surfaces_project_suffix_hash_idx`, which the identity baseline and
 `20260923140000_project_name_surfaces_label_indexes.sql` install on
 `(namespace, hash_array_extended(raw_labels, 0))`. They use it to find the surfaces that
-store no raw bytes, whose indexed expression is NULL, and to learn that none exists.
+store no raw bytes, whose indexed expression is NULL, and to learn that none exists. The sweep
+runs on the first family block after a completed Interpret redo attempt and reads every such
+surface of the chain once.
 
 Project's selection of the names under a changed ENSv2 path
 (`project:families.resolution_paths.prepare`, see

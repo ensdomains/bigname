@@ -2030,3 +2030,107 @@ async fn v2_transferred_surface_less_basenames_child_serves_its_holder() -> Resu
 
     database.cleanup().await
 }
+
+/// A shadow child whose owner gives its node away with `setOwner(node, 0)`, a registry `Transfer`
+/// to the zero address (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f),
+/// and which its parent then issues again with `setSubnodeOwner` to another owner
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L85 @ ens_v1@91c966f). The
+/// ownerless verdict reads the latest `Transfer`, whatever the surface's state, so the child stays
+/// out of its parent's subnames and their count. The shadow's summary row carries that verdict.
+#[tokio::test]
+async fn v2_shadow_child_given_away_and_issued_again_stays_out_of_the_subnames() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bounded_membership_blocks(&database, 240).await?;
+    let (alpha, alpha_resource) =
+        seed_family_name(&database, "alpha.eth", 0x7f9_0000, "ens_v1").await?;
+    insert_family_label_preimage(&database.pool, b"Burnt").await?;
+    let burnt_resource = Uuid::from_u128(0x7f9_0011);
+    let burnt = insert_registry_child(
+        &database,
+        "alpha.eth",
+        "Burnt",
+        RC_OWNER,
+        202,
+        burnt_resource,
+    )
+    .await?;
+    let plain = insert_registry_child(
+        &database,
+        "alpha.eth",
+        "plain",
+        RC_OWNER,
+        202,
+        Uuid::from_u128(0x7f9_0012),
+    )
+    .await?;
+    let burnt_id = insert_shadow_child_surface(
+        &database,
+        &burnt,
+        "Burnt",
+        ("ens_v1_resolver_l1", RC_OWNER),
+        "NameChanged",
+        202,
+    )
+    .await?;
+    let zero = "0x0000000000000000000000000000000000000000";
+    let alpha_node = bigname_lookup::ens_namehash_hex("alpha.eth")?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            family_event(
+                "rc-burnt-alpha-grant",
+                Some(&alpha),
+                Some(alpha_resource),
+                "RegistrationGranted",
+                "ens_v1_registrar_l1",
+                201,
+                0,
+                json!({"authority_kind": "registrar", "registrant": RC_OWNER,
+                       "expiry": 1_900_000_000i64}),
+            ),
+            family_event(
+                "rc-burnt-given-away",
+                Some(&burnt_id),
+                Some(burnt_resource),
+                "AuthorityTransferred",
+                "ens_v1_registry_l1",
+                203,
+                0,
+                json!({"source_event": "Transfer", "node": burnt, "owner": zero,
+                       "owner_getter": zero, "emitter_role": "registry"}),
+            ),
+            family_event(
+                "rc-burnt-issued-again",
+                None,
+                Some(burnt_resource),
+                "SubregistryChanged",
+                "ens_v1_registry_l1",
+                204,
+                0,
+                json!({"source_event": "NewOwner", "node": alpha_node, "child_node": burnt,
+                       "labelhash": child_labelhash("Burnt"), "owner": RC_BUYER,
+                       "owner_getter": RC_BUYER, "emitter_role": "registry"}),
+            ),
+        ],
+    )
+    .await?;
+    publish_test_families(&database, 240).await?;
+
+    let pages =
+        read_family_pages(&database, "/v1/names/alpha.eth/subnames?page_size=10&include=counts")
+            .await?;
+    let rows = rows_of(&pages);
+    assert!(rows.iter().all(|row| row["namehash"] != json!(burnt)), "{rows:#?}");
+    served_child(&rows, &plain);
+    assert_eq!(pages[0]["total_count"], json!(1), "{pages:#?}");
+    // The shadow's summary row stores the ownerless verdict.
+    let zero_owner: bool = sqlx::query_scalar(
+        "SELECT zero_owner FROM project_name_summary WHERE chain_id = $1 AND logical_name_id = $2",
+    )
+    .bind(FAMILY_CHAIN)
+    .bind(&burnt_id)
+    .fetch_one(&database.pool)
+    .await?;
+    assert!(zero_owner);
+    database.cleanup().await
+}

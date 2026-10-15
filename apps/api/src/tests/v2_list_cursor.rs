@@ -350,13 +350,13 @@ async fn v2_list_cursor_past_the_end_answers_an_empty_last_page() -> Result<()> 
                     (
                         vec![
                             ("sort_value", "zzzz.eth"),
-                            ("normalized_name", "zzzz.eth"),
+                            ("order_name", "zzzz.eth"),
                             ("namespace", "ens"),
                             ("namehash", &namehash_ff),
                         ],
                         vec![
                             ("sort_value", "alz.eth"),
-                            ("normalized_name", "alz.eth"),
+                            ("order_name", "alz.eth"),
                             ("namespace", "ens"),
                             ("namehash", &namehash_ff),
                         ],

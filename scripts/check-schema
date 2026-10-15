@@ -532,7 +532,7 @@ refusal_assertions_passed=0
 expected_refusal_assertions=467
 predecessor_shape_proof_count=0
 # Includes registration_lifecycle applied after lookup_precomputation on the removal path.
-expected_predecessor_shape_proof_count=81
+expected_predecessor_shape_proof_count=82
 refusal_probe_seconds=0
 timing_started=$SECONDS
 unread_index_migration="$ROOT/migrations/20261012130000_drop_unread_indexes.sql"
@@ -797,6 +797,13 @@ check_served_projection_removal() {
             fi
             emit_phase_migration "$unread_index_migration" baseline-first
             emit_phase_migration "$unread_index_migration" baseline-first
+            # The bound-name selector columns and index: added to the pre-7c shape, already in
+            # the baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261014120000_project_name_summary_bound_names.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261014120000_project_name_summary_bound_names.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261014120000_project_name_summary_bound_names.sql" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -947,7 +954,8 @@ for migration_file in \
     "$ROOT/migrations/20261009130000_project_family_marker_admission.sql" \
     "$ROOT/migrations/20261011120000_split_content_hash_comments.sql" \
     "$ROOT/migrations/20261012120000_name_surfaces_project_path_indexes.sql" \
-    "$unread_index_migration"
+    "$unread_index_migration" \
+    "$ROOT/migrations/20261014120000_project_name_summary_bound_names.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1514,6 +1522,75 @@ BEGIN
 END $$;
 SQL
     emit_phase_migration "$summary_selector_migration" baseline-first
+} | run_psql
+# The bound-name selector on project_name_summary. From a populated summary without the seven
+# columns, the schema-migration must clear the summaries, add the columns with the baseline's
+# types and comments and build both page order indexes with their reviewed definitions, then accept
+# that shape on a rerun without clearing anything.
+summary_bound_migration="$ROOT/migrations/20261014120000_project_name_summary_bound_names.sql"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+ALTER TABLE project_name_summary
+    DROP COLUMN IF EXISTS resolver_chain_id, DROP COLUMN IF EXISTS resolver_address,
+    DROP COLUMN IF EXISTS resolver_listing_eligible, DROP COLUMN IF EXISTS resolver_support_exempt,
+    DROP COLUMN IF EXISTS raw_name, DROP COLUMN IF EXISTS order_name, DROP COLUMN IF EXISTS namehash;
+INSERT INTO project_name_summary (chain_id, logical_name_id, namespace, serving, zero_owner,
+    expiry_listable)
+VALUES ('apply-check', 'ens:0x01', 'ens', FALSE, FALSE, FALSE);
+SQL
+    emit_phase_migration "$summary_bound_migration" preceding-shape
+    cat <<SQL
+DO \$\$
+DECLARE
+    bound_index text;
+    bound_definition text;
+BEGIN
+    IF EXISTS (SELECT 1 FROM project_name_summary) THEN
+        RAISE EXCEPTION 'the bound-name selector upgrade kept a summary written without it';
+    END IF;
+    IF (SELECT count(*) FROM pg_attribute
+        WHERE attrelid = 'project_name_summary'::regclass AND NOT attisdropped
+          AND ((attname IN ('resolver_chain_id', 'resolver_address', 'raw_name', 'order_name')
+                AND atttypid = 'text'::regtype AND NOT attnotnull)
+            OR (attname IN ('resolver_listing_eligible', 'resolver_support_exempt')
+                AND atttypid = 'boolean'::regtype AND attnotnull)
+            OR (attname = 'namehash' AND atttypid = 'text'::regtype AND attnotnull))
+          AND col_description(attrelid, attnum) IS NOT NULL) <> 7 THEN
+        RAISE EXCEPTION 'the bound-name selector upgrade left the wrong columns';
+    END IF;
+    FOR bound_index, bound_definition IN VALUES
+        ('project_name_summary_bound_order_idx',
+         'CREATE INDEX project_name_summary_bound_order_idx ON $scratch_schema.project_name_summary USING btree (resolver_chain_id, resolver_address, order_name, namespace, namehash) WHERE (resolver_listing_eligible AND (octet_length(order_name) <= 2000))'),
+        ('project_name_summary_bound_exempt_order_idx',
+         'CREATE INDEX project_name_summary_bound_exempt_order_idx ON $scratch_schema.project_name_summary USING btree (resolver_chain_id, resolver_address, order_name, namespace, namehash) WHERE (resolver_listing_eligible AND resolver_support_exempt AND (octet_length(order_name) <= 2000))')
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_index
+            WHERE indexrelid = to_regclass(bound_index) AND indisvalid AND indisready
+              AND pg_get_indexdef(indexrelid) = bound_definition
+        ) THEN
+            RAISE EXCEPTION '% differs from its reviewed definition: %', bound_index,
+                pg_get_indexdef(to_regclass(bound_index));
+        END IF;
+    END LOOP;
+    INSERT INTO project_name_summary (chain_id, logical_name_id, namespace, serving,
+        zero_owner, expiry_listable, resolver_listing_eligible, resolver_support_exempt,
+        namehash)
+    VALUES ('apply-check', 'ens:0x01', 'ens', FALSE, FALSE, FALSE, FALSE, FALSE, '0x01');
+END \$\$;
+SQL
+    emit_phase_migration "$summary_bound_migration" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM project_name_summary) <> 1 THEN
+        RAISE EXCEPTION 'the bound-name selector rerun cleared a summary that carries it';
+    END IF;
+    DELETE FROM project_name_summary;
+END $$;
+SQL
+    emit_phase_migration "$summary_bound_migration" baseline-first
 } | run_psql
 # The event walk's expiry indexes. From a schema that still has the three indexes with the
 # definitions 20260928140000 gave them, and the selector column's earlier comment, the

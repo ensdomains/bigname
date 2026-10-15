@@ -2808,7 +2808,13 @@ the name's row is listed by expiry (`expiry_listable`: the name composes a row,
 its coverage is not unsupported and its registration carries a finite expiry)
 and the public `authority` the row serves (`public_authority`: `ens_v0`,
 `ens_v1`, `ens_v2`, or none). That listing selects each page's names by
-these two fields and the stored expiry, then composes only the selected names. Each but the zero-owner flag
+these two fields and the stored expiry, then composes only the selected names. It
+stores the bound-name selector of the resolver overview's `bound_names` too: the
+resolver the name row serves, whether the row passes the listing's rules other
+than the resolver match and the binding-enumeration capability gate, whether the
+row is exempt from that gate, the raw name its surface stores, and the page
+order key (the name rendered from chain data alone, each label without raw bytes
+as `[<labelhash>]` and cut to its first 2000 bytes, then the namespace and the namehash). Each but the zero-owner flag
 is the value
 the [composed name row](#composed-name-row) carries, from the same selection
 code; the zero-owner flag attributes a Transfer by the name it carries, else the

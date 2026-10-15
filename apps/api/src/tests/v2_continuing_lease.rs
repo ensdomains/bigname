@@ -199,7 +199,7 @@ pub(super) async fn publish(database: &TestDatabase, blocks: Vec<(u64, Logs)>) -
     )
     .await?;
     assert_eq!(publication.marker.map(|marker| marker.number), Some(HEAD));
-    Ok(())
+    assert_bound_fields_follow_the_publication(pool, CHAIN).await
 }
 
 #[tokio::test]

@@ -4678,6 +4678,7 @@ For a registrar lease first identified by a later readable observation, registra
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
 | `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
+| `include` | query | array of enum `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count requests the exact number of bound names. Without it bound_names.page.total_count is null. |
 | `If-None-Match` | header | string | no | none | ETag validator from an earlier response, a comma-separated validator list, or *; evaluated only for a cacheable indexed read. |
 
 <!-- openapi:responses GET /v1/resolvers/{chain_id}/{address} -->
@@ -4697,13 +4698,22 @@ For a registrar lease first identified by a later readable observation, registra
 - Tier: product read.
 - Purpose: resolver overview for numeric `chain_id` and resolver `address`.
 - Request parameters: path `chain_id`, `address`; query `at`, `finality`,
-  `cursor`, `page_size`. Other query parameters, `include` among them, return
-  `400 invalid_input`.
+  `cursor`, `page_size`, `include`. `include` accepts only `total_count`. Any
+  other value returns `400 invalid_input`, as do other query parameters.
 - Response shape: `data` is a resolver overview in product vocabulary. The
   route includes route-local `bound_names: {data, page}`, a nested collection
-  of record-shaped name rows that replaces resolver-based name filtering. A
-  name longer than 2000 bytes is never listed, as for
-  [search](#get-v1search).
+  of record-shaped name rows that replaces resolver-based name filtering. The
+  rows are ordered by the name as rendered from chain data, then namespace and
+  namehash: a name's raw name, or for a name whose surface stores no raw bytes
+  each label as `[<labelhash>]`. A name whose label is known only from an
+  imported preimage is shown with that label's text but sorts by its bracketed
+  form, so an import never moves a name or a cursor. A raw name longer than
+  2000 bytes is never listed, as in search. A name without raw bytes whose
+  bracketed form is longer than that sorts by its first 2000 bytes, then
+  namespace and namehash. A name whose raw bytes Interpret observes after the
+  published block is listed where the published block sorts it and shown with
+  its raw name, and it moves when Project publishes the block that observed
+  them.
   `data.mirror` is present only when the resolver is a declared
   [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver):
   `{kind: "ensv1_registry", registry: {chain_id, address}}` names the ENSv1
@@ -4756,13 +4766,18 @@ For a registrar lease first identified by a later readable observation, registra
   formerly served `counts` (`nodes`, `aliases`, `links`, `linked_records`,
   `role_holders`) and, through the `include` parameter, bounded samples
   `nodes`, `aliases`, `links`, and `roles` and an `events` count object; those
-  fields and the parameter are removed, and a request that still sends
-  `include` is rejected rather than served without the sections. The former
+  fields are removed, and a request that still asks `include` for a section is
+  rejected rather than served without it. The former
   `/aliases` collection is removed too and answers like any unknown route: it
   paged mappings that only the retired 2026-06-29 resolver generation could
   emit ([upstream](upstream.md)).
 - Pagination behavior: standard collection pagination applies to the
   nested `bound_names.page` object. The top-level response has no `page`.
+  `bound_names.page.total_count` is `null` unless the request has
+  `include=total_count`. Then it is the exact number of names in the whole
+  listing, counted from the same filtered names as the page on the same
+  database snapshot, so it is the same on every page of an unchanged
+  publication, whatever the cursor.
 - Snapshot behavior: the resolver overview and bound names read
   `bigname_phase` projections from one completed projection-phase generation. A row
   target may precede the selected position when the row was unchanged by later
