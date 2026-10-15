@@ -111,6 +111,8 @@ class GenerationTests(unittest.TestCase):
         operation = doc["paths"]["/v1/names/{name}"]["get"]
         self.assertEqual(operation["operationId"], "get_v1_names_name")
         self.assertEqual(operation["tags"], ["names"])
+        self.assertEqual(operation["x-fern-sdk-group-name"], "names")
+        self.assertEqual(operation["x-fern-sdk-method-name"], "names_name")
         self.assertIn("#get-v1namesname", operation["description"])
         self.assertEqual(operation["parameters"][1]["schema"]["default"], ["counts", "roles"])
         self.assertFalse(operation["parameters"][1]["explode"])
@@ -225,7 +227,15 @@ class GenerationTests(unittest.TestCase):
         operation = self.generate(routes=routes)["paths"]["/v1/names/{name}"]["post"]
         self.assertEqual(operation["requestBody"]["content"]["application/json"]["schema"]["$ref"], "#/components/schemas/Record")
         self.assertNotIn("body", [p["in"] for p in operation["parameters"]])
+        self.assertEqual(operation["x-fern-sdk-method-name"], "names_name")
         self.reject(routes=routes.replace("POST ", "GET "))
+
+    def test_sdk_group_and_method_names_are_distinct(self):
+        operation = ROUTES[ROUTES.index("### `GET"):]
+        doc = self.generate(routes=ROUTES + operation.replace("/{name}", "/{name}/history"))
+        names = {(o["x-fern-sdk-group-name"], o["x-fern-sdk-method-name"]) for m in doc["paths"].values() for o in m.values()}
+        self.assertEqual(names, {("names", "names_name"), ("names", "names_name_history")})
+        self.reject(routes=ROUTES + operation.replace("GET ", "POST "), match="duplicate SDK group and method names.names_name")
 
     def test_empty_parameter_table(self):
         routes = ROUTES.replace("/{name}", "")

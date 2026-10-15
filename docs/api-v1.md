@@ -2891,7 +2891,11 @@ The generator derives the rest of each operation. The `operationId` is the
 lowercase method followed by the path segments with braces removed and hyphens
 turned into underscores, joined by underscores: `GET /v1/names/{name}` becomes
 `get_v1_names_name`. The single tag is the first path segment after `/v1`,
-such as `names`. The description is a link to the operation's section in
+such as `names`. Each operation also carries the `x-fern-sdk-group-name` and
+`x-fern-sdk-method-name` extensions, which SDK generators use to name a
+client's groups and methods: the group is the tag, and the method is the
+`operationId` without its method and `v1` prefix, such as `names_name`. No two
+operations share a group and method. The description is a link to the operation's section in
 [`api-v1-routes.md`](api-v1-routes.md). No summary is generated. Relative
 links in any description are resolved against the documentation base URL the
 generator is given.

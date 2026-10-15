@@ -14,6 +14,8 @@
         "tags": [
           "addresses"
         ],
+        "x-fern-sdk-group-name": "addresses",
+        "x-fern-sdk-method-name": "addresses_address_history",
         "description": "See [GET /v1/addresses/{address}/history](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1addressesaddresshistory).",
         "parameters": [
           {
@@ -401,6 +403,8 @@
         "tags": [
           "addresses"
         ],
+        "x-fern-sdk-group-name": "addresses",
+        "x-fern-sdk-method-name": "addresses_address_names",
         "description": "See [GET /v1/addresses/{address}/names](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1addressesaddressnames).",
         "parameters": [
           {
@@ -836,6 +840,8 @@
         "tags": [
           "addresses"
         ],
+        "x-fern-sdk-group-name": "addresses",
+        "x-fern-sdk-method-name": "addresses_address_primary_name",
         "description": "See [GET /v1/addresses/{address}/primary-name](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1addressesaddressprimary-name).",
         "parameters": [
           {
@@ -1128,6 +1134,8 @@
         "tags": [
           "events"
         ],
+        "x-fern-sdk-group-name": "events",
+        "x-fern-sdk-method-name": "events",
         "description": "See [GET /v1/events](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1events).",
         "parameters": [
           {
@@ -1538,6 +1546,8 @@
         "tags": [
           "names"
         ],
+        "x-fern-sdk-group-name": "names",
+        "x-fern-sdk-method-name": "names",
         "description": "See [GET /v1/names](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1names).",
         "parameters": [
           {
@@ -1901,6 +1911,8 @@
         "tags": [
           "names"
         ],
+        "x-fern-sdk-group-name": "names",
+        "x-fern-sdk-method-name": "names_name",
         "description": "See [GET /v1/names/{name}](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1namesname).",
         "parameters": [
           {
@@ -2249,6 +2261,8 @@
         "tags": [
           "names"
         ],
+        "x-fern-sdk-group-name": "names",
+        "x-fern-sdk-method-name": "names_name_history",
         "description": "See [GET /v1/names/{name}/history](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1namesnamehistory).",
         "parameters": [
           {
@@ -2616,6 +2630,8 @@
         "tags": [
           "names"
         ],
+        "x-fern-sdk-group-name": "names",
+        "x-fern-sdk-method-name": "names_name_records",
         "description": "See [GET /v1/names/{name}/records](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1namesnamerecords).",
         "parameters": [
           {
@@ -2985,6 +3001,8 @@
         "tags": [
           "names"
         ],
+        "x-fern-sdk-group-name": "names",
+        "x-fern-sdk-method-name": "names_name_subnames",
         "description": "See [GET /v1/names/{name}/subnames](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1namesnamesubnames).",
         "parameters": [
           {
@@ -3314,6 +3332,8 @@
         "tags": [
           "namespaces"
         ],
+        "x-fern-sdk-group-name": "namespaces",
+        "x-fern-sdk-method-name": "namespaces_namespace",
         "description": "See [GET /v1/namespaces/{namespace}](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1namespacesnamespace).",
         "parameters": [
           {
@@ -3491,6 +3511,8 @@
         "tags": [
           "permissions"
         ],
+        "x-fern-sdk-group-name": "permissions",
+        "x-fern-sdk-method-name": "permissions",
         "description": "See [GET /v1/permissions](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1permissions).",
         "parameters": [
           {
@@ -3793,6 +3815,8 @@
         "tags": [
           "registries"
         ],
+        "x-fern-sdk-group-name": "registries",
+        "x-fern-sdk-method-name": "registries_chain_id_address",
         "description": "See [GET /v1/registries/{chain_id}/{address}](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1registrieschain_idaddress).",
         "parameters": [
           {
@@ -4066,6 +4090,8 @@
         "tags": [
           "registries"
         ],
+        "x-fern-sdk-group-name": "registries",
+        "x-fern-sdk-method-name": "registries_chain_id_address_labels",
         "description": "See [GET /v1/registries/{chain_id}/{address}/labels](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1registrieschain_idaddresslabels).",
         "parameters": [
           {
@@ -4359,6 +4385,8 @@
         "tags": [
           "resolvers"
         ],
+        "x-fern-sdk-group-name": "resolvers",
+        "x-fern-sdk-method-name": "resolvers_chain_id_address",
         "description": "See [GET /v1/resolvers/{chain_id}/{address}](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1resolverschain_idaddress).",
         "parameters": [
           {
@@ -4660,6 +4688,8 @@
         "tags": [
           "resolvers"
         ],
+        "x-fern-sdk-group-name": "resolvers",
+        "x-fern-sdk-method-name": "resolvers_chain_id_address_links",
         "description": "See [GET /v1/resolvers/{chain_id}/{address}/links](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1resolverschain_idaddresslinks-and-roles).",
         "parameters": [
           {
@@ -4916,6 +4946,8 @@
         "tags": [
           "resolvers"
         ],
+        "x-fern-sdk-group-name": "resolvers",
+        "x-fern-sdk-method-name": "resolvers_chain_id_address_records",
         "description": "See [GET /v1/resolvers/{chain_id}/{address}/records](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1resolverschain_idaddressrecords).",
         "parameters": [
           {
@@ -5282,6 +5314,8 @@
         "tags": [
           "resolvers"
         ],
+        "x-fern-sdk-group-name": "resolvers",
+        "x-fern-sdk-method-name": "resolvers_chain_id_address_roles",
         "description": "See [GET /v1/resolvers/{chain_id}/{address}/roles](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1resolverschain_idaddresslinks-and-roles).",
         "parameters": [
           {
@@ -5538,6 +5572,8 @@
         "tags": [
           "search"
         ],
+        "x-fern-sdk-group-name": "search",
+        "x-fern-sdk-method-name": "search",
         "description": "See [GET /v1/search](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1search).",
         "parameters": [
           {
@@ -5807,6 +5843,8 @@
         "tags": [
           "status"
         ],
+        "x-fern-sdk-group-name": "status",
+        "x-fern-sdk-method-name": "status",
         "description": "See [GET /v1/status](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1status).",
         "parameters": [],
         "responses": {
@@ -5945,6 +5983,8 @@
         "tags": [
           "lookup"
         ],
+        "x-fern-sdk-group-name": "lookup",
+        "x-fern-sdk-method-name": "lookup",
         "description": "See [POST /v1/lookup](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#post-v1lookup).",
         "parameters": [],
         "responses": {
