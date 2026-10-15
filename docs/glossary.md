@@ -1681,21 +1681,21 @@ row's powers are that owner's roles on the token's own resource.
 ## Grant relation
 
 the optional public classification of how a permission subject relates to its
-authority. `operator` identifies the owner-scoped, registry-wide—not
-per-name—`ApprovalForAll` relation. Direct resource permission rows have no
-classified relation and omit the field. (upstream:
+authority. `operator` marks a grant that exists through an owner's
+`ApprovalForAll`, which approves the operator for every name the owner holds on
+that contract: the account-scope row for a registry operator, and the per-name
+effective rows for a NameWrapper operator. A NameWrapper operator row keeps the
+scope of the holder row it expands, registration or resolver. (upstream:
 .refs/ens_v1/contracts/registry/ENS.sol:L18-L21 @ ens_v1@91c966f) (upstream:
 .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L117 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L159-L167 @
 ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L150-L157 @
 basenames@1809bbc) (upstream: .refs/basenames/src/L2/Registry.sol:L202-L207 @
-basenames@1809bbc)
-`operator` marks a grant that exists through an `ApprovalForAll`: the
-account-scope row for a registry operator, and the per-name effective rows for
-a NameWrapper operator. A NameWrapper operator row keeps the scope of the holder
-row it expands, registration or resolver, because its powers on that name come
-from the holder's account-wide approval. (upstream:
-.refs/ens_v1/contracts/wrapper/NameWrapper.sol:L214-L222 @ ens_v1@91c966f)
+basenames@1809bbc) (upstream:
+.refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L105-L117 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L214-L222 @
+ens_v1@91c966f) Direct resource permission rows have no classified relation and
+omit the field.
 
 For supported WrapperRegistry histories, `holder` identifies the current owner
 of the registry's parent entry, whose bitmap is derived from the parent
