@@ -2103,10 +2103,13 @@ A recognized namespace with no available publication returns retryable `409 stal
   and bigname keeps no `TokenControlTransferred` row for a burn, so the
   reservation is the only row that marks the end of that holding. A relation
   that ended after that block has no current row, so it is reproduced only
-  from the three historical shapes the ownership matcher knows: a
+  from the historical shapes the ownership matcher knows: a
   `RegistrationGranted` registrant and a `TokenControlTransferred` recipient
-  on a token-backed, Basenames or ENSv2 resource, and an
-  `AuthorityTransferred` owner on a registry-only or ENSv2 resource. The
+  on a token-backed, Basenames or ENSv2 resource, an
+  `AuthorityTransferred` owner on a registry-only or ENSv2 resource, and,
+  for an effective controller, the recipient of an ENSv2 registry or root
+  registry `TokenControlTransferred` that carries a name, which the transfer
+  makes the [manager](api-v1.md#manager). The
   second current input is the resolver's current classification row, which
   decides whether an ENSv2 resolver pointer attributes node-keyed writes on
   that resolver.
@@ -2119,7 +2122,7 @@ A recognized namespace with no available publication returns retryable `409 stal
   registration, transfer or surface snapshot, registry owner, or NameWrapper
   holder). The controller is set only by a `PermissionChanged` whose scope is
   the name's resource
-  (bigname: `crates/project/src/families/addresses.rs:70-83`). Upstream
+  (bigname: `crates/project/src/families/addresses.rs:82-95`). Upstream
   reports an ENSv2 role change as an account's roles within an access control
   resource of the emitting contract
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L17-L27 @ ens_v2_sepolia_20260916@366de741),
@@ -4305,7 +4308,12 @@ introduces it rebuilds Project from full history before serving the option; see
   ended (see [history anchors](#history-collection-filters)), `owner` matches the `RegistrationGranted` that named the address and the
   `TokenControlTransferred` that sent it the token, and also, on a resource
   with no token, the registry `AuthorityTransferred` that made it the owner,
-  which matches `manager` too. Under a
+  which matches `manager` too. On an ENSv2 name, the registry
+  `TokenControlTransferred` that sent the address the token matches `manager`
+  as well as `owner`, since the transfer gives it the sender's roles
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L517-L547 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L236-L252 @ ens_v2_sepolia_20261001@07e55a05).
+  Under a
   [registry-only handoff](glossary.md#registry-only-handoff) (a `.eth` token
   transfer without `reclaim`) the registry owner is only the `manager`, so
   that `AuthorityTransferred` matches `manager` and not `owner` from the
@@ -4678,6 +4686,7 @@ For a registrar lease first identified by a later readable observation, registra
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
 | `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
+| `include` | query | array of enum `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count requests the exact number of bound names. Without it bound_names.page.total_count is null. |
 | `If-None-Match` | header | string | no | none | ETag validator from an earlier response, a comma-separated validator list, or *; evaluated only for a cacheable indexed read. |
 
 <!-- openapi:responses GET /v1/resolvers/{chain_id}/{address} -->
@@ -4697,13 +4706,22 @@ For a registrar lease first identified by a later readable observation, registra
 - Tier: product read.
 - Purpose: resolver overview for numeric `chain_id` and resolver `address`.
 - Request parameters: path `chain_id`, `address`; query `at`, `finality`,
-  `cursor`, `page_size`. Other query parameters, `include` among them, return
-  `400 invalid_input`.
+  `cursor`, `page_size`, `include`. `include` accepts only `total_count`. Any
+  other value returns `400 invalid_input`, as do other query parameters.
 - Response shape: `data` is a resolver overview in product vocabulary. The
   route includes route-local `bound_names: {data, page}`, a nested collection
-  of record-shaped name rows that replaces resolver-based name filtering. A
-  name longer than 2000 bytes is never listed, as for
-  [search](#get-v1search).
+  of record-shaped name rows that replaces resolver-based name filtering. The
+  rows are ordered by the name as rendered from chain data, then namespace and
+  namehash: a name's raw name, or for a name whose surface stores no raw bytes
+  each label as `[<labelhash>]`. A name whose label is known only from an
+  imported preimage is shown with that label's text but sorts by its bracketed
+  form, so an import never moves a name or a cursor. A raw name longer than
+  2000 bytes is never listed, as in search. A name without raw bytes whose
+  bracketed form is longer than that sorts by its first 2000 bytes, then
+  namespace and namehash. A name whose raw bytes Interpret observes after the
+  published block is listed where the published block sorts it and shown with
+  its raw name, and it moves when Project publishes the block that observed
+  them.
   `data.mirror` is present only when the resolver is a declared
   [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver):
   `{kind: "ensv1_registry", registry: {chain_id, address}}` names the ENSv1
@@ -4756,13 +4774,18 @@ For a registrar lease first identified by a later readable observation, registra
   formerly served `counts` (`nodes`, `aliases`, `links`, `linked_records`,
   `role_holders`) and, through the `include` parameter, bounded samples
   `nodes`, `aliases`, `links`, and `roles` and an `events` count object; those
-  fields and the parameter are removed, and a request that still sends
-  `include` is rejected rather than served without the sections. The former
+  fields are removed, and a request that still asks `include` for a section is
+  rejected rather than served without it. The former
   `/aliases` collection is removed too and answers like any unknown route: it
   paged mappings that only the retired 2026-06-29 resolver generation could
   emit ([upstream](upstream.md)).
 - Pagination behavior: standard collection pagination applies to the
   nested `bound_names.page` object. The top-level response has no `page`.
+  `bound_names.page.total_count` is `null` unless the request has
+  `include=total_count`. Then it is the exact number of names in the whole
+  listing, counted from the same filtered names as the page on the same
+  database snapshot, so it is the same on every page of an unchanged
+  publication, whatever the cursor.
 - Snapshot behavior: the resolver overview and bound names read
   `bigname_phase` projections from one completed projection-phase generation. A row
   target may precede the selected position when the row was unchanged by later

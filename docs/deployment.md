@@ -4194,6 +4194,148 @@ release containing this change requires a full-range Project redo, with no
 Interpret or Ingest redo and no schema-migration. An already running Project pass
 uses its deployed query and does not cover a later release's changed hash.
 
+## Names under a changed name recomposed only when their paths can move
+
+The build that recomposes the names under a touched name only when its change
+can move their resolution paths (see
+[owned key families](projections.md#owned-key-families)) changes one Project
+statement, `project:families.resolution_paths.prepare`. It also bounds the
+ENSv1 mirror walk's surface reads by the publication's block
+([projections](projections.md#records-shared-through-resolver-links)).
+
+- A touched name still recomposes itself. It recomposes the `.eth` names under
+  it only for the changes that
+  [owned key families](projections.md#owned-key-families) lists. A change from
+  one nonzero owner to another on a parent with many names under it now
+  recomposes that parent alone.
+- A name whose [name surface](glossary.md#surface-name-surface) appeared since
+  the [family marker](glossary.md#family-marker)'s block also recomposes the
+  `.eth` names under it.
+- Which names Project recomposes in each batch changes, not what they serve.
+- The mirror walk no longer reads a name surface that Interpret wrote above the
+  block Project publishes. While Interpret runs ahead, three results that read
+  a new surface through a mirror now change at that surface's block, not
+  earlier: a name below `.eth`, the record inventory of a resource whose
+  resolver is a mirror, and `GET /v1/resolvers/{chain_id}/{address}/records`
+  for a mirror resolver, which walks at the servable publication. Once Project
+  publishes that block, stored rows and API responses are the same as before.
+- The statement is in `crates/project/src` and the mirror walk is in
+  `crates/storage/src/families/records/mirror.rs`. Both are inputs of the
+  [projection content hash](glossary.md#projection-content-hash) only. That hash
+  rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, at a
+  planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+  matching runner and API binaries. The change rides the next re-derivation
+  release and shares that release's Project redo.
+- Run that redo as the
+  [planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
+  describes, with no attestation. A Project redo already running under an
+  earlier binary uses that binary's statement and does not discharge this
+  rotation. Nothing else changes for an operator.
+- It adds no table, schema-migration, manifest or setting. The
+  manifest-authority fingerprint and the compiled watch plan are unchanged, so
+  stamp no Ingest redo.
+
+## Hydration retry reset in rebuild ranges
+
+The build that makes each block of a
+[rebuild range](glossary.md#rebuild-range) find its hydration keys from its own
+changes reduces how much one Ethereum Mainnet rebuild reads. It does not change
+what the rebuild writes (see
+[follow-only hydration](projections.md#follow-only-hydration) and
+[owned key families](projections.md#owned-key-families)).
+
+- On every Ethereum Mainnet block, Project clears obsolete text and reverse-name
+  [hydration](glossary.md#hydration) retry scheduling for the keys the block
+  changed. Inside a rebuild range, each block read the keys of every earlier
+  block of the range as well, so a range's reads grew with the square of its
+  length. Each block now reads only the keys it changed. Those are the only
+  keys whose retry scheduling the block can clear.
+- `project:families.hydrate.text.keys` and
+  `project:families.hydrate.reverse.keys` keep their text. Inside a range they
+  now read the block's own changes instead of the range's.
+- `project:families.hydrate.text.select` and
+  `project:families.hydrate.reverse.select` keep their text and their change
+  inputs, which were already the block's own. Inside a range only their key
+  lists narrow, to the keys the block's own changes reach.
+- A block outside a range, including every live head block, gives all four
+  statements the same parameters as before.
+- Stored rows do not change. API responses do not change.
+- The change is in `crates/project/src`, an input of the
+  [projection content hash](glossary.md#projection-content-hash) only. That hash
+  rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, at a
+  planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+  matching runner and API binaries. The change rides the next re-derivation
+  release and shares that release's Project redo.
+- It adds no table, schema-migration, manifest or setting. The
+  manifest-authority fingerprint and the compiled watch plan are unchanged, so
+  stamp no Ingest redo.
+
+## Bound names read from the name summary
+
+The build that pages [`GET /v1/resolvers/{chain_id}/{address}`](api-v1-routes.md#get-v1resolverschain_idaddress)
+`bound_names` from the [name summary](glossary.md#name-summary) changes the composition Project
+stores (`crates/storage/src/families/name/summary.rs` and `bound_rules.rs`) and Project's family
+step. It rotates the [projection content hash](glossary.md#projection-content-hash) for every
+chain and leaves the [interpreter content hash](glossary.md#interpreter-content-hash)
+unchanged. It needs one full-range Project redo and no Interpret or Ingest redo. It changes no
+manifest, so the manifest-authority fingerprint is unchanged.
+
+- Schema-migration `20261014120000_project_name_summary_bound_names.sql` adds seven columns
+  to `project_name_summary`: `resolver_chain_id`, `resolver_address`,
+  `resolver_listing_eligible`, `resolver_support_exempt`, `raw_name`, `order_name` and
+  `namehash`. It adds two partial indexes on
+  `(resolver_chain_id, resolver_address, order_name, namespace, namehash)`:
+  `project_name_summary_bound_order_idx`
+  `WHERE resolver_listing_eligible AND octet_length(order_name) <= 2000`, which pages a
+  resolver that supports binding enumeration, and `project_name_summary_bound_exempt_order_idx`
+  with `AND resolver_support_exempt` added, which pages one that does not. Both are built in
+  the schema-migration's transaction, after the reset, over an empty summary table.
+- On a database without the columns it resets every owned key family with the
+  [family marker](glossary.md#family-marker), undo journal and repair records, under the same
+  `EXCLUSIVE` lock on the marker table as
+  [the expiry selector's schema-migration](#expiry-selector-on-the-name-summary). It is a
+  blocking maintenance schema-migration. Run it in a maintenance window with the phase runner
+  stopped. Fenced routes answer `409 stale` until the next family run rebuilds the families.
+  The rotated hash rebuilds them anyway, so the reset adds no second rebuild.
+- Apply the schema-migration before the new build starts. The new writer run against a schema
+  without the columns drops the values it has no column for and publishes summaries with no
+  selector. Do not run the previous build against the migrated schema: its writer fails on the
+  new `NOT NULL` columns.
+- Keep every Project of the previous build stopped for the whole upgrade, from the
+  schema-migration until the new build runs. It cannot write the new summary shape, so its
+  family step fails rather than publish, and the chain's families stop advancing while it runs.
+- A page composes at most `page_size + 1` names. `include=total_count` is new and serves the
+  exact count of the whole list. It reads every listed name of the resolver, so its cost grows
+  with the list.
+- The order of a name whose surface stores no raw bytes changes when one of its labels is
+  known only from an imported preimage. Such a label sorted by its text and now sorts as
+  `[<labelhash>]`. The cursor now holds the order name, so a `bound_names` cursor issued
+  before the change answers `400 invalid_input`. A client walking bound names across the
+  change restarts from the first page.
+- A name whose surface stores no raw bytes and whose bracketed form is longer than 2000 bytes
+  sorts by its first 2000 bytes, then namespace and namehash.
+- A name whose surface Interpret gives raw bytes in a block after the published one stays at
+  its published position, shown with its raw name, until Project publishes that block. The
+  previous build moved it at once.
+- `project_named_resource_pointer_resolver_idx` and `project_registry_pointer_resolver_idx`
+  stay, though the listing no longer reads them.
+- A family block runs the raw-name sweep when the Interpret revision it reads, Interpret's
+  input content hash and redo attempt, differs from the one its prior marker recorded. That is
+  the first block after a completed Interpret redo attempt, after an interpreter content-hash
+  change and after a reset, and the first block replayed after a Project undo or redo that
+  restores a marker recorded under an earlier revision. It runs while the block holds its
+  chain's family marker, reads every surface of the chain that stores no raw bytes, about 1.37
+  million on mainnet, and checks each one's summary. Its cost at that size has not been
+  measured.
+
+Before the release is recorded, confirm that the Project redo adopted the new projection
+content hash and that `GET /v1/resolvers/1/<address>?include=total_count` answers for a busy
+resolver.
+
 ## ENSv1 unwrap without a lease and resolver logs kept on a batch re-run
 
 The build that gives an unwrapped ENSv1 name with no registrar lease a registry-only
@@ -4291,6 +4433,36 @@ ready under the new hash.
 
 It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
 and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## ENSv2 transfers move the manager relation
+
+The build that moves the `manager` relation to the recipient of an ENSv2 token
+transfer (see [Manager](api-v1.md#manager)) changes `crates/project/src`,
+`crates/storage/src/families/records/address_relations.rs` and
+`crates/storage/src/history/address_evidence.rs`. All are inputs of the
+[projection content hash](glossary.md#projection-content-hash) only. The last
+also lets address history keep a former ENSv2 manager's events under
+`relation=manager` once the name has moved on.
+
+- The projection content hash rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, under
+  matching runner and API binaries.
+- Project now records each ENSv2 registry transfer among the events that set a
+  name's manager. An existing database holds no such record for the transfers
+  it already processed, and the history and lookup relation rows it stored at
+  earlier publications keep the old manager. Until the Project redo completes,
+  an account that transferred an ENSv2 name away still matches
+  `relation=manager` on `GET /v1/addresses/{address}/names`, in bounded
+  `GET /v1/addresses/{address}/history` and in reverse `POST /v1/lookup`.
+- Schema-migration
+  `20261015120000_project_address_controller_candidate_transfer_comments`
+  rewrites the table, `action` and `subject` comments of
+  `project_address_controller_candidate` to name the ENSv2 transfer. It changes
+  no column, index or row.
+- It adds no table, manifest or setting. The
+  manifest-authority fingerprint and the compiled watch plan are unchanged, so
+  stamp no Ingest redo.
 
 ## Registry-only resource grants follow the registry owner
 

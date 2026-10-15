@@ -113,6 +113,9 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
                 ('column', 'bigname_phase.project_name_summary.search_supported'),
                 ('column', 'bigname_phase.project_name_summary.search_fields'),
                 ('column', 'bigname_phase.project_name_summary.search_creation_transport_resource_id'),
+                ('column', 'bigname_phase.project_name_summary.resolver_address'),
+                ('column', 'bigname_phase.project_name_summary.resolver_listing_eligible'),
+                ('column', 'bigname_phase.project_name_summary.raw_name'),
 
                 (
                     'function',

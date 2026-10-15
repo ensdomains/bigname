@@ -2117,7 +2117,7 @@ CREATE TABLE IF NOT EXISTS project_address_controller_candidate (
     CHECK (action IN ('set', 'revoke'))
 );
 COMMENT ON TABLE project_address_controller_candidate IS
-    'Project-owned controller candidates of family F13: every named controller event (AuthorityTransferred, state-derived registry-only SurfaceBound, resource-scoped PermissionChanged) with its resource and position, never pruned, so a read folds the candidates the served admission keeps (address_names.rs:115-283).';
+    'Project-owned controller candidates of family F13: every named controller event (AuthorityTransferred, state-derived registry-only SurfaceBound, resource-scoped PermissionChanged, and an ENSv2 registry or root registry TokenControlTransferred, whose recipient takes the sender''s roles (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L517-L547 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L236-L252 @ ens_v2_sepolia_20261001@07e55a05)) with its resource and position, never pruned, so a read folds the candidates the served admission keeps (address_names.rs:115-283).';
 COMMENT ON COLUMN project_address_controller_candidate.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_address_controller_candidate.logical_name_id IS
@@ -2139,9 +2139,9 @@ COMMENT ON COLUMN project_address_controller_candidate.event_kind IS
 COMMENT ON COLUMN project_address_controller_candidate.source_family IS
     'This value is the event''s source family.';
 COMMENT ON COLUMN project_address_controller_candidate.action IS
-    'This value is set for an AuthorityTransferred, a SurfaceBound and a PermissionChanged whose effective powers hold resource_control, and revoke for any other resource-scoped PermissionChanged, before any read-time mask.';
+    'This value is set for an AuthorityTransferred, a SurfaceBound, an ENSv2 registry or root registry TokenControlTransferred, whose recipient takes the sender''s roles (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L517-L547 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L236-L252 @ ens_v2_sepolia_20261001@07e55a05), and a PermissionChanged whose effective powers hold resource_control, and revoke for any other resource-scoped PermissionChanged, before any read-time mask.';
 COMMENT ON COLUMN project_address_controller_candidate.subject IS
-    'This value is the lower-cased controller the event names: the registry owner (the zero address for a masked owner word), the SurfaceBound owner or the permission subject.';
+    'This value is the lower-cased controller the event names: the registry owner (the zero address for a masked owner word), the SurfaceBound owner, the permission subject or the ENSv2 transfer recipient, who takes the sender''s roles (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L517-L547 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L236-L252 @ ens_v2_sepolia_20261001@07e55a05).';
 
 CREATE TABLE IF NOT EXISTS project_address_name_index (
     address text NOT NULL,
@@ -2276,6 +2276,13 @@ CREATE TABLE IF NOT EXISTS project_name_summary (
     search_supported boolean NOT NULL,
     search_fields jsonb,
     search_creation_transport_resource_id uuid,
+    resolver_chain_id text,
+    resolver_address text,
+    resolver_listing_eligible boolean NOT NULL,
+    resolver_support_exempt boolean NOT NULL,
+    raw_name text,
+    order_name text,
+    namehash text NOT NULL,
     CONSTRAINT project_name_summary_search_check CHECK (
         (search_supported AND search_fields IS NOT NULL AND jsonb_typeof(search_fields) = 'object'
          AND search_fields ? 'status')
@@ -2318,6 +2325,30 @@ COMMENT ON COLUMN project_name_summary.search_fields IS
     'Shared public registration and ENSv1 fields with omission/null preserved, finished wrapper expiry and declared creation only. No identity spelling, fallback clock or deferred wrapper marker.';
 COMMENT ON COLUMN project_name_summary.search_creation_transport_resource_id IS
     'Optional selected Basenames resource whose live pointer and Ethereum context may add a creation timestamp; no stored cross-chain eligibility decision.';
+CREATE INDEX IF NOT EXISTS project_name_summary_bound_order_idx
+    ON project_name_summary
+        (resolver_chain_id, resolver_address, order_name, namespace, namehash)
+    WHERE resolver_listing_eligible AND octet_length(order_name) <= 2000;
+CREATE INDEX IF NOT EXISTS project_name_summary_bound_exempt_order_idx
+    ON project_name_summary
+        (resolver_chain_id, resolver_address, order_name, namespace, namehash)
+    WHERE resolver_listing_eligible AND resolver_support_exempt
+      AND octet_length(order_name) <= 2000;
+
+COMMENT ON COLUMN project_name_summary.resolver_chain_id IS
+    'This value is the chain of the resolver the composed name row serves (declared_summary.resolver.chain_id). It is null when it serves none or the name composes no row.';
+COMMENT ON COLUMN project_name_summary.resolver_address IS
+    'This value is the lower-cased address of the resolver the composed name row serves (declared_summary.resolver.address). It is null when it serves none or the name composes no row. It is not the ENSv1 registry pointer.';
+COMMENT ON COLUMN project_name_summary.resolver_listing_eligible IS
+    'This value is whether the composed name row passes every rule of the resolver overview''s bound-name list except the resolver match and the capability gate (families/name/bound_rules.rs). It is false when the name composes no row.';
+COMMENT ON COLUMN project_name_summary.resolver_support_exempt IS
+    'This value is whether the composed name row is listed whatever its resolver family''s binding-enumeration support: it has a selected resource, or no serving resource. The support itself is read from the resolver''s classification at request time.';
+COMMENT ON COLUMN project_name_summary.raw_name IS
+    'This value is the raw name of the name''s surface when the summary was composed, null when the surface stores no raw bytes. Project''s raw-name sweep checks it against the surface.';
+COMMENT ON COLUMN project_name_summary.order_name IS
+    'This value is the name as the composed name row renders it from chain data alone: its raw name, else each label as [<labelhash>], with no imported preimage, cut to its first 2000 bytes. The bound-name page orders and continues by it, then namespace and namehash. It is null when the name composes no row.';
+COMMENT ON COLUMN project_name_summary.namehash IS
+    'This value is the namehash of the name''s surface, the last key of the bound-name page order.';
 CREATE INDEX IF NOT EXISTS project_name_summary_recompose_idx
     ON project_name_summary (chain_id, recompose_at)
     WHERE recompose_at IS NOT NULL;

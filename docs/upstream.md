@@ -295,6 +295,30 @@ migration correlation or path changes.
 > interpreter does not do. The delegate row is served as still granted.
 > **Since**: `2026-09-13`
 
+> **A registry write that ends a NameWrapper authority revokes a token approval the chain still holds** —
+> once a registry owner write moves a wrapped name's record away from the NameWrapper, such as
+> the parent's `setSubnodeOwner` to a new owner or to zero, bigname ends the NameWrapper
+> authority and revokes the per-token approved address's `extend_subname_expiry` at that log.
+> On chain the approval stays in `_tokenApprovals` until the old token moves or burns, or the
+> holder approves again.
+> `getApproved` still names the address while the old token has an owner, and
+> `canExtendSubnames` reads the parent's token without checking that it is still wrapped, so
+> the address can still extend the expiry of a wrapped child.
+> **Upstream**: (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L109-L136 @ ens_v1@91c966f)
+> (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L228-L238 @ ens_v1@91c966f)
+> (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L443-L470 @ ens_v1@91c966f)
+> (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L837-L840 @ ens_v1@91c966f)
+> (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269-L275 @ ens_v1@91c966f)
+> (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L375-L378 @ ens_v1@91c966f)
+> (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1079 @ ens_v1@91c966f)
+> **Our rule**: [projections](projections.md) (the per-token delegate).
+> **Why**: the name is not wrapped while the NameWrapper does not hold its record, so bigname
+> ends the NameWrapper authority at that write. The old token's later transfer, burn or
+> `Approval` no longer reaches the ended authority, so no observed log would clear the row, and serving it
+> would keep a grant on an authority that has ended. A later wrap burns the old token, which
+> clears the approval on chain as well.
+> **Since**: `2026-10-15`
+
 > **A registry child the NameWrapper holds without a current wrap, or under a label failing normalization, is not served for its token holder** —
 > once a registry write moves a wrapped name's record away from NameWrapper, bigname ends the
 > NameWrapper authority. If the record is later written back to the NameWrapper address with

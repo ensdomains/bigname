@@ -4420,6 +4420,23 @@
             }
           },
           {
+            "name": "include",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated expansion names; unlisted values are invalid. total_count requests the exact number of bound names. Without it bound_names.page.total_count is null.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "total_count"
+                ]
+              }
+            },
+            "style": "form",
+            "explode": false
+          },
+          {
             "name": "If-None-Match",
             "in": "header",
             "required": false,
@@ -8329,7 +8346,7 @@
           },
           "bound_names": {
             "$ref": "#/components/schemas/BoundNames",
-            "description": "Nested page of names whose current serving resource selects this resolver."
+            "description": "Nested page of names whose current serving resource selects this resolver, ordered by the name as rendered from chain data: a name whose label is known only from an imported preimage sorts by its bracketed form."
           }
         },
         "additionalProperties": false,

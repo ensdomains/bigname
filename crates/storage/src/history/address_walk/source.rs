@@ -16,6 +16,7 @@ use crate::history::{
         push_history_cursor_cte,
     },
     paging::{push_history_filters, push_history_order_terms},
+    resolver_source::ResolverSource,
     source::push_history_lineage_join,
 };
 
@@ -266,7 +267,12 @@ pub(super) fn push_arm_filters<'a>(
     }
     push_history_lineage_join(builder);
     builder.push(" WHERE ne.consumer_visibility = 'activated'");
-    push_history_filters(builder, filter, read.canonical_only);
+    push_history_filters(
+        builder,
+        filter,
+        read.canonical_only,
+        ResolverSource::Condition,
+    );
     push_fixed_product_history_duplicate_filter(builder);
     if let Some(keyset) = keyset {
         builder.push(" AND ");

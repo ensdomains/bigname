@@ -123,10 +123,7 @@ async fn v2_bound_name_display_and_cursors_use_shared_emoji_normalization() -> R
             decoded.last_item["sort_value"],
             normalized.canonical_display_name
         );
-        assert_eq!(
-            decoded.last_item["normalized_name"],
-            normalized.normalized_name
-        );
+        assert_eq!(decoded.last_item["order_name"], normalized.normalized_name);
     }
     database.cleanup().await
 }

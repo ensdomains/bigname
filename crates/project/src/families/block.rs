@@ -17,7 +17,6 @@ use super::{
     keys, manifests,
     marker::{self, FamilyMarker, RecordedToken},
     reduce, repair, store,
-    tables::NAME_SUMMARY,
 };
 use crate::{Marker, ProjectError, Result};
 
@@ -248,6 +247,10 @@ pub(crate) async fn publish(
     } = opened;
     let after = prior.current.as_ref().map_or(-1, |marker| marker.number);
     let composition = marker::Composition::of(chain_id, &manifests)?;
+    // The first block under an input revision the prior block did not read (a completed
+    // Interpret redo attempt, or a reset) checks every stored raw name against its surface: a
+    // redo can withdraw a surface's raw bytes in place, below any block it replays.
+    let raw_name_sweep = prior.token.revision() != token.revision();
     let mut stats = write(
         &mut transaction,
         chain_id,
@@ -255,6 +258,7 @@ pub(crate) async fn publish(
         after,
         rows,
         &composition,
+        raw_name_sweep,
     )
     .await?;
     journal_marker(&mut transaction, chain_id, &block, &prior).await?;
@@ -319,12 +323,21 @@ async fn write(
     after: i64,
     rows: &store::RowSet,
     composition: &marker::Composition,
+    raw_name_sweep: bool,
 ) -> Result<BlockStats> {
     let changes = rows.written();
     let mut stats = BlockStats::default();
     if changes.is_empty() {
         // The name summaries follow the block clock too, which moves with no row changing.
-        refresh_derived(transaction, chain_id, block, after, composition, &mut stats).await?;
+        super::derived::refresh_block(
+            transaction,
+            chain_id,
+            block,
+            (after, raw_name_sweep),
+            composition,
+            &mut stats,
+        )
+        .await?;
         return Ok(stats);
     }
     let journal = changes
@@ -357,46 +370,16 @@ async fn write(
     hydration
         .refresh(transaction, chain_id, block.number)
         .await?;
-    refresh_derived(transaction, chain_id, block, after, composition, &mut stats).await?;
-    Ok(stats)
-}
-
-/// Refresh the derived rows of the keys the block touched, and count the name summaries it
-/// wrote and journalled like a family table's.
-async fn refresh_derived(
-    transaction: &mut Transaction<'_, Postgres>,
-    chain_id: &str,
-    block: &input::BlockHeader,
-    after: i64,
-    composition: &marker::Composition,
-    stats: &mut BlockStats,
-) -> Result<()> {
-    let root = composition.admission.as_ref();
-    let root = root.map(|admission| admission.root_registry.as_str());
-    super::resolution_paths::prepare(transaction, chain_id, block, after, root).await?;
-    super::lookup::prepare(transaction, chain_id, block, after).await?;
-    let touched = super::derived::touched(transaction, chain_id, block.number, Some(after)).await?;
-    let summary = super::derived::refresh(transaction, chain_id, &touched, composition).await?;
-    if summary.rows > 0 {
-        stats.rows.insert(NAME_SUMMARY.name, summary.rows);
-    }
-    stats.undo_rows += summary.undo_rows;
-    super::history_catalogue::refresh(
+    super::derived::refresh_block(
         transaction,
         chain_id,
         block,
-        after,
-        &summary.names,
-        &summary.current_relations,
-        stats,
+        (after, raw_name_sweep),
+        composition,
+        &mut stats,
     )
     .await?;
-    let (rows, undo_rows) =
-        super::resolution_paths::refresh(transaction, chain_id, block, composition).await?;
-    *stats.rows.entry(NAME_SUMMARY.name).or_default() += rows;
-    stats.undo_rows += undo_rows;
-    super::lookup::refresh(transaction, chain_id, block, composition, stats).await?;
-    Ok(())
+    Ok(stats)
 }
 
 /// Journal each family once. The resolution-path refresh revisits summary and lookup keys the

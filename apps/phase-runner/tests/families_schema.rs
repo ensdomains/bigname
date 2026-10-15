@@ -489,6 +489,8 @@ const REGISTRATION_LIFECYCLE: &str =
 
 const DURABLE_SEARCH: &str =
     include_str!("../../../migrations/20261005210000_durable_name_search.sql");
+const BOUND_NAMES: &str =
+    include_str!("../../../migrations/20261014120000_project_name_summary_bound_names.sql");
 const SEARCH_TABLES: &[&str] = &[
     "name_search_documents",
     "name_search_postings",
@@ -549,7 +551,7 @@ async fn search_schema_upgrade_resets_old_fields_preserves_identity_and_matches_
         VALUES ('0x01',convert_to('retained','UTF8'),'retained','old',true,'fixture',1)")
         .execute(&mut *tx).await?;
     tx.commit().await?;
-    for migration in [DURABLE_SEARCH, REGISTRATION_LIFECYCLE] {
+    for migration in [DURABLE_SEARCH, REGISTRATION_LIFECYCLE, BOUND_NAMES] {
         sqlx::raw_sql(migration).execute(upgraded.pool()).await?;
     }
     for table in SEARCH_TABLES {
@@ -576,12 +578,13 @@ async fn search_schema_upgrade_resets_old_fields_preserves_identity_and_matches_
     );
     sqlx::query(
         "INSERT INTO bigname_phase.project_name_summary(chain_id,logical_name_id,namespace,
-        serving,zero_owner,expiry_listable,search_supported)
-        VALUES ('search-upgrade','ens:upgrade','ens',false,false,false,false)",
+        serving,zero_owner,expiry_listable,search_supported,resolver_listing_eligible,
+        resolver_support_exempt,namehash)
+        VALUES ('search-upgrade','ens:upgrade','ens',false,false,false,false,false,false,'upgrade')",
     )
     .execute(upgraded.pool())
     .await?;
-    for migration in [DURABLE_SEARCH, REGISTRATION_LIFECYCLE] {
+    for migration in [DURABLE_SEARCH, REGISTRATION_LIFECYCLE, BOUND_NAMES] {
         sqlx::raw_sql(migration).execute(upgraded.pool()).await?;
     }
     let summaries: i64 =

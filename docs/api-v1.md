@@ -41,7 +41,7 @@ step-3-gate vocabulary needed by the route schemas:
 
 | `v2` name | Meaning | Replaces (`v1`) |
 | --- | --- | --- |
-| `name` | the ENSIP-15 normalized name string, with two exceptions. A name whose [name surface](glossary.md#surface-name-surface) stores no raw label bytes is served as its [rendered name](glossary.md#rendered-name): each label is its text when bigname holds a preimage for it that passed normalization, and otherwise `[<64 lowercase hex digits of the labelhash>]`, at any position, `eth` and `base` included. That name is served wherever the name is: name detail, lookup records, `GET /v1/names` and search rows, address names, subnames, resolver `bound_names` and links, history rows including a child registration's, and the names of a registry's subregistry pointers; cursors over those lists carry it too. Admitted ENSv1 `NewOwner` events produce it when the complete labelhash path is proven from the root or a fully proven ancestor. The other exception is a route that documents an explicit [non-name form](glossary.md#non-name-form) for a label bigname cannot state as a name — today only `GET /v1/names/{name}/subnames` | `normalized_name`, `logical_name_id` (derivable as `namespace:namehash`) |
+| `name` | the ENSIP-15 normalized name string, with two exceptions. A name whose [name surface](glossary.md#surface-name-surface) stores no raw label bytes is served as its [rendered name](glossary.md#rendered-name): each label is its text when bigname holds a preimage for it that passed normalization, and otherwise `[<64 lowercase hex digits of the labelhash>]`, at any position, `eth` and `base` included. That name is served wherever the name is: name detail, lookup records, `GET /v1/names` and search rows, address names, subnames, resolver `bound_names` and links, history rows including a child registration's, and the names of a registry's subregistry pointers. Cursors over those lists carry it too, except resolver `bound_names`, which orders and continues by the name rendered from chain data alone (every label without raw bytes as `[<labelhash>]`). Admitted ENSv1 `NewOwner` events produce it when the complete labelhash path is proven from the root or a fully proven ancestor. The other exception is a route that documents an explicit [non-name form](glossary.md#non-name-form) for a label bigname cannot state as a name — today only `GET /v1/names/{name}/subnames` | `normalized_name`, `logical_name_id` (derivable as `namespace:namehash`) |
 | `display_name` | display form of the name; equal to `name` for a [rendered name](glossary.md#rendered-name) | `canonical_display_name` |
 | `namespace` | public namespace slug used to resolve a name or filter a route, such as `ens` or `basenames` | `namespace` path segment/query usage (unchanged; now echoed consistently) |
 | `namehash` | ENS namehash hex string | `namehash` (unchanged) |
@@ -782,6 +782,9 @@ Rules:
   as the page before its cursor.
   The registry overview's nested `referenced_by` page populates it only with
   `include=counts`.
+  The resolver overview's nested `bound_names` page populates it only with
+  `include=total_count`, with the exact number of bound names on the page's
+  snapshot.
   Other routes populate it only where a precomputed count makes it
   cheap or where they explicitly document `include=total_count`; they must not
   otherwise run unconditional full counts on the request path.
@@ -1422,6 +1425,15 @@ registration sets the registry record
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f)
 until a `reclaim` or registry transfer moves it
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f).
+An ENSv2 registry moves the sender's
+roles on a name to the recipient when it transfers the name's token, so the
+transfer of an ENSv2 name moves `manager` and the `manager` relation to the
+recipient with the token
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L517-L547 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L236-L252 @ ens_v2_sepolia_20261001@07e55a05).
+A transfer that carries no name, of a token bigname has not linked to a name's
+registration or of one in a registry no root reaches, does not move the `manager`
+relation and adds no history under `relation=manager`.
 
 A name with a [name row](glossary.md#composed-name-row) stops being served as
 wrapped once a registry write moves its record away from NameWrapper; a child
@@ -3449,7 +3461,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | `chain_id` | integer | always | Numeric EVM chain ID. |
 | `address` | string | always | EVM address in hexadecimal form. |
 | `mirror` | object ResolverMirror | optional | Registry followed by an admitted mirror resolver; absent for other resolver kinds. |
-| `bound_names` | object BoundNames | always | Nested page of names whose current serving resource selects this resolver. |
+| `bound_names` | object BoundNames | always | Nested page of names whose current serving resource selects this resolver, ordered by the name as rendered from chain data: a name whose label is known only from an imported preimage sorts by its bracketed form. |
 
 ### ResolverMirror
 

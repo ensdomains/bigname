@@ -12,8 +12,9 @@ async fn summaries(database: &TestDatabase) -> Result<Value> {
     .await?)
 }
 
-/// `summary` with `CHILD`'s stored `ens_v1.resolver` naming `pointer`. A registry pointer write
-/// changes those bytes of the summary and no others.
+/// `summary` with `CHILD`'s stored `ens_v1.resolver` naming `pointer` and no served resolver,
+/// which an unknown mirror target withholds. A registry pointer write changes those bytes of the
+/// summary and no others.
 fn with_pointer(summary: &Value, pointer: &str) -> Value {
     let child = bigname_storage::logical_name_id_for_name("ens", CHILD);
     let mut summary = summary.clone();
@@ -21,6 +22,8 @@ fn with_pointer(summary: &Value, pointer: &str) -> Value {
         if row["logical_name_id"] == child.as_str() {
             row["search_fields"]["ens_v1"]["resolver"] =
                 json!({"chain_id": 11_155_111, "address": pointer});
+            row["resolver_chain_id"] = Value::Null;
+            row["resolver_address"] = Value::Null;
         }
     }
     summary

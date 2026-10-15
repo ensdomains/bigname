@@ -30,6 +30,12 @@
 //!   (`list_keys.rs`); for such a row `expires_at` is the expiry the listing serves and orders by;
 //! - `public_authority`: the public `authority` the row serves (`ens_v0`, `ens_v1` or `ens_v2`),
 //!   null when it serves none or the name composes no row (`list_keys.rs`);
+//! - `resolver_chain_id`, `resolver_address`, `resolver_listing_eligible` and
+//!   `resolver_support_exempt`: the bound-name selector of the resolver overview, from the
+//!   rule text the bound-name reader checks its page with (`bound_rules.rs`);
+//! - `raw_name`: the surface's raw name, null when it stores no raw bytes;
+//! - `order_name` and `namehash`: the bound-name page order with `namespace`. The order name is
+//!   `bound_rules::order_name`: the raw name, else each label as `[<labelhash>]`;
 //! - `recompose_at`: the first second after the composition's block at which the composition
 //!   can change with no fact changing (a binding interval opening or closing, a NameWrapper
 //!   expiry or grace boundary, or an ENSv2 resolution path expiry), in Unix seconds, since a NameWrapper expiry can lie past the last
@@ -41,7 +47,7 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, Postgres, QueryBuilder};
 
-use super::{CoverageShape, FamilyPublication, batch::load_chain, list_keys, loaders::surfaces};
+use super::{CoverageShape, FamilyPublication, batch::load_chain, list_keys, loaders::surfaces_at};
 use crate::address_names::{push_expires_at_timestamp_expr, push_registered_at_timestamp_expr};
 
 /// The summary rows of `logical_name_ids` at `publication`, as `to_jsonb` of a
@@ -98,15 +104,9 @@ async fn compose_summaries(
     if logical_name_ids.is_empty() {
         return Ok(NameSummaryPublication::default());
     }
-    // The block's own surfaces and every earlier one; the marker has not moved to it yet.
-    let surfaces: Vec<_> = surfaces(&mut *conn, logical_name_ids)
-        .await?
-        .into_iter()
-        .filter(|surface| {
-            surface.chain_id == publication.chain_id
-                && surface.block_number <= publication.block_number
-        })
-        .collect();
+    // The block's own surfaces and every earlier one, as the block reads them. The marker has
+    // not moved to it yet.
+    let surfaces = surfaces_at(&mut *conn, logical_name_ids, publication).await?;
     let mut composed = load_chain(
         &mut *conn,
         publication,
@@ -185,7 +185,44 @@ async fn compose_summaries(
             })
             .collect::<Result<Vec<Value>>>()?,
     );
-    // The chain and block bind first, as `$1` and `$2`, which `zero_owner` reads.
+    let by_name: BTreeMap<&str, &super::compose::Surface> = surfaces
+        .iter()
+        .map(|surface| (surface.logical_name_id.as_str(), surface))
+        .collect();
+    let bound_source = Value::Array(
+        composed
+            .values()
+            .filter_map(|composed| composed.row.as_ref())
+            .map(|row| {
+                let surface = by_name.get(row.logical_name_id.as_str()).with_context(|| {
+                    format!("{} was composed without its surface", row.logical_name_id)
+                })?;
+                let mut inputs = super::bound_rules::bound_inputs(row);
+                let order = super::bound_rules::order_name(surface)?;
+                inputs.insert("raw_name".to_owned(), Value::String(order));
+                Ok(Value::Object(inputs))
+            })
+            .collect::<Result<Vec<_>>>()?,
+    );
+    // The raw names of the surfaces the rows were composed from. The statement reads them from
+    // here rather than from name_surfaces again, so the stored raw name and the order name come
+    // from one read of each surface, even when Interpret commits a surface change between two
+    // statements.
+    let composed_raw = Value::Array(
+        surfaces
+            .iter()
+            .map(|surface| {
+                json!({
+                    "logical_name_id": surface.logical_name_id,
+                    "raw_name": surface.raw_name,
+                })
+            })
+            .collect(),
+    );
+    // Every surface of the chain at or below the block has a row, whatever its state. One the
+    // block does not compose, such as a shadow, has no composed row and no bound-name selector,
+    // so its row carries only `zero_owner`. The chain and block bind first, as `$1` and `$2`,
+    // which `zero_owner` reads.
     let mut builder = QueryBuilder::<Postgres>::new(
         "/* storage:families.name.summaries */ SELECT named.logical_name_id, to_jsonb(summary)
          FROM (SELECT ",
@@ -196,7 +233,7 @@ async fn compose_summaries(
     builder.push(
         "::bigint AS block_number) params
          CROSS JOIN LATERAL (
-             SELECT DISTINCT surface.logical_name_id, surface.namespace
+             SELECT DISTINCT surface.logical_name_id, surface.namespace, surface.namehash
              FROM bigname_phase.name_surfaces surface
              WHERE surface.chain_id = params.chain_id
                AND surface.block_number <= params.block_number
@@ -204,19 +241,32 @@ async fn compose_summaries(
     );
     builder.push_bind(logical_name_ids);
     builder.push("::text[])) named LEFT JOIN jsonb_to_recordset(");
-    builder.push_bind(&source);
+    builder.push_bind(&composed_raw);
     builder.push(
+        ") AS composed(logical_name_id text, raw_name text)
+           ON composed.logical_name_id = named.logical_name_id
+         LEFT JOIN jsonb_to_recordset(",
+    );
+    builder.push_bind(&source);
+    builder.push(format!(
         ") AS nc(logical_name_id text, authority_arm text, declared_summary jsonb, provenance jsonb,
                  recompose_at bigint, listing_supported boolean, public_authority text, owner text,
                  search_supported boolean, search_fields jsonb, search_creation_transport_resource_id uuid)
            ON nc.logical_name_id = named.logical_name_id
+         LEFT JOIN (SELECT {bound} FROM jsonb_to_recordset(",
+        bound = super::bound_rules::stored_bound_columns_sql(),
+    ));
+    builder.push_bind(&bound_source);
+    builder.push(format!(
+        ") AS {columns}) bound ON bound.logical_name_id = named.logical_name_id
          CROSS JOIN LATERAL (
              SELECT params.chain_id, named.logical_name_id, named.namespace,
                 nc.authority_arm,
-                COALESCE(nc.provenance #>> '{read_reachability,serving_resource_id}' IS NOT NULL,
+                COALESCE(nc.provenance #>> '{{read_reachability,serving_resource_id}}' IS NOT NULL,
                          FALSE) AS serving,
-                nc.declared_summary #>> '{registration,lifecycle_status}' AS registration_status, ",
-    );
+                nc.declared_summary #>> '{{registration,lifecycle_status}}' AS registration_status, ",
+        columns = super::bound_rules::COMPOSED_NC_COLUMNS,
+    ));
     push_expires_at_timestamp_expr(&mut builder);
     builder.push(" AS expires_at, (nc.declared_summary #>> '{registration,grace_ends_at}')::numeric AS grace_ends_at, ");
     push_registered_at_timestamp_expr(&mut builder);
@@ -225,7 +275,11 @@ async fn compose_summaries(
                 nc.recompose_at, nc.owner,
                 COALESCE(nc.listing_supported AND {}, FALSE) AS expiry_listable,
                 nc.public_authority, COALESCE(nc.search_supported, FALSE) AS search_supported,
-                nc.search_fields, nc.search_creation_transport_resource_id) summary",
+                nc.search_fields, nc.search_creation_transport_resource_id,
+                bound.resolver_chain_id, bound.resolver_address,
+                COALESCE(bound.resolver_listing_eligible, FALSE) AS resolver_listing_eligible,
+                COALESCE(bound.resolver_support_exempt, FALSE) AS resolver_support_exempt,
+                NULLIF(composed.raw_name, '') AS raw_name, bound.order_name, named.namehash) summary",
         zero_owner(),
         list_keys::FINITE_REGISTRATION_EXPIRY_SQL
     ));

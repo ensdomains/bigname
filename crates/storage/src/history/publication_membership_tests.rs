@@ -25,6 +25,11 @@ fn holding(address: &str, name: Option<&str>, id: Option<u128>, mask: i16) -> Ho
         mask,
     )
 }
+/// The holdings of a named ENSv2 registry transfer's recipient: the token holder and, as the
+/// transfer moves the sender's roles, the controller.
+fn sent(address: &str, name: Option<&str>, id: Option<u128>) -> [Holding; 2] {
+    [holding(address, name, id, 1), holding(address, name, id, 2)]
+}
 fn sorted(rows: Vec<HistoricalHistoryRelation>) -> Vec<Holding> {
     let mut rows: Vec<_> = rows
         .into_iter()
@@ -141,18 +146,20 @@ async fn evidence_arms_keep_name_resource_nameless_and_repeated_keys() -> Result
             'basenames_base_registry', 1, 'base-mainnet', 1, 'other-chain', 'ens_v2_registry_resource_surface', 'canonical', '{\"to\":\"other-chain\"}')")
             .execute(&mut *c).await?;
         let names = vec![NAME.into()]; let resources = vec![resource(1), resource(2), resource(3), resource(5), resource(12)];
-        let all = vec![holding("both", Some(NAME), Some(1), 1), holding("resource", Some(OTHER_NAME), Some(2), 1),
-            holding("nameless", None, Some(3), 1), holding("name", Some(NAME), Some(4), 1),
-            holding("empty-name", Some("ens:empty"), Some(5), 1)];
+        // A transfer with no name holds its token but moves no controller.
+        let nameless = holding("nameless", None, Some(3), 1);
+        let all = [&sent("both", Some(NAME), Some(1))[..], &sent("resource", Some(OTHER_NAME), Some(2)),
+            std::slice::from_ref(&nameless), &sent("name", Some(NAME), Some(4)),
+            &sent("empty-name", Some("ens:empty"), Some(5))].concat();
         assert_holdings(c, &names, &resources, all.clone()).await?;
         assert_holdings(c, &[NAME.into(), NAME.into()], &resources.repeat(2), all.clone()).await?;
         let mut reversed = resources.clone(); reversed.reverse();
         assert_holdings(c, &names, &reversed, all).await?;
         assert_holdings(c, &[], &[], vec![]).await?;
         assert_holdings(c, &[String::new()], &[], vec![]).await?;
-        assert_holdings(c, &names, &[], vec![holding("both", Some(NAME), Some(1), 1), holding("name", Some(NAME), Some(4), 1)]).await?;
-        assert_holdings(c, &[], &resources, vec![holding("both", Some(NAME), Some(1), 1), holding("resource", Some(OTHER_NAME), Some(2), 1),
-            holding("nameless", None, Some(3), 1), holding("empty-name", Some("ens:empty"), Some(5), 1)]).await?;
+        assert_holdings(c, &names, &[], [sent("both", Some(NAME), Some(1)), sent("name", Some(NAME), Some(4))].concat()).await?;
+        assert_holdings(c, &[], &resources, [&sent("both", Some(NAME), Some(1))[..], &sent("resource", Some(OTHER_NAME), Some(2)),
+            &[nameless], &sent("empty-name", Some("ens:empty"), Some(5))].concat()).await?;
         Ok(())
     }).await
 }
@@ -180,7 +187,7 @@ async fn publication_bounds_and_eligibility_keep_only_readable_evidence() -> Res
             UPDATE normalized_events SET block_hash='orphan-2', block_number=2 WHERE event_identity='orphan-lineage';")
             .execute(&mut *c).await?;
         assert_holdings(c, &[NAME.into()], &[resource(1), resource(10), resource(11)],
-            vec![holding("eligible", Some(NAME), Some(1), 1)]).await
+            sent("eligible", Some(NAME), Some(1)).into()).await
     }).await
 }
 

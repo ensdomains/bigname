@@ -39,6 +39,7 @@ mod read_filter;
 mod redo;
 mod registration_identity;
 mod registry_handoffs;
+mod resolver_source;
 pub use registry_handoffs::{HistoryRegistryHandoff, load_history_registry_handoffs};
 mod selectors;
 mod source;

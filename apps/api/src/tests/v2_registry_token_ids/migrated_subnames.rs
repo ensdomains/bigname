@@ -678,6 +678,18 @@ async fn assert_name_consumers(
         expected,
         "{lookup:#}"
     );
+    let listed = bigname_storage::families::name::assert_bound_names_match_the_walk(
+        &database.pool,
+        PATH_CHAIN,
+        &format!("{resolver:#x}"),
+        None,
+    )
+    .await?;
+    assert_eq!(
+        listed.iter().any(|row| row.as_str() == name),
+        expected,
+        "{listed:?}"
+    );
     let bound = path_get(database, &format!("/v1/resolvers/11155111/{resolver:#x}")).await?;
     assert_eq!(
         bound["data"]["bound_names"]["data"]

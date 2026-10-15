@@ -154,12 +154,19 @@ async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()
         json!(false)
     );
 
+    assert_eq!(
+        bigname_storage::families::name::assert_bound_names_match_the_walk(&database.pool, "ethereum-mainnet", V2_RESOLVER_ADDRESS, None)
+            .await?,
+        ["alpha.eth", "beta.eth"]
+    );
+
     database.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
-async fn v2_get_resolver_rejects_include_and_serves_no_sampled_sections() -> Result<()> {
+async fn v2_get_resolver_rejects_include_other_than_total_count_and_serves_no_sections()
+-> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_overview(&database, true).await?;
 
@@ -172,7 +179,7 @@ async fn v2_get_resolver_rejects_include_and_serves_no_sampled_sections() -> Res
         assert!(payload["data"].get(removed).is_none(), "{removed}");
     }
 
-    for include in ["nodes", "nodes,aliases,roles", "links", "events"] {
+    for include in ["nodes", "nodes,aliases,roles", "links", "events", "total_count,links"] {
         let response = v2_resolver_response_for_database(
             &database,
             &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include={include}"),
@@ -270,6 +277,11 @@ async fn v2_get_resolver_omits_names_without_projected_authority() -> Result<()>
     )
     .await?;
     assert_eq!(body["data"]["bound_names"]["data"], json!([]));
+    assert!(
+        bigname_storage::families::name::assert_bound_names_match_the_walk(&database.pool, "ethereum-mainnet", V2_RESOLVER_ADDRESS, None)
+            .await?
+            .is_empty()
+    );
     database.cleanup().await
 }
 
@@ -329,13 +341,72 @@ async fn v2_get_resolver_omits_a_released_name_from_bound_names() -> Result<()> 
     )
     .await?;
     assert_eq!(body["data"]["bound_names"]["data"], json!([]));
+    assert!(
+        bigname_storage::families::name::assert_bound_names_match_the_walk(
+            &database.pool,
+            "ethereum-mainnet",
+            "0x0000000000000000000000000000000000000abc",
+            None
+        )
+        .await?
+        .is_empty()
+    );
     database.cleanup().await
 }
 
 #[tokio::test]
 async fn v2_get_resolver_lists_a_root_registry_pointer_without_projected_authority() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_unbound_name_inputs(&database, "eth", true).await?;
+    seed_root_registry_pointer_at_a_permissioned_resolver(&database).await?;
+    let classification = bigname_storage::families::topology::load_family_resolver_current(
+        &database.pool,
+        "ethereum-mainnet",
+        ROUND2_RESOLVER,
+    )
+    .await?
+    .context("permissioned resolver")?;
+    assert_eq!(
+        classification.declared_summary["bindings"]["status"],
+        json!("supported")
+    );
+    let name = bigname_storage::families::name::load_family_name(
+        &database.pool,
+        &bigname_storage::logical_name_id_for_name("ens", "eth"),
+    )
+    .await?
+    .context("root pointer surface")?;
+    assert!(name.surface_binding_id.is_none());
+    assert!(name.resource_id.is_none());
+    assert!(name.serving_resource_id.is_some());
+    assert_eq!(
+        name.provenance["read_reachability"]["basis"],
+        json!("root_registry_resolver_pointer")
+    );
+    let body =
+        v2_resolver_payload_for_database(&database, &format!("/v1/resolvers/1/{ROUND2_RESOLVER}"))
+            .await?;
+    assert_eq!(
+        names(
+            body["data"]["bound_names"]["data"]
+                .as_array()
+                .context("bound names")?
+        ),
+        vec!["eth"]
+    );
+    assert_eq!(
+        bigname_storage::families::name::assert_bound_names_match_the_walk(&database.pool, "ethereum-mainnet", ROUND2_RESOLVER, None).await?,
+        ["eth"]
+    );
+    database.cleanup().await
+}
+
+/// The `eth` TLD served through its root-registry resolver pointer at `ROUND2_RESOLVER`, a
+/// proxy upgraded at 21000003 to an admitted permissioned resolver, published by a rebuild.
+/// Returns the admitting manifest.
+async fn seed_root_registry_pointer_at_a_permissioned_resolver(
+    database: &TestDatabase,
+) -> Result<i64> {
+    seed_unbound_name_inputs(database, "eth", true).await?;
     // The record-read helper uses an ENSv1 resolver, whose binding enumeration is unsupported.
     // This actual upgrade admits a permissioned resolver for the positive bound-name case.
     let implementation = "0x0000000000000000000000000000000000000fed";
@@ -387,42 +458,7 @@ async fn v2_get_resolver_lists_a_root_registry_pointer_without_projected_authori
         json!({"node":bigname_lookup::ens_namehash_hex("eth")?, "resolver":ROUND2_RESOLVER});
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[pointer]).await?;
     rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
-    let classification = bigname_storage::families::topology::load_family_resolver_current(
-        &database.pool,
-        "ethereum-mainnet",
-        ROUND2_RESOLVER,
-    )
-    .await?
-    .context("permissioned resolver")?;
-    assert_eq!(
-        classification.declared_summary["bindings"]["status"],
-        json!("supported")
-    );
-    let name = bigname_storage::families::name::load_family_name(
-        &database.pool,
-        &bigname_storage::logical_name_id_for_name("ens", "eth"),
-    )
-    .await?
-    .context("root pointer surface")?;
-    assert!(name.surface_binding_id.is_none());
-    assert!(name.resource_id.is_none());
-    assert!(name.serving_resource_id.is_some());
-    assert_eq!(
-        name.provenance["read_reachability"]["basis"],
-        json!("root_registry_resolver_pointer")
-    );
-    let body =
-        v2_resolver_payload_for_database(&database, &format!("/v1/resolvers/1/{ROUND2_RESOLVER}"))
-            .await?;
-    assert_eq!(
-        names(
-            body["data"]["bound_names"]["data"]
-                .as_array()
-                .context("bound names")?
-        ),
-        vec!["eth"]
-    );
-    database.cleanup().await
+    Ok(manifest)
 }
 
 #[tokio::test]
@@ -469,6 +505,11 @@ async fn v2_get_resolver_omits_ownerless_reservations_from_bound_names() -> Resu
     )
     .await?;
     assert_eq!(body["data"]["bound_names"]["data"], json!([]));
+    assert!(
+        bigname_storage::families::name::assert_bound_names_match_the_walk(&database.pool, "ethereum-mainnet", V2_RESOLVER_ADDRESS, None)
+            .await?
+            .is_empty()
+    );
     database.cleanup().await
 }
 
@@ -528,6 +569,11 @@ async fn v2_get_resolver_excludes_ownerless_name_when_bindings_are_unsupported()
     )
     .await?;
     assert_eq!(body["data"]["bound_names"]["data"], json!([]));
+    assert!(
+        bigname_storage::families::name::assert_bound_names_match_the_walk(&database.pool, "ethereum-mainnet", V2_RESOLVER_ADDRESS, None)
+            .await?
+            .is_empty()
+    );
     database.cleanup().await
 }
 
@@ -548,6 +594,18 @@ async fn v2_get_resolver_includes_ownerless_name_when_bindings_are_supported() -
         ),
         vec!["ownerless.base.eth"]
     );
+    for (namespace, listed) in [
+        (None, vec!["ownerless.base.eth"]),
+        (Some("basenames"), vec!["ownerless.base.eth"]),
+        (Some("ens"), vec![]),
+    ] {
+        assert_eq!(
+            bigname_storage::families::name::assert_bound_names_match_the_walk(&database.pool, "base-mainnet", V2_RESOLVER_ADDRESS, namespace)
+                .await?,
+            listed,
+            "{namespace:?}"
+        );
+    }
     database.cleanup().await
 }
 
@@ -651,7 +709,7 @@ async fn v2_get_resolver_filters_bound_names_by_declared_resolver_chain() -> Res
 
     let payload = v2_resolver_payload_for_database(
         &database,
-        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=total_count"),
     )
     .await?;
     let rows = payload["data"]["bound_names"]["data"]
@@ -659,6 +717,19 @@ async fn v2_get_resolver_filters_bound_names_by_declared_resolver_chain() -> Res
         .expect("bound_names data must be an array");
 
     assert_eq!(names(rows), vec!["alpha.eth"]);
+    assert_eq!(
+        payload["data"]["bound_names"]["page"]["total_count"],
+        json!(1),
+        "the count leaves out the name of the other chain"
+    );
+
+    for (chain, listed) in [("ethereum-mainnet", "alpha.eth"), ("base-mainnet", "beta.base.eth")] {
+        assert_eq!(
+            bigname_storage::families::name::assert_bound_names_match_the_walk(&database.pool, chain, V2_RESOLVER_ADDRESS, None).await?,
+            [listed],
+            "{chain}"
+        );
+    }
 
     database.cleanup().await?;
     Ok(())
@@ -701,6 +772,8 @@ async fn v2_get_resolver_refuses_an_orphaned_family_publication() -> Result<()> 
     database.cleanup().await
 }
 
+/// The route chain's rows page across a name of another chain that declares the same resolver
+/// address, and the count is the number of names those pages serve.
 #[tokio::test]
 async fn v2_get_resolver_paginates_route_chain_rows_across_interleaved_chains() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -713,7 +786,7 @@ async fn v2_get_resolver_paginates_route_chain_rows_across_interleaved_chains() 
 
     let first_page = v2_resolver_payload_for_database(
         &database,
-        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?page_size=1"),
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?page_size=1&include=total_count"),
     )
     .await?;
     let first_rows = first_page["data"]["bound_names"]["data"]
@@ -726,7 +799,10 @@ async fn v2_get_resolver_paginates_route_chain_rows_across_interleaved_chains() 
 
     let second_page = v2_resolver_payload_for_database(
         &database,
-        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?page_size=1&cursor={next_cursor}"),
+        &format!(
+            "/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?page_size=1&include=total_count\
+             &cursor={next_cursor}"
+        ),
     )
     .await?;
     let second_rows = second_page["data"]["bound_names"]["data"]
@@ -734,6 +810,13 @@ async fn v2_get_resolver_paginates_route_chain_rows_across_interleaved_chains() 
         .expect("bound_names data must be an array");
 
     assert_eq!(names(second_rows), vec!["gamma.eth"]);
+    for page in [&first_page, &second_page] {
+        assert_eq!(
+            page["data"]["bound_names"]["page"]["total_count"],
+            json!(first_rows.len() + second_rows.len()),
+            "{page:#}"
+        );
+    }
     assert_eq!(
         first_rows
             .iter()

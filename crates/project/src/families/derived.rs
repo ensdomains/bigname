@@ -16,6 +16,7 @@ mod summary_plan_tests;
 
 use sqlx::{Postgres, Transaction};
 
+use super::{block::BlockStats, input, marker, tables::NAME_SUMMARY};
 use crate::{ProjectError, Result};
 
 #[derive(Debug, Default)]
@@ -26,6 +27,9 @@ pub(crate) struct Touched {
     /// are composed again for the surfaces and registry events after it. `None` on an undo, whose
     /// journal restores the name summaries exactly.
     summaries_after: Option<i64>,
+    /// Whether the summary refresh also composes again every name whose stored raw name its
+    /// surface no longer carries (`summary::RAW_NAME_SWEEP`).
+    pub(crate) raw_name_sweep: bool,
     names: Vec<String>,
     node_resolvers: Vec<String>,
     nodes: Vec<String>,
@@ -159,7 +163,15 @@ pub(crate) async fn refresh(
     let Some(after) = touched.summaries_after else {
         return Ok(summary::Refreshed::default());
     };
-    summary::refresh(transaction, chain_id, touched.number, after, composition).await
+    summary::refresh(
+        transaction,
+        chain_id,
+        touched.number,
+        after,
+        touched.raw_name_sweep,
+        composition,
+    )
+    .await
 }
 
 async fn run(
@@ -334,3 +346,44 @@ const RECORD_ID_INSERT: &str = "/* project:families.derived.record_id_insert */
     WHERE value.address ~ '^0x[0-9a-f]{40}$'
       AND value.address <> '0x0000000000000000000000000000000000000000'
     ON CONFLICT DO NOTHING";
+
+/// Refresh the derived rows of the keys a block touched after the family marker's block `after`,
+/// and count the name summaries it wrote and journalled like a family table's. With
+/// `raw_name_sweep` the summaries also take the stored raw names their surfaces lost
+/// (`summary::RAW_NAME_SWEEP`).
+pub(super) async fn refresh_block(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    block: &input::BlockHeader,
+    (after, raw_name_sweep): (i64, bool),
+    composition: &marker::Composition,
+    stats: &mut BlockStats,
+) -> Result<()> {
+    let root = composition.admission.as_ref();
+    let root = root.map(|admission| admission.root_registry.as_str());
+    super::resolution_paths::prepare(transaction, chain_id, block, after, root).await?;
+    super::lookup::prepare(transaction, chain_id, block, after).await?;
+    let mut touched = touched(transaction, chain_id, block.number, Some(after)).await?;
+    touched.raw_name_sweep = raw_name_sweep;
+    let summary = refresh(transaction, chain_id, &touched, composition).await?;
+    if summary.rows > 0 {
+        stats.rows.insert(NAME_SUMMARY.name, summary.rows);
+    }
+    stats.undo_rows += summary.undo_rows;
+    super::history_catalogue::refresh(
+        transaction,
+        chain_id,
+        block,
+        after,
+        &summary.names,
+        &summary.current_relations,
+        stats,
+    )
+    .await?;
+    let (rows, undo_rows) =
+        super::resolution_paths::refresh(transaction, chain_id, block, composition).await?;
+    *stats.rows.entry(NAME_SUMMARY.name).or_default() += rows;
+    stats.undo_rows += undo_rows;
+    super::lookup::refresh(transaction, chain_id, block, composition, stats).await?;
+    Ok(())
+}

@@ -12,8 +12,9 @@ mod support;
 use std::time::Duration;
 
 use anyhow::Result;
-use bigname_project::families::{FamilyMode, HydrationTimeLimits};
+use bigname_project::families::{FamilyMode, HydrationTimeLimits, RebuildRanges};
 use reverse::{CHAIN, apply, fork_block, journalled, node, options, run, seed, tuple, work_index};
+use serde_json::Value;
 use support::{Fixture, hash, marker};
 
 async fn fixture(label: &str, blocks: i64) -> Result<(Fixture, rpc::Rpc)> {
@@ -440,4 +441,135 @@ async fn fresh_evidence_resets_never_observed_reverse_splits_without_restarting_
         reset_work
     );
     fixture.cleanup().await
+}
+
+/// A block of mainnet family work that changes no row: an event no reducer keys.
+async fn filler(fixture: &Fixture, block: i64) -> Result<()> {
+    let identity = format!("filler:{block}");
+    fixture
+        .event(
+            support::Event::new(
+                &identity,
+                block,
+                90,
+                "PreimageObserved",
+                "ens_v1_registry_l1",
+            )
+            .on(CHAIN),
+        )
+        .await?;
+    Ok(())
+}
+
+/// A tuple's two retry columns.
+fn retry(row: &Value) -> [Option<i64>; 2] {
+    [
+        row["attempt_limit"].as_i64(),
+        row["attempt_failures"].as_i64(),
+    ]
+}
+
+/// Tuples 1 and 3 claimed in block 2 and tuple 2 in block `claim`, which is 2 or 3. Tuple 2 is
+/// deferred by a failed aggregate at head 4, then taken by a Sepolia claim of the same address.
+/// The reverse reducer sets only the event columns, so the Sepolia row keeps the retry columns,
+/// and a mainnet reset deletes only mainnet rows.
+async fn deferred_tuple_on_another_chain(label: &str, claim: i64) -> Result<(Fixture, rpc::Rpc)> {
+    let (fixture, rpc) = fixture(label, 6).await?;
+    fixture.apply_on(support::CHAIN, 0).await?;
+    for block in [1, 3] {
+        filler(&fixture, block).await?;
+    }
+    for (block, index) in [(2, 1), (claim, 2), (2, 3)] {
+        seed(&fixture, block, index).await?;
+    }
+    run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
+    run(&fixture, 3, FamilyMode::Normal, &rpc).await?;
+    rpc.poison(&node(2));
+    run(&fixture, 4, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(retry(&tuple(&fixture, 2).await?), [Some(1), Some(1)]);
+    fixture
+        .event(
+            support::Event::new("other-claim:1", 1, 1, "ReverseChanged", "ens_v1_reverse_l1").after(
+                serde_json::json!({"source_event":"ReverseClaimed", "address":reverse::address(2),
+                       "coin_type":"60", "namespace":"ens", "reverse_node":node(2)}),
+            ),
+        )
+        .await?;
+    fixture.apply_on(support::CHAIN, 1).await?;
+    let displaced = tuple(&fixture, 2).await?;
+    assert_eq!(displaced["chain_id"], support::CHAIN);
+    assert_eq!(retry(&displaced), [Some(1), Some(1)]);
+    Ok((fixture, rpc))
+}
+
+/// Rebuild mainnet from `deferred_tuple_on_another_chain` and return the families. The
+/// rebuild's own claim of tuple 2 is fresh evidence, so it clears the carried retry columns.
+async fn rebuilt_over_another_chains_tuple(
+    label: &str,
+    claim: i64,
+    ranges: RebuildRanges,
+) -> Result<Vec<(String, String)>> {
+    let (fixture, rpc) = deferred_tuple_on_another_chain(label, claim).await?;
+    rpc::head(&fixture.pool, 6).await?;
+    let calls = rpc.calls();
+    let (outcome, error) = apply(
+        &fixture,
+        &marker(6),
+        FamilyMode::Rebuild,
+        &options(&rpc).with_rebuild_ranges(ranges),
+    )
+    .await;
+    assert!(error.is_none(), "{error:?}");
+    assert_eq!(outcome.marker, Some(marker(6)));
+    // Ranges [1] and [2, 3], then the target on its own.
+    let ranged = matches!(ranges, RebuildRanges::Through(_));
+    assert_eq!(outcome.ranges, if ranged { 2 } else { 0 });
+    assert_eq!(rpc.calls(), calls, "a rebuild makes no provider call");
+    let rebuilt = tuple(&fixture, 2).await?;
+    assert_eq!(rebuilt["chain_id"], CHAIN);
+    assert_eq!(retry(&rebuilt), [None, None], "{rebuilt}");
+    let families = fixture.exact().await?;
+    fixture.cleanup().await?;
+    Ok(families)
+}
+
+// A reverse tuple is keyed without its chain, so a Sepolia claim can carry a mainnet tuple's
+// retry columns past a mainnet reset. A mainnet rebuild in ranges clears them as a rebuild block
+// by block does, from the same start. The rebuild's claim of tuple 2 lands in the first block of
+// the range [2, 3] and, in the second case, in its later block, after block 2 changed the other
+// two tuples in the same working set.
+#[tokio::test]
+async fn a_mainnet_range_rebuild_clears_retry_values_carried_by_another_chains_tuple() -> Result<()>
+{
+    let (first_ranged, first_per_block, later_ranged, later_per_block) = tokio::try_join!(
+        rebuilt_over_another_chains_tuple(
+            "family_hydration_shared_retry_first_ranges",
+            2,
+            RebuildRanges::Through(6)
+        ),
+        rebuilt_over_another_chains_tuple(
+            "family_hydration_shared_retry_first_blocks",
+            2,
+            RebuildRanges::Off
+        ),
+        rebuilt_over_another_chains_tuple(
+            "family_hydration_shared_retry_later_ranges",
+            3,
+            RebuildRanges::Through(6)
+        ),
+        rebuilt_over_another_chains_tuple(
+            "family_hydration_shared_retry_later_blocks",
+            3,
+            RebuildRanges::Off
+        ),
+    )?;
+    for (ranged, per_block) in [
+        (first_ranged, first_per_block),
+        (later_ranged, later_per_block),
+    ] {
+        for ((table, in_ranges), (_, by_block)) in ranged.iter().zip(&per_block) {
+            assert_eq!(in_ranges, by_block, "{table}");
+        }
+    }
+    Ok(())
 }
