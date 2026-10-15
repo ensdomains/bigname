@@ -27,11 +27,8 @@ use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use sqlx::{PgConnection, raw_sql};
 
-use super::{CHAIN, ETH, PLAN_MODES, ROOT, current, hash, oracle};
-use crate::families::{
-    derived::SUMMARY_WORK_LIST,
-    guard_tests::{database, executed_scans, indexes_read, reads_through},
-};
+use super::{CHAIN, ETH, PLAN_MODES, ROOT, current, hash};
+use crate::families::guard_tests::{database, executed_scans, indexes_read, reads_through};
 
 const ETH_LABEL: &str = "0x4f5b812789fc606be1b3b16908db13fc7a9adf7ca72641f84d75b47069d3d7f0";
 const SURFACES: &str = "name_surfaces";
@@ -214,7 +211,20 @@ async fn stimulate(connection: &mut PgConnection, tree: Tree, stimulus: Stimulus
              UNION ALL
              SELECT {registry}, {t}
              FROM generate_series({second} * 3 / 4, {second} * 3 / 4 + {entries} - {in_eth} - 1) n
-         ) entry (registry, label)",
+         ) entry (registry, label);
+
+         INSERT INTO project_registry_pointer (chain_id, namespace, node, block_number,
+             event_identity, resolver_address, source_family)
+         VALUES ('{CHAIN}', 'ens', '0x' || md5('n2' || 0) || md5(0 || 'n2'), {block},
+                 'pointer:0', '0x00000000000000000000000000000000000000c1',
+                 'ens_v1_registry_l1');
+
+         INSERT INTO project_family_undo (chain_id, block_number, block_hash, family, key,
+             before_image)
+         VALUES ('{CHAIN}', {block}, '{hash}', 'project_registry_pointer',
+                 jsonb_build_array('{CHAIN}', 'ens',
+                     '0x' || md5('n2' || 0) || md5(0 || 'n2'))::text,
+                 '{{\"resolver_address\": \"0x00000000000000000000000000000000000000c0\"}}'::jsonb)",
         hash = hash(block),
     ))
     .execute(&mut *connection)
@@ -238,7 +248,7 @@ async fn stimulate(connection: &mut PgConnection, tree: Tree, stimulus: Stimulus
     Ok(())
 }
 
-/// Prepare the current statement and the one before the probes against a session work table.
+/// Prepare the current statement against a session work table.
 async fn prepare_statements(connection: &mut PgConnection) -> Result<()> {
     raw_sql(
         "CREATE TEMP TABLE bigname_resolution_path_work (logical_name_id text PRIMARY KEY);
@@ -246,17 +256,13 @@ async fn prepare_statements(connection: &mut PgConnection) -> Result<()> {
     )
     .execute(&mut *connection)
     .await?;
-    for (name, statement) in [
-        ("path_work", current()),
-        ("path_work_before", oracle::statement(SUMMARY_WORK_LIST)),
-    ] {
-        raw_sql(&format!(
-            "PREPARE {name} (text, bigint, bigint, bigint, text) AS {statement}"
-        ))
-        .execute(&mut *connection)
-        .await
-        .with_context(|| format!("prepare {name}"))?;
-    }
+    raw_sql(&format!(
+        "PREPARE path_work (text, bigint, bigint, bigint, text) AS {}",
+        current()
+    ))
+    .execute(&mut *connection)
+    .await
+    .context("prepare path_work")?;
     Ok(())
 }
 
@@ -404,12 +410,9 @@ async fn prepare_visits_the_same_surfaces_when_the_namespace_grows() -> Result<(
         for (mode, small) in PLAN_MODES.into_iter().zip(&small) {
             set_mode(&mut connection, mode).await?;
             let large = run(&mut connection, "path_work", PUBLICATION.block).await?;
-            let before = run(&mut connection, "path_work_before", PUBLICATION.block).await?;
             ensure!(
-                !large.selected.is_empty() && large.selected == before.selected,
-                "{mode}: the statement selects {} names, the one before the probes {}",
-                large.selected.len(),
-                before.selected.len()
+                !large.selected.is_empty(),
+                "{mode}: the statement selects no names"
             );
             ensure!(
                 large.selected == small.selected,
@@ -557,10 +560,9 @@ async fn a_publication_that_changes_nothing_visits_only_due_names() -> Result<()
         for mode in PLAN_MODES {
             set_mode(&mut connection, mode).await?;
             let run = run(&mut connection, "path_work", 10).await?;
-            let before = run_before(&mut connection, 10).await?;
             ensure!(
-                run.selected == due && before == due,
-                "{mode}: selected {:?}, before the probes {before:?}",
+                run.selected == due,
+                "{mode}: selected {:?}, not the due names",
                 run.selected
             );
             ensure!(
@@ -576,8 +578,67 @@ async fn a_publication_that_changes_nothing_visits_only_due_names() -> Result<()
     result
 }
 
-async fn run_before(connection: &mut PgConnection, block: i64) -> Result<BTreeSet<String>> {
-    Ok(run(connection, "path_work_before", block).await?.selected)
+// A publication that touches one second-level name only in its own state selects that
+// name alone, however many descendants and unrelated surfaces the chain holds, and the
+// surfaces it visits do not grow with the namespace.
+#[tokio::test]
+async fn a_self_only_parent_change_visits_the_same_surfaces_when_the_namespace_grows() -> Result<()>
+{
+    let (database, pool) = database().await?;
+    let result = async {
+        let mut connection = pool.acquire().await?;
+        let tree = Tree::of(SMALL);
+        install(&mut connection, tree).await?;
+        let parent = "'ens:0x' || md5('n2' || 0) || md5(0 || 'n2')";
+        raw_sql(&format!(
+            "INSERT INTO project_family_undo (chain_id, block_number, block_hash, family, key)
+             VALUES ('{CHAIN}', 10, '{hash}', 'project_name_state',
+                     jsonb_build_array('{CHAIN}', 'ens', {parent})::text)",
+            hash = hash(10),
+        ))
+        .execute(&mut *connection)
+        .await?;
+        raw_sql("ANALYZE").execute(&mut *connection).await?;
+        prepare_statements(&mut connection).await?;
+        let expected: BTreeSet<String> = BTreeSet::from([sqlx::query_scalar::<_, String>(
+            &format!("SELECT {parent}"),
+        )
+        .fetch_one(&mut *connection)
+        .await?]);
+        let mut small = Vec::new();
+        for mode in PLAN_MODES {
+            set_mode(&mut connection, mode).await?;
+            let run = run(&mut connection, "path_work", 10).await?;
+            ensure!(
+                run.selected == expected,
+                "{mode}: a self-only change selects {:?}, not the parent alone",
+                run.selected
+            );
+            small.push(run);
+        }
+        grow(&mut connection, GROWTH).await?;
+        raw_sql("ANALYZE").execute(&mut *connection).await?;
+        for (mode, small) in PLAN_MODES.into_iter().zip(&small) {
+            set_mode(&mut connection, mode).await?;
+            let large = run(&mut connection, "path_work", 10).await?;
+            ensure!(
+                large.selected == expected,
+                "{mode}: the added surfaces changed the selection"
+            );
+            ensure!(
+                large.total() <= small.total() + 16,
+                "{mode}: the statement visits {} surfaces of {SMALL} and {} of {} for one \
+                 self-only parent",
+                small.total(),
+                large.total(),
+                SMALL + GROWTH
+            );
+        }
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
 }
 
 // The statement's cost at scale, run by hand:

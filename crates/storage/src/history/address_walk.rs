@@ -280,7 +280,11 @@ pub(super) async fn load_page_on(
         output.count
     };
     let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
-    super::columns::push_history_select(&mut query, &filter, true, false, false);
+    let resolver_source =
+        super::columns::push_history_select(&mut query, &filter, true, false, false);
+    // An address walk carries no resolver, so its select is never the resolver arms and no
+    // resolver condition is owed.
+    debug_assert!(resolver_source == super::resolver_source::ResolverSource::Condition);
     let has_more = output.ids.len() > size;
     let page_ids = &output.ids[..output.ids.len().min(size)];
     query
