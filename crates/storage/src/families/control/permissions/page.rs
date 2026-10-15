@@ -472,7 +472,12 @@ async fn effective_rows(
             load_permissions_on(conn, &publication.chain_id, &clock, &inputs, Some(keys)).await?;
         for shadow in shadows.values() {
             for grant in &shadow.grants {
-                rows.push(direct_row(grant, &publication)?);
+                let mut row = direct_row(grant, &publication)?;
+                // The NameWrapper `ApprovalForAll` fan-out keeps its holder's resource scope.
+                if grant.grant_source["relation_kind"] == "operator" {
+                    row.grant_relation = Some(PermissionGrantRelation::Operator);
+                }
+                rows.push(row);
             }
         }
         for grant in super::ens_v2::root_holder_rows(conn, &publication, &clock, keys).await? {

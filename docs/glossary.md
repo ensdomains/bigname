@@ -1690,6 +1690,10 @@ classified relation and omit the field. (upstream:
 ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L150-L157 @
 basenames@1809bbc) (upstream: .refs/basenames/src/L2/Registry.sol:L202-L207 @
 basenames@1809bbc)
+A NameWrapper operator row keeps its holder's registration scope and still
+carries `operator`, because its powers on that name come from the holder's
+account-wide approval. (upstream:
+.refs/ens_v1/contracts/wrapper/NameWrapper.sol:L214-L222 @ ens_v1@91c966f)
 
 For supported WrapperRegistry histories, `holder` identifies the current owner
 of the registry's parent entry, whose bitmap is derived from the parent

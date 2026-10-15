@@ -7,7 +7,10 @@ mod read_support;
 mod support;
 
 use anyhow::Result;
-use bigname_storage::{load_serving_effective_permissions_page, load_serving_permission_summaries};
+use bigname_storage::{
+    PermissionGrantRelation, load_serving_effective_permissions_page,
+    load_serving_permission_summaries,
+};
 use read_support::{
     publish,
     wrapper::{
@@ -19,13 +22,16 @@ use serde_json::{Value, json};
 use support::Fixture;
 use uuid::Uuid;
 
-/// The resource's page with the switch at `on`: `(subject, registry-operator row, powers)` per
-/// row (the wrapper operator fan-out is a resource row of its own), and
+/// The resource's page with the switch at `on`: `(subject, grant relation, powers)` per row
+/// (the wrapper operator fan-out is a resource row of its own, with the operator relation), and
 /// its summary's restriction block.
 async fn read(
     fixture: &Fixture,
     resource: &str,
-) -> Result<(Vec<(String, bool, Value)>, Option<Value>)> {
+) -> Result<(
+    Vec<(String, Option<PermissionGrantRelation>, Value)>,
+    Option<Value>,
+)> {
     let id: Uuid = resource.parse()?;
     let page =
         load_serving_effective_permissions_page(&fixture.pool, None, Some(id), None, None, 50)
@@ -37,7 +43,7 @@ async fn read(
             .map(|row| {
                 (
                     row.subject.clone(),
-                    row.grant_relation.is_some(),
+                    row.grant_relation,
                     row.effective_powers.clone(),
                 )
             })
@@ -139,8 +145,12 @@ async fn a_fuse_burn_between_two_publications_moves_the_page() -> Result<()> {
     assert_eq!(
         rows,
         vec![
-            (HOLDER.to_owned(), false, emancipated.clone()),
-            (OPERATOR.to_owned(), false, emancipated.clone()),
+            (HOLDER.to_owned(), None, emancipated.clone()),
+            (
+                OPERATOR.to_owned(),
+                Some(PermissionGrantRelation::Operator),
+                emancipated.clone()
+            ),
         ],
         "at 12"
     );
@@ -169,8 +179,12 @@ async fn a_fuse_burn_between_two_publications_moves_the_page() -> Result<()> {
     assert_eq!(
         rows,
         vec![
-            (HOLDER.to_owned(), false, locked.clone()),
-            (OPERATOR.to_owned(), false, locked),
+            (HOLDER.to_owned(), None, locked.clone()),
+            (
+                OPERATOR.to_owned(),
+                Some(PermissionGrantRelation::Operator),
+                locked
+            ),
         ],
         "at 14"
     );
@@ -199,8 +213,12 @@ async fn a_role_change_crossing_the_clock_moves_the_page() -> Result<()> {
     assert_eq!(
         read(&fixture, &resource).await?.0,
         vec![
-            (HOLDER.to_owned(), false, emancipated.clone()),
-            (OPERATOR.to_owned(), false, emancipated),
+            (HOLDER.to_owned(), None, emancipated.clone()),
+            (
+                OPERATOR.to_owned(),
+                Some(PermissionGrantRelation::Operator),
+                emancipated
+            ),
         ],
         "at 14"
     );
@@ -208,8 +226,12 @@ async fn a_role_change_crossing_the_clock_moves_the_page() -> Result<()> {
     assert_eq!(
         read(&fixture, &resource).await?.0,
         vec![
-            (HOLDER.to_owned(), false, json!(["approve"])),
-            (OPERATOR.to_owned(), false, json!(["approve"])),
+            (HOLDER.to_owned(), None, json!(["approve"])),
+            (
+                OPERATOR.to_owned(),
+                Some(PermissionGrantRelation::Operator),
+                json!(["approve"])
+            ),
         ],
         "at 15"
     );

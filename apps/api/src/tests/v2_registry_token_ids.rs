@@ -25,6 +25,8 @@ mod history_wrapper;
 mod migrated_subnames;
 #[path = "v2_registry_token_ids/node_identity.rs"]
 mod node_identity;
+#[path = "v2_registry_token_ids/permissions_wrapper_operator.rs"]
+mod permissions_wrapper_operator;
 #[path = "v2_registry_token_ids/races.rs"]
 mod races;
 #[path = "v2_registry_token_ids/routes.rs"]
