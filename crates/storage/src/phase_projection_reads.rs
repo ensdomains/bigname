@@ -3,7 +3,6 @@ mod names;
 mod resolver;
 mod status;
 
-pub(crate) use names::BOUND_NAME_PREDICATES;
 pub use names::{
     load_phase_identity_name_feed_records_by_ids, load_phase_identity_records_by_ids,
     load_phase_name_current_rows_by_ids,

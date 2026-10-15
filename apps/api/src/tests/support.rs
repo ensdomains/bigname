@@ -3995,7 +3995,43 @@ async fn publish_test_families_on(pool: &PgPool, chain: &str, target: i64) -> Re
     ).await?;
     anyhow::ensure!(outcome.marker.as_ref().map(|marker| marker.number) == Some(target),
         "the families published {chain} at {target}: {outcome:?}");
-    Ok(())
+    assert_bound_fields_follow_the_publication(pool, chain).await
+}
+
+/// After a block the family step published incrementally, the stored bound-name fields of every
+/// name equal a fresh composition: the summary writer's selection reached every name whose
+/// bound-name inputs the block changed. Large perf fixtures are left out, and so are fixtures
+/// no chain produces: block times that run backwards, or a surface whose canonicality a test
+/// rewrote apart from its block's.
+async fn assert_bound_fields_follow_the_publication(pool: &PgPool, chain: &str) -> Result<()> {
+    let (names, impossible): (i64, bool) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM project_name_summary WHERE chain_id = $1),
+                EXISTS (SELECT 1 FROM (
+                    SELECT block_timestamp < max(block_timestamp) OVER (
+                        ORDER BY block_number ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                    ) AS backwards
+                    FROM chain_lineage
+                    WHERE chain_id = $1 AND canonicality_state IN ('canonical', 'safe', 'finalized')
+                ) lineage WHERE backwards)
+                OR EXISTS (SELECT 1 FROM name_surfaces surface
+                           JOIN chain_lineage lineage ON lineage.chain_id = surface.chain_id
+                            AND lineage.block_hash = surface.block_hash
+                           WHERE surface.chain_id = $1
+                             AND (surface.canonicality_state = 'orphaned')
+                                 <> (lineage.canonicality_state = 'orphaned'))",
+    )
+    .bind(chain)
+    .fetch_one(pool)
+    .await?;
+    if names > 400
+        || impossible
+        || bigname_storage::families::name::load_family_publication(pool, chain)
+            .await?
+            .is_none()
+    {
+        return Ok(());
+    }
+    bigname_storage::families::name::assert_stored_bound_fields_are_fresh(pool, chain).await
 }
 
 /// Read the permanent family endpoint, preserving the full response for contract assertions.

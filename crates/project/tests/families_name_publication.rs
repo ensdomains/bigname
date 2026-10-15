@@ -136,10 +136,15 @@ async fn an_empty_bound_name_walk_during_a_rebuild_is_unavailable() -> Result<()
     let fixture = Fixture::new("families_name_bound_rebuild", 20).await?;
     registered(&fixture).await?;
     let resolver = "0x00000000000000000000000000000000000000d9";
-    let live = load_family_bound_names(&fixture.pool, CHAIN, resolver, None, None, 10).await?;
-    ensure!(live.is_empty(), "the resolver has no names: {live:?}");
+    let live =
+        load_family_bound_names(&fixture.pool, CHAIN, resolver, None, None, 10, true).await?;
+    ensure!(
+        live.rows.is_empty() && live.total_count == Some(0),
+        "the resolver has no names: {live:?}"
+    );
     set_marker_state(&fixture, CHAIN, "bootstrap_pending").await?;
-    let during = load_family_bound_names(&fixture.pool, CHAIN, resolver, None, None, 10).await;
+    let during =
+        load_family_bound_names(&fixture.pool, CHAIN, resolver, None, None, 10, true).await;
     assert!(
         during.as_ref().is_err_and(is_publication_unavailable),
         "an empty walk during a rebuild must be unavailable: {during:?}"

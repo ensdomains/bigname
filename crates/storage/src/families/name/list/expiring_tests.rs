@@ -86,7 +86,8 @@ pub(super) async fn install_fixture(connection: &mut PgConnection) -> Result<()>
              ({ROWS} + 9, ARRAY['0x' || repeat('c', 64), '0x' || repeat('2', 64),
                                 '0x' || repeat('1', 64)])) textless(n, path);
          INSERT INTO project_name_summary (chain_id, logical_name_id, namespace, serving,
-             zero_owner, expires_at, expiry_listable, public_authority, search_supported)
+             zero_owner, expires_at, expiry_listable, public_authority, search_supported,
+             resolver_listing_eligible, resolver_support_exempt, namehash)
          SELECT '{CHAIN}', 'ens:0x' || lpad(to_hex(n), 64, '0'), 'ens', TRUE, FALSE,
                 CASE WHEN n > {ROWS} + 1 THEN {TIE}
                      WHEN n % 501 = 0 THEN 9223372036854775808 + n
@@ -94,7 +95,8 @@ pub(super) async fn install_fixture(connection: &mut PgConnection) -> Result<()>
                      ELSE 1800000000 + n * 1000 + CASE WHEN n % 97 = 0 THEN 0.5 ELSE 0 END
                 END,
                 n % 11 <> 0,
-                (ARRAY['ens_v0', 'ens_v1', 'ens_v2', NULL])[n % 4 + 1], FALSE
+                (ARRAY['ens_v0', 'ens_v1', 'ens_v2', NULL])[n % 4 + 1], FALSE, FALSE, FALSE,
+                '0x' || lpad(to_hex(n), 64, '0')
          FROM fixture_name;
          ANALYZE name_surfaces; ANALYZE project_name_summary; ANALYZE chain_lineage;"
     ))

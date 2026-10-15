@@ -219,6 +219,17 @@ async fn v2_ens_v1_resolver_reports_the_pointer_beside_a_withheld_top_level_reso
         "{data:#}"
     );
     assert!(data.get("resolver").is_none(), "{data:#}");
+    // The withheld name is not a bound name of the resolver its registry pointer names.
+    assert!(
+        bigname_storage::families::name::assert_bound_names_match_the_walk(
+            &database.pool,
+            CHAIN,
+            PUBLIC_RESOLVER,
+            None
+        )
+        .await?
+        .is_empty()
+    );
     assert_eq!(
         data["ens_v1"]["expires_at"],
         json!(LEASE.to_string()),

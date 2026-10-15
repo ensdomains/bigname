@@ -53,28 +53,30 @@ fn batch_size(page_size: u64) -> usize {
 
 /// One composed row as the list CTE binds it (name_current/list.rs, `COMPOSED_NC_COLUMNS`).
 pub(super) fn source_row(row: &NameCurrentRow) -> Value {
-    let unsupported = super::list_keys::unsupported(&row.coverage);
-    json!({
-        "logical_name_id": row.logical_name_id,
-        "namespace": row.namespace,
-        "raw_name": row.normalized_name,
-        "display_name": row.canonical_display_name,
-        "namehash": row.namehash,
-        "surface_binding_id": row.surface_binding_id,
-        "resource_id": row.resource_id,
-        "serving_resource_id": row.serving_resource_id,
-        "token_lineage_id": row.token_lineage_id,
-        "binding_kind": row.binding_kind.map(|kind| kind.as_str()),
-        "declared_summary": row.declared_summary,
-        "provenance": row.provenance,
-        "listing_eligible": super::list_keys::listing_eligible(&row.coverage, &row.declared_summary),
-        "support_status": if unsupported { "unsupported" } else { "supported" },
-        "unsupported_reason": row.coverage.get("unsupported_reason"),
-        "chain_positions": row.chain_positions,
-        "canonicality_summary": row.canonicality_summary,
-        "manifest_version": row.manifest_version,
-        "last_recomputed_at": crate::time::format_timestamp(row.last_recomputed_at),
-    })
+    let mut source = super::bound_rules::bound_inputs(row);
+    for (key, value) in [
+        ("raw_name", json!(row.normalized_name)),
+        ("display_name", json!(row.canonical_display_name)),
+        ("namehash", json!(row.namehash)),
+        ("token_lineage_id", json!(row.token_lineage_id)),
+        (
+            "listing_eligible",
+            json!(super::list_keys::listing_eligible(
+                &row.coverage,
+                &row.declared_summary
+            )),
+        ),
+        ("chain_positions", row.chain_positions.clone()),
+        ("canonicality_summary", row.canonicality_summary.clone()),
+        ("manifest_version", json!(row.manifest_version)),
+        (
+            "last_recomputed_at",
+            json!(crate::time::format_timestamp(row.last_recomputed_at)),
+        ),
+    ] {
+        source.insert(key.to_owned(), value);
+    }
+    Value::Object(source)
 }
 
 /// Composed rows gathered across candidate batches, each name once.

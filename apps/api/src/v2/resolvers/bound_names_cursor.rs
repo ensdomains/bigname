@@ -11,13 +11,15 @@ const RESOLVER_FILTER_KEY: &str = "resolver";
 const NAMESPACE_FILTER_KEY: &str = "namespace";
 const SORT_VALUE_CURSOR_KEY: &str = "sort_value";
 const CURSOR_NAMESPACE_KEY: &str = "namespace";
-const NORMALIZED_NAME_CURSOR_KEY: &str = "normalized_name";
+/// The order name the listing continues from (`BoundName::order_name`). A cursor written before
+/// the listing ordered by it holds `normalized_name` instead, and is refused as malformed.
+const ORDER_NAME_CURSOR_KEY: &str = "order_name";
 const NAMEHASH_CURSOR_KEY: &str = "namehash";
 const NONE_FILTER_VALUE: &str = "";
 const POSITION_KEYS: [&str; 4] = [
     SORT_VALUE_CURSOR_KEY,
     CURSOR_NAMESPACE_KEY,
-    NORMALIZED_NAME_CURSOR_KEY,
+    ORDER_NAME_CURSOR_KEY,
     NAMEHASH_CURSOR_KEY,
 ];
 
@@ -58,7 +60,7 @@ pub(crate) fn bound_names_next_cursor(
     bound_names_list_cursor(binding).next(ListPosition::new([
         (SORT_VALUE_CURSOR_KEY, cursor_sort_value(cursor)),
         (CURSOR_NAMESPACE_KEY, cursor.namespace.clone()),
-        (NORMALIZED_NAME_CURSOR_KEY, cursor.normalized_name.clone()),
+        (ORDER_NAME_CURSOR_KEY, cursor.normalized_name.clone()),
         (NAMEHASH_CURSOR_KEY, cursor.namehash.clone()),
     ]))
 }
@@ -87,7 +89,7 @@ pub(crate) fn bound_names_storage_cursor(
             position.get(SORT_VALUE_CURSOR_KEY)?.to_owned(),
         ),
         namespace: position.get(CURSOR_NAMESPACE_KEY)?.to_owned(),
-        normalized_name: position.get(NORMALIZED_NAME_CURSOR_KEY)?.to_owned(),
+        normalized_name: position.get(ORDER_NAME_CURSOR_KEY)?.to_owned(),
         namehash: position.get(NAMEHASH_CURSOR_KEY)?.to_owned(),
     })
 }

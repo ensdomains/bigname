@@ -187,6 +187,11 @@ async fn v2_textless_name_is_a_bound_name_of_its_resolver() -> Result<()> {
             "{pages:#?}"
         );
     }
+    assert_eq!(
+        bigname_storage::families::name::assert_bound_names_match_the_walk(&database.pool, FAMILY_CHAIN, FAMILY_RESOLVER, None)
+            .await?,
+        [fixture.first_name.as_str()]
+    );
     database.cleanup().await
 }
 

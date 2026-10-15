@@ -99,7 +99,7 @@ async fn lifecycle_schema_migration_fences_old_payload_and_is_repeatable() -> Re
         raw_sql(migration).execute(&mut *conn).await?;
         let counts: (i64,i64) = sqlx::query_as("SELECT (SELECT count(*) FROM project_name_summary), (SELECT count(*) FROM project_family_marker)").fetch_one(&mut *conn).await?;
         assert_eq!(counts, (0,0));
-        raw_sql("INSERT INTO project_name_summary (chain_id, logical_name_id, namespace, serving, zero_owner, expiry_listable, search_supported, search_fields) VALUES ('test', 'ens:rebuilt', 'ens', false, false, false, true, '{\"status\":\"unregistered\"}')")
+        raw_sql("INSERT INTO project_name_summary (chain_id, logical_name_id, namespace, serving, zero_owner, expiry_listable, search_supported, search_fields, resolver_listing_eligible, resolver_support_exempt, namehash) VALUES ('test', 'ens:rebuilt', 'ens', false, false, false, true, '{\"status\":\"unregistered\"}', false, false, 'rebuilt')")
             .execute(&mut *conn).await?;
         raw_sql(migration).execute(&mut *conn).await?;
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM project_name_summary").fetch_one(&mut *conn).await?;

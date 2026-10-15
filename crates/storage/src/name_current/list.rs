@@ -219,14 +219,8 @@ pub(crate) async fn list_page_from(
     })
 }
 
-/// The column list of a composed row set bound as `jsonb_to_recordset` (the rows
-/// `source_row` in families/name/list.rs builds).
-pub(crate) const COMPOSED_NC_COLUMNS: &str =
-    "nc(logical_name_id text, namespace text, raw_name text, display_name text,
-    namehash text, surface_binding_id uuid, resource_id uuid, serving_resource_id uuid,
-    token_lineage_id uuid, binding_kind text, declared_summary jsonb, provenance jsonb,
-    support_status text, unsupported_reason text, listing_eligible boolean, chain_positions jsonb,
-    canonicality_summary jsonb, manifest_version bigint, last_recomputed_at timestamptz)";
+/// The column list of a composed row set bound as `jsonb_to_recordset`.
+pub(crate) use crate::families::name::COMPOSED_NC_COLUMNS;
 
 /// Push the `filtered_names` CTE over the served rows, or over `composed` rows, which the
 /// composed reader has already judged readable, and let the caller append extra predicates

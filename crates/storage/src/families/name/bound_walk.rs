@@ -1,0 +1,313 @@
+//! The bound-name listing as it stood before it selected names from the name summary: a walk
+//! of the names the resolver's pointers reach, in page order, composing each batch and keeping
+//! the rows the bound-name rules admit. The parity tests compare the summary-selected page with
+//! this one, so the body below is a frozen copy, rules included, and is never edited to follow
+//! the current reader. It is compiled for tests only.
+use anyhow::{Context, Result, bail};
+use serde_json::Value;
+use sqlx::{PgConnection, Row};
+
+use super::{CoverageShape, batch};
+use crate::{
+    NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentRow,
+    families::topology::{
+        FAMILY_RESOLVER_SERVED_ROWS, FAMILY_RESOLVER_SUMMARY, rendered_lateral_sql,
+        textless_surface_sql, textless_surfaces_exist_sql,
+    },
+    name_current::{COMPOSED_NC_COLUMNS, DEFAULT_NAME_CURRENT_LINEAGE_JOINS},
+};
+
+/// At least this many candidates are composed per walk step.
+const BATCH_FLOOR: i64 = 200;
+
+/// The bound-name listing over the composed rows: up to `limit` names
+/// bound to `resolver_address` on `chain_id`, after `cursor`, in name order.
+pub async fn load_bound_names_by_walk(
+    db: impl Into<crate::ReadDb<'_>>,
+    chain_id: &str,
+    resolver_address: &str,
+    namespace: Option<&str>,
+    cursor: Option<&NameCurrentListCursor>,
+    limit: i64,
+) -> Result<Vec<NameCurrentRow>> {
+    let mut after = cursor
+        .map(|cursor| match &cursor.sort_value {
+            NameCurrentListCursorValue::Name(_) => Ok((
+                cursor.normalized_name.clone(),
+                cursor.namespace.clone(),
+                cursor.namehash.clone(),
+            )),
+            _ => bail!("composed bound-name cursor must use name ordering"),
+        })
+        .transpose()?;
+    let wanted = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+    let batch = i64::try_from(super::seams::batch_size(
+        usize::try_from(limit.saturating_add(1).saturating_mul(4).max(BATCH_FLOOR))
+            .unwrap_or(usize::MAX),
+    ))
+    .unwrap_or(i64::MAX);
+    let mut snapshot = db.into().snapshot().await?;
+    // The walk reads family tables, which a rebuild empties: read the marker first, so a rebuild
+    // refuses rather than answers a resolver with no names.
+    batch::ensure_published(&mut snapshot, &[chain_id.to_owned()]).await?;
+    let mut out = Vec::new();
+    while out.len() < wanted {
+        let candidates = candidates(
+            &mut snapshot,
+            (chain_id, resolver_address, namespace),
+            after.as_ref(),
+            batch,
+        )
+        .await?;
+        let exhausted = i64::try_from(candidates.len()).unwrap_or(i64::MAX) < batch;
+        let Some((_, name, space, hash)) = candidates.last() else {
+            break;
+        };
+        after = Some((name.clone(), space.clone(), hash.clone()));
+        let ids: Vec<String> = candidates.into_iter().map(|(id, ..)| id).collect();
+        let mut composed = batch::load(&mut snapshot, &ids, CoverageShape::Plain).await?;
+        let source = Value::Array(composed.values().map(super::list::source_row).collect());
+        let remaining = i64::try_from(wanted - out.len()).unwrap_or(i64::MAX);
+        for id in admitted(
+            &mut snapshot,
+            (chain_id, resolver_address),
+            &source,
+            remaining,
+        )
+        .await?
+        {
+            out.push(
+                composed
+                    .remove(&id)
+                    .with_context(|| format!("composed bound name {id} vanished"))?,
+            );
+        }
+        if exhausted {
+            break;
+        }
+    }
+    snapshot.close().await?;
+    Ok(out)
+}
+
+/// Bound by `candidates`. The length bound matches
+/// `name_surfaces_name_order_idx`'s predicate, so the walk reads that index in page order. With no
+/// cursor the keyset bound is `('', '', '')`, below every row (namespaces are never empty), so a
+/// generic plan still binds the cursor as an index condition.
+const BOUND_WALK_CANDIDATES_SQL: &str = "/* storage:families.name.bound_walk_candidates */
+     WITH reached AS (
+         SELECT event.logical_name_id
+         FROM bigname_phase.project_resource_pointer pointer
+         JOIN bigname_phase.normalized_events event
+           ON event.event_identity = pointer.pointer_position ->> 'event_identity'
+         WHERE pointer.chain_id = $1 AND pointer.resolver_address = lower($2)
+           AND event.logical_name_id IS NOT NULL
+         UNION
+         SELECT pointer.namespace || ':' || lower(pointer.namehash)
+         FROM bigname_phase.project_resource_pointer pointer
+         WHERE pointer.chain_id = $1 AND pointer.resolver_address = lower($2)
+           AND pointer.source_family = 'ens_v2_root_l1'
+           AND pointer.namespace IS NOT NULL AND pointer.namehash IS NOT NULL
+         UNION
+         SELECT event.logical_name_id
+         FROM bigname_phase.project_registry_pointer pointer
+         JOIN bigname_phase.normalized_events event
+           ON event.event_identity = pointer.event_identity
+         WHERE pointer.chain_id = $1 AND pointer.resolver_address = lower($2)
+           AND pointer.resource_id IS NULL AND event.logical_name_id IS NOT NULL
+         UNION
+         -- Named F5 keys retain a name's own latest pointer when the resource's latest
+         -- pointer names another name. The resolver index reads retained pointer keys,
+         -- never the history of ResolverChanged events at this resolver.
+         SELECT pointer.logical_name_id
+         FROM bigname_phase.project_named_resource_pointer pointer
+         WHERE pointer.chain_id = $1 AND pointer.resolver_address = lower($2)
+     )
+     SELECT surface.logical_name_id, surface.raw_name, surface.namespace, surface.namehash
+     FROM reached
+     JOIN bigname_phase.name_surfaces surface
+       ON surface.logical_name_id = reached.logical_name_id
+     JOIN bigname_phase.chain_lineage lineage
+       ON lineage.chain_id = surface.chain_id AND lineage.block_hash = surface.block_hash
+     JOIN bigname_phase.project_family_marker marker ON marker.chain_id = surface.chain_id
+     WHERE surface.visibility_state = 'active'
+       AND octet_length(surface.raw_name) <= 2000
+       AND surface.block_number <= marker.current_block_number
+       AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
+       AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+       AND ($3::text IS NULL OR surface.namespace = $3)
+       AND (surface.raw_name, surface.namespace, surface.namehash)
+           > (COALESCE($4, ''), COALESCE($5, ''), COALESCE($6, ''))
+     ORDER BY surface.raw_name, surface.namespace, surface.namehash
+     LIMIT $7";
+
+/// The statement `candidates` runs: [`BOUND_WALK_CANDIDATES_SQL`], unchanged, for the surfaces with raw
+/// bytes, then the reached surfaces without them under their served name (`rendered`), merged in
+/// page order. The second arm repeats the first arm's `reached` text rather than sharing one
+/// CTE, which the planner would materialize for both, and is not run while no surface lacks its
+/// bytes (`textless_surfaces_exist_sql`).
+fn bound_walk_candidates_sql() -> String {
+    let (tagged_reached, _) = BOUND_WALK_CANDIDATES_SQL
+        .split_once("\n     SELECT surface.")
+        .expect("the bound candidates select from their reached names");
+    let (_, reached) = tagged_reached
+        .split_once("*/")
+        .expect("the bound candidates statement is tagged");
+    format!(
+        "({BOUND_WALK_CANDIDATES_SQL})
+     UNION ALL
+     ({reached}
+      SELECT surface.logical_name_id, rendered.name, surface.namespace, surface.namehash
+      FROM reached
+      JOIN bigname_phase.name_surfaces surface
+        ON surface.logical_name_id = reached.logical_name_id
+      JOIN bigname_phase.chain_lineage lineage
+        ON lineage.chain_id = surface.chain_id AND lineage.block_hash = surface.block_hash
+      JOIN bigname_phase.project_family_marker marker ON marker.chain_id = surface.chain_id
+      {rendered}
+      WHERE {exist} AND {textless} AND surface.visibility_state = 'active'
+        AND surface.block_number <= marker.current_block_number
+        AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
+        AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+        AND ($3::text IS NULL OR surface.namespace = $3)
+        AND (rendered.name, surface.namespace, surface.namehash)
+            > (COALESCE($4, ''), COALESCE($5, ''), COALESCE($6, ''))
+      ORDER BY rendered.name, surface.namespace, surface.namehash
+      LIMIT $7)
+     ORDER BY raw_name, namespace, namehash
+     LIMIT $7",
+        rendered = rendered_lateral_sql(),
+        exist = textless_surfaces_exist_sql(),
+        textless = textless_surface_sql("surface"),
+    )
+}
+
+/// The next names after `after` in the page order that a pointer naming the resolver reaches:
+/// (logical_name_id, served name, namespace, namehash). A candidate is a superset: `admitted`
+/// keeps the names whose composed row serves the resolver.
+async fn candidates(
+    conn: &mut PgConnection,
+    (chain_id, resolver_address, namespace): (&str, &str, Option<&str>),
+    after: Option<&(String, String, String)>,
+    limit: i64,
+) -> Result<Vec<(String, String, String, String)>> {
+    let rows = sqlx::query(&bound_walk_candidates_sql())
+        .bind(chain_id)
+        .bind(resolver_address)
+        .bind(namespace)
+        .bind(after.map(|(name, ..)| name.as_str()))
+        .bind(after.map(|(_, namespace, _)| namespace.as_str()))
+        .bind(after.map(|(.., namehash)| namehash.as_str()))
+        .bind(limit)
+        .fetch_all(conn)
+        .await
+        .with_context(|| {
+            format!("failed to walk the bound-name candidates of {chain_id}:{resolver_address}")
+        })?;
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get("logical_name_id")?,
+                row.try_get("raw_name")?,
+                row.try_get("namespace")?,
+                row.try_get("namehash")?,
+            ))
+        })
+        .collect()
+}
+
+/// The ids of the composed rows in `source` the served predicates admit, in page order, at most
+/// `limit`.
+async fn admitted(
+    conn: &mut PgConnection,
+    (chain_id, resolver_address): (&str, &str),
+    source: &Value,
+    limit: i64,
+) -> Result<Vec<String>> {
+    let query = format!(
+        "/* storage:families.name.bound_walk_admitted */
+         SELECT nc.logical_name_id
+         FROM JSONB_TO_RECORDSET($3::jsonb) AS {COMPOSED_NC_COLUMNS}
+         JOIN bigname_phase.name_surfaces surface
+           ON surface.logical_name_id = nc.logical_name_id
+         LEFT JOIN bigname_phase.resources resource
+           ON resource.resource_id = nc.resource_id
+         LEFT JOIN bigname_phase.surface_bindings binding
+           ON binding.surface_binding_id = nc.surface_binding_id
+         LEFT JOIN bigname_phase.token_lineages token_lineage
+           ON token_lineage.token_lineage_id = nc.token_lineage_id
+         LEFT JOIN LATERAL (
+             SELECT {FAMILY_RESOLVER_SUMMARY} AS declared_summary
+             FROM bigname_phase.project_resolver_classification classification_row
+             WHERE classification_row.chain_id = $1
+               AND classification_row.resolver_address = lower($2)
+               AND {FAMILY_RESOLVER_SERVED_ROWS}
+         ) resolver_capability ON TRUE
+         {DEFAULT_NAME_CURRENT_LINEAGE_JOINS}
+         WHERE {BOUND_NAME_PREDICATES}
+         ORDER BY nc.raw_name, nc.namespace, nc.namehash
+         LIMIT $4"
+    );
+    sqlx::query_scalar(&query)
+        .bind(chain_id)
+        .bind(resolver_address)
+        .bind(source)
+        .bind(limit)
+        .fetch_all(conn)
+        .await
+        .with_context(|| {
+            format!("failed to filter the composed bound names of {chain_id}:{resolver_address}")
+        })
+}
+
+const BOUND_NAME_PREDICATES: &str = r#"
+  nc.support_status IN ('supported', 'unsupported')
+  -- Retained pointer evidence alone does not list a name whose authority is not projected.
+  -- An ENSv2 TLD's current root-registry pointer is its serving resource and does.
+  AND (
+      nc.unsupported_reason IS DISTINCT FROM 'current_authority_not_projected'
+      OR nc.provenance #>> '{read_reachability,basis}' =
+          'root_registry_resolver_pointer'
+  )
+  AND (
+      (
+          nc.surface_binding_id IS NOT NULL
+          AND nc.declared_summary #>> '{registration,status}' IS DISTINCT FROM 'released'
+          AND NULLIF(btrim(COALESCE(
+                  nc.declared_summary #>> '{registration,released_at}', ''
+              )), '') IS NULL
+          AND (
+              nc.declared_summary #>> '{registration,authority_kind}' = 'registrar'
+              OR (
+                  nc.declared_summary #>> '{registration,authority_kind}'
+                      IN ('registry_only', 'ens_v2_registry')
+                  AND NULLIF(btrim(COALESCE(
+                      nc.declared_summary #>> '{control,owner}',
+                      nc.declared_summary #>> '{control,registry_owner}', ''
+                  )), '') IS NOT NULL
+              )
+              OR (
+                  nc.declared_summary #>> '{registration,authority_kind}' = 'wrapper'
+                  AND nc.namespace <> 'basenames'
+              )
+          )
+      )
+      OR (
+          nc.surface_binding_id IS NULL
+          AND nc.resource_id IS NULL
+          AND nc.serving_resource_id IS NOT NULL
+          AND nc.binding_kind IS NULL
+          AND nc.namespace IN ('ens', 'basenames')
+          AND nc.provenance #>> '{read_reachability,basis}' IN (
+              'retained_registry_resolver_pointer', 'root_registry_resolver_pointer'
+          )
+      )
+  )
+  AND nc.declared_summary #>> '{resolver,chain_id}' = $1
+  AND lower(nc.declared_summary #>> '{resolver,address}') = lower($2)
+  AND (
+      nc.resource_id IS NOT NULL
+      OR nc.serving_resource_id IS NULL
+      OR resolver_capability.declared_summary #>> '{bindings,status}' = 'supported'
+  )
+"#;
