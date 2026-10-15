@@ -258,8 +258,10 @@ fn push_token_holder_match_filter<'a>(
 }
 
 /// An ENSv2 registry moves the sender's roles on a name to the recipient with its token, so the
-/// recipient of an ENSv2 registry or root registry transfer is the name's manager. The arm has
-/// the event kind and the expression of the token-holder match index, so it reads that index.
+/// recipient of an ENSv2 registry or root registry transfer is the name's manager. A transfer
+/// with no name, such as one inside a registry with no path to a root, moves no `manager`, as a
+/// controller candidate needs a name. The arm has the event kind and the expression of the
+/// token-holder match index, so it reads that index.
 /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L517-L547 @ ens_v2_sepolia_20261001@07e55a05)
 fn push_ens_v2_transfer_controller_match_filter<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
@@ -270,6 +272,7 @@ fn push_ens_v2_transfer_controller_match_filter<'a>(
         (
             ne.event_kind = 'TokenControlTransferred'
             AND ne.source_family IN ('ens_v2_registry_l1', 'ens_v2_root_l1')
+            AND ne.logical_name_id IS NOT NULL
             AND LOWER(COALESCE(ne.after_state ->> 'to', '')) =
         "#,
     );

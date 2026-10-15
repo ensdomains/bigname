@@ -408,3 +408,38 @@ async fn a_migrated_name_sent_on_ens_v2_moves_the_manager_relation() -> Result<(
     assert_eq!(looked_up(&database, RECIPIENT, "manager").await?, vec!["alpha.eth".to_owned()]);
     database.cleanup().await
 }
+
+sol! {
+    event RegistryCreated();
+}
+
+/// A registry that no root reaches, admitted by the `RegistryCreated` its constructor emits,
+/// registers the label to Alice, who sends the token with all her roles to Bob. The token has
+/// a registration and no name, so the transfer moves no `manager`: Bob's history holds the
+/// transfer under `owner` and nothing under `manager`, as no name lists him as its manager.
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L117-L120 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L185-L190 @ ens_v2_sepolia_20261001@07e55a05)
+#[tokio::test]
+async fn a_transfer_in_a_registry_no_root_reaches_moves_no_manager_history() -> Result<()> {
+    let mut logs = Logs::default();
+    logs.push(120, RegistryCreated {}.encode_log_data())
+        .roles(120, U256::ZERO, ROOT_HOLDER, U256::ZERO, bit(0) | bit(128))
+        .register(121, FAR);
+    send(&mut logs, 124, versioned(0), ALICE, BOB, owner_roles());
+    let output = interpret_in(ETH_REGISTRY, logs, false)?;
+    let sent = output.normalized_events.iter()
+        .filter(|event| event.event_kind == "TokenControlTransferred" && event.block_number == Some(124))
+        .collect::<Vec<_>>();
+    assert_eq!(sent.len(), 1, "{sent:#?}");
+    assert_eq!((sent[0].logical_name_id.as_deref(), sent[0].resource_id.is_some(),
+        sent[0].source_family.as_str()), (None, true, "ens_v2_registry_l1"), "{sent:#?}");
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_blocks(&database, 120..=132).await?;
+    store_interpreted(&database, &output).await?;
+    publish(&database, &output, 124).await?;
+    let owner = history(&database, BOB, "owner").await?;
+    assert!(owner.as_array().unwrap().iter().any(|row| row["block_number"] == 124), "{owner:#}");
+    assert_eq!(history(&database, BOB, "manager").await?, json!([]));
+    assert_eq!(listed(&database, BOB, "relation=manager").await?, Vec::<(String, Value)>::new());
+    database.cleanup().await
+}

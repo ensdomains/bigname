@@ -334,6 +334,29 @@ async fn seed_in(
     logs: Logs,
     declared: bool,
 ) -> Result<(Uuid, Output)> {
+    let output = interpret_in(registry, logs, true)?;
+    let token = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "PermissionChanged")
+        .and_then(|event| event.resource_id)
+        .context("the owner's grant names the token resource")?;
+
+    seed_v2_history_blocks(database, 120..=132).await?;
+    declare(database, registry, declared).await?;
+    let surface = output.name_surfaces.first().context("the registration names the label")?;
+    let mut name = collection_name_surface(&format!("ens:{}", registry.name), registry.name,
+        &surface.namehash, 121);
+    name.block_hash = "0xhistory121".into();
+    upsert_test_name_surfaces(&database.pool, &[name]).await?;
+    store_interpreted(database, &output).await?;
+    Ok((token, output))
+}
+
+/// Runs `logs` through the production adapter under `registry`'s family. `admitted` gives the
+/// adapter the registry's manifest admission, which anchors its names. Without it the registry
+/// is admitted only by the `RegistryCreated` its own logs announce.
+fn interpret_in(registry: Registry, logs: Logs, admitted: bool) -> Result<Output> {
     let (manifest, admission) = registry_family(registry);
     let (output, _) = prepare_schema_v2_batch_incremental(
         BatchInput {
@@ -349,7 +372,7 @@ async fn seed_in(
                     admission: "reachable_from_root".into(),
                 })
                 .collect(),
-            admissions: vec![admission],
+            admissions: if admitted { vec![admission] } else { vec![] },
             prior_events: vec![],
             blocks: (120..=132)
                 .map(|block| RawBlockInput {
@@ -367,20 +390,11 @@ async fn seed_in(
     )?
     .finish(vec![])?;
     assert!(output.decode_skips.is_empty(), "{:?}", output.decode_skips);
-    let token = output
-        .normalized_events
-        .iter()
-        .find(|event| event.event_kind == "PermissionChanged")
-        .and_then(|event| event.resource_id)
-        .context("the owner's grant names the token resource")?;
+    Ok(output)
+}
 
-    seed_v2_history_blocks(database, 120..=132).await?;
-    declare(database, registry, declared).await?;
-    let surface = output.name_surfaces.first().context("the registration names the label")?;
-    let mut name = collection_name_surface(&format!("ens:{}", registry.name), registry.name,
-        &surface.namehash, 121);
-    name.block_hash = "0xhistory121".into();
-    upsert_test_name_surfaces(&database.pool, &[name]).await?;
+/// Stores the token lineages, resources and events of `output` as Interpret would.
+async fn store_interpreted(database: &TestDatabase, output: &Output) -> Result<()> {
     upsert_test_token_lineages(&database.pool, &output.token_lineages.iter()
         .map(|l| address_name_token_lineage(l.token_lineage_id, &l.block_hash, l.block_number))
         .collect::<Vec<_>>()).await?;
@@ -405,7 +419,7 @@ async fn seed_in(
         })
         .collect::<Vec<_>>();
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
-    Ok((token, output))
+    Ok(())
 }
 
 /// `(address, scope kind, account owner, powers)` of every row, in served order.

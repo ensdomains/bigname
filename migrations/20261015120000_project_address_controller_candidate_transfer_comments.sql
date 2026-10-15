@@ -13,17 +13,17 @@ END IF;
 
 EXECUTE $ddl$
 COMMENT ON TABLE bigname_phase.project_address_controller_candidate IS
-    'Project-owned controller candidates of family F13: every named controller event (AuthorityTransferred, state-derived registry-only SurfaceBound, resource-scoped PermissionChanged, and an ENSv2 registry or root registry TokenControlTransferred, whose recipient takes the sender''s roles) with its resource and position, never pruned, so a read folds the candidates the served admission keeps (address_names.rs:115-283).'
+    'Project-owned controller candidates of family F13: every named controller event (AuthorityTransferred, state-derived registry-only SurfaceBound, resource-scoped PermissionChanged, and an ENSv2 registry or root registry TokenControlTransferred, whose recipient takes the sender''s roles (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L517-L547 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L236-L252 @ ens_v2_sepolia_20261001@07e55a05)) with its resource and position, never pruned, so a read folds the candidates the served admission keeps (address_names.rs:115-283).'
 $ddl$;
 
 EXECUTE $ddl$
 COMMENT ON COLUMN bigname_phase.project_address_controller_candidate.action IS
-    'This value is set for an AuthorityTransferred, a SurfaceBound, an ENSv2 registry or root registry TokenControlTransferred and a PermissionChanged whose effective powers hold resource_control, and revoke for any other resource-scoped PermissionChanged, before any read-time mask.'
+    'This value is set for an AuthorityTransferred, a SurfaceBound, an ENSv2 registry or root registry TokenControlTransferred, whose recipient takes the sender''s roles (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L517-L547 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L236-L252 @ ens_v2_sepolia_20261001@07e55a05), and a PermissionChanged whose effective powers hold resource_control, and revoke for any other resource-scoped PermissionChanged, before any read-time mask.'
 $ddl$;
 
 EXECUTE $ddl$
 COMMENT ON COLUMN bigname_phase.project_address_controller_candidate.subject IS
-    'This value is the lower-cased controller the event names: the registry owner (the zero address for a masked owner word), the SurfaceBound owner, the permission subject or the ENSv2 transfer recipient.'
+    'This value is the lower-cased controller the event names: the registry owner (the zero address for a masked owner word), the SurfaceBound owner, the permission subject or the ENSv2 transfer recipient, who takes the sender''s roles (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L517-L547 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L236-L252 @ ens_v2_sepolia_20261001@07e55a05).'
 $ddl$;
 END
 $migration$;

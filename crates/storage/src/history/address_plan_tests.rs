@@ -304,7 +304,8 @@ type AnchorCase<'a> = (
 /// The anchor lookup must reach the target's rows through the three address-match indexes,
 /// not by reading every grant and transfer, and must find the target's name and resource. The
 /// `manager` lookup alone reads the registry owner index for the owner transfer and the token
-/// holder index for the ENSv2 registry transfer, and finds both of their anchors.
+/// holder index for the ENSv2 registry transfer, and finds only the owner transfer's anchor: the
+/// ENSv2 transfer carries no name, so it moves no `manager`.
 async fn check_anchor_plan(connection: &mut PgConnection) -> Result<()> {
     let manager = [AddressNameRelation::EffectiveController];
     let cases: [AnchorCase<'_>; 2] = [
@@ -320,7 +321,7 @@ async fn check_anchor_plan(connection: &mut PgConnection) -> Result<()> {
         (
             Some(&manager),
             &ANCHOR_INDEXES[1..],
-            BTreeSet::from([(None, Some(target_resource())), (Some(target_name()), None)]),
+            BTreeSet::from([(Some(target_name()), None)]),
         ),
     ];
     let mut plan_failures = Vec::new();

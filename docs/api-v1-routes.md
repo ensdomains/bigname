@@ -2108,8 +2108,8 @@ A recognized namespace with no available publication returns retryable `409 stal
   on a token-backed, Basenames or ENSv2 resource, an
   `AuthorityTransferred` owner on a registry-only or ENSv2 resource, and,
   for an effective controller, the recipient of an ENSv2 registry or root
-  registry `TokenControlTransferred`, which the transfer makes the
-  [manager](api-v1.md#manager). The
+  registry `TokenControlTransferred` that carries a name, which the transfer
+  makes the [manager](api-v1.md#manager). The
   second current input is the resolver's current classification row, which
   decides whether an ENSv2 resolver pointer attributes node-keyed writes on
   that resolver.

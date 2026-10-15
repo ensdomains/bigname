@@ -25,7 +25,7 @@ fn holding(address: &str, name: Option<&str>, id: Option<u128>, mask: i16) -> Ho
         mask,
     )
 }
-/// The holdings of an ENSv2 registry transfer's recipient: the token holder and, as the
+/// The holdings of a named ENSv2 registry transfer's recipient: the token holder and, as the
 /// transfer moves the sender's roles, the controller.
 fn sent(address: &str, name: Option<&str>, id: Option<u128>) -> [Holding; 2] {
     [holding(address, name, id, 1), holding(address, name, id, 2)]
@@ -146,9 +146,11 @@ async fn evidence_arms_keep_name_resource_nameless_and_repeated_keys() -> Result
             'basenames_base_registry', 1, 'base-mainnet', 1, 'other-chain', 'ens_v2_registry_resource_surface', 'canonical', '{\"to\":\"other-chain\"}')")
             .execute(&mut *c).await?;
         let names = vec![NAME.into()]; let resources = vec![resource(1), resource(2), resource(3), resource(5), resource(12)];
-        let all = [sent("both", Some(NAME), Some(1)), sent("resource", Some(OTHER_NAME), Some(2)),
-            sent("nameless", None, Some(3)), sent("name", Some(NAME), Some(4)),
-            sent("empty-name", Some("ens:empty"), Some(5))].concat();
+        // A transfer with no name holds its token but moves no controller.
+        let nameless = holding("nameless", None, Some(3), 1);
+        let all = [&sent("both", Some(NAME), Some(1))[..], &sent("resource", Some(OTHER_NAME), Some(2)),
+            std::slice::from_ref(&nameless), &sent("name", Some(NAME), Some(4)),
+            &sent("empty-name", Some("ens:empty"), Some(5))].concat();
         assert_holdings(c, &names, &resources, all.clone()).await?;
         assert_holdings(c, &[NAME.into(), NAME.into()], &resources.repeat(2), all.clone()).await?;
         let mut reversed = resources.clone(); reversed.reverse();
@@ -156,8 +158,8 @@ async fn evidence_arms_keep_name_resource_nameless_and_repeated_keys() -> Result
         assert_holdings(c, &[], &[], vec![]).await?;
         assert_holdings(c, &[String::new()], &[], vec![]).await?;
         assert_holdings(c, &names, &[], [sent("both", Some(NAME), Some(1)), sent("name", Some(NAME), Some(4))].concat()).await?;
-        assert_holdings(c, &[], &resources, [sent("both", Some(NAME), Some(1)), sent("resource", Some(OTHER_NAME), Some(2)),
-            sent("nameless", None, Some(3)), sent("empty-name", Some("ens:empty"), Some(5))].concat()).await?;
+        assert_holdings(c, &[], &resources, [&sent("both", Some(NAME), Some(1))[..], &sent("resource", Some(OTHER_NAME), Some(2)),
+            &[nameless], &sent("empty-name", Some("ens:empty"), Some(5))].concat()).await?;
         Ok(())
     }).await
 }
