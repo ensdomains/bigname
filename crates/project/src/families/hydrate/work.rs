@@ -13,20 +13,22 @@ use crate::{ProjectError, Result};
 
 pub(crate) type Images = BTreeMap<&'static str, Vec<Value>>;
 
+/// The tables whose changed rows say which hydration keys a block or a publication touches.
+static SOURCES: [&tables::TableSpec; 8] = [
+    &tables::NODE_RECORD_VALUE,
+    &tables::NODE_RECORD_PARTITION,
+    &tables::RESOLVER_CLASSIFICATION,
+    &tables::REVERSE_TUPLE,
+    &tables::REGISTRY_POINTER,
+    &tables::RESOURCE_POINTER,
+    &tables::REVERSE_NODE_CLAIM,
+    &tables::CLAIM_NORMALIZATION,
+];
+
 pub(crate) fn images(changes: &[Change<'_>]) -> Images {
     let mut images = Images::new();
     for change in changes {
-        if !matches!(
-            change.table.name,
-            "project_node_record_value"
-                | "project_node_record_partition"
-                | "project_resolver_classification"
-                | "project_reverse_tuple"
-                | "project_registry_pointer"
-                | "project_resource_pointer"
-                | "project_reverse_node_claim"
-                | "project_claim_normalization"
-        ) {
+        if !SOURCES.iter().any(|table| table.name == change.table.name) {
             continue;
         }
         let entries = images.entry(change.table.name).or_default();
@@ -174,6 +176,17 @@ pub(super) async fn replace(
     Ok(())
 }
 
+/// The images of the rows the current block changed, each with its value before that block
+/// (`RowSet::changes_in`). A rebuild range applies all its blocks in one working set, where the
+/// transaction's changes would also hold every earlier block of the range.
 pub(super) fn changed_images(rows: &RowSet) -> Images {
-    images(&rows.written())
+    let changes: Vec<_> = SOURCES
+        .iter()
+        .flat_map(|&table| rows.changes_in(table))
+        .collect();
+    images(&changes)
 }
+
+#[cfg(test)]
+#[path = "work_tests.rs"]
+mod tests;
