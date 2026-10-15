@@ -114,6 +114,16 @@ async fn walked(
     fixture: &Fixture,
     path: &[&String],
 ) -> Result<Option<(i32, String, String)>> {
+    walked_at(pool, fixture, path, 2).await
+}
+
+/// [`walked`] for a publication at `block`.
+async fn walked_at(
+    pool: &PgPool,
+    fixture: &Fixture,
+    path: &[&String],
+    block: i64,
+) -> Result<Option<(i32, String, String)>> {
     let pointer = ServingPointer {
         resource_id: Uuid::nil(),
         logical_name_id: fixture.id(path),
@@ -125,7 +135,7 @@ async fn walked(
         block_number: 2,
     };
     let mut conn = pool.acquire().await?;
-    let (nearest, _) = nearest(&mut conn, CHAIN, &pointer).await?;
+    let (nearest, _) = nearest(&mut conn, CHAIN, &pointer, block).await?;
     Ok(nearest.map(|nearest| {
         assert_eq!(
             nearest.mirrored_node,
@@ -206,6 +216,49 @@ async fn the_walk_follows_names_and_ancestors_without_raw_labels() -> Result<()>
         );
         Ok(())
     })
+    .await
+}
+
+// Interpret can run ahead of Project. A surface anchored above the publication is not yet
+// part of the chain the publication composes, so the walk reads neither an ancestor's surface
+// nor the queried name's own surface above the publication's block. `late.alpha.eth` gets its
+// surface at block 5 with a registry pointer, under `alpha.eth`'s pointer and above its child
+// `kid.late.alpha.eth`, whose surface is at block 2. At block 4 the child's nearest node is
+// `alpha.eth`, and `late.alpha.eth` itself has no readable surface. At block 5 the child reads
+// `late.alpha.eth`.
+#[tokio::test]
+async fn the_walk_reads_no_surface_above_the_publication() -> Result<()> {
+    with_fixture(
+        "families_mirror_publication_bound",
+        async |pool, fixture| {
+            let late = format!("{:#x}", keccak256(b"late"));
+            let kid = format!("{:#x}", keccak256(b"kid"));
+            let late_path = [&late, &fixture.alpha, &fixture.eth];
+            let kid_path = [&kid, &late, &fixture.alpha, &fixture.eth];
+            insert_textless_surface(pool, "ens", CHAIN, &late_path, 5).await?;
+            insert_textless_surface(pool, "ens", CHAIN, &kid_path, 2).await?;
+            point(pool, &fixture.alpha_path(), "0xa").await?;
+            point(pool, &late_path, "0xe").await?;
+            let late_name = format!(
+                "{}.alpha.eth",
+                placeholder_label(&late).expect("a labelhash")
+            );
+            assert_eq!(
+                walked_at(pool, fixture, &kid_path, 4).await?,
+                Some((2, "alpha.eth".to_owned(), "0xa".to_owned()))
+            );
+            assert_eq!(walked_at(pool, fixture, &late_path, 4).await?, None);
+            assert_eq!(
+                walked_at(pool, fixture, &kid_path, 5).await?,
+                Some((1, late_name.clone(), "0xe".to_owned()))
+            );
+            assert_eq!(
+                walked_at(pool, fixture, &late_path, 5).await?,
+                Some((0, late_name, "0xe".to_owned()))
+            );
+            Ok(())
+        },
+    )
     .await
 }
 

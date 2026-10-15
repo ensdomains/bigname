@@ -46,6 +46,11 @@ pub async fn admit(fixture: &Fixture) -> Result<String> {
 
 /// The surface of `name` at block 0, with its real namehash and label hashes.
 pub async fn surface(fixture: &Fixture, name: &str) -> Result<String> {
+    surface_at(fixture, name, 0).await
+}
+
+/// The surface of `name` anchored at `block`, with its real namehash and label hashes.
+pub async fn surface_at(fixture: &Fixture, name: &str, block: i64) -> Result<String> {
     let logical_name_id = logical_name_id(name);
     let normalized = bigname_domain::normalization::normalize_name(name)?;
     let labelhashes: Vec<String> = normalized
@@ -57,7 +62,7 @@ pub async fn surface(fixture: &Fixture, name: &str) -> Result<String> {
         "INSERT INTO name_surfaces (logical_name_id, namespace, raw_name, raw_labels,
              dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state,
              chain_id, block_hash, block_number, canonicality_state)
-         VALUES ($1, 'ens', $2, $3, $4, $5, $6, $7, 'active', $8, $9, 0, 'canonical')
+         VALUES ($1, 'ens', $2, $3, $4, $5, $6, $7, 'active', $8, $9, $10, 'canonical')
          ON CONFLICT DO NOTHING",
     )
     .bind(&logical_name_id)
@@ -68,7 +73,8 @@ pub async fn surface(fixture: &Fixture, name: &str) -> Result<String> {
     .bind(labelhashes)
     .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
     .bind(CHAIN)
-    .bind(hash(0))
+    .bind(hash(block))
+    .bind(block)
     .execute(&fixture.pool)
     .await?;
     Ok(logical_name_id)
@@ -217,6 +223,11 @@ fn entry(registry: &str, label: &str) -> (String, String, String) {
     let resource =
         bigname_storage::ens_v2_registry_resource_id(CHAIN, instance, &token).to_string();
     (token, instance.to_string(), resource)
+}
+
+/// The resource id storage derives for `label`'s entry in `registry`.
+pub fn entry_resource(registry: &str, label: &str) -> String {
+    entry(registry, label).2
 }
 
 /// Write the two events of source family `ens_v2_registry_l1` the family reducers read as a
