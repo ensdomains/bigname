@@ -1229,6 +1229,9 @@ its value map:
   - `source=indexed` and `source=auto` both read the indexed inventory and
     report `meta.source=indexed`. `source=verified` returns `400
     invalid_input` with `source must be indexed or auto when values=false`.
+    A `values=false&source=auto` response carries neither caching header, as
+    for every `source=auto` read
+    ([caching headers](#caching-headers-on-indexed-single-resource-reads)).
   - Omitted, empty or whitespace `keys` is accepted. After the source check,
     any nonblank `keys` returns `400 invalid_input` with `keys must be omitted
     when values=false`, before key parsing, even for a malformed or oversized
