@@ -1,10 +1,11 @@
 // A relation the address held at the bound and lost after it. Project's publication after the loss
 // has no current row for the relation, so a read bound below the loss
 // can admit the name's older events only if the historical event matcher reproduces the relation
-// from the event that created it. The matcher knows three shapes: a `RegistrationGranted`
+// from the event that created it. The matcher knows these shapes: a `RegistrationGranted`
 // registrant and a `TokenControlTransferred` recipient on a token-backed resource, both read as
-// `owner`, and an `AuthorityTransferred` owner on a registry-only resource or an ENSv2 registry
-// resource. Each
+// `owner`, an `AuthorityTransferred` owner on a registry-only resource or an ENSv2 registry
+// resource, and the recipient of an ENSv2 registry `TokenControlTransferred`, read as `manager`
+// too. Each
 // test below loses one relation kind; the ignored ones are the known limitation listed under
 // "Known limitation" in the history anchor section of docs/api-v1-routes.md: kinds the matcher
 // does not reproduce, which stay on the current-row path bounded by the cited block.

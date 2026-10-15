@@ -24,7 +24,7 @@ use super::super::{
     summary::push_history_count_query,
 };
 use super::push_historical_address_matches_query;
-use crate::address_names::push_address_names_current_query;
+use crate::{AddressNameRelation, address_names::push_address_names_current_query};
 
 const TARGET: &str = "0x0000000000000000000000000000000000000a11";
 const TARGET_RESOLVER: &str = "0x0000000000000000000000000000000000000c11";
@@ -294,31 +294,60 @@ async fn check_root_role_plans(connection: &mut PgConnection) -> Result<()> {
     Ok(())
 }
 
+/// An anchor lookup: the relations it asks for, the indexes it must read and the anchors it finds.
+type AnchorCase<'a> = (
+    Option<&'a [AddressNameRelation]>,
+    &'a [&'a str],
+    BTreeSet<(Option<String>, Option<Uuid>)>,
+);
+
 /// The anchor lookup must reach the target's rows through the three address-match indexes,
-/// not by reading every grant and transfer, and must find the target's name and resource.
+/// not by reading every grant and transfer, and must find the target's name and resource. The
+/// `manager` lookup alone reads the registry owner index for the owner transfer and the token
+/// holder index for the ENSv2 registry transfer, and finds only the owner transfer's anchor: the
+/// ENSv2 transfer carries no name, so it moves no `manager`.
 async fn check_anchor_plan(connection: &mut PgConnection) -> Result<()> {
-    let push_anchors = |builder: &mut _| {
-        push_historical_address_matches_query(builder, TARGET, None, None, true, false, None);
-    };
+    let manager = [AddressNameRelation::EffectiveController];
+    let cases: [AnchorCase<'_>; 2] = [
+        (
+            None,
+            &ANCHOR_INDEXES,
+            BTreeSet::from([
+                (Some(target_name()), Some(target_resource())),
+                (None, Some(target_resource())),
+                (Some(target_name()), None),
+            ]),
+        ),
+        (
+            Some(&manager),
+            &ANCHOR_INDEXES[1..],
+            BTreeSet::from([(Some(target_name()), None)]),
+        ),
+    ];
     let mut plan_failures = Vec::new();
-    for plan in explain_both(connection, push_anchors).await? {
-        if let Err(error) = assert_anchor_uses_address_match_indexes(&plan) {
-            plan_failures.push(error.to_string());
+    for (relations, indexes, expected) in cases {
+        let push_anchors = |builder: &mut _| {
+            push_historical_address_matches_query(
+                builder, TARGET, None, relations, true, false, None,
+            );
+        };
+        for plan in explain_both(connection, push_anchors).await? {
+            if let Err(error) = assert_anchor_uses_address_match_indexes(&plan, indexes) {
+                plan_failures.push(format!("{relations:?}: {error}"));
+            }
         }
+        let mut anchors = QueryBuilder::<Postgres>::new("");
+        push_anchors(&mut anchors);
+        let rows = anchors.build().fetch_all(&mut *connection).await?;
+        let anchors = rows
+            .iter()
+            .map(|row| Ok((row.try_get(0)?, row.try_get(1)?)))
+            .collect::<Result<BTreeSet<(Option<String>, Option<Uuid>)>>>()?;
+        ensure!(
+            anchors == expected,
+            "{relations:?} anchor lookup returned {anchors:?}"
+        );
     }
-    let mut anchors = QueryBuilder::<Postgres>::new("");
-    push_anchors(&mut anchors);
-    let rows = anchors.build().fetch_all(&mut *connection).await?;
-    let anchors = rows
-        .iter()
-        .map(|row| Ok((row.try_get(0)?, row.try_get(1)?)))
-        .collect::<Result<BTreeSet<(Option<String>, Option<Uuid>)>>>()?;
-    let expected = BTreeSet::from([
-        (Some(target_name()), Some(target_resource())),
-        (None, Some(target_resource())),
-        (Some(target_name()), None),
-    ]);
-    ensure!(anchors == expected, "anchor lookup returned {anchors:?}");
     ensure!(
         plan_failures.is_empty(),
         "address history anchor plans:\n{}",
@@ -815,12 +844,12 @@ fn assert_no_event_seq_scan(statement: &str, plan: &Value) -> Result<()> {
     Ok(())
 }
 
-fn assert_anchor_uses_address_match_indexes(plan: &Value) -> Result<()> {
+fn assert_anchor_uses_address_match_indexes(plan: &Value, keyed: &[&str]) -> Result<()> {
     let nodes = main_plan_nodes(plan);
     let indexes = index_names(&nodes);
     // The keyed-scan check runs first so it alone catches a regressed shape.
-    assert_no_unkeyed_event_scan("anchor", &nodes, plan, &ANCHOR_INDEXES)?;
-    for expected in ANCHOR_INDEXES {
+    assert_no_unkeyed_event_scan("anchor", &nodes, plan, keyed)?;
+    for &expected in keyed {
         ensure!(
             indexes.contains(&expected),
             "anchor lookup does not use {expected}: {plan}"

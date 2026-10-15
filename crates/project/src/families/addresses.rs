@@ -2,8 +2,14 @@
 //! controller fold unmasked (address_names.rs `controller_events` and `controller_fold`): an
 //! AuthorityTransferred or a state-derived registry-only SurfaceBound sets the controller, a
 //! resource-scoped PermissionChanged sets it when its effective powers hold `resource_control`
-//! and otherwise revokes it from its subject only. The name also keeps its latest token holder,
-//! and its latest registrant as the retained F2a rows of the name give it (lifecycle.rs,
+//! and otherwise revokes it from its subject only. An ENSv2 registry token transfer moves the
+//! token holder and also writes a controller candidate for its recipient: the registry moves
+//! the sender's roles on the name to the recipient with the token, so the authority over the
+//! registry record follows the token
+//! (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L517-L547 @ ens_v2_sepolia_20261001@07e55a05)
+//! (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L236-L252 @ ens_v2_sepolia_20261001@07e55a05).
+//! Every other token transfer moves the token holder only. The name also keeps its latest token
+//! holder, and its latest registrant as the retained F2a rows of the name give it (lifecycle.rs,
 //! `fold_registrants`). A registrar transfer of a lease with no name surface
 //! (docs/glossary.md#surface-name-surface: no known name carries it yet) folds under the lease's
 //! `<namespace>:<namehash>` id, which is the name's id once a surface names it.
@@ -35,6 +41,12 @@ const ZERO: &str = "0x0000000000000000000000000000000000000000";
 /// The adapter's `owner_getter_reason` for a registry write naming the admitted Graveyard.
 const GRAVEYARD_OWNER_REASON: &str = "graveyard";
 const REGISTRAR_FAMILIES: [&str; 2] = ["ens_v1_registrar_l1", "basenames_base_registrar"];
+/// The ENSv2 registry families: the root registry and the registries below it. The official
+/// deployments are `PermissionedRegistry`, whose transfer moves the sender's roles on a name with
+/// its token.
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/RootRegistry.json:L1797 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ETHRegistry.json:L1797 @ ens_v2_sepolia_20261001@07e55a05)
+const ENS_V2_REGISTRIES: [&str; 2] = ["ens_v2_registry_l1", "ens_v2_root_l1"];
 
 /// The two controller actions, stored by their lower-cased names. The names are spelled through
 /// `Debug` because the statement guard reads any literal that starts with an SQL keyword, as
@@ -91,6 +103,16 @@ fn change(event: &BlockEvent) -> Option<Change> {
         }
         "TokenControlTransferred" => Some(Change::TokenHolder(raw_lower(after, "to"))),
         _ => None,
+    }
+}
+
+/// The controller candidate a change writes, as `(set, subject)`.
+fn controller_candidate(event: &BlockEvent, change: Change) -> Option<(bool, Option<String>)> {
+    match change {
+        Change::Controller { set, subject } => Some((set, subject)),
+        Change::TokenHolder(holder) => ENS_V2_REGISTRIES
+            .contains(&event.source_family.as_str())
+            .then_some((true, holder)),
     }
 }
 
@@ -163,7 +185,7 @@ fn fold_key(chain: &Value, event: &BlockEvent) -> Option<super::store::Row> {
 
 /// The candidate row of a named controller event.
 fn candidate_key(chain: &Value, event: &BlockEvent) -> Option<super::store::Row> {
-    matches!(change(event)?, Change::Controller { .. }).then_some(())?;
+    controller_candidate(event, change(event)?)?;
     Some(key_of(
         &tables::ADDRESS_CONTROLLER_CANDIDATE,
         [
@@ -209,15 +231,10 @@ pub(super) async fn apply(
     load_rows(transaction, rows, candidates, candidate_keys).await?;
     let graveyard_writes = graveyard_writes(events);
     for event in events {
-        if let (
-            Some(key),
-            Some(Change::Controller {
-                set: control,
-                subject,
-            }),
-        ) = (
+        if let (Some(key), Some((control, subject))) = (
             candidate_key(&chain, event),
-            served_change(event, &graveyard_writes),
+            served_change(event, &graveyard_writes)
+                .and_then(|change| controller_candidate(event, change)),
         ) {
             let mut row = current(rows, candidates, &key);
             set(
@@ -290,7 +307,7 @@ pub(super) async fn apply(
 mod tests {
     use serde_json::{Value, json};
 
-    use super::{Change, fold_key, graveyard_writes, served_change};
+    use super::{Change, candidate_key, fold_key, graveyard_writes, served_change};
     use crate::families::{input::BlockEvent, position::Position};
 
     const GRAVEYARD: &str = "0x950b93885b33ce4c7e8571be2c88a1aa93d82f49";
@@ -403,5 +420,56 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// An ENSv2 registry or root registry transfer, from `TransferSingle` or one item of
+    /// `TransferBatch`, keeps moving the token holder and also writes a controller candidate for
+    /// its recipient. A registrar or NameWrapper transfer moves the token holder only, and an
+    /// ENSv2 transfer of a token with no name writes no candidate.
+    #[test]
+    fn only_an_ens_v2_registry_transfer_writes_a_controller_candidate() {
+        const BOB: &str = "0x00000000000000000000000000000000000000b1";
+        let chain = json!("1");
+        let transfer = |family: &str, after: Value| {
+            let mut event = event("TokenControlTransferred", 1, after);
+            event.source_family = family.to_owned();
+            event
+        };
+        let recipient = |event: &BlockEvent| match served_change(event, &graveyard_writes(&[])) {
+            Some(Change::TokenHolder(holder)) => holder,
+            _ => panic!("expected a token holder change"),
+        };
+        for (family, after) in [
+            (
+                "ens_v2_registry_l1",
+                json!({"source_event": "TransferSingle", "to": BOB}),
+            ),
+            (
+                "ens_v2_registry_l1",
+                json!({"source_event": "TransferBatch", "to": BOB, "transfer_index": 1}),
+            ),
+            (
+                "ens_v2_root_l1",
+                json!({"source_event": "TransferSingle", "to": BOB}),
+            ),
+        ] {
+            let event = transfer(family, after);
+            assert!(candidate_key(&chain, &event).is_some(), "{event:?}");
+            assert!(fold_key(&chain, &event).is_some());
+            assert_eq!(recipient(&event).as_deref(), Some(BOB));
+        }
+        for family in [
+            "ens_v1_registrar_l1",
+            "basenames_base_registrar",
+            "ens_v1_wrapper_l1",
+        ] {
+            let event = transfer(family, json!({"to": BOB}));
+            assert!(candidate_key(&chain, &event).is_none(), "{family}");
+            assert!(fold_key(&chain, &event).is_some(), "{family}");
+        }
+        let mut unnamed = transfer("ens_v2_registry_l1", json!({"to": BOB}));
+        unnamed.logical_name_id = None;
+        assert!(candidate_key(&chain, &unnamed).is_none());
+        assert!(fold_key(&chain, &unnamed).is_none());
     }
 }
