@@ -163,7 +163,8 @@ pub(crate) async fn evaluate_family_mirror_at(
     publication: &FamilyPublication,
 ) -> Result<MirrorSelection> {
     let mirror_namespace_matches = mirror.declared_in(&pointer.namespace);
-    let (nearest, consulted_nodes) = nearest(conn, chain_id, pointer).await?;
+    let (nearest, consulted_nodes) =
+        nearest(conn, chain_id, pointer, publication.block_number).await?;
     let nearest = match nearest {
         Some(mut nearest) => {
             let classification = super::facts::load_classifications_at(
@@ -187,19 +188,24 @@ pub(crate) async fn evaluate_family_mirror_at(
     })
 }
 
+/// The walk reads only surfaces at or below `block`, the publication's block, as the name summary
+/// reader does. Interpret can run ahead of Project, so a surface anchored above the publication
+/// is not yet part of the chain the publication composes.
 async fn nearest(
     conn: &mut PgConnection,
     chain_id: &str,
     pointer: &ServingPointer,
+    block: i64,
 ) -> Result<(Option<MirrorNearest>, Vec<(String, String)>)> {
     let surface = sqlx::query(
         "SELECT namespace, raw_labels, labelhashes FROM bigname_phase.name_surfaces
-         WHERE logical_name_id = $1 AND chain_id = $2
+         WHERE logical_name_id = $1 AND chain_id = $2 AND block_number <= $3
            AND canonicality_state IN ('canonical', 'safe', 'finalized')
          LIMIT 1",
     )
     .bind(&pointer.logical_name_id)
     .bind(chain_id)
+    .bind(block)
     .fetch_optional(&mut *conn)
     .await
     .context("failed to load the queried name of a mirror pointer")?;
@@ -235,7 +241,7 @@ async fn nearest(
               walk (ancestor_depth, node, labels, hashes)
          JOIN bigname_phase.name_surfaces surface
            ON surface.namespace = $2 AND surface.namehash = walk.node
-          AND surface.chain_id = $1 AND {same_labels}
+          AND surface.chain_id = $1 AND surface.block_number <= $7 AND {same_labels}
           AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
          JOIN bigname_phase.project_registry_pointer registry
            ON registry.chain_id = $1 AND registry.namespace = surface.namespace
@@ -252,6 +258,7 @@ async fn nearest(
         .bind(&nodes)
         .bind(&labels)
         .bind(&hashes)
+        .bind(block)
         .fetch_all(&mut *conn)
         .await
         .context("failed to walk the ENSv1 registry pointers of a mirror pointer")?;

@@ -7,7 +7,7 @@ use super::{
     HistorySummaryMode,
     duplicates::push_product_history_duplicate_filter,
     paging::{push_history_filters, push_history_order_terms},
-    source::push_history_source_for_filter,
+    resolver_source::push_history_source_for_filter,
 };
 
 pub(super) async fn load_history_summary(
@@ -81,8 +81,9 @@ pub(super) fn push_history_count_query<'a>(
     if limit.is_some() {
         builder.push(" FROM (SELECT 1 ");
     }
-    push_history_source_for_filter(builder, filter, canonical_only, false, false);
-    push_history_filters(builder, filter, canonical_only);
+    let resolver_source =
+        push_history_source_for_filter(builder, filter, canonical_only, false, false);
+    push_history_filters(builder, filter, canonical_only, resolver_source);
     push_product_history_duplicate_filter(builder, filter, canonical_only);
     if let Some(limit) = limit {
         builder.push(" LIMIT ");
@@ -139,8 +140,9 @@ async fn load_history_full_summary(
             MAX(rb.block_timestamp) AS last_updated
         "#,
     );
-    push_history_source_for_filter(&mut builder, filter, canonical_only, false, false);
-    push_history_filters(&mut builder, filter, canonical_only);
+    let resolver_source =
+        push_history_source_for_filter(&mut builder, filter, canonical_only, false, false);
+    push_history_filters(&mut builder, filter, canonical_only, resolver_source);
     push_product_history_duplicate_filter(&mut builder, filter, canonical_only);
 
     let row = builder
@@ -180,7 +182,8 @@ async fn load_history_chain_position_samples(
             rb.block_timestamp
         "#,
     );
-    push_history_source_for_filter(&mut builder, filter, canonical_only, false, false);
+    let resolver_source =
+        push_history_source_for_filter(&mut builder, filter, canonical_only, false, false);
     builder.push(
         r#"
           AND ne.chain_id IS NOT NULL
@@ -189,7 +192,7 @@ async fn load_history_chain_position_samples(
           AND rb.block_timestamp IS NOT NULL
         "#,
     );
-    push_history_filters(&mut builder, filter, canonical_only);
+    push_history_filters(&mut builder, filter, canonical_only, resolver_source);
     push_product_history_duplicate_filter(&mut builder, filter, canonical_only);
     builder.push(
         r#"

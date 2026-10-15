@@ -4194,6 +4194,49 @@ release containing this change requires a full-range Project redo, with no
 Interpret or Ingest redo and no schema-migration. An already running Project pass
 uses its deployed query and does not cover a later release's changed hash.
 
+## Names under a changed name recomposed only when their paths can move
+
+The build that recomposes the names under a touched name only when its change
+can move their resolution paths (see
+[owned key families](projections.md#owned-key-families)) changes one Project
+statement, `project:families.resolution_paths.prepare`. It also bounds the
+ENSv1 mirror walk's surface reads by the publication's block
+([projections](projections.md#records-shared-through-resolver-links)).
+
+- A touched name still recomposes itself. It recomposes the `.eth` names under
+  it only for the changes that
+  [owned key families](projections.md#owned-key-families) lists. A change from
+  one nonzero owner to another on a parent with many names under it now
+  recomposes that parent alone.
+- A name whose [name surface](glossary.md#surface-name-surface) appeared since
+  the [family marker](glossary.md#family-marker)'s block also recomposes the
+  `.eth` names under it.
+- Which names Project recomposes in each batch changes, not what they serve.
+- The mirror walk no longer reads a name surface that Interpret wrote above the
+  block Project publishes. While Interpret runs ahead, three results that read
+  a new surface through a mirror now change at that surface's block, not
+  earlier: a name below `.eth`, the record inventory of a resource whose
+  resolver is a mirror, and `GET /v1/resolvers/{chain_id}/{address}/records`
+  for a mirror resolver, which walks at the servable publication. Once Project
+  publishes that block, stored rows and API responses are the same as before.
+- The statement is in `crates/project/src` and the mirror walk is in
+  `crates/storage/src/families/records/mirror.rs`. Both are inputs of the
+  [projection content hash](glossary.md#projection-content-hash) only. That hash
+  rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, at a
+  planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+  matching runner and API binaries. The change rides the next re-derivation
+  release and shares that release's Project redo.
+- Run that redo as the
+  [planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
+  describes, with no attestation. A Project redo already running under an
+  earlier binary uses that binary's statement and does not discharge this
+  rotation. Nothing else changes for an operator.
+- It adds no table, schema-migration, manifest or setting. The
+  manifest-authority fingerprint and the compiled watch plan are unchanged, so
+  stamp no Ingest redo.
+
 ## Hydration retry reset in rebuild ranges
 
 The build that makes each block of a
