@@ -6,9 +6,10 @@
 //!   or no resource on the selected arm), plus the registry-only predecessor window:
 //!   AuthorityTransferred events on the resource of the binding a registry-only selected binding
 //!   replaced, from that binding's block up to the selected binding's position. An
-//!   AuthorityTransferred or state-derived SurfaceBound sets the controller; a PermissionChanged
-//!   acts only on the name's resource, sets it when its powers hold `resource_control` and the
-//!   NameWrapper mask allows, and otherwise revokes it from its subject only.
+//!   AuthorityTransferred, a state-derived SurfaceBound or an ENSv2 registry token transfer sets
+//!   the controller. A PermissionChanged acts only on the name's resource, sets it when its
+//!   powers hold `resource_control` and the NameWrapper mask allows, and otherwise revokes it
+//!   from its subject only.
 //! - The token holder (served as `owner`) is the composed `control.owner`, the owner the row
 //!   serves: the registrant, else the registry owner, and no one on a released registration,
 //!   once the owner lapsed, or while the admitted Graveyard holds the record. A name with no
@@ -208,7 +209,7 @@ fn controller(
     let mut controller: Option<(String, FamilyPosition)> = None;
     for event in events {
         let set = match event.event_kind.as_str() {
-            "AuthorityTransferred" | "SurfaceBound" => true,
+            "AuthorityTransferred" | "SurfaceBound" | "TokenControlTransferred" => true,
             "PermissionChanged" => {
                 if name_resource.is_none() || event.resource_id != name_resource {
                     continue;

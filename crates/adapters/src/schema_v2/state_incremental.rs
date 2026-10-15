@@ -45,6 +45,8 @@ impl State {
             v1_registrar_evidence: OrdMap::new(),
             v1_expiries: OrdSet::new(),
             v2_migration_times: OrdMap::new(),
+            v2_locked_migration_names: OrdSet::new(),
+            v2_locked_migration_positions: OrdMap::new(),
             v1_registry_authorities: OrdMap::new(),
             v1_registry_owners: OrdMap::new(),
             v1_registry_owner_words: OrdMap::new(),
@@ -127,6 +129,8 @@ impl State {
         self.v1_registrars = replayed.v1_registrars;
         self.v1_registrar_evidence = replayed.v1_registrar_evidence;
         self.v1_expiries = replayed.v1_expiries;
+        self.v2_locked_migration_names = replayed.v2_locked_migration_names;
+        self.v2_locked_migration_positions = replayed.v2_locked_migration_positions;
         self.v1_registry_authorities = replayed.v1_registry_authorities;
         self.v1_registry_owners = replayed.v1_registry_owners;
         self.v1_registry_owner_words = replayed.v1_registry_owner_words;

@@ -152,11 +152,13 @@ impl State {
         })
     }
 
+    /// `reclaim_owner` is the registry owner a later write in the same transaction sets.
     pub(in crate::schema_v2) fn converge_v1_registrar_transfer(
         &mut self,
         namespace: &str,
         namehash: &str,
         at_unix_timestamp: i64,
+        reclaim_owner: Option<&str>,
     ) -> Option<V1NameState> {
         let current = self.v1_name(namespace, namehash);
         if current
@@ -169,7 +171,9 @@ impl State {
         let registrar_was_current = current
             .as_ref()
             .is_some_and(|authority| authority.resource_id == registrar.resource_id);
-        let registry_owner = self.v1_registry_owner(namespace, namehash);
+        let registry_owner = reclaim_owner
+            .map(str::to_owned)
+            .or_else(|| self.v1_registry_owner(namespace, namehash));
         let registrar_matches_registry = registry_owner.as_deref().is_none_or(|owner| {
             if owner.eq_ignore_ascii_case(ZERO_ADDRESS) {
                 registrar_was_current

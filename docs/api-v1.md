@@ -1425,6 +1425,15 @@ registration sets the registry record
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f)
 until a `reclaim` or registry transfer moves it
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f).
+An ENSv2 registry moves the sender's
+roles on a name to the recipient when it transfers the name's token, so the
+transfer of an ENSv2 name moves `manager` and the `manager` relation to the
+recipient with the token
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L517-L547 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L236-L252 @ ens_v2_sepolia_20261001@07e55a05).
+A transfer that carries no name, of a token bigname has not linked to a name's
+registration or of one in a registry no root reaches, does not move the `manager`
+relation and adds no history under `relation=manager`.
 
 A name with a [name row](glossary.md#composed-name-row) stops being served as
 wrapped once a registry write moves its record away from NameWrapper; a child

@@ -799,6 +799,50 @@ async fn a_registry_owner_without_the_token_is_the_manager_in_history_not_the_ow
     Ok(())
 }
 
+/// An ENSv1 `.eth` registrar transfer without `reclaim` leaves the registry owner the
+/// manager and makes the recipient the owner, and only a registry `Transfer` moves the manager.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f)
+#[tokio::test]
+async fn an_ens_v1_registrar_transfer_leaves_the_manager_to_the_registry() -> Result<()> {
+    let (registered, session) = interpret(REGISTERED, registration(), None)?;
+    let (handed_off, session) = interpret(REBOUND, handoff(), Some(session))?;
+    let (moved, _) = interpret(
+        REGISTRY_MOVED,
+        registry_set_owner(REGISTRY_MOVED, OTHER),
+        Some(session),
+    )?;
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_blocks(&database, REGISTERED..=REGISTRY_MOVED).await?;
+    let pool = &database.pool;
+    let mut relations = Vec::new();
+    for (block, output) in [
+        (REGISTERED, &registered),
+        (REBOUND, &handed_off),
+        (REGISTRY_MOVED, &moved),
+    ] {
+        persist(pool, output).await?;
+        project_to(pool, block, None).await?;
+        let mut held = Vec::new();
+        for address in [OWNER, HOLDER, OTHER] {
+            held.push(relations_of(pool, address).await?);
+        }
+        relations.push(held);
+    }
+    database.cleanup().await?;
+
+    let (owner, manager) = ("token_holder", "effective_controller");
+    assert_eq!(
+        relations,
+        [
+            vec![vec![manager, owner], vec![], vec![]],
+            vec![vec![manager], vec![owner], vec![]],
+            vec![vec![], vec![owner], vec![manager]],
+        ]
+    );
+    Ok(())
+}
+
 /// The registry owner of a subname with no token owns it, so the `NewOwner` that created the
 /// subname for it is in its history under `owner` as well as `manager`
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f).

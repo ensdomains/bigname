@@ -28,9 +28,9 @@ use crate::schema_v2::{
 pub(in crate::schema_v2) mod graveyard;
 pub(super) mod node;
 mod permissions;
+mod registry_owner_grants;
 pub(super) mod surface;
-use permissions::append_authority_permissions;
-pub(super) use permissions::push_permission_change;
+pub(super) use permissions::{append_authority_permissions, push_permission_change};
 pub(in crate::schema_v2) mod wrapper_custody;
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 sol! {
@@ -169,6 +169,20 @@ pub(super) fn interpret(
     let previous_registry_owner_reason = owner
         .as_ref()
         .and_then(|_| state.v1_registry_owner_reason(&selected.source.namespace, &affected_node));
+    // Read before this write changes the registry owner it remembers.
+    let retained_registry_owner = (matches!(
+        owner_view,
+        Some(RegistryOwnerView::Authentic { .. } | RegistryOwnerView::ZeroEquivalent { .. })
+    ) || selected.event.name == "NewResolver")
+        .then(|| {
+            registry_owner_grants::retained(
+                state,
+                &selected.source.namespace,
+                &affected_node,
+                previous.as_ref(),
+            )
+        })
+        .flatten();
     let surface_known = previous.as_ref().is_some_and(|state| state.surface_known)
         || state
             .v1_registry_read_anchor(&selected.source.namespace, &affected_node)
@@ -474,6 +488,9 @@ pub(super) fn interpret(
                 state_scope: String::new(),
             });
         }
+        let retained_resolvers = retained_registry_owner
+            .as_ref()
+            .map(|retained| (retained, previous_resolver.clone(), resolver.clone()));
         if let Some(authority) = linked.as_ref()
             && let Some(subject) = authority.owner.as_deref()
             && previous_resolver != resolver
@@ -505,6 +522,17 @@ pub(super) fn interpret(
                 );
             }
         }
+        if let Some((retained, previous_resolver, resolver)) = retained_resolvers {
+            registry_owner_grants::reconcile_resolver(
+                &mut output,
+                retained,
+                previous_resolver
+                    .as_deref()
+                    .filter(|resolver| !resolver.eq_ignore_ascii_case(ZERO_ADDRESS)),
+                resolver.as_deref(),
+                raw,
+            );
+        }
     } else if owner.is_some()
         && previous
             .as_ref()
@@ -513,6 +541,15 @@ pub(super) fn interpret(
                 .as_ref()
                 .map(|state| (&state.owner, state.resource_id))
     {
+        wrapper_custody::revoke_delegate(
+            &mut output,
+            state,
+            (&selected.source.namespace, &affected_node),
+            previous.as_ref(),
+            linked.as_ref(),
+            context,
+            raw,
+        );
         append_authority_permissions(
             &mut output,
             previous.as_ref(),
@@ -520,6 +557,43 @@ pub(super) fn interpret(
             state.v1_resolver(&selected.source.namespace, &affected_node),
             raw,
         );
+    }
+    if let Some(retained) = retained_registry_owner.as_ref() {
+        let registry_owner = match owner_view.as_ref() {
+            Some(RegistryOwnerView::Authentic { owner }) => Some(Some(owner.as_str())),
+            Some(RegistryOwnerView::ZeroEquivalent { .. }) => Some(None),
+            Some(RegistryOwnerView::UnavailableUnmasked) | None => None,
+        };
+        if let Some(registry_owner) = registry_owner {
+            // `unwrapETH2LD`'s registrar transfer, later in this transaction, selects the
+            // name's successor and grants its owner, so this write only ends the old grants.
+            // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L390-L395 @ ens_v1@91c966f)
+            let successor_grants_follow = context.wrapper_custody.unwrap_follows
+                && wrapper_custody::registrar_transfer_may_follow(
+                    state,
+                    &selected.source.namespace,
+                    &affected_node,
+                );
+            // The admitted Graveyard is the ENSv1→ENSv2 migration's burn address for ENSv1
+            // names, so a write naming it grants it nothing, and the retained owner's grants
+            // still end.
+            // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/Graveyard.sol:L20-L23 @ ens_v2_sepolia_20261001@07e55a05)
+            let graveyard_owner = registry_owner.is_some_and(|owner| {
+                graveyard::owner_reason(context.registry_graveyard, owner).is_some()
+            });
+            registry_owner_grants::reconcile_owner(
+                &mut output,
+                retained,
+                registry_owner,
+                !successor_grants_follow && !graveyard_owner,
+                linked.as_ref(),
+                state
+                    .v1_resolver(&selected.source.namespace, &affected_node)
+                    .as_deref()
+                    .filter(|resolver| !resolver.eq_ignore_ascii_case(ZERO_ADDRESS)),
+                raw,
+            );
+        }
     }
     node::retain_identity(&mut output, selected, raw, state, identity);
     Ok(output)

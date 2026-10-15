@@ -617,11 +617,22 @@ include!("tests/v2_search_lean.rs");
 #[path = "tests/v2_wrapper_callback.rs"]
 mod v2_wrapper_callback;
 
+#[path = "tests/v2_registry_only_wrap_grants.rs"]
+mod v2_registry_only_wrap_grants;
+#[path = "tests/v2_unwrapped_registry_only_child.rs"]
+mod v2_unwrapped_registry_only_child;
+
 #[path = "tests/v2_canonical_association.rs"]
 mod v2_canonical_association;
 
 #[path = "tests/v2_continuing_lease.rs"]
 mod v2_continuing_lease;
+
+#[path = "tests/v2_wrap_registry_interval.rs"]
+mod v2_wrap_registry_interval;
+
+#[path = "tests/v2_wrapped_child_approval.rs"]
+mod v2_wrapped_child_approval;
 
 #[path = "tests/v2_resolver_records.rs"]
 mod v2_resolver_records;
