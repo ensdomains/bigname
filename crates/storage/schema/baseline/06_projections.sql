@@ -2117,7 +2117,7 @@ CREATE TABLE IF NOT EXISTS project_address_controller_candidate (
     CHECK (action IN ('set', 'revoke'))
 );
 COMMENT ON TABLE project_address_controller_candidate IS
-    'Project-owned controller candidates of family F13: every named controller event (AuthorityTransferred, state-derived registry-only SurfaceBound, resource-scoped PermissionChanged) with its resource and position, never pruned, so a read folds the candidates the served admission keeps (address_names.rs:115-283).';
+    'Project-owned controller candidates of family F13: every named controller event (AuthorityTransferred, state-derived registry-only SurfaceBound, resource-scoped PermissionChanged, and an ENSv2 registry or root registry TokenControlTransferred, whose recipient takes the sender''s roles) with its resource and position, never pruned, so a read folds the candidates the served admission keeps (address_names.rs:115-283).';
 COMMENT ON COLUMN project_address_controller_candidate.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_address_controller_candidate.logical_name_id IS
@@ -2139,9 +2139,9 @@ COMMENT ON COLUMN project_address_controller_candidate.event_kind IS
 COMMENT ON COLUMN project_address_controller_candidate.source_family IS
     'This value is the event''s source family.';
 COMMENT ON COLUMN project_address_controller_candidate.action IS
-    'This value is set for an AuthorityTransferred, a SurfaceBound and a PermissionChanged whose effective powers hold resource_control, and revoke for any other resource-scoped PermissionChanged, before any read-time mask.';
+    'This value is set for an AuthorityTransferred, a SurfaceBound, an ENSv2 registry or root registry TokenControlTransferred and a PermissionChanged whose effective powers hold resource_control, and revoke for any other resource-scoped PermissionChanged, before any read-time mask.';
 COMMENT ON COLUMN project_address_controller_candidate.subject IS
-    'This value is the lower-cased controller the event names: the registry owner (the zero address for a masked owner word), the SurfaceBound owner or the permission subject.';
+    'This value is the lower-cased controller the event names: the registry owner (the zero address for a masked owner word), the SurfaceBound owner, the permission subject or the ENSv2 transfer recipient.';
 
 CREATE TABLE IF NOT EXISTS project_address_name_index (
     address text NOT NULL,

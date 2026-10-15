@@ -4310,7 +4310,10 @@ introduces it rebuilds Project from full history before serving the option; see
   with no token, the registry `AuthorityTransferred` that made it the owner,
   which matches `manager` too. On an ENSv2 name, the registry
   `TokenControlTransferred` that sent the address the token matches `manager`
-  as well as `owner`, since the transfer gives it the sender's roles. Under a
+  as well as `owner`, since the transfer gives it the sender's roles
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L517-L547 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L236-L252 @ ens_v2_sepolia_20261001@07e55a05).
+  Under a
   [registry-only handoff](glossary.md#registry-only-handoff) (a `.eth` token
   transfer without `reclaim`) the registry owner is only the `manager`, so
   that `AuthorityTransferred` matches `manager` and not `owner` from the

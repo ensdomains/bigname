@@ -4357,6 +4357,11 @@ also lets address history keep a former ENSv2 manager's events under
   an account that transferred an ENSv2 name away still matches
   `relation=manager` on `GET /v1/addresses/{address}/names`, in bounded
   `GET /v1/addresses/{address}/history` and in reverse `POST /v1/lookup`.
-- It adds no table, schema-migration, manifest or setting. The
+- Schema-migration
+  `20261015120000_project_address_controller_candidate_transfer_comments`
+  rewrites the table, `action` and `subject` comments of
+  `project_address_controller_candidate` to name the ENSv2 transfer. It changes
+  no column, index or row.
+- It adds no table, manifest or setting. The
   manifest-authority fingerprint and the compiled watch plan are unchanged, so
   stamp no Ingest redo.
