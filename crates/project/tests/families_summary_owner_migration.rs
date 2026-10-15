@@ -1,7 +1,9 @@
 //! The schema-migrations that add `project_name_summary.owner`
 //! (migrations/20260929170000_project_name_summary_owner.sql) and the expiry selector columns
 //! `expiry_listable` and `public_authority` with their indexes
-//! (migrations/20261005150000_project_name_summary_expiry_selector.sql). On a database without
+//! (migrations/20261005150000_project_name_summary_expiry_selector.sql), and the bound-name
+//! selector with its order key and indexes
+//! (migrations/20261014120000_project_name_summary_bound_names.sql). On a database without
 //! its columns each resets every owned key family, so the next family run rebuilds them and
 //! writes every summary whole.
 //! Each takes the marker table before touching anything and holds it to commit. So a family run
@@ -11,7 +13,10 @@
 #[path = "families_support/mod.rs"]
 mod support;
 
-use std::{collections::BTreeSet, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, ensure};
 use bigname_project::families::{self, FamilyMode, FamilyOptions};
@@ -29,6 +34,15 @@ const MIGRATION: &str =
     include_str!("../../../migrations/20260929170000_project_name_summary_owner.sql");
 const SELECTOR_MIGRATION: &str =
     include_str!("../../../migrations/20261005150000_project_name_summary_expiry_selector.sql");
+const BOUND_MIGRATION: &str =
+    include_str!("../../../migrations/20261014120000_project_name_summary_bound_names.sql");
+/// The bound-name migration's predecessor: the summary without its columns and indexes.
+const BOUND_PREDECESSOR: &str = "DROP INDEX project_name_summary_bound_order_idx,
+         project_name_summary_bound_exempt_order_idx;
+     ALTER TABLE project_name_summary DROP COLUMN resolver_chain_id,
+         DROP COLUMN resolver_address, DROP COLUMN resolver_listing_eligible,
+         DROP COLUMN resolver_support_exempt, DROP COLUMN raw_name, DROP COLUMN order_name,
+         DROP COLUMN namehash";
 const V2_REGISTRY: &str = "ens_v2_registry_l1";
 const REGISTRY: &str = "0x00000000000000000000000000000000000000e5";
 const OWNER: &str = "0x00000000000000000000000000000000000000aa";
@@ -145,6 +159,17 @@ fn lifecycle_reset_literal_names_every_current_family_table() {
     );
 }
 
+#[test]
+fn bound_name_reset_literal_names_every_current_family_table() {
+    assert_eq!(
+        reset_literal(BOUND_MIGRATION),
+        families::family_tables()
+            .chain(CONTROL_TABLES)
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+    );
+}
+
 /// An ENSv2 registration of `name` on `chain` at `block`, as the adapter writes it: the pending
 /// LabelRegistered grant, then the TokenResource log's SurfaceBound, grant, AuthorityTransferred
 /// naming `owner` and ExpiryChanged, and the name's open ENSv2 binding to `resource`.
@@ -246,10 +271,42 @@ async fn row_count(connection: &mut PgConnection, table: &str) -> Result<i64> {
 }
 
 /// One row in `table` when it has none, so the reset has something to remove from every
-/// table: each NOT NULL column without a default gets a placeholder of its type.
+/// table: each NOT NULL column without a default gets a placeholder of its type. A foreign key's
+/// columns take one row of the table it references, which gets a row first.
 async fn populate(connection: &mut PgConnection, table: &str) -> Result<()> {
     if row_count(connection, table).await? > 0 {
         return Ok(());
+    }
+    let keys = sqlx::query(
+        "SELECT confrelid::regclass::text AS parent,
+                ARRAY(SELECT attribute.attname::text
+                      FROM unnest(conkey) WITH ORDINALITY AS key(attnum, position)
+                      JOIN pg_attribute attribute
+                        ON attribute.attrelid = conrelid AND attribute.attnum = key.attnum
+                      ORDER BY key.position) AS columns,
+                ARRAY(SELECT attribute.attname::text
+                      FROM unnest(confkey) WITH ORDINALITY AS key(attnum, position)
+                      JOIN pg_attribute attribute
+                        ON attribute.attrelid = confrelid AND attribute.attnum = key.attnum
+                      ORDER BY key.position) AS referenced
+         FROM pg_constraint
+         WHERE conrelid = $1::regclass AND contype = 'f' AND confrelid <> conrelid",
+    )
+    .bind(table)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut referenced = BTreeMap::new();
+    for key in &keys {
+        let parent: String = key.try_get("parent")?;
+        Box::pin(populate(connection, &parent)).await?;
+        let columns: Vec<String> = key.try_get("columns")?;
+        let targets: Vec<String> = key.try_get("referenced")?;
+        for (column, target) in columns.into_iter().zip(targets) {
+            referenced.insert(
+                column,
+                format!("(SELECT \"{target}\" FROM {parent} ORDER BY ctid LIMIT 1)"),
+            );
+        }
     }
     let columns = sqlx::query(
         "SELECT attribute.attname::text AS name,
@@ -280,6 +337,7 @@ async fn populate(connection: &mut PgConnection, table: &str) -> Result<()> {
         let category: String = column.try_get("category")?;
         let oid: i64 = column.try_get("oid")?;
         let value = match (typtype.as_str(), category.as_str(), kind.as_str()) {
+            _ if referenced.contains_key(&name) => referenced[&name].clone(),
             ("e", _, _) => format!(
                 "(SELECT enumlabel FROM pg_enum WHERE enumtypid = {oid} \
                  ORDER BY enumsortorder LIMIT 1)::{kind}"
@@ -289,7 +347,22 @@ async fn populate(connection: &mut PgConnection, table: &str) -> Result<()> {
             (_, _, "jsonb" | "json") => format!("'{{}}'::{kind}"),
             (_, _, "boolean") => "false".to_owned(),
             (_, _, "bytea") => "'\\x'::bytea".to_owned(),
-            (_, "N", _) => format!("0::{kind}"),
+            // A number a check limits takes the first integer after its name.
+            (_, "N", _) => {
+                let number = checks
+                    .iter()
+                    .find_map(|check| {
+                        let after = &check[check.find(name.as_str())? + name.len()..];
+                        let start = after.find(|c: char| c.is_ascii_digit())?;
+                        let digits: String = after[start..]
+                            .chars()
+                            .take_while(char::is_ascii_digit)
+                            .collect();
+                        Some(digits)
+                    })
+                    .unwrap_or_else(|| "0".to_owned());
+                format!("{number}::{kind}")
+            }
             (_, "D", _) => format!("now()::{kind}"),
             // A text column a check limits to literals takes the first literal after its name.
             _ => checks
@@ -434,6 +507,112 @@ async fn the_selector_migration_takes_the_marker_table_before_any_reset() -> Res
         selector_reset_tables(),
     )
     .await
+}
+
+/// The same interleaving for the bound-name selector, over every current family table.
+#[tokio::test]
+async fn the_bound_name_migration_takes_the_marker_table_before_any_reset() -> Result<()> {
+    takes_the_marker_table_before_any_reset(
+        "summary_bound_migration",
+        BOUND_MIGRATION,
+        BOUND_PREDECESSOR,
+        families::family_tables()
+            .chain(CONTROL_TABLES)
+            .map(str::to_owned)
+            .collect(),
+    )
+    .await
+}
+
+/// A database from before the bound-name selector: the migration empties every family and its
+/// markers, so the bound-name listing refuses rather than answer from summaries without the
+/// selector, until the family run rebuilds the chain and lists the name its resolver serves
+/// again. A second run of the migration changes nothing.
+#[tokio::test]
+async fn the_bound_name_listing_refuses_after_the_migration_until_the_rebuild() -> Result<()> {
+    const RESOLVER: &str = "0x00000000000000000000000000000000000000d7";
+    let fixture = Fixture::new("summary_bound_refusal", 12).await?;
+    register_on(
+        &fixture,
+        CHAIN,
+        NAME,
+        2,
+        "0x1",
+        &uuid(0xa01),
+        &uuid(0xb01),
+        OWNER,
+    )
+    .await?;
+    fixture
+        .event(
+            Event::new(
+                "summary-bound-resolver",
+                3,
+                0,
+                "ResolverChanged",
+                V2_REGISTRY,
+            )
+            .name(NAME)
+            .resource(&uuid(0xa01))
+            .after(json!({"resolver": RESOLVER}))
+            .raw(json!({"emitting_address": REGISTRY})),
+        )
+        .await?;
+    fixture.apply(7, FamilyMode::Normal).await?;
+    let listing = |pool: PgPool| async move {
+        bigname_storage::families::name::load_family_bound_names(
+            &pool, CHAIN, RESOLVER, None, None, 10, true,
+        )
+        .await
+    };
+    let served = |page: &bigname_storage::families::name::BoundNamesPage| {
+        page.total_count == Some(1)
+            && page
+                .rows
+                .iter()
+                .map(|bound| bound.row.logical_name_id.as_str())
+                .eq([NAME])
+    };
+    let before = listing(fixture.pool.clone()).await?;
+    ensure!(served(&before), "before the migration: {before:?}");
+    raw_sql(BOUND_PREDECESSOR).execute(&fixture.pool).await?;
+    raw_sql(BOUND_MIGRATION).execute(&fixture.pool).await?;
+    for table in families::family_tables().chain(CONTROL_TABLES) {
+        let mut connection = fixture.pool.acquire().await?;
+        ensure!(
+            row_count(&mut connection, table).await? == 0,
+            "{table} kept rows"
+        );
+    }
+    let refused = listing(fixture.pool.clone())
+        .await
+        .err()
+        .context("the listing answered before the rebuild")?;
+    ensure!(
+        refused
+            .downcast_ref::<bigname_storage::families::name::FamilyPublicationUnavailable>()
+            .is_some(),
+        "{refused:#}"
+    );
+    fixture.apply(7, FamilyMode::Normal).await?;
+    let after = listing(fixture.pool.clone()).await?;
+    ensure!(served(&after), "after the rebuild: {after:?}");
+    let summaries = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, Value>(
+            "SELECT jsonb_agg(to_jsonb(summary) ORDER BY chain_id, logical_name_id)
+             FROM project_name_summary summary",
+        )
+        .fetch_one(&pool)
+        .await
+    };
+    let rebuilt = summaries(fixture.pool.clone()).await?;
+    ensure!(
+        rebuilt[0]["namehash"] == json!(NAME.trim_start_matches("ens:")),
+        "{rebuilt:#}"
+    );
+    raw_sql(BOUND_MIGRATION).execute(&fixture.pool).await?;
+    ensure!(summaries(fixture.pool.clone()).await? == rebuilt);
+    fixture.cleanup().await
 }
 
 async fn takes_the_marker_table_before_any_reset(

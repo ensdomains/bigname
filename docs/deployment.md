@@ -4274,6 +4274,68 @@ what the rebuild writes (see
   manifest-authority fingerprint and the compiled watch plan are unchanged, so
   stamp no Ingest redo.
 
+## Bound names read from the name summary
+
+The build that pages [`GET /v1/resolvers/{chain_id}/{address}`](api-v1-routes.md#get-v1resolverschain_idaddress)
+`bound_names` from the [name summary](glossary.md#name-summary) changes the composition Project
+stores (`crates/storage/src/families/name/summary.rs` and `bound_rules.rs`) and Project's family
+step. It rotates the [projection content hash](glossary.md#projection-content-hash) for every
+chain and leaves the [interpreter content hash](glossary.md#interpreter-content-hash)
+unchanged. It needs one full-range Project redo and no Interpret or Ingest redo. It changes no
+manifest, so the manifest-authority fingerprint is unchanged.
+
+- Schema-migration `20261014120000_project_name_summary_bound_names.sql` adds seven columns
+  to `project_name_summary`: `resolver_chain_id`, `resolver_address`,
+  `resolver_listing_eligible`, `resolver_support_exempt`, `raw_name`, `order_name` and
+  `namehash`. It adds two partial indexes on
+  `(resolver_chain_id, resolver_address, order_name, namespace, namehash)`:
+  `project_name_summary_bound_order_idx`
+  `WHERE resolver_listing_eligible AND octet_length(order_name) <= 2000`, which pages a
+  resolver that supports binding enumeration, and `project_name_summary_bound_exempt_order_idx`
+  with `AND resolver_support_exempt` added, which pages one that does not. Both are built in
+  the schema-migration's transaction, after the reset, over an empty summary table.
+- On a database without the columns it resets every owned key family with the
+  [family marker](glossary.md#family-marker), undo journal and repair records, under the same
+  `EXCLUSIVE` lock on the marker table as
+  [the expiry selector's schema-migration](#expiry-selector-on-the-name-summary). It is a
+  blocking maintenance schema-migration. Run it in a maintenance window with the phase runner
+  stopped. Fenced routes answer `409 stale` until the next family run rebuilds the families.
+  The rotated hash rebuilds them anyway, so the reset adds no second rebuild.
+- Apply the schema-migration before the new build starts. The new writer run against a schema
+  without the columns drops the values it has no column for and publishes summaries with no
+  selector. Do not run the previous build against the migrated schema: its writer fails on the
+  new `NOT NULL` columns.
+- Keep every Project of the previous build stopped for the whole upgrade, from the
+  schema-migration until the new build runs. It cannot write the new summary shape, so its
+  family step fails rather than publish, and the chain's families stop advancing while it runs.
+- A page composes at most `page_size + 1` names. `include=total_count` is new and serves the
+  exact count of the whole list. It reads every listed name of the resolver, so its cost grows
+  with the list.
+- The order of a name whose surface stores no raw bytes changes when one of its labels is
+  known only from an imported preimage. Such a label sorted by its text and now sorts as
+  `[<labelhash>]`. The cursor now holds the order name, so a `bound_names` cursor issued
+  before the change answers `400 invalid_input`. A client walking bound names across the
+  change restarts from the first page.
+- A name whose surface stores no raw bytes and whose bracketed form is longer than 2000 bytes
+  sorts by its first 2000 bytes, then namespace and namehash.
+- A name whose surface Interpret gives raw bytes in a block after the published one stays at
+  its published position, shown with its raw name, until Project publishes that block. The
+  previous build moved it at once.
+- `project_named_resource_pointer_resolver_idx` and `project_registry_pointer_resolver_idx`
+  stay, though the listing no longer reads them.
+- A family block runs the raw-name sweep when the Interpret revision it reads, Interpret's
+  input content hash and redo attempt, differs from the one its prior marker recorded. That is
+  the first block after a completed Interpret redo attempt, after an interpreter content-hash
+  change and after a reset, and the first block replayed after a Project undo or redo that
+  restores a marker recorded under an earlier revision. It runs while the block holds its
+  chain's family marker, reads every surface of the chain that stores no raw bytes, about 1.37
+  million on mainnet, and checks each one's summary. Its cost at that size has not been
+  measured.
+
+Before the release is recorded, confirm that the Project redo adopted the new projection
+content hash and that `GET /v1/resolvers/1/<address>?include=total_count` answers for a busy
+resolver.
+
 ## ENSv2 transfers move the manager relation
 
 The build that moves the `manager` relation to the recipient of an ENSv2 token

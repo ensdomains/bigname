@@ -12,14 +12,18 @@
 //! share of the chain and may hash-join it to a scan of every event, which is why the lookup is
 //! a parameterized subquery.
 //!
-//! The test pins access paths, not the cost of the whole statement. It checks three scans (the
-//! block's registry events, its surfaces and the per-resource lookup) and makes no row or
+//! The test pins access paths, not the cost of the whole statement. It checks four scans (the
+//! block's registry events, its surfaces, the per-resource lookup and the preimages observed in
+//! the block, `revealed`) and makes no row or
 //! buffer assertions. It does not cover the other CTEs' plans, the `clocked` lookup against a
 //! populated `project_name_summary`, or how long a resource with a long history takes to probe.
 //!
 //! The rows are those of the statement before the fix, which joined the marker row for the
 //! lower bound, for a one-block follow, a multi-block rebuild range, and a rebuild from a reset
 //! family marker.
+//!
+//! A row test of one branch: a block that changes only a name's retained pointer on a resource
+//! names that name from the pointer's journal key.
 
 use anyhow::{Context, Result, ensure};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
@@ -35,9 +39,34 @@ const REGISTRY_EVENTS: i64 = 200_000;
 const OTHER_EVENTS: i64 = 60_000;
 const NAMES: i64 = 40_000;
 const PLAN_MODES: [&str; 2] = ["force_generic_plan", "force_custom_plan"];
-const BLOCK_INDEXES: &[&str] = &[
-    "normalized_events_chain_block_number_idx",
-    "normalized_events_chain_block_number_desc_idx",
+/// The conditions on an index's leading columns, in key order, that bound its range to the
+/// follow block. PostgreSQL 16 has no skip scan, so a btree range is bounded only by the leading
+/// columns up to the first one without a condition. A condition on a later column filters
+/// inside the range, though EXPLAIN prints it as an index condition too.
+type Probe<'a> = (&'a str, &'a [&'a str]);
+const BLOCK_RANGE: &[&str] = &["(chain_id = ", "(block_number > ", "(block_number <= "];
+const BLOCK_INDEXES: &[Probe] = &[
+    ("normalized_events_chain_block_number_idx", BLOCK_RANGE),
+    ("normalized_events_chain_block_number_desc_idx", BLOCK_RANGE),
+];
+/// The block indexes, and `normalized_events_projection_idx` on
+/// `(event_kind, canonicality_state, chain_id, block_number, ...)` with every leading column
+/// bound in its index condition, so it reads one block range for each canonicality state. A
+/// canonicality condition in the scan's filter instead leaves the range bounded by the event
+/// kind alone.
+const OBSERVED_INDEXES: &[Probe] = &[
+    ("normalized_events_chain_block_number_idx", BLOCK_RANGE),
+    ("normalized_events_chain_block_number_desc_idx", BLOCK_RANGE),
+    (
+        "normalized_events_projection_idx",
+        &[
+            "(event_kind = 'PreimageObserved'::text)",
+            "(canonicality_state = ",
+            "(chain_id = ",
+            "(block_number > ",
+            "(block_number <= ",
+        ],
+    ),
 ];
 
 #[tokio::test]
@@ -58,6 +87,42 @@ async fn the_summary_work_list_reads_one_follow_block_by_index() -> Result<()> {
     result
 }
 
+/// A block that changes only a name's own retained pointer on a resource names that name, from
+/// the pointer's journal key alone. No event of the block names it.
+#[tokio::test]
+async fn the_summary_work_list_names_the_name_of_a_changed_named_pointer() -> Result<()> {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("family_summary_named_pointer").pool_max_connections(1),
+    )
+    .await?;
+    let result = async {
+        let mut connection = database.pool().acquire().await?;
+        install_schema(&mut connection).await?;
+        let key = serde_json::json!([CHAIN, "00000000-0000-0000-0000-0000000000a1", name(1)]);
+        sqlx::query(
+            "INSERT INTO project_family_undo (chain_id, block_number, block_hash, family, key)
+             VALUES ($1, $2, '0x01', 'project_named_resource_pointer', $3)",
+        )
+        .bind(CHAIN)
+        .bind(FOLLOW)
+        .bind(key.to_string())
+        .execute(&mut *connection)
+        .await?;
+        let names: Vec<String> = sqlx::query_scalar(WORK_LIST)
+            .bind(CHAIN)
+            .bind(FOLLOW)
+            .bind(block_time(FOLLOW))
+            .bind(FOLLOW - 1)
+            .fetch_all(&mut *connection)
+            .await?;
+        ensure!(names == [name(1)], "the block named {names:?}");
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
 async fn check_plans(connection: &mut PgConnection) -> Result<()> {
     raw_sql(&format!(
         "PREPARE summary_names (text, bigint, bigint, bigint) AS {WORK_LIST}"
@@ -65,7 +130,6 @@ async fn check_plans(connection: &mut PgConnection) -> Result<()> {
     .execute(&mut *connection)
     .await
     .context("prepare summary_names")?;
-    let bounded = &["(chain_id = ", "(block_number > ", "(block_number <= "][..];
     let mut failures = Vec::new();
     // A prepared statement may switch to the generic plan after its first calls, when that plan
     // is estimated no worse than planning each call; both must read only the follow block.
@@ -84,28 +148,26 @@ async fn check_plans(connection: &mut PgConnection) -> Result<()> {
         .with_context(|| format!("explain summary_names {mode}"))?;
         let mut scans = Vec::new();
         collect_scans(&plan[0]["Plan"], &mut scans);
-        let checks: [(&str, &str, &[&str], &[&str]); 3] = [
-            (
-                "normalized_events",
-                "registry_event",
-                BLOCK_INDEXES,
-                bounded,
-            ),
+        let checks: [(&str, &str, &[Probe]); 4] = [
+            ("normalized_events", "registry_event", BLOCK_INDEXES),
             (
                 "name_surfaces",
                 "surface",
-                &["name_surfaces_chain_block_number_idx"],
-                bounded,
+                &[("name_surfaces_chain_block_number_idx", BLOCK_RANGE)],
             ),
             (
                 "normalized_events",
                 "carried_event",
-                &["normalized_events_resource_history_idx"],
-                &["(resource_id = registry_event.resource_id)"],
+                &[(
+                    "normalized_events_resource_history_idx",
+                    &["(resource_id = registry_event.resource_id)"],
+                )],
             ),
+            // The preimages observed in the blocks after the marker's (`revealed`).
+            ("normalized_events", "observed", OBSERVED_INDEXES),
         ];
-        for (relation, alias, indexes, conditions) in checks {
-            if let Some(failure) = probe_failure(&scans, relation, alias, indexes, conditions) {
+        for (relation, alias, probes) in checks {
+            if let Some(failure) = probe_failure(&scans, relation, alias, probes) {
                 failures.push(format!("{mode}: {failure}"));
             }
         }
@@ -195,7 +257,7 @@ async fn check_rows(connection: &mut PgConnection) -> Result<()> {
 
 /// The statement before the fix: `linked` joined every registry event up to `$2` to the other
 /// events of its resource, and it and `surfaced` took their lower bound from a join to the family
-/// marker row. The rest of the statement is unchanged.
+/// marker row. It had no `revealed` arm. The rest of the statement is unchanged.
 fn before_fix() -> Result<String> {
     const LINKED: &str = "    linked AS (
         SELECT DISTINCT carried.logical_name_id
@@ -221,6 +283,7 @@ fn before_fix() -> Result<String> {
           AND surface.block_number > COALESCE(marker.current_block_number, -1)
     )
 ";
+    const REVEALED: &str = "        UNION SELECT logical_name_id FROM revealed\n";
     let mut sql = WORK_LIST.to_owned();
     for (from, to, before) in [
         (
@@ -243,6 +306,11 @@ fn before_fix() -> Result<String> {
         ensure!(start < end, "{from:?} follows {to:?}");
         sql.replace_range(start..end, before);
     }
+    ensure!(
+        sql.matches(REVEALED).count() == 1,
+        "the work list no longer unions `revealed`"
+    );
+    sql = sql.replace(REVEALED, "");
     ensure!(!sql.contains("$4"), "the work list binds $4 elsewhere");
     Ok(sql)
 }
@@ -260,21 +328,23 @@ fn collect_scans<'a>(node: &'a Value, scans: &mut Vec<&'a Value>) {
     }
 }
 
-/// Why the scans of `relation` under `alias` are not all index probes of one of `indexes` whose
-/// index condition holds every one of `conditions`, or `None` when they are. A bitmap heap scan
-/// passes when a bitmap index scan below it does.
+/// Why the scans of `relation` under `alias` are not all index probes of one of the indexes of
+/// `probes` whose index condition holds every condition that index's entry lists, or `None` when
+/// they are. A bitmap heap scan passes when a bitmap index scan below it does.
 fn probe_failure(
     scans: &[&Value],
     relation: &str,
     alias: &str,
-    indexes: &[&str],
-    conditions: &[&str],
+    probes: &[Probe],
 ) -> Option<String> {
-    let probes = |node: &Value| {
-        indexes.contains(&node["Index Name"].as_str().unwrap_or_default())
-            && node["Index Cond"]
-                .as_str()
-                .is_some_and(|cond| conditions.iter().all(|part| cond.contains(part)))
+    let probes_node = |node: &Value| {
+        let index = node["Index Name"].as_str().unwrap_or_default();
+        probes.iter().any(|(name, conditions)| {
+            *name == index
+                && node["Index Cond"]
+                    .as_str()
+                    .is_some_and(|cond| conditions.iter().all(|part| cond.contains(part)))
+        })
     };
     let of_relation: Vec<&Value> = scans
         .iter()
@@ -287,19 +357,19 @@ fn probe_failure(
     for node in of_relation {
         let kind = node["Node Type"].as_str().unwrap_or_default();
         let passes = match kind {
-            "Index Scan" | "Index Only Scan" => probes(node),
+            "Index Scan" | "Index Only Scan" => probes_node(node),
             "Bitmap Heap Scan" => {
                 let mut below = Vec::new();
                 collect_scans(node, &mut below);
                 below
                     .iter()
-                    .any(|child| child["Node Type"] == "Bitmap Index Scan" && probes(child))
+                    .any(|child| child["Node Type"] == "Bitmap Index Scan" && probes_node(child))
             }
             _ => false,
         };
         if !passes {
             return Some(format!(
-                "{kind} of {relation} {alias} is not a probe of {indexes:?} on {conditions:?}"
+                "{kind} of {relation} {alias} is not a probe of {probes:?}"
             ));
         }
     }

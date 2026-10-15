@@ -12,6 +12,8 @@ pub mod search_dictionary;
 pub mod topology;
 
 #[cfg(test)]
+mod bound_page_plan_tests;
+#[cfg(test)]
 mod id_index_plan_tests;
 #[cfg(test)]
 mod name_order_plan_tests;

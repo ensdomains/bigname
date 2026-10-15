@@ -30,6 +30,11 @@
 //! position of its own and an `at` below the publication cannot be served from it.
 mod batch;
 mod bound;
+#[cfg(any(test, feature = "test-support"))]
+mod bound_parity;
+pub(crate) mod bound_rules;
+#[cfg(any(test, feature = "test-support"))]
+pub mod bound_walk;
 mod compose;
 mod heads;
 mod list;
@@ -55,9 +60,14 @@ pub(crate) use batch::{
     all_servable_publications, load as load_composed, load_base as load_composed_base,
     servable_publication,
 };
+pub use bound::{BoundName, BoundNamesPage, load_family_bound_names};
 #[cfg(test)]
-pub(crate) use bound::BOUND_CANDIDATES_SQL;
-pub use bound::load_family_bound_names;
+pub(crate) use bound::{
+    bound_count_sql, bound_page_sql, count as bound_count, count_plan as bound_count_plan,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use bound_parity::{assert_bound_names_match_the_walk, assert_stored_bound_fields_are_fresh};
+pub(crate) use bound_rules::COMPOSED_NC_COLUMNS;
 #[cfg(test)]
 pub(crate) use list::SEARCH_CANDIDATES_SQL;
 pub use list::{load_family_expiring_page, load_family_search_page};

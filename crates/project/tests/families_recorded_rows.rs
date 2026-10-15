@@ -37,10 +37,10 @@ const TARGET: i64 = 300;
 /// family marker and the history catalogue marker are taken without their generation and
 /// without the content hash of the build that wrote them, which differs between builds by
 /// design.
-const RECORDED: &str = "9ca5faea64679be9efa486b0da8b5c90d172ca950baea6a33685c2283899c56f";
+const RECORDED: &str = "b04360d7543153e96fa2c355273062165f2842c8b454696d4d8679c9173b0374";
 const MAINNET: &str = "ethereum-mainnet";
 /// The same digest for the seed alone on `MAINNET`.
-const RECORDED_MAINNET: &str = "f40f07a77f648e8506900de7e74c8134fc26d41f992e04bc7f5d6d4512f75340";
+const RECORDED_MAINNET: &str = "7326556e0a5f7fb3a03ad14a82b5084c1cf57ad22407fd30f1d6ff1edea7ad09";
 
 /// The tables the ENSv2 path history fills. The digest holds a selection change to account
 /// only where they have rows.
