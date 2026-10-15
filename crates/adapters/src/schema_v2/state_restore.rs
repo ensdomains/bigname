@@ -497,7 +497,20 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
             };
             state.set_v1_wrapper_burnt(&event.namespace, namehash, false);
             state.release_v1_name(&event.namespace, namehash);
-            if event.after_state.get("reactivated_resource_id").is_some() {
+            // The live unwrap writes `reactivated_resource_id` for either successor, so
+            // the registry-only successor must be recognised by its authority kind
+            // first. Otherwise the registrar reactivation below swallows it and the
+            // successor is dropped at the batch boundary.
+            if event
+                .after_state
+                .get("authority_kind")
+                .and_then(Value::as_str)
+                == Some("registry_only")
+            {
+                // No lease was reactivated. The unwrap's successor is the registry-only
+                // authority retained from its registry write.
+                state.activate_retained_v1_registry_authority(&event.namespace, namehash);
+            } else if event.after_state.get("reactivated_resource_id").is_some() {
                 let at = event
                     .after_state
                     .get("unwrapped_at")
@@ -518,7 +531,12 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
 // records an ERC-1155 burn as a `relation_kind=holder` revocation whose subject is still the
 // linked owner (a plain transfer restores the new owner from `TokenControlTransferred` first).
 fn restore_wrapper_delegate(state: &mut State, event: &PriorEventInput) {
-    if event.event_kind != "PermissionChanged" || event.source_family != "ens_v1_wrapper_l1" {
+    // A registry write that ends the NameWrapper authority revokes the approval in a registry
+    // row, so a registry `token_approval` row counts here as well.
+    let registry_row = event.source_family == "ens_v1_registry_l1";
+    if event.event_kind != "PermissionChanged"
+        || !(registry_row || event.source_family == "ens_v1_wrapper_l1")
+    {
         return;
     }
     let source = event
@@ -545,6 +563,10 @@ fn restore_wrapper_delegate(state: &mut State, event: &PriorEventInput) {
         .get("effective_powers")
         .and_then(Value::as_array)
         .is_some_and(|powers| !powers.is_empty());
+    if registry_row && source.get("relation_kind").and_then(Value::as_str) != Some("token_approval")
+    {
+        return;
+    }
     if source.get("relation_kind").and_then(Value::as_str) == Some("holder") {
         let burnt = !granted
             && matches!(

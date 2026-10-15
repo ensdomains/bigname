@@ -1,10 +1,36 @@
 //! Registrar token movement and its authority handoff, including a complete wrapper callback.
+use alloy_primitives::Address;
+
 use super::*;
 
+/// The node and recipient of a BaseRegistrar token transfer between two nonzero holders. A
+/// malformed log gives none, and normal dispatch reports it.
+pub(in crate::schema_v2::protocol::v1) fn target(
+    selected: &Selected,
+    raw: &RawLogInput,
+) -> Option<(String, Address)> {
+    if selected.source.source_family != "ens_v1_registrar_l1"
+        || selected.emitter_role.as_deref() != Some("registrar")
+        || selected.event.signature != "Transfer(address,address,uint256)"
+    {
+        return None;
+    }
+    let event = decode_event_log::<transfer::Transfer>(&raw.topics, &raw.data, "").ok()?;
+    (event.from != Address::ZERO && event.to != Address::ZERO).then(|| {
+        (
+            registrar_namehash(selected, B256::from(event.tokenId.to_be_bytes::<32>())),
+            event.to,
+        )
+    })
+}
+
+/// `reclaim_follows` holds when the recipient is the admitted NameWrapper and the next registry
+/// owner write for the node in this transaction is the `NewOwner` naming it.
 pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
+    reclaim_follows: bool,
 ) -> anyhow::Result<Interpreted> {
     ensure_declared(selected, &["TokenControlTransferred"])?;
     let event = decode_event_log::<transfer::Transfer>(
@@ -56,17 +82,31 @@ pub(super) fn interpret(
     else {
         return Ok(Interpreted::new());
     };
+    // `wrapETH2LD` and `onERC721Received` move the token to the NameWrapper and then reclaim the
+    // registry to it in the same transaction. When the lease is the active authority, the
+    // registry naming the holder between those two logs is never visible outside the
+    // transaction, so the lease converges against the owner the reclaim writes and no
+    // registry-only authority opens. A divergence open before the transaction still closes at
+    // the reclaim. The transfer log comes first because `reclaim` requires the NameWrapper to
+    // own the token already. The ERC721 base the BaseRegistrar imports is not vendored at the pin.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L778-L804 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+    let lease_was_active = previous_active
+        .as_ref()
+        .is_some_and(|active| active.resource_id == linked.resource_id);
     let mut active_after = state.converge_v1_registrar_transfer(
         &selected.source.namespace,
         &raw_namehash,
         raw.block_timestamp.unix_timestamp(),
+        (reclaim_follows && lease_was_active).then_some(to.as_str()),
     );
     registry_only_fallback::activate_registry_only_authority(
         selected,
         raw,
         state,
         &raw_namehash,
-        labelhash,
+        Some(format!("{labelhash:#x}")),
         &linked,
         &mut active_after,
     );

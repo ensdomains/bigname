@@ -55,7 +55,7 @@ pub(in crate::schema_v2::protocol::v1) fn push_permission_change(
     });
 }
 
-pub(super) fn append_authority_permissions(
+pub(in crate::schema_v2::protocol::v1) fn append_authority_permissions(
     output: &mut Interpreted,
     previous: Option<&V1NameState>,
     current: Option<&V1NameState>,

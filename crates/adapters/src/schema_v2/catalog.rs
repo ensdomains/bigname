@@ -28,6 +28,7 @@ pub(super) struct Selected {
     pub manifest_declared_emitter: bool,
 }
 
+#[derive(Clone)]
 pub(super) struct Catalog {
     manifests: Vec<ManifestSource>,
     by_id: BTreeMap<i64, usize>,

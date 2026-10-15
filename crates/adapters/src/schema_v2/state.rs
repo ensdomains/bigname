@@ -122,6 +122,8 @@ pub(super) struct State {
     v1_registrar_evidence: OrdMap<String, Value>,
     v1_expiries: OrdSet<(i64, String)>,
     v2_migration_times: OrdMap<String, i64>,
+    v2_locked_migration_names: OrdSet<String>,
+    v2_locked_migration_positions: OrdMap<String, crate::schema_v2::model::PriorWritePosition>,
     v1_registry_authorities: OrdMap<String, V1NameState>,
     v1_registry_owners: OrdMap<String, String>,
     v1_registry_owner_words: OrdMap<String, String>,
@@ -343,6 +345,15 @@ impl State {
         let mut authority = self.v1_registry_authorities.get(key)?.clone();
         authority.owner = Some(owner.clone());
         Some(authority)
+    }
+
+    /// The node's remembered registry-only authority with its current nonzero registry owner.
+    pub(super) fn v1_current_registry_authority(
+        &self,
+        namespace: &str,
+        namehash: &str,
+    ) -> Option<V1NameState> {
+        self.v1_registry_authority_if_authentic(&v1_key(namespace, namehash))
     }
 
     pub(super) fn set_v1_registry_owner_views(

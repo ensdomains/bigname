@@ -36,11 +36,20 @@ mod same_transaction_pointer;
 #[path = "tests/v1_wrapped_registration_resolver.rs"]
 mod v1_wrapped_registration_resolver;
 
+#[path = "tests/wrap_registry_interval.rs"]
+mod wrap_registry_interval;
+
+#[path = "tests/output_pins.rs"]
+mod output_pins;
+
 #[path = "tests/wrapper_permissions.rs"]
 mod wrapper_permissions;
 
 #[path = "tests/wrapper_registry_write.rs"]
 mod wrapper_registry_write;
+
+#[path = "tests/unwrapped_child_under_wrapped_parent.rs"]
+mod unwrapped_child_under_wrapped_parent;
 
 const CHAIN: &str = "adapter-test";
 const CONTRACT: &str = "0x0000000000000000000000000000000000000042";

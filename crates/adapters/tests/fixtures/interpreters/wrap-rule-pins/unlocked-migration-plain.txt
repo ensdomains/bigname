@@ -1,0 +1,86 @@
+normalized_events 235:0 SubregistryChanged ens_v1_registry_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f eff45a5642649ed0
+normalized_events 235:0 AuthorityTransferred ens_v1_registry_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f 7fafb5da1f7b9bd0
+normalized_events 235:0 PermissionChanged ens_v1_registry_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f d57d8680350ab0b9
+normalized_events 235:1 RegistrationGranted ens_v1_registrar_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f b4e6c36025e7fa91
+normalized_events 235:1 ExpiryChanged ens_v1_registrar_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f 11705aa1253ccb63
+normalized_events 235:1 PermissionChanged ens_v1_registrar_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f 33e35350a4135e78
+normalized_events 235:1 SurfaceBound ens_v1_registrar_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f 9ecc52e34aa3b320
+normalized_events 235:1 AuthorityEpochChanged ens_v1_registrar_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f 321ae109548857a6
+normalized_events 235:1 PreimageObserved ens_v1_registrar_l1 - d8352292687b3b2d
+normalized_events 235:2 ResolverChanged ens_v1_registry_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f f725eb279d64c89c
+normalized_events 235:2 ResolverChanged ens_v1_registry_l1 fa4f08cc-e41e-58fd-bfc3-42a546c306d6 b3ceb9b9b318c2b3
+normalized_events 235:2 PermissionChanged ens_v1_registry_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f 703a1a25af0ad7d3
+normalized_events 236:0 TokenControlTransferred ens_v1_registrar_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f f564496a1c25cf18
+normalized_events 236:0 PermissionChanged ens_v1_registrar_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f a88674e54ab97f6b
+normalized_events 236:0 PermissionChanged ens_v1_registrar_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f 4225095a72697685
+normalized_events 236:0 PermissionChanged ens_v1_registrar_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f c065133bb524df79
+normalized_events 236:1 SubregistryChanged ens_v1_registry_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f a8cdf670e89eadc5
+normalized_events 236:1 AuthorityTransferred ens_v1_registry_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f 5b8060ff5ef0f838
+normalized_events 236:2 AuthorityTransferred ens_v1_registry_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f 06baa865a9afe453
+normalized_events 236:2 PermissionChanged ens_v1_registry_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f b4d1f932200e0b8e
+normalized_events 236:2 PermissionChanged ens_v1_registry_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f 18ea675218a551fd
+normalized_events 236:3 ResolverChanged ens_v1_registry_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f 883443f77f21a74f
+normalized_events 236:5 TokenControlTransferred ens_v1_registrar_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f d49b41e40edba524
+normalized_events 236:5 PermissionChanged ens_v1_registrar_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f 90ca38bca2cd5cf6
+normalized_events 236:5 PermissionChanged ens_v1_registrar_l1 1e54e324-2955-52f8-86b3-8bd1d7b1371f c726e9fab5a0def7
+normalized_events 236:6 RegistrationGranted ens_v2_registry_l1 - e7c06764b589e6a0
+normalized_events 236:6 PreimageObserved ens_v2_registry_l1 - 1914242d96b79282
+normalized_events 236:6 MigrationApplied ens_v2_migration_l1 - c1b2270b92aac443
+normalized_events 236:8 TokenResourceLinked ens_v2_registry_l1 6f859f98-8762-5467-86a5-591b802bb0a0 a07db4b17c4d5ede
+normalized_events 236:8 SurfaceBound ens_v2_registry_l1 6f859f98-8762-5467-86a5-591b802bb0a0 8d06579025d924ab
+normalized_events 236:8 RegistrationGranted ens_v2_registry_l1 6f859f98-8762-5467-86a5-591b802bb0a0 815010f1bbbce21d
+normalized_events 236:8 AuthorityTransferred ens_v2_registry_l1 6f859f98-8762-5467-86a5-591b802bb0a0 726ff1b4107de7f1
+normalized_events 236:8 ExpiryChanged ens_v2_registry_l1 6f859f98-8762-5467-86a5-591b802bb0a0 5e48f9d7fa2be275
+normalized_events 236:8 PreimageObserved ens_v2_registry_l1 - 8b3827259dd15521
+normalized_events 236:9 PermissionChanged ens_v2_registry_l1 6f859f98-8762-5467-86a5-591b802bb0a0 819276e066f4510d
+normalized_events 236:10 ResolverChanged ens_v2_registry_l1 6f859f98-8762-5467-86a5-591b802bb0a0 7a1060b318d09310
+label_preimages #0 51aece137ea6c78b
+label_preimages #1 bc6f624feeb2702d
+label_preimages #2 22161b93a9288d5f
+label_preimages #3 4a1d52797fd84846
+label_preimages #4 986a0187e4fed999
+label_preimages #5 45d0cfc7ef74036a
+name_surfaces #0 a79a390e59777474
+name_surfaces #1 46ba4c47b434ac38
+name_surfaces #2 293170d610a36c3a
+token_lineages #0 560f04e7179e16b3
+token_lineages #1 f5c6d2d313ffc05d
+resources #0 88c2373d55f6d66e
+resources #1 586fe2f7e503e978
+resources #2 3e3bfbfdb6b8f8c5
+resources #3 8ed0cd476edfcba7
+resources #4 4620925f81dc5d1d
+resources #5 28b9e991e25061af
+resources #6 20a6d0eb78193163
+resources #7 20a6d0eb78193163
+resources #8 2c1f4f3434fe0703
+resources #9 12391e5317a64538
+resources #10 12391e5317a64538
+resources #11 987ece8be52edb10
+resources #12 1bfc4c1ab2ec4f93
+surface_bindings #0 c848b1cc682e2c09
+surface_bindings #1 dac5f997ec228d25
+binding_closures #0 e765580f45a6675a
+binding_closures #1 0d14e32a27349b04
+binding_closures #2 8aca5558fd3a983e
+contract_instances #0 1df896baf4c3de91
+contract_addresses #0 0bf43bdfcbd097a3
+discovery_edges #0 b2029a51cf3d3d44
+discovery_edge_closures #0 11efcbc4d22bdbbf
+discovery_edge_closures #1 471bd1a2916f0d38
+discovery_edge_closures #2 8f7ab1b40ae4d1d8
+migration_event_associations #0 2c1efaee4ad17165
+migration_event_associations #1 29880ee63cc0bba9
+migration_event_associations #2 21ee87a7bdca4b92
+migration_event_associations #3 60e7f2b5f5788e16
+migration_event_associations #4 77e2b5b3d91c9977
+migration_event_associations #5 d7b9f318e9187a18
+migration_event_associations #6 1ed97cf8c4fac42c
+migration_event_associations #7 2cae0a2cc7c3a670
+migration_event_associations #8 3417044268a095cd
+migration_event_associations #9 b65a31a92b52a9e0
+migration_event_associations #10 127caa4d36aca912
+migration_event_associations #11 2adf8659f1750dcc
+migration_event_associations #12 6a7552949a51acd7
+migration_candidate_identity_effects #0 de62c980eeb4e279
+migration_authority_transitions #0 ffa8c11752126dd7

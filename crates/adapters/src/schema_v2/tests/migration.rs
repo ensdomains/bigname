@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use super::*;
 
+mod announced_resolver;
 mod child;
 mod expiry;
 mod intermediary;
@@ -5352,6 +5353,37 @@ fn plain_unwrapped_cleanup_keeps_one_predecessor_without_v1_reopenings() -> anyh
             .iter()
             .any(|event| event.after_state["source_event"] == "NewResolver"
                 && event.after_state["resolver"] == ZERO_ADDRESS)
+    );
+    Ok(())
+}
+
+/// The unlocked migration moves the registrar token to its controller and reclaims the registry
+/// to it in one transaction, the same transfer-then-reclaim order a wrap uses. The controller is
+/// not the NameWrapper, so this output must stay as it is. The pins were taken on the tree
+/// before the wrap rule, one line per output row.
+/// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L121 @ ens_v2@a971bd64)
+#[test]
+fn unlocked_migration_transfer_and_reclaim_is_unchanged_by_the_wrap_rule() -> anyhow::Result<()> {
+    use super::output_pins::{output_rows, pin_matches};
+    let plain = interpret_test_batch(plain_unwrapped_input()?)?;
+    let handoff = interpret_test_batch(unwrapped_input(Some(Address::from([0x52; 20])))?)?;
+    let plain_matches = pin_matches(
+        "unlocked-migration-plain",
+        &output_rows(&plain),
+        include_str!(
+            "../../../tests/fixtures/interpreters/wrap-rule-pins/unlocked-migration-plain.txt"
+        ),
+    );
+    let handoff_matches = pin_matches(
+        "unlocked-migration-handoff",
+        &output_rows(&handoff),
+        include_str!(
+            "../../../tests/fixtures/interpreters/wrap-rule-pins/unlocked-migration-handoff.txt"
+        ),
+    );
+    assert!(
+        plain_matches && handoff_matches,
+        "pinned migration output moved: see the PIN lines above"
     );
     Ok(())
 }

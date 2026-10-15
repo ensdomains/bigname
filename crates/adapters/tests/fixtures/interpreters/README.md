@@ -226,3 +226,10 @@ registry setup; the migration controller then reclaims, clears registry ownershi
 transfers the registrar token to Graveyard before injecting the successor.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f)
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
+
+### Wrap-rule pins
+
+`wrap-rule-pins/` holds one pin file per wrap, unwrap or migration scenario. Each line is an
+output row's collection, its key and a 16-hex digest of the row's `Debug`. They are read by
+`crates/adapters/src/schema_v2/tests/output_pins.rs`. A failing pin prints the row diff, with the
+new rows in full. Re-take a pin only from that printed diff, after the moved rows are reviewed.

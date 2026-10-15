@@ -4335,3 +4335,101 @@ manifest, so the manifest-authority fingerprint is unchanged.
 Before the release is recorded, confirm that the Project redo adopted the new projection
 content hash and that `GET /v1/resolvers/1/<address>?include=total_count` answers for a busy
 resolver.
+
+## ENSv1 unwrap without a lease and resolver logs kept on a batch re-run
+
+The build that gives an unwrapped ENSv1 name with no registrar lease a registry-only
+successor (TYR-334) changes the unwrap and restore paths and the batch re-run in
+`crates/adapters/src`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain. The
+[projection content hash](glossary.md#projection-content-hash) moves with it.
+
+What changes for names:
+
+- A wrapped ENSv1 name unwrapped with no registrar lease to reactivate serves as
+  active with its registry owner on `GET /v1/names/{name}`. This includes a name whose
+  registry record left the NameWrapper before the unwrap, whether or not it came back. It
+  also appears in that owner's address names. Before, it served as `status: unregistered`.
+- Every log an ENSv2 resolver emitted earlier in a batch is kept when Interpret re-runs
+  that batch, even after a later announcement in the batch replaced its
+  [resolver announcement admission](glossary.md#resolver-announcement-admission). A role
+  granted by `EACRolesChanged` shows on `GET /v1/resolvers/{chain_id}/{address}/roles`,
+  and a text record it sets shows on `GET /v1/resolvers/{chain_id}/{address}/records`.
+  Before, the expiry re-run dropped the earlier logs of a resolver whose admission was
+  replaced later in that batch. Interpret makes that re-run when an old lease expires
+  after an ENSv1→ENSv2 migration in the same batch.
+
+These rows arrive through re-derivation, not through an in-place change. Every chain
+needs a full-history Interpret redo, then the Project redo it installs, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and
+API binaries. The change rides the next re-derivation release and shares that release's
+one Interpret and Project redo pair with its other hash-rotating changes. Do not mark old
+rows ready under the new hash.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority
+fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## Wrapping a `.eth` name opens no registry-only interval
+
+The build that keeps a `.eth` lease bound while `wrapETH2LD`, or a direct token send to the
+NameWrapper, moves it into the NameWrapper changes the BaseRegistrar transfer path in
+`crates/adapters/src`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain. The
+[projection content hash](glossary.md#projection-content-hash) moves with it.
+
+What changes for names:
+
+- `GET /v1/events?type=permission` no longer serves a grant and a revoke of
+  `registration_control` to the holder on a registry-only resource, with
+  `registration_id: null`, for each such wrap.
+- The name's history and the holder's and the NameWrapper's address histories lose the
+  NameWrapper's second `registration_control` grant on the lease at the reclaim log. A wrap's
+  permission history in name history goes from 7 rows to 6. The latest state is unchanged.
+- When the registry already has a resolver, `resolver_control` on the lease moves from the
+  holder to the NameWrapper at the transfer log. Before, the holder held it on a registry-only
+  resource between the two logs, and the NameWrapper got it at the reclaim log.
+- A transfer to the NameWrapper without the reclaim in its own transaction, such as a plain
+  `transferFrom`, still opens the registry-only authority, as does any transfer to another
+  holder ([upstream divergences](upstream.md#known-divergences)). A wrap while the registry
+  already names an owner other than the holder is unchanged too.
+
+These rows arrive through re-derivation, not through an in-place change. Every chain needs a
+full-history Interpret redo, then the Project redo it installs, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+binaries. The change rides the next re-derivation release and shares that release's one
+Interpret and Project redo pair with its other hash-rotating changes. Do not mark old rows
+ready under the new hash.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
+and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## A registry write that ends a wrapped name revokes its token approval
+
+The build that ends the NameWrapper's per-token approval where a registry owner write ends the
+NameWrapper authority changes the ENSv1 registry path in `crates/adapters/src`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain. The
+[projection content hash](glossary.md#projection-content-hash) moves with it.
+
+What changes for names:
+
+- When a parent's registry write gives a wrapped child to a new owner or to zero, the address
+  the holder approved on the NameWrapper loses its NameWrapper powers at that write, before the
+  holder's revoke. `GET /v1/events?type=permission` serves that revoke once.
+- `GET /v1/permissions` no longer serves the approved address on the old NameWrapper resource
+  after that write. Before, the row stayed until the old token moved or burned.
+- The same holds for the Sepolia Graveyard's clear of a wrapped child. A lapsed wrapped
+  `.eth` name registered again without the NameWrapper is unchanged, since the read already
+  masks the lapsed approval.
+- A registry write that names the NameWrapper, the holder's own unwrap and owner-wide operators
+  are unchanged. An operator's NameWrapper rows are copied from the holder's served rows, which
+  the same write already revoked.
+
+These rows arrive through re-derivation, not through an in-place change. Every chain needs a
+full-history Interpret redo, then the Project redo it installs, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+binaries. The change rides the next re-derivation release and shares that release's one
+Interpret and Project redo pair with its other hash-rotating changes. Do not mark old rows
+ready under the new hash.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
+and the compiled watch plan are unchanged, so stamp no Ingest redo.

@@ -1334,6 +1334,25 @@ accept only the holder and its operators.
 (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L275 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L375-L378 @ ens_v1@91c966f)
 
+A registry owner write that ends a NameWrapper authority, such as the parent's
+`setSubnodeOwner` to a new owner or to zero, or the admitted Graveyard's clear,
+also revokes the delegate without an event, at that write's log and before the
+holder's revocation. NameWrapper keeps the approval on chain until the old token
+moves or burns, or the holder approves again, but those logs no longer reach the
+ended authority, so without this revocation the delegate would keep its row (see
+[upstream divergences](upstream.md#known-divergences)). A registry write that
+keeps the NameWrapper authority, such as a write naming the NameWrapper or the
+NameWrapper's own unwrap, revokes nothing there.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L837-L840 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269-L275 @ ens_v1@91c966f)
+
+The revocation is a registry-family row that names the admitted NameWrapper as
+its authority contract, so it has the grant's state scope. Its interpreter state
+key carries the registry family, so a resumed interpreter keeps it next to the
+newest NameWrapper row of that subject. Prior rows restore in chain order, so
+the revocation still follows the grant, and a later grant to another address
+survives it.
+
 Owner-wide operators come from NameWrapper `ApprovalForAll`, normalized like
 registry operators into `project_account_approval` with
 `authority_kind=wrapper` and `wrapper_control`. For these operators,
