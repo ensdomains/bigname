@@ -1,5 +1,5 @@
 use crate::v2::support::{ResolutionRecordKey, parse_resolution_record_key};
-use crate::v2::{V2Error, V2Result, validate_product_record};
+use crate::v2::{RequestSource, V2Error, V2Result, validate_product_record};
 
 use super::MAX_RECORD_KEYS;
 
@@ -37,6 +37,45 @@ pub(crate) fn parse_record_keys(keys: Option<&str>) -> V2Result<Option<Vec<Resol
     }
 
     Ok(Some(parsed))
+}
+
+pub(crate) fn records_include_inventory(include: &[String]) -> V2Result<bool> {
+    let mut include_inventory = false;
+    for value in include {
+        match value.as_str() {
+            "inventory" => include_inventory = true,
+            _ => {
+                return Err(V2Error::invalid_input(
+                    "include must contain only inventory",
+                ));
+            }
+        }
+    }
+    Ok(include_inventory)
+}
+
+/// Whether a records read asks for the inventory alone (`values=false`). That mode answers no
+/// value, so it takes no verified read and no `keys`, and both conflicts are refused before the
+/// keys are parsed (docs/api-v1-routes.md § `GET /v1/names/{name}/records`).
+pub(crate) fn inventory_only_request(
+    values: Option<bool>,
+    source: RequestSource,
+    keys: Option<&str>,
+) -> V2Result<bool> {
+    if values != Some(false) {
+        return Ok(false);
+    }
+    if source == RequestSource::Verified {
+        return Err(V2Error::invalid_input(
+            "source must be indexed or auto when values=false",
+        ));
+    }
+    if keys.is_some() {
+        return Err(V2Error::invalid_input(
+            "keys must be omitted when values=false",
+        ));
+    }
+    Ok(true)
 }
 
 /// The record keys one records-route read answers, and whether the caller chose them.

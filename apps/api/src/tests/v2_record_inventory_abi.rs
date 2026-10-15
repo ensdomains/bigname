@@ -422,6 +422,8 @@ async fn abi_content_types_list_public_resolver_v2_and_basenames_writes() -> Res
     let inventory = &records["data"]["inventory"];
     assert_eq!(inventory["abi_content_types"], json!(["1", "256"]), "{records:#}");
     assert!(inventory.get("abi_unsupported_reason").is_none(), "{records:#}");
+    let inventory_only = v2_get_json(&database, "/v1/names/abi.base.eth/records?values=false").await?;
+    assert_eq!(inventory_only["data"], inventory_only_data(&records), "{inventory_only:#}");
     database.cleanup().await
 }
 

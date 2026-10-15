@@ -177,22 +177,17 @@ pub(super) async fn assert_alias(
     expected["namehash"] = json!(bigname_lookup::ens_namehash_hex(alias)?);
     expected["canonical_name"] = json!(canonical);
     assert_eq!(served["data"], expected, "{alias} under {canonical}");
-    let records = ok(
-        database,
-        &format!("/v1/names/{alias}/records?source=indexed"),
-    )
-    .await?;
-    let canonical_records = ok(
-        database,
-        &format!("/v1/names/{canonical}/records?source=indexed"),
-    )
-    .await?;
-    let mut expected = canonical_records["data"].clone();
-    expected["canonical_name"] = json!(canonical);
-    assert_eq!(
-        records["data"], expected,
-        "{alias} records under {canonical}"
-    );
+    for query in ["source=indexed", "values=false"] {
+        let records = ok(database, &format!("/v1/names/{alias}/records?{query}")).await?;
+        let canonical_records =
+            ok(database, &format!("/v1/names/{canonical}/records?{query}")).await?;
+        let mut expected = canonical_records["data"].clone();
+        expected["canonical_name"] = json!(canonical);
+        assert_eq!(
+            records["data"], expected,
+            "{alias} records under {canonical} with {query}"
+        );
+    }
     Ok(served)
 }
 

@@ -1183,8 +1183,9 @@ its value map:
 | `namespace` | query | string | no | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
 | `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
-| `source` | query | enum `indexed`, `verified`, `auto` | no | `indexed` | Answer origin. |
-| `keys` | query | array [0, 200] of string | no | none | Comma-separated record selectors: addr:<decimal>, text:<key>, contenthash or avatar; omitted/blank uses the inventory-derived default keys. At most 200 keys. |
+| `source` | query | enum `indexed`, `verified`, `auto` | no | `indexed` | Answer origin. values=false accepts indexed or auto and reads the indexed inventory. |
+| `keys` | query | array [0, 200] of string | no | none | Comma-separated record selectors: addr:<decimal>, text:<key>, contenthash or avatar; omitted/blank uses the inventory-derived default keys when values is true; keys must be omitted or blank when values is false. At most 200 value keys. |
+| `values` | query | boolean | no | `true` | False returns the name's inventory and records: {}, without per-key answers or the 200-value-key limit. Omitted, true or blank preserves value answers. source=verified and nonblank keys conflict with false before key parsing. |
 | `include` | query | array of enum `inventory` | no | none | Comma-separated expansion names; unlisted values are invalid. |
 | `If-None-Match` | header | string | no | none | ETag validator from an earlier response, a comma-separated validator list, or *; evaluated only for a cacheable indexed read. |
 
@@ -1198,7 +1199,7 @@ its value map:
 | 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
 | 409 | object ErrorEnvelope | `conflict` | none | The explicit snapshot selector cannot form a canonical snapshot or, for lookup, its selected positions cannot be combined. |
 | 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
-| 422 | object ErrorEnvelope | `unsupported` | none | The inventory-derived default record-key set exceeds the 200-key limit. |
+| 422 | object ErrorEnvelope | `unsupported` | none | In value mode, the inventory-derived default record-key set exceeds the 200-key limit. values=false returns the whole inventory without that limit. |
 | 429 | object ErrorEnvelope | `rate_limited` | none | The enabled verified-execution client rate limit rejected this request. |
 | 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
 | 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
@@ -1216,10 +1217,38 @@ its value map:
   reports what a given resolver holds for the name's node, without a
   resolution claim.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`,
-  `source=indexed|verified|auto`, `keys`, `include=inventory`.
+  `source=indexed|verified|auto`, `keys`, `values`, `include=inventory`.
+- Inventory only: `values=false` returns `records: {}` and the name's
+  record inventory, the container `include=inventory` returns, including when
+  it holds more than 200 product keys. It reads a name's inventory without
+  first finding its resolver address, and it carries the meaning `values=false`
+  has on [`GET /v1/resolvers/{chain_id}/{address}/records`](#get-v1resolverschain_idaddressrecords),
+  for the name's served resolver.
+  - It implies inventory, so a redundant `include=inventory` is accepted. The
+    container gains no requested keys.
+  - `source=indexed` and `source=auto` both read the indexed inventory and
+    report `meta.source=indexed`. `source=verified` returns `400
+    invalid_input` with `source must be indexed or auto when values=false`.
+    A `values=false&source=auto` response carries neither caching header, as
+    for every `source=auto` read
+    ([caching headers](#caching-headers-on-indexed-single-resource-reads)).
+  - Omitted, empty or whitespace `keys` is accepted. After the source check,
+    any nonblank `keys` returns `400 invalid_input` with `keys must be omitted
+    when values=false`, before key parsing, even for a malformed or oversized
+    key list. Invalid `include` remains an error.
+  - Boolean spelling, duplicate `values` fields, and omitted, `true`, empty or
+    whitespace `values` follow the resolver records route.
+  - The `inventory` field is present exactly when `include=inventory` would
+    return it, under the rules below. A name with no current registration,
+    such as a released name, has none. An unsupported inventory row lists its
+    keys under `unsupported_keys`. A declared ENSv1 mirror resolver serves
+    what its registry walk selects. A name bigname does not hold returns `404
+    not_found`.
+
+  For example: `GET /v1/names/alice.eth/records?values=false`.
 - Response shape: `data` returns `namespace`, `resolver`, and route-local
-  `records`, plus `inventory` with `include=inventory`. `records` is the only
-  value shape on this route and is always present in a successful response:
+  `records`, plus `inventory` with `include=inventory` or `values=false`.
+  `records` is the only value shape on this route and is always present in a successful response:
   an object keyed by record key whose values are
   `{status, value?, unsupported_reason?, failure_reason?, meta?}`. It is not
   the [grouped records](#grouped-name-profile-records) object of
@@ -1548,8 +1577,8 @@ its value map:
   than 200 keys, every source (`indexed`, `verified`, and `auto`) returns
   `422 unsupported` before any lookup or provider call; a set of exactly 200
   keys is served. The route never truncates the set; callers can supply `keys`
-  to select a smaller one. For the verified flat
-  name-profile, the limit applies to inventory-derived selectors before the
+  to select a smaller one, or read the whole inventory with `values=false`.
+  For the verified flat name-profile, the limit applies to inventory-derived selectors before the
   route adds its synthetic primary-address request. A 200-selector inventory
   may therefore produce 201 provider keys when `addr:60` was absent; an
   inventory with more than 200 selectors still returns `422 unsupported`.
@@ -3428,7 +3457,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | 404 | object ErrorEnvelope | `not_found` | none | The requested namespace is not a supported public namespace. |
 | 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
 | 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
-| 422 | object ErrorEnvelope | `unsupported` | none | A requested expansion exceeds its bounded permission budget, or a coin_type=evm row would carry more than 100 matches. |
+| 422 | object ErrorEnvelope | `unsupported` | none | include=role_summary exceeds its 1,000 grant-row budget: omit the include and page GET /v1/permissions?registration_id= for each row's permission_resource_id. Or a coin_type=evm row would carry more than 100 matches: read one decimal coin_type at a time. |
 | 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
 | 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
 
@@ -4988,7 +5017,7 @@ For a registrar lease first identified by a later readable observation, registra
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `source` | query | enum `indexed` | no | `indexed` | Answer origin. Only indexed answers are served. |
 | `keys` | query | array [0, 200] of string | no | none | Comma-separated record selectors: addr:<decimal>, text:<key>, contenthash or avatar; omitted/blank uses the inventory-derived default keys when values is true; keys must be omitted or blank when values is false. At most 200 value keys. |
-| `values` | query | boolean | no | `true` | False returns the full inventory and records: {}, without per-key answers or the 200-value-key limit. Omitted, true or blank preserves value answers. Nonblank keys conflict with false before key parsing. Only this route accepts the flag. |
+| `values` | query | boolean | no | `true` | False returns the full inventory and records: {}, without per-key answers or the 200-value-key limit. Omitted, true or blank preserves value answers. Nonblank keys conflict with false before key parsing. The name records route accepts the same flag. |
 | `include` | query | array of enum `inventory` | no | none | Comma-separated expansion names; unlisted values are invalid. |
 | `If-None-Match` | header | string | no | none | ETag validator from an earlier response, a comma-separated validator list, or *; evaluated only for a cacheable indexed read. |
 
@@ -5002,7 +5031,7 @@ For a registrar lease first identified by a later readable observation, registra
 | 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
 | 409 | object ErrorEnvelope | `conflict` | none | The explicit snapshot selector cannot form a canonical snapshot or, for lookup, its selected positions cannot be combined. |
 | 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
-| 422 | object ErrorEnvelope | `unsupported` | none | In value mode, the inventory-derived default record-key set exceeds the 200-key limit. |
+| 422 | object ErrorEnvelope | `unsupported` | none | In value mode, the inventory-derived default record-key set exceeds the 200-key limit. values=false returns the full inventory without that limit. |
 | 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure. |
 | 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling is exhausted. |
 
@@ -5045,7 +5074,8 @@ For a registrar lease first identified by a later readable observation, registra
     `keys must be omitted when values=false`, even for malformed or oversized
     key lists. Invalid `include` remains an error. Boolean spelling is `true`
     or `false`, with surrounding whitespace trimmed; other spellings or duplicate
-    `values` fields return `400 invalid_input`. Other routes reject `values`.
+    `values` fields return `400 invalid_input`. The name records route accepts
+    the same flag, and other routes reject `values`.
     For example: `GET /v1/resolvers/1/0x0000000000000000000000000000000000000abc/records?name=alice.eth&values=false`.
     The mode skips per-key answer construction; full inventory still reads
     stored record facts and makes no claim of avoiding value-column reads.

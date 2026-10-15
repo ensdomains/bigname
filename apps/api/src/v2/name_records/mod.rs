@@ -36,7 +36,9 @@ pub(crate) use build::{
     build_verified_name_records, ens_universal_resolver_discovery_candidate, indexed_record_answer,
     indexed_records_requiring_verified_fallback, verified_discovery,
 };
-pub(crate) use keys::{RecordSelection, parse_record_keys};
+pub(crate) use keys::{
+    RecordSelection, inventory_only_request, parse_record_keys, records_include_inventory,
+};
 
 pub(crate) const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
 const VERIFIED_ANSWER_STALE_FOR_SNAPSHOT_REASON: &str = "verified_answer_stale_for_snapshot";
@@ -112,17 +114,23 @@ pub(crate) mod auto_fallback_test_hooks {
 pub(crate) struct NameRecordsQueryParams;
 
 impl QueryParamAllowlist for NameRecordsQueryParams {
-    const ALLOWED: &'static [&'static str] =
-        &["namespace", "at", "finality", "source", "keys", "include"];
+    const ALLOWED: &'static [&'static str] = &[
+        "namespace",
+        "at",
+        "finality",
+        "source",
+        "keys",
+        "values",
+        "include",
+    ];
 }
 
 pub(crate) type NameRecordsQuery = StrictQueryParams<NameRecordsQueryParams>;
 
 /// The records route's response data. `records` is its only value shape: one answer per
 /// requested key, or per inventory-derived default key when `keys` is omitted, serialized in
-/// record-key byte order. The resolver-anchored route with `values=false` returns an empty
-/// records map and the full inventory instead. The flat value maps live on name detail and
-/// lookup only.
+/// record-key byte order. With `values=false` either records route returns an empty records map
+/// and the inventory instead. The flat value maps live on name detail and lookup only.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct NameRecords {
     pub(crate) namespace: String,
@@ -179,8 +187,10 @@ pub(crate) async fn get_name_records(
         .namespace
         .clone()
         .unwrap_or_else(|| normalized.namespace.to_owned());
+    let inventory_only =
+        inventory_only_request(params.values, params.source, params.keys.as_deref())?;
     let explicit_records = parse_record_keys(params.keys.as_deref())?;
-    let include_inventory = records_include_inventory(&params.include)?;
+    let include_inventory = records_include_inventory(&params.include)? || inventory_only;
 
     let include_resolution_auxiliary =
         namespace == BASENAMES_NAMESPACE && params.source == RequestSource::Verified;
@@ -197,10 +207,12 @@ pub(crate) async fn get_name_records(
 
     // Without `keys`, every source answers the inventory-derived default set. Inventory is loaded
     // only for a row the name may serve, so reservation and audit-only rows derive no keys. The
-    // limit is checked before any lookup can run.
+    // limit is checked before any lookup can run. `values=false` answers no key, so the limit does
+    // not apply, and the read stays indexed on every admitted source.
     let default_records;
     let selection = match explicit_records.as_deref() {
         Some(records) => RecordSelection::requested(records),
+        None if inventory_only => RecordSelection::inventory_default(&[]),
         None => {
             default_records = default_requested_records(record_inventory.as_ref());
             ensure_default_record_limit(&default_records)?;
@@ -561,21 +573,6 @@ async fn execute_verified_record_lookup(
             resource,
         )),
     }
-}
-
-pub(crate) fn records_include_inventory(include: &[String]) -> V2Result<bool> {
-    let mut include_inventory = false;
-    for value in include {
-        match value.as_str() {
-            "inventory" => include_inventory = true,
-            _ => {
-                return Err(V2Error::invalid_input(
-                    "include must contain only inventory",
-                ));
-            }
-        }
-    }
-    Ok(include_inventory)
 }
 
 #[cfg(test)]

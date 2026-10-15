@@ -149,6 +149,17 @@ async fn resolver_records(database: &TestDatabase, resolver: &str, query: &str) 
     Ok(body)
 }
 
+async fn inventory_only_name_records(database: &TestDatabase) -> Result<Value> {
+    let (status, body) = get(
+        database,
+        &format!("/v1/names/{NAME}/records?namespace=ens&values=false"),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert_eq!(body["data"]["records"], json!({}), "{body:#}");
+    Ok(body)
+}
+
 async fn name_records(database: &TestDatabase) -> Result<Value> {
     let (status, body) = get(
         database,
@@ -278,6 +289,20 @@ async fn serves_records_for_a_released_lease() -> Result<()> {
     assert_withheld(&name_records(&database).await?);
     let body = resolver_records(&database, PUBLIC_RESOLVER, KEYS).await?;
     assert_eq!(body["data"]["records"], served("released.png"), "{body:#}");
+    // The name route's inventory-only read withholds the inventory as `include=inventory` does,
+    // while the resolver still lists the keys it holds for the node.
+    let released = inventory_only_name_records(&database).await?;
+    assert_eq!(
+        released["data"],
+        json!({"namespace": "ens", "resolver": null, "records": {}}),
+        "{released:#}"
+    );
+    let held = resolver_records(&database, PUBLIC_RESOLVER, "values=false").await?;
+    assert_eq!(
+        held["data"]["inventory"]["known_keys"],
+        json!(["addr:60", "text:avatar", "text:description"]),
+        "{held:#}"
+    );
     database.cleanup().await
 }
 
@@ -386,6 +411,30 @@ async fn reads_the_resolver_not_the_latest_pointer_when_the_pointer_moved_twice_
     }
     let unkeyed = resolver_records(&database, OTHER_RESOLVER, "").await?;
     assert_eq!(unkeyed["data"]["records"], json!({}), "{unkeyed:#}");
+    // The name route's inventory-only read follows the latest pointer: the records written at
+    // the earlier resolver are not in it.
+    let current = inventory_only_name_records(&database).await?;
+    assert_eq!(
+        current["data"]["resolver"]["address"],
+        json!(OTHER_RESOLVER),
+        "{current:#}"
+    );
+    let other = resolver_records(&database, OTHER_RESOLVER, "values=false").await?;
+    assert_eq!(
+        current["data"]["inventory"], other["data"]["inventory"],
+        "{current:#}"
+    );
+    assert_eq!(
+        current["data"]["inventory"]["known_keys"],
+        json!([]),
+        "{current:#}"
+    );
+    let earlier = resolver_records(&database, PUBLIC_RESOLVER, "values=false").await?;
+    assert_eq!(
+        earlier["data"]["inventory"]["known_keys"],
+        json!(["addr:60", "text:avatar", "text:description"]),
+        "{earlier:#}"
+    );
     database.cleanup().await
 }
 
@@ -1288,7 +1337,6 @@ async fn inventory_only_rejects_conflicts_and_invalid_flags_on_the_owning_route(
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
     assert_eq!(body["error"]["message"], json!("name is required"));
     for uri in [
-        "/v1/names/alice.eth/records?values=false",
         "/v1/names/alice.eth?values=false",
         "/v1/diagnostics/names/alice.eth/records?values=false",
     ] {
