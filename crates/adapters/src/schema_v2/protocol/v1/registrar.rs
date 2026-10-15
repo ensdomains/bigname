@@ -18,12 +18,13 @@ use crate::schema_v2::{
     state::{State, V1NameState},
 };
 pub(in crate::schema_v2) mod identity;
-mod registry_only_fallback;
+pub(super) mod registry_only_fallback;
 use identity::{new_registrar_identity, registrar_namehash};
 pub(super) mod base;
 pub(in crate::schema_v2) mod decode;
 mod enrichment;
 mod token_transfer;
+pub(super) use token_transfer::target as token_transfer_target;
 mod transfer_permissions;
 mod wrapper_renewal;
 use transfer_permissions::append_transfer_permissions;
@@ -74,7 +75,12 @@ pub(super) fn interpret(
             if selected.source.source_family == "ens_v1_registrar_l1"
                 && selected.emitter_role.as_deref() == Some("registrar") =>
         {
-            let mut ordinary = token_transfer::interpret(selected, raw, state)?;
+            let mut ordinary = token_transfer::interpret(
+                selected,
+                raw,
+                state,
+                context.wrapper_custody.reclaim_follows,
+            )?;
             if context.migration_enabled {
                 let mut correlated =
                     super::super::migration::interpret_base_registrar(selected, raw, state)?;
@@ -117,7 +123,12 @@ pub(super) fn interpret(
         }
         "NameRegistered" => name_event(selected, raw, state, true),
         "NameRenewed" => name_event(selected, raw, state, false),
-        "Transfer" => token_transfer::interpret(selected, raw, state),
+        "Transfer" => token_transfer::interpret(
+            selected,
+            raw,
+            state,
+            context.wrapper_custody.reclaim_follows,
+        ),
         "Upgraded" => super::upgrade::interpret(selected, raw),
         name => bail!("unsupported registrar event {name}"),
     }

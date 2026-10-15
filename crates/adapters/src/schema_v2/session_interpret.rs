@@ -6,6 +6,10 @@ pub(super) fn interpret_loaded(
     raw_logs: Vec<crate::schema_v2::RawLogInput>,
     state: &mut State,
 ) -> anyhow::Result<BatchOutput> {
+    // A pass admits and retires discovered contracts as it reads the batch.
+    // Each re-run below starts from the admissions the batch began with, so
+    // a later admission cannot hide an emitter's earlier logs.
+    let initial_catalog = catalog.clone();
     let output = interpret_once(catalog, blocks, raw_logs.clone(), state)?;
     let crossed = output
         .migration_authority_transitions
@@ -22,9 +26,81 @@ pub(super) fn interpret_loaded(
             })
         })
         .collect::<Vec<_>>();
+    // Locked boundaries are only activated after batch assembly, but an
+    // original child unwrapped later in the same batch must already see
+    // them. Re-run once with each activated locked boundary recorded at
+    // its own position. The unwrap gate orders against that position, so
+    // a boundary proved later in the batch changes nothing earlier.
+    // Any activated boundary triggers the re-run. An unwrap the boundary
+    // changes need not leave a first-pass event that shows it: one that
+    // keeps an already-selected registry-only authority binds nothing.
+    let locked_boundaries = output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.event_kind == "MigrationApplied"
+                && event.consumer_visibility == "activated"
+                && matches!(
+                    event.after_state["migration_path"].as_str(),
+                    Some("locked_wrapped" | "locked_child")
+                )
+        })
+        .filter_map(|event| {
+            Some((
+                event.logical_name_id.clone()?,
+                crate::schema_v2::model::PriorWritePosition::from_parts(
+                    event.block_number,
+                    event.transaction_index,
+                    event.log_index,
+                )?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    if !locked_boundaries.is_empty() {
+        let mut seeded = state.clone();
+        for (name, position) in &locked_boundaries {
+            seeded.note_live_locked_migration(name, *position);
+        }
+        *catalog = initial_catalog.clone();
+        let corrected = interpret_once(catalog, blocks, raw_logs.clone(), &mut seeded)?;
+        anyhow::ensure!(
+            corrected.migration_authority_transitions == output.migration_authority_transitions,
+            "locked-boundary reconciliation changed its proving ENSv1→ENSv2 migration boundaries"
+        );
+        if crossed.is_empty() {
+            return Ok(corrected);
+        }
+        // Both reconciliations apply. The locked re-run's output is only
+        // checked above and then discarded. The expiry re-run starts again
+        // from `state`, seeded with the same locked boundaries and with the
+        // crossed ENSv1→ENSv2 migrations.
+        let mut expiry_state = state.clone();
+        for (name, position) in &locked_boundaries {
+            expiry_state.note_live_locked_migration(name, *position);
+        }
+        let mut reconciled = expiry_state;
+        for transition in crossed {
+            let block = blocks
+                .iter()
+                .find(|block| block.block_number == transition.block_number)
+                .expect("ENSv1→ENSv2 migration boundary belongs to a loaded block");
+            reconciled.remember_v2_migration(
+                &transition.logical_name_id,
+                block.block_timestamp.unix_timestamp(),
+            );
+        }
+        *catalog = initial_catalog;
+        let corrected = interpret_once(catalog, blocks, raw_logs, &mut reconciled)?;
+        anyhow::ensure!(
+            corrected.migration_authority_transitions == output.migration_authority_transitions,
+            "expiry reconciliation changed its proving ENSv1→ENSv2 migration boundaries"
+        );
+        return Ok(corrected);
+    }
     if crossed.is_empty() {
         return Ok(output);
     }
+    // No locked boundary is activated here, so the expiry re-run needs none.
     // Migration groups are confirmed after batch assembly. If this same batch
     // also crosses an old lease's expiry, interpret it once more with those
     // proven boundaries. The timestamp prevents a future proof affecting an
@@ -40,6 +116,7 @@ pub(super) fn interpret_loaded(
             block.block_timestamp.unix_timestamp(),
         );
     }
+    *catalog = initial_catalog;
     let corrected = interpret_once(catalog, blocks, raw_logs, &mut reconciled)?;
     anyhow::ensure!(
         corrected.migration_authority_transitions == output.migration_authority_transitions,

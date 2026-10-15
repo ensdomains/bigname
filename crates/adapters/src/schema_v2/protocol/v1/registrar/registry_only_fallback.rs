@@ -1,13 +1,15 @@
 use super::*;
 
-/// When a registrar transfer leaves no active authority but the registry still names a nonzero
-/// owner, activate the registry-only authority for the name.
-pub(super) fn activate_registry_only_authority(
+/// When an authority handoff leaves no active authority but the registry still names a
+/// nonzero owner, activate the registry-only authority for the name. Shared by the
+/// registrar token transfer and the NameWrapper unwrap, which both close the previous
+/// binding in the same transition that names this successor.
+pub(in crate::schema_v2::protocol::v1) fn activate_registry_only_authority(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
     raw_namehash: &str,
-    labelhash: B256,
+    labelhash: Option<String>,
     linked: &V1NameState,
     active_after: &mut Option<V1NameState>,
 ) {
@@ -35,7 +37,7 @@ pub(super) fn activate_registry_only_authority(
             }
             .to_owned(),
             source_manifest_id: None,
-            labelhash: Some(format!("{labelhash:#x}")),
+            labelhash,
             expiry: None,
             owner: Some(registry_owner),
             registry_contract: None,

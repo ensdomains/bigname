@@ -12,7 +12,7 @@ type RetirementKey = (String, Uuid, String);
 
 /// Stable sequence numbers preserve the original admission order after removals.
 /// Secondary indexes contain only live entries, including during discovery churn.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Admissions {
     entries: BTreeMap<usize, AddressAdmissionInput>,
     by_address: HashMap<String, BTreeSet<usize>>,

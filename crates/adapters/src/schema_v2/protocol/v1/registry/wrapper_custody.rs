@@ -17,11 +17,17 @@ use anyhow::Context;
 
 use crate::schema_v2::{
     catalog::{Catalog, Selected},
+    common::hash_hex,
     migration::RegistrarContext,
-    state::V1NameState,
+    model::RawLogInput,
+    protocol::{
+        Interpreted,
+        v1::{WrapperPermissionContext, append_delegate_permission},
+    },
+    state::{State, V1NameState},
 };
 
-const WRAPPER_FAMILY: &str = "ens_v1_wrapper_l1";
+pub(super) const WRAPPER_FAMILY: &str = "ens_v1_wrapper_l1";
 
 /// What a registry owner log needs to decide whether it keeps the NameWrapper authority.
 #[derive(Clone, Copy, Debug, Default)]
@@ -30,16 +36,22 @@ pub(in crate::schema_v2) struct WrapperCustody {
     pub(in crate::schema_v2) name_wrapper: Option<Address>,
     /// A `NameUnwrapped` for the log's node follows it in its transaction.
     pub(in crate::schema_v2) unwrap_follows: bool,
+    /// The log is a BaseRegistrar transfer to the admitted NameWrapper, and the next registry
+    /// owner write for its node in the transaction is a `NewOwner` naming the NameWrapper.
+    pub(in crate::schema_v2) reclaim_follows: bool,
 }
 
-/// The admitted NameWrapper a current ENSv1 registry log can name as a node's owner: the
-/// wrapper manifest's `name_wrapper` role on the same chain and namespace.
+/// The admitted NameWrapper on the same chain and namespace as a current ENSv1 registry log,
+/// which can name it as a node's owner, or as a BaseRegistrar log, whose token it can receive:
+/// the wrapper manifest's `name_wrapper` role.
 pub(in crate::schema_v2) fn admitted(
     catalog: &Catalog,
     selected: &Selected,
 ) -> anyhow::Result<Option<Address>> {
-    if selected.source.source_family != "ens_v1_registry_l1"
-        || selected.emitter_role.as_deref() != Some("registry")
+    if (selected.source.source_family != "ens_v1_registry_l1"
+        || selected.emitter_role.as_deref() != Some("registry"))
+        && (selected.source.source_family != "ens_v1_registrar_l1"
+            || selected.emitter_role.as_deref() != Some("registrar"))
     {
         return Ok(None);
     }
@@ -75,6 +87,46 @@ pub(super) fn keeps_authority(
                 .is_some_and(|wrapper| owner.parse::<Address>().ok() == Some(wrapper)))
 }
 
+/// A registry write that ends the NameWrapper authority `previous`, because the authority it
+/// links is none or on another resource, also ends the per-token approved address's NameWrapper
+/// permission, at the same log as the holder's. On chain the approval lasts until the old token
+/// moves or burns, but those logs no longer reach this authority. The revoke names the admitted
+/// NameWrapper, so it shares the approval grant's retained state.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L228-L238 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L837-L840 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269-L275 @ ens_v1@91c966f)
+pub(super) fn revoke_delegate(
+    output: &mut Interpreted,
+    state: &mut State,
+    (namespace, node): (&str, &str),
+    previous: Option<&V1NameState>,
+    linked: Option<&V1NameState>,
+    context: RegistrarContext<'_>,
+    raw: &RawLogInput,
+) {
+    let Some(ended) = previous.filter(|authority| {
+        authority.authority_source_family == WRAPPER_FAMILY
+            && linked.map(|current| current.resource_id) != Some(authority.resource_id)
+    }) else {
+        return;
+    };
+    let Some(name_wrapper) = context.wrapper_custody.name_wrapper else {
+        return;
+    };
+    let Some(delegate) = state.set_v1_wrapper_delegate(namespace, node, None) else {
+        return;
+    };
+    let permission = WrapperPermissionContext {
+        name: ended,
+        resolver: None,
+        chain_id: &raw.chain_id,
+        wrapper: format!("{name_wrapper:#x}"),
+        source_event_kind: "AuthorityTransferred",
+        identity_suffix: "AuthorityTransferred",
+    };
+    append_delegate_permission(output, &permission, &delegate, false);
+}
+
 /// Whether a zero-equivalent registry owner write closes the active authority: a registry-only
 /// one always, a NameWrapper one unless the NameWrapper's own `_unwrap(node, 0)` wrote it.
 pub(super) fn zero_write_closes(
@@ -86,4 +138,27 @@ pub(super) fn zero_write_closes(
             || (authority.authority_source_family == WRAPPER_FAMILY
                 && !context.wrapper_custody.unwrap_follows)
     })
+}
+
+/// Whether the BaseRegistrar transfer that follows an unwrap of `node` in its transaction takes
+/// the name over: a wrapped `.eth` second-level name with a wrapper-derived registrar expiry
+/// and no materialized registrar identity yet. `unwrap` refuses a `.eth` second-level name, and
+/// `unwrapETH2LD` runs `_unwrap`, which writes the registry and emits `NameUnwrapped`, and only
+/// then transfers the registrar token to the registrant. That transfer's fallback registrar
+/// identity needs only the derived expiry, so this check needs no more.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L381-L395 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L403-L414 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
+pub(in crate::schema_v2::protocol::v1) fn registrar_transfer_may_follow(
+    state: &State,
+    namespace: &str,
+    node: &str,
+) -> bool {
+    state.v1_registrar(namespace, node).is_none()
+        && state
+            .v1_node_path(namespace, node)
+            .is_some_and(|path| path.len() == 2 && path[1] == hash_hex(b"eth"))
+        && state
+            .v1_registrar_expiry_from_wrapper(namespace, node)
+            .is_some()
 }

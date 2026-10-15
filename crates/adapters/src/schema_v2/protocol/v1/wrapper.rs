@@ -3,7 +3,8 @@ use anyhow::bail;
 use serde_json::json;
 
 use super::super::{Interpreted, NameDraft, ResourceDraft, ShadowNameDraft, ensure_declared};
-use super::registry::{append_authority_transition, authority_kind};
+use super::registrar::registry_only_fallback;
+use super::registry::{append_authority_transition, authority_kind, wrapper_custody};
 use super::support::{events_linked, single_event};
 use crate::evm_abi::{address_hex, decode_event_log, hex_string};
 use crate::schema_v2::{
@@ -356,11 +357,90 @@ fn name_unwrapped(
         raw,
     );
     let linked = state.release_v1_name(&selected.source.namespace, &namehash);
-    let reactivated = state.reactivate_v1_registrar(
+    let mut reactivated = state.reactivate_v1_registrar(
         &selected.source.namespace,
         &namehash,
         raw.block_timestamp.unix_timestamp(),
     );
+    // An unwrapped subname with no lease to reactivate keeps the registry record its
+    // unwrap just wrote: `_unwrap` sets the registry owner to the unwrapped owner
+    // before emitting, so only when the registry already names that owner does the
+    // registry-only authority succeed the wrapped binding in this same transition
+    // rather than leaving the known surface unbound. Otherwise a following
+    // same-transaction registrar transfer owns the successor.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1029-L1031 @ ens_v1@91c966f)
+    let registry_settled_to_unwrapped_owner = state
+        .v1_registry_owner(&selected.source.namespace, &namehash)
+        .is_some_and(|owner| owner.eq_ignore_ascii_case(&address_hex(event.owner)));
+    // An original child of a parent an activated locked-wrapper ENSv1→ENSv2
+    // migration covers keeps its old wrapper-bound pointer selection. A registry-only
+    // successor would re-project that pointer onto a new resource, which the
+    // published rule does not do.
+    let locked_migrated_original_child = state.v1_is_locked_migrated_original_child(
+        &selected.source.namespace,
+        &namehash,
+        crate::schema_v2::model::PriorWritePosition {
+            block_number: raw.block_number,
+            transaction_index: raw.transaction_index,
+            log_index: raw.log_index,
+        },
+    );
+    // A retained registry owner that is the admitted Graveyard is a burned
+    // record, not a live registry-only owner, even when it equals the unwrap
+    // owner. The Graveyard is the ENSv1→ENSv2 migration's burn address for
+    // ENSv1 names, and that migration's cleanups unwrap into it.
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/Graveyard.sol:L20-L23 @ ens_v2_sepolia_20261001@07e55a05)
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/Graveyard.sol:L199 @ ens_v2_sepolia_20261001@07e55a05)
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2_sepolia_20261001@07e55a05)
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/UnlockedMigrationController.sol:L147 @ ens_v2_sepolia_20261001@07e55a05)
+    let graveyard_retained = state
+        .v1_registry_owner_reason(&selected.source.namespace, &namehash)
+        .as_deref()
+        == Some("graveyard");
+    // A wrapped .eth name with wrapper-derived registrar expiry but no
+    // materialized registrar identity yet is taken over by the BaseRegistrar
+    // transfer that follows the unwrap in the same transaction, from the
+    // unwrap moment. `unwrapETH2LD` runs `_unwrap`, which emits NameUnwrapped,
+    // and only then transfers the registrar token to the registrant.
+    // Opening a registry-only interval first would be spurious.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L390-L395 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1031 @ ens_v1@91c966f)
+    let registrar_transfer_may_follow = wrapper_custody::registrar_transfer_may_follow(
+        state,
+        &selected.source.namespace,
+        &namehash,
+    );
+    // The successor follows the authority selected at the unwrap, not its source family.
+    // When registry custody left the NameWrapper, whether or not it came back through the
+    // registry, the registry writes already selected the registry-only authority, and the
+    // unwrap keeps it unchanged.
+    if reactivated.is_none()
+        && registry_settled_to_unwrapped_owner
+        && !locked_migrated_original_child
+        && !graveyard_retained
+        && !registrar_transfer_may_follow
+        && let Some(previous) = linked.as_ref().filter(|name| name.surface_known)
+    {
+        if previous.authority_source_family == selected.source.source_family {
+            registry_only_fallback::activate_registry_only_authority(
+                selected,
+                raw,
+                state,
+                &namehash,
+                previous.labelhash.clone(),
+                previous,
+                &mut reactivated,
+            );
+        } else if previous.token_lineage_id.is_none() && authority_kind(previous) == "registry_only"
+        {
+            state.activate_v1_authority(
+                &selected.source.namespace,
+                &namehash,
+                Some(previous.clone()),
+            );
+            reactivated = Some(previous.clone());
+        }
+    }
     let resolver = state.v1_resolver_for_activation(
         &selected.source.namespace,
         &namehash,
@@ -386,6 +466,8 @@ fn name_unwrapped(
         resolver,
         None,
     );
+    // The registry-only successor already holds its owner's grants: the registry write
+    // that precedes this event moved them to the owner it names.
     if let Some(name) = linked
         .as_ref()
         .filter(|name| name.authority_source_family == selected.source.source_family)

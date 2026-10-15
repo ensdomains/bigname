@@ -303,6 +303,7 @@ fn zero_getter_blocks_stale_registry_authority_fallback_during_registrar_transfe
         NAMESPACE,
         NODE,
         1_000 + super::ENS_GRACE_PERIOD_SECS + 1,
+        None,
     );
     assert!(
         next.is_none(),
