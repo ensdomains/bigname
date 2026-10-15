@@ -2103,10 +2103,13 @@ A recognized namespace with no available publication returns retryable `409 stal
   and bigname keeps no `TokenControlTransferred` row for a burn, so the
   reservation is the only row that marks the end of that holding. A relation
   that ended after that block has no current row, so it is reproduced only
-  from the three historical shapes the ownership matcher knows: a
+  from the historical shapes the ownership matcher knows: a
   `RegistrationGranted` registrant and a `TokenControlTransferred` recipient
-  on a token-backed, Basenames or ENSv2 resource, and an
-  `AuthorityTransferred` owner on a registry-only or ENSv2 resource. The
+  on a token-backed, Basenames or ENSv2 resource, an
+  `AuthorityTransferred` owner on a registry-only or ENSv2 resource, and,
+  for an effective controller, the recipient of an ENSv2 registry or root
+  registry `TokenControlTransferred`, which the transfer makes the
+  [manager](api-v1.md#manager). The
   second current input is the resolver's current classification row, which
   decides whether an ENSv2 resolver pointer attributes node-keyed writes on
   that resolver.
@@ -2119,7 +2122,7 @@ A recognized namespace with no available publication returns retryable `409 stal
   registration, transfer or surface snapshot, registry owner, or NameWrapper
   holder). The controller is set only by a `PermissionChanged` whose scope is
   the name's resource
-  (bigname: `crates/project/src/families/addresses.rs:70-83`). Upstream
+  (bigname: `crates/project/src/families/addresses.rs:82-95`). Upstream
   reports an ENSv2 role change as an account's roles within an access control
   resource of the emitting contract
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L17-L27 @ ens_v2_sepolia_20260916@366de741),
@@ -4305,7 +4308,9 @@ introduces it rebuilds Project from full history before serving the option; see
   ended (see [history anchors](#history-collection-filters)), `owner` matches the `RegistrationGranted` that named the address and the
   `TokenControlTransferred` that sent it the token, and also, on a resource
   with no token, the registry `AuthorityTransferred` that made it the owner,
-  which matches `manager` too. Under a
+  which matches `manager` too. On an ENSv2 name, the registry
+  `TokenControlTransferred` that sent the address the token matches `manager`
+  as well as `owner`, since the transfer gives it the sender's roles. Under a
   [registry-only handoff](glossary.md#registry-only-handoff) (a `.eth` token
   transfer without `reclaim`) the registry owner is only the `manager`, so
   that `AuthorityTransferred` matches `manager` and not `owner` from the

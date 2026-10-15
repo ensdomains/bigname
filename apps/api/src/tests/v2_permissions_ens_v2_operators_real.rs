@@ -61,8 +61,35 @@ fn versioned(version: u32) -> U256 {
     (id >> 32 << 32) | U256::from(version)
 }
 
-/// The admitted Sepolia ENSv2 registry family declaration, moved onto this test's chain.
-fn registry_family() -> (ManifestInput, AddressAdmissionInput) {
+/// The registry a fixture's logs come from: its family, the manifest role of its address, the
+/// edges its discovery rules follow and the name its label registers.
+#[derive(Clone, Copy)]
+struct Registry {
+    family: &'static str,
+    role: &'static str,
+    edges: &'static [&'static str],
+    name: &'static str,
+}
+
+/// The ETH registry, where the label registers alice.eth.
+const ETH_REGISTRY: Registry = Registry {
+    family: "ens_v2_registry_l1",
+    role: "registry",
+    edges: &["subregistry", "resolver", "registry_announcement"],
+    name: "alice.eth",
+};
+
+/// The root registry, where the label registers the top-level name alice.
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/RootRegistry.json:L1797 @ ens_v2_sepolia_20261001@07e55a05)
+const ROOT_REGISTRY: Registry = Registry {
+    family: "ens_v2_root_l1",
+    role: "root_registry",
+    edges: &["subregistry", "resolver"],
+    name: "alice",
+};
+
+/// The admitted Sepolia declaration of `registry`'s family, moved onto this test's chain.
+fn registry_family(registry: Registry) -> (ManifestInput, AddressAdmissionInput) {
     let repository = bigname_manifests::load_repository(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests/sepolia"),
     )
@@ -71,7 +98,7 @@ fn registry_family() -> (ManifestInput, AddressAdmissionInput) {
         .manifests()
         .iter()
         .find(|m| {
-            m.manifest.source_family == "ens_v2_registry_l1"
+            m.manifest.source_family == registry.family
                 && m.manifest.rollout_status == bigname_manifests::RolloutStatus::Active
         })
         .unwrap();
@@ -82,7 +109,7 @@ fn registry_family() -> (ManifestInput, AddressAdmissionInput) {
             manifest_id: INSTANCE as i64,
             manifest_version: manifest.manifest_version as i64,
             namespace: manifest.namespace.clone(),
-            source_family: "ens_v2_registry_l1".into(),
+            source_family: registry.family.into(),
             chain_id: CHAIN.into(),
             deployment_label: manifest.deployment_epoch.clone(),
             normalizer_version: manifest.normalizer_version.clone(),
@@ -92,7 +119,7 @@ fn registry_family() -> (ManifestInput, AddressAdmissionInput) {
             address: REGISTRY.into(),
             contract_instance_id: Uuid::from_u128(INSTANCE),
             source_manifest_id: Some(INSTANCE as i64),
-            role: Some("registry".into()),
+            role: Some(registry.role.into()),
             discovery_edge_kind: None,
             discovery_from_contract_instance_id: None,
             discovery_observation_key: None,
@@ -199,13 +226,19 @@ type Output = bigname_adapters::schema_v2::BatchOutput;
 /// Publishes the families at `block`, after storing the name bindings Interpret holds by then:
 /// each binding the adapter opened, closed where a later closure of the name covers it.
 async fn publish(database: &TestDatabase, output: &Output, block: i64) -> Result<()> {
+    publish_in(database, ETH_REGISTRY, output, block).await
+}
+
+/// `publish` for a fixture whose logs come from `registry`.
+async fn publish_in(database: &TestDatabase, registry: Registry, output: &Output, block: i64)
+    -> Result<()> {
     let bindings = output
         .surface_bindings
         .iter()
         .filter(|opened| opened.block_number <= block)
         .map(|opened| SurfaceBinding {
             surface_binding_id: opened.surface_binding_id,
-            logical_name_id: "ens:alice.eth".to_owned(),
+            logical_name_id: format!("ens:{}", registry.name),
             resource_id: opened.resource_id,
             binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
             authority_arm: opened.authority_arm.clone(),
@@ -254,9 +287,10 @@ async fn publish(database: &TestDatabase, output: &Output, block: i64) -> Result
     assert_permission_fixture_reads_agree(database).await
 }
 
-/// The registry's contract instance. `declared` puts it in an active ENSv2 registry manifest, as
-/// the ETH registry is; otherwise the instance holds its address as a discovered registry does.
-async fn declare(database: &TestDatabase, declared: bool) -> Result<()> {
+/// The registry's contract instance. `declared` puts it in an active manifest of `registry`'s
+/// family, as the ETH registry is. Without it the instance holds its address as a discovered
+/// registry does.
+async fn declare(database: &TestDatabase, registry: Registry, declared: bool) -> Result<()> {
     let instance = Uuid::from_u128(INSTANCE);
     sqlx::query("INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind) VALUES ($1, $2, 'contract')")
         .bind(instance).bind(CHAIN).execute(&database.pool).await?;
@@ -268,13 +302,14 @@ async fn declare(database: &TestDatabase, declared: bool) -> Result<()> {
     }
     let manifest: i64 = sqlx::query_scalar("INSERT INTO manifest_versions (manifest_version, namespace, source_family,
             chain_id, deployment_label, rollout_status, normalizer_version, file_path, manifest_payload)
-        VALUES (1, 'ens', 'ens_v2_registry_l1', $1, 'fixture', 'active', 'fixture',
+        VALUES (1, 'ens', $2, $1, 'fixture', 'active', 'fixture',
             'fixture/registry.toml', '{}') RETURNING manifest_id")
-        .bind(CHAIN).fetch_one(&database.pool).await?;
+        .bind(CHAIN).bind(registry.family).fetch_one(&database.pool).await?;
     sqlx::query("INSERT INTO manifest_contract_instances (manifest_id, chain_id, declaration_kind, declaration_name,
             contract_instance_id, declared_address, role, proxy_kind)
-        VALUES ($1, $2, 'contract', 'fixture', $3, $4, 'registry', 'none')")
-        .bind(manifest).bind(CHAIN).bind(instance).bind(REGISTRY).execute(&database.pool).await?;
+        VALUES ($1, $2, 'contract', 'fixture', $3, $4, $5, 'none')")
+        .bind(manifest).bind(CHAIN).bind(instance).bind(REGISTRY).bind(registry.role)
+        .execute(&database.pool).await?;
     sqlx::query("INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address,
             active_from_block_number, source_manifest_id, provenance)
         VALUES ($1, $2, $3, 0, $4, jsonb_build_object('source', 'manifest_declaration', 'manifest_id', $4))")
@@ -289,19 +324,31 @@ async fn seed(
     logs: Logs,
     declared: bool,
 ) -> Result<(Uuid, Output)> {
-    let (manifest, admission) = registry_family();
+    seed_in(database, ETH_REGISTRY, logs, declared).await
+}
+
+/// `seed` for logs that come from `registry`.
+async fn seed_in(
+    database: &TestDatabase,
+    registry: Registry,
+    logs: Logs,
+    declared: bool,
+) -> Result<(Uuid, Output)> {
+    let (manifest, admission) = registry_family(registry);
     let (output, _) = prepare_schema_v2_batch_incremental(
         BatchInput {
             chain_id: CHAIN.into(),
             manifests: vec![manifest],
-            discovery_rules: ["subregistry", "resolver", "registry_announcement"]
+            discovery_rules: registry
+                .edges
+                .iter()
                 .map(|edge_kind| DiscoveryRuleInput {
                     manifest_id: INSTANCE as i64,
-                    edge_kind: edge_kind.into(),
-                    from_role: Some("registry".into()),
+                    edge_kind: (*edge_kind).into(),
+                    from_role: Some(registry.role.into()),
                     admission: "reachable_from_root".into(),
                 })
-                .into(),
+                .collect(),
             admissions: vec![admission],
             prior_events: vec![],
             blocks: (120..=132)
@@ -328,9 +375,10 @@ async fn seed(
         .context("the owner's grant names the token resource")?;
 
     seed_v2_history_blocks(database, 120..=132).await?;
-    declare(database, declared).await?;
-    let surface = output.name_surfaces.first().context("the registration names alice.eth")?;
-    let mut name = collection_name_surface("ens:alice.eth", "alice.eth", &surface.namehash, 121);
+    declare(database, registry, declared).await?;
+    let surface = output.name_surfaces.first().context("the registration names the label")?;
+    let mut name = collection_name_surface(&format!("ens:{}", registry.name), registry.name,
+        &surface.namehash, 121);
     name.block_hash = "0xhistory121".into();
     upsert_test_name_surfaces(&database.pool, &[name]).await?;
     upsert_test_token_lineages(&database.pool, &output.token_lineages.iter()
@@ -793,3 +841,6 @@ async fn bounded_permissions_match_the_loop_for_ens_v2_operator_and_root_keys() 
     }
     database.cleanup().await
 }
+
+#[path = "v2_address_names_ens_v2_transfer.rs"]
+mod transfer_relations;

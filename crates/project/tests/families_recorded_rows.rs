@@ -33,7 +33,7 @@ const TARGET: i64 = 300;
 /// family marker and the history catalogue marker are taken without their generation and
 /// without the content hash of the build that wrote them, which differs between builds by
 /// design.
-const RECORDED: &str = "7a61dec99f6ea22c2a236cf6f33f9130b9422e2d4057c7222b0d42efb4c2da0a";
+const RECORDED: &str = "9ca5faea64679be9efa486b0da8b5c90d172ca950baea6a33685c2283899c56f";
 
 /// The tables the ENSv2 path history fills. The digest holds a selection change to account
 /// only where they have rows.

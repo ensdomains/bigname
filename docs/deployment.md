@@ -4193,3 +4193,28 @@ Interpret content hash and manifest-authority fingerprint remain unchanged. A
 release containing this change requires a full-range Project redo, with no
 Interpret or Ingest redo and no schema-migration. An already running Project pass
 uses its deployed query and does not cover a later release's changed hash.
+
+## ENSv2 transfers move the manager relation
+
+The build that moves the `manager` relation to the recipient of an ENSv2 token
+transfer (see [Manager](api-v1.md#manager)) changes `crates/project/src`,
+`crates/storage/src/families/records/address_relations.rs` and
+`crates/storage/src/history/address_evidence.rs`. All are inputs of the
+[projection content hash](glossary.md#projection-content-hash) only. The last
+also lets address history keep a former ENSv2 manager's events under
+`relation=manager` once the name has moved on.
+
+- The projection content hash rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, under
+  matching runner and API binaries.
+- Project now records each ENSv2 registry transfer among the events that set a
+  name's manager. An existing database holds no such record for the transfers
+  it already processed, and the history and lookup relation rows it stored at
+  earlier publications keep the old manager. Until the Project redo completes,
+  an account that transferred an ENSv2 name away still matches
+  `relation=manager` on `GET /v1/addresses/{address}/names`, in bounded
+  `GET /v1/addresses/{address}/history` and in reverse `POST /v1/lookup`.
+- It adds no table, schema-migration, manifest or setting. The
+  manifest-authority fingerprint and the compiled watch plan are unchanged, so
+  stamp no Ingest redo.
