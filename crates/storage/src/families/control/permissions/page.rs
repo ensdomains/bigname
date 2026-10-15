@@ -473,7 +473,7 @@ async fn effective_rows(
         for shadow in shadows.values() {
             for grant in &shadow.grants {
                 let mut row = direct_row(grant, &publication)?;
-                // The NameWrapper `ApprovalForAll` fan-out keeps its holder's resource scope.
+                // The NameWrapper `ApprovalForAll` fan-out keeps each holder row's scope.
                 if grant.grant_source["relation_kind"] == "operator" {
                     row.grant_relation = Some(PermissionGrantRelation::Operator);
                 }

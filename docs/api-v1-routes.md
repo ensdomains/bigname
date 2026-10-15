@@ -2995,10 +2995,10 @@ introduces it rebuilds Project from full history before serving the option; see
   its operators identically; the delegate carries only
   `extend_subname_expiry`; every row applies the expiry-effective fuse mask, and
   rows revoke on transfer, unwrap, approval revocation, and expiry. An operator
-  row keeps the holder's `registration` scope and carries
-  `grant_relation=operator`. Its powers are the operator's on this one name,
-  derived from the owner-wide approval, so `grant_scope` still names the
-  protocol scope the powers apply to. The holder and delegate rows are direct
+  row keeps the scope of the holder row it expands, `registration` or
+  `resolver`, and carries `grant_relation=operator`. Its powers are the
+  operator's on this one name, derived from the owner-wide approval, so
+  `grant_scope` still names the protocol scope the powers apply to. The holder and delegate rows are direct
   rows and omit `grant_relation`. Request-relative completeness metadata below
   remains authoritative.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L214-L238 @ ens_v1@91c966f)
@@ -3781,7 +3781,8 @@ introduces it rebuilds Project from full history before serving the option; see
   registry-operator grants carry `grant_relation=operator`, the account scope,
   and `powers=["registry_control"]` for an ENSv1 or Basenames registry or the
   token owner's powers for an ENSv2 registry. NameWrapper operator grants carry
-  `grant_relation=operator` with the holder's `registration` scope and powers.
+  `grant_relation=operator` with the scope and powers of the holder grant they
+  expand, `registration` or `resolver`.
   Operator grants expand roles for resources
   already on the page but never add or remove address-name membership rows.
   The registry root holders a permissions read of one ENSv2 registration lists
