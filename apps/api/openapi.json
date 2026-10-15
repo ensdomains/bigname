@@ -741,7 +741,7 @@
             }
           },
           "422": {
-            "description": "`unsupported`: A requested expansion exceeds its bounded permission budget, or a coin_type=evm row would carry more than 100 matches.",
+            "description": "`unsupported`: include=role_summary exceeds its 1,000 grant-row budget: omit the include and page GET /v1/permissions?registration_id= for each row's permission_resource_id. Or a coin_type=evm row would carry more than 100 matches: read one decimal coin_type at a time.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2659,7 +2659,7 @@
             "name": "source",
             "in": "query",
             "required": false,
-            "description": "Answer origin.",
+            "description": "Answer origin. values=false accepts indexed or auto and reads the indexed inventory.",
             "schema": {
               "type": "string",
               "enum": [
@@ -2674,7 +2674,7 @@
             "name": "keys",
             "in": "query",
             "required": false,
-            "description": "Comma-separated record selectors: addr:<decimal>, text:<key>, contenthash or avatar; omitted/blank uses the inventory-derived default keys. At most 200 keys.",
+            "description": "Comma-separated record selectors: addr:<decimal>, text:<key>, contenthash or avatar; omitted/blank uses the inventory-derived default keys when values is true; keys must be omitted or blank when values is false. At most 200 value keys.",
             "schema": {
               "type": "array",
               "items": {
@@ -2685,6 +2685,16 @@
             },
             "style": "form",
             "explode": false
+          },
+          {
+            "name": "values",
+            "in": "query",
+            "required": false,
+            "description": "False returns the name's inventory and records: {}, without per-key answers or the 200-value-key limit. Omitted, true or blank preserves value answers. source=verified and nonblank keys conflict with false before key parsing.",
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
           },
           {
             "name": "include",
@@ -2861,7 +2871,7 @@
             }
           },
           "422": {
-            "description": "`unsupported`: The inventory-derived default record-key set exceeds the 200-key limit.",
+            "description": "`unsupported`: In value mode, the inventory-derived default record-key set exceeds the 200-key limit. values=false returns the whole inventory without that limit.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5006,7 +5016,7 @@
             "name": "values",
             "in": "query",
             "required": false,
-            "description": "False returns the full inventory and records: {}, without per-key answers or the 200-value-key limit. Omitted, true or blank preserves value answers. Nonblank keys conflict with false before key parsing. Only this route accepts the flag.",
+            "description": "False returns the full inventory and records: {}, without per-key answers or the 200-value-key limit. Omitted, true or blank preserves value answers. Nonblank keys conflict with false before key parsing. The name records route accepts the same flag.",
             "schema": {
               "type": "boolean",
               "default": true
@@ -5187,7 +5197,7 @@
             }
           },
           "422": {
-            "description": "`unsupported`: In value mode, the inventory-derived default record-key set exceeds the 200-key limit.",
+            "description": "`unsupported`: In value mode, the inventory-derived default record-key set exceeds the 200-key limit. values=false returns the full inventory without that limit.",
             "content": {
               "application/json": {
                 "schema": {
@@ -7953,11 +7963,11 @@
             "additionalProperties": {
               "$ref": "#/components/schemas/RecordAnswer"
             },
-            "description": "Per-key resolver answers; empty with values=false on the resolver-anchored records route."
+            "description": "Per-key resolver answers; empty with values=false on either records route."
           },
           "inventory": {
             "$ref": "#/components/schemas/RecordInventory",
-            "description": "Record inventory requested with `include=inventory`, or implied by `values=false` on the resolver-anchored records route."
+            "description": "Record inventory requested with `include=inventory`, or implied by `values=false` on either records route."
           }
         },
         "additionalProperties": false,
