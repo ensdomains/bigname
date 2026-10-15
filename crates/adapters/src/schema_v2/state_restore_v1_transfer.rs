@@ -44,6 +44,8 @@ pub(super) fn restore(state: &mut State, event: &PriorEventInput) {
         "ens_v1_registrar_l1" | "basenames_base_registrar"
     ) {
         state.transfer_v1_registrar_owner(&event.namespace, namehash, to.to_owned());
+        // The stored reclaim of the same transaction is restored right after this row, so
+        // the restore needs no lookahead to reach the transaction's end state.
         state.converge_v1_registrar_transfer(
             &event.namespace,
             namehash,
@@ -51,6 +53,7 @@ pub(super) fn restore(state: &mut State, event: &PriorEventInput) {
                 .block_timestamp
                 .map(|timestamp| timestamp.unix_timestamp())
                 .unwrap_or(i64::MIN),
+            None,
         );
     }
 }

@@ -1,0 +1,28 @@
+normalized_events 5000000:1 SubregistryChanged ens_v1_registry_l1 cac64062-44c6-587c-aa46-b5b4549bff18 5ac2bc15ce928545
+normalized_events 5000000:1 AuthorityTransferred ens_v1_registry_l1 cac64062-44c6-587c-aa46-b5b4549bff18 3d5ca47cf4306b9e
+normalized_events 5000000:1 PermissionChanged ens_v1_registry_l1 cac64062-44c6-587c-aa46-b5b4549bff18 7cbe6f072f53d435
+normalized_events 5000000:2 RegistrationGranted ens_v1_registrar_l1 9617bf7d-c8f0-5e44-8cac-c99ece016677 779077506a0d47d5
+normalized_events 5000000:2 ExpiryChanged ens_v1_registrar_l1 9617bf7d-c8f0-5e44-8cac-c99ece016677 b2b3824db3e394f6
+normalized_events 5000000:2 PermissionChanged ens_v1_registrar_l1 9617bf7d-c8f0-5e44-8cac-c99ece016677 d5e68cde9b611b1b
+normalized_events 5000000:2 AuthorityEpochChanged ens_v1_registrar_l1 9617bf7d-c8f0-5e44-8cac-c99ece016677 8ddca90b51e93097
+normalized_events 5000000:3 TokenControlTransferred ens_v1_wrapper_l1 70b33951-4df6-56a5-9a18-8f29b2001800 826482b4d4797f82
+normalized_events 5000000:3 ExpiryChanged ens_v1_wrapper_l1 70b33951-4df6-56a5-9a18-8f29b2001800 f456b417260d15a0
+normalized_events 5000000:3 PermissionScopeChanged ens_v1_wrapper_l1 70b33951-4df6-56a5-9a18-8f29b2001800 c78f5535270fa33d
+normalized_events 5000000:3 SurfaceBound ens_v1_wrapper_l1 70b33951-4df6-56a5-9a18-8f29b2001800 3c55bbfc43e24e6e
+normalized_events 5000000:3 AuthorityEpochChanged ens_v1_wrapper_l1 70b33951-4df6-56a5-9a18-8f29b2001800 ea52db5bbcba225d
+normalized_events 5000000:3 PermissionChanged ens_v1_wrapper_l1 70b33951-4df6-56a5-9a18-8f29b2001800 0ba141219f1ccad8
+normalized_events 5000000:3 PreimageObserved ens_v1_wrapper_l1 - a6815dd5aef2942d
+normalized_events 5000000:4 PreimageObserved ens_v1_wrapper_l1 - 46af071767f391e9
+label_preimages #0 46c474e590d67146
+label_preimages #1 3ac7730e441d45e8
+label_preimages #2 e962ce31d8c7218a
+label_preimages #3 8b953b3d4351c13b
+name_surfaces #0 580602330b61f2dd
+name_surfaces #1 016641d108cd4459
+token_lineages #0 7ff1472c9f1136b0
+token_lineages #1 d600baa0080088c1
+resources #0 f9ce25ba8a74b306
+resources #1 4c2f0873d3adceb6
+resources #2 d0d5e0fec485e007
+surface_bindings #0 42cac55396d3e04d
+binding_closures #0 a66962d3927ce4ce
