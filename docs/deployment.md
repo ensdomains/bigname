@@ -4291,3 +4291,39 @@ ready under the new hash.
 
 It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
 and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## Registry-only resource grants follow the registry owner
+
+The build that makes a node's [registry-only resource](glossary.md#registry-only-resource)
+hold its registry owner's grants, and only those, whichever authority is selected changes the
+ENSv1 registry, registrar, release and restore paths in `crates/adapters/src`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain. The
+[projection content hash](glossary.md#projection-content-hash) moves with it.
+
+What changes for names:
+
+- An account that stops being a node's registry owner loses `registration_control` and
+  `resolver_control` on its registry-only resource at that write. On Sepolia this includes an
+  original child unwrapped after its parent's locked ENSv1→ENSv2 migration, then written
+  again or wrapped again. Before, `GET /v1/permissions?registration_id=<resource>` and the
+  old owner's `GET /v1/permissions?address=<account>` kept serving the old owner beside the
+  new one.
+- The registry owner's `resolver_control` on that resource moves with each registry resolver
+  change, including while a lease or the NameWrapper is selected.
+- On Sepolia, a registry write naming the admitted Graveyard grants it nothing there.
+- `GET /v1/events?type=permission` no longer serves a second grant to an owner that already
+  holds the resource: at a registrar transfer back to the registry owner, at a `registerOnly`
+  registration, and at a lease release.
+- Every permission row on a registry-only resource keeps its retained state under its
+  subject, scope kind and resolver, so its `raw_fact_ref` changes.
+
+These rows arrive through re-derivation, not through an in-place change. Every chain needs a
+full-history Interpret redo, then the Project redo it installs, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+binaries. The change rides the next re-derivation release and shares that release's one
+Interpret and Project redo pair with its other hash-rotating changes. Do not mark old rows
+ready under the new hash. Restores read the new keys only, so no restore may start from rows
+made before the redo.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
+and the compiled watch plan are unchanged, so stamp no Ingest redo.

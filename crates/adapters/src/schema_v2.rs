@@ -243,7 +243,16 @@ fn settle_block_boundary(
                 }),
                 state_scope: format!("boundary:{}:resolver", release.namehash),
             });
-            if let Some(subject) = next.owner.as_deref() {
+            if v1_authority_kind(&next.authority_source_family) == "registry_only" {
+                protocol::v1::registry_only_hand_back(
+                    &mut transition_events,
+                    state,
+                    (&registrar_source.namespace, &release.namehash),
+                    next,
+                    Some(resolver),
+                    &block.chain_id,
+                );
+            } else if let Some(subject) = next.owner.as_deref() {
                 append_boundary_permission(
                     &mut transition_events,
                     next,
@@ -267,6 +276,17 @@ fn settle_block_boundary(
                     "registry-resolver-grant",
                 );
             }
+        } else if let Some(next) = next_surface
+            && v1_authority_kind(&next.authority_source_family) == "registry_only"
+        {
+            protocol::v1::registry_only_hand_back(
+                &mut transition_events,
+                state,
+                (&registrar_source.namespace, &release.namehash),
+                next,
+                None,
+                &block.chain_id,
+            );
         } else if let Some(next) = next_surface
             && let Some(subject) = next.owner.as_deref()
         {

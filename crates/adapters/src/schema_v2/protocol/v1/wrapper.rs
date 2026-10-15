@@ -402,23 +402,24 @@ fn name_unwrapped(
     // transfer that follows the unwrap in the same transaction, from the
     // unwrap moment. `unwrapETH2LD` runs `_unwrap`, which emits NameUnwrapped,
     // and only then transfers the registrar token to the registrant.
-    // Opening a registry-only interval first would be spurious.
+    // Opening a registry-only interval first would be spurious. The unwrap's registry write
+    // reads the same predicate, so it leaves the registry-only resource without a holder.
     // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L390-L395 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1031 @ ens_v1@91c966f)
-    let registrar_transfer_may_follow = wrapper_custody::registrar_transfer_may_follow(
+    let lease_succeeds = wrapper_custody::lease_succeeds_unwrap(
         state,
         &selected.source.namespace,
         &namehash,
+        raw.block_timestamp.unix_timestamp(),
     );
     // The successor follows the authority selected at the unwrap, not its source family.
     // When registry custody left the NameWrapper, whether or not it came back through the
     // registry, the registry writes already selected the registry-only authority, and the
     // unwrap keeps it unchanged.
-    if reactivated.is_none()
+    if !lease_succeeds
         && registry_settled_to_unwrapped_owner
         && !locked_migrated_original_child
         && !graveyard_retained
-        && !registrar_transfer_may_follow
         && let Some(previous) = linked.as_ref().filter(|name| name.surface_known)
     {
         if previous.authority_source_family == selected.source.source_family {

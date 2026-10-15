@@ -4,6 +4,8 @@ use {serde_json::Value, uuid::Uuid};
 mod support;
 #[path = "state_restore_v1_registry.rs"]
 mod v1_registry;
+#[path = "state_restore_v1_registry_only.rs"]
+mod v1_registry_only;
 #[path = "state_restore_v1_surface.rs"]
 pub(super) mod v1_surface;
 #[path = "state_restore_v1_transfer.rs"]
@@ -209,6 +211,7 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
     v1_registry::restore_migration_marker(state, event);
     v1_surface::restore_preimage(state, event);
     restore_wrapper_delegate(state, event);
+    v1_registry_only::restore(state, event);
     if matches!(source_event, Some("NewOwner" | "Transfer"))
         && let Some(namehash) = event
             .after_state

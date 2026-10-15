@@ -20,6 +20,8 @@ pub(in crate::schema_v2::protocol::v1) fn push_permission_change(
     source_event_kind: &str,
     suffix: &str,
 ) {
+    // Rows on a registry-only resource move its holder, so registry_owner_grants writes them.
+    debug_assert_ne!(authority_kind(authority), "registry_only");
     let Some(authority_key) = authority.authority_key.as_deref() else {
         return;
     };

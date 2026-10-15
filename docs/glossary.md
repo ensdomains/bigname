@@ -2294,6 +2294,20 @@ cleanup.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L118 @ ens_v2@a971bd6)
 
+<a id="registry-only-resource"></a>
+## Registry-only resource
+
+the resource that stands for a node's ENSv1 or Basenames registry record, one per chain
+and node. A name is bound to it when the registry record is the name's authority, with no
+registrar lease or NameWrapper token selected. Its `resource_control` and
+`resolver_control` grants follow the record's registry owner whichever authority is
+selected, so while a name is wrapped they belong to the NameWrapper. A zero owner, a write
+that a live registrar lease takes over and the admitted Graveyard leave it with no holder. A
+write that a registration later in its transaction takes over keeps the holder when it names
+the current holder, so a registrant that registers its lapsed name again directly keeps it.
+The rule is in [Permissions](projections.md#permissions).
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L16-L21 @ ens_v1@91c966f)
+
 ## Resolution divergence ledger
 
 the schema-v2 audit table whose active rows

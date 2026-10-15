@@ -1097,11 +1097,38 @@ summary is an authoritative permission enumeration. The current family reader
 reports partial coverage for the documented absent surfaces; an empty row set
 alone cannot establish full coverage.
 
+A node's [registry-only resource](glossary.md#registry-only-resource) holds
+`resource_control`, and `resolver_control` at the node's nonzero registry resolver, for
+one account. That account is its holder: the owner the newest registry owner write named.
+This holds whichever authority is selected for the name, because the registry lets that
+owner or its operators write the record either way. So while a name is wrapped, the
+NameWrapper holds the resource.
+
+Each registry owner write revokes the old holder before it grants the new one. A zero owner
+leaves no holder. A write that a live registrar lease takes over leaves no holder either,
+and the lease gets the owner's grants instead, even when it names the current holder. A write
+that a registration later in its transaction takes over keeps the holder when it names the
+current holder, because it makes no row for the lease to take. So a registrant that registers
+its lapsed name again directly keeps the resource beside its lease. The admitted Graveyard
+is a burned record, so a write naming it grants it nothing. A registry resolver change moves
+the holder's `resolver_control` to the new resolver.
+
+Each row on the resource keeps its retained state under its subject, its scope kind and its
+resolver. A restore reads the newest row of each and rebuilds the same holder. A restore
+that finds two live holders, or `resolver_control` outside the holder, fails.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L16-L21 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/Graveyard.sol:L20-L23 @ ens_v2_sepolia_20261001@07e55a05)
+
 When a registrar `Transfer` changes ENSv1 or Basenames authority between a
 registrar resource and a registry-only resource, `resource_control` and
-`resolver_control` for any selected nonzero resolver are revoked on the retiring
-registry-only resource or granted to its owner when it becomes active. An unchanged
-authority emits no additional registry-only balancing rows; ordinary token-holder permission rows remain unchanged.
+`resolver_control` at the node's nonzero resolver are revoked from the retiring
+registry-only resource's holder. When the registry-only resource becomes active, they are
+granted to its registry owner, unless that owner already holds them. A lapsed lease that
+hands the name back to its registry-only authority does the same at the release. An
+unchanged authority emits no additional registry-only balancing rows. Ordinary token-holder
+permission rows remain unchanged.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L86-L95 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
 (upstream: .refs/basenames/src/L2/Registry.sol:L46-L52 @ basenames@1809bbc)

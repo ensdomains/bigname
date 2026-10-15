@@ -52,6 +52,7 @@ impl State {
             v1_registry_owner_words: OrdMap::new(),
             v1_registry_owner_reasons: OrdMap::new(),
             v1_registry_read_anchors: OrdMap::new(),
+            v1_registry_only_holders: Default::default(),
             v1_resolvers: OrdMap::new(),
             v1_resolver_links: OrdMap::new(),
             v1_resolver_linked_resources: OrdMap::new(),
@@ -136,6 +137,7 @@ impl State {
         self.v1_registry_owner_words = replayed.v1_registry_owner_words;
         self.v1_registry_owner_reasons = replayed.v1_registry_owner_reasons;
         self.v1_registry_read_anchors = replayed.v1_registry_read_anchors;
+        self.v1_registry_only_holders = replayed.v1_registry_only_holders;
         self.v1_resolvers = replayed.v1_resolvers;
         self.v1_resolver_links = replayed.v1_resolver_links;
         self.v1_resolver_linked_resources = replayed.v1_resolver_linked_resources;
@@ -182,6 +184,7 @@ impl State {
             self.refresh_dirty_v2_names(timestamp);
         }
         crate::schema_v2::state_restore::rebuild_v2_indexes(self);
+        self.finish_v1_registry_only_restore();
         self.prune_unbacked_surfaces();
     }
 
@@ -265,6 +268,7 @@ impl State {
             self.refresh_dirty_v2_names(delta_timestamp);
         }
         if !full_restore {
+            self.finish_v1_registry_only_restore();
             self.prune_unbacked_surfaces();
         }
     }

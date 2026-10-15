@@ -5599,19 +5599,15 @@ fn registry_only_handoff_cleanup_keeps_the_registrant_revocations_on_the_registr
 }
 
 /// After the handoff without `reclaim`, the registrant sends the registry record to the Graveyard
-/// with `setOwner` before the holder migrates, so the Graveyard holds resource control and
-/// resolver control on the registry-only resource from before the migration transaction. Inside
-/// the transaction the controller's reclaim revokes those grants (log 1), the registry transfer to
-/// the Graveyard grants the same subject and scopes again as a temporary authority (log 2), and
-/// the resolver clear and the cleanup transfer revoke those temporary grants (logs 3 and 5).
-/// Only the reclaim's revocations close grants made before the transaction, so they are the ones
-/// reconciliation must keep: a revocation is transient only when a removed grant with the same
-/// subject and scope precedes it, not when one merely appears later in the transaction.
+/// with `setOwner` before the holder migrates. The admitted Graveyard is a burned record, so that
+/// write revokes the registrant on the registry-only resource and grants the Graveyard nothing.
+/// Inside the migration transaction the reclaim, the registry transfer back to the Graveyard, the
+/// resolver clear and the cleanup transfer then have no Graveyard grant to revoke and make none.
+/// Without the migration manifest the Graveyard is an ordinary owner and is granted as one.
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L68 @ ens_v1@91c966f)
-/// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/Graveyard.sol:L20-L23 @ ens_v2_sepolia_20261001@07e55a05)
 #[test]
-fn registry_only_handoff_cleanup_keeps_the_reclaim_revocations_of_a_prior_graveyard_owner()
--> anyhow::Result<()> {
+fn registry_only_handoff_cleanup_grants_a_prior_graveyard_owner_nothing() -> anyhow::Result<()> {
     let holder = Address::from([0x52; 20]);
     let graveyard = format!("{:#x}", address(&fixture()?["addresses"], "graveyard")?);
     let input = unwrapped_handoff_input_with_graveyard_registry_owner(holder)?;
@@ -5631,7 +5627,7 @@ fn registry_only_handoff_cleanup_keeps_the_reclaim_revocations_of_a_prior_gravey
         .find(|binding| binding.block_number == block - 1 && binding.authority_arm == "ens_v1")
         .expect("the handoff binds the name to a registry-only resource")
         .resource_id;
-    let graveyard_permissions = |output: &BatchOutput, block_number: i64| {
+    let permissions = |output: &BatchOutput, block_number: i64| {
         output
             .normalized_events
             .iter()
@@ -5639,96 +5635,49 @@ fn registry_only_handoff_cleanup_keeps_the_reclaim_revocations_of_a_prior_gravey
                 event.block_number == Some(block_number)
                     && event.event_kind == "PermissionChanged"
                     && event.resource_id == Some(registry_resource)
-                    && event.after_state["subject"]
-                        .as_str()
-                        .is_some_and(|subject| subject.eq_ignore_ascii_case(&graveyard))
             })
             .cloned()
             .collect::<Vec<_>>()
     };
-    let at_log = |events: &[NormalizedEvent], log: i64| {
+    let of_graveyard = |events: &[NormalizedEvent]| {
         events
             .iter()
-            .filter(|event| event.log_index == Some(log))
+            .filter(|event| {
+                event.after_state["subject"]
+                    .as_str()
+                    .is_some_and(|subject| subject.eq_ignore_ascii_case(&graveyard))
+            })
             .cloned()
             .collect::<Vec<_>>()
     };
-    let revoked_by = |events: &[NormalizedEvent], source_event_kind: &str| {
-        !events.is_empty()
-            && events.iter().all(|event| {
-                event.after_state["effective_powers"] == json!([])
-                    && event.after_state["revocation_source"]["source_event_kind"]
-                        == source_event_kind
-            })
-    };
 
-    // The registrant's `setOwner` grants the Graveyard both scopes on the registry-only resource
-    // in the block before the migration; reconciliation leaves that block alone.
-    let prior_grants = graveyard_permissions(&ordinary, block - 1);
+    let unadmitted = of_graveyard(&permissions(&ordinary, block - 1));
     assert_eq!(
-        effective_powers(&prior_grants, "after"),
+        effective_powers(&unadmitted, "after"),
         ["resolver_control", "resource_control"],
-        "the registry transfer grants the Graveyard on the registry-only resource: {prior_grants:#?}"
+        "an unadmitted Graveyard is granted like any registry owner: {unadmitted:#?}"
+    );
+    let prior = permissions(&output, block - 1);
+    assert!(
+        of_graveyard(&prior).is_empty(),
+        "the admitted Graveyard holds nothing on the registry-only resource: {prior:#?}"
     );
     assert!(
-        prior_grants
+        prior
             .iter()
-            .all(|event| !event.after_state["grant_source"].is_null()),
-        "{prior_grants:#?}"
+            .filter(|event| event.log_index == Some(1))
+            .all(|event| event.after_state["effective_powers"] == json!([])),
+        "the write naming the Graveyard only revokes the registrant: {prior:#?}"
     );
-    assert_eq!(prior_grants, graveyard_permissions(&output, block - 1));
-
-    // Ordinary interpretation of the migration transaction: the reclaim revokes the prior grants,
-    // the registry transfer grants the same keys again, and the later logs revoke those.
-    let migration = graveyard_permissions(&ordinary, block);
-    let reclaim_revocations = at_log(&migration, 1);
-    assert_eq!(
-        effective_powers(&reclaim_revocations, "before"),
-        ["resolver_control", "resource_control"],
-        "the reclaim revokes both prior grants: {migration:#?}"
+    let migration = permissions(&output, block);
+    assert!(
+        of_graveyard(&migration).is_empty(),
+        "no log of the migration transaction moves a Graveyard grant: {migration:#?}"
     );
     assert!(
-        revoked_by(&reclaim_revocations, "AuthorityTransferred"),
-        "{reclaim_revocations:#?}"
-    );
-    let transient_grants = at_log(&migration, 2);
-    assert_eq!(
-        effective_powers(&transient_grants, "after"),
-        ["resolver_control", "resource_control"],
-        "the registry transfer to the Graveyard grants both scopes again: {migration:#?}"
-    );
-    assert!(
-        transient_grants
+        migration
             .iter()
-            .all(|event| !event.after_state["grant_source"].is_null()),
-        "{transient_grants:#?}"
-    );
-    assert!(
-        revoked_by(&at_log(&migration, 3), "ResolverChanged")
-            && revoked_by(&at_log(&migration, 5), "TokenControlTransferred"),
-        "the resolver clear and the cleanup transfer revoke the transient grants: {migration:#?}"
-    );
-    assert_eq!(
-        migration.len(),
-        reclaim_revocations.len() + transient_grants.len() + 2,
-        "{migration:#?}"
-    );
-
-    // Reconciliation keeps the reclaim's revocations and nothing else of the Graveyard's on the
-    // registry-only resource inside the migration transaction.
-    let reconciled = graveyard_permissions(&output, block);
-    assert_eq!(
-        reconciled, reclaim_revocations,
-        "reconciliation keeps the reclaim's revocations of the Graveyard's pre-migration grants \
-         on the registry-only resource and drops the transient grants with their revocations"
-    );
-    assert!(
-        output.normalized_events.iter().all(|event| {
-            event.block_number != Some(block)
-                || event.event_kind != "PermissionChanged"
-                || event.resource_id != Some(registry_resource)
-                || event.after_state["effective_powers"] == json!([])
-        }),
+            .all(|event| event.after_state["effective_powers"] == json!([])),
         "no grant on the registry-only resource survives the migration transaction"
     );
     Ok(())
@@ -5838,6 +5787,44 @@ fn plain_unwrapped_cleanup_is_identical_after_cold_predecessor_restore() -> anyh
         resumed.surface_bindings
     );
     Ok(())
+}
+
+/// Only the migration manifest admits the Graveyard. Without it, the Graveyard is an ordinary
+/// registry owner and holds the registry-only resource like any other. The admitted Graveyard is
+/// a burned record and holds nothing there, so its rows on that resource drop out, and the later
+/// rows of each log they came from move up one draft each.
+fn drop_graveyard_registry_only_rows(events: &mut Vec<NormalizedEvent>, graveyard: &Value) {
+    let graveyard = graveyard.as_str().unwrap_or_default();
+    /// A log's draft list: its block, transaction, log index and manifest.
+    type Log = (Option<String>, Option<String>, Option<i64>, Option<i64>);
+    let mut dropped = std::collections::BTreeMap::<Log, i64>::new();
+    events.retain_mut(|event| {
+        let key = (
+            event.block_hash.clone(),
+            event.transaction_hash.clone(),
+            event.log_index,
+            event.source_manifest_id,
+        );
+        let registry_only = ["grant_source", "revocation_source"]
+            .iter()
+            .any(|source| event.after_state[source]["authority_kind"] == "registry_only");
+        if event.event_kind == "PermissionChanged"
+            && registry_only
+            && event.after_state["subject"]
+                .as_str()
+                .is_some_and(|subject| subject.eq_ignore_ascii_case(graveyard))
+        {
+            *dropped.entry(key).or_default() += 1;
+            return false;
+        }
+        if let Some(count) = dropped.get(&key)
+            && let Some((prefix, ordinal)) = event.event_identity.rsplit_once(':')
+            && let Ok(ordinal) = ordinal.parse::<i64>()
+        {
+            event.event_identity = format!("{prefix}:{}", ordinal - count);
+        }
+        true
+    });
 }
 
 #[test]
@@ -5963,6 +5950,7 @@ fn incomplete_unwrapped_cleanup_keeps_ordinary_authority_effects() -> anyhow::Re
         for event in &mut expected_events {
             mark_graveyard_getter(&mut event.after_state, &fixture["addresses"]["graveyard"]);
         }
+        drop_graveyard_registry_only_rows(&mut expected_events, &fixture["addresses"]["graveyard"]);
         let mut retirement_events = 0;
         for event in &mut expected_events {
             if event.source_family != "ens_v1_registrar_l1"
