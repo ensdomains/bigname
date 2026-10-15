@@ -4335,3 +4335,36 @@ manifest, so the manifest-authority fingerprint is unchanged.
 Before the release is recorded, confirm that the Project redo adopted the new projection
 content hash and that `GET /v1/resolvers/1/<address>?include=total_count` answers for a busy
 resolver.
+
+## ENSv1 unwrap without a lease and resolver logs kept on a batch re-run
+
+The build that gives an unwrapped ENSv1 name with no registrar lease a registry-only
+successor (TYR-334) changes the unwrap and restore paths and the batch re-run in
+`crates/adapters/src`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain. The
+[projection content hash](glossary.md#projection-content-hash) moves with it.
+
+What changes for names:
+
+- A wrapped ENSv1 name unwrapped with no registrar lease to reactivate serves as
+  active with its registry owner on `GET /v1/names/{name}`. This includes a name whose
+  registry record left the NameWrapper before the unwrap, whether or not it came back. It
+  also appears in that owner's address names. Before, it served as `status: unregistered`.
+- Every log an ENSv2 resolver emitted earlier in a batch is kept when Interpret re-runs
+  that batch, even after a later announcement in the batch replaced its
+  [resolver announcement admission](glossary.md#resolver-announcement-admission). A role
+  granted by `EACRolesChanged` shows on `GET /v1/resolvers/{chain_id}/{address}/roles`,
+  and a text record it sets shows on `GET /v1/resolvers/{chain_id}/{address}/records`.
+  Before, the expiry re-run dropped the earlier logs of a resolver whose admission was
+  replaced later in that batch. Interpret makes that re-run when an old lease expires
+  after an ENSv1→ENSv2 migration in the same batch.
+
+These rows arrive through re-derivation, not through an in-place change. Every chain
+needs a full-history Interpret redo, then the Project redo it installs, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and
+API binaries. The change rides the next re-derivation release and shares that release's
+one Interpret and Project redo pair with its other hash-rotating changes. Do not mark old
+rows ready under the new hash.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority
+fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.

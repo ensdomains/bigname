@@ -497,7 +497,20 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
             };
             state.set_v1_wrapper_burnt(&event.namespace, namehash, false);
             state.release_v1_name(&event.namespace, namehash);
-            if event.after_state.get("reactivated_resource_id").is_some() {
+            // The live unwrap writes `reactivated_resource_id` for either successor, so
+            // the registry-only successor must be recognised by its authority kind
+            // first. Otherwise the registrar reactivation below swallows it and the
+            // successor is dropped at the batch boundary.
+            if event
+                .after_state
+                .get("authority_kind")
+                .and_then(Value::as_str)
+                == Some("registry_only")
+            {
+                // No lease was reactivated. The unwrap's successor is the registry-only
+                // authority retained from its registry write.
+                state.activate_retained_v1_registry_authority(&event.namespace, namehash);
+            } else if event.after_state.get("reactivated_resource_id").is_some() {
                 let at = event
                     .after_state
                     .get("unwrapped_at")

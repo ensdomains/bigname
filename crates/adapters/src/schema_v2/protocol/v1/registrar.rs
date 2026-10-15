@@ -18,7 +18,7 @@ use crate::schema_v2::{
     state::{State, V1NameState},
 };
 pub(in crate::schema_v2) mod identity;
-mod registry_only_fallback;
+pub(super) mod registry_only_fallback;
 use identity::{new_registrar_identity, registrar_namehash};
 pub(super) mod base;
 pub(in crate::schema_v2) mod decode;

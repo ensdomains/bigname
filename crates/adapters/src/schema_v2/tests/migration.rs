@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use super::*;
 
+mod announced_resolver;
 mod child;
 mod expiry;
 mod intermediary;
