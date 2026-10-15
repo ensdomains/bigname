@@ -620,3 +620,128 @@ async fn register_and_wrap_serves_no_registry_only_permission_rows() -> Result<(
     );
     database.cleanup().await
 }
+
+/// The `(grant_scope.kind, grant_relation)` of each of `address`'s rows, sorted.
+fn scopes_of(rows: &[Value], address: &str) -> Vec<(String, Option<String>)> {
+    let mut scopes: Vec<(String, Option<String>)> = rows
+        .iter()
+        .filter(|row| {
+            row["address"]
+                .as_str()
+                .is_some_and(|row| row.eq_ignore_ascii_case(address))
+        })
+        .map(|row| {
+            (
+                row["grant_scope"]["kind"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                row.get("grant_relation")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            )
+        })
+        .collect();
+    scopes.sort();
+    scopes
+}
+
+/// A NameWrapper operator of a holder whose name already had a resolver when it was wrapped
+/// expands both holder rows. The operator's rows keep the `registration` and `resolver` scopes
+/// and carry `grant_relation=operator`, on the permission read and in the holder's
+/// address-name `role_summary`. The holder's own rows omit the field.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L214-L222 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L105-L117 @ ens_v1@91c966f)
+#[tokio::test]
+async fn a_wrapper_operator_keeps_the_resolver_scope_of_the_holder_row() -> Result<()> {
+    const OPERATOR: &str = "0x00000000000000000000000000000000000000e5";
+    let database = TestDatabase::new_migrated().await?;
+    let probe = name("wrapoperated");
+    let start = LEASE - 200 * 86_400;
+    let operator_approval = vec![(
+        NAME_WRAPPER,
+        ApprovalForAll {
+            owner: HOLDER.parse()?,
+            operator: OPERATOR.parse()?,
+            approved: true,
+        }
+        .encode_log_data(),
+    )];
+    publish(
+        &database,
+        vec![
+            (start, registration(&probe)?),
+            (start + 30, set_resolver(&probe)?),
+            (start + 60, approval()?),
+            (start + 120, move_into_wrapper(&probe, HOLDER)?),
+            (start + 180, operator_approval),
+        ],
+    )
+    .await?;
+    let both = |relation: Option<&str>| {
+        vec![
+            ("registration".to_owned(), relation.map(str::to_owned)),
+            ("resolver".to_owned(), relation.map(str::to_owned)),
+        ]
+    };
+    let mut reads = Vec::new();
+    for route in [
+        "/v1/permissions?name=wrapoperated.eth".to_owned(),
+        "/v1/permissions?name=wrapoperated.eth&include=lineage".to_owned(),
+        format!("/v1/permissions?namespace=ens&address={OPERATOR}"),
+    ] {
+        let (status, body) = get(&database, &route).await?;
+        assert_eq!(status, StatusCode::OK, "{route}: {body}");
+        if let Err(error) = crate::tests::assert_permission_additive_vocabulary(&body) {
+            panic!("{route}: {error}: {body:#}");
+        }
+        let rows = body["data"]
+            .as_array()
+            .with_context(|| format!("{route}: {body}"))?
+            .clone();
+        let resolver = rows
+            .iter()
+            .find(|row| row["address"] == OPERATOR && row["grant_scope"]["kind"] == "resolver")
+            .with_context(|| format!("{route}: operator resolver row in {body:#}"))?;
+        assert_eq!(resolver["powers"], json!(["resolver_control"]), "{route}");
+        reads.push((route, rows));
+    }
+    let route =
+        format!("/v1/addresses/{HOLDER}/names?namespace=ens&relation=owner&include=role_summary");
+    let (status, body) = get(&database, &route).await?;
+    assert_eq!(status, StatusCode::OK, "{route}: {body}");
+    if let Err(error) = crate::tests::assert_permission_additive_vocabulary(&body) {
+        panic!("{route}: {error}: {body:#}");
+    }
+    let summary: Vec<Value> = body["data"]
+        .as_array()
+        .with_context(|| format!("{route}: {body}"))?
+        .iter()
+        .filter(|row| row["name"] == "wrapoperated.eth")
+        .flat_map(|row| row["role_summary"].as_array().cloned().unwrap_or_default())
+        .flat_map(|role| {
+            let address = role["address"].clone();
+            role["grants"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(move |mut grant| {
+                    grant["address"] = address.clone();
+                    grant
+                })
+        })
+        .collect();
+    reads.push((route, summary));
+    for (route, rows) in &reads {
+        assert_eq!(
+            scopes_of(rows, OPERATOR),
+            both(Some("operator")),
+            "{route}: {rows:#?}"
+        );
+        if !route.contains("address=") {
+            assert_eq!(scopes_of(rows, HOLDER), both(None), "{route}: {rows:#?}");
+        }
+    }
+    database.cleanup().await
+}

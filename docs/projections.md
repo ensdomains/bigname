@@ -1359,7 +1359,8 @@ registry operators into `project_account_approval` with
 the reader joins wrapper holder rows to approved account rows whose owner is
 that holder and whose authority contract is the same NameWrapper. It composes
 one operator row per scope with the holder's masked powers and
-`grant_source.relation_kind=operator`. An operator who is also the token
+`grant_source.relation_kind=operator`, which the permission reads serve with
+`grant_relation=operator`. An operator who is also the token
 delegate keeps the operator set. The join uses one publication snapshot, so
 approval changes need no persisted per-resource fan-out. `canModifyName` and
 the ERC-1155-fuse approval and transfer checks authorize an operator as the holder.

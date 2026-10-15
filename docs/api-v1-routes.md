@@ -3026,8 +3026,13 @@ introduces it rebuilds Project from full history before serving the option; see
   rows carry the holder's powers because NameWrapper authorizes the holder and
   its operators identically; the delegate carries only
   `extend_subname_expiry`; every row applies the expiry-effective fuse mask, and
-  rows revoke on transfer, unwrap, approval revocation, and expiry. Request-
-  relative completeness metadata below remains authoritative.
+  rows revoke on transfer, unwrap, approval revocation, and expiry. An operator
+  row keeps the scope of the holder row it expands, `registration` or
+  `resolver`, and carries `grant_relation=operator`. Its powers are the
+  operator's on this one name, derived from the owner-wide approval, so
+  `grant_scope` still names the protocol scope the powers apply to. The holder and delegate rows are direct
+  rows and omit `grant_relation`. Request-relative completeness metadata below
+  remains authoritative.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L214-L238 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L37-L47 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L105-L117 @ ens_v1@91c966f)
@@ -3062,10 +3067,13 @@ introduces it rebuilds Project from full history before serving the option; see
   `{resolver: {chain_id, address}}` for `resolver` with numeric `chain_id`;
   `{chain_id, manager}` for `record_manager`; and
   `{chain_id, authority_kind, authority_contract, owner}` for the
-  [`account` permission scope](glossary.md#account-permission-scope). Effective
-  account rows carry `grant_relation=operator`. An ENSv1 or Basenames registry
-  operator has `powers=["registry_control"]`; an ENSv2 registry operator has
-  the powers of the token owner's own row on that registration. Direct rows
+  [`account` permission scope](glossary.md#account-permission-scope).
+  `grant_relation=operator` marks a grant that exists through an
+  `ApprovalForAll`: the account-scope row for a registry operator, and the
+  per-name effective rows for a NameWrapper operator.
+  An ENSv1 or Basenames registry operator has `powers=["registry_control"]`; an
+  ENSv2 registry operator has the powers of the token owner's own row on that
+  registration. Direct rows
   omit `grant_relation` and are otherwise byte-for-byte compatible. For
   example, a direct row remains:
 
@@ -3806,7 +3814,10 @@ introduces it rebuilds Project from full history before serving the option; see
   `GET /v1/permissions`. Direct grants omit `grant_relation`; effective
   registry-operator grants carry `grant_relation=operator`, the account scope,
   and `powers=["registry_control"]` for an ENSv1 or Basenames registry or the
-  token owner's powers for an ENSv2 registry. Operator grants expand roles for resources
+  token owner's powers for an ENSv2 registry. NameWrapper operator grants carry
+  `grant_relation=operator` with the scope and powers of the holder grant they
+  expand, `registration` or `resolver`.
+  Operator grants expand roles for resources
   already on the page but never add or remove address-name membership rows.
   The registry root holders a permissions read of one ENSv2 registration lists
   are not repeated in `role_summary`: they are the same for every name of a
