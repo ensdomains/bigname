@@ -7906,7 +7906,7 @@
         "properties": {
           "grant_relation": {
             "$ref": "#/components/schemas/GrantRelation",
-            "description": "`operator` for an effective account approval or `holder` for a derived WrapperRegistry parent owner; direct grants omit it."
+            "description": "`operator` marks a grant that exists through an `ApprovalForAll`: the account-scope row for a registry operator, and the per-name effective rows for a NameWrapper operator. `holder` marks a derived WrapperRegistry parent owner. Direct grants omit it."
           },
           "grant_scope": {
             "$ref": "#/components/schemas/GrantScope",
@@ -8515,7 +8515,7 @@
         "properties": {
           "grant_relation": {
             "$ref": "#/components/schemas/GrantRelation",
-            "description": "`operator` for an effective account approval or `holder` for a derived WrapperRegistry parent owner; direct grants omit it."
+            "description": "`operator` marks a grant that exists through an `ApprovalForAll`: the account-scope row for a registry operator, and the per-name effective rows for a NameWrapper operator. `holder` marks a derived WrapperRegistry parent owner. Direct grants omit it."
           },
           "grant_scope": {
             "$ref": "#/components/schemas/GrantScope",

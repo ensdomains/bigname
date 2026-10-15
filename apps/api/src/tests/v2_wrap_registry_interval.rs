@@ -692,6 +692,9 @@ async fn a_wrapper_operator_keeps_the_resolver_scope_of_the_holder_row() -> Resu
     ] {
         let (status, body) = get(&database, &route).await?;
         assert_eq!(status, StatusCode::OK, "{route}: {body}");
+        if let Err(error) = crate::tests::assert_permission_additive_vocabulary(&body) {
+            panic!("{route}: {error}: {body:#}");
+        }
         let rows = body["data"]
             .as_array()
             .with_context(|| format!("{route}: {body}"))?
@@ -707,6 +710,9 @@ async fn a_wrapper_operator_keeps_the_resolver_scope_of_the_holder_row() -> Resu
         format!("/v1/addresses/{HOLDER}/names?namespace=ens&relation=owner&include=role_summary");
     let (status, body) = get(&database, &route).await?;
     assert_eq!(status, StatusCode::OK, "{route}: {body}");
+    if let Err(error) = crate::tests::assert_permission_additive_vocabulary(&body) {
+        panic!("{route}: {error}: {body:#}");
+    }
     let summary: Vec<Value> = body["data"]
         .as_array()
         .with_context(|| format!("{route}: {body}"))?

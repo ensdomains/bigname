@@ -27,9 +27,13 @@ fn emitted(
     log
 }
 
+/// A served page, after the API contract's permission vocabulary check.
 async fn current(database: &TestDatabase, route: &str) -> Result<Value> {
     let (status, body) = read_family_response(database, route).await?;
     assert_eq!(status, StatusCode::OK, "{route}: {body:#}");
+    if let Err(error) = crate::tests::assert_permission_additive_vocabulary(&body) {
+        panic!("{route}: {error}: {body:#}");
+    }
     Ok(body)
 }
 

@@ -104,7 +104,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `scope` (history) | `name`, `registration`, `both` | `surface`, `resource`, `both` |
 | `subject` (history) | on name history with `include=child_registrations` only: the row's relation to the requested name, `name` for the name's own rows and `child` for a [direct child registration](api-v1-routes.md#direct-child-registrations-includechild_registrations) | comparing a row's `name` with the requested name |
 | `grant_scope` | the protocol scope of a permission row: `root`, `registry`, `registration`, `resolver`, `record_manager`, or [`account`](glossary.md#account-permission-scope) | permission-row `scope` (renamed so history `scope` and permission scope are two names for two concepts) |
-| `grant_relation` | optional explicit [grant relation](glossary.md#grant-relation); `operator` identifies an account approval and `holder` a derived WrapperRegistry parent owner; direct permission rows omit the field | new in v2 |
+| `grant_relation` | optional explicit [grant relation](glossary.md#grant-relation). `operator` marks a grant that exists through an `ApprovalForAll`: the account-scope row for a registry operator, and the per-name effective rows for a NameWrapper operator. `holder` marks a derived WrapperRegistry parent owner. Direct permission rows omit the field | new in v2 |
 | `verification` | typed checked-answer summary for claimed-vs-verified answers | `verified_state`, `verified_primary_name` section wrappers |
 | `status` | one result vocabulary: `ok`, `not_found`, `invalid_name`, `mismatch`, `unsupported`, `stale`, `failed` | `ResultStatus`, `IdentityStatus`, `NameRecordStatus`, `unnormalizable_input` (folds into `invalid_name`); `mismatch` kept for verification results |
 | `unsupported_reason` | reason code or short reason string required with `status=unsupported` | `coverage.unsupported_reason`, route-specific unsupported details |
@@ -3322,7 +3322,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 <!-- openapi:object AddressNameGrant -->
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
-| `grant_relation` | enum GrantRelation | optional | `operator` for an effective account approval or `holder` for a derived WrapperRegistry parent owner; direct grants omit it. |
+| `grant_relation` | enum GrantRelation | optional | `operator` marks a grant that exists through an `ApprovalForAll`: the account-scope row for a registry operator, and the per-name effective rows for a NameWrapper operator. `holder` marks a derived WrapperRegistry parent owner. Direct grants omit it. |
 | `grant_scope` | object GrantScope | always | Scope in which these powers apply. |
 | `powers` | array of enum PermissionPower | always | Product permission powers; see [permission powers vocabulary](#permission-powers-vocabulary). |
 

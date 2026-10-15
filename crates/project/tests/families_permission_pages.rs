@@ -8,7 +8,7 @@ mod support;
 
 use anyhow::Result;
 use bigname_storage::{
-    PermissionGrantRelation, load_serving_effective_permissions_page,
+    EffectivePermissionScope, PermissionGrantRelation, load_serving_effective_permissions_page,
     load_serving_permission_summaries,
 };
 use read_support::{
@@ -37,6 +37,18 @@ async fn read(
         load_serving_effective_permissions_page(&fixture.pool, None, Some(id), None, None, 50)
             .await?;
     let summaries = load_serving_permission_summaries(&fixture.pool, &[id]).await?;
+    // A per-name operator row exists through the holder's NameWrapper `ApprovalForAll`.
+    for row in &page.rows {
+        if row.grant_relation == Some(PermissionGrantRelation::Operator)
+            && matches!(row.scope, EffectivePermissionScope::Direct(_))
+        {
+            assert_eq!(row.grant_source["relation_kind"], "operator", "{row:?}");
+            assert_eq!(
+                row.grant_source["source_event_kind"], "ApprovalForAll",
+                "{row:?}"
+            );
+        }
+    }
     Ok((
         page.rows
             .iter()

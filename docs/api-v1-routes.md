@@ -3035,8 +3035,10 @@ introduces it rebuilds Project from full history before serving the option; see
   `{resolver: {chain_id, address}}` for `resolver` with numeric `chain_id`;
   `{chain_id, manager}` for `record_manager`; and
   `{chain_id, authority_kind, authority_contract, owner}` for the
-  [`account` permission scope](glossary.md#account-permission-scope). Effective
-  account rows and NameWrapper operator rows carry `grant_relation=operator`.
+  [`account` permission scope](glossary.md#account-permission-scope).
+  `grant_relation=operator` marks a grant that exists through an
+  `ApprovalForAll`: the account-scope row for a registry operator, and the
+  per-name effective rows for a NameWrapper operator.
   An ENSv1 or Basenames registry operator has `powers=["registry_control"]`; an
   ENSv2 registry operator has the powers of the token owner's own row on that
   registration. Direct rows
