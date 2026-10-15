@@ -599,6 +599,7 @@ include!("tests/v2_bracketed_labelhash_names.rs");
 include!("tests/v2_textless_surface.rs");
 include!("tests/v2_textless_surface_lookup.rs");
 include!("tests/v2_bound_names_paging.rs");
+include!("tests/v2_bound_names_as_of.rs");
 include!("tests/v2_textless_surface_expiry.rs");
 include!("tests/v2_textless_address_history.rs");
 include!("tests/v2_family_name_publication_changes.rs");

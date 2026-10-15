@@ -4225,6 +4225,9 @@ manifest, so the manifest-authority fingerprint is unchanged.
   without the columns drops the values it has no column for and publishes summaries with no
   selector. Do not run the previous build against the migrated schema: its writer fails on the
   new `NOT NULL` columns.
+- Keep every Project of the previous build stopped for the whole upgrade, from the
+  schema-migration until the new build runs. It cannot write the new summary shape, so its
+  family step fails rather than publish, and the chain's families stop advancing while it runs.
 - A page composes at most `page_size + 1` names. `include=total_count` is new and serves the
   exact count of the whole list. It reads every listed name of the resolver, so its cost grows
   with the list.

@@ -32,19 +32,75 @@ pub(super) async fn surfaces(conn: &mut PgConnection, ids: &[String]) -> Result<
     .fetch_all(&mut *conn)
     .await
     .context("failed to load name surfaces")?;
-    rows.into_iter()
-        .map(|row| {
-            Ok(Surface {
-                logical_name_id: row.try_get("logical_name_id")?,
-                namespace: row.try_get("namespace")?,
-                raw_name: row.try_get("raw_name")?,
-                namehash: row.try_get("namehash")?,
-                labelhashes: row.try_get("labelhashes")?,
-                chain_id: row.try_get("chain_id")?,
-                block_number: row.try_get("block_number")?,
-            })
-        })
-        .collect()
+    rows.iter().map(surface_row).collect()
+}
+
+/// The surfaces of `ids` on the publication's chain that the summary writer composes, as the
+/// publication's block reads them. Interpret fills a surface's raw bytes and its shadow state in
+/// place from a later preimage observation and keeps the surface's anchor. So the raw bytes and
+/// the shadow state count only when the surface's preimage witness is an event at or below the
+/// block, with the event and its lineage block canonical, safe or finalized. That is Interpret's
+/// own witness check (`TAKES_INCOMING_EVIDENCE` in `interpret::write::identity_names`). Like it,
+/// this read does not test `consumer_visibility`. A candidate preimage observation never changes
+/// visibility, since the event writer refuses a visibility-only rewrite, so requiring `activated`
+/// would drop raw bytes Interpret took. Otherwise the surface reads as it stood before the
+/// observation: active and without raw bytes. A surface whose raw bytes name no witness reads as
+/// stored.
+pub(super) async fn surfaces_at(
+    conn: &mut PgConnection,
+    ids: &[String],
+    publication: &FamilyPublication,
+) -> Result<Vec<Surface>> {
+    let rows = sqlx::query(&format!(
+        "/* storage:families.name.surfaces_at */
+         SELECT surface.logical_name_id, surface.namespace,
+                CASE WHEN witnessed.readable THEN surface.raw_name END AS raw_name,
+                surface.namehash, surface.labelhashes, surface.chain_id, surface.block_number
+         FROM bigname_phase.name_surfaces surface
+         JOIN bigname_phase.chain_lineage lineage
+           ON lineage.chain_id = surface.chain_id AND lineage.block_hash = surface.block_hash
+         CROSS JOIN LATERAL (
+             SELECT surface.preimage_event_identity IS NULL OR EXISTS (
+                 SELECT 1 FROM bigname_phase.normalized_events witness
+                 WHERE witness.event_identity = surface.preimage_event_identity
+                   AND witness.chain_id = surface.chain_id
+                   AND witness.block_number <= $3
+                   AND witness.canonicality_state IN ('canonical', 'safe', 'finalized')
+                   AND EXISTS (
+                       SELECT 1 FROM bigname_phase.chain_lineage witness_lineage
+                       WHERE witness_lineage.chain_id = witness.chain_id
+                         AND witness_lineage.block_hash = witness.block_hash
+                         AND witness_lineage.block_number = witness.block_number
+                         AND witness_lineage.canonicality_state
+                             IN ('canonical', 'safe', 'finalized'))
+             ) AS readable
+         ) witnessed
+         WHERE surface.logical_name_id = ANY($1::text[])
+           AND surface.chain_id = $2 AND surface.block_number <= $3
+           AND (NOT witnessed.readable OR {composed})
+           AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')",
+        composed = composed_surface_sql("surface")
+    ))
+    .bind(ids)
+    .bind(&publication.chain_id)
+    .bind(publication.block_number)
+    .fetch_all(&mut *conn)
+    .await
+    .context("failed to load the name surfaces of a publication")?;
+    rows.iter().map(surface_row).collect()
+}
+
+fn surface_row(row: &sqlx::postgres::PgRow) -> Result<Surface> {
+    Ok(Surface {
+        logical_name_id: row.try_get("logical_name_id")?,
+        namespace: row.try_get("namespace")?,
+        raw_name: row.try_get("raw_name")?,
+        namehash: row.try_get("namehash")?,
+        labelhashes: row.try_get("labelhashes")?,
+        chain_id: row.try_get("chain_id")?,
+        block_number: row.try_get("block_number")?,
+    })
 }
 
 pub(super) async fn histories(

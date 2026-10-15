@@ -62,7 +62,9 @@ pub(crate) use batch::{
 };
 pub use bound::{BoundName, BoundNamesPage, load_family_bound_names};
 #[cfg(test)]
-pub(crate) use bound::{bound_count_sql, bound_page_sql, count as bound_count};
+pub(crate) use bound::{
+    bound_count_sql, bound_page_sql, count as bound_count, count_plan as bound_count_plan,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use bound_parity::{assert_bound_names_match_the_walk, assert_stored_bound_fields_are_fresh};
 pub(crate) use bound_rules::COMPOSED_NC_COLUMNS;

@@ -20,7 +20,7 @@ use sqlx::{PgConnection, Row, raw_sql};
 
 use super::{
     id_index_plan_tests::{PLAN_MODES, with_database},
-    name::{bound_count, bound_count_sql, bound_page_sql},
+    name::{bound_count, bound_count_plan, bound_count_sql, bound_page_sql},
 };
 
 const CHAIN: &str = "ethereum-mainnet";
@@ -268,6 +268,42 @@ async fn reader_count(connection: &mut PgConnection) -> Result<()> {
     ensure!(
         text.contains(&format!("'{CHAIN}'::text")),
         "the reader's count was planned without the resolver's values\n{text}"
+    );
+    forced_generic_count(connection).await
+}
+
+/// A session that forces generic plans, as a server or role setting can, still counts with the
+/// custom plan, and keeps its own setting after the count.
+async fn forced_generic_count(connection: &mut PgConnection) -> Result<()> {
+    let address = resolver('a');
+    raw_sql("SET plan_cache_mode = force_generic_plan")
+        .execute(&mut *connection)
+        .await?;
+    let started = std::time::Instant::now();
+    let total = bound_count(&mut *connection, (CHAIN, &address, None), true).await?;
+    eprintln!(
+        "BOUND COUNT (reader, session force_generic_plan) of {total} names: {} ms",
+        started.elapsed().as_millis()
+    );
+    let plan = bound_count_plan(&mut *connection, (CHAIN, &address, None), true).await?;
+    let setting: String = sqlx::query_scalar("SHOW plan_cache_mode")
+        .fetch_one(&mut *connection)
+        .await?;
+    raw_sql("RESET plan_cache_mode")
+        .execute(&mut *connection)
+        .await?;
+    eprintln!("BOUND COUNT (reader plan, session force_generic_plan)\n{plan}");
+    ensure!(
+        i64::try_from(total)? == LISTED + TEXTLESS + 1,
+        "the reader counted {total} under a forced generic plan"
+    );
+    ensure!(
+        plan.contains(&format!("'{CHAIN}'::text")) && !plan.contains("$1"),
+        "the count took the generic plan the session forces\n{plan}"
+    );
+    ensure!(
+        setting == "force_generic_plan",
+        "the count changed the session's plan_cache_mode to {setting}"
     );
     Ok(())
 }

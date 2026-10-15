@@ -47,7 +47,7 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, Postgres, QueryBuilder};
 
-use super::{CoverageShape, FamilyPublication, batch::load_chain, list_keys, loaders::surfaces};
+use super::{CoverageShape, FamilyPublication, batch::load_chain, list_keys, loaders::surfaces_at};
 use crate::address_names::{push_expires_at_timestamp_expr, push_registered_at_timestamp_expr};
 
 /// The summary rows of `logical_name_ids` at `publication`, as `to_jsonb` of a
@@ -104,15 +104,9 @@ async fn compose_summaries(
     if logical_name_ids.is_empty() {
         return Ok(NameSummaryPublication::default());
     }
-    // The block's own surfaces and every earlier one; the marker has not moved to it yet.
-    let surfaces: Vec<_> = surfaces(&mut *conn, logical_name_ids)
-        .await?
-        .into_iter()
-        .filter(|surface| {
-            surface.chain_id == publication.chain_id
-                && surface.block_number <= publication.block_number
-        })
-        .collect();
+    // The block's own surfaces and every earlier one, as the block reads them. The marker has
+    // not moved to it yet.
+    let surfaces = surfaces_at(&mut *conn, logical_name_ids, publication).await?;
     let mut composed = load_chain(
         &mut *conn,
         publication,
@@ -210,23 +204,25 @@ async fn compose_summaries(
             })
             .collect::<Result<Vec<_>>>()?,
     );
-    // The surfaces the rows were composed from. The statement reads them from here rather than
-    // from name_surfaces again, so the stored raw name and the order name come from one read of
-    // each surface, even when Interpret commits a surface change between two statements.
-    let named = Value::Array(
+    // The raw names of the surfaces the rows were composed from. The statement reads them from
+    // here rather than from name_surfaces again, so the stored raw name and the order name come
+    // from one read of each surface, even when Interpret commits a surface change between two
+    // statements.
+    let composed_raw = Value::Array(
         surfaces
             .iter()
             .map(|surface| {
                 json!({
                     "logical_name_id": surface.logical_name_id,
-                    "namespace": surface.namespace,
                     "raw_name": surface.raw_name,
-                    "namehash": surface.namehash,
                 })
             })
             .collect(),
     );
-    // The chain and block bind first, as `$1` and `$2`, which `zero_owner` reads.
+    // Every surface of the chain at or below the block has a row, whatever its state. One the
+    // block does not compose, such as a shadow, has no composed row and no bound-name selector,
+    // so its row carries only `zero_owner`. The chain and block bind first, as `$1` and `$2`,
+    // which `zero_owner` reads.
     let mut builder = QueryBuilder::<Postgres>::new(
         "/* storage:families.name.summaries */ SELECT named.logical_name_id, to_jsonb(summary)
          FROM (SELECT ",
@@ -236,11 +232,19 @@ async fn compose_summaries(
     builder.push_bind(publication.block_number);
     builder.push(
         "::bigint AS block_number) params
-         CROSS JOIN jsonb_to_recordset(",
+         CROSS JOIN LATERAL (
+             SELECT DISTINCT surface.logical_name_id, surface.namespace, surface.namehash
+             FROM bigname_phase.name_surfaces surface
+             WHERE surface.chain_id = params.chain_id
+               AND surface.block_number <= params.block_number
+               AND surface.logical_name_id = ANY(",
     );
-    builder.push_bind(&named);
+    builder.push_bind(logical_name_ids);
+    builder.push("::text[])) named LEFT JOIN jsonb_to_recordset(");
+    builder.push_bind(&composed_raw);
     builder.push(
-        ") AS named(logical_name_id text, namespace text, raw_name text, namehash text)
+        ") AS composed(logical_name_id text, raw_name text)
+           ON composed.logical_name_id = named.logical_name_id
          LEFT JOIN jsonb_to_recordset(",
     );
     builder.push_bind(&source);
@@ -275,7 +279,7 @@ async fn compose_summaries(
                 bound.resolver_chain_id, bound.resolver_address,
                 COALESCE(bound.resolver_listing_eligible, FALSE) AS resolver_listing_eligible,
                 COALESCE(bound.resolver_support_exempt, FALSE) AS resolver_support_exempt,
-                NULLIF(named.raw_name, '') AS raw_name, bound.order_name, named.namehash) summary",
+                NULLIF(composed.raw_name, '') AS raw_name, bound.order_name, named.namehash) summary",
         zero_owner(),
         list_keys::FINITE_REGISTRATION_EXPIRY_SQL
     ));

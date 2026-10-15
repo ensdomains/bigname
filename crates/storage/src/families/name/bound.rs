@@ -29,7 +29,7 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use sqlx::{PgConnection, Row};
+use sqlx::{Connection, PgConnection, Row};
 
 use super::{
     CoverageShape, batch,
@@ -296,25 +296,83 @@ async fn select(
 
 /// The number of names in the whole list ([`bound_count_sql`]).
 ///
-/// The count is sent unprepared, so PostgreSQL plans each count with the resolver's own values. A
-/// cached generic plan guesses a few hundred names and probes every name's surfaces in a nested
-/// loop, which takes seconds at a million names.
+/// The count is planned with the resolver's own values on every run. A generic plan guesses a
+/// few hundred names and probes every name's surfaces in a nested loop, which takes seconds at a
+/// million names. So the count is sent unprepared, which no cached statement can switch to its
+/// generic plan, and it runs under `plan_cache_mode = force_custom_plan` ([`custom_plans`]),
+/// which a server, role or session setting of `force_generic_plan` cannot override.
 pub(crate) async fn count(
     conn: &mut PgConnection,
     (chain_id, resolver_address, namespace): (&str, &str, Option<&str>),
     supported: bool,
 ) -> Result<u64> {
+    let mut scoped = custom_plans(conn).await?;
     let total: i64 = sqlx::query_scalar(&bound_count_sql(supported))
         .bind(chain_id)
         .bind(resolver_address)
         .bind(namespace)
         .persistent(false)
-        .fetch_one(conn)
+        .fetch_one(&mut *scoped)
         .await
         .with_context(|| {
             format!("failed to count the bound names of {chain_id}:{resolver_address}")
         })?;
+    // Rolling back ends the setting. The count wrote nothing.
+    scoped.rollback().await?;
     Ok(u64::try_from(total).unwrap_or_default())
+}
+
+/// A savepoint on `conn` (or a transaction, on a connection outside one) whose statements are
+/// planned with their values: `SET LOCAL plan_cache_mode = force_custom_plan`. The caller rolls
+/// it back, which restores the setting for the rest of the read and keeps its snapshot.
+async fn custom_plans(conn: &mut PgConnection) -> Result<sqlx::Transaction<'_, sqlx::Postgres>> {
+    let mut scoped = conn
+        .begin()
+        .await
+        .context("failed to open the bound-name count's savepoint")?;
+    sqlx::query("SET LOCAL plan_cache_mode = force_custom_plan")
+        .execute(&mut *scoped)
+        .await
+        .context("failed to plan the bound-name count with its values")?;
+    Ok(scoped)
+}
+
+/// The plan PostgreSQL picks for the count statement under [`custom_plans`], as `EXPLAIN
+/// EXECUTE` prints it for a statement prepared in the same savepoint: placeholders for a generic
+/// plan, the values for a custom one. A plain `EXPLAIN` with bound values plans them as
+/// constants whatever `plan_cache_mode` says, so it cannot tell.
+#[cfg(test)]
+pub(crate) async fn count_plan(
+    conn: &mut PgConnection,
+    (chain_id, resolver_address, namespace): (&str, &str, Option<&str>),
+    supported: bool,
+) -> Result<String> {
+    let quoted = |value: Option<&str>| {
+        value.map_or("NULL".to_owned(), |value| {
+            format!("'{}'", value.replace('\'', "''"))
+        })
+    };
+    let mut scoped = custom_plans(conn).await?;
+    sqlx::query(&format!(
+        "PREPARE bound_count_probe (text, text, text) AS {}",
+        bound_count_sql(supported)
+    ))
+    .execute(&mut *scoped)
+    .await?;
+    let plan: Vec<String> = sqlx::query_scalar(&format!(
+        "EXPLAIN EXECUTE bound_count_probe ({}, {}, {})",
+        quoted(Some(chain_id)),
+        quoted(Some(resolver_address)),
+        quoted(namespace)
+    ))
+    .fetch_all(&mut *scoped)
+    .await?;
+    // A prepared statement outlives a rollback.
+    sqlx::query("DEALLOCATE bound_count_probe")
+        .execute(&mut *scoped)
+        .await?;
+    scoped.rollback().await?;
+    Ok(plan.join("\n"))
 }
 
 /// The ids of the composed rows in `source` the bound-name rules admit.

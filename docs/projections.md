@@ -1991,10 +1991,15 @@ use the same canonical event order and before-image journal as every family.
 The composed name reader fetches named pointers by exact resource/name pairs.
 The bound-name list reads no pointer key at request time. The family step stores
 each name's served resolver and order name on its name summary, and a block that
-writes a named pointer composes the name it names again. A page reads one range
+writes a named pointer composes the name it names again. The summary writer counts a
+surface's raw bytes and shadow state only from the block of its preimage witness. A page reads one range
 of one of the summary's two order indexes, the one the resolver's binding support picks,
 from its cursor and stops one name past its last
 ([storage](storage.md#table-ownership)).
+Project's raw-name sweep reads the surfaces without raw bytes through
+`name_surfaces_project_suffix_hash_idx`, on `(namespace, hash_array_extended(raw_labels, 0))`.
+That index has no chain column, so the sweep's chain condition filters inside each
+namespace's range, which holds those surfaces of every chain.
 
 Schema-migration `20260929140000_named_resource_pointer.sql` adds the named key
 table to an existing phase schema and atomically clears all family rows, the

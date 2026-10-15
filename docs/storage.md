@@ -614,18 +614,29 @@ Family indexes serve these concrete readers:
   served, imported preimages included. The capability gate is never stored, because a
   classification can change while no name is composed again. `include=total_count` counts
   the same names on the same snapshot, with the surface fences as one semi-join, so it reads
-  every listed name of the resolver. The count is sent unprepared, so PostgreSQL plans each
-  count with the resolver's own values. A cached generic plan guesses a few hundred names and
+  every listed name of the resolver. The count is sent unprepared, inside a savepoint that sets
+  `plan_cache_mode = force_custom_plan`, so PostgreSQL plans each count with the resolver's own
+  values even on a session set to `force_generic_plan`. A cached generic plan guesses a few hundred names and
   probes every name's surfaces in a nested loop. On the plan test's 1.1 million names the
   unprepared count takes about 0.4 s and that generic plan about 3.7 s. The unprepared count
   hashes the surfaces in a parallel semi-join. On those 1.1 million names, with the default
   `work_mem` and 2 parallel workers, it writes about 243 MB of temp files per count, an amount
-  that grows with the chain's surfaces. A surface's raw name changes in place only when Interpret
-  observes a preimage for it, which the family step's name selection reads
-  (`PreimageObserved`), or when an Interpret redo releases its preimage witness, after which
+  that grows with the chain's surfaces. Interpret writes a surface's raw bytes and its shadow
+  state in place when it observes a preimage for it, and keeps the surface's block. The summary
+  writer reads them as the composed block does (`loaders::surfaces_at`): only when the surface's
+  preimage witness is a readable `PreimageObserved` at or below the block. Otherwise the surface
+  counts as active and without raw bytes. The family step composes the name again at the
+  witness's block, which its name selection reads (`PreimageObserved`). So the stored order
+  name, raw name, and exempt and textless selection depend only on evidence at or below the
+  composed block, wherever Interpret is. Every surface at or below the block has a summary row.
+  One the block does not compose, such as a shadow, stores only `zero_owner`, with no
+  bound-name selector, so no bound-name page or count reads it. A witness repair
+  inside an Interpret redo above the marker changes nothing Project published. One at or below
+  it stamps a Project redo, whose undo restores the rows it composed. A surface that stores raw
+  bytes and names no witness is read as stored. When an Interpret redo releases such a raw name,
   the family step's first block sweeps the summaries whose stored `raw_name` their surface no
-  longer stores. Until then the name stays at its stored order name and is shown as served. An
-  imported label preimage changes no stored value.
+  longer stores. Until the family step composes a name again it stays at its stored order name
+  and is shown as served. An imported label preimage changes no stored value.
   `project_named_resource_pointer_resolver_idx` and `project_registry_pointer_resolver_idx`
   remain, though the listing no longer reads them.
 - Name-summary recomposition uses `project_name_summary_recompose_idx`,

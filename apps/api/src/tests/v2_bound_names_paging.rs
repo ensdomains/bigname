@@ -11,6 +11,7 @@ const PAGING_RELEASED: usize = 40;
 /// The paging fixture's names: the name without raw bytes, and a raw-name name the tests change.
 struct Paging {
     first: String,
+    first_resource: Uuid,
     first_labelhash: String,
     bound: String,
     bound_resource: Uuid,
@@ -134,6 +135,7 @@ async fn seed_bound_paging(database: &TestDatabase) -> Result<Paging> {
     publish_test_families(database, 240).await?;
     Ok(Paging {
         first,
+        first_resource,
         first_labelhash,
         bound,
         bound_resource,
@@ -459,15 +461,25 @@ async fn a_released_preimage_witness_is_swept_by_the_project_redo_the_interpret_
 /// An Interpret redo of `block` that releases the preimage witness of `name` and finds none
 /// again, as its witness repair writes it.
 async fn release_witness(database: &TestDatabase, name: &str, block: i64) -> Result<()> {
+    release_witness_in(database, name, (block, block)).await
+}
+
+/// [`release_witness`] by an Interpret redo of the blocks `from..=to`.
+async fn release_witness_in(
+    database: &TestDatabase,
+    name: &str,
+    (from, to): (i64, i64),
+) -> Result<()> {
     database
         .simulate_interpret_redo_begin(FAMILY_CHAIN, "redo")
         .await?;
     sqlx::query(
-        "UPDATE chain_phase_state SET redo_from_block_number = $2, redo_to_block_number = $2
+        "UPDATE chain_phase_state SET redo_from_block_number = $2, redo_to_block_number = $3
          WHERE chain_id = $1 AND phase_name = 'interpret'",
     )
     .bind(FAMILY_CHAIN)
-    .bind(block)
+    .bind(from)
+    .bind(to)
     .execute(&database.pool)
     .await?;
     sqlx::query(
