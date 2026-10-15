@@ -578,8 +578,9 @@ them.
 
 ### Permission powers vocabulary
 
-`powers` (on `GET /v1/permissions` rows, `include=role_summary` grants, and
-lineage objects) is a list of snake_case names drawn from four producers. The
+`powers` (on `GET /v1/permissions` rows, `include=role_summary` grants,
+lineage objects, and `permission` event rows) is a list of snake_case names
+drawn from five producers. The
 table is the complete vocabulary the code can serve; a test
 (`documented_powers_vocabulary_matches_code` in
 `apps/api/src/v2/permission_values.rs`) fails when this table and the producing
@@ -597,6 +598,12 @@ them.
   carries `registry_control` alone, applied at read time to the registrations
   the approving account currently owns in that registry.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
+- **ENSv1 NameWrapper operator approvals** (adapter
+  `crates/adapters/src/schema_v2/protocol/standard_approvals.rs`). A NameWrapper
+  `ApprovalForAll` event row carries `wrapper_control` alone while the approval
+  stands. Only event rows serve it. Permission rows give the operator the
+  holder's masked powers on each wrapped name instead (see below).
+  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L105-L117 @ ens_v1@91c966f)
 - **ENSv1 NameWrapper fuse vocabulary** (read-time mask in
   `crates/storage/src/families/control/permissions/grants.rs`). The permission
   reader recognises these names and removes each one from a wrapped name's effective powers when
@@ -644,6 +651,7 @@ them.
 | `registration_control` | ENSv1/Basenames control | Storage `resource_control`. Held by the account that controls the registration's authority object: the registrar token owner (`RegistrationGranted`, registrar `Transfer`), the registry owner of a registry-only resource (`NewOwner`/`Transfer`), or the NameWrapper token holder (`TokenControlTransferred`). Masked away while the wrapper is `locked`. |
 | `resolver_control` | ENSv1/Basenames control | Held by the same account, scoped to the registration's current nonzero resolver (`grant_scope.kind = resolver`); revoked and re-granted on `ResolverChanged` and `RegistrationGranted`. Masked by `CANNOT_SET_RESOLVER` (8). |
 | `registry_control` | ENSv1/Basenames registry operator | Held by an operator the registry owner approved through registry `ApprovalForAll`, on rows with `grant_relation = operator` and `grant_scope.kind = account`; applies only while the approving account owns the registration in that registry and the approval stands. |
+| `wrapper_control` | ENSv1 NameWrapper operator | Carried by a NameWrapper `ApprovalForAll` event row (`operator_approval_changed`, `grant_scope.kind = account`, `authority_kind = wrapper`) while the approval stands. Permission rows never carry it: an approved operator holds the holder's masked powers on each name the approving account holds in that NameWrapper. |
 | `set_resolver` | ENSv2 registry; wrapper mask | Registry `ROLE_SET_RESOLVER` (bit 24). On a wrapped ENSv1 name the mask removes it under `CANNOT_SET_RESOLVER` (8). |
 | `set_ttl` | wrapper mask | Removed under `CANNOT_SET_TTL` (16). |
 | `create_subnames` | wrapper mask | Removed under `CANNOT_CREATE_SUBDOMAIN` (32). |
