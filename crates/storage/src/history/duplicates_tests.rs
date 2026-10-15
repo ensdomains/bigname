@@ -5,7 +5,7 @@ use sqlx::{PgConnection, Postgres, QueryBuilder};
 
 use super::super::{
     EventHistoryReadFilter, duplicates::push_product_history_duplicate_filter,
-    paging::push_history_filters, selectors::HistorySelector,
+    paging::push_history_filters, resolver_source::ResolverSource, selectors::HistorySelector,
     source::push_history_source_for_filter,
 };
 
@@ -70,7 +70,7 @@ async fn exercise_plan(connection: &mut PgConnection) -> Result<()> {
     let filter = EventHistoryReadFilter::default();
     let mut query = QueryBuilder::<Postgres>::new("SELECT count(*)::bigint");
     push_history_source_for_filter(&mut query, &filter, true, false, false);
-    push_history_filters(&mut query, &filter, true);
+    push_history_filters(&mut query, &filter, true, ResolverSource::Condition);
     push_product_history_duplicate_filter(&mut query, &filter, true);
     let sql = query.sql().to_owned();
     let plan: Value = sqlx::query_scalar(&format!("EXPLAIN (FORMAT JSON) {sql}"))
@@ -192,7 +192,7 @@ async fn expanded_history_selectors_fit_postgres_bind_limit() -> Result<()> {
             };
             let mut query = QueryBuilder::<Postgres>::new("SELECT count(*)::bigint");
             push_history_source_for_filter(&mut query, &filter, true, false, false);
-            push_history_filters(&mut query, &filter, true);
+            push_history_filters(&mut query, &filter, true, ResolverSource::Condition);
             push_product_history_duplicate_filter(&mut query, &filter, true);
             assert_eq!(
                 query

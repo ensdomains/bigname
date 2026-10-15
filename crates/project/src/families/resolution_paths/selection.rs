@@ -17,6 +17,51 @@
 //! Missing/current/former membership and divergence evidence never restrict this candidate set.
 //! SourceManifestUpdated has no block position. Supported manifest sync invalidates phase hashes
 //! and requires a complete Interpret/Project redo; it is not an incremental event-range trigger.
+//!
+//! Every touched name recomposes itself. A touched name also becomes a prefix whose whole
+//! subtree recomposes, but only when its change can move other names' resolution paths.
+//! A journal row is such a change only when a field that a descendant's composition reads
+//! through its ancestors changed, judged against the row's before-image:
+//!
+//! - `project_ens_v2_entry_owner`: `expiry`, `status`, `registry_contract_instance_id`,
+//!   `resource_id` or `token_id`.
+//! - `project_registry_pointer`: `resolver_address`.
+//! - `project_resource_pointer`: `resolver_address`, `nonzero_resolver_address`, or a move
+//!   of its `namespace` or `namehash`. A move counts for the name before it and the name
+//!   after it. A change of `boundary_kind` alone does not count.
+//!
+//! `project_resolver_classification` is already field-exact in `changed_resolvers`.
+//!
+//! A name whose surface is anchored in the publication's window also becomes a prefix. The
+//! window is every block after the family marker's block, up to the publication's block,
+//! the window the summary work list uses for new surfaces. The ENSv1 mirror lookup reads an
+//! ancestor's registry pointer only through the ancestor's surface. So the names under a
+//! newly surfaced name can compose to a different result even when no checked field of a
+//! pointer row changed.
+//!
+//! A rebound name reads the original node across branches through wrapper eligibility.
+//! The rebound name is mounted in a migration registry. Its composition does not read
+//! the original name as an ancestor. It reads the original node through wrapper
+//! eligibility instead. That read uses two inputs of the original node.
+//!
+//! The first is the class of its latest owner getter. The class is unknown when there is
+//! no row, the owner word is unmasked, or the getter is missing or does not parse as an
+//! address. It is zero when the getter is the zero address, and nonzero for any other
+//! address. The stored reason does not change the class. Setting the owner to the
+//! registry itself and setting it to the zero address both read as zero.
+//!
+//! The second input is the wrapper row of the original node: whether the row is present,
+//! the name it names, whether it has a modifier, its `PARENT_CANNOT_CONTROL` fuse
+//! (fuses & 65536), and the parsed stored expiry.
+//!
+//! A change in any of those can change the eligibility answer. So
+//! `project_registry_node_state` can move other names' resolution paths when the getter
+//! class changes. `project_wrapper_state` can move them when the row appears or goes away,
+//! its name changes, its modifier presence changes, that fuse bit changes, or its parsed
+//! expiry changes. When a wrapper row or a resource pointer moves to another name, the
+//! change counts for both the old name and the new name. Every other journalled family
+//! (`project_parent_subregistry`, `project_binding_candidate`, `project_name_state` and
+//! `project_lifecycle_event`) moves only the name it names, never its descendants.
 use bigname_storage::families::name::PHYSICAL_POINTER_EVENT_SQL;
 
 pub(super) fn statement(normal_work: &str) -> String {
@@ -34,24 +79,111 @@ pub(super) fn statement(normal_work: &str) -> String {
     WITH RECURSIVE journal AS MATERIALIZED (
         SELECT family, key::jsonb AS key, before_image FROM project_family_undo
         WHERE chain_id=$1 AND block_number=$2
-          AND family IN ('project_parent_subregistry', 'project_ens_v2_entry_owner',
-            'project_wrapper_state', 'project_registry_node_state', 'project_registry_pointer',
+          AND family IN ('project_ens_v2_entry_owner', 'project_registry_pointer',
             'project_resource_pointer', 'project_resolver_classification',
-            'project_lifecycle_event', 'project_binding_candidate', 'project_name_state')
-    ), path_change AS MATERIALIZED (
-        SELECT 1 FROM journal WHERE family NOT IN ('project_resource_pointer', 'project_resolver_classification')
-        UNION ALL
-        SELECT 1 FROM journal JOIN project_resource_pointer pointer
+            'project_registry_node_state', 'project_wrapper_state')
+    ), names_whose_change_can_move_descendants AS MATERIALIZED (
+        SELECT pointer.namespace || ':' || lower(pointer.node) AS logical_name_id
+        FROM journal JOIN project_registry_pointer pointer
+          ON journal.family='project_registry_pointer' AND pointer.chain_id=$1
+         AND pointer.namespace=journal.key->>1 AND pointer.node=journal.key->>2
+        WHERE journal.before_image IS NULL
+           OR pointer.resolver_address IS DISTINCT FROM journal.before_image->>'resolver_address'
+        UNION
+        SELECT pointer.namespace || ':' || lower(pointer.namehash)
+        FROM journal LEFT JOIN project_resource_pointer pointer
           ON journal.family='project_resource_pointer' AND pointer.chain_id=$1
          AND pointer.resource_id=(journal.key->>1)::uuid
-        WHERE pointer.pointer_position IS DISTINCT FROM journal.before_image->'pointer_position'
-        UNION ALL
-        SELECT 1 FROM normalized_events event WHERE event.chain_id=$1
-          AND event.block_number>$4 AND event.block_number<=$2
-          AND event.event_kind IN ('Upgraded','ContractDiscovered','RegistryCreated')
-          AND event.source_family IN ('ens_v2_root_l1','ens_v2_registry_l1','ens_v2_migration_l1')
-          AND event.consumer_visibility='activated'
-          AND event.canonicality_state IN ('canonical','safe','finalized')
+        WHERE journal.family='project_resource_pointer'
+          AND pointer.namespace IS NOT NULL AND pointer.namehash IS NOT NULL
+          AND (journal.before_image IS NULL
+           OR pointer.resolver_address IS DISTINCT FROM journal.before_image->>'resolver_address'
+           OR pointer.nonzero_resolver_address IS DISTINCT FROM journal.before_image->>'nonzero_resolver_address'
+           OR pointer.namespace IS DISTINCT FROM journal.before_image->>'namespace'
+           OR pointer.namehash IS DISTINCT FROM journal.before_image->>'namehash')
+        UNION
+        SELECT (journal.before_image->>'namespace') || ':' || lower(journal.before_image->>'namehash')
+        FROM journal LEFT JOIN project_resource_pointer pointer
+          ON journal.family='project_resource_pointer' AND pointer.chain_id=$1
+         AND pointer.resource_id=(journal.key->>1)::uuid
+        WHERE journal.family='project_resource_pointer'
+          AND journal.before_image->>'namespace' IS NOT NULL
+          AND journal.before_image->>'namehash' IS NOT NULL
+          AND (journal.before_image IS NULL
+           OR pointer.resolver_address IS DISTINCT FROM journal.before_image->>'resolver_address'
+           OR pointer.nonzero_resolver_address IS DISTINCT FROM journal.before_image->>'nonzero_resolver_address'
+           OR pointer.namespace IS DISTINCT FROM journal.before_image->>'namespace'
+           OR pointer.namehash IS DISTINCT FROM journal.before_image->>'namehash')
+        UNION
+        SELECT COALESCE(state.namespace, journal.before_image->>'namespace', journal.key->>1)
+                 || ':' || lower(COALESCE(state.node, journal.before_image->>'node', journal.key->>2))
+        FROM journal LEFT JOIN project_registry_node_state state
+          ON journal.family='project_registry_node_state' AND state.chain_id=$1
+         AND state.namespace=journal.key->>1 AND state.node=journal.key->>2
+        WHERE journal.family='project_registry_node_state'
+          AND (CASE
+                 WHEN journal.before_image IS NULL THEN 'unknown'
+                 WHEN (journal.before_image->>'owner_word_unmasked')='true' THEN 'unknown'
+                 WHEN lower(journal.before_image->>'owner_getter') IS NULL THEN 'unknown'
+                 WHEN lower(journal.before_image->>'owner_getter') !~ '^0x[0-9a-f]{{40}}$' THEN 'unknown'
+                 WHEN lower(journal.before_image->>'owner_getter')='0x0000000000000000000000000000000000000000' THEN 'zero'
+                 ELSE 'nonzero' END)
+              IS DISTINCT FROM
+              (CASE
+                 WHEN state.namespace IS NULL THEN 'unknown'
+                 WHEN state.owner_word_unmasked IS TRUE THEN 'unknown'
+                 WHEN state.owner_getter IS NULL THEN 'unknown'
+                 WHEN lower(state.owner_getter) !~ '^0x[0-9a-f]{{40}}$' THEN 'unknown'
+                 WHEN lower(state.owner_getter)='0x0000000000000000000000000000000000000000' THEN 'zero'
+                 ELSE 'nonzero' END)
+        UNION
+        SELECT wrapper.logical_name_id
+        FROM journal LEFT JOIN project_wrapper_state wrapper
+          ON journal.family='project_wrapper_state' AND wrapper.chain_id=$1
+         AND wrapper.resource_id=(journal.key->>1)::uuid
+        WHERE journal.family='project_wrapper_state'
+          AND wrapper.logical_name_id IS NOT NULL
+          AND (journal.before_image IS NULL
+           OR wrapper.resource_id IS NULL
+           OR wrapper.logical_name_id IS DISTINCT FROM journal.before_image->>'logical_name_id'
+           OR COALESCE(wrapper.wrapper_state_position IS NOT NULL
+                AND jsonb_typeof(wrapper.wrapper_state_position)='object', false)
+              IS DISTINCT FROM COALESCE(jsonb_typeof(journal.before_image->'wrapper_state_position')='object', false)
+           OR COALESCE(CASE WHEN (journal.before_image->>'fuses') ~ '^-?[0-9]+$'
+                             AND (journal.before_image->>'fuses')::numeric BETWEEN -9223372036854775808 AND 9223372036854775807
+                            THEN ((journal.before_image->>'fuses')::bigint & 65536) <> 0 END, false)
+              IS DISTINCT FROM COALESCE(wrapper.fuses IS NOT NULL AND (wrapper.fuses & 65536) <> 0, false)
+           OR (CASE WHEN (journal.before_image->>'expiry_seconds') ~ '^[0-9]+$'
+                     AND (journal.before_image->>'expiry_seconds')::numeric <= 18446744073709551615
+                    THEN (journal.before_image->>'expiry_seconds')::numeric END)
+              IS DISTINCT FROM
+              (CASE WHEN wrapper.expiry_seconds::text ~ '^[0-9]+$'
+                     AND wrapper.expiry_seconds <= 18446744073709551615
+                    THEN wrapper.expiry_seconds END))
+        UNION
+        SELECT journal.before_image->>'logical_name_id'
+        FROM journal LEFT JOIN project_wrapper_state wrapper
+          ON journal.family='project_wrapper_state' AND wrapper.chain_id=$1
+         AND wrapper.resource_id=(journal.key->>1)::uuid
+        WHERE journal.family='project_wrapper_state'
+          AND journal.before_image->>'logical_name_id' IS NOT NULL
+          AND (journal.before_image IS NULL
+           OR wrapper.resource_id IS NULL
+           OR wrapper.logical_name_id IS DISTINCT FROM journal.before_image->>'logical_name_id'
+           OR COALESCE(wrapper.wrapper_state_position IS NOT NULL
+                AND jsonb_typeof(wrapper.wrapper_state_position)='object', false)
+              IS DISTINCT FROM COALESCE(jsonb_typeof(journal.before_image->'wrapper_state_position')='object', false)
+           OR COALESCE(CASE WHEN (journal.before_image->>'fuses') ~ '^-?[0-9]+$'
+                             AND (journal.before_image->>'fuses')::numeric BETWEEN -9223372036854775808 AND 9223372036854775807
+                            THEN ((journal.before_image->>'fuses')::bigint & 65536) <> 0 END, false)
+              IS DISTINCT FROM COALESCE(wrapper.fuses IS NOT NULL AND (wrapper.fuses & 65536) <> 0, false)
+           OR (CASE WHEN (journal.before_image->>'expiry_seconds') ~ '^[0-9]+$'
+                     AND (journal.before_image->>'expiry_seconds')::numeric <= 18446744073709551615
+                    THEN (journal.before_image->>'expiry_seconds')::numeric END)
+              IS DISTINCT FROM
+              (CASE WHEN wrapper.expiry_seconds::text ~ '^[0-9]+$'
+                     AND wrapper.expiry_seconds <= 18446744073709551615
+                    THEN wrapper.expiry_seconds END))
     ), normal AS MATERIALIZED ({normal_work}),
     changed_resolvers AS MATERIALIZED (
         SELECT journal.key->>1 AS resolver FROM journal
@@ -64,7 +196,8 @@ pub(super) fn statement(normal_work: &str) -> String {
     ), global_change AS MATERIALIZED (
         SELECT 1 FROM changed_resolvers WHERE resolver='0x322b7581ca210a69c6d0e0d7c88a7688d2789cb0'
     ), source_names AS MATERIALIZED (
-        SELECT logical_name_id FROM normal WHERE EXISTS (SELECT 1 FROM path_change)
+        SELECT logical_name_id FROM normal
+        WHERE logical_name_id IN (SELECT logical_name_id FROM names_whose_change_can_move_descendants)
         UNION
         SELECT pointer.namespace || ':' || lower(pointer.namehash)
         FROM changed_resolvers changed JOIN project_resource_pointer pointer
@@ -90,7 +223,19 @@ pub(super) fn statement(normal_work: &str) -> String {
         ) probe
         WHERE EXISTS (SELECT 1 FROM source_names)
     ), changed_entries AS MATERIALIZED (
-        SELECT key->>1 AS registry, key->>2 AS entry_key FROM journal WHERE family='project_ens_v2_entry_owner'
+        SELECT journal.key->>1 AS registry, journal.key->>2 AS entry_key FROM journal
+        LEFT JOIN project_ens_v2_entry_owner entry ON entry.chain_id=$1
+          AND journal.family='project_ens_v2_entry_owner' AND entry.registry=journal.key->>1
+          AND entry.entry_key=journal.key->>2
+        WHERE journal.family='project_ens_v2_entry_owner'
+          AND (journal.before_image IS NULL
+           OR entry.status IS DISTINCT FROM journal.before_image->>'status'
+           OR COALESCE(to_jsonb(entry.expiry), 'null'::jsonb)
+                IS DISTINCT FROM COALESCE(journal.before_image->'expiry', 'null'::jsonb)
+           OR entry.registry_contract_instance_id IS DISTINCT FROM journal.before_image->>'registry_contract_instance_id'
+           OR COALESCE(to_jsonb(entry.resource_id), 'null'::jsonb)
+                IS DISTINCT FROM COALESCE(journal.before_image->'resource_id', 'null'::jsonb)
+           OR entry.token_id IS DISTINCT FROM journal.before_image->>'token_id')
         UNION
         SELECT lower(event.raw_fact_ref->>'emitting_address'), left(lower(event.after_state->>'token_id'),58)||'00000000'
         FROM normalized_events event WHERE event.chain_id=$1 AND event.block_number>$4 AND event.block_number<=$2
@@ -161,6 +306,12 @@ pub(super) fn statement(normal_work: &str) -> String {
     ), logical_prefixes AS MATERIALIZED (
         SELECT DISTINCT surface.labelhashes FROM source_names name JOIN name_surfaces surface
           ON surface.logical_name_id=name.logical_name_id AND surface.chain_id=$1 AND surface.namespace='ens'
+        UNION
+        -- A surface anchored in the publication's window is a prefix too (see the module docs).
+        -- The summary work list holds every such name, so its surfaces are read by key.
+        SELECT DISTINCT surface.labelhashes FROM normal name JOIN name_surfaces surface
+          ON surface.logical_name_id=name.logical_name_id AND surface.chain_id=$1 AND surface.namespace='ens'
+        WHERE surface.block_number>$4 AND surface.block_number<=$2
     ), candidates AS MATERIALIZED (
         -- A changed registry can sit below any name, so every surface is a candidate.
         SELECT surface.labelhashes FROM name_surfaces surface
@@ -251,6 +402,10 @@ pub(super) fn statement(normal_work: &str) -> String {
         UNION
         SELECT summary.logical_name_id FROM project_name_summary summary
         WHERE summary.chain_id=$1 AND summary.recompose_at<=$3
+        UNION
+        -- Every touched name recomposes itself, whether or not its change can move
+        -- other names' resolution paths.
+        SELECT logical_name_id FROM normal
     )
     SELECT DISTINCT surface.logical_name_id FROM affected
     JOIN name_surfaces surface ON surface.logical_name_id=affected.logical_name_id AND surface.chain_id=$1

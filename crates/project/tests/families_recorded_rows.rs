@@ -17,6 +17,10 @@
 //! this history and the digest says nothing about them: the two hydration work tables, the two
 //! address record indexes, the record values by record id, the resolver links, the account
 //! approvals and the Universal Resolver proxies.
+//!
+//! Project clears obsolete hydration retry scheduling while it applies each Ethereum Mainnet
+//! block, and only there (`docs/projections.md`, "Follow-only hydration"). So the same seed is
+//! also recorded on Ethereum Mainnet, without the ENSv2 path history, in `RECORDED_MAINNET`.
 #[path = "families_support/mod.rs"]
 mod support;
 
@@ -34,6 +38,9 @@ const TARGET: i64 = 300;
 /// without the content hash of the build that wrote them, which differs between builds by
 /// design.
 const RECORDED: &str = "7a61dec99f6ea22c2a236cf6f33f9130b9422e2d4057c7222b0d42efb4c2da0a";
+const MAINNET: &str = "ethereum-mainnet";
+/// The same digest for the seed alone on `MAINNET`.
+const RECORDED_MAINNET: &str = "0305a5e3a3a985941db06144b32ab60847b6000e314cd5b08c2000ac19b430ee";
 
 /// The tables the ENSv2 path history fills. The digest holds a selection change to account
 /// only where they have rows.
@@ -45,6 +52,10 @@ const PATH_TABLES: [&str; 4] = [
 ];
 /// The tables that hold the published rows of a name the selection reaches.
 const PUBLISHED_TABLES: [&str; 2] = ["project_lookup_name", "project_name_summary"];
+/// Two of the tables whose changes say which hydration retry scheduling an Ethereum Mainnet block
+/// clears. The mainnet digest holds a change to that clearing to account only where they have
+/// rows.
+const MAINNET_TABLES: [&str; 2] = ["project_node_record_value", "project_reverse_tuple"];
 
 /// Drop the content hash of the build that wrote a marker row.
 fn without_content_hash(row: &mut Value) {
@@ -53,9 +64,15 @@ fn without_content_hash(row: &mut Value) {
         .remove("input_content_hash");
 }
 
-/// The digest of the families as they stand, and one digest per table to locate a difference.
-/// `subname` is the name only the path selection reaches.
-async fn digest(fixture: &Fixture, subname: &str) -> Result<(String, Vec<(String, String)>)> {
+/// The digest of the families and the marker of `chain` as they stand, and one digest per table
+/// to locate a difference. Each of `filled` must have rows. `subname` is the name only the path
+/// selection reaches, when the history has one.
+async fn digest(
+    fixture: &Fixture,
+    chain: &str,
+    filled: &[&str],
+    subname: Option<&str>,
+) -> Result<(String, Vec<(String, String)>)> {
     let sha256 = |text: String| async move {
         sqlx::query_scalar::<_, String>("SELECT encode(sha256(convert_to($1, 'UTF8')), 'hex')")
             .bind(text)
@@ -66,6 +83,13 @@ async fn digest(fixture: &Fixture, subname: &str) -> Result<(String, Vec<(String
     let mut tables = Vec::new();
     for (table, mut rows) in fixture.exact().await? {
         if table == "marker" {
+            rows = sqlx::query_scalar(
+                "SELECT (to_jsonb(m) - 'sequence')::text FROM project_family_marker m
+                 WHERE chain_id = $1",
+            )
+            .bind(chain)
+            .fetch_one(&fixture.pool)
+            .await?;
             let mut marker: Value = serde_json::from_str(&rows)?;
             without_content_hash(&mut marker);
             rows = marker.to_string();
@@ -76,13 +100,15 @@ async fn digest(fixture: &Fixture, subname: &str) -> Result<(String, Vec<(String
             rows = Value::Array(stamps).to_string();
         }
         ensure!(
-            !PATH_TABLES.contains(&table.as_str()) || rows != "[]",
+            !filled.contains(&table.as_str()) || rows != "[]",
             "{table} has no rows, so the digest does not cover it"
         );
-        ensure!(
-            !PUBLISHED_TABLES.contains(&table.as_str()) || rows.contains(subname),
-            "{table} has no row of {subname}, so the digest does not cover it"
-        );
+        if let Some(subname) = subname {
+            ensure!(
+                !PUBLISHED_TABLES.contains(&table.as_str()) || rows.contains(subname),
+                "{table} has no row of {subname}, so the digest does not cover it"
+            );
+        }
         every.push_str(&format!("{table}\n{rows}\n"));
         tables.push((table, sha256(rows).await?));
     }
@@ -130,7 +156,7 @@ async fn rebuilt(blocks: u64) -> Result<()> {
         covered,
         "the recorded digest must cover historical address membership"
     );
-    let (digest, tables) = digest(&fixture, &names.sub).await?;
+    let (digest, tables) = digest(&fixture, CHAIN, &PATH_TABLES, Some(&names.sub)).await?;
     ensure!(
         digest == RECORDED,
         "a rebuild in ranges of {blocks} blocks projects rows with digest {digest}, not the \
@@ -145,4 +171,128 @@ async fn rebuilt(blocks: u64) -> Result<()> {
 async fn the_all_families_fixture_rebuilds_to_the_recorded_rows() -> Result<()> {
     tokio::try_join!(rebuilt(1), rebuilt(4), rebuilt(64))?;
     Ok(())
+}
+
+/// The seed alone on `MAINNET`, with its clock moved to the fixture's.
+async fn mainnet_fixture(label: &str) -> Result<Fixture> {
+    let fixture = Fixture::new(label, 0).await?;
+    fixture.lineage(MAINNET, 0).await?;
+    raw_sql(
+        &SEED
+            .replace("__NAMES__", NAMES)
+            .replace("__CHAIN__", MAINNET)
+            .replace("1700000000", "1800000000"),
+    )
+    .execute(&fixture.pool)
+    .await?;
+    Ok(fixture)
+}
+
+/// One family run of `MAINNET` to `TARGET`.
+async fn mainnet_run(
+    fixture: &Fixture,
+    mode: FamilyMode,
+    options: &FamilyOptions,
+) -> Result<families::FamilyOutcome> {
+    let token = families::input_token(&fixture.pool, MAINNET).await?;
+    Ok(families::apply(
+        &fixture.pool,
+        MAINNET,
+        &marker(TARGET),
+        mode,
+        &token,
+        options,
+    )
+    .await?)
+}
+
+/// Require the recorded mainnet rows after a rebuild described by `label`.
+async fn require_recorded_mainnet(fixture: &Fixture, label: &str) -> Result<()> {
+    let (digest, tables) = digest(fixture, MAINNET, &MAINNET_TABLES, None).await?;
+    ensure!(
+        digest == RECORDED_MAINNET,
+        "a mainnet rebuild {label} projects rows with digest {digest}, not the recorded \
+         {RECORDED_MAINNET}; by table: {tables:#?}"
+    );
+    Ok(())
+}
+
+/// Seed the mainnet history, rebuild it in ranges of at most `blocks` blocks and require the
+/// recorded rows.
+async fn rebuilt_on_mainnet(blocks: u64) -> Result<()> {
+    let fixture = mainnet_fixture(&format!("families_recorded_rows_mainnet_{blocks}")).await?;
+    let options = FamilyOptions::new(CONTENT_HASH)
+        .with_max_blocks_per_run(u64::MAX)
+        .with_rebuild_ranges(RebuildRanges::Through(TARGET))
+        .with_range_caps(blocks, u64::MAX);
+    let outcome = mainnet_run(&fixture, FamilyMode::Rebuild, &options).await?;
+    ensure!(
+        outcome.marker.as_ref().map(|marker| marker.number) == Some(TARGET),
+        "the mainnet rebuild in ranges of {blocks} blocks stopped at {:?}",
+        outcome.marker
+    );
+    require_recorded_mainnet(&fixture, &format!("in ranges of {blocks} blocks")).await?;
+    fixture.cleanup().await
+}
+
+// The same history on Ethereum Mainnet, rebuilt block by block, in ranges of four blocks and in
+// ranges of sixty-four, projects its recorded rows.
+#[tokio::test]
+async fn the_mainnet_fixture_rebuilds_to_the_recorded_rows() -> Result<()> {
+    tokio::try_join!(
+        rebuilt_on_mainnet(1),
+        rebuilt_on_mainnet(4),
+        rebuilt_on_mainnet(64)
+    )?;
+    Ok(())
+}
+
+// A rebuild stopped by its budget resumes on the next run with a range of its whole budget, the
+// largest range a run applies in one transaction. Rebuilt seven work blocks a run on Ethereum
+// Mainnet, and then again block by block, the history projects its recorded rows both times.
+#[tokio::test]
+async fn a_mainnet_range_rebuild_resumed_after_budget_stops_equals_block_by_block() -> Result<()> {
+    let fixture = mainnet_fixture("families_recorded_rows_mainnet_resumed").await?;
+    let options = FamilyOptions::new(CONTENT_HASH)
+        .with_max_blocks_per_run(7)
+        .with_rebuild_ranges(RebuildRanges::Through(TARGET));
+    let mut mode = FamilyMode::Rebuild;
+    let mut runs = 0;
+    loop {
+        let outcome = mainnet_run(&fixture, mode.clone(), &options).await?;
+        ensure!(
+            !outcome.reset || runs == 0,
+            "run {runs} restarted the rebuild"
+        );
+        ensure!(
+            runs == 0 || outcome.ranges > 0,
+            "run {runs} applied no range"
+        );
+        runs += 1;
+        mode = FamilyMode::Normal;
+        if outcome.marker.as_ref().map(|marker| marker.number) == Some(TARGET) {
+            break;
+        }
+        ensure!(runs < 200, "the rebuild did not finish");
+    }
+    ensure!(
+        runs > 2,
+        "the rebuild finished in {runs} runs, so it never resumed"
+    );
+    require_recorded_mainnet(&fixture, "resumed seven work blocks a run").await?;
+    let per_block = FamilyOptions::new(CONTENT_HASH)
+        .with_max_blocks_per_run(u64::MAX)
+        .with_rebuild_ranges(RebuildRanges::Off);
+    let outcome = mainnet_run(&fixture, FamilyMode::Rebuild, &per_block).await?;
+    ensure!(
+        (
+            outcome.marker.as_ref().map(|marker| marker.number),
+            outcome.ranges
+        ) == (Some(TARGET), 0),
+        "the block-by-block rebuild stopped at {:?} after {} ranges",
+        outcome.marker,
+        outcome.ranges
+    );
+    require_recorded_mainnet(&fixture, "block by block").await?;
+    fixture.cleanup().await
 }
