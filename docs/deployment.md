@@ -987,7 +987,9 @@ active at the published head. The first effect is the earliest of:
   either side of the change. A declaration without a start reads as block zero.
 
 The redo runs from that block, or from a lower pending Interpret stamp such as
-the one an Ingest redo leaves, or from the start of an open Project redo. A
+the one an Ingest redo leaves, or from the start of an open Project redo.
+Interpret's engine resets and rewrites only from that start, so its rows below
+it stay as they are. A
 completed Interpret redo leaves that Project redo open until Project publishes
 it, so a sync between the two halves still redoes what the first one changed.
 It never runs below the first ingested block. When

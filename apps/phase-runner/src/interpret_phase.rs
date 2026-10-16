@@ -49,42 +49,10 @@ impl Phase for InterpretPhase {
 
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
         Box::pin(async move {
-            let Some(available) = context.available_heads.as_ref() else {
+            let Some(request) = batch_request(&context) else {
                 return Ok(PhaseBatchOutcome::Complete(PhaseProgress::default()));
             };
-            let range = context.mode.range();
-            let from_block = range.map_or_else(
-                || {
-                    context
-                        .sources
-                        .iter()
-                        .map(|source| source.start_block_number)
-                        .min()
-                        .unwrap_or(0)
-                },
-                |range| range.from,
-            );
-            let to_block = if matches!(context.mode, RunMode::Redo(_)) {
-                available.latest.number
-            } else {
-                range.map_or(available.latest.number, |range| range.to)
-            };
-            let mode = match context.mode {
-                RunMode::Normal => InterpretRunMode::Normal,
-                RunMode::Redo(_) => InterpretRunMode::Redo,
-                RunMode::RecomputeFlags(_) => InterpretRunMode::RecomputeFlags,
-            };
-            let outcome = self
-                .engine
-                .run_batch(BatchRequest {
-                    chain_id: context.chain_id,
-                    from_block,
-                    to_block,
-                    resume_current: context.resume.current.as_ref().map(interpret_marker),
-                    mode,
-                })
-                .await
-                .map_err(runner_error)?;
+            let outcome = self.engine.run_batch(request).await.map_err(runner_error)?;
             let progress = PhaseProgress {
                 current: Some(runner_marker(outcome.current)?),
                 target: Some(runner_marker(outcome.target)?),
@@ -112,6 +80,48 @@ impl Phase for InterpretPhase {
     fn has_after_progress_work(&self, chain_id: &str) -> bool {
         self.engine.statistics_refresh_due(chain_id)
     }
+}
+
+/// The engine request for one Interpret batch of `context`, or `None` while no head is
+/// readable. A redo runs from its attempt's execution range, the start the runner settled at
+/// begin: a bounded start, a resumed audited one, or the requested one. The engine's opening
+/// reset, search reset and final refresh all cover `from_block..=to_block`, so nothing below
+/// that start is rewritten.
+#[doc(hidden)]
+pub fn batch_request(context: &PhaseContext) -> Option<BatchRequest> {
+    let available = context.available_heads.as_ref()?;
+    let range = match (&context.mode, context.redo_attempt) {
+        (RunMode::Redo(_), Some(attempt)) => Some(attempt.execution_range),
+        (mode, _) => mode.range(),
+    };
+    let from_block = range.map_or_else(
+        || {
+            context
+                .sources
+                .iter()
+                .map(|source| source.start_block_number)
+                .min()
+                .unwrap_or(0)
+        },
+        |range| range.from,
+    );
+    let to_block = if matches!(context.mode, RunMode::Redo(_)) {
+        available.latest.number
+    } else {
+        range.map_or(available.latest.number, |range| range.to)
+    };
+    let mode = match context.mode {
+        RunMode::Normal => InterpretRunMode::Normal,
+        RunMode::Redo(_) => InterpretRunMode::Redo,
+        RunMode::RecomputeFlags(_) => InterpretRunMode::RecomputeFlags,
+    };
+    Some(BatchRequest {
+        chain_id: context.chain_id.clone(),
+        from_block,
+        to_block,
+        resume_current: context.resume.current.as_ref().map(interpret_marker),
+        mode,
+    })
 }
 
 fn interpret_marker(marker: &BlockMarker) -> Marker {

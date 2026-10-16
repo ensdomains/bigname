@@ -29,7 +29,7 @@ use phase_runner::{
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
     error::{ErrorKind, RunnerError, RunnerResult},
     heads::{BlockMarker, HeadMarkers, publish_heads},
-    interpret_phase::InterpretPhase,
+    interpret_phase::{InterpretPhase, batch_request},
     phase::{
         BlockRange, LoopbackPhase, Phase, PhaseContext, PhaseFuture, PhaseName, PhaseSet, RunMode,
     },
@@ -1235,6 +1235,39 @@ async fn a_removed_rule_redoes_from_an_edge_it_produced_below_the_floor() -> Res
     ranges
 }
 
+// Row 40. Interpret rows below the bounded start are left as they were. A registry event below
+// the start of a newly declared resolver keeps its row, its id and its state through the bounded
+// run, which rewrites only from the start, and the tables still equal the full pair's.
+#[tokio::test]
+async fn rows_below_the_bounded_start_are_untouched() -> Result<()> {
+    let fixture = Fixture::new("bounded_rows_below_start", 59).await?;
+    let start = START + 20;
+    fixture
+        .log(START + 5, 0, REGISTRY, &new_resolver(RESOLVER)?)
+        .await?;
+    fixture
+        .log(start + 1, 0, RESOLVER, &addr_changed()?)
+        .await?;
+    fixture.initial_pair().await?;
+    let before = events_below(fixture.pool(), start).await?;
+    ensure!(
+        !before.is_empty(),
+        "the registry event below the start has a row"
+    );
+    fixture.add_resolver("public_resolver_fixture", RESOLVER, start)?;
+    let token = fixture.sync().await?;
+    let run = fixture.discharge(&token, None).await?;
+    let after = events_below(fixture.pool(), start).await?;
+    ensure!(
+        after == before,
+        "rows below the bounded start changed: {before:?} became {after:?}"
+    );
+    fixture.assert_hashes().await?;
+    let ranges = run.assert_ranges(start, start);
+    fixture.assert_equals_full_pair().await?;
+    ranges
+}
+
 // The first-effect statements read the indexes they are written for. Over a corpus of 20,000 logs
 // from 200 emitters on 20 topics, 2,000 contract instances and 10,000 edges, the generic plan a
 // prepared statement settles on probes each address's own logs, each topic's own logs, each
@@ -1980,7 +2013,7 @@ struct Run {
 }
 
 impl Run {
-    /// The execution range of each redo batch of `phase`, in order.
+    /// The recorded range of each redo batch of `phase`, in order (`Recorded`).
     fn ranges(&self, phase: PhaseName) -> Vec<BlockRange> {
         self.batches
             .lock()
@@ -1991,8 +2024,8 @@ impl Run {
             .collect()
     }
 
-    /// The first Interpret batch runs `interpret..=H` and the first Project batch was requested
-    /// from `project`.
+    /// The first Interpret engine request that opens the redo, and so its opening reset, starts at
+    /// `interpret`, and the first Project batch was requested from `project`.
     fn assert_ranges(&self, interpret: i64, project: i64) -> Result<()> {
         let interpreted = self.ranges(PhaseName::Interpret);
         let projected = self.ranges(PhaseName::Project);
@@ -2008,8 +2041,8 @@ impl Run {
     }
 }
 
-/// A phase that records each batch's range (Interpret's execution range, Project's requested
-/// range) and, when `stop` is set, fails its first batch without running it.
+/// A phase that records each batch's range (the range Interpret's engine opens its redo over,
+/// Project's requested range) and, when `stop` is set, fails its first batch without running it.
 struct Recorded {
     inner: Arc<dyn Phase>,
     batches: Batches,
@@ -2032,8 +2065,14 @@ impl Phase for Recorded {
     }
 
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        // Interpret: the range of the request its engine receives for a batch that opens the
+        // redo, which is the range the engine's opening reset covers. Project: its requested
+        // range, which its family driver runs from.
         let range = match self.inner.name() {
-            PhaseName::Interpret => context.redo_attempt.map(|attempt| attempt.execution_range),
+            PhaseName::Interpret if context.mode.is_redo() => batch_request(&context)
+                .filter(|request| request.resume_current.is_none())
+                .and_then(|request| BlockRange::new(request.from_block, request.to_block).ok()),
+            PhaseName::Interpret => None,
             _ => context.mode.range(),
         };
         self.batches
@@ -2147,6 +2186,19 @@ fn difference(table: &str, was: &str, now: &str) -> String {
 
 /// `ens_execution` active, as the baseline of the cases that edit a family with no events.
 /// Every declaration of the resolver family starts at `start`.
+/// Each normalized event below `block` on the chain: its id, block and state.
+async fn events_below(pool: &sqlx::PgPool, block: i64) -> Result<Vec<(i64, i64, String)>> {
+    Ok(sqlx::query_as(
+        "SELECT normalized_event_id, block_number, canonicality_state::text
+         FROM normalized_events WHERE chain_id = $1 AND block_number < $2
+         ORDER BY normalized_event_id",
+    )
+    .bind(CHAIN)
+    .bind(block)
+    .fetch_all(pool)
+    .await?)
+}
+
 fn resolver_starts_at(profile: &Path, start: i64) -> Result<()> {
     let path = profile.join(RESOLVER_FILE);
     let manifest = std::fs::read_to_string(&path)?;
