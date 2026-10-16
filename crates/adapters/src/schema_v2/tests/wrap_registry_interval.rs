@@ -448,11 +448,49 @@ fn permission_rows(
         .collect()
 }
 
+/// Whether `subject` holds `resource_control` on the registry-only resource after the rows up
+/// to `log_index` of `block`.
+fn holds_registry_only(
+    fixture: &Fixture,
+    output: &BatchOutput,
+    subject: &str,
+    (block, log_index): (i64, i64),
+) -> bool {
+    let resource = fixture.registry_only_resource();
+    output
+        .normalized_events
+        .iter()
+        .rfind(|event| {
+            event.event_kind == "PermissionChanged"
+                && event.resource_id == Some(resource)
+                && event.after_state["scope"]["kind"] == "resource"
+                && event.after_state["subject"] == subject
+                && (event.block_number, event.log_index) <= (Some(block), Some(log_index))
+        })
+        .is_some_and(|event| event.after_state["effective_powers"] == json!(["resource_control"]))
+}
+
+/// `register` has its registry write in another transaction than its `NameRegistered`, so the
+/// lease never takes that write over and the holder keeps the registry-only resource beside the
+/// lease. The reclaim is a write the live lease takes over, so it revokes the holder there and
+/// grants no one: the registry-only resource follows the registry owner whatever is selected.
 fn assert_no_interval(fixture: &Fixture, output: &BatchOutput) {
-    let leaked = registry_only_events(fixture, output, MOVED);
+    assert!(holds_registry_only(fixture, output, HOLDER, (MOVED, 0)));
+    let (revokes, leaked): (Vec<_>, Vec<_>) = registry_only_events(fixture, output, MOVED)
+        .into_iter()
+        .partition(|event| {
+            event.event_kind == "PermissionChanged"
+                && event.log_index == Some(1)
+                && event.after_state["subject"] == HOLDER
+                && event.after_state["effective_powers"] == json!([])
+        });
     assert!(
         leaked.is_empty(),
         "the move into the NameWrapper opened a registry-only authority: {leaked:#?}"
+    );
+    assert!(
+        !revokes.is_empty() && !holds_registry_only(fixture, output, HOLDER, (MOVED, 1)),
+        "the reclaim revokes the holder on the registry-only resource: {revokes:#?}"
     );
     let lease = lease(output);
     let reclaim = at(&output.normalized_events, MOVED)
@@ -513,7 +551,7 @@ fn wrapping_a_live_lease_opens_no_registry_only_interval() -> anyhow::Result<()>
     let rows = permission_rows(&output, MOVED);
     assert_eq!(
         rows.iter()
-            .filter(|row| row.0 < 2)
+            .filter(|row| row.0 < 2 && row.2 != Some(fixture.registry_only_resource()))
             .cloned()
             .collect::<Vec<_>>(),
         lease_rows(&output, &fixture.wrapper),
@@ -535,7 +573,9 @@ fn wrapping_a_lease_with_a_registry_resolver_moves_resolver_control_on_the_lease
     let lease = lease(&output);
     let resolver_rows = permission_rows(&output, MOVED)
         .into_iter()
-        .filter(|row| row.0 < 2 && row.3 == "resolver")
+        .filter(|row| {
+            row.0 < 2 && row.3 == "resolver" && row.2 != Some(fixture.registry_only_resource())
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         resolver_rows,
@@ -567,7 +607,7 @@ fn a_direct_token_send_to_the_name_wrapper_opens_no_registry_only_interval() -> 
     assert_eq!(
         permission_rows(&output, MOVED)
             .into_iter()
-            .filter(|row| row.0 < 2)
+            .filter(|row| row.0 < 2 && row.2 != Some(fixture.registry_only_resource()))
             .collect::<Vec<_>>(),
         lease_rows(&output, &fixture.wrapper)
     );
@@ -696,8 +736,15 @@ fn assert_rebinds_at(fixture: &Fixture, output: &BatchOutput, log_index: i64) {
         .map(|event| event.event_kind.as_str())
         .collect::<Vec<_>>();
     assert!(
-        opened.contains(&"AuthorityEpochChanged") && opened.contains(&"PermissionChanged"),
+        opened.contains(&"AuthorityEpochChanged"),
         "the transfer without a following reclaim rebinds to the registry-only authority: {opened:?}"
+    );
+    // The registry owner already holds the registry-only resource from `register`'s write
+    // (see `assert_no_interval`), so the rebind grants it nothing again.
+    assert!(
+        !opened.contains(&"PermissionChanged")
+            && holds_registry_only(fixture, output, HOLDER, (MOVED, log_index)),
+        "the rebind keeps the registry owner's grant: {opened:?}"
     );
 }
 

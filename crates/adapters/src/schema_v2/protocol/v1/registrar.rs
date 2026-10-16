@@ -153,6 +153,14 @@ fn name_event(
         vec!["eth".to_owned()]
     };
     let raw_namehash = registrar_namehash(selected, explicit_labelhash);
+    if registration {
+        // Registry writes earlier in this transaction are the registration's setup, and the
+        // lease holds their grants.
+        state.end_v1_registry_only_holder_for_registration(
+            super::registry::registry_owner_grants::resource_id(&raw.chain_id, &raw_namehash),
+            &raw.transaction_hash,
+        );
+    }
     let decoded_label = decoded_label(&raw_label);
     let label = admitted_label(&raw_label);
     let labels = label.map(|label| {

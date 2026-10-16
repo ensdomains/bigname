@@ -25,10 +25,13 @@ mod registrar_evidence;
 pub(super) use registrar::v1_key;
 #[path = "state_identity.rs"]
 mod identity;
+#[path = "state_registry_only_holder.rs"]
+mod registry_only_holder;
 #[path = "state_resolver_links.rs"]
 mod resolver_links;
 #[path = "state_surfaces.rs"]
 mod surfaces;
+pub(in crate::schema_v2) use registry_only_holder::RegistryOnlyHolder;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct V1NameState {
     pub logical_name_id: String,
@@ -129,6 +132,7 @@ pub(super) struct State {
     v1_registry_owner_words: OrdMap<String, String>,
     v1_registry_owner_reasons: OrdMap<String, String>,
     v1_registry_read_anchors: OrdMap<String, V1RegistryReadAnchor>,
+    v1_registry_only_holders: registry_only_holder::RegistryOnlyHolders,
     v1_resolvers: OrdMap<String, String>,
     v1_resolver_links: OrdMap<String, V1ResolverLink>,
     v1_resolver_linked_resources: OrdMap<String, OrdMap<Uuid, V1ResolverLink>>,

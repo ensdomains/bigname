@@ -7,7 +7,7 @@ use crate::schema_v2::{
     catalog::{Catalog, Selected},
     migration::RegistrarContext,
     protocol::v1::{
-        registrar_registration_namehash, registrar_token_transfer,
+        registrar_registration, registrar_registration_namehash, registrar_token_transfer,
         registry_registration_setup_namehash,
     },
 };
@@ -24,6 +24,8 @@ pub(super) struct TransactionIndex {
     /// The log indexes of the `registry_setups` writes that are `NewOwner`.
     registry_new_owners: BTreeMap<TransactionNodeKey, Vec<i64>>,
     name_unwraps: BTreeMap<TransactionNodeKey, Vec<i64>>,
+    /// The registrations of each node, with a numeric registration's registrant.
+    registrations: BTreeMap<TransactionNodeKey, Vec<(i64, Option<String>)>>,
 }
 
 fn key(selected: &Selected, raw: &RawLogInput, node: String) -> TransactionNodeKey {
@@ -45,6 +47,16 @@ impl TransactionIndex {
             let Some(selected) = catalog.select(raw)? else {
                 continue;
             };
+            if let Some((namehash, registrant)) = registrar_registration(&selected, raw)
+                && !crate::schema_v2::migration::registrar_context(catalog, &selected, raw)?
+                    .graveyard_cleanup
+            {
+                index
+                    .registrations
+                    .entry(key(&selected, raw, namehash))
+                    .or_default()
+                    .push((raw.log_index, registrant));
+            }
             match selected.source.source_family.as_str() {
                 "ens_v1_registry_l1" => {
                     if let Some((namehash, owner)) =
@@ -104,6 +116,31 @@ impl TransactionIndex {
                         .unwrap_or_else(|| {
                             setups.iter().any(|(_, setup_owner)| setup_owner == &owner)
                         })
+                });
+        }
+        if let Some((namehash, owner)) = registry_registration_setup_namehash(selected, raw)? {
+            // A registration later in the transaction takes this write over: a controller's
+            // every registry write before it, a numeric BaseRegistrar registration a write naming
+            // its registrant when the node's last write before it does too. Block reconciliation
+            // then moves the write's registry-only grants to the lease.
+            let node = key(selected, raw, namehash.clone());
+            let writes = self.registry_setups.get(&node);
+            context.registration_follows =
+                self.registrations.get(&node).is_some_and(|registrations| {
+                    registrations.iter().any(|(registration, registrant)| {
+                        *registration > raw.log_index
+                            && registrant.as_ref().is_none_or(|registrant| {
+                                registrant == &owner
+                                    && writes
+                                        .and_then(|writes| {
+                                            writes
+                                                .iter()
+                                                .filter(|(write, _)| write < registration)
+                                                .max_by_key(|(write, _)| *write)
+                                        })
+                                        .is_some_and(|(_, last)| last == registrant)
+                            })
+                    })
                 });
         }
         if selected.source.source_family == "ens_v1_registry_l1"

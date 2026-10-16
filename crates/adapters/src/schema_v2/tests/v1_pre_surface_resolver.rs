@@ -1420,20 +1420,34 @@ fn current_registry_zero_to_nonzero_grants_without_revoking_the_zero_address() -
             && event.before_state["resolver"] == ZERO_ADDRESS
             && event.after_state["resolver"] == RESOLVER_B
     }));
+    // The registration's own block has no registry write, so the registry owner keeps the
+    // registry-only resource beside the lease, and its resolver scope moves with the resolver
+    // too: one grant on each resource, no revoke of the zero address.
+    let registry_only =
+        super::common::stable_uuid(&format!("resource:registry-only:{CHAIN}:{node:#x}"));
     let resolver_permissions = live
         .normalized_events
         .iter()
         .filter(|event| event.block_number == Some(5) && event.event_kind == "PermissionChanged")
         .collect::<Vec<_>>();
-    assert_eq!(resolver_permissions.len(), 1);
-    let grant = resolver_permissions[0];
-    assert_eq!(grant.after_state["scope"]["resolver_address"], RESOLVER_B);
+    assert_eq!(resolver_permissions.len(), 2);
     assert_eq!(
-        grant.after_state["effective_powers"],
-        json!(["resolver_control"])
+        resolver_permissions
+            .iter()
+            .filter(|event| event.resource_id == Some(registry_only))
+            .map(|event| event.after_state["subject"].clone())
+            .collect::<Vec<_>>(),
+        [json!(OWNER_2)]
     );
-    assert!(grant.after_state["grant_source"].is_object());
-    assert!(grant.after_state["revocation_source"].is_null());
+    for grant in resolver_permissions {
+        assert_eq!(grant.after_state["scope"]["resolver_address"], RESOLVER_B);
+        assert_eq!(
+            grant.after_state["effective_powers"],
+            json!(["resolver_control"])
+        );
+        assert!(grant.after_state["grant_source"].is_object());
+        assert!(grant.after_state["revocation_source"].is_null());
+    }
     Ok(())
 }
 #[test]
@@ -1628,7 +1642,8 @@ fn registrar_transfer_retires_registry_resource_control() -> anyhow::Result<()> 
     Ok(())
 }
 #[test]
-fn registrar_transfer_grants_registry_resource_control() -> anyhow::Result<()> {
+fn registrar_transfer_back_to_the_registry_owner_keeps_its_resource_control() -> anyhow::Result<()>
+{
     let (_, _, node) = fixture();
     let history = vec![
         current_new_owner(OWNER_2, 7)?,
@@ -1641,15 +1656,25 @@ fn registrar_transfer_grants_registry_resource_control() -> anyhow::Result<()> {
     let (events, _) = assert_four_way_and_restore_parity(&history, 4)?;
     let registry_resource =
         super::common::stable_uuid(&format!("resource:registry-only:{CHAIN}:{node:#x}"));
-    for (block, powers, message) in [
+    // The registry owner holds the registry-only resource from its block 7 write, which no
+    // registration took over, so the transfer back to it grants nothing again.
+    for (block, powers, count, message) in [
+        (
+            7,
+            json!(["resource_control"]),
+            1,
+            "the registry owner write did not grant resource_control on the registry resource",
+        ),
         (
             10,
             json!(["resource_control"]),
-            "registrar-driven registrar-to-registry transition did not grant resource_control on the registry resource",
+            0,
+            "registrar-driven registrar-to-registry transition granted the holder resource_control again",
         ),
         (
             11,
             json!([]),
+            1,
             "registry-driven registry-to-registrar transition did not revoke resource_control on the registry resource",
         ),
     ] {
@@ -1663,7 +1688,7 @@ fn registrar_transfer_grants_registry_resource_control() -> anyhow::Result<()> {
                     && event.after_state["scope"]["kind"] == "resource"
                     && event.after_state["effective_powers"] == powers)
                 .count(),
-            1,
+            count,
             "{message}",
         );
     }

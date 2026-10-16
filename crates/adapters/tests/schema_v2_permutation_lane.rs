@@ -292,6 +292,8 @@ fn wrapped_past_grace_lapse_is_batch_grid_independent() -> Result<()> {
         .filter(|event| event.block_number == Some(boundary_block))
         .map(|event| event.event_kind.as_str())
         .collect::<Vec<_>>();
+    // The registrant's registry writes in the first block already made it the holder of the
+    // registry-only resource, so the lapse revokes the lease's grant and grants nothing new.
     assert_eq!(
         boundary_kinds,
         [
@@ -300,7 +302,6 @@ fn wrapped_past_grace_lapse_is_batch_grid_independent() -> Result<()> {
             "SurfaceUnbound",
             "SurfaceBound",
             "AuthorityEpochChanged",
-            "PermissionChanged",
         ],
         "the observing block must carry the complete lease-lapse transition"
     );

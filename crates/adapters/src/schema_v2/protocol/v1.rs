@@ -5,6 +5,7 @@ mod registrar_surface;
 pub(in crate::schema_v2) use registrar_surface::materialize as materialize_registrar_surface;
 mod registry;
 pub(in crate::schema_v2) use registry::graveyard::admitted as registry_graveyard;
+pub(in crate::schema_v2) use registry::registry_owner_grants::hand_back as registry_only_hand_back;
 pub(in crate::schema_v2) use registry::wrapper_custody::{
     WrapperCustody, admitted as registry_name_wrapper,
 };
@@ -19,7 +20,7 @@ pub(in crate::schema_v2) use wrapper::{WrapperPermissionContext, append_delegate
 
 use std::collections::HashMap;
 
-use anyhow::bail;
+use anyhow::{Context, bail};
 
 use super::Interpreted;
 use crate::schema_v2::{
@@ -189,6 +190,11 @@ pub(super) fn reconcile_block(
         )?;
         let mut replayed_state = committed_state.clone();
         replayed_state.apply_prior_event_delta(delta);
+        // A replay that cannot rebuild the reconciled rows fails at this block, before any later
+        // block of the batch interprets from state the rows do not hold.
+        replayed_state
+            .ensure_restore_succeeded()
+            .with_context(|| format!("replaying reconciled block {}", block.block_number))?;
         // Live interpretation saw provisional transitions. Advance ENSv1 using only the
         // reconciled observations; preserve other protocols' uninterrupted state.
         block_state.replace_ens_v1_protocol_state_from_replay(replayed_state);
@@ -238,6 +244,13 @@ pub(in crate::schema_v2) fn registrar_registration_namehash(
     raw: &RawLogInput,
 ) -> anyhow::Result<Option<(String, String)>> {
     registrar::base::registration_namehash(selected, raw)
+}
+
+pub(in crate::schema_v2) fn registrar_registration(
+    selected: &Selected,
+    raw: &RawLogInput,
+) -> Option<(String, Option<String>)> {
+    registrar::identity::registration(selected, raw)
 }
 
 pub(in crate::schema_v2) fn registrar_token_transfer(
