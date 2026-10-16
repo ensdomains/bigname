@@ -1696,7 +1696,10 @@ remains bounded after it, stamps the required Ingest redo from block zero
 (clamped to the earliest configured source start), and invalidates the derived
 phases for the restored interval. That repair
 converges in one sync: the stored row is then zero and its positive-floor
-predicate cannot fire again. A current finite declaration keeps the persisted
+predicate cannot fire again. It writes no manifest event, so when it is the
+sync's only change the published manifest set stays as it was, and the
+Interpret and Project redos that discharge its marker keep the full range
+([manifest-authority marker](deployment.md#manifest-authority-marker)). A current finite declaration keeps the persisted
 finite watch bound; retained omitted-start history still supplies zero only to
 later widening classification. Thus
 splitting a declaration-start raise and a discovery-enabling change across two
@@ -1882,9 +1885,8 @@ that phase consumes the repaired events. A history-triggered invalidation uses
 the same manifest-authority marker and attested Interpret redo as an authority
 change, bounded the same way ([manifest-authority
 marker](deployment.md#manifest-authority-marker)). A repaired event whose
-payload equals the published one replays one block, a changed payload starts
-the redo at the change's first effect, and a repair that leaves the published
-set as it was keeps the full range.
+payload equals the published one replays one block, and a changed payload
+starts the redo at the change's first effect.
 
 Manifest synchronization writes `SourceManifestUpdated` with no block position,
 so the manifest set has none either. Every block Project composes takes the

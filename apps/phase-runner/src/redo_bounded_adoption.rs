@@ -78,11 +78,12 @@ const CURRENT_SET: &str = "SELECT DISTINCT ON (event.source_manifest_id) {COLUMN
       AND (event.block_number IS NULL OR event.block_number <= $2)
     ORDER BY event.source_manifest_id, event.normalized_event_id DESC";
 
-/// Decide the redo of chain `chain_id`'s marker against the head `through`. Reads the family
-/// marker and the manifest events only: the first-effect scan runs separately.
+/// Decide the redo of chain `chain_id`'s marker on `phase` against the head `through`. Reads
+/// the family marker and the manifest events only: the first-effect scan runs separately.
 pub(crate) async fn plan(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
+    phase: PhaseName,
     through: i64,
 ) -> RunnerResult<Plan> {
     let database =
@@ -190,15 +191,18 @@ pub(crate) async fn plan(
                 "manifest {manifest_id} changed `{field}`, which Interpret reads at every block"
             )));
         }
-        // Base Project reads the Ethereum Mainnet `basenames_execution` manifest at every block
-        // and has no Interpret redo of its own to bound (docs/manifests.md § Discovery
-        // admission).
+        // Base Project reads the Ethereum Mainnet `basenames_execution` manifest at every block,
+        // so its change keeps the Project redo full. Base Interpret does not read it, so its redo
+        // bounds to Base's own changes (docs/manifests.md § Discovery admission).
         if let Some(row) = before.or(after).filter(|row| row.2 != chain_id) {
-            return Ok(Plan::Full(format!(
-                "manifest {manifest_id} is on chain {}, whose change this chain's Project reads \
-                 at every block",
-                row.2
-            )));
+            if phase == PhaseName::Project {
+                return Ok(Plan::Full(format!(
+                    "manifest {manifest_id} is on chain {}, whose change this chain's Project \
+                     reads at every block",
+                    row.2
+                )));
+            }
+            continue;
         }
         diff.add(old.as_ref(), new.as_ref());
     }
@@ -244,7 +248,7 @@ pub(crate) async fn require_adoption_range(
     let (Some(marker), Some(head), Some(range)) = (marker, head, mode.range()) else {
         return full(transaction, chain_id, phase, mode, previous, None).await;
     };
-    let plan = plan(transaction, chain_id, head).await?;
+    let plan = plan(transaction, chain_id, phase, head).await?;
     let Some(full_range) = full_hash_range(
         transaction,
         chain_id,
@@ -357,7 +361,8 @@ pub(crate) async fn project_stamp_from(
     if marker.rsplit_once(':').map(|(_, token)| token) != Some(audit.generation_token()) {
         return Ok(None);
     }
-    Ok(match plan(transaction, chain_id, project_head).await? {
+    let plan = plan(transaction, chain_id, PhaseName::Project, project_head).await?;
+    Ok(match plan {
         Plan::Bounded { project: true, .. } => Some(audit.range().from.min(project_head)),
         _ => None,
     })

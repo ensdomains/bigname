@@ -1007,7 +1007,9 @@ family file that declares `[[abi.events]]` changes that hash and still takes
 the full Interpret and Project pair. A changed ENSv2 root registry reaches no
 full resync only when it is admitted in a release that already pays that pair.
 The Base Project redo that an Ethereum Mainnet `basenames_execution` change
-requires stays the full range.
+requires stays the full range. A Base Interpret redo in the same sync still
+starts at the first effect of the Base change, because Base Interpret does not
+read `basenames_execution`.
 
 Manifest synchronization records a [manifest-authority
 marker](glossary.md#manifest-authority-marker) when its authority changes. Every

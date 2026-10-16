@@ -23,7 +23,7 @@ use alloy_sol_types::{SolEvent, sol};
 use anyhow::{Context, Result, ensure};
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
 use phase_runner::{
-    INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH,
+    CREATE_STAMP, INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH, REQUIRED_REDO_PREFIX,
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
     error::{ErrorKind, RunnerError, RunnerResult},
@@ -55,6 +55,7 @@ const SENDER: &str = "0x0000000000000000000000000000000000200002";
 const RESOLVER_FILE: &str = "ethereum/ens/ens_v1_resolver_l1/v1.toml";
 const EXECUTION_FILE: &str = "ethereum/ens/ens_execution/v1.toml";
 const BASE: &str = "base-mainnet";
+const BASE_RESOLVER_FILE: &str = "base/basenames/basenames_base_resolver/v1.toml";
 const BASENAMES_EXECUTION_FILE: &str = "ethereum/basenames/basenames_execution/v2.toml";
 const HYDRATION_WORK: [&str; 2] = [
     "project_text_hydration_work",
@@ -763,9 +764,9 @@ async fn a_basenames_execution_change_keeps_the_base_project_redo_full() -> Resu
     fixture.cleanup().await
 }
 
-// Row 24. A floor repair beside a payload change. The repair's Ingest redo leaves an Interpret
-// stamp from the first ingested block, which R4 cannot see because the set changed too. The
-// bounded start is lowered to that stamp, and the tables equal the full pair's.
+// Row 24. A floor repair beside a payload change. The repair's Ingest redo from the first
+// ingested block stamps Interpret from there, which R4 cannot see because the set changed too.
+// The bounded start is lowered to that stamp, and the tables equal the full pair's.
 #[tokio::test]
 async fn a_pending_interpret_stamp_lowers_the_bounded_start() -> Result<()> {
     let fixture = Fixture::new("bounded_pending_stamp", 59).await?;
@@ -776,28 +777,29 @@ async fn a_pending_interpret_stamp_lowers_the_bounded_start() -> Result<()> {
     fixture.initial_pair().await?;
     fixture.add_resolver("public_resolver_fixture", RESOLVER, start)?;
     let token = fixture.sync().await?;
-    // The stamp a completed Ingest redo leaves on Interpret (`redo_stamp.rs`, `create_stamp`).
-    let stamped = sqlx::query(
-        "UPDATE chain_phase_state
-         SET redo_attempt_generation = redo_attempt_generation + 1,
-             phase_status = 'running', redo_in_progress = true, redo_mode = 'redo',
-             redo_previous_phase_status = phase_status,
-             redo_previous_last_error = last_error,
-             redo_previous_started_at = started_at,
-             redo_previous_finished_at = finished_at,
-             redo_from_block_number = $2, redo_to_block_number = $3,
-             last_error = 'required downstream redo: ingest redo completed',
-             started_at = now(), finished_at = NULL, updated_at = now()
-         WHERE chain_id = $1 AND phase_name = 'interpret' AND NOT redo_in_progress",
+    // The stamp the runner writes on Interpret when the repair's Ingest redo starts
+    // (`redo_stamp.rs`, `stamp_ingest_redo_dependents`), by the runner's own statement. The
+    // harness's test source fails the intake check an Ingest redo makes.
+    sqlx::query(CREATE_STAMP)
+        .bind(CHAIN)
+        .bind(PhaseName::Interpret.as_str())
+        .bind(START)
+        .bind(fixture.head)
+        .bind(format!(
+            "{REQUIRED_REDO_PREFIX}ingest redo may change the raw-fact extent"
+        ))
+        .execute(fixture.pool())
+        .await?;
+    let stamp: (bool, Option<i64>) = sqlx::query_as(
+        "SELECT redo_in_progress, redo_from_block_number FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
     )
     .bind(CHAIN)
-    .bind(START)
-    .bind(fixture.head)
-    .execute(fixture.pool())
+    .fetch_one(fixture.pool())
     .await?;
     ensure!(
-        stamped.rows_affected() == 1,
-        "the Interpret row takes the stamp"
+        stamp == (true, Some(START)),
+        "the Interpret row takes the stamp from the first ingested block: {stamp:?}"
     );
     fixture
         .discharge(&token, None)
@@ -842,6 +844,49 @@ async fn a_first_effect_below_the_cursor_start_redoes_from_the_cursor_start() ->
     ensure!(fixture.audits().await? == vec![(START, fixture.head)]);
     fixture.assert_hashes().await?;
     fixture.assert_equals_full_pair().await
+}
+
+// Row 26. One sync changes a Base manifest and the Ethereum Mainnet `basenames_execution`
+// manifest together. Base's Interpret does not read `basenames_execution`, so its redo bounds to
+// the Base change, a capability flag with no first effect, and replays the head alone. Base's
+// Project reads it at every block, so the Project redo it stamps keeps the full range.
+#[tokio::test]
+async fn a_combined_base_sync_bounds_only_the_base_interpret_redo() -> Result<()> {
+    let fixture = Fixture::new("bounded_base_combined", 59).await?;
+    fixture.seed_chain(BASE, "base_seam").await?;
+    fixture
+        .run(None, None)
+        .runner
+        .redo(
+            &base_chain()?,
+            RedoPhase::Phase(PhaseName::Project),
+            BlockRange::new(START, fixture.head)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    fixture.edit(BASE_RESOLVER_FILE, |manifest| {
+        manifest.replacen(
+            "[capability_flags]\n",
+            "[capability_flags]\nbounded_fixture = { status = \"supported\", notes = \"fixture\" }\n",
+            1,
+        )
+    })?;
+    fixture.edit(BASENAMES_EXECUTION_FILE, |manifest| {
+        manifest.replacen("the frozen exact-surface", "the exact-surface", 1)
+    })?;
+    sync_schema_v2_repository(fixture.pool(), &load_repository(&fixture.profile)?).await?;
+    let token = fixture.token_on(BASE).await?;
+    let run = fixture.run_on(BASE, Some(&token), None);
+    run.runner
+        .redo(
+            &base_chain()?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(START, fixture.head)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    run.assert_ranges(fixture.head, START)?;
+    fixture.cleanup().await
 }
 
 // The first-effect statements read the indexes they are written for. Over a corpus of 20,000 logs
@@ -1155,11 +1200,15 @@ impl Fixture {
     }
 
     async fn token(&self) -> Result<String> {
+        self.token_on(CHAIN).await
+    }
+
+    async fn token_on(&self, chain: &str) -> Result<String> {
         let hash: Option<String> = sqlx::query_scalar(
             "SELECT input_content_hash FROM chain_phase_state
              WHERE chain_id = $1 AND phase_name = 'interpret'",
         )
-        .bind(CHAIN)
+        .bind(chain)
         .fetch_one(self.pool())
         .await?;
         let hash = hash.context("the Interpret row records a hash")?;
@@ -1223,6 +1272,11 @@ impl Fixture {
     }
 
     fn run(&self, token: Option<&str>, stop: Option<PhaseName>) -> Run {
+        self.run_on(CHAIN, token, stop)
+    }
+
+    /// The runner, attesting `token` for `chain` when given.
+    fn run_on(&self, chain: &str, token: Option<&str>, stop: Option<PhaseName>) -> Run {
         let batches = Arc::new(Mutex::new(Vec::new()));
         let recorded = |inner: Arc<dyn Phase>| -> Arc<dyn Phase> {
             Arc::new(Recorded {
@@ -1256,7 +1310,7 @@ impl Fixture {
         )
         .expect("the runner builds");
         let runner = match token {
-            Some(token) => runner.with_watch_set_coverage_attestation(CHAIN, token),
+            Some(token) => runner.with_watch_set_coverage_attestation(chain, token),
             None => runner,
         };
         Run { runner, batches }
