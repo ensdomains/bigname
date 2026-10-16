@@ -351,17 +351,22 @@ class Generator:
         self.compile_headers()
         parameters, responses = self.tables.get("parameters", {}), self.tables.get("responses", {})
         require(parameters and parameters.keys() == responses.keys(), "each operation requires exactly one parameters and one responses table")
-        paths, ids = {}, set()
+        paths, ids, sdk_names = {}, set(), set()
         for key in sorted(parameters):
             method, path = key.split(" ", 1)
             table = parameters[key]
             operation_id = re.sub(r"[{}]", "", method.lower() + path.replace("/", "_").replace("-", "_"))
             require(operation_id not in ids, f"duplicate operationId {operation_id}")
             ids.add(operation_id)
+            tag, sdk_method = path.split("/")[2], operation_id.removeprefix(f"{method.lower()}_v1_")
+            require((tag, sdk_method) not in sdk_names, f"duplicate SDK group and method {tag}.{sdk_method}")
+            sdk_names.add((tag, sdk_method))
             params, body = self.parameters(table, method, path)
             operation = {
                 "operationId": operation_id,
-                "tags": [path.split("/")[2]],
+                "tags": [tag],
+                "x-fern-sdk-group-name": tag,
+                "x-fern-sdk-method-name": sdk_method,
                 "description": f"See [{key}]({urljoin(self.base_url, 'api-v1-routes.md')}#{table.anchor}).",
                 "parameters": params,
                 "responses": self.responses(responses[key]),

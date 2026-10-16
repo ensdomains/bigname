@@ -18,7 +18,7 @@ prefix in #315, and the public edge serves it.
 versioned product routes. The landing page and the API reference are a
 separate static site ([`site/`](../site/README.md)) outside the API binary;
 both describe this contract and neither is part of it. The API answers `GET /`
-and `GET /docs` like any unknown route. `GET /openapi.json` serves the generated OpenAPI 3.1 reference for the 19
+and `GET /docs` like any unknown route. `GET /openapi.json` serves the generated OpenAPI 3.1 reference for the 20
 product operations below. It is a static contract artifact, outside the product envelope, and excludes
 the six diagnostic operations.
 

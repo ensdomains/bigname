@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde_json::{Value, json};
+
 use super::openapi_contract::document;
 
 fn literals(source: &str) -> BTreeSet<&str> {
@@ -188,4 +190,116 @@ fn openapi_query_names_equal_every_route_specific_extractor() {
             }
         }
     }
+}
+
+/// Each operation's Fern SDK group and method name. SDK generators that group by these
+/// extensions, such as Forge, silently leave out an operation that lacks them.
+fn fern_sdk_names(document: &Value) -> Result<BTreeSet<(String, String)>, String> {
+    let mut names = BTreeSet::new();
+    for (path, methods) in document["paths"].as_object().ok_or("no paths")? {
+        for (method, operation) in methods.as_object().ok_or(format!("{path}: no methods"))? {
+            let at = format!("{method} {path}");
+            let Some([Value::String(tag)]) = operation["tags"].as_array().map(Vec::as_slice) else {
+                return Err(format!("{at}: needs exactly one tag"));
+            };
+            let prefix = format!("{method}_v1_");
+            let sdk_method = operation["operationId"]
+                .as_str()
+                .and_then(|id| id.strip_prefix(&prefix))
+                .ok_or(format!("{at}: operationId lacks the {prefix} prefix"))?;
+            if operation["x-fern-sdk-group-name"] != tag.as_str() {
+                return Err(format!("{at}: x-fern-sdk-group-name is not the tag {tag}"));
+            }
+            if operation["x-fern-sdk-method-name"] != sdk_method {
+                return Err(format!("{at}: x-fern-sdk-method-name is not {sdk_method}"));
+            }
+            if !names.insert((tag.clone(), sdk_method.to_owned())) {
+                return Err(format!(
+                    "{at}: SDK group and method {tag}.{sdk_method} repeat"
+                ));
+            }
+        }
+    }
+    Ok(names)
+}
+
+#[test]
+fn every_operation_has_a_distinct_fern_sdk_group_and_method() {
+    let names = fern_sdk_names(document()).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(names.len(), 20, "one SDK method per operation");
+    assert!(names.contains(&("lookup".into(), "lookup".into())));
+
+    let spec = |operations: &[(&str, &str, Value)]| {
+        let mut paths = json!({});
+        for (path, method, operation) in operations {
+            paths[*path][*method] = operation.clone();
+        }
+        json!({ "paths": paths })
+    };
+    let operation = |id: &str, tags: Value, group: &str, sdk_method: &str| {
+        json!({
+            "operationId": id,
+            "tags": tags,
+            "x-fern-sdk-group-name": group,
+            "x-fern-sdk-method-name": sdk_method,
+        })
+    };
+    let name = operation("get_v1_names_name", json!(["names"]), "names", "names_name");
+    let pairs = |names: &[(&str, &str)]| {
+        names
+            .iter()
+            .map(|(group, sdk_method)| (group.to_string(), sdk_method.to_string()))
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(
+        fern_sdk_names(&spec(&[("/v1/names/{name}", "get", name.clone())])),
+        Ok(pairs(&[("names", "names_name")]))
+    );
+    let mut untagged = name.clone();
+    untagged.as_object_mut().unwrap().remove("tags");
+    for tags in [None, Some(json!([])), Some(json!(["names", "extra"]))] {
+        let mut operation = untagged.clone();
+        if let Some(tags) = tags {
+            operation["tags"] = tags;
+        }
+        let error = fern_sdk_names(&spec(&[("/v1/names/{name}", "get", operation)])).unwrap_err();
+        assert!(error.contains("exactly one tag"), "{error}");
+    }
+    let subnames = operation(
+        "get_v1_names_name_subnames",
+        json!(["names"]),
+        "names",
+        "names_name_subnames",
+    );
+    assert_eq!(
+        fern_sdk_names(&spec(&[
+            ("/v1/names/{name}", "get", name.clone()),
+            ("/v1/names/{name}/subnames", "get", subnames),
+        ])),
+        Ok(pairs(&[
+            ("names", "names_name"),
+            ("names", "names_name_subnames")
+        ]))
+    );
+    let lookup = operation("post_v1_lookup", json!(["lookup"]), "lookup", "lookup");
+    assert_eq!(
+        fern_sdk_names(&spec(&[("/v1/lookup", "post", lookup.clone())])),
+        Ok(pairs(&[("lookup", "lookup")]))
+    );
+    let mut unstripped = lookup;
+    unstripped["x-fern-sdk-method-name"] = json!("post_v1_lookup");
+    let error = fern_sdk_names(&spec(&[("/v1/lookup", "post", unstripped)])).unwrap_err();
+    assert!(error.contains("is not lookup"), "{error}");
+    let post_name = operation(
+        "post_v1_names_name",
+        json!(["names"]),
+        "names",
+        "names_name",
+    );
+    let error = fern_sdk_names(&spec(&[
+        ("/v1/names/{name}", "get", name),
+        ("/v1/names/{name}", "post", post_name),
+    ]))
+    .unwrap_err();
+    assert!(error.contains("names.names_name repeat"), "{error}");
 }
