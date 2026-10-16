@@ -3,7 +3,8 @@
 //! primary key of `project_lifecycle_event` once per lease, with `state_key` in the index
 //! condition, on a table seeded so that PostgreSQL's estimate of the unnamed lease events is far
 //! below their real count, as on the mainnet replay. A partial index over exactly those events
-//! made PostgreSQL read every one of them for the chain on each call and filter by lease.
+//! made PostgreSQL read every one of them for the chain and filter by lease, under the generic
+//! plan and under custom plans for many leases.
 //!
 //! sqlx prepares the statement, and the phase runner's pool keeps `plan_cache_mode = auto`
 //! (apps/phase-runner/tests/bootstrap.rs), so after five executions the runner may get the
@@ -12,9 +13,11 @@
 //! key. The custom plan does too here, except on a small chain without unnamed events, where it
 //! may read the chain's rows with no decoded name through
 //! `project_lifecycle_event_decoded_name_idx`. On the mainnet replay, with 11.3M rows, a custom
-//! plan with 424 literal leases walked that index for the whole chain, a choice the runner's
-//! prepared path does not make there. Forcing custom plans on the runner's pool would bring that
-//! walk back for this statement.
+//! plan with 424 literal leases walked that index for the whole chain. The runner does get custom
+//! plans: PostgreSQL plans a prepared statement's first five executions that way, and the count
+//! restarts when sqlx's per-connection statement cache evicts the statement and prepares it
+//! again. The invariant is the plan from the seventh execution on. Forcing custom plans on the
+//! runner's pool would bring that walk back on every execution.
 mod families_support;
 
 use std::collections::BTreeSet;

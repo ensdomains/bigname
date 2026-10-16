@@ -4578,9 +4578,10 @@ The build that drops `project_lifecycle_event_unnamed_lease_idx` changes no stor
 answer. Project reads, for each block, the ENSv1 `.eth` registrar lease events that carry no
 name yet, for the leases that block's names bind. That read is the statement tagged
 `project:families.decode.unnamed_rows`. With the partial index in place, PostgreSQL judged the
-index far smaller than it was. On every call it read every unnamed lease event of the chain,
-then filtered by lease. On the mainnet replay that is about 8,000 rows a call, whatever the
-block's lease count. Without the index the read probes the primary key of
+index far smaller than it was. Under the generic plan the runner settles on, and under a custom
+plan for 25 leases or more, each call read every unnamed lease event of the chain, then
+filtered by lease. On the mainnet replay that is about 8,000 rows a call. Without the index the
+read probes the primary key of
 `project_lifecycle_event` once per lease, on chain, state kind and lease.
 
 - Schema-migration `20261016120000_project_lifecycle_event_drop_unnamed_lease_index.sql` drops
