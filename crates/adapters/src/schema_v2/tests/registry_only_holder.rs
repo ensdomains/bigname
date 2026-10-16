@@ -1065,7 +1065,8 @@ fn unsurfaced_transfer(block: i64, log_index: i64, from: &str, to: &str) -> RawL
 /// hand-back is the holder's, which every other registry-only row follows whether or not the
 /// name has a surface. When the registration's registry write was its own transaction the owner
 /// already holds the resource and the release adds no row, and a Graveyard owner is granted
-/// nothing.
+/// nothing. U5 is the Sepolia route, a numeric-only registration with no label.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f)
 #[test]
 fn a_lapsed_lease_on_a_surface_unknown_name_hands_the_resource_back_to_its_registry_owner()
 -> anyhow::Result<()> {
@@ -1135,6 +1136,33 @@ fn a_lapsed_lease_on_a_surface_unknown_name_hands_the_resource_back_to_its_regis
             )
             .forbid(|event| about(event, GRAVEYARD)),
         ],
+    )?);
+    // Sepolia's route: the numeric `NameRegistered` names no label, so the name has no surface
+    // unless one is learnt elsewhere.
+    let numeric_registration = vec![
+        lease_transfer(2, 0, ZERO, HOLDER),
+        new_owner_under(node(&["eth"]), 2, 1, "leased", HOLDER),
+        numeric_registered(2, 2, HOLDER, 10),
+        new_resolver(3, 0, leased(), RESOLVER),
+    ];
+    failures.extend(holder_row_failures(
+        &numeric_batch,
+        vec![HolderRow::new(
+            "U5 a release after a Sepolia numeric-only registration, with a resolver set",
+            vec![new_owner_under(B256::ZERO, 1, 0, "eth", CONTRACT)],
+            vec![
+                numeric_registration,
+                vec![new_owner_under(
+                    node(&["eth"]),
+                    RELEASED,
+                    0,
+                    "other",
+                    AWAY_OWNER,
+                )],
+            ],
+            registry_only_of(&leased_hex()),
+            held_by(HOLDER, Some(RESOLVER)),
+        )],
     )?);
     assert_no_failures(failures)
 }
