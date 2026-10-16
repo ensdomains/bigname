@@ -4641,3 +4641,25 @@ DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.project_lifecycle_event_unnamed_
 - A concurrent drop that is cancelled leaves the index invalid. Run the same statement again.
 - Record the step in the release record, then apply the schema-migration. It finds no index and
   records itself.
+
+## Repeated label and address observations written once per batch
+
+The build that writes a label or a discovered address once per Interpret batch, however
+often the batch observes it (TYR-362, see
+[durable search data](storage.md#durable-search-data)), changes the label and
+discovered-address writers in `crates/interpret/src/write`. Before, every observation of a
+label ran its own `label_preimages` upsert, and every observation of an address read and
+locked its `contract_instance_addresses` row and updated it again. Nearly every batch
+observes `eth`, and a busy contract emits many logs in one batch.
+
+- Stored rows are the same, row for row. Only the statement count changes.
+- It adds no schema-migration, table, index, manifest or setting. The manifest-authority
+  fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.
+- `crates/interpret/src/write` is an input of the
+  [interpreter content hash](glossary.md#interpreter-content-hash), so the hash rotates for
+  every chain, and the [projection content hash](glossary.md#projection-content-hash) moves
+  with it. Every chain needs a full-history Interpret redo, then the Project redo it
+  installs, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+  matching runner and API binaries. The change rides the next re-derivation release and
+  shares that release's one Interpret and Project redo pair with its other hash-rotating
+  changes. Do not mark old rows ready under the new hash.

@@ -273,3 +273,89 @@ async fn search_lock_timeout_is_transient() -> TestResult {
     database.cleanup().await?;
     Ok(())
 }
+
+/// A label observed many times in one batch is inserted once, and a stored label is updated
+/// once.
+#[tokio::test]
+async fn repeated_label_observations_are_written_once_per_batch() -> TestResult {
+    let database = database("interpret_preimage_statement_counts").await?;
+    write_output(
+        &database,
+        &BatchOutput {
+            label_preimages: vec![observed_preimage("stored", b"stored", 5, json!({}))],
+            ..BatchOutput::default()
+        },
+    )
+    .await?;
+    let output = BatchOutput {
+        label_preimages: (0..10)
+            .flat_map(|step| {
+                [
+                    observed_preimage("new", b"new", 1, json!({"step": step})),
+                    observed_preimage("stored", b"stored", 1, json!({"step": step})),
+                ]
+            })
+            .collect(),
+        ..BatchOutput::default()
+    };
+    // The connection may still hold unreported counts of earlier transactions, so compare two
+    // readings inside this one.
+    let statistics = "SELECT n_tup_ins, n_tup_upd FROM pg_stat_xact_user_tables
+                      WHERE relname = 'label_preimages'";
+    let mut transaction = database.pool().begin().await?;
+    let before: (i64, i64) = sqlx::query_as(statistics)
+        .fetch_one(&mut *transaction)
+        .await?;
+    write(&mut transaction, &output).await?;
+    let after: (i64, i64) = sqlx::query_as(statistics)
+        .fetch_one(&mut *transaction)
+        .await?;
+    transaction.rollback().await?;
+    assert_eq!((after.0 - before.0, after.1 - before.1), (1, 1));
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A stored row that outranks every observation in the batch keeps its source, and the write
+/// still records that the label was observed in this transaction.
+#[tokio::test]
+async fn stored_higher_priority_keeps_source_and_refreshes_observed_time() -> TestResult {
+    let database = database("interpret_preimage_stored_outranks_batch").await?;
+    write_output(
+        &database,
+        &BatchOutput {
+            label_preimages: vec![observed_preimage(
+                "stored",
+                b"stored",
+                9,
+                json!({"stored": true}),
+            )],
+            ..BatchOutput::default()
+        },
+    )
+    .await?;
+    let output = BatchOutput {
+        label_preimages: [1, 5, 3, 5]
+            .into_iter()
+            .map(|priority| {
+                observed_preimage("stored", b"stored", priority, json!({"batch": priority}))
+            })
+            .collect(),
+        ..BatchOutput::default()
+    };
+    let mut transaction = database.pool().begin().await?;
+    write(&mut transaction, &output).await?;
+    let stored: (String, i32, serde_json::Value, bool) = sqlx::query_as(
+        "SELECT source_kind, source_priority, provenance, observed_at = now()
+         FROM label_preimages WHERE labelhash = 'stored'",
+    )
+    .fetch_one(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    assert_eq!(
+        stored,
+        ("source-9".to_owned(), 9, json!({"stored": true}), true)
+    );
+    database.cleanup().await?;
+    Ok(())
+}
