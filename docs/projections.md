@@ -2560,7 +2560,7 @@ least 5 blocks below the safe block. The family tables, and the marker apart
 from its generation, equal applying the same blocks one by one
 (`crates/project/tests/families_range.rs`,
 `crates/project/tests/families_compose.rs`, and every test's rebuild
-comparison, which rebuilds both ways); the undo rows and the generation count
+comparison, which rebuilds both ways). The undo rows and the generation count
 differ by design. Redo replay and live follow stay one block to a
 transaction.
 
