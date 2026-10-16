@@ -937,8 +937,11 @@ propagation](manifests.md#manifest-change-propagation)). A change to the
 admitted ENSv2 root registry changes every `.eth` name at every block, and the
 stamped Project redo recomposes every name from the first ingested block. A
 declared `start_block` is a Project [work block](glossary.md#work-block): a
-declared resolver is classified again there and takes the declaration's
-`read_features` from it, even when no event lands on that block.
+declared resolver is classified again there, even when no event lands on that
+block. From that block it takes `read_features` from the declaration. An ENSv2
+resolver proxy declared under a role other than `public_resolver_v2` or
+`ensv1_mirror_resolver` takes them instead from the `resolver_implementations`
+entry that matches its latest upgrade.
 
 Admit a planned contract before it goes live. Sync its manifest while its
 declared `start_block`, its first event and the first event that names its
@@ -946,11 +949,23 @@ address all lie above the published head, so its first effect lands above
 every block already derived. Its own address watches then start above the
 published head too, and manifest synchronization stamps no Ingest redo for a
 [watch-plan](glossary.md#watch-plan--watched-tuple) widening that starts above
-it. Another widening in the same change still stamps one. A new all-emitter
-event is such a widening, because it compiles from block zero. The authority
-change still records the marker and still needs the exact token-attested
-full-range Interpret redo and the stamped Project redo. A root-registry change
-gains nothing from the timing, because it applies at every block.
+it. Other widenings in the same change are judged on their own:
+
+- A watch whose declaration has no `start_block` compiles from block zero and
+  stamps one. That covers a family-wide event, a resolver implementation, a
+  root or a contract declared without a start. An all-emitter event always
+  does.
+- A widened ENSv2 registry announcement rule is stamped from its start or from
+  the earliest retained `RegistryCreated` log, whichever is lower, so it can
+  stamp one below the published head.
+- A widened resolver discovery rule, or a widened registry announcement rule
+  of another family, that starts at or below the published head makes manifest
+  synchronization refuse the change.
+
+Until the bounded adoption mode lands (TYR-356), the authority change still
+records the marker and still needs the exact token-attested full-range
+Interpret redo and the stamped Project redo. A root-registry change gains
+nothing from the timing, because it applies at every block.
 
 Manifest synchronization records a [manifest-authority
 marker](glossary.md#manifest-authority-marker) when its authority changes. Every

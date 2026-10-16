@@ -1902,18 +1902,25 @@ cases follow:
   new set ([ordering and undo](projections.md#ordering-and-undo)).
 - A declared contract's `start_block` is a Project [work
   block](glossary.md#work-block). Project classifies a declared resolver again
-  at its start block and takes the declaration's `read_features` from that
-  block on, with or without an event there. An edit to `read_features`, or a
-  declared start at or below the published head, can change derived rows from
-  that block on with no event to mark it.
+  at its start block, with or without an event there. From that block it takes
+  `read_features` from the declaration. An ENSv2 resolver proxy declared under
+  a role other than `public_resolver_v2` or `ensv1_mirror_resolver` takes them
+  instead from the `resolver_implementations` entry that matches its latest
+  upgrade. An edit to `read_features`, or a declared start at or below the
+  published head, can change derived rows below the head with no event to mark
+  it.
 
 Admit a planned contract before it goes live, while its declared
 `start_block`, its first event and the first event that names its address all
 lie above the published head. Its first effect then lands above every block
-already derived. The authority change still records a manifest-authority marker
-and still needs the attested full Interpret redo and the Project redo it
-stamps. A root-registry change gains nothing from the timing, because it
-applies at every block.
+already derived, and its own address watches start above the head, so they
+need no historical fetch. A watch in the change whose declaration has no
+`start_block` compiles from block zero and still stamps the [mandatory
+historical fetch](#mandatory-historical-fetch-after-watch-plan-widening), and
+an all-emitter event always does. Today the authority change still records a
+manifest-authority marker and still needs the attested full Interpret redo and
+the Project redo it stamps. A root-registry change gains nothing from the
+timing, because it applies at every block.
 
 The legacy resolver-profile authority journal, input queue, and reconciliation tables remain only in immutable migration history. Their Rust APIs and consumers have been deleted. Current manifests and schema-v2 discovery edges are the admission truth; legacy rows do not gate synchronization or interpretation.
 
