@@ -813,3 +813,23 @@ async fn load_manifest_counter_structure(pool: &sqlx::PgPool) -> Result<Vec<Stri
     .fetch_all(pool)
     .await?)
 }
+
+/// The read of unnamed registrar lease events probes the primary key under the plan PostgreSQL
+/// gives a prepared statement in `plan_cache_mode = auto`
+/// (crates/project/tests/families_unnamed_rows_plan.rs). The runner's pool must leave that mode.
+#[tokio::test]
+async fn runner_pool_plans_prepared_statements_in_auto_mode() -> Result<()> {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("phase_runner_plan_cache_mode").pool_max_connections(1),
+    )
+    .await?;
+    let runner =
+        RunnerDatabase::connect_with_options(database.pool().connect_options().as_ref().clone(), 1)
+            .await?;
+    let mode: String = sqlx::query_scalar("SHOW plan_cache_mode")
+        .fetch_one(runner.pool())
+        .await?;
+    assert_eq!(mode, "auto");
+    runner.pool().close().await;
+    database.cleanup().await
+}

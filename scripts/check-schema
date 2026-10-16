@@ -529,13 +529,14 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=467
+expected_refusal_assertions=468
 predecessor_shape_proof_count=0
 # Includes registration_lifecycle applied after lookup_precomputation on the removal path.
-expected_predecessor_shape_proof_count=83
+expected_predecessor_shape_proof_count=84
 refusal_probe_seconds=0
 timing_started=$SECONDS
 unread_index_migration="$ROOT/migrations/20261012130000_drop_unread_indexes.sql"
+unnamed_lease_index_migration="$ROOT/migrations/20261016120000_project_lifecycle_event_drop_unnamed_lease_index.sql"
 # label_hashes and its GIN index as the identity baseline defined them before
 # 20261012130000_drop_unread_indexes.sql. The baseline no longer does, so a proof that
 # starts from the earlier shape builds both from this text.
@@ -805,13 +806,18 @@ check_served_projection_removal() {
             emit_phase_migration "$ROOT/migrations/20261014120000_project_name_summary_bound_names.sql" baseline-first
             emit_phase_migration "$ROOT/migrations/20261014120000_project_name_summary_bound_names.sql" baseline-first
             emit_phase_migration "$ROOT/migrations/20261015120000_project_address_controller_candidate_transfer_comments.sql" baseline-first
+            # The unnamed lease index: present in the pre-7c shape, absent from the baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$unnamed_lease_index_migration" preceding-shape
+            fi
+            emit_phase_migration "$unnamed_lease_index_migration" baseline-first
             # The composition pass columns and constraints of the repair record: added to the
             # pre-7c shape, already in the baseline.
             if [ "$suffix" = removal ]; then
-                emit_phase_migration "$ROOT/migrations/20261016120000_project_repair_record_composing.sql" preceding-shape
+                emit_phase_migration "$ROOT/migrations/20261016130000_project_repair_record_composing.sql" preceding-shape
             fi
-            emit_phase_migration "$ROOT/migrations/20261016120000_project_repair_record_composing.sql" baseline-first
-            emit_phase_migration "$ROOT/migrations/20261016120000_project_repair_record_composing.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261016130000_project_repair_record_composing.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261016130000_project_repair_record_composing.sql" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -965,7 +971,8 @@ for migration_file in \
     "$unread_index_migration" \
     "$ROOT/migrations/20261014120000_project_name_summary_bound_names.sql" \
     "$ROOT/migrations/20261015120000_project_address_controller_candidate_transfer_comments.sql" \
-    "$ROOT/migrations/20261016120000_project_repair_record_composing.sql"
+    "$unnamed_lease_index_migration" \
+    "$ROOT/migrations/20261016130000_project_repair_record_composing.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1304,8 +1311,8 @@ for migration_file in \
     "$ROOT/migrations/20261012120000_name_surfaces_project_path_indexes.sql" \
     "$ROOT/migrations/20261015120000_project_address_controller_candidate_transfer_comments.sql" \
     "$ROOT/migrations/20261015120000_project_address_controller_candidate_transfer_comments.sql" \
-    "$ROOT/migrations/20261016120000_project_repair_record_composing.sql" \
-    "$ROOT/migrations/20261016120000_project_repair_record_composing.sql"
+    "$ROOT/migrations/20261016130000_project_repair_record_composing.sql" \
+    "$ROOT/migrations/20261016130000_project_repair_record_composing.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
@@ -1668,6 +1675,73 @@ assert_migration_refusal "table-named-project_wrapper_state_expiry_idx" \
     "$scratch_schema.project_wrapper_state_expiry_idx is not an index on $scratch_schema.project_wrapper_state; it is not dropped" <<'SQL'
 CREATE TABLE project_wrapper_state_expiry_idx (placeholder integer);
 SQL
+# The unnamed lease index. From a schema that has it as 20260926100800 gave it, the
+# schema-migration must drop exactly that index and keep every other index on
+# project_lifecycle_event. Under a caller's own lock_timeout it must put that setting back.
+# A rerun on the result, the baseline's shape, changes nothing. A relation of that name
+# that is not an index on the table must stop it.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+-- The pre-7c shape and 20260926100800, applied above, hold the index already.
+DROP INDEX project_lifecycle_event_unnamed_lease_idx;
+CREATE TEMP TABLE expected_lifecycle_event_indexes AS
+SELECT indexrelid::regclass::text AS index_name, pg_get_indexdef(indexrelid) AS definition
+FROM pg_index
+WHERE indrelid = 'project_lifecycle_event'::regclass;
+CREATE TEMP VIEW lifecycle_event_index_drift AS
+(SELECT indexrelid::regclass::text, pg_get_indexdef(indexrelid) FROM pg_index
+ WHERE indrelid = 'project_lifecycle_event'::regclass
+ EXCEPT SELECT index_name, definition FROM expected_lifecycle_event_indexes)
+UNION ALL
+(SELECT index_name, definition FROM expected_lifecycle_event_indexes
+ EXCEPT SELECT indexrelid::regclass::text, pg_get_indexdef(indexrelid) FROM pg_index
+ WHERE indrelid = 'project_lifecycle_event'::regclass);
+CREATE INDEX project_lifecycle_event_unnamed_lease_idx
+    ON project_lifecycle_event (chain_id, state_key)
+    WHERE state_kind = 'resource' AND source_family = 'ens_v1_registrar_l1'
+      AND original_logical_name_id IS NULL AND decoded_logical_name_id IS NULL;
+
+-- Under a caller's own lock_timeout.
+BEGIN;
+SET LOCAL lock_timeout = '7s';
+SQL
+    emit_phase_migration "$unnamed_lease_index_migration" specialized
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM lifecycle_event_index_drift) THEN
+        RAISE EXCEPTION 'dropping the unnamed lease index left a different index set than the baseline';
+    END IF;
+    IF current_setting('lock_timeout') <> '7s' THEN
+        RAISE EXCEPTION 'the unnamed lease index drop left lock_timeout at %', current_setting('lock_timeout');
+    END IF;
+END $$;
+ROLLBACK;
+SQL
+    emit_phase_migration "$unnamed_lease_index_migration" preceding-shape
+    emit_phase_migration "$unnamed_lease_index_migration" baseline-first
+    emit_phase_migration "$unnamed_lease_index_migration" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM lifecycle_event_index_drift) THEN
+        RAISE EXCEPTION 'dropping the unnamed lease index left a different index set than the baseline';
+    END IF;
+END $$;
+DROP VIEW lifecycle_event_index_drift;
+DROP TABLE expected_lifecycle_event_indexes;
+SQL
+} | run_psql
+assert_migration_refusal "table-named-project_lifecycle_event_unnamed_lease_idx" \
+    "$unnamed_lease_index_migration" \
+    "$scratch_schema.project_lifecycle_event_unnamed_lease_idx is not an index on $scratch_schema.project_lifecycle_event; it is not dropped" <<'SQL'
+CREATE TABLE project_lifecycle_event_unnamed_lease_idx (placeholder integer);
+SQL
+assert_migration_context_count "$unnamed_lease_index_migration" empty-schema 1
+assert_migration_context_count "$unnamed_lease_index_migration" preceding-shape 2
+assert_migration_context_count "$unnamed_lease_index_migration" specialized 1
+assert_migration_context_count "$unnamed_lease_index_migration" baseline-first 4
 report_timing baseline-first
 # Recreate the additive historical binding index from its preceding schema shape.
 # Compare the resulting catalog definition to the fresh baseline, then prove reruns.

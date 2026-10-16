@@ -4572,6 +4572,59 @@ admission changes (see
   manifest-authority fingerprint and the compiled watch plan are unchanged, so
   stamp no Ingest redo.
 
+## Unnamed registrar lease events read through the primary key
+
+The build that drops `project_lifecycle_event_unnamed_lease_idx` changes no stored row and no
+answer. Project reads, for each block, the ENSv1 `.eth` registrar lease events that carry no
+name yet, for the leases that block's names bind. That read is the statement tagged
+`project:families.decode.unnamed_rows`. With the partial index in place, PostgreSQL judged the
+index far smaller than it was. Under the generic plan the runner settles on, and under a custom
+plan for 25 leases or more, each call read every unnamed lease event of the chain, then
+filtered by lease. On the mainnet replay that is about 8,000 rows a call. Without the index the
+read probes the primary key of
+`project_lifecycle_event` once per lease, on chain, state kind and lease.
+
+- Schema-migration `20261016120000_project_lifecycle_event_drop_unnamed_lease_index.sql` drops
+  the index. No other statement reads it.
+- It changes no table, column, row or comment, and no manifest or setting.
+- Neither the [interpreter content hash](glossary.md#interpreter-content-hash) nor the
+  [projection content hash](glossary.md#projection-content-hash) rotates. No redo is needed.
+- The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
+  Ingest redo.
+- The previous build sends the same statement. It runs against the migrated schema and reads
+  through the primary key too, so a rollback of the binaries needs no schema step.
+- The read relies on the plan PostgreSQL gives a prepared statement under the default
+  `plan_cache_mode = auto`, which is how the phase runner sends it. Do not set
+  `plan_cache_mode = force_custom_plan` on the runner's connections: on the mainnet replay a
+  custom plan for a few hundred leases walks `project_lifecycle_event_decoded_name_idx` instead.
+
+### Applying the drop
+
+The [planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
+applies schema-migrations while the API and the phase runner are stopped. Nothing then holds
+the table, and the drop takes moments.
+
+Applied while they run, the schema-migration behaves as follows.
+
+- `DROP INDEX` takes an `ACCESS EXCLUSIVE` lock on `project_lifecycle_event` and keeps it until
+  the schema-migration commits.
+- It waits behind every open transaction that holds the table. While it waits, new statements
+  on the table wait behind it.
+- It sets a five-second `lock_timeout` for itself. If the lock is not granted in that time it
+  fails, records nothing and changes nothing. Run `sqlx migrate run` again.
+
+A database that cannot take that lock drops the index by hand first, outside a transaction:
+
+```sql
+DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.project_lifecycle_event_unnamed_lease_idx;
+```
+
+- A concurrent drop blocks no read and no write. It waits for every open transaction that could
+  still use the index, so a long transaction delays it.
+- A concurrent drop that is cancelled leaves the index invalid. Run the same statement again.
+- Record the step in the release record, then apply the schema-migration. It finds no index and
+  records itself.
+
 ## A family rebuild in ranges composes once, in a composition pass
 
 The build whose rebuild ranges compose nothing and whose
@@ -4584,7 +4637,7 @@ changes `crates/project/src` and adds a schema-migration. It is an input of the
   Every chain needs one full-range Project redo and no Interpret redo, under
   matching runner and API binaries. The change rides the next re-derivation
   release and shares that release's Project redo.
-- The schema-migration `20261016120000_project_repair_record_composing.sql`
+- The schema-migration `20261016130000_project_repair_record_composing.sql`
   adds the repair record state `composing` and the columns `composed_block`,
   `compose_stream` and `compose_cursor`. It must run before the new runner
   binary: without it the record refuses `composing` and the family run fails

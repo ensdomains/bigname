@@ -695,10 +695,6 @@ COMMENT ON COLUMN project_lifecycle_event.registry_owner IS
     'This value is the lower-cased after-state registry_owner.';
 COMMENT ON COLUMN project_lifecycle_event.authority_key IS
     'This value is the event''s after_state authority_key as ->> reads it, which the served authority context reports with the authority kind (name_current/build.sql:393-395).';
-CREATE INDEX IF NOT EXISTS project_lifecycle_event_unnamed_lease_idx
-    ON project_lifecycle_event (chain_id, state_key)
-    WHERE state_kind = 'resource' AND source_family = 'ens_v1_registrar_l1'
-      AND original_logical_name_id IS NULL AND decoded_logical_name_id IS NULL;
 CREATE INDEX IF NOT EXISTS project_lifecycle_event_decoded_name_idx
     ON project_lifecycle_event (chain_id, decoded_logical_name_id);
 -- The child reads' released-lease probe of a node with no name surface

@@ -1,5 +1,5 @@
 //! The schema-migration that gives `project_repair_record` the composition pass of a rebuild in
-//! ranges (migrations/20261016120000_project_repair_record_composing.sql): the state `composing`
+//! ranges (migrations/20261016130000_project_repair_record_composing.sql): the state `composing`
 //! and the columns `composed_block`, `compose_stream` and `compose_cursor`. Without it the
 //! record refuses `composing`, and a family run of this build fails before it writes a pass. On
 //! the record as it stood before, the migration keeps every row and leaves the table as the
@@ -12,7 +12,7 @@ use bigname_project::families::{FamilyMode, FamilyOptions, RebuildRanges};
 use support::{CHAIN, CONTENT_HASH, Fixture};
 
 const MIGRATION: &str =
-    include_str!("../../../migrations/20261016120000_project_repair_record_composing.sql");
+    include_str!("../../../migrations/20261016130000_project_repair_record_composing.sql");
 /// The record as the release before this one defines it.
 const PREDECESSOR: &str = "ALTER TABLE project_repair_record
          DROP CONSTRAINT project_repair_record_compose_check,
