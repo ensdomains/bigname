@@ -2600,8 +2600,6 @@ enum GateGraveyardEnd {
     NameWrapperKeeps,
     /// None of the NameWrapper's grants.
     NameWrapperEnds,
-    /// The write at the block makes no registry-owner reconcile row at all.
-    NoReconcileAt(i64),
 }
 
 /// `holder`'s `unwrap` of `node` into `to` at `block`, in transaction 1: the burn, the
@@ -2684,8 +2682,9 @@ fn gate_registry_owner_at(
 }
 
 /// `gyeth.eth`, registered to GATE_OWNER at block 205 and wrapped by `wrapETH2LD` at 206 with a
-/// resolver. These registrar logs make no registrar identity, so while the name is wrapped its
-/// retained registry owner is the NameWrapper. Returns the logs and the name's node.
+/// resolver. These registrar logs make no registrar identity, so no lease takes the wrap's
+/// registry write over, and the NameWrapper holds the name's registry-only resource while the
+/// name is wrapped. Returns the logs and the name's node.
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L152 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L278 @ ens_v1@91c966f)
 fn gate_wrapped_eth_name(fixture: &Value) -> anyhow::Result<(Vec<RawLogInput>, String)> {
@@ -2754,13 +2753,13 @@ fn gate_wrapped_eth_name(fixture: &Value) -> anyhow::Result<(Vec<RawLogInput>, S
 
 /// Every ENSv1 registry write that names the admitted Graveyard as the owner of a wrapped name,
 /// checked on the name's registry-only resource. The Graveyard is the ENSv1→ENSv2 migration's
-/// burn address for ENSv1 names, so the reconcile of the retained registry owner grants it
-/// nothing there, and a write that moves the record away from the NameWrapper still ends the
-/// NameWrapper's grants. Each row runs in one batch and cut after the setup and after each
-/// step, resumed warm, restored cold and restored from folded rows, each without and with the
-/// locked re-run trigger of `gate_locked_rerun_logs`.
+/// burn address for ENSv1 names, so no write grants it anything there, and a write that moves
+/// the record away from the NameWrapper still ends the NameWrapper's grants. Each row runs in
+/// one batch and cut after the setup and after each step, resumed warm, restored cold and
+/// restored from folded rows, each without and with the locked re-run trigger of
+/// `gate_locked_rerun_logs`.
 ///
-/// The rows whose retained registry owner is the NameWrapper:
+/// The rows whose registry owner is the NameWrapper with the wrapper authority selected:
 /// - "unwrap": the holder's `unwrap` into the Graveyard. `_unwrap`'s `setOwner` is the only
 ///   registry write of the NameWrapper that names an owner other than itself, so this row also
 ///   covers `setOwner` to the Graveyard.
@@ -2774,18 +2773,16 @@ fn gate_wrapped_eth_name(fixture: &Value) -> anyhow::Result<(Vec<RawLogInput>, S
 ///   to the NameWrapper and moves only the token.
 /// - "parent write": the parent's registry write naming the Graveyard, as `Graveyard.clear`
 ///   makes for a child of a parent it owns in the registry. That write selects the
-///   registry-only authority, which grants its new owner through its own path, as any registry
-///   transfer into the Graveyard does, so this row checks only that the NameWrapper's grants
-///   end.
+///   registry-only authority, so this row checks that the NameWrapper's grants end.
 /// - ".eth": `setResolver` to zero, then `unwrapETH2LD` into the Graveyard and the BaseRegistrar
 ///   transfer to it, as the unlocked controller migrates a wrapped `.eth` name in an
 ///   ENSv1→ENSv2 migration.
 ///
-/// The row with no retained registry owner, so no reconcile row at all:
+/// The row with the registry-only authority selected:
 /// - "away": the holder's unwrap into the Graveyard after the record left the NameWrapper and
 ///   came back through the registry, so the registry-only authority is selected at the unwrap.
 ///
-/// A `.eth` name with a registrar identity has no retained registry owner either. Its row is
+/// A `.eth` name with a registrar identity has its lease take those writes over. Its row is
 /// `unwrapped_child_under_wrapped_parent::unwrap_eth2ld_into_the_graveyard_moves_no_registry_only_grants`.
 /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/Graveyard.sol:L20-L23 @ ens_v2_sepolia_20261001@07e55a05)
 /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/Graveyard.sol:L171 @ ens_v2_sepolia_20261001@07e55a05)
@@ -2921,8 +2918,7 @@ fn a_registry_write_naming_the_graveyard_grants_it_nothing_on_the_registry_only_
     ));
     setup.push(gate_new_owner(212, 0, parent_node, "gyaway", wrapper));
     let steps = unwrap_by_holder(&node);
-    let end = GateGraveyardEnd::NoReconcileAt(214);
-    rows.push(("away", setup, steps, node, end));
+    rows.push(("away", setup, steps, node, GateGraveyardEnd::Nothing));
     let build = |logs: Vec<RawLogInput>| gate_batch(logs, &fixture);
     let mut failures = Vec::new();
     for (row, setup, steps, node, end) in &rows {
@@ -2957,20 +2953,21 @@ fn a_registry_write_naming_the_graveyard_grants_it_nothing_on_the_registry_only_
                         "{context}: the locked re-run trigger did not activate"
                     ));
                 }
-                let reconcile_grants = events()
+                let graveyard_grants = events()
                     .filter(|event| {
                         event.event_kind == "PermissionChanged"
                             && event.resource_id == Some(resource)
-                            && event.event_identity.contains(":registry-owner-")
-                            && event.event_identity.contains("-grant:")
+                            && event.after_state["effective_powers"]
+                                .as_array()
+                                .is_some_and(|powers| !powers.is_empty())
                             && event.after_state["subject"]
                                 .as_str()
                                 .is_some_and(|subject| subject.eq_ignore_ascii_case(graveyard))
                     })
                     .collect::<Vec<_>>();
-                if !reconcile_grants.is_empty() {
+                if !graveyard_grants.is_empty() {
                     failures.push(format!(
-                        "{context}: the reconcile granted the Graveyard: {reconcile_grants:?}"
+                        "{context}: the Graveyard was granted: {graveyard_grants:?}"
                     ));
                 }
                 let outputs = outputs.iter().collect::<Vec<_>>();
@@ -3009,17 +3006,6 @@ fn a_registry_write_naming_the_graveyard_grants_it_nothing_on_the_registry_only_
                         failures.push(format!(
                             "{context}: the NameWrapper keeps grants: {grants:?}"
                         ));
-                    }
-                    GateGraveyardEnd::NoReconcileAt(block) => {
-                        let rows = events()
-                            .filter(|event| {
-                                event.block_number == Some(*block)
-                                    && event.event_identity.contains(":registry-owner-")
-                            })
-                            .collect::<Vec<_>>();
-                        if !rows.is_empty() {
-                            failures.push(format!("{context}: reconcile rows: {rows:?}"));
-                        }
                     }
                     _ => {}
                 }
@@ -3494,3 +3480,6 @@ fn locked_cleanup_without_registry_evidence_derives_nothing() -> anyhow::Result<
     );
     Ok(())
 }
+
+#[path = "child_registry_holder.rs"]
+mod registry_holder;

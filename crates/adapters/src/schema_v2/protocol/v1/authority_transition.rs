@@ -5,10 +5,11 @@ use super::super::{
     BindingClosureDraft, BindingDraft, EventDraft, Interpreted, ResourceDraft, SourcedEventBatch,
     permissions::v1_revoke_states,
 };
+use super::registry::registry_owner_grants;
 use crate::schema_v2::{
     common::{event_time, stable_uuid},
     model::RawLogInput,
-    state::{V1NameState, V1ResolverLink, V1SurfaceMaterialization},
+    state::{State, V1NameState, V1ResolverLink, V1SurfaceMaterialization},
 };
 
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
@@ -73,6 +74,7 @@ pub(super) fn registry_fallback_handoff_kind(
 
 pub(super) fn append_registry_fallback_handoff(
     output: &mut Interpreted,
+    state: &mut State,
     handoff: Option<&(bool, Vec<V1ResolverLink>)>,
     previous: Option<&V1NameState>,
     raw: &RawLogInput,
@@ -132,17 +134,46 @@ pub(super) fn append_registry_fallback_handoff(
     }) else {
         return;
     };
+    let resolver = &retired_links
+        .iter()
+        .find(|retired| retired.resource_id == Some(authority.resource_id))
+        .expect("matched authority has a retired resolver link")
+        .resolver_address;
+    let identity_suffix = format!("PermissionChanged:registry-fallback-handoff:{node}:{resolver}");
+    // A registry-only resource's `resolver_control` belongs to its holder, so only a holder
+    // still granted at the retired resolver loses it.
+    if authority_kind(authority) == "registry_only" {
+        let Some(holder) = state
+            .v1_registry_only_holder(authority.resource_id)
+            .filter(|holder| {
+                registry_owner_grants::end_resolver(
+                    state,
+                    authority.resource_id,
+                    &holder.subject,
+                    resolver,
+                )
+            })
+        else {
+            return;
+        };
+        output.events.extend(registry_owner_grants::row(
+            authority,
+            &holder.subject,
+            Some(resolver),
+            false,
+            &raw.emitting_address,
+            &raw.chain_id,
+            source_event,
+            identity_suffix,
+        ));
+        return;
+    }
     let (Some(subject), Some(authority_key)) = (
         authority.owner.as_deref(),
         authority.authority_key.as_deref(),
     ) else {
         return;
     };
-    let resolver = &retired_links
-        .iter()
-        .find(|retired| retired.resource_id == Some(authority.resource_id))
-        .expect("matched authority has a retired resolver link")
-        .resolver_address;
     let (before, after) = v1_revoke_states(
         subject,
         json!({
@@ -161,10 +192,7 @@ pub(super) fn append_registry_fallback_handoff(
             .surface_known
             .then(|| authority.logical_name_id.clone()),
         resource_id: Some(authority.resource_id),
-        identity_suffix: format!(
-            "PermissionChanged:registry-fallback-handoff:{node}:{}",
-            resolver
-        ),
+        identity_suffix,
         explicit_before: Some(before),
         after_state: after,
         state_scope: format!(

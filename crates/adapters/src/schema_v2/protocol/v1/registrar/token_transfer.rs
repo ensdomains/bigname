@@ -145,12 +145,12 @@ pub(super) fn interpret(
     });
     append_transfer_permissions(
         &mut output,
+        state,
+        (&selected.source.namespace, &raw_namehash),
+        raw,
         &from,
         &linked,
-        previous_active.as_ref(),
-        active_after.as_ref(),
-        state.v1_resolver(&selected.source.namespace, &raw_namehash),
-        &raw.chain_id,
+        (previous_active.as_ref(), active_after.as_ref()),
     );
     let linked_resolver = state.v1_resolver_for_activation(
         &selected.source.namespace,

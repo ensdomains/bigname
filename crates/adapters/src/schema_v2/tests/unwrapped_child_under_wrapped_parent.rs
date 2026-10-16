@@ -1972,11 +1972,11 @@ fn wrap_eth2ld_lease_grants_follow_the_registrar_token() -> anyhow::Result<()> {
     for (layout, outputs) in every_layout(&lease_batch, &logs, &[unwrap])? {
         for block in [2, 3] {
             let rows = permission_rows_at(&outputs, block, |event| {
-                event.event_identity.contains(":registry-owner-")
+                event.resource_id == Some(registry_only)
             });
             if !rows.is_empty() {
                 failures.push(format!(
-                    "registry owner rows, block {block}, {layout}: {rows:?}"
+                    "registry-only rows, block {block}, {layout}: {rows:?}"
                 ));
             }
         }
@@ -2041,9 +2041,9 @@ fn with_graveyard(mut input: BatchInput) -> BatchInput {
 
 /// `unwrapETH2LD` of `leased.eth` into the admitted Graveyard after `setResolver` to zero, then
 /// the BaseRegistrar transfer to it, as the unlocked controller migrates a wrapped `.eth` name
-/// in an ENSv1→ENSv2 migration. The name has a registrar identity, so it has no retained
-/// registry owner: no write of the wrap or the unwrap makes a registry-owner reconcile row, and
-/// the registry-only resource holds no grants at the end, the Graveyard's among them. The
+/// in an ENSv1→ENSv2 migration. The name has a registrar identity, whose lease takes every
+/// registry write of the wrap and the unwrap over: none of them makes a row on the registry-only
+/// resource, and that resource holds no grants at the end, the Graveyard's among them. The
 /// registry write naming the Graveyard is marked with the Graveyard's getter reason, so the
 /// Graveyard is admitted. Every layout runs in one batch and cut after the wrap, resumed warm,
 /// restored cold and restored from folded rows.
@@ -2076,11 +2076,11 @@ fn unwrap_eth2ld_into_the_graveyard_moves_no_registry_only_grants() -> anyhow::R
         }
         for block in [2, 3] {
             let rows = permission_rows_at(&outputs, block, |event| {
-                event.event_identity.contains(":registry-owner-")
+                event.resource_id == Some(registry_only)
             });
             if !rows.is_empty() {
                 failures.push(format!(
-                    "registry owner rows, block {block}, {layout}: {rows:?}"
+                    "registry-only rows, block {block}, {layout}: {rows:?}"
                 ));
             }
         }
@@ -2093,3 +2093,6 @@ fn unwrap_eth2ld_into_the_graveyard_moves_no_registry_only_grants() -> anyhow::R
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     Ok(())
 }
+
+#[path = "registry_only_holder.rs"]
+pub(in crate::schema_v2::tests) mod registry_only_holder;

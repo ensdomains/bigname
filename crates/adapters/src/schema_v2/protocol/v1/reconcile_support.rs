@@ -2,6 +2,7 @@ mod event_index;
 mod node_identity;
 mod owner_timeline;
 mod side_index;
+mod transient_removal;
 mod unwrapped_migration;
 pub(in crate::schema_v2::protocol) use unwrapped_migration::reconcile as reconcile_unwrapped_migrations;
 
@@ -18,6 +19,7 @@ use self::{
         OwnerTimeline, remove_reconciled_transfer_structure, remove_redundant_successor_epochs,
     },
     side_index::{BindingIndex, ClosureIndex},
+    transient_removal::remove_transient_events,
 };
 use super::{refresh_interpreter_state_key, retarget_permission_authority};
 use crate::schema_v2::model::BatchOutput;
@@ -215,14 +217,17 @@ fn reconcile_registration(
         .filter_map(|position| owner_positions.get(position).cloned())
         .collect::<BTreeSet<_>>();
 
-    remove_transient_events(
+    // A kept revoke ends a grant made after the setup, so it stays as the first pass emitted it:
+    // on its resource, under its name, and closing no preceding grant.
+    let kept_revokes = remove_transient_events(
         events,
         &pending_positions,
         &stale_resources,
         &transient_owner_positions,
         &transient_owners,
     );
-    let setup_revocations = setup_revocations(events, &pending_positions, &stale_resources);
+    let setup_revocations =
+        setup_revocations(events, &pending_positions, &stale_resources, &kept_revokes);
     // Revocations that close preceding registry-only permission grants, plus those grants, remain
     // attached to the preceding resource. Other incoming grants may move to the registration.
     // Attachment never reaches across a block boundary: the block is the atomic unit every batch
@@ -235,7 +240,10 @@ fn reconcile_registration(
         &predecessor_owner_positions,
         &setup_revocations,
     );
-    for index in predecessor_events {
+    for index in predecessor_events
+        .into_iter()
+        .filter(|index| !kept_revokes.contains(index))
+    {
         let event = &mut output.normalized_events[index];
         event.logical_name_id = registration
             .surface_known
@@ -264,7 +272,10 @@ fn reconcile_registration(
         })
         .collect::<BTreeSet<_>>();
     let retarget_candidates = retarget_candidates(events, &target_candidates, &pending_positions);
-    for index in retarget_candidates {
+    for index in retarget_candidates
+        .into_iter()
+        .filter(|index| !kept_revokes.contains(index))
+    {
         // `wrapETH2LD` emits `NameWrapped` before its resolver write; a later controller
         // registration sets its registry record before the controller emits `NameRegistered`.
         // When those calls share a transaction, the wrapper-materialized pointer remains on the
@@ -423,49 +434,11 @@ fn reconcile_registration(
     );
 }
 
-fn remove_transient_events(
-    events: &mut EventIndex,
-    pending_positions: &BTreeSet<Position>,
-    stale_resources: &BTreeSet<Uuid>,
-    transient_positions: &BTreeSet<Position>,
-    transient_owners: &BTreeSet<String>,
-) {
-    for position in pending_positions {
-        for index in events.candidates_at(*position) {
-            let fields = &events.fields[index];
-            if events.active[index]
-                && fields.permission
-                && fields
-                    .resource_id
-                    .is_some_and(|resource| stale_resources.contains(&resource))
-                && fields
-                    .subject
-                    .as_ref()
-                    .is_some_and(|subject| transient_owners.contains(subject))
-            {
-                events.active[index] = false;
-            }
-        }
-    }
-    for position in transient_positions {
-        for index in events.candidates_at(*position) {
-            let fields = &events.fields[index];
-            if events.active[index]
-                && !fields.permission
-                && fields
-                    .resource_id
-                    .is_some_and(|resource| stale_resources.contains(&resource))
-            {
-                events.active[index] = false;
-            }
-        }
-    }
-}
-
 fn setup_revocations(
     events: &EventIndex,
     pending_positions: &BTreeSet<Position>,
     stale_resources: &BTreeSet<Uuid>,
+    kept_revokes: &BTreeSet<usize>,
 ) -> Vec<PermissionRevocation> {
     let mut revocations = Vec::new();
     for position in pending_positions {
@@ -480,6 +453,7 @@ fn setup_revocations(
                 continue;
             };
             if events.active[index]
+                && !kept_revokes.contains(&index)
                 && fields.permission
                 && fields.revocation
                 && stale_resources.contains(&resource_id)

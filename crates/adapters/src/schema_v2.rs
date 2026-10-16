@@ -41,6 +41,34 @@ use anyhow::{Context, bail};
 
 use self::{catalog::Catalog, state::State};
 
+/// The release hand-back of a registry-only resource whose name has no surface.
+fn hand_back_unsurfaced(
+    catalog: &Catalog,
+    registrar_source: &manifest::ManifestSource,
+    block: &RawBlockInput,
+    state: &mut State,
+    output: &mut BatchOutput,
+    release: &state::V1Release,
+    next: &state::V1NameState,
+) {
+    let source = next
+        .source_manifest_id
+        .and_then(|manifest_id| catalog.source(manifest_id))
+        .or_else(|| catalog.source_for_family(&next.authority_source_family))
+        .unwrap_or(registrar_source)
+        .clone();
+    let mut events = Vec::new();
+    protocol::v1::registry_only_hand_back(
+        &mut events,
+        state,
+        (&registrar_source.namespace, &release.namehash),
+        next,
+        release.resolver.as_deref(),
+        &block.chain_id,
+    );
+    normalized::materialize_boundary(&source, block, events, state, output);
+}
+
 fn settle_block_boundary(
     catalog: &Catalog,
     block: &RawBlockInput,
@@ -163,6 +191,22 @@ fn settle_block_boundary(
             .next_authority
             .as_ref()
             .filter(|authority| authority.surface_known);
+        // The registry-only holder follows the registry owner whether or not the name has a
+        // surface, so a surface-unknown name still gets the hand-back, with no surface events.
+        if let Some(next) = release.next_authority.as_ref().filter(|authority| {
+            !authority.surface_known
+                && v1_authority_kind(&authority.authority_source_family) == "registry_only"
+        }) {
+            hand_back_unsurfaced(
+                catalog,
+                &registrar_source,
+                block,
+                state,
+                output,
+                &release,
+                next,
+            );
+        }
         if previous_surface.is_none() && next_surface.is_none() {
             continue;
         }
@@ -243,7 +287,16 @@ fn settle_block_boundary(
                 }),
                 state_scope: format!("boundary:{}:resolver", release.namehash),
             });
-            if let Some(subject) = next.owner.as_deref() {
+            if v1_authority_kind(&next.authority_source_family) == "registry_only" {
+                protocol::v1::registry_only_hand_back(
+                    &mut transition_events,
+                    state,
+                    (&registrar_source.namespace, &release.namehash),
+                    next,
+                    Some(resolver),
+                    &block.chain_id,
+                );
+            } else if let Some(subject) = next.owner.as_deref() {
                 append_boundary_permission(
                     &mut transition_events,
                     next,
@@ -267,6 +320,17 @@ fn settle_block_boundary(
                     "registry-resolver-grant",
                 );
             }
+        } else if let Some(next) = next_surface
+            && v1_authority_kind(&next.authority_source_family) == "registry_only"
+        {
+            protocol::v1::registry_only_hand_back(
+                &mut transition_events,
+                state,
+                (&registrar_source.namespace, &release.namehash),
+                next,
+                None,
+                &block.chain_id,
+            );
         } else if let Some(next) = next_surface
             && let Some(subject) = next.owner.as_deref()
         {

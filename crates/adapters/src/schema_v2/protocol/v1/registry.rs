@@ -28,7 +28,7 @@ use crate::schema_v2::{
 pub(in crate::schema_v2) mod graveyard;
 pub(super) mod node;
 mod permissions;
-mod registry_owner_grants;
+pub(in crate::schema_v2::protocol::v1) mod registry_owner_grants;
 pub(super) mod surface;
 pub(super) use permissions::{append_authority_permissions, push_permission_change};
 pub(in crate::schema_v2) mod wrapper_custody;
@@ -169,17 +169,15 @@ pub(super) fn interpret(
     let previous_registry_owner_reason = owner
         .as_ref()
         .and_then(|_| state.v1_registry_owner_reason(&selected.source.namespace, &affected_node));
+    let registry_only = registry_owner_grants::resource_id(&raw.chain_id, &affected_node);
     // Read before this write changes the registry owner it remembers.
-    let retained_registry_owner = (matches!(
-        owner_view,
-        Some(RegistryOwnerView::Authentic { .. } | RegistryOwnerView::ZeroEquivalent { .. })
-    ) || selected.event.name == "NewResolver")
+    let registry_only_before = (owner.is_some() || selected.event.name == "NewResolver")
         .then(|| {
-            registry_owner_grants::retained(
+            registry_owner_grants::authority(
                 state,
                 &selected.source.namespace,
                 &affected_node,
-                previous.as_ref(),
+                &raw.chain_id,
             )
         })
         .flatten();
@@ -216,103 +214,112 @@ pub(super) fn interpret(
             );
             anchor
         });
-    let linked = if matches!(owner_view, Some(RegistryOwnerView::UnavailableUnmasked)) {
-        kinds.push("AuthorityTransferred");
-        unmasked_word::close_authority_for_unmasked_owner(
-            state,
-            &selected.source.namespace,
-            &affected_node,
-            previous.as_ref(),
-        )
-    } else {
-        if let (Some(owner), Some((owner_getter, reason))) = (owner.as_ref(), getter_view) {
-            let owner_view_changed = previous_registry_owner_getter
-                .as_deref()
-                .is_none_or(|previous| !previous.eq_ignore_ascii_case(&owner_getter))
-                || previous_registry_owner_reason != reason;
-            state.set_v1_registry_owner_views(
+    let (linked, registry_authority) =
+        if matches!(owner_view, Some(RegistryOwnerView::UnavailableUnmasked)) {
+            kinds.push("AuthorityTransferred");
+            let linked = unmasked_word::close_authority_for_unmasked_owner(
+                state,
                 &selected.source.namespace,
                 &affected_node,
-                owner.clone(),
-                owner_getter,
-                reason,
+                previous.as_ref(),
             );
-            if previous_registry_owner_word
-                .as_deref()
-                .is_none_or(|previous| !previous.eq_ignore_ascii_case(owner))
-                || owner_view_changed
-            {
-                kinds.push("AuthorityTransferred");
-            }
-        }
-        let registry_authority = owner_view.as_ref().and_then(|view| match view {
-            RegistryOwnerView::Authentic { owner } => {
-                let anchor = read_anchor.as_ref().expect("owner event has read anchor");
-                let authority = V1NameState {
-                    logical_name_id: anchor.logical_name_id.clone(),
-                    surface_known: anchor.surface_known,
-                    resource_id: anchor.resource_id,
-                    token_lineage_id: None,
-                    authority_source_family: selected.source.source_family.clone(),
-                    source_manifest_id: Some(selected.source.manifest_id),
-                    labelhash: after
-                        .get("labelhash")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    expiry: None,
-                    owner: Some(owner.to_owned()),
-                    registry_contract: Some(raw.emitting_address.to_lowercase()),
-                    authority_key: Some(format!("registry-only:{}:{affected_node}", raw.chain_id)),
-                    wrapper_fallback: false,
-                };
-                state.remember_v1_registry_authority(
+            (linked, None)
+        } else {
+            if let (Some(owner), Some((owner_getter, reason))) = (owner.as_ref(), getter_view) {
+                let owner_view_changed = previous_registry_owner_getter
+                    .as_deref()
+                    .is_none_or(|previous| !previous.eq_ignore_ascii_case(&owner_getter))
+                    || previous_registry_owner_reason != reason;
+                state.set_v1_registry_owner_views(
                     &selected.source.namespace,
                     &affected_node,
-                    authority.clone(),
+                    owner.clone(),
+                    owner_getter,
+                    reason,
                 );
-                Some(authority)
-            }
-            RegistryOwnerView::ZeroEquivalent { .. } | RegistryOwnerView::UnavailableUnmasked => {
-                None
-            }
-        });
-        match owner_view.as_ref() {
-            Some(RegistryOwnerView::ZeroEquivalent { .. }) => {
-                if wrapper_custody::zero_write_closes(previous.as_ref(), context) {
-                    state.activate_v1_authority(&selected.source.namespace, &affected_node, None);
-                    None
-                } else {
-                    previous.clone()
+                if previous_registry_owner_word
+                    .as_deref()
+                    .is_none_or(|previous| !previous.eq_ignore_ascii_case(owner))
+                    || owner_view_changed
+                {
+                    kinds.push("AuthorityTransferred");
                 }
             }
-            Some(RegistryOwnerView::Authentic { owner })
-                if wrapper_custody::keeps_authority(previous.as_ref(), owner, context) =>
-            {
-                previous.clone()
-            }
-            Some(RegistryOwnerView::Authentic { owner }) => {
-                if let Some(registrar) = state.reactivate_v1_registrar_for_owner(
-                    &selected.source.namespace,
-                    &affected_node,
-                    owner,
-                    raw.block_timestamp.unix_timestamp(),
-                ) {
-                    Some(registrar)
-                } else {
-                    let authority = registry_authority
-                        .clone()
-                        .expect("nonzero registry owner has a registry authority");
-                    state.activate_v1_authority(
+            let registry_authority = owner_view.as_ref().and_then(|view| match view {
+                RegistryOwnerView::Authentic { owner } => {
+                    let anchor = read_anchor.as_ref().expect("owner event has read anchor");
+                    let authority = V1NameState {
+                        logical_name_id: anchor.logical_name_id.clone(),
+                        surface_known: anchor.surface_known,
+                        resource_id: anchor.resource_id,
+                        token_lineage_id: None,
+                        authority_source_family: selected.source.source_family.clone(),
+                        source_manifest_id: Some(selected.source.manifest_id),
+                        labelhash: after
+                            .get("labelhash")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        expiry: None,
+                        owner: Some(owner.to_owned()),
+                        registry_contract: Some(raw.emitting_address.to_lowercase()),
+                        authority_key: Some(format!(
+                            "registry-only:{}:{affected_node}",
+                            raw.chain_id
+                        )),
+                        wrapper_fallback: false,
+                    };
+                    state.remember_v1_registry_authority(
                         &selected.source.namespace,
                         &affected_node,
-                        Some(authority.clone()),
+                        authority.clone(),
                     );
                     Some(authority)
                 }
-            }
-            None | Some(RegistryOwnerView::UnavailableUnmasked) => previous.clone(),
-        }
-    };
+                RegistryOwnerView::ZeroEquivalent { .. }
+                | RegistryOwnerView::UnavailableUnmasked => None,
+            });
+            let linked = match owner_view.as_ref() {
+                Some(RegistryOwnerView::ZeroEquivalent { .. }) => {
+                    if wrapper_custody::zero_write_closes(previous.as_ref(), context) {
+                        state.activate_v1_authority(
+                            &selected.source.namespace,
+                            &affected_node,
+                            None,
+                        );
+                        None
+                    } else {
+                        previous.clone()
+                    }
+                }
+                Some(RegistryOwnerView::Authentic { owner })
+                    if wrapper_custody::keeps_authority(previous.as_ref(), owner, context) =>
+                {
+                    previous.clone()
+                }
+                Some(RegistryOwnerView::Authentic { owner }) => {
+                    if let Some(registrar) = state.reactivate_v1_registrar_for_owner(
+                        &selected.source.namespace,
+                        &affected_node,
+                        owner,
+                        raw.block_timestamp.unix_timestamp(),
+                    ) {
+                        Some(registrar)
+                    } else {
+                        let authority = registry_authority
+                            .clone()
+                            .expect("nonzero registry owner has a registry authority");
+                        state.activate_v1_authority(
+                            &selected.source.namespace,
+                            &affected_node,
+                            Some(authority.clone()),
+                        );
+                        Some(authority)
+                    }
+                }
+                None | Some(RegistryOwnerView::UnavailableUnmasked) => previous.clone(),
+            };
+            (linked, registry_authority)
+        };
     if let Some(kind) =
         registry_fallback_handoff_kind(&selected.event.name, migration_handoff.as_ref())
         && !kinds.contains(&kind)
@@ -402,6 +409,7 @@ pub(super) fn interpret(
     }
     append_registry_fallback_handoff(
         &mut output,
+        state,
         migration_handoff.as_ref(),
         previous.as_ref(),
         raw,
@@ -488,12 +496,9 @@ pub(super) fn interpret(
                 state_scope: String::new(),
             });
         }
-        let retained_resolvers = retained_registry_owner
-            .as_ref()
-            .map(|retained| (retained, previous_resolver.clone(), resolver.clone()));
-        if let Some(authority) = linked.as_ref()
-            && let Some(subject) = authority.owner.as_deref()
-            && previous_resolver != resolver
+        if let Some(authority) = linked.as_ref().filter(|authority| {
+            authority.resource_id != registry_only && previous_resolver != resolver
+        }) && let Some(subject) = authority.owner.as_deref()
         {
             if let Some(previous_resolver) = previous_resolver
                 && !previous_resolver.eq_ignore_ascii_case(ZERO_ADDRESS)
@@ -509,7 +514,7 @@ pub(super) fn interpret(
                     "resolver-revoke",
                 );
             }
-            if let Some(resolver) = resolver {
+            if let Some(resolver) = resolver.as_ref() {
                 push_permission_change(
                     &mut output,
                     authority,
@@ -522,78 +527,34 @@ pub(super) fn interpret(
                 );
             }
         }
-        if let Some((retained, previous_resolver, resolver)) = retained_resolvers {
-            registry_owner_grants::reconcile_resolver(
-                &mut output,
-                retained,
-                previous_resolver
-                    .as_deref()
-                    .filter(|resolver| !resolver.eq_ignore_ascii_case(ZERO_ADDRESS)),
+        if let Some(authority) = linked
+            .as_ref()
+            .filter(|authority| authority.resource_id == registry_only)
+            .or(registry_only_before.as_ref())
+        {
+            registry_owner_grants::move_resolver(
+                &mut output.events,
+                state,
+                authority,
                 resolver.as_deref(),
-                raw,
+                registry_owner_grants::registry_rows(raw, "ResolverChanged"),
             );
         }
-    } else if owner.is_some()
-        && previous
-            .as_ref()
-            .map(|state| (&state.owner, state.resource_id))
-            != linked
-                .as_ref()
-                .map(|state| (&state.owner, state.resource_id))
-    {
-        wrapper_custody::revoke_delegate(
+    } else if let Some(view) = owner_view.as_ref() {
+        registry_owner_grants::apply_owner_write(
             &mut output,
             state,
-            (&selected.source.namespace, &affected_node),
-            previous.as_ref(),
-            linked.as_ref(),
+            registry_owner_grants::OwnerWrite {
+                node: (&selected.source.namespace, &affected_node),
+                view,
+                previous: previous.as_ref(),
+                linked: linked.as_ref(),
+                written: registry_authority.as_ref(),
+                before: registry_only_before.as_ref(),
+            },
             context,
             raw,
         );
-        append_authority_permissions(
-            &mut output,
-            previous.as_ref(),
-            linked.as_ref(),
-            state.v1_resolver(&selected.source.namespace, &affected_node),
-            raw,
-        );
-    }
-    if let Some(retained) = retained_registry_owner.as_ref() {
-        let registry_owner = match owner_view.as_ref() {
-            Some(RegistryOwnerView::Authentic { owner }) => Some(Some(owner.as_str())),
-            Some(RegistryOwnerView::ZeroEquivalent { .. }) => Some(None),
-            Some(RegistryOwnerView::UnavailableUnmasked) | None => None,
-        };
-        if let Some(registry_owner) = registry_owner {
-            // `unwrapETH2LD`'s registrar transfer, later in this transaction, selects the
-            // name's successor and grants its owner, so this write only ends the old grants.
-            // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L390-L395 @ ens_v1@91c966f)
-            let successor_grants_follow = context.wrapper_custody.unwrap_follows
-                && wrapper_custody::registrar_transfer_may_follow(
-                    state,
-                    &selected.source.namespace,
-                    &affected_node,
-                );
-            // The admitted Graveyard is the ENSv1→ENSv2 migration's burn address for ENSv1
-            // names, so a write naming it grants it nothing, and the retained owner's grants
-            // still end.
-            // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/Graveyard.sol:L20-L23 @ ens_v2_sepolia_20261001@07e55a05)
-            let graveyard_owner = registry_owner.is_some_and(|owner| {
-                graveyard::owner_reason(context.registry_graveyard, owner).is_some()
-            });
-            registry_owner_grants::reconcile_owner(
-                &mut output,
-                retained,
-                registry_owner,
-                !successor_grants_follow && !graveyard_owner,
-                linked.as_ref(),
-                state
-                    .v1_resolver(&selected.source.namespace, &affected_node)
-                    .as_deref()
-                    .filter(|resolver| !resolver.eq_ignore_ascii_case(ZERO_ADDRESS)),
-                raw,
-            );
-        }
     }
     node::retain_identity(&mut output, selected, raw, state, identity);
     Ok(output)

@@ -7,6 +7,8 @@ mod alias;
 mod getter;
 #[path = "wrapper/physical.rs"]
 mod physical;
+#[path = "wrapper/registry_only_holder.rs"]
+mod registry_only_holder;
 use super::*;
 use alloy_primitives::B256;
 const V1: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";

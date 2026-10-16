@@ -223,7 +223,7 @@ async fn publish_child(database: &TestDatabase, blocks: Vec<Logs>) -> Result<Uui
 }
 
 /// Each row's (address, authority_context).
-fn served(body: &Value) -> std::collections::BTreeSet<(String, String)> {
+pub(super) fn served(body: &Value) -> std::collections::BTreeSet<(String, String)> {
     body["data"]
         .as_array()
         .map(|rows| {
@@ -247,6 +247,17 @@ fn served(body: &Value) -> std::collections::BTreeSet<(String, String)> {
 /// keeps a row on it by address.
 async fn serves_only(
     database: &TestDatabase,
+    resource: Uuid,
+    owner: &str,
+    gone: &[&str],
+) -> Result<Vec<String>> {
+    serves_only_at(database, "child.grantparent.eth", resource, owner, gone).await
+}
+
+/// `serves_only` for the name `name` and its registry-only resource.
+pub(super) async fn serves_only_at(
+    database: &TestDatabase,
+    name: &str,
     resource: Uuid,
     owner: &str,
     gone: &[&str],
@@ -290,7 +301,7 @@ async fn serves_only(
     }
     let (status, by_name) = get(
         database,
-        "/v1/permissions?name=child.grantparent.eth&namespace=ens",
+        &format!("/v1/permissions?name={name}&namespace=ens"),
     )
     .await?;
     assert_eq!(status, StatusCode::OK, "{by_name:#}");

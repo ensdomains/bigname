@@ -1472,7 +1472,7 @@ mod token_approval {
 
         /// The parent's `setSubnodeOwner` to a new owner writes four rows in this order: the
         /// approved address's revoke on the NameWrapper resource, the holder's revoke there, the
-        /// new owner's grant on the registry-only resource, then the NameWrapper's revoke there.
+        /// NameWrapper's revoke on the registry-only resource, then the new owner's grant there.
         /// The approved address's revoke is the one `token_approval` row, from the registry.
         #[test]
         fn a_parents_write_revokes_the_delegate_once_and_grants_the_new_owner_once()
@@ -1491,8 +1491,8 @@ mod token_approval {
                 vec![
                     (DELEGATE.to_owned(), Some(wrapped), false),
                     (HOLDER.to_owned(), Some(wrapped), false),
-                    (NEW_OWNER.to_owned(), registry_only, true),
                     (fixture.wrapper.to_ascii_lowercase(), registry_only, false),
+                    (NEW_OWNER.to_owned(), registry_only, true),
                 ]
             );
             assert_eq!(
@@ -1560,14 +1560,23 @@ mod token_approval {
         use crate::schema_v2::state::State;
 
         /// The delegate of the child after a cold restore from `rows`, in the namespace of its
-        /// approval rows.
-        fn delegate(rows: Vec<PriorEventInput>) -> Option<String> {
+        /// approval rows, and whether the restore marks its wrapper token burnt.
+        fn restored(rows: Vec<PriorEventInput>) -> (Option<String>, bool) {
             let namespace = rows
                 .iter()
                 .find(|row| row.source_family == "ens_v1_wrapper_l1")
                 .map(|row| row.namespace.clone())
                 .expect("a wrapper row");
-            State::new(rows, Vec::new()).v1_wrapper_delegate(&namespace, &format!("{:#x}", team()))
+            let node = format!("{:#x}", team());
+            let mut state = State::new(rows, Vec::new());
+            let delegate = state.v1_wrapper_delegate(&namespace, &node);
+            // Clearing the flag returns the one the restore left.
+            let burnt = state.set_v1_wrapper_burnt(&namespace, &node, false);
+            (delegate, burnt)
+        }
+
+        fn delegate(rows: Vec<PriorEventInput>) -> Option<String> {
+            restored(rows).0
         }
 
         /// The newest of `rows` per retained-state key, in their order.
@@ -1610,7 +1619,11 @@ mod token_approval {
                     .cloned()
                     .collect::<Vec<_>>();
                 for (form, rows) in both_forms(&before) {
-                    assert_eq!(delegate(rows), Some(DELEGATE.to_owned()), "{owner} {form}");
+                    assert_eq!(
+                        restored(rows),
+                        (Some(DELEGATE.to_owned()), false),
+                        "{owner} {form}"
+                    );
                 }
                 for (form, rows) in both_forms(events) {
                     let registry_revoke = |row: &PriorEventInput| {
@@ -1623,14 +1636,18 @@ mod token_approval {
                         rows.iter().any(registry_revoke),
                         "{owner} {form} keeps the registry revoke"
                     );
-                    assert_eq!(delegate(rows), None, "{owner} {form}");
+                    // The registry's holder revoke at the write is not a token burn.
+                    assert_eq!(restored(rows), (None, false), "{owner} {form}");
                 }
             }
             Ok(())
         }
 
         /// A later grant to another address, between the old delegate's grant and the registry's
-        /// revoke of that old delegate, survives the revoke, from all rows and compacted.
+        /// revoke of that old delegate, survives the revoke, from all rows and compacted. The
+        /// later grant is a hand-built row, so this is a row-level check of the restore rule: no
+        /// real chain produces this order, because a newer `approve` first revokes the old
+        /// delegate and the parent's write would then revoke the newer one.
         #[test]
         fn an_older_subjects_revoke_leaves_a_later_delegate() -> anyhow::Result<()> {
             let fixture = Fixture::new()?;
@@ -1663,6 +1680,78 @@ mod token_approval {
             ] {
                 assert_eq!(delegate(rows), Some(NEXT_DELEGATE.to_owned()), "{form}");
             }
+            Ok(())
+        }
+
+        /// The holder's `TransferSingle` burn row of the child, from the holder's own `unwrap`,
+        /// and every row before it.
+        fn rows_through_the_burn() -> anyhow::Result<(Vec<PriorEventInput>, PriorEventInput)> {
+            let fixture = Fixture::new()?;
+            let calls = Calls { fixture: &fixture };
+            let mut steps = calls.approved_child();
+            steps.push(vec![
+                calls.wrapper(
+                    events::TransferSingle {
+                        operator: address(HOLDER),
+                        from: address(HOLDER),
+                        to: Address::ZERO,
+                        id: U256::from_be_bytes(team().0),
+                        value: U256::from(1),
+                    }
+                    .encode_log_data(),
+                    WRITTEN,
+                    0,
+                ),
+            ]);
+            let output = fixture.run(steps)?;
+            let events = &output.normalized_events;
+            let burn = events
+                .iter()
+                .find(|event| {
+                    event.block_number == Some(WRITTEN)
+                        && event.source_family == "ens_v1_wrapper_l1"
+                        && event.after_state["subject"] == HOLDER
+                        && event
+                            .after_state
+                            .pointer("/revocation_source/relation_kind")
+                            == Some(&json!("holder"))
+                })
+                .map(prior_event)
+                .expect("the burn revokes the holder");
+            let rows = events
+                .iter()
+                .filter(|event| event.block_number < Some(WRITTEN))
+                .map(prior_event)
+                .collect();
+            Ok((rows, burn))
+        }
+
+        /// Positive control: the wrapper's holder revoke at a real ERC-1155 burn marks the token
+        /// burnt on restore.
+        /// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269-L278 @ ens_v1@91c966f)
+        #[test]
+        fn a_wrapper_burn_row_restores_the_token_burnt() -> anyhow::Result<()> {
+            let (mut rows, burn) = rows_through_the_burn()?;
+            rows.push(burn);
+            assert!(restored(rows).1);
+            Ok(())
+        }
+
+        /// Synthetic, row-level: the same burn row with the registry as its family. A registry
+        /// row counts for the delegate only as a `token_approval` row, so a holder row that
+        /// looks like a burn does not mark the wrapper token burnt.
+        #[test]
+        fn a_registry_holder_row_that_looks_like_a_burn_does_not_burn_the_wrapper()
+        -> anyhow::Result<()> {
+            let (mut rows, burn) = rows_through_the_burn()?;
+            let mut registry_row = burn.clone();
+            registry_row.source_family = "ens_v1_registry_l1".to_owned();
+            registry_row.retained_state_key = burn
+                .retained_state_key
+                .replace("ens_v1_wrapper_l1", "ens_v1_registry_l1");
+            assert_ne!(registry_row.retained_state_key, burn.retained_state_key);
+            rows.push(registry_row);
+            assert!(!restored(rows).1);
             Ok(())
         }
     }

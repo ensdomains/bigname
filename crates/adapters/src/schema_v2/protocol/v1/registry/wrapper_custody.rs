@@ -22,9 +22,12 @@ use crate::schema_v2::{
     model::RawLogInput,
     protocol::{
         Interpreted,
-        v1::{WrapperPermissionContext, append_delegate_permission},
+        v1::{
+            WrapperPermissionContext, append_delegate_permission,
+            authority_transition::authority_kind,
+        },
     },
-    state::{State, V1NameState},
+    state::{State, V1NameState, v1_registration_is_live},
 };
 
 pub(super) const WRAPPER_FAMILY: &str = "ens_v1_wrapper_l1";
@@ -91,7 +94,8 @@ pub(super) fn keeps_authority(
 /// links is none or on another resource, also ends the per-token approved address's NameWrapper
 /// permission, at the same log as the holder's. On chain the approval lasts until the old token
 /// moves or burns, but those logs no longer reach this authority. The revoke names the admitted
-/// NameWrapper, so it shares the approval grant's retained state.
+/// NameWrapper, so it carries the grant's state scope. Restore keeps it beside the grant under its
+/// own family's key and applies the two in chain order.
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L228-L238 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L837-L840 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269-L275 @ ens_v1@91c966f)
@@ -138,6 +142,36 @@ pub(super) fn zero_write_closes(
             || (authority.authority_source_family == WRAPPER_FAMILY
                 && !context.wrapper_custody.unwrap_follows)
     })
+}
+
+/// Whether a live registrar lease takes a registry owner write over, so the lease holds the
+/// owner's grants: the write selected the lease, or it is the NameWrapper's own unwrap of a name
+/// that a lease succeeds.
+pub(super) fn lease_takes_write(
+    state: &State,
+    (namespace, node): (&str, &str),
+    linked: Option<&V1NameState>,
+    context: RegistrarContext<'_>,
+    raw: &RawLogInput,
+) -> bool {
+    linked.is_some_and(|authority| authority_kind(authority) == "registrar")
+        || (context.wrapper_custody.unwrap_follows
+            && lease_succeeds_unwrap(state, namespace, node, raw.block_timestamp.unix_timestamp()))
+}
+
+/// Whether a registrar lease succeeds an unwrap of `node` at `at`: `NameUnwrapped` reactivates a
+/// live lease, and the registrar transfer that follows `unwrapETH2LD` takes the name over.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L390-L395 @ ens_v1@91c966f)
+pub(in crate::schema_v2::protocol::v1) fn lease_succeeds_unwrap(
+    state: &State,
+    namespace: &str,
+    node: &str,
+    at: i64,
+) -> bool {
+    state
+        .v1_registrar(namespace, node)
+        .is_some_and(|lease| v1_registration_is_live(lease.expiry, at))
+        || registrar_transfer_may_follow(state, namespace, node)
 }
 
 /// Whether the BaseRegistrar transfer that follows an unwrap of `node` in its transaction takes

@@ -1,3 +1,4 @@
+use super::super::registry::registry_owner_grants::{self, Rows};
 use super::{
     Interpreted, ResourceDraft, State, ZERO_ADDRESS, events_linked, new_registrar_identity,
     registrar_namehash,
@@ -110,10 +111,42 @@ fn name_registered(
     );
     output.events[2].explicit_before = Some(before);
     output.events[2].after_state = permission_after;
+    // A registry write earlier in this transaction that the registration takes over leaves no
+    // registry-only holder: the lease holds its grants.
+    let registry_only = registry_owner_grants::resource_id(&raw.chain_id, &namehash);
+    state.end_v1_registry_only_holder_for_registration(registry_only, &raw.transaction_hash);
     let active = state.v1_name(&selected.source.namespace, &namehash);
     let resolver =
         state.v1_resolver_for_activation(&selected.source.namespace, &namehash, active.as_ref());
-    if let (Some(authority), Some(subject), Some(resolver)) = (
+    if let Some(authority) = active
+        .as_ref()
+        .filter(|authority| authority.resource_id == registry_only)
+    {
+        // The registry-only resource's `resolver_control` stays with its holder.
+        if let Some(resolver) = resolver
+            .as_ref()
+            .filter(|link| !link.resolver_address.eq_ignore_ascii_case(ZERO_ADDRESS))
+            && state
+                .v1_registry_only_holder(registry_only)
+                .zip(authority.owner.as_deref())
+                .is_some_and(|(holder, owner)| holder.subject.eq_ignore_ascii_case(owner))
+        {
+            registry_owner_grants::move_resolver(
+                &mut output.events,
+                state,
+                authority,
+                Some(&resolver.resolver_address),
+                Rows {
+                    emitter: &raw.emitting_address,
+                    chain_id: &raw.chain_id,
+                    source_event_kind: "RegistrationGranted",
+                    resource: ["registration-resource-revoke", "registration-resource"],
+                    resolver: ["registration-resolver-revoke", "registration-resolver"],
+                    boundary: false,
+                },
+            );
+        }
+    } else if let (Some(authority), Some(subject), Some(resolver)) = (
         active.as_ref(),
         active
             .as_ref()

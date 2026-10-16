@@ -14,7 +14,7 @@ use crate::schema_v2::{catalog::Catalog, catalog::Selected, model::RawLogInput};
 const MIGRATION_FAMILY: &str = "ens_v2_migration_l1";
 
 /// The `owner_getter_reason` of a registry owner write naming the admitted Graveyard.
-const OWNER_REASON: &str = "graveyard";
+pub(super) const OWNER_REASON: &str = "graveyard";
 
 /// The admitted Graveyard a current ENSv1 registry log can name as a node's owner: the
 /// migration manifest's `graveyard` role on the same chain and namespace, from its declared start

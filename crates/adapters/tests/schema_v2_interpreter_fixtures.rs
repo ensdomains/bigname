@@ -2601,9 +2601,11 @@ fn dense_output_is_purely_additive_over_the_pre_retention_snapshot() -> Result<(
         .filter(|line| !line.trim().starts_with("before_state_explicit:"))
         .collect::<Vec<_>>()
         .join("\n");
+    // Re-taken when the registry-only resource's permission rows got a retained-state key per
+    // subject and scope: the corpus rows moved to the registrations carry the new keys.
     assert_eq!(
         format!("{:#x}", keccak256(snapshot.as_bytes())),
-        "0xb9f842fdc4a0679e37ac4bdfec4f3ec4a8eada269211a176df7ce0580d31677d",
+        "0xc4315021e9af5d86729dfc643dc950e6d7cea6fb9b0eb9df34b7decd3573c403",
         "output minus the debug-only flag, retained rows, and verified registrar evidence must equal the pre-retention snapshot"
     );
     Ok(())

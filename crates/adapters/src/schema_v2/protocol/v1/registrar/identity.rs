@@ -34,3 +34,37 @@ pub(super) fn new_registrar_identity(
     let resource_id = stable_uuid(&format!("resource:{authority_key}"));
     (token_lineage_id, resource_id, Some(authority_key))
 }
+
+/// The node of a registration log and, for a numeric BaseRegistrar `NameRegistered`, its
+/// registrant. A controller's `NameRegistered` comes after every registry write of its
+/// registration, so it has no registrant here. Block reconciliation moves the registry-only
+/// grants of the writes each one takes over to its lease.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L301-L341 @ ens_v1@91c966f)
+pub(in crate::schema_v2) fn registration(
+    selected: &Selected,
+    raw: &RawLogInput,
+) -> Option<(String, Option<String>)> {
+    let lifecycle = selected
+        .event
+        .normalized_events
+        .iter()
+        .any(|event| event == "RegistrationGranted");
+    if !lifecycle || selected.event.name != "NameRegistered" {
+        return None;
+    }
+    match selected.source.source_family.as_str() {
+        "ens_v1_registrar_l1"
+            if selected.emitter_role.as_deref() == Some("registrar")
+                && selected.event.signature == "NameRegistered(uint256,address,uint256)" =>
+        {
+            super::base::registration_namehash(selected, raw)
+                .ok()
+                .flatten()
+                .map(|(namehash, owner)| (namehash, Some(owner)))
+        }
+        "ens_v1_registrar_l1" | "basenames_base_registrar" => super::decode::name(selected, raw)
+            .ok()
+            .map(|(_, labelhash, _)| (registrar_namehash(selected, labelhash), None)),
+        _ => None,
+    }
+}

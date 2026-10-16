@@ -1,6 +1,6 @@
 normalized_events 234:0 SubregistryChanged ens_v1_registry_l1 ac858fa2-74ee-5cb8-8dc9-e9e1a992a8fd f546a75f0a9bdc9b
 normalized_events 234:0 AuthorityTransferred ens_v1_registry_l1 ac858fa2-74ee-5cb8-8dc9-e9e1a992a8fd eaaaac0611ffe210
-normalized_events 234:0 PermissionChanged ens_v1_registry_l1 ac858fa2-74ee-5cb8-8dc9-e9e1a992a8fd badf31d1ce1391b6
+normalized_events 234:0 PermissionChanged ens_v1_registry_l1 ac858fa2-74ee-5cb8-8dc9-e9e1a992a8fd 3e4737fb32b53012
 normalized_events 234:1 RegistrationGranted ens_v1_registrar_l1 ac858fa2-74ee-5cb8-8dc9-e9e1a992a8fd 6f4092490c46767d
 normalized_events 234:1 ExpiryChanged ens_v1_registrar_l1 ac858fa2-74ee-5cb8-8dc9-e9e1a992a8fd c17ea4622db1d623
 normalized_events 234:1 PermissionChanged ens_v1_registrar_l1 ac858fa2-74ee-5cb8-8dc9-e9e1a992a8fd 9fbf0bf398f9170a
@@ -13,9 +13,9 @@ normalized_events 234:2 PermissionChanged ens_v1_registry_l1 ac858fa2-74ee-5cb8-
 normalized_events 235:0 TokenControlTransferred ens_v1_registrar_l1 ac858fa2-74ee-5cb8-8dc9-e9e1a992a8fd 564bad0649d2f505
 normalized_events 235:0 PermissionChanged ens_v1_registrar_l1 ac858fa2-74ee-5cb8-8dc9-e9e1a992a8fd fa94dd12901d68be
 normalized_events 235:0 PermissionChanged ens_v1_registrar_l1 ac858fa2-74ee-5cb8-8dc9-e9e1a992a8fd 432e90c63d6cb129
-normalized_events 235:0 PermissionChanged ens_v1_registrar_l1 fa4f08cc-e41e-58fd-bfc3-42a546c306d6 1631d9891861ed58
+normalized_events 235:0 PermissionChanged ens_v1_registrar_l1 fa4f08cc-e41e-58fd-bfc3-42a546c306d6 159ff02cd34eba52
 normalized_events 235:0 PermissionChanged ens_v1_registrar_l1 ac858fa2-74ee-5cb8-8dc9-e9e1a992a8fd 3994d0e6ba7e7160
-normalized_events 235:0 PermissionChanged ens_v1_registrar_l1 fa4f08cc-e41e-58fd-bfc3-42a546c306d6 075dccde4c266633
+normalized_events 235:0 PermissionChanged ens_v1_registrar_l1 fa4f08cc-e41e-58fd-bfc3-42a546c306d6 b8872a720e544f48
 normalized_events 235:0 SurfaceUnbound ens_v1_registrar_l1 ac858fa2-74ee-5cb8-8dc9-e9e1a992a8fd ccfb71c76f0ee05a
 normalized_events 235:0 SurfaceBound ens_v1_registrar_l1 fa4f08cc-e41e-58fd-bfc3-42a546c306d6 14279208886eaa53
 normalized_events 235:0 AuthorityEpochChanged ens_v1_registrar_l1 fa4f08cc-e41e-58fd-bfc3-42a546c306d6 64d1cd0bd6953aa0
@@ -25,8 +25,8 @@ normalized_events 236:0 PermissionChanged ens_v1_registrar_l1 ac858fa2-74ee-5cb8
 normalized_events 236:0 PermissionChanged ens_v1_registrar_l1 ac858fa2-74ee-5cb8-8dc9-e9e1a992a8fd 441c465988e9282d
 normalized_events 236:1 SubregistryChanged ens_v1_registry_l1 ac858fa2-74ee-5cb8-8dc9-e9e1a992a8fd 0d46792bd3628a58
 normalized_events 236:1 AuthorityTransferred ens_v1_registry_l1 ac858fa2-74ee-5cb8-8dc9-e9e1a992a8fd f1fff0e5826074a6
-normalized_events 236:1 PermissionChanged ens_v1_registry_l1 fa4f08cc-e41e-58fd-bfc3-42a546c306d6 a9af361d1438ef5d
-normalized_events 236:1 PermissionChanged ens_v1_registry_l1 fa4f08cc-e41e-58fd-bfc3-42a546c306d6 676dfc421dc55351
+normalized_events 236:1 PermissionChanged ens_v1_registry_l1 fa4f08cc-e41e-58fd-bfc3-42a546c306d6 05be7feb14d9eb84
+normalized_events 236:1 PermissionChanged ens_v1_registry_l1 fa4f08cc-e41e-58fd-bfc3-42a546c306d6 99fe0f63eac679bf
 normalized_events 236:2 AuthorityTransferred ens_v1_registry_l1 ac858fa2-74ee-5cb8-8dc9-e9e1a992a8fd 274c3b57ed564110
 normalized_events 236:2 PermissionChanged ens_v1_registry_l1 ac858fa2-74ee-5cb8-8dc9-e9e1a992a8fd 3ce7eb221bdeadba
 normalized_events 236:2 PermissionChanged ens_v1_registry_l1 ac858fa2-74ee-5cb8-8dc9-e9e1a992a8fd 714366d674f6e37e
