@@ -245,7 +245,7 @@ impl Run<'_> {
             .iter()
             .map(|table| table.name)
             .chain(tables::DERIVED)
-            .chain(["project_family_undo"])
+            .chain(["project_family_undo", tables::COMPOSE_NAME_WORK])
         {
             sqlx::query(&format!(
                 "/* project:families.reset_{table} */ DELETE FROM {table} WHERE chain_id = $1"
@@ -371,12 +371,18 @@ pub(super) enum Transition {
 /// Refresh the planner statistics of every family table. A failure only costs plan quality, so
 /// it is logged and the rebuild continues.
 pub(super) async fn analyze(pool: &sqlx::PgPool, chain_id: &str) {
-    for table in tables::JOURNALLED
+    let tables: Vec<&'static str> = tables::JOURNALLED
         .iter()
         .map(|table| table.name)
         .chain(tables::DERIVED)
         .chain(["project_family_undo"])
-    {
+        .collect();
+    analyze_tables(pool, chain_id, &tables).await;
+}
+
+/// Refresh the planner statistics of `tables`, as `analyze` does.
+pub(super) async fn analyze_tables(pool: &sqlx::PgPool, chain_id: &str, tables: &[&'static str]) {
+    for &table in tables {
         if let Err(error) = sqlx::query(&format!(
             "/* project:families.rebuild.analyze */ ANALYZE {table}"
         ))

@@ -4,13 +4,15 @@
 //! record to composing; chunks then compose the pass's streams (families/compose.rs) at the
 //! marker's block, each in its own transaction and each one block of the run's budget, and a
 //! fenced transition ends the pass: the record returns to rebuilding with `composed_block` set,
-//! and one marker journal row under the pass block ends the undo journal there. Every generation
+//! and one marker journal row under the pass block ends the undo journal there. The transition
+//! that begins the pass also writes its name work list, which the names stream then pages
+//! through, and the pass end drops it. The pass end spends one block of the budget too. Every generation
 //! after that composes and journals as a block always did. A run that stops anywhere in the pass
 //! leaves the record saying where, and the next run continues from it.
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 
-use super::{Run, transitions::analyze};
+use super::{Run, transitions::analyze_tables};
 use crate::{
     Marker, ProjectError, Result,
     families::{
@@ -20,13 +22,14 @@ use crate::{
         manifests,
         marker::{self, Composition, FamilyMarker},
         repair::{self, Record, State},
+        tables,
         undo::ENDS_JOURNAL,
     },
 };
 
 /// What one chunk of the pass composes.
 enum Work<'a> {
-    Names(&'a [(String, compose::Reach)]),
+    Names(&'a [(i64, String, compose::Reach)]),
     Pairs(Vec<(String, String)>),
     /// The catalogue window after this block; its end is planned inside the chunk.
     Window(i64),
@@ -68,15 +71,24 @@ impl Run<'_> {
             }
             let mut transaction = self.fenced(family, &record, revision).await?;
             repair::begin_compose(&mut transaction, self.chain_id).await?;
+            let names =
+                compose::prepare_names(&mut transaction, self.chain_id, pass.number).await?;
             commit(transaction).await?;
+            analyze_tables(self.pool, self.chain_id, &[tables::COMPOSE_NAME_WORK]).await;
             record.state = State::Composing;
             record.compose_stream = Some(Stream::Names.index());
             record.compose_cursor = None;
+            tracing::info!(
+                target: "bigname_project::families",
+                chain_id = self.chain_id,
+                block = pass.number,
+                names,
+                "the rebuild's composition pass began"
+            );
         }
         let composition = Composition::recorded(family);
         let done = pass.number.to_string();
         let size = self.options.compose_chunk_keys.max(1);
-        let mut committed = 0_u64;
         loop {
             let stream = Stream::of(record.compose_stream);
             let cursor = record.compose_cursor.clone();
@@ -90,20 +102,14 @@ impl Run<'_> {
             let limit = usize::try_from(self.budget.left)
                 .unwrap_or(usize::MAX)
                 .saturating_mul(size);
-            let chunks = match stream {
+            let within_budget = match stream {
                 Stream::Names => {
-                    let ids = compose::names(
-                        self.pool,
-                        self.chain_id,
-                        pass.number,
-                        cursor.as_deref(),
-                        limit,
-                    )
-                    .await?;
+                    let ids =
+                        compose::names(self.pool, self.chain_id, cursor.as_deref(), limit).await?;
                     let last = ids.len() < limit;
                     let mut chunks = Vec::new();
                     for chunk in ids.chunks(size) {
-                        let at = chunk.last().map(|(id, _)| id.clone());
+                        let at = chunk.last().map(|(serial, _, _)| serial.to_string());
                         chunks.push((Work::Names(chunk), at));
                     }
                     self.chunks(
@@ -160,15 +166,8 @@ impl Run<'_> {
                     .await?
                 }
             };
-            let Some(chunks) = chunks else {
+            if !within_budget {
                 return Ok(None);
-            };
-            for _ in 0..chunks {
-                committed += 1;
-                if committed.is_power_of_two() {
-                    analyze(self.pool, self.chain_id).await;
-                    outcome.statistics_refreshes += 1;
-                }
             }
         }
         if !self.budget.take(outcome) {
@@ -185,9 +184,11 @@ impl Run<'_> {
             vec![json!({"family": "marker", "key": self.chain_id, "before_image": image})],
         )
         .await?;
+        compose::clear_names(&mut transaction, self.chain_id).await?;
         repair::end_compose(&mut transaction, self.chain_id, pass.number).await?;
         commit(transaction).await?;
         outcome.undo_rows += 1;
+        outcome.compose_chunks += 1;
         tracing::info!(
             target: "bigname_project::families",
             chain_id = self.chain_id,
@@ -199,7 +200,9 @@ impl Run<'_> {
 
     /// Commit `chunks` in order, each taking one block of the budget. The last one moves to the
     /// next stream when `last` says the stream has no keys after it; with no chunk at all that
-    /// move is a step of its own. Returns how many chunks committed, `None` when the budget ran
+    /// move is a step of its own, which spends nothing. After the pass's 1st, 2nd, 4th, 8th, ...
+    /// chunk, counted on the repair record across runs, the composed tables' planner statistics
+    /// are refreshed: they grow from empty during the pass. Returns false when the budget ran
     /// out first.
     #[allow(clippy::too_many_arguments)]
     async fn chunks(
@@ -211,21 +214,22 @@ impl Run<'_> {
         chunks: Vec<(Work<'_>, Option<String>)>,
         last: bool,
         outcome: &mut FamilyOutcome,
-    ) -> Result<Option<usize>> {
+    ) -> Result<bool> {
         let stream = Stream::of(record.compose_stream);
         if chunks.is_empty() {
             let mut transaction = self.fenced(family, record, revision).await?;
             let next = stream.next();
-            repair::compose_step(&mut transaction, self.chain_id, next.index(), None).await?;
+            repair::compose_step(&mut transaction, self.chain_id, next.index(), None, false)
+                .await?;
             commit(transaction).await?;
             record.compose_stream = Some(next.index());
             record.compose_cursor = None;
-            return Ok(Some(0));
+            return Ok(true);
         }
         let count = chunks.len();
         for (index, (work, at)) in chunks.into_iter().enumerate() {
             if !self.budget.take(outcome) {
-                return Ok(None);
+                return Ok(false);
             }
             let (next, cursor) = if last && index + 1 == count {
                 (stream.next(), None)
@@ -293,11 +297,12 @@ impl Run<'_> {
                     Some(end.to_string())
                 }
             };
-            repair::compose_step(
+            let committed = repair::compose_step(
                 &mut transaction,
                 self.chain_id,
                 next.index(),
                 cursor.as_deref(),
+                true,
             )
             .await?;
             commit(transaction).await?;
@@ -305,6 +310,10 @@ impl Run<'_> {
             record.compose_cursor = cursor;
             outcome.compose_chunks += 1;
             outcome.add(stats);
+            if committed.is_power_of_two() {
+                analyze_tables(self.pool, self.chain_id, &tables::COMPOSED).await;
+                outcome.statistics_refreshes += 1;
+            }
             tracing::debug!(
                 target: "bigname_project::families",
                 chain_id = self.chain_id,
@@ -313,7 +322,7 @@ impl Run<'_> {
                 "committed a chunk of the rebuild's composition pass"
             );
         }
-        Ok(Some(count))
+        Ok(true)
     }
 
     /// A pass transaction past its fences: the marker the pass composes at, generation and all,

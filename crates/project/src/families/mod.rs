@@ -336,7 +336,8 @@ pub struct FamilyOutcome {
     pub duplicate_anomalies: u64,
     /// Times a rebuild refreshed the planner statistics of the family tables.
     pub statistics_refreshes: u64,
-    /// Chunks of a rebuild's composition pass committed; each spent one block of the budget.
+    /// Steps of a rebuild's composition pass committed that spent a block of the budget: its
+    /// chunks and its end. A run of these alone still made progress.
     pub compose_chunks: u64,
     /// Elapsed milliseconds of the whole run.
     pub elapsed_ms: u64,

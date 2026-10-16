@@ -93,7 +93,7 @@ async fn record_composition(
          ) VALUES (
              $1, 0, 'content_hash_rebuild', $2, 'target', $3,
              CASE WHEN $4 THEN NULL ELSE $2 - 10 END, CASE WHEN $4 THEN 0 END,
-             CASE WHEN $4 THEN 'ens:0x01' END
+             CASE WHEN $4 THEN '5' END
          )
          ON CONFLICT (chain_id) DO UPDATE SET state = EXCLUDED.state,
              composed_block = EXCLUDED.composed_block, compose_stream = EXCLUDED.compose_stream,

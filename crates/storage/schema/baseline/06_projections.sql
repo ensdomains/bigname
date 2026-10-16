@@ -200,6 +200,7 @@ CREATE TABLE IF NOT EXISTS project_repair_record (
     composed_block bigint,
     compose_stream smallint,
     compose_cursor text,
+    compose_chunks bigint NOT NULL DEFAULT 0,
     PRIMARY KEY (chain_id),
     CHECK (reason IN ('required_redo_range', 'orphaned_lineage', 'content_hash_rebuild', 'operator_redo')),
     CHECK (state IN ('undoing', 'replaying', 'rebuilding', 'composing', 'complete')),
@@ -212,8 +213,7 @@ CREATE TABLE IF NOT EXISTS project_repair_record (
     CONSTRAINT project_repair_record_prefix_recorded_check
         CHECK (state <> 'undoing' OR NOT prefix_recorded),
     CONSTRAINT project_repair_record_compose_check
-        CHECK ((state = 'composing') = (compose_stream IS NOT NULL)
-            AND (state = 'composing' OR compose_cursor IS NULL))
+        CHECK (state <> 'composing' OR compose_stream IS NOT NULL)
 );
 COMMENT ON TABLE project_repair_record IS
     'Project-owned repair record: the durable description of the latest family undo-then-replay or rebuild of a chain, its attempt, reason, trusted base, replay target, state, input revision and completion identity. Undo never rewrites it.';
@@ -256,11 +256,33 @@ COMMENT ON COLUMN project_repair_record.reset_sequence IS
 COMMENT ON COLUMN project_repair_record.composed_block IS
     'This value is the block a rebuild''s composition pass composed at, -1 when it composed nothing; null before the pass and for an undo-then-replay. Every rebuild generation above it composes and journals.';
 COMMENT ON COLUMN project_repair_record.compose_stream IS
-    'This value is the composition pass stream under way: 0 names, 1 record nodes, 2 record ids, 3 history windows; null unless composing.';
+    'This value is the composition pass stream under way: 0 names, 1 record nodes, 2 record ids, 3 history windows; null outside a pass.';
 COMMENT ON COLUMN project_repair_record.compose_cursor IS
-    'This value is the last key the composition pass committed in its stream; null at a stream''s start and unless composing.';
+    'This value is the last key the composition pass committed in its stream, a work list serial in the names stream; null at a stream''s start and outside a pass.';
+COMMENT ON COLUMN project_repair_record.compose_chunks IS
+    'This value is how many chunks the latest composition pass committed; zero before a pass. The pass refreshes the planner statistics of the composed tables after 1, 2, 4, 8, ... chunks.';
 COMMENT ON COLUMN project_repair_record.prefix_recorded IS
     'This value is true once the replay or rebuild captured its input revision in prefix_interpret_input_content_hash and prefix_interpret_redo_attempt, which may both be null when the chain has no Interpret row; false while undoing.';
+
+CREATE TABLE IF NOT EXISTS project_compose_name_work (
+    chain_id text NOT NULL,
+    serial bigint NOT NULL,
+    logical_name_id text NOT NULL,
+    reach smallint NOT NULL,
+    PRIMARY KEY (chain_id, serial),
+    CHECK (serial > 0),
+    CHECK (reach IN (0, 1, 2))
+);
+COMMENT ON TABLE project_compose_name_work IS
+    'Project-owned work list of a rebuild''s composition pass: every name id the pass composes or indexes, numbered in COLLATE "C" order once when the pass begins. The names stream reads it in serial order. The pass end and a family reset clear the chain''s rows.';
+COMMENT ON COLUMN project_compose_name_work.chain_id IS
+    'This value is the chain whose rebuild composes the id.';
+COMMENT ON COLUMN project_compose_name_work.serial IS
+    'This value is the id''s position in the work list, from 1.';
+COMMENT ON COLUMN project_compose_name_work.logical_name_id IS
+    'This value is the name id the pass composes or indexes.';
+COMMENT ON COLUMN project_compose_name_work.reach IS
+    'This value is what the pass composes for the id: 0 the address name index, 1 the lookup name row as well, 2 also the summary and the catalogue name source.';
 
 CREATE TABLE IF NOT EXISTS project_name_state (
     namespace text NOT NULL,

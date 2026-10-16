@@ -308,7 +308,7 @@ pub(crate) async fn begin_undo(
              pending_undo_target = EXCLUDED.pending_undo_target, completed_sequence = NULL,
              completed_marker_number = NULL, completed_marker_hash = NULL,
              completed_input_hash = NULL, reset_sequence = NULL, composed_block = NULL,
-             compose_stream = NULL, compose_cursor = NULL, updated_at = now()",
+             compose_stream = NULL, compose_cursor = NULL, compose_chunks = 0, updated_at = now()",
     )
     .bind(chain_id)
     .bind(repair.attempt)
@@ -429,7 +429,7 @@ pub(crate) async fn begin_rebuild(
              completed_sequence = NULL, completed_marker_number = NULL,
              completed_marker_hash = NULL, completed_input_hash = NULL,
              reset_sequence = EXCLUDED.reset_sequence, composed_block = NULL,
-             compose_stream = NULL, compose_cursor = NULL, updated_at = now()",
+             compose_stream = NULL, compose_cursor = NULL, compose_chunks = 0, updated_at = now()",
     )
     .bind(chain_id)
     .bind(attempt)

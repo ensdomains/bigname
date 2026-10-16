@@ -2916,9 +2916,11 @@ rows, address indexes and address history catalogue the ranges' blocks would
 each have composed. It runs before the rebuild's first generation above the
 switch point, at the block the last range left the [family
 marker](#family-marker) on, in chunks of up to 1,000 keys, each a transaction
-of its own that counts as one block of the run's budget. The [repair
-record](#repair-record) is `composing` while it runs and records its stream and
-cursor, so a run that stops resumes it. It ends with one marker journal row
+of its own that counts as one block of the run's budget. Its beginning lists
+the names to compose once, in `project_compose_name_work`, and the names
+stream pages through that list. The [repair record](#repair-record) is
+`composing` while it runs and records its stream, cursor and chunk count, so a
+run that stops resumes it. It ends with one marker journal row
 that ends the [undo journal](#family-undo-journal) at its block
 ([projections](projections.md#owned-key-families)).
 

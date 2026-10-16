@@ -2534,18 +2534,29 @@ not even the prior marker. Nothing serves those rows while the marker is
 `bootstrap_pending`. Before the first generation that is not such a range (a
 work block above the switch point, or the target), the rebuild runs the pass:
 
-- A fenced transition moves the repair record to `composing`.
+- A fenced transition moves the repair record to `composing` and lists, once,
+  every name the incremental path would have named for those blocks in the
+  work table `project_compose_name_work`, numbered in `COLLATE "C"` order. The
+  names come from the surfaces, the base families and the activated
+  interpreted events at or below the marker's block, never from the journal.
+  Nothing writes the families until the pass ends, so the list stays the one
+  its beginning found.
 - Chunks then compose, at the marker's block and with the manifest set the
-  marker recorded, every name the incremental path would have named for those
-  blocks, every address index key, and the history catalogue over consecutive
-  block windows. The names come from the surfaces, the base families and the
-  interpreted events at or below that block, never from the journal. Each chunk
-  is one transaction fenced on the marker, the input revision and the record's
-  stream and cursor, and counts as one block against the run's budget, so a run
-  stops between chunks and the next continues from the record's cursor.
-- A fenced transition ends the pass. The record returns to `rebuilding` with
-  `composed_block` set to the marker's block, and one marker journal row under
+  marker recorded, the listed names by number, every address index key, and the
+  history catalogue over consecutive block windows. Each chunk is one
+  transaction fenced on the marker, the input revision and the record's stream
+  and cursor, and counts as one block against the run's budget, so a run stops
+  between chunks and the next continues from the record's cursor. After the
+  pass's 1st, 2nd, 4th, 8th and later powers of two of chunks, counted on the
+  record across runs, the pass refreshes the planner statistics of the tables it
+  composes.
+- A fenced transition ends the pass, which also counts as one block of the
+  budget. The record returns to `rebuilding` with `composed_block` set to the
+  marker's block, the work list is dropped, and one marker journal row under
   that block, marked `families_journalled: false`, ends the undo journal there.
+
+The runner continues a run that spent its budget on chunks or the pass's end
+alone, as it continues one that applied blocks.
 
 Every later generation (the single blocks above the switch point, a range
 formed after the pass because the switch point rose between runs, and the
@@ -2608,7 +2619,7 @@ attempt, reason, trusted base, replay target, state (`undoing`, `replaying`,
 `rebuilding`, `composing` or `complete`), the block a rebuild's composition
 pass composed at (`composed_block`), and, once done, the marker, generation and
 input content hash it completed with. A rebuild is `composing` while its
-composition pass runs, with the pass's stream and cursor. Each transition
+composition pass runs, with the pass's stream, cursor and chunk count. Each transition
 commits with the work it describes: the reset commits with the rebuild's
 intent, the last undo with the move to replaying, each pass chunk with its
 cursor, and the final replayed or rebuilt block with the completion. A redo

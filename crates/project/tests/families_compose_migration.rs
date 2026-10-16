@@ -1,9 +1,11 @@
 //! The schema-migration that gives `project_repair_record` the composition pass of a rebuild in
-//! ranges (migrations/20261016130000_project_repair_record_composing.sql): the state `composing`
-//! and the columns `composed_block`, `compose_stream` and `compose_cursor`. Without it the
-//! record refuses `composing`, and a family run of this build fails before it writes a pass. On
-//! the record as it stood before, the migration keeps every row and leaves the table as the
-//! baseline defines it, and applied again it changes nothing.
+//! ranges (migrations/20261016130000_project_repair_record_composing.sql): the state `composing`,
+//! the columns `composed_block`, `compose_stream`, `compose_cursor` and `compose_chunks`, and the
+//! pass's work list `project_compose_name_work`. Without it the record refuses `composing`, and a
+//! family run of this build fails as it reads the record. On the record as it stood before, the
+//! migration keeps every row and leaves the tables as the baseline defines them, and applied again
+//! it changes nothing. A runner of the release before, which knows none of the new columns, can
+//! still move a record off composing.
 #[path = "families_support/mod.rs"]
 mod support;
 
@@ -14,31 +16,49 @@ use support::{CHAIN, CONTENT_HASH, Fixture};
 const MIGRATION: &str =
     include_str!("../../../migrations/20261016130000_project_repair_record_composing.sql");
 /// The record as the release before this one defines it.
-const PREDECESSOR: &str = "ALTER TABLE project_repair_record
+const PREDECESSOR: &str = "DROP TABLE IF EXISTS project_compose_name_work;
+     ALTER TABLE project_repair_record
          DROP CONSTRAINT project_repair_record_compose_check,
          DROP CONSTRAINT project_repair_record_rebuild_base_check,
          DROP CONSTRAINT project_repair_record_state_check,
          DROP COLUMN composed_block, DROP COLUMN compose_stream, DROP COLUMN compose_cursor,
+         DROP COLUMN IF EXISTS compose_chunks,
          ADD CHECK (state IN ('undoing', 'replaying', 'rebuilding', 'complete')),
          ADD CHECK (state <> 'rebuilding' OR trusted_base_number IS NULL)";
 const R1: &str = "0x00000000000000000000000000000000000000a1";
 
-/// The record's columns, constraint definitions, named constraints and comments.
+/// The record's and the work list's columns, defaults, constraint definitions and comments, and
+/// the record's named constraints.
 async fn shape(fixture: &Fixture) -> Result<Vec<Vec<String>>> {
     let columns = sqlx::query_scalar(
-        "SELECT attribute.attname || ' ' || format_type(attribute.atttypid, attribute.atttypmod)
+        "SELECT relation.relname || '.' || attribute.attname || ' '
+                || format_type(attribute.atttypid, attribute.atttypmod)
                 || CASE WHEN attribute.attnotnull THEN ' not null' ELSE '' END
+                || coalesce(' default ' || pg_get_expr(fallback.adbin, fallback.adrelid), '')
                 || coalesce(' -- ' || col_description(attribute.attrelid, attribute.attnum), '')
          FROM pg_attribute attribute
-         WHERE attribute.attrelid = 'project_repair_record'::regclass
+         JOIN pg_class relation ON relation.oid = attribute.attrelid
+         LEFT JOIN pg_attrdef fallback
+           ON fallback.adrelid = attribute.attrelid AND fallback.adnum = attribute.attnum
+         WHERE relation.relname IN ('project_repair_record', 'project_compose_name_work')
+           AND relation.relnamespace = 'bigname_phase'::regnamespace
            AND attribute.attnum > 0 AND NOT attribute.attisdropped
+         UNION ALL
+         SELECT relation.relname || ' -- ' || coalesce(obj_description(relation.oid, 'pg_class'), '')
+         FROM pg_class relation
+         WHERE relation.relname = 'project_compose_name_work'
+           AND relation.relnamespace = 'bigname_phase'::regnamespace
          ORDER BY 1",
     )
     .fetch_all(&fixture.pool)
     .await?;
     let checks = sqlx::query_scalar(
-        "SELECT pg_get_constraintdef(oid) FROM pg_constraint
-         WHERE conrelid = 'project_repair_record'::regclass ORDER BY 1",
+        "SELECT relation.relname || ' ' || pg_get_constraintdef(constraint_row.oid)
+         FROM pg_constraint constraint_row
+         JOIN pg_class relation ON relation.oid = constraint_row.conrelid
+         WHERE relation.relname IN ('project_repair_record', 'project_compose_name_work')
+           AND relation.relnamespace = 'bigname_phase'::regnamespace
+         ORDER BY 1",
     )
     .fetch_all(&fixture.pool)
     .await?;
@@ -108,6 +128,41 @@ async fn the_migration_gives_the_record_its_composition_pass() -> Result<()> {
         "the migrated record is the baseline's: {:?} against {baseline:?}",
         shape(&fixture).await?
     );
+    // A runner of the release before moves a record off composing and leaves the pass columns
+    // it does not know.
+    sqlx::query(
+        "INSERT INTO project_repair_record (chain_id, attempt, reason, replay_target_number,
+             replay_target_hash, state, compose_stream, compose_cursor)
+         VALUES ('ethereum-sepolia', 2, 'content_hash_rebuild', 9, 'target', 'composing', 0,
+                 '7')",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let moved = sqlx::query(
+        "UPDATE project_repair_record SET state = 'rebuilding', attempt = 3
+         WHERE chain_id = 'ethereum-sepolia'",
+    )
+    .execute(&fixture.pool)
+    .await;
+    ensure!(
+        moved.is_ok(),
+        "the record leaves composing with its pass columns: {moved:?}"
+    );
+    let refused = sqlx::query(
+        "UPDATE project_repair_record SET state = 'composing', compose_stream = NULL
+         WHERE chain_id = 'ethereum-sepolia'",
+    )
+    .execute(&fixture.pool)
+    .await;
+    ensure!(
+        refused
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("check constraint")),
+        "composing still needs a stream: {refused:?}"
+    );
+    sqlx::query("DELETE FROM project_repair_record WHERE chain_id = 'ethereum-sepolia'")
+        .execute(&fixture.pool)
+        .await?;
     let kept: (String, Option<i64>) = sqlx::query_as(
         "SELECT state, composed_block FROM project_repair_record
          WHERE chain_id = 'ethereum-holesky'",

@@ -163,6 +163,15 @@ async fn install_reorg(scratch: &ScratchDatabase, fixture: &RpcFixture, chain: &
 }
 
 fn runner(scratch: &ScratchDatabase, chain: &str, budget: u64) -> Result<PhaseRunner> {
+    runner_in(scratch, chain, budget, RebuildRanges::Off)
+}
+
+fn runner_in(
+    scratch: &ScratchDatabase,
+    chain: &str,
+    budget: u64,
+    rebuild_ranges: RebuildRanges,
+) -> Result<PhaseRunner> {
     Ok(PhaseRunner::new(
         scratch.runner(),
         PhaseSet::with_ingest_interpret_and_project(
@@ -172,7 +181,7 @@ fn runner(scratch: &ScratchDatabase, chain: &str, budget: u64) -> Result<PhaseRu
                 ProjectPhase::new(scratch.pool().clone()).with_family_settings(FamilySettings {
                     max_blocks_per_run: budget,
                     retry_family_failures: false,
-                    rebuild_ranges: RebuildRanges::Off,
+                    rebuild_ranges,
                     ..FamilySettings::default()
                 }),
             ),

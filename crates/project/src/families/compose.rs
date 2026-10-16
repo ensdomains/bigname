@@ -33,7 +33,7 @@ const COMPOSED: Reach = 2;
 /// The pass's streams in the order it runs them; `compose_stream` on the repair record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Stream {
-    /// Every name id the incremental path composes or indexes, in `COLLATE "C"` order.
+    /// Every name id the incremental path composes or indexes, in the work list's order.
     Names = 0,
     /// The (resolver, node) pairs of the record values, for the address record node index.
     Nodes = 1,
@@ -67,13 +67,17 @@ impl Stream {
     }
 }
 
-/// The next `limit` name ids after `cursor` the pass composes or indexes, in `COLLATE "C"`
-/// order, each with its reach (`Reach`). A composed id is one the summary work list
+/// The pass's work list, written once when the pass begins (`prepare_names`): every name id the
+/// pass composes or indexes, numbered from 1 in `COLLATE "C"` order, each with its reach
+/// (`Reach`). The ranges below the pass are done by then and nothing else writes the families
+/// until the pass ends, so the list a later run reads is the one a single enumeration at the
+/// pass's start finds. A composed id is one the summary work list
 /// (`derived::SUMMARY_WORK_LIST`) names for some block at or below the pass block `$2`: a
 /// surface, a key of a family keyed by name or registry node, a name column of a family row, a
 /// resource pointer's name, or a name an interpreted event carried, which covers every value a
 /// family row held before a later event moved it (a pointer's node, a wrapper's or key state's
-/// name, a record row's name). No base row of those families is deleted in a rebuild, so the
+/// name, a record row's name). The events read are the activated ones, the input the fold applies
+/// (input.rs, range/reads.rs), so an event no block applied names nothing. No base row of those families is deleted in a rebuild, so the
 /// current rows hold every key the journal arms read. Each composed id gets its lookup name row
 /// and its catalogue name source, and its summary when it has a surface.
 ///
@@ -85,7 +89,7 @@ impl Stream {
 /// more. Every other family's name column holds an event's name, which has a surface
 /// (`normalized_events` references `name_surfaces`). The ENSv1 child-edge ids only index
 /// addresses.
-const NAMES: &str = r#"/* project:families.compose.names */
+const PREPARE_NAMES: &str = r#"/* project:families.compose.prepare_names */
     WITH ids (logical_name_id, reach) AS (
         SELECT surface.logical_name_id, 2 FROM name_surfaces surface
         WHERE surface.chain_id = $1 AND surface.block_number <= $2
@@ -132,6 +136,7 @@ const NAMES: &str = r#"/* project:families.compose.names */
           AND transfer.canonicality_state IN ('canonical', 'safe', 'finalized')
           AND transfer.chain_id = $1 AND transfer.block_number <= $2
           AND transfer.logical_name_id IS NULL
+          AND transfer.consumer_visibility = 'activated'
           AND transfer.source_family IN ('ens_v1_registrar_l1', 'basenames_base_registrar')
         GROUP BY 1 HAVING count(DISTINCT transfer.block_number) > 1
         UNION ALL
@@ -142,16 +147,26 @@ const NAMES: &str = r#"/* project:families.compose.names */
                   THEN event.namespace || ':' || lower(event.after_state ->> 'node') END)) name (value)
         WHERE event.chain_id = $1 AND event.block_number <= $2
           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+          AND event.consumer_visibility = 'activated'
         UNION ALL
         SELECT edge.namespace || ':' || edge.child_node, 0 FROM project_child_edge_candidate edge
         WHERE edge.chain_id = $1 AND edge.authority_arm = 'ens_v1'
     )
-    SELECT logical_name_id, max(reach)::smallint FROM ids
+    INSERT INTO project_compose_name_work (chain_id, serial, logical_name_id, reach)
+    SELECT $1, row_number() OVER (ORDER BY logical_name_id COLLATE "C"), logical_name_id,
+           max(reach)::smallint
+    FROM ids
     WHERE logical_name_id IS NOT NULL AND logical_name_id <> ''
-      AND logical_name_id COLLATE "C" > $3
-    GROUP BY logical_name_id
-    ORDER BY logical_name_id COLLATE "C"
-    LIMIT $4"#;
+    GROUP BY logical_name_id"#;
+
+const NAMES: &str = "/* project:families.compose.names */
+    SELECT work.serial, work.logical_name_id, work.reach FROM project_compose_name_work work
+    WHERE work.chain_id = $1 AND work.serial > $2
+    ORDER BY work.serial
+    LIMIT $3";
+
+const CLEAR_NAMES: &str = "/* project:families.compose.clear_names */
+    DELETE FROM project_compose_name_work WHERE chain_id = $1";
 
 const NODES: &str = r#"/* project:families.compose.nodes */
     SELECT DISTINCT value.resolver_address, value.node FROM project_node_record_value value
@@ -177,18 +192,53 @@ const WINDOW: &str = "/* project:families.compose.window */
     ) block
     ORDER BY block.block_number";
 
-/// The next name ids of the names stream after `cursor`, at most `limit`.
+/// Write the pass's work list for the pass block `block`, in the transaction that begins the
+/// pass, over whatever list an interrupted beginning left.
+pub(crate) async fn prepare_names(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    block: i64,
+) -> Result<u64> {
+    clear_names(transaction, chain_id).await?;
+    sqlx::query(PREPARE_NAMES)
+        .bind(chain_id)
+        .bind(block)
+        .execute(&mut **transaction)
+        .await
+        .map(|result| result.rows_affected())
+        .map_err(|error| ProjectError::database("failed to list the names to compose", error))
+}
+
+/// Drop the chain's work list, at the pass end.
+pub(crate) async fn clear_names(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+) -> Result<()> {
+    sqlx::query(CLEAR_NAMES)
+        .bind(chain_id)
+        .execute(&mut **transaction)
+        .await
+        .map(|_| ())
+        .map_err(|error| ProjectError::database("failed to clear the names to compose", error))
+}
+
+/// The next ids of the work list after the serial `cursor`, at most `limit`, each with its
+/// serial.
 pub(crate) async fn names(
     pool: &PgPool,
     chain_id: &str,
-    block: i64,
     cursor: Option<&str>,
     limit: usize,
-) -> Result<Vec<(String, Reach)>> {
+) -> Result<Vec<(i64, String, Reach)>> {
+    let after = match cursor {
+        Some(cursor) => cursor.parse::<i64>().map_err(|error| {
+            ProjectError::data_integrity(format!("composition names cursor {cursor}: {error}"))
+        })?,
+        None => 0,
+    };
     sqlx::query_as(NAMES)
         .bind(chain_id)
-        .bind(block)
-        .bind(cursor.unwrap_or(""))
+        .bind(after)
         .bind(i64::try_from(limit).unwrap_or(i64::MAX))
         .fetch_all(pool)
         .await
@@ -270,13 +320,13 @@ pub(crate) async fn names_chunk(
     chain_id: &str,
     block: &BlockHeader,
     composition: &marker::Composition,
-    ids: &[(String, Reach)],
+    ids: &[(i64, String, Reach)],
     stats: &mut BlockStats,
 ) -> Result<()> {
     let reaching = |least: Reach| {
         ids.iter()
-            .filter(|(_, reach)| *reach >= least)
-            .map(|(id, _)| id.clone())
+            .filter(|(_, _, reach)| *reach >= least)
+            .map(|(_, id, _)| id.clone())
             .collect::<Vec<_>>()
     };
     let (every, looked_up, composed) = (reaching(0), reaching(LOOKUP), reaching(COMPOSED));

@@ -135,6 +135,60 @@ async fn a_real_rebuild_has_truthful_bounded_progress_and_resumes_without_anothe
     scratch.cleanup().await
 }
 
+/// A redo that rebuilds in ranges, one block of budget a run: most runs of the composition pass
+/// commit a chunk or the pass end and apply no block, and the runner continues through them
+/// without recording a Project failure.
+#[tokio::test]
+async fn a_ranged_rebuild_continues_through_runs_that_only_compose() -> Result<()> {
+    let chain = "project-compose-runs";
+    let (scratch, fixture) = ready(chain).await?;
+    let before = pointers(&scratch, chain).await?;
+    sqlx::query("DELETE FROM project_family_undo WHERE chain_id = $1 AND block_number <= 20")
+        .bind(chain)
+        .execute(scratch.pool())
+        .await?;
+    sqlx::raw_sql(
+        "CREATE TABLE project_failures_seen (last_error text);
+         CREATE FUNCTION project_failure_seen() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             INSERT INTO project_failures_seen VALUES (NEW.last_error);
+             RETURN NEW;
+         END $$;
+         CREATE TRIGGER project_failure_seen AFTER UPDATE ON chain_phase_state
+         FOR EACH ROW WHEN (NEW.phase_name = 'project' AND NEW.last_error IS NOT NULL
+                            AND NEW.last_error IS DISTINCT FROM OLD.last_error)
+         EXECUTE FUNCTION project_failure_seen();",
+    )
+    .execute(scratch.pool())
+    .await?;
+    runner_in(&scratch, chain, 1, RebuildRanges::Through(HEAD))?
+        .redo(
+            &live_chain(chain, &fixture.endpoint)?,
+            RedoPhase::Phase(PhaseName::Project),
+            BlockRange::new(10, 11)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    let composed: Option<i64> =
+        sqlx::query_scalar("SELECT composed_block FROM project_repair_record WHERE chain_id = $1")
+            .bind(chain)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert!(
+        composed.is_some_and(|block| block > 0),
+        "the rebuild composed in a pass: {composed:?}"
+    );
+    let failures: Vec<Option<String>> =
+        sqlx::query_scalar("SELECT last_error FROM project_failures_seen")
+            .fetch_all(scratch.pool())
+            .await?;
+    assert!(failures.is_empty(), "no Project failure: {failures:?}");
+    assert_eq!(pointers(&scratch, chain).await?, before);
+    assert_eq!(family_marker(&scratch, chain).await?, HEAD);
+    fixture.server.abort();
+    scratch.cleanup().await
+}
+
 #[tokio::test]
 async fn undo_of_a_range_transaction_records_its_actual_predecessor() -> Result<()> {
     let chain = "project-ranged-undo";

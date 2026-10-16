@@ -283,6 +283,19 @@ async fn empty_rows(fixture: &Fixture, id: &str) -> Result<(bool, bool)> {
     Ok((lookup == 1, source == 1))
 }
 
+/// The lookup name rows and catalogue name sources of `id`, of any content.
+async fn composed_for(fixture: &Fixture, id: &str) -> Result<i64> {
+    count(
+        fixture,
+        &format!(
+            "SELECT (SELECT count(*) FROM project_lookup_name WHERE logical_name_id = '{id}')
+                  + (SELECT count(*) FROM project_history_source
+                     WHERE source_kind = 0 AND source_key = '{id}')"
+        ),
+    )
+    .await
+}
+
 // Rebuilt in ranges through the target with one name to a chunk and catalogue windows of at most
 // 25 events, the history equals its block-by-block rebuild in every family table, the 12 composed
 // tables among them. The comparison covers what it is meant to: lookup rows with no composed core
@@ -436,6 +449,7 @@ async fn a_rebuild_in_ranges_composes_once_what_block_by_block_composes() -> Res
 #[derive(Debug)]
 struct Seen {
     chunks: u64,
+    refreshes: u64,
     blocks: u64,
     ranges: u64,
     undo_rows: u64,
@@ -451,8 +465,11 @@ struct Seen {
 // with no pass recorded. Every later run has a budget of one block: it commits at most one chunk
 // of five keys, or the pass's end, or one single block. The pass continues from the cursor the
 // previous run left, a stream starts from its beginning once the one before it is done, and a run
-// that finds the last window done only ends the pass. The single blocks above the switch point
-// then compose and journal as block by block does, and the finished families equal it.
+// that finds the last window done only ends the pass, which counts as a step that spent the
+// budget. The composed tables' statistics are refreshed after the pass's 1st, 2nd, 4th, ... chunk,
+// counted across runs, so once per power of two however the chunks fall into runs. The single
+// blocks above the switch point then compose and journal as block by block does, and the finished
+// families equal it.
 #[tokio::test]
 async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
     let fixture = seeded("families_compose_resume").await?;
@@ -495,6 +512,7 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
         let (state, stream, cursor, composed) = pass_state(&fixture).await?;
         seen.push(Seen {
             chunks: outcome.compose_chunks,
+            refreshes: outcome.statistics_refreshes,
             blocks: outcome.blocks,
             ranges: outcome.ranges,
             undo_rows: outcome.undo_rows,
@@ -510,6 +528,21 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
         ensure!(seen.len() < 2000, "the rebuild does not converge");
     }
     require_equal(&fixture, &expected, "a pass over runs of one block").await?;
+    let ended = seen
+        .iter()
+        .position(|run| run.composed.is_i64())
+        .expect("the pass ends");
+    // One refresh per power of two of the pass's chunks, not one per run.
+    let chunks: u64 = seen[..ended].iter().map(|run| run.chunks).sum();
+    let refreshes: u64 = seen[..=ended].iter().map(|run| run.refreshes).sum();
+    let record = fixture.repair_record().await?.unwrap_or_default();
+    ensure!(
+        chunks > 8
+            && record["compose_chunks"] == json!(chunks)
+            && refreshes == u64::from(chunks.ilog2()) + 1,
+        "{refreshes} refreshes over {chunks} chunks, the record counts {}",
+        record["compose_chunks"]
+    );
 
     // Each run commits at most one chunk, the pass's end or one block, and no range.
     for (index, run) in seen.iter().enumerate() {
@@ -546,7 +579,15 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
             .iter()
             .filter_map(|cursor| cursor.as_str().map(str::to_owned))
             .collect();
-        if stream != 3 {
+        if stream == 0 {
+            // The names cursor is the work list serial the chunk ended at.
+            let serials: Vec<i64> = texts.iter().filter_map(|text| text.parse().ok()).collect();
+            ensure!(
+                serials.len() == texts.len()
+                    && serials.windows(2).all(|pair| pair[1] == pair[0] + 5),
+                "the names cursor moves on five serials a chunk: {texts:?}"
+            );
+        } else if stream != 3 {
             let mut sorted = texts.clone();
             sorted.sort();
             sorted.dedup();
@@ -557,13 +598,9 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
         }
     }
     // The run that found the last window done ended the pass and did nothing else.
-    let ended = seen
-        .iter()
-        .position(|run| run.composed.is_i64())
-        .expect("the pass ends");
     let end = &seen[ended];
     ensure!(
-        (end.chunks, end.blocks, end.undo_rows, end.marker) == (0, 0, 1, pass_block)
+        (end.chunks, end.blocks, end.undo_rows, end.marker) == (1, 0, 1, pass_block)
             && end.composed.as_i64() == pass_block
             && end.state == "rebuilding",
         "the pass's end: {end:?}"
@@ -597,6 +634,116 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
         single_journal > 0,
         "a single block journals the rows it writes"
     );
+    fixture.cleanup().await
+}
+
+// The pass's beginning lists every id the pass composes once, numbered from 1, and a later run
+// of the pass pages through that list rather than enumerating the families again. A name a base
+// row gains after the pass began, which no block can give it while the pass runs, is therefore
+// not composed. The pass's end drops the list, and the families equal the block-by-block ones.
+#[tokio::test]
+async fn a_later_run_of_the_pass_composes_the_list_its_beginning_wrote() -> Result<()> {
+    let fixture = seeded("families_compose_list").await?;
+    let expected = block_by_block(&fixture).await?;
+    let pre_pass = work_blocks(&fixture, SWITCH).await?;
+    let mut budgeted = options(RebuildRanges::Through(SWITCH))
+        .with_compose_chunk_keys(5)
+        .with_max_blocks_per_run(pre_pass + 1);
+    budgeted.max_range_events = 25;
+    run(&fixture, true, &budgeted).await?;
+    let (state, stream, cursor, _) = pass_state(&fixture).await?;
+    ensure!(
+        (state.as_str(), &stream) == ("composing", &json!(0)) && cursor.is_string(),
+        "one chunk of names committed: {state} {stream} {cursor}"
+    );
+    // Read now, checked after the probe below.
+    let listed: sqlx::Result<(i64, Option<i64>, Option<i64>, i64)> = sqlx::query_as(
+        "SELECT count(*), min(serial), max(serial), count(DISTINCT logical_name_id)
+         FROM project_compose_name_work WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .fetch_one(&fixture.pool)
+    .await;
+    let late = format!("0x{}", "f".repeat(64));
+    sqlx::query(
+        "INSERT INTO project_registry_node_state (chain_id, namespace, node, block_number,
+             event_identity)
+         VALUES ($1, 'ens', $2, 1, 'late-probe')",
+    )
+    .bind(CHAIN)
+    .bind(&late)
+    .execute(&fixture.pool)
+    .await?;
+    run(
+        &fixture,
+        false,
+        &budgeted.clone().with_max_blocks_per_run(u64::MAX),
+    )
+    .await?;
+    ensure!(
+        composed_for(&fixture, &unsurfaced(&late)).await? == 0,
+        "a name gained after the pass began is not composed"
+    );
+    let (rows, first, last, distinct) = listed?;
+    ensure!(
+        rows > 5 && first == Some(1) && last == Some(rows) && distinct == rows,
+        "the list numbers every id once from 1: {rows} {first:?} {last:?} {distinct}"
+    );
+    ensure!(
+        count(&fixture, "SELECT count(*) FROM project_compose_name_work").await? == 0,
+        "the pass's end drops the list"
+    );
+    sqlx::query("DELETE FROM project_registry_node_state WHERE event_identity = 'late-probe'")
+        .execute(&fixture.pool)
+        .await?;
+    require_equal(&fixture, &expected, "a pass over its list").await?;
+    fixture.cleanup().await
+}
+
+// An event the fold never applies, a candidate one that waits for a migration's activation,
+// names nothing in the pass either: its ResolverChanged node gets no lookup row or name source,
+// as block by block, where no block applies the event.
+#[tokio::test]
+async fn an_event_the_fold_never_applies_names_nothing_in_the_pass() -> Result<()> {
+    let fixture = seeded("families_compose_candidate").await?;
+    let candidate = format!("0x{}", "e".repeat(64));
+    let event = fixture
+        .write(
+            170,
+            9,
+            "ResolverChanged",
+            "ens_v2_registry_l1",
+            None,
+            Some(&uuid(906)),
+            json!({"node": candidate, "resolver": R1}),
+            R1,
+        )
+        .await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET consumer_visibility = 'candidate', migration_correlation_ids = ARRAY['probe']
+         WHERE normalized_event_id = $1",
+    )
+    .bind(event)
+    .execute(&fixture.pool)
+    .await?;
+    let expected = block_by_block(&fixture).await?;
+    ensure!(
+        composed_for(&fixture, &unsurfaced(&candidate)).await? == 0,
+        "block by block names nothing for the candidate event"
+    );
+    fixture
+        .apply_with(
+            TARGET,
+            FamilyMode::Rebuild,
+            &options(RebuildRanges::Through(TARGET)).with_compose_chunk_keys(5),
+        )
+        .await?;
+    ensure!(
+        composed_for(&fixture, &unsurfaced(&candidate)).await? == 0,
+        "the pass names nothing for the candidate event"
+    );
+    require_equal(&fixture, &expected, "with a candidate event").await?;
     fixture.cleanup().await
 }
 

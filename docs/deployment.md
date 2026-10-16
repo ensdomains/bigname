@@ -4638,14 +4638,22 @@ changes `crates/project/src` and adds a schema-migration. It is an input of the
   matching runner and API binaries. The change rides the next re-derivation
   release and shares that release's Project redo.
 - The schema-migration `20261016130000_project_repair_record_composing.sql`
-  adds the repair record state `composing` and the columns `composed_block`,
-  `compose_stream` and `compose_cursor`. It must run before the new runner
-  binary: without it the record refuses `composing` and the family run fails
-  before its pass.
+  adds the repair record state `composing`, the columns `composed_block`,
+  `compose_stream`, `compose_cursor` and `compose_chunks`, and the pass's work
+  list table `project_compose_name_work`. It must run before the new runner
+  binary. Every family run of the new binary reads the new record columns, so
+  without the migration every family run fails, live follow included, not only
+  the pass.
+- Rolling the runner back mid-pass is safe. The previous binary resets the
+  chain under its own projection content hash and leaves the pass columns it
+  does not know, which the migration's constraint allows outside `composing`.
+  The new binary clears them when it next resets.
 - During the rebuild the composed tables (name summaries, lookup rows, address
   indexes and the history catalogue) read zero rows until the pass. During the
   pass the [family marker](glossary.md#family-marker) stays on one block while
-  the [repair record](glossary.md#repair-record)'s `compose_stream` and
-  `compose_cursor` move ([pipeline monitoring](runbooks/pipeline-monitoring.md)).
-- It adds no table, manifest or setting. The manifest-authority fingerprint and
-  the compiled watch plan are unchanged, so stamp no Ingest redo.
+  the [repair record](glossary.md#repair-record)'s `compose_stream`,
+  `compose_cursor` and `compose_chunks` move
+  ([pipeline monitoring](runbooks/pipeline-monitoring.md)).
+- It adds no manifest or setting. Its only table is the pass's work list, which
+  holds rows only while a pass runs. The manifest-authority fingerprint and the
+  compiled watch plan are unchanged, so stamp no Ingest redo.
