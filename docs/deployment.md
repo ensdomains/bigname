@@ -4485,7 +4485,7 @@ What changes for names:
 - On Sepolia, a registry write naming the admitted Graveyard grants it nothing there.
 - A contract registrant that hands the token and the record on in its registration's
   transaction holds the resource only between the two, on every chain, and the next owner's
-  write leaves that owner alone.
+  write leaves the next owner as the only holder.
 - `GET /v1/events?type=permission` no longer serves a second grant to an owner that already
   holds the resource: at a registrar transfer back to the registry owner, at a `registerOnly`
   registration, and at a lease release.

@@ -1069,16 +1069,28 @@ enum NextWrite {
     NextBlock,
 }
 
+/// How a hand-on's registration gets its resolver.
+#[derive(Clone, Copy, PartialEq)]
+enum HandOnResolver {
+    /// None: the controller registers straight to HOLDER.
+    Zero,
+    /// The controller's: it registers to itself, writes the record to HOLDER with the resolver
+    /// and transfers the token to HOLDER.
+    Controller,
+    /// HOLDER's own: a zero-resolver registration, then HOLDER's registry `setResolver` before
+    /// the hand-on.
+    Own,
+}
+
 /// The hand-on transaction at block 2: HOLDER, a contract registrant, registers `leased.eth`,
 /// then transfers the token to TRANSFEREE and sets the registry owner to TRANSFEREE. `numeric`
 /// emits the registration as the BaseRegistrar's numeric `NameRegistered`, as Sepolia admits
-/// it. Otherwise it is the controller's `NameRegistered`, as mainnet admits it. With a zero
-/// resolver the controller registers straight to HOLDER. With a resolver it registers to
-/// itself, writes the record to HOLDER with the resolver and transfers the token to HOLDER
-/// first.
+/// it. Otherwise it is the controller's `NameRegistered`, as mainnet admits it. `resolver` sets
+/// how the name gets its resolver before the hand-on.
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L287-L317 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L333-L341 @ ens_v1@91c966f)
-fn handed_on(numeric: bool, resolver: bool) -> Vec<RawLogInput> {
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L86-L95 @ ens_v1@91c966f)
+fn handed_on(numeric: bool, resolver: HandOnResolver) -> Vec<RawLogInput> {
     const EXPIRES: u64 = 4_000_000_000;
     let mut logs = Vec::new();
     let mut log_index = 0;
@@ -1086,7 +1098,7 @@ fn handed_on(numeric: bool, resolver: bool) -> Vec<RawLogInput> {
         logs.push(raw(log_index));
         log_index += 1;
     };
-    if resolver {
+    if resolver == HandOnResolver::Controller {
         push(|index| lease_transfer(2, index, ZERO, REGISTERING_CONTROLLER));
         push(|index| new_owner_under(node(&["eth"]), 2, index, "leased", REGISTERING_CONTROLLER));
         if numeric {
@@ -1106,6 +1118,9 @@ fn handed_on(numeric: bool, resolver: bool) -> Vec<RawLogInput> {
         } else {
             push(|index| registered(2, index, HOLDER, EXPIRES));
         }
+        if resolver == HandOnResolver::Own {
+            push(|index| new_resolver(2, index, leased(), RESOLVER));
+        }
     }
     push(|index| lease_transfer(2, index, HOLDER, TRANSFEREE));
     push(|index| registry_transfer(2, index, leased(), TRANSFEREE));
@@ -1113,9 +1128,14 @@ fn handed_on(numeric: bool, resolver: bool) -> Vec<RawLogInput> {
 }
 
 /// One row of the hand-on table: the hand-on, then TRANSFEREE's registry write to AWAY_OWNER at
-/// `next`. AWAY_OWNER ends as the only holder, with `resolver_control` when the registration
-/// set a resolver, and no row on the resource names HOLDER after the hand-on.
-fn hand_on_row(row: &'static str, numeric: bool, resolver: bool, next: NextWrite) -> HolderRow {
+/// `next`. AWAY_OWNER ends as the only holder, with `resolver_control` when the name has a
+/// resolver, and no row on the resource names HOLDER after the hand-on.
+fn hand_on_row(
+    row: &'static str,
+    numeric: bool,
+    resolver: HandOnResolver,
+    next: NextWrite,
+) -> HolderRow {
     let mut hand_on = handed_on(numeric, resolver);
     let last = hand_on.last().map_or(0, |raw| raw.log_index);
     let steps = match next {
@@ -1137,7 +1157,10 @@ fn hand_on_row(row: &'static str, numeric: bool, resolver: bool, next: NextWrite
         vec![new_owner_under(B256::ZERO, 1, 0, "eth", CONTRACT)],
         steps,
         registry_only_of(&leased_hex()),
-        held_by(AWAY_OWNER, resolver.then_some(RESOLVER)),
+        held_by(
+            AWAY_OWNER,
+            (resolver != HandOnResolver::Zero).then_some(RESOLVER),
+        ),
     )
     .forbid(move |event| {
         about(event, HOLDER)
@@ -1146,35 +1169,49 @@ fn hand_on_row(row: &'static str, numeric: bool, resolver: bool, next: NextWrite
     })
 }
 
-/// Where a Sepolia zero-resolver hand-on's two rows about HOLDER miss the registry-only
-/// resource, in any layout of `row`: the grant at HOLDER's token transfer and the revoke at
-/// TRANSFEREE's registry write must each appear once, both on that resource. The reconcile keeps
-/// the grant, and keeps the revoke as the first pass emitted it.
-fn hand_on_pair_failures(row: &HolderRow) -> anyhow::Result<Vec<String>> {
-    let hand_on = handed_on(true, false);
+/// Where a Sepolia hand-on's rows about HOLDER miss the registry-only resource, in any layout of
+/// `row`: in each scope HOLDER holds, the grant at HOLDER's token transfer and the revoke at
+/// TRANSFEREE's registry write must each appear once, both on that resource and in that scope.
+/// The scopes are `resource_control`, and `resolver_control` at RESOLVER when HOLDER set it
+/// itself. The reconcile keeps each grant, and keeps each revoke as the first pass emitted it.
+fn hand_on_pair_failures(row: &HolderRow, resolver: HandOnResolver) -> anyhow::Result<Vec<String>> {
+    let hand_on = handed_on(true, resolver);
     let write = hand_on.last().map_or(0, |raw| raw.log_index);
     let transfer = write - 1;
+    let resource_scope = serde_json::json!({"kind": "resource"});
+    let resolver_scope = serde_json::json!({
+        "chain_id": CHAIN,
+        "kind": "resolver",
+        "resolver_address": RESOLVER.to_ascii_lowercase(),
+    });
+    let mut scopes = vec![resource_scope];
+    if resolver == HandOnResolver::Own {
+        scopes.push(resolver_scope);
+    }
     let mut failures = Vec::new();
     for (layout, outputs) in every_layout(&numeric_batch, &row.prefix, &row.steps)? {
-        for (log_index, granted, kept) in [(transfer, true, "grant"), (write, false, "revoke")] {
-            let resources = outputs
-                .iter()
-                .flat_map(|output| output.normalized_events.iter())
-                .filter(|event| {
-                    event.event_kind == "PermissionChanged"
-                        && about(event, HOLDER)
-                        && event.after_state["scope"]["kind"] == "resource"
-                        && (event.block_number, event.transaction_index, event.log_index)
-                            == (Some(2), Some(0), Some(log_index))
-                        && is_grant(event) == granted
-                })
-                .map(|event| event.resource_id)
-                .collect::<Vec<_>>();
-            if resources != vec![Some(row.resource)] {
-                failures.push(format!(
-                    "{}, {layout}: the kept {kept} of HOLDER at log {log_index} is on {resources:?}, expected only {:?}",
-                    row.row, row.resource
-                ));
+        for scope in &scopes {
+            for (log_index, granted, kept) in [(transfer, true, "grant"), (write, false, "revoke")]
+            {
+                let resources = outputs
+                    .iter()
+                    .flat_map(|output| output.normalized_events.iter())
+                    .filter(|event| {
+                        event.event_kind == "PermissionChanged"
+                            && about(event, HOLDER)
+                            && event.after_state["scope"] == *scope
+                            && (event.block_number, event.transaction_index, event.log_index)
+                                == (Some(2), Some(0), Some(log_index))
+                            && is_grant(event) == granted
+                    })
+                    .map(|event| event.resource_id)
+                    .collect::<Vec<_>>();
+                if resources != vec![Some(row.resource)] {
+                    failures.push(format!(
+                        "{}, {layout}: the kept {kept} of HOLDER in {scope} at log {log_index} is on {resources:?}, expected only {:?}",
+                        row.row, row.resource
+                    ));
+                }
             }
         }
     }
@@ -1208,68 +1245,74 @@ fn a_registration_handed_on_in_its_transaction_leaves_one_holder() -> anyhow::Re
         (
             sepolia,
             "1 Sepolia, zero resolver, next write in its transaction",
-            false,
+            HandOnResolver::Zero,
             SameTransaction,
         ),
         (
             sepolia,
             "3 Sepolia, zero resolver, next write in the next block",
-            false,
+            HandOnResolver::Zero,
             NextBlock,
         ),
         (
             mainnet,
             "4 mainnet, zero resolver, next write in its transaction",
-            false,
+            HandOnResolver::Zero,
             SameTransaction,
         ),
         (
             mainnet,
             "5 mainnet, zero resolver, next write later in its block",
-            false,
+            HandOnResolver::Zero,
             LaterTransaction,
         ),
         (
             mainnet,
             "6 mainnet, zero resolver, next write in the next block",
-            false,
+            HandOnResolver::Zero,
             NextBlock,
         ),
         (
             sepolia,
             "7 Sepolia, resolver, next write in its transaction",
-            true,
+            HandOnResolver::Controller,
             SameTransaction,
         ),
         (
             sepolia,
             "8 Sepolia, resolver, next write later in its block",
-            true,
+            HandOnResolver::Controller,
             LaterTransaction,
         ),
         (
             sepolia,
             "9 Sepolia, resolver, next write in the next block",
-            true,
+            HandOnResolver::Controller,
             NextBlock,
         ),
         (
             mainnet,
             "10 mainnet, resolver, next write in its transaction",
-            true,
+            HandOnResolver::Controller,
             SameTransaction,
         ),
         (
             mainnet,
             "11 mainnet, resolver, next write later in its block",
-            true,
+            HandOnResolver::Controller,
             LaterTransaction,
         ),
         (
             mainnet,
             "12 mainnet, resolver, next write in the next block",
-            true,
+            HandOnResolver::Controller,
             NextBlock,
+        ),
+        (
+            sepolia,
+            "14 Sepolia, own resolver, next write later in its block",
+            HandOnResolver::Own,
+            LaterTransaction,
         ),
     ];
     let mut failures = Vec::new();
@@ -1280,11 +1323,11 @@ fn a_registration_handed_on_in_its_transaction_leaves_one_holder() -> anyhow::Re
             &lease_batch
         };
         let mut holder_row = hand_on_row(row, numeric, resolver, next);
-        if numeric && !resolver && matches!(next, NextBlock) {
+        if numeric && resolver == HandOnResolver::Zero && matches!(next, NextBlock) {
             holder_row = holder_row.lookahead();
         }
-        if numeric && !resolver {
-            match hand_on_pair_failures(&holder_row) {
+        if numeric && resolver != HandOnResolver::Controller {
+            match hand_on_pair_failures(&holder_row, resolver) {
                 Ok(found) => failures.extend(found),
                 Err(error) => failures.push(format!("{row}: {error:#}")),
             }
@@ -1304,13 +1347,16 @@ fn a_registration_handed_on_in_its_transaction_leaves_one_holder() -> anyhow::Re
 #[test]
 fn a_block_replay_after_a_hand_on_keeps_one_holder() -> anyhow::Result<()> {
     let row = "2 Sepolia, zero resolver, next write later in its block";
-    let mut failures =
-        hand_on_pair_failures(&hand_on_row(row, true, false, NextWrite::LaterTransaction))
-            .unwrap_or_else(|error| vec![format!("{row}: {error:#}")]);
+    let zero = HandOnResolver::Zero;
+    let mut failures = hand_on_pair_failures(
+        &hand_on_row(row, true, zero, NextWrite::LaterTransaction),
+        zero,
+    )
+    .unwrap_or_else(|error| vec![format!("{row}: {error:#}")]);
     failures.extend(
         holder_row_failures(
             &numeric_batch,
-            vec![hand_on_row(row, true, false, NextWrite::LaterTransaction)],
+            vec![hand_on_row(row, true, zero, NextWrite::LaterTransaction)],
         )
         .unwrap_or_else(|error| vec![format!("{row}: {error:#}")]),
     );
