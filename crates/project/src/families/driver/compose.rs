@@ -106,26 +106,37 @@ impl Run<'_> {
                         let at = chunk.last().map(|(id, _)| id.clone());
                         chunks.push((Work::Names(chunk), at));
                     }
-                    self.chunks(family, &mut record, revision, &composition, chunks, last, outcome)
-                        .await?
+                    self.chunks(
+                        family,
+                        &mut record,
+                        revision,
+                        &composition,
+                        chunks,
+                        last,
+                        outcome,
+                    )
+                    .await?
                 }
                 Stream::Nodes | Stream::RecordIds => {
-                    let pairs = compose::pairs(
-                        self.pool,
-                        self.chain_id,
-                        stream,
-                        cursor.as_deref(),
-                        limit,
-                    )
-                    .await?;
+                    let pairs =
+                        compose::pairs(self.pool, self.chain_id, stream, cursor.as_deref(), limit)
+                            .await?;
                     let last = pairs.len() < limit;
                     let mut chunks = Vec::new();
                     for chunk in pairs.chunks(size) {
                         let at = chunk.last().map(compose::pair_cursor);
                         chunks.push((Work::Pairs(chunk.to_vec()), at));
                     }
-                    self.chunks(family, &mut record, revision, &composition, chunks, last, outcome)
-                        .await?
+                    self.chunks(
+                        family,
+                        &mut record,
+                        revision,
+                        &composition,
+                        chunks,
+                        last,
+                        outcome,
+                    )
+                    .await?
                 }
                 Stream::Windows => {
                     let after = match cursor.as_deref() {
@@ -221,7 +232,10 @@ impl Run<'_> {
             } else {
                 (stream, at)
             };
-            let pass = family.current.as_ref().expect("a pass with chunks has a block");
+            let pass = family
+                .current
+                .as_ref()
+                .expect("a pass with chunks has a block");
             let mut transaction = self.fenced(family, record, revision).await?;
             let mut header = self.pass_block(&mut transaction, pass).await?;
             header.journal = false;
@@ -240,8 +254,14 @@ impl Run<'_> {
                     cursor
                 }
                 Work::Pairs(pairs) => {
-                    compose::pairs_chunk(&mut transaction, self.chain_id, stream, composition, pairs)
-                        .await?;
+                    compose::pairs_chunk(
+                        &mut transaction,
+                        self.chain_id,
+                        stream,
+                        composition,
+                        pairs,
+                    )
+                    .await?;
                     cursor
                 }
                 Work::Window(after) => {
@@ -262,13 +282,24 @@ impl Run<'_> {
                             ))
                         })?;
                     window.journal = false;
-                    compose::window_chunk(&mut transaction, self.chain_id, &window, after, &mut stats)
-                        .await?;
+                    compose::window_chunk(
+                        &mut transaction,
+                        self.chain_id,
+                        &window,
+                        after,
+                        &mut stats,
+                    )
+                    .await?;
                     Some(end.to_string())
                 }
             };
-            repair::compose_step(&mut transaction, self.chain_id, next.index(), cursor.as_deref())
-                .await?;
+            repair::compose_step(
+                &mut transaction,
+                self.chain_id,
+                next.index(),
+                cursor.as_deref(),
+            )
+            .await?;
             commit(transaction).await?;
             record.compose_stream = Some(next.index());
             record.compose_cursor = cursor;
@@ -294,10 +325,9 @@ impl Run<'_> {
         record: &Record,
         revision: &Revision,
     ) -> Result<Transaction<'static, Postgres>> {
-        let mut transaction =
-            self.pool.begin().await.map_err(|error| {
-                ProjectError::database("failed to begin a composition chunk", error)
-            })?;
+        let mut transaction = self.pool.begin().await.map_err(|error| {
+            ProjectError::database("failed to begin a composition chunk", error)
+        })?;
         let locked = marker::lock(&mut transaction, self.chain_id).await?;
         marker::require(
             self.chain_id,

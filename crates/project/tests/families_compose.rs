@@ -203,7 +203,11 @@ async fn block_by_block(fixture: &Fixture) -> Result<Vec<(String, String)>> {
 }
 
 /// Require every family table and the marker as `expected` holds them.
-async fn require_equal(fixture: &Fixture, expected: &[(String, String)], label: &str) -> Result<()> {
+async fn require_equal(
+    fixture: &Fixture,
+    expected: &[(String, String)],
+    label: &str,
+) -> Result<()> {
     let now = fixture.exact().await?;
     for ((table, was), (_, rebuilt)) in expected.iter().zip(&now) {
         ensure!(
@@ -371,7 +375,10 @@ async fn a_rebuild_in_ranges_composes_once_what_block_by_block_composes() -> Res
                            WHERE surface.logical_name_id = 'ens:' || state.node)",
     )
     .await?;
-    ensure!(child > 0, "the history has a registry child with no surface");
+    ensure!(
+        child > 0,
+        "the history has a registry child with no surface"
+    );
     let child: String = sqlx::query_scalar(
         "SELECT 'ens:' || state.node FROM project_registry_node_state state
          WHERE NOT EXISTS (SELECT 1 FROM name_surfaces surface
@@ -395,7 +402,11 @@ async fn a_rebuild_in_ranges_composes_once_what_block_by_block_composes() -> Res
     .await?;
     for (id, rows, what) in [
         (child, (true, true), "a registry child a NewOwner created"),
-        (once, (true, false), "a name transferred unnamed in one block"),
+        (
+            once,
+            (true, false),
+            "a name transferred unnamed in one block",
+        ),
         (
             unsurfaced(TRANSFERRED),
             (true, true),
@@ -459,7 +470,12 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
     );
     ensure!(
         pass_state(&fixture).await?
-            == ("rebuilding".to_owned(), Value::Null, Value::Null, Value::Null),
+            == (
+                "rebuilding".to_owned(),
+                Value::Null,
+                Value::Null,
+                Value::Null
+            ),
         "no pass begun: {:?}",
         pass_state(&fixture).await?
     );
@@ -504,7 +520,10 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
     }
     // The pass runs its streams in order, each from its beginning, until it ends.
     let passing: Vec<&Seen> = seen.iter().filter(|run| run.state == "composing").collect();
-    let streams: Vec<i64> = passing.iter().filter_map(|run| run.stream.as_i64()).collect();
+    let streams: Vec<i64> = passing
+        .iter()
+        .filter_map(|run| run.stream.as_i64())
+        .collect();
     ensure!(
         streams.windows(2).all(|pair| pair[0] <= pair[1]),
         "the streams run in order: {streams:?}"
@@ -531,7 +550,10 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
             let mut sorted = texts.clone();
             sorted.sort();
             sorted.dedup();
-            ensure!(sorted == texts, "stream {stream}'s cursor only moves on: {texts:?}");
+            ensure!(
+                sorted == texts,
+                "stream {stream}'s cursor only moves on: {texts:?}"
+            );
         }
     }
     // The run that found the last window done ended the pass and did nothing else.
@@ -630,8 +652,7 @@ async fn a_chunk_that_fails_to_commit_is_composed_again_from_the_cursor() -> Res
         "{error}"
     );
     ensure!(
-        pass_state(&fixture).await?
-            == ("composing".to_owned(), json!(0), Value::Null, Value::Null),
+        pass_state(&fixture).await? == ("composing".to_owned(), json!(0), Value::Null, Value::Null),
         "the pass began at the start of the names stream: {:?}",
         pass_state(&fixture).await?
     );
@@ -736,7 +757,10 @@ async fn a_range_after_the_pass_composes_and_journals() -> Result<()> {
         "the pass composed at 14: {state} {composed}"
     );
     let stopped = fixture.marker().await?.0;
-    ensure!(stopped == Some(16), "two single blocks after the pass: {stopped:?}");
+    ensure!(
+        stopped == Some(16),
+        "two single blocks after the pass: {stopped:?}"
+    );
     let high = options(RebuildRanges::Through(24));
     let second = run_to(&fixture, 25, false, &high).await?;
     ensure!(
@@ -757,9 +781,15 @@ async fn a_range_after_the_pass_composes_and_journals() -> Result<()> {
         ),
     )
     .await?;
-    ensure!(range_rows > 0, "the range journals its family and composed rows");
+    ensure!(
+        range_rows > 0,
+        "the range journals its family and composed rows"
+    );
     let undone = families::undo_to(&fixture.pool, CHAIN, 16).await?;
-    ensure!(undone == 2, "25, then the range ending at 24 as one step: {undone}");
+    ensure!(
+        undone == 2,
+        "25, then the range ending at 24 as one step: {undone}"
+    );
     fixture
         .apply_with(25, FamilyMode::Normal, &options(RebuildRanges::Off))
         .await?;
@@ -984,7 +1014,13 @@ async fn a_manifest_sync_before_the_pass_rebuilds_under_the_new_set() -> Result<
         }
         fixture.interpret_row("h1", 1, false).await?;
         let ranged = options(RebuildRanges::Through(25));
-        let first = run_to(&fixture, 30, true, &ranged.clone().with_max_blocks_per_run(15)).await?;
+        let first = run_to(
+            &fixture,
+            30,
+            true,
+            &ranged.clone().with_max_blocks_per_run(15),
+        )
+        .await?;
         ensure!(
             first.budget_exhausted && pass_state(&fixture).await?.1.is_null(),
             "stopped after the ranges, before the pass: {first:?}"
@@ -993,7 +1029,10 @@ async fn a_manifest_sync_before_the_pass_rebuilds_under_the_new_set() -> Result<
         if moved {
             fixture.interpret_row("h2", 1, false).await?;
             let next = run_to(&fixture, 30, false, &ranged).await?;
-            ensure!(next.reset, "moved {moved}: rebuilt from the start: {next:?}");
+            ensure!(
+                next.reset,
+                "moved {moved}: rebuilt from the start: {next:?}"
+            );
             fixture.assert_rebuild_equal(30).await?;
         } else {
             let error = run_to(&fixture, 30, false, &ranged)
@@ -1068,9 +1107,7 @@ async fn after_a_rebuild_in_ranges_undo_stops_at_the_pass_block() -> Result<()> 
     }
     fixture.resolver_changed(26, 1, 1, R1).await?;
     let ranged = options(RebuildRanges::Through(20));
-    fixture
-        .apply_with(25, FamilyMode::Rebuild, &ranged)
-        .await?;
+    fixture.apply_with(25, FamilyMode::Rebuild, &ranged).await?;
     ensure!(pass_state(&fixture).await?.3 == json!(20));
     // The first follow block composes, journals and undoes as always.
     fixture.assert_undo_restores(26).await?;
@@ -1133,9 +1170,11 @@ fn sibling(block: i64) -> String {
 // equals a block-by-block rebuild of the new branch.
 #[tokio::test]
 async fn a_reorg_at_or_below_the_pass_block_rebuilds() -> Result<()> {
-    for (through, orphaned, undo_first, rebuilds) in
-        [(20, 24, false, false), (24, 18, false, true), (24, 24, true, true)]
-    {
+    for (through, orphaned, undo_first, rebuilds) in [
+        (20, 24, false, false),
+        (24, 18, false, true),
+        (24, 24, true, true),
+    ] {
         let case = format!("pass at {through}, orphaned from {orphaned}");
         let fixture = Fixture::new("families_compose_orphan", 25).await?;
         for block in 10..=24 {
@@ -1144,7 +1183,11 @@ async fn a_reorg_at_or_below_the_pass_block_rebuilds() -> Result<()> {
                 .await?;
         }
         fixture
-            .apply_with(25, FamilyMode::Rebuild, &options(RebuildRanges::Through(through)))
+            .apply_with(
+                25,
+                FamilyMode::Rebuild,
+                &options(RebuildRanges::Through(through)),
+            )
             .await?;
         ensure!(
             pass_state(&fixture).await?.3 == json!(through),
@@ -1152,7 +1195,10 @@ async fn a_reorg_at_or_below_the_pass_block_rebuilds() -> Result<()> {
             pass_state(&fixture).await?
         );
         if undo_first {
-            ensure!(families::undo_to(&fixture.pool, CHAIN, 24).await? == 1, "{case}");
+            ensure!(
+                families::undo_to(&fixture.pool, CHAIN, 24).await? == 1,
+                "{case}"
+            );
             ensure!(fixture.marker().await?.0 == Some(24), "{case}");
         }
         sqlx::query(
@@ -1235,15 +1281,16 @@ async fn an_admission_change_before_the_pass_is_neither_swept_nor_capped() -> Re
     .bind(hash(6))
     .execute(&fixture.pool)
     .await?;
-    ensure!(positioned.rows_affected() > 0, "the root admission is positioned");
+    ensure!(
+        positioned.rows_affected() > 0,
+        "the root admission is positioned"
+    );
     fixture
         .apply_with(13, FamilyMode::Rebuild, &options(RebuildRanges::Off))
         .await?;
     let expected = fixture.exact().await?;
     let capped = options(RebuildRanges::Through(13)).with_max_admission_sweep_names(1);
-    let outcome = fixture
-        .apply_with(13, FamilyMode::Rebuild, &capped)
-        .await?;
+    let outcome = fixture.apply_with(13, FamilyMode::Rebuild, &capped).await?;
     ensure!(
         outcome.ranges > 1 && outcome.compose_chunks > 0,
         "ranges across block 6, then the pass: {outcome:?}"

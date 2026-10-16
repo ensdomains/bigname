@@ -252,8 +252,18 @@ pub(crate) async fn publish(
     let after = prior.current.as_ref().map_or(-1, |marker| marker.number);
     let composition = marker::Composition::of(chain_id, &manifests)?;
     let composes = !matches!(plan.role, Role::Rebuild { .. })
-        || record.as_ref().is_some_and(|record| record.composed_block.is_some());
-    if !composes && matches!(plan.role, Role::Rebuild { completes: true, .. }) {
+        || record
+            .as_ref()
+            .is_some_and(|record| record.composed_block.is_some());
+    if !composes
+        && matches!(
+            plan.role,
+            Role::Rebuild {
+                completes: true,
+                ..
+            }
+        )
+    {
         return Err(ProjectError::data_integrity(format!(
             "chain {chain_id}'s rebuild reached its target {} before its composition pass",
             block.number

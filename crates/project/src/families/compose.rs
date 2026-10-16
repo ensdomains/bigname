@@ -212,7 +212,11 @@ pub(crate) async fn pairs(
         }
         None => (None, None),
     };
-    let sql = if stream == Stream::Nodes { NODES } else { RECORD_IDS };
+    let sql = if stream == Stream::Nodes {
+        NODES
+    } else {
+        RECORD_IDS
+    };
     sqlx::query_as(sql)
         .bind(chain_id)
         .bind(first.unwrap_or_default())
@@ -282,8 +286,12 @@ pub(crate) async fn names_chunk(
     let mut current: Vec<CurrentHistoryRelation> = Vec::new();
     for chunk in composed.chunks(derived::SUMMARY_CHUNK) {
         let fresh = derived::compose_summaries(transaction, &publication, chunk).await?;
-        derived::retire_null_resolver_divergences(transaction, chain_id, &fresh.null_resolver_names)
-            .await?;
+        derived::retire_null_resolver_divergences(
+            transaction,
+            chain_id,
+            &fresh.null_resolver_names,
+        )
+        .await?;
         current.extend(fresh.current_history_relations);
         let (rows, _) =
             derived::replace_summary_chunk(transaction, chain_id, block, chunk, &fresh.rows)

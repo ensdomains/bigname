@@ -841,8 +841,14 @@ async fn a_rebuild_run_reads_one_work_block_past_its_budget() -> Result<()> {
     // (work blocks, a discovery edge starting at, per run with ranges off, then with ranges:
     // marker, blocks applied, budget spent)
     type Run = (i64, u64, bool);
-    let cases: [(&[i64], Option<i64>, &[Run], &[Run]); 7] = [
-        (&[5, 7], None, &[(12, 3, false)], &[(7, 2, true), (12, 1, false)]),
+    type Case<'a> = (&'a [i64], Option<i64>, &'a [Run], &'a [Run]);
+    let cases: [Case<'_>; 7] = [
+        (
+            &[5, 7],
+            None,
+            &[(12, 3, false)],
+            &[(7, 2, true), (12, 1, false)],
+        ),
         (
             &[5, 7, 9],
             None,
@@ -855,7 +861,12 @@ async fn a_rebuild_run_reads_one_work_block_past_its_budget() -> Result<()> {
             &[(9, 3, true), (12, 2, false)],
             &[(9, 3, true), (11, 1, true), (12, 1, false)],
         ),
-        (&[5, 12], None, &[(12, 2, false)], &[(5, 1, true), (12, 1, false)]),
+        (
+            &[5, 12],
+            None,
+            &[(12, 2, false)],
+            &[(5, 1, true), (12, 1, false)],
+        ),
         (
             &[5, 7, 12],
             None,

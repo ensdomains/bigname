@@ -146,7 +146,15 @@ async fn a_rebuild_in_ranges_retires_evidence_from_its_pass_and_later_blocks() -
     for (index, (name, _, resource)) in names.iter().enumerate() {
         let n = u32::try_from(index)?;
         fixture
-            .binding(&support::uuid(100 + n), name, resource, "ens_v1", 1, 0, None)
+            .binding(
+                &support::uuid(100 + n),
+                name,
+                resource,
+                "ens_v1",
+                1,
+                0,
+                None,
+            )
             .await?;
         fixture
             .write(

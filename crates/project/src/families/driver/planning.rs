@@ -80,7 +80,9 @@ pub async fn redo_extent(
     // Both a new and a resumed rebuild can need any retained work block. A changed prefix or
     // orphaned rebuild marker restarts population, so its envelope still starts at zero.
     let lower = if rebuild
-        || record.as_ref().is_some_and(|record| record.state.rebuilds())
+        || record
+            .as_ref()
+            .is_some_and(|record| record.state.rebuilds())
     {
         0
     } else {

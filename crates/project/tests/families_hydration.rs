@@ -719,7 +719,10 @@ async fn rebuilt_work(
         return Err(error.into());
     }
     let mut work = Vec::new();
-    for table in ["project_reverse_hydration_work", "project_text_hydration_work"] {
+    for table in [
+        "project_reverse_hydration_work",
+        "project_text_hydration_work",
+    ] {
         work.push(
             sqlx::query_scalar(&format!(
                 "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]')::text
@@ -740,8 +743,11 @@ async fn rebuilt_work(
 async fn a_rebuild_in_ranges_leaves_the_hydration_work_of_a_rebuild_block_by_block() -> Result<()> {
     let (off, expected) =
         rebuilt_work("family_hydration_ranges_off", families::RebuildRanges::Off).await?;
-    let (ranged, work) =
-        rebuilt_work("family_hydration_ranges", families::RebuildRanges::Through(4)).await?;
+    let (ranged, work) = rebuilt_work(
+        "family_hydration_ranges",
+        families::RebuildRanges::Through(4),
+    )
+    .await?;
     assert_eq!((off.ranges, off.compose_chunks), (0, 0));
     assert!(
         ranged.ranges > 0 && ranged.compose_chunks > 0,

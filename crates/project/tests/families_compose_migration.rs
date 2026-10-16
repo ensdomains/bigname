@@ -57,7 +57,9 @@ async fn shape(fixture: &Fixture) -> Result<Vec<Vec<String>>> {
 }
 
 /// A ranged rebuild of a few pointer blocks to 20, which composes in a pass.
-async fn rebuild(fixture: &Fixture) -> bigname_project::Result<bigname_project::families::FamilyOutcome> {
+async fn rebuild(
+    fixture: &Fixture,
+) -> bigname_project::Result<bigname_project::families::FamilyOutcome> {
     fixture
         .apply_with(
             20,
@@ -127,12 +129,11 @@ async fn the_migration_gives_the_record_its_composition_pass() -> Result<()> {
         outcome.compose_chunks > 0,
         "the migrated record holds a pass: {outcome:?}"
     );
-    let composed: Option<i64> = sqlx::query_scalar(
-        "SELECT composed_block FROM project_repair_record WHERE chain_id = $1",
-    )
-    .bind(CHAIN)
-    .fetch_one(&fixture.pool)
-    .await?;
+    let composed: Option<i64> =
+        sqlx::query_scalar("SELECT composed_block FROM project_repair_record WHERE chain_id = $1")
+            .bind(CHAIN)
+            .fetch_one(&fixture.pool)
+            .await?;
     ensure!(composed == Some(14), "{composed:?}");
     fixture.cleanup().await
 }
