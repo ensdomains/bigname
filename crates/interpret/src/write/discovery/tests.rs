@@ -502,3 +502,100 @@ async fn values_boundary_and_idempotent_replay_persist_every_contract_instance()
     database.cleanup().await?;
     Ok(())
 }
+
+/// Scans and updates of `contract_instance_addresses` the connection has not reported yet.
+/// Unreported counts of earlier transactions on the connection are included, so callers
+/// compare two readings taken inside one transaction.
+async fn address_statistics(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> TestResult<(i64, i64)> {
+    Ok(sqlx::query_as(
+        "SELECT COALESCE(seq_scan, 0) + COALESCE(idx_scan, 0), n_tup_upd
+         FROM pg_stat_xact_user_tables WHERE relname = 'contract_instance_addresses'",
+    )
+    .fetch_one(&mut **transaction)
+    .await?)
+}
+
+/// Repeated observations of one address read and lock its row once per spelling, and an
+/// observation that would change nothing issues no UPDATE.
+#[tokio::test]
+async fn repeated_address_observations_lock_once_per_spelling_and_skip_noop_updates() -> TestResult
+{
+    let database = TestDatabase::create(TestDatabaseConfig::new(
+        "interpret_discovery_address_statement_counts",
+    ))
+    .await?;
+    for sql in [
+        include_str!("../../../../storage/schema/baseline/01_chain.sql"),
+        include_str!("../../../../storage/schema/baseline/03_identity.sql"),
+    ] {
+        sqlx::raw_sql(sql).execute(database.pool()).await?;
+    }
+    let instance_id = Uuid::from_u128(553);
+    let address = "0x0000000000000000000000000000000000000553";
+    let upper = address.to_ascii_uppercase();
+    sqlx::query(
+        "INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+         VALUES ($1, 'count-test', 'contract')",
+    )
+    .bind(instance_id)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (
+             contract_instance_id, chain_id, address, active_from_block_number,
+             active_from_block_hash, source_manifest_id, provenance
+         ) VALUES ($1, 'count-test', $2, 20, 'block-20', 7, '{\"source\":\"raw_log\"}')",
+    )
+    .bind(instance_id)
+    .bind(address)
+    .execute(database.pool())
+    .await?;
+    let observation = |spelling: &str| ContractAddress {
+        contract_instance_id: instance_id,
+        chain_id: "count-test".to_owned(),
+        address: spelling.to_owned(),
+        active_from_block_number: 20,
+        active_from_block_hash: "block-20".to_owned(),
+        source_manifest_id: 7,
+        provenance: json!({"source": "raw_log"}),
+    };
+    let alternating = (0..20)
+        .map(|index| observation(if index % 2 == 0 { address } else { &upper }))
+        .collect::<Vec<_>>();
+    let mut counts = Vec::new();
+    for observations in [
+        vec![observation(address)],
+        vec![observation(address); 20],
+        vec![observation(address), observation(&upper)],
+        alternating,
+    ] {
+        let output = BatchOutput {
+            contract_addresses: observations,
+            ..BatchOutput::default()
+        };
+        let mut transaction = database.pool().begin().await?;
+        let before = address_statistics(&mut transaction).await?;
+        write(&mut transaction, &output, false).await?;
+        let after = address_statistics(&mut transaction).await?;
+        transaction.rollback().await?;
+        counts.push((after.0 - before.0, after.1 - before.1));
+    }
+    assert_eq!(
+        counts
+            .iter()
+            .map(|(_, updates)| *updates)
+            .collect::<Vec<_>>(),
+        [0, 0, 0, 0],
+        "unchanged observations issue no UPDATE"
+    );
+    assert_eq!(counts[1], counts[0], "twenty repeats read the row once");
+    assert_eq!(
+        counts[3], counts[2],
+        "twenty repeats of two spellings read it twice"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
