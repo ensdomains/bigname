@@ -43,6 +43,8 @@ pub struct Engine {
     pool: PgPool,
     state_cache_capacity: StateCacheCapacity,
     blocks_per_batch: NonZeroU32,
+    adaptive: Option<AdaptiveBatchConfig>,
+    adaptive_work: std::sync::Mutex<Option<planning::CachedWork>>,
     lookahead_statement_timeout_secs: Option<NonZeroU32>,
     force_full_state_loader: bool,
     loader_choices: loader_choice::LoaderChoices,
@@ -60,6 +62,8 @@ impl Engine {
             pool,
             state_cache_capacity: StateCacheCapacity::Entries(entries),
             blocks_per_batch: DEFAULT_INTERPRET_BLOCKS_PER_BATCH,
+            adaptive: None,
+            adaptive_work: std::sync::Mutex::new(None),
             lookahead_statement_timeout_secs: None,
             force_full_state_loader: false,
             loader_choices: loader_choice::LoaderChoices::default(),
@@ -144,14 +148,9 @@ impl Engine {
                 estimated_write_bytes,
             });
         }
-        let markers = load::canonical_markers(
-            &self.pool,
-            &request.chain_id,
-            next_block,
-            target.number,
-            i64::from(self.blocks_per_batch.get()),
-        )
-        .await?;
+        let markers = self
+            .plan_batch(&request.chain_id, request.mode, next_block, target.number)
+            .await?;
         validate_contiguous_markers(&request.chain_id, next_block, &markers)?;
         let Some((batch_from, _)) = markers.first() else {
             return Err(InterpretError::data_integrity(format!(
@@ -413,12 +412,17 @@ fn validate_loaded_lineage(
     Ok(())
 }
 
+#[path = "engine/adaptive.rs"]
+pub(crate) mod adaptive;
 #[path = "engine/loader_choice.rs"]
 mod loader_choice;
+#[path = "engine/planning.rs"]
+mod planning;
 #[path = "engine/prior_sessions.rs"]
 mod prior_sessions;
 #[path = "engine/statistics.rs"]
 mod statistics;
+pub use adaptive::AdaptiveBatchConfig;
 pub use loader_choice::{FullStateReason, StateLoader};
 
 #[cfg(test)]

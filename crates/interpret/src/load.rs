@@ -10,6 +10,7 @@ use sqlx::{PgConnection, PgPool, types::Uuid};
 
 use crate::{InterpretError, Result};
 
+pub(crate) mod adaptive;
 mod cache;
 pub(crate) mod lookahead;
 mod lookahead_query;

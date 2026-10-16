@@ -175,6 +175,7 @@ async fn main() -> Result<()> {
             instance_id,
             chains,
             capacity,
+            interpret_adaptive,
             timing,
             phase,
             range,
@@ -265,10 +266,11 @@ async fn main() -> Result<()> {
                 let ingest = Arc::new(
                     IngestPhase::with_engine(ingest_engine).with_metrics(metrics_feed.clone()),
                 );
-                let interpret = Arc::new(InterpretPhase::from_capacity(
-                    database.pool().clone(),
-                    &capacity,
-                ));
+                let interpret = InterpretPhase::from_capacity(database.pool().clone(), &capacity);
+                let interpret = Arc::new(match interpret_adaptive {
+                    Some(config) => interpret.with_adaptive_batching(config),
+                    None => interpret,
+                });
                 let project = Arc::new(
                     ProjectPhase::with_hydration(database.pool().clone(), hydration_rpc_urls)
                         .with_family_settings(project_families)
