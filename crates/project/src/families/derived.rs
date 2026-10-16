@@ -19,6 +19,17 @@ use sqlx::{Postgres, Transaction};
 use super::{block::BlockStats, input, marker, tables::NAME_SUMMARY};
 use crate::{ProjectError, Result};
 
+/// The names a publication composes again beyond the ones its block touched.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Sweeps {
+    /// Every name whose stored raw name its surface no longer carries
+    /// (`summary::RAW_NAME_SWEEP`).
+    pub(crate) raw_name: bool,
+    /// Every name with a surface or a stored row, when the publication composes with another
+    /// ENSv2 root registry admission than the prior marker recorded (`summary::ADMISSION_SWEEP`).
+    pub(crate) admission: bool,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Touched {
     /// The block whose journal named the keys.
@@ -27,9 +38,8 @@ pub(crate) struct Touched {
     /// are composed again for the surfaces and registry events after it. `None` on an undo, whose
     /// journal restores the name summaries exactly.
     summaries_after: Option<i64>,
-    /// Whether the summary refresh also composes again every name whose stored raw name its
-    /// surface no longer carries (`summary::RAW_NAME_SWEEP`).
-    pub(crate) raw_name_sweep: bool,
+    /// The names the summary refresh composes again beyond the touched ones.
+    pub(crate) sweeps: Sweeps,
     names: Vec<String>,
     node_resolvers: Vec<String>,
     nodes: Vec<String>,
@@ -168,7 +178,7 @@ pub(crate) async fn refresh(
         chain_id,
         touched.number,
         after,
-        touched.raw_name_sweep,
+        touched.sweeps,
         composition,
     )
     .await
@@ -348,23 +358,22 @@ const RECORD_ID_INSERT: &str = "/* project:families.derived.record_id_insert */
     ON CONFLICT DO NOTHING";
 
 /// Refresh the derived rows of the keys a block touched after the family marker's block `after`,
-/// and count the name summaries it wrote and journalled like a family table's. With
-/// `raw_name_sweep` the summaries also take the stored raw names their surfaces lost
-/// (`summary::RAW_NAME_SWEEP`).
+/// and count the name summaries it wrote and journalled like a family table's. `sweeps` adds the
+/// names the summaries and the lookup names compose again beyond the touched ones.
 pub(super) async fn refresh_block(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     block: &input::BlockHeader,
-    (after, raw_name_sweep): (i64, bool),
+    (after, sweeps): (i64, Sweeps),
     composition: &marker::Composition,
     stats: &mut BlockStats,
 ) -> Result<()> {
     let root = composition.admission.as_ref();
     let root = root.map(|admission| admission.root_registry.as_str());
     super::resolution_paths::prepare(transaction, chain_id, block, after, root).await?;
-    super::lookup::prepare(transaction, chain_id, block, after).await?;
+    super::lookup::prepare(transaction, chain_id, block, after, sweeps.admission).await?;
     let mut touched = touched(transaction, chain_id, block.number, Some(after)).await?;
-    touched.raw_name_sweep = raw_name_sweep;
+    touched.sweeps = sweeps;
     let summary = refresh(transaction, chain_id, &touched, composition).await?;
     if summary.rows > 0 {
         stats.rows.insert(NAME_SUMMARY.name, summary.rows);

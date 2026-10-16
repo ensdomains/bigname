@@ -1962,6 +1962,19 @@ An interpreter content-hash rotation requires a full-history Interpret and
 Project walk. Phase state and API admission refuse to mix output from different
 compiled hashes.
 
+A change of the chain's ENSv2 root registry admission (the
+[Universal Resolver cutover](glossary.md#universal-resolver-cutover)) has no
+block of its own. Manifest sync writes it with none, so the new manifest set
+applies at every block. The first family publication that composes with another
+admission than the marker before it composes every name again, inside its own
+transaction: every name with a surface at or below its block, and every name
+with a stored summary or lookup row. An undo restores the earlier admission
+with the marker, and the replayed block composes every name again. A followed
+publication therefore leaves the rows a rebuild under the same manifest set
+leaves at the same block. Manifest sync still moves the phase hashes, so a full
+Interpret and Project redo still adopts every manifest change, a root admission
+included.
+
 ## Owned key families
 
 Project keeps per-key current state for the facts readers compose, grouped by

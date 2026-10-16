@@ -4463,3 +4463,29 @@ also lets address history keep a former ENSv2 manager's events under
 - It adds no table, manifest or setting. The
   manifest-authority fingerprint and the compiled watch plan are unchanged, so
   stamp no Ingest redo.
+
+## A changed ENSv2 root admission composes every name again
+
+The build that composes every name again when a chain's ENSv2 root registry
+admission changes (see
+[Universal Resolver cutover](glossary.md#universal-resolver-cutover)) changes
+`crates/project/src`. It is an input of the
+[projection content hash](glossary.md#projection-content-hash) only.
+
+- The projection content hash rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, under
+  matching runner and API binaries. The change rides the next re-derivation
+  release and shares that release's Project redo.
+- The first family publication whose admission differs from the one the
+  [family marker](glossary.md#family-marker) before it recorded composes every
+  name again in its own transaction
+  ([reorg and redo](projections.md#reorg-and-redo)). Before, a name whose own
+  rows did not change kept the composition of the earlier admission.
+- A manifest sync still moves the manifest-authority fingerprint, so the runner
+  still asks for a full redo before it follows again. A followed chain therefore
+  meets a changed admission only inside that redo, which composes every name
+  anyway.
+- It adds no schema-migration, table, manifest or setting. The
+  manifest-authority fingerprint and the compiled watch plan are unchanged, so
+  stamp no Ingest redo.

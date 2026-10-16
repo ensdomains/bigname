@@ -16,7 +16,10 @@
 //! A prefix whose first label hash is null has no entry key to look up and also reads them all.
 //! Missing/current/former membership and divergence evidence never restrict this candidate set.
 //! SourceManifestUpdated has no block position. Supported manifest sync invalidates phase hashes
-//! and requires a complete Interpret/Project redo; it is not an incremental event-range trigger.
+//! and requires a complete Interpret/Project redo. It is not an incremental event-range trigger.
+//! A change of the ENSv2 root registry admission is not selected here: the summary and lookup
+//! refreshes compose every name for it (`derived/summary.rs`, `ADMISSION_SWEEP`), and this
+//! selection's refresh then rewrites nothing.
 //!
 //! Every touched name recomposes itself. A touched name also becomes a prefix whose whole
 //! subtree recomposes, but only when its change can move other names' resolution paths.
