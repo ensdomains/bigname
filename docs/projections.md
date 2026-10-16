@@ -2005,9 +2005,11 @@ applies at every block. The first family publication that composes with another
 admission than the marker before it composes every name again, inside its own
 transaction: every name with a surface at or below its block, and every name
 with a stored summary or lookup row. Above 50,000 such names a followed
-publication is refused as a data-integrity halt before it composes any, naming
-the full Project redo, which composes them in ranges. A rebuild's first
-publication is not capped. An undo restores the earlier admission
+publication is refused before it composes any, on every attempt. The error
+names the full Project redo, which composes them in ranges. The supervised
+runner retries and logs that instruction until the redo runs. A one-shot
+`phase-runner redo` halts on it. A rebuild's first publication is not capped.
+An undo restores the earlier admission
 with the marker, and the replayed block composes every name again. A followed
 publication therefore leaves the rows a rebuild under the same manifest set
 leaves at the same block. Manifest sync still moves the phase hashes, so a full

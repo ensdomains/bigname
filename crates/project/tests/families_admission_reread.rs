@@ -1132,8 +1132,8 @@ fn capped(names: u64) -> FamilyOptions {
 }
 
 // Row 19, the cap. Row 1's chain, with the swept-name cap one below the names the publication at
-// block 7 composes again. The publication is refused as a data-integrity halt that names the full
-// Project redo, and its transaction rolls back: the marker stays on block 6 and no family row
+// block 7 composes again. The publication is refused with a data-integrity error that names the
+// full Project redo, and its transaction rolls back: the marker stays on block 6 and no family row
 // moves. With the cap at exactly that count, the next run publishes block 7 as row 1 does.
 #[tokio::test]
 async fn a_sweep_above_the_cap_is_refused_and_one_at_the_cap_publishes() -> Result<()> {

@@ -4560,7 +4560,10 @@ admission changes (see
   [family marker](glossary.md#family-marker) before it recorded composes every
   name again in its own transaction
   ([reorg and redo](projections.md#reorg-and-redo)). Before, a name whose own
-  rows did not change kept the composition of the earlier admission.
+  rows did not change kept the composition of the earlier admission. Above
+  50,000 such names a followed publication is refused on every attempt, with an
+  error that names the full-range Project redo to run
+  (`phase-runner redo --chain <chain> --phase project`).
 - A manifest sync still moves the manifest-authority fingerprint, so the runner
   still asks for a full redo before it follows again. A followed chain therefore
   meets a changed admission only inside that redo, which composes every name
