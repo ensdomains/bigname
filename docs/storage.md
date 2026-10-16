@@ -269,6 +269,19 @@ posting set replacement commit atomically. An aborted import or Interpret write 
 none of those changes. Reorg re-anchoring and normalizer recompute use the same
 writer; retained verified preimages are not deleted with a chain observation.
 
+Within one Interpret write transaction, a label hash observed more than once is
+submitted to `label_preimages` once. Every observation must carry the same bytes and
+normalization verdict, or the write fails as it would row by row. The submitted
+source is the highest-priority observation, and the last one wins a tie, which is
+the row the row-by-row upserts would leave. Discovered addresses are written in
+batch order. A later observation with the same spelling of an address reuses the
+row the transaction already locked or inserted for it instead of reading it again.
+A different spelling of the same address reads and locks the row again. An update
+that would change nothing is skipped when the observation's provenance is flat
+JSON, which every provenance the adapters build is. An address without an active
+row is read again on each observation. The stored rows are the ones the row-by-row
+writes produce.
+
 After changing the source rows, the writer refreshes the affected documents. It first
 writes the affected names once into a temporary table. These are the names it changed
 and every surface without raw bytes whose path holds a changed label. It then reads
