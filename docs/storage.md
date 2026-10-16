@@ -296,6 +296,13 @@ a pool that refreshes search. The phase runner's advisory-lock connection runs t
 refresh when a redo with a normalization-flag recompute completes. It is not a pool
 connection. It lives until the runner releases that phase lock and closes it.
 
+Within a publication, repeated label hashes are checked for incompatible evidence
+before being coalesced to their highest-priority observation (the last observation
+wins a priority tie). Discovered-address writes retain their original order and
+reuse only rows already locked or inserted by that transaction; absent addresses
+are not cached. These reductions preserve provenance and interval rules while
+avoiding repeated database work for the same label or address.
+
 Project extends its existing `project_name_summary` with `search_supported`,
 `search_fields` and `search_creation_transport_resource_id`. The supported payload
 holds the shared public registration and ENSv1 fields, including resolved wrapper

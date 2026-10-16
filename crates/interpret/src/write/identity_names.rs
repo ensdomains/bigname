@@ -7,10 +7,13 @@ use crate::{InterpretError, NORMALIZATION_STATE_REPAIR_REASON, Result};
 
 use super::batching::{batch_row_context, conflict_free_batches};
 
+mod preimages;
+
 pub(super) async fn write(
     transaction: &mut Transaction<'_, Postgres>,
     output: &BatchOutput,
 ) -> Result<()> {
+    let preimages = preimages::deduplicate(output)?;
     let names: Vec<String> = output
         .name_surfaces
         .iter()
@@ -21,7 +24,8 @@ pub(super) async fn write(
         .iter()
         .map(|surface| surface.labelhashes.clone())
         .collect();
-    let labels: Vec<String> = preimages_for_submission(output)
+    let labels: Vec<String> = preimages
+        .iter()
         .map(|preimage| preimage.labelhash.clone())
         .collect();
     // Existing rows cannot change bytes or normalization verdict through this writer, so only
@@ -34,7 +38,7 @@ pub(super) async fn write(
     )
     .await
     .map_err(|error| InterpretError::database_anyhow("failed to prepare search labels", error))?;
-    write_preimages(transaction, output).await?;
+    write_preimages(transaction, &preimages).await?;
     write_surfaces(transaction, output).await?;
     bigname_storage::identity_search::refresh(transaction, &names, &changed)
         .await
@@ -43,10 +47,9 @@ pub(super) async fn write(
 
 async fn write_preimages(
     transaction: &mut Transaction<'_, Postgres>,
-    output: &BatchOutput,
+    preimages: &[&bigname_adapters::schema_v2::LabelPreimage],
 ) -> Result<()> {
-    let preimages = preimages_for_submission(output).collect::<Vec<_>>();
-    for (start, batch) in conflict_free_batches(&preimages, |preimage| preimage.labelhash.clone()) {
+    for (start, batch) in conflict_free_batches(preimages, |preimage| preimage.labelhash.clone()) {
         let mut query = QueryBuilder::<Postgres>::new(
             "
             INSERT INTO label_preimages (
