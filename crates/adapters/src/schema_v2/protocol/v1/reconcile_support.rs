@@ -215,14 +215,17 @@ fn reconcile_registration(
         .filter_map(|position| owner_positions.get(position).cloned())
         .collect::<BTreeSet<_>>();
 
-    remove_transient_events(
+    // A kept revoke ends a grant made after the setup, so it stays as the first pass emitted it:
+    // on its resource, under its name, and closing no preceding grant.
+    let kept_revokes = remove_transient_events(
         events,
         &pending_positions,
         &stale_resources,
         &transient_owner_positions,
         &transient_owners,
     );
-    let setup_revocations = setup_revocations(events, &pending_positions, &stale_resources);
+    let setup_revocations =
+        setup_revocations(events, &pending_positions, &stale_resources, &kept_revokes);
     // Revocations that close preceding registry-only permission grants, plus those grants, remain
     // attached to the preceding resource. Other incoming grants may move to the registration.
     // Attachment never reaches across a block boundary: the block is the atomic unit every batch
@@ -235,7 +238,10 @@ fn reconcile_registration(
         &predecessor_owner_positions,
         &setup_revocations,
     );
-    for index in predecessor_events {
+    for index in predecessor_events
+        .into_iter()
+        .filter(|index| !kept_revokes.contains(index))
+    {
         let event = &mut output.normalized_events[index];
         event.logical_name_id = registration
             .surface_known
@@ -264,7 +270,10 @@ fn reconcile_registration(
         })
         .collect::<BTreeSet<_>>();
     let retarget_candidates = retarget_candidates(events, &target_candidates, &pending_positions);
-    for index in retarget_candidates {
+    for index in retarget_candidates
+        .into_iter()
+        .filter(|index| !kept_revokes.contains(index))
+    {
         // `wrapETH2LD` emits `NameWrapped` before its resolver write; a later controller
         // registration sets its registry record before the controller emits `NameRegistered`.
         // When those calls share a transaction, the wrapper-materialized pointer remains on the
@@ -429,7 +438,8 @@ fn remove_transient_events(
     stale_resources: &BTreeSet<Uuid>,
     transient_positions: &BTreeSet<Position>,
     transient_owners: &BTreeSet<String>,
-) {
+) -> BTreeSet<usize> {
+    let mut removed = BTreeSet::new();
     for position in pending_positions {
         for index in events.candidates_at(*position) {
             let fields = &events.fields[index];
@@ -443,9 +453,13 @@ fn remove_transient_events(
                     .as_ref()
                     .is_some_and(|subject| transient_owners.contains(subject))
             {
-                events.active[index] = false;
+                removed.insert(index);
             }
         }
+    }
+    let kept = keep_revokes_of_kept_grants(events, &mut removed);
+    for index in removed {
+        events.active[index] = false;
     }
     for position in transient_positions {
         for index in events.candidates_at(*position) {
@@ -460,12 +474,65 @@ fn remove_transient_events(
             }
         }
     }
+    kept
+}
+
+/// Keeps each revoke in `removed` that ends a grant the reconcile keeps, and returns them.
+/// Folded in log order, the transaction's own surviving rows for the revoke's resource, subject
+/// and scope must not leave the subject live where the first pass ended it. A contract
+/// registrant that hands its name on in its registration's transaction gets a grant at its
+/// registrar transfer, which is no setup position, and loses it at the registry write that
+/// follows, which is one.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L287-L292 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f)
+fn keep_revokes_of_kept_grants(
+    events: &EventIndex,
+    removed: &mut BTreeSet<usize>,
+) -> BTreeSet<usize> {
+    let mut kept = BTreeSet::new();
+    let mut revokes = removed
+        .iter()
+        .copied()
+        .filter(|index| events.fields[*index].revocation)
+        .filter_map(|index| Some((events.fields[index].position?, index)))
+        .collect::<Vec<_>>();
+    revokes.sort_unstable();
+    for (position, index) in revokes {
+        let fields = &events.fields[index];
+        let Some(resource_id) = fields.resource_id else {
+            continue;
+        };
+        let live = events
+            .by_resource
+            .get(&resource_id)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|other| events.active[*other] && !removed.contains(other))
+            .filter(|other| {
+                let other = &events.fields[*other];
+                other.permission
+                    && other.subject == fields.subject
+                    && other.scope == fields.scope
+                    && other.position.is_some_and(|other| {
+                        (other.0, other.1) == (position.0, position.1) && other < position
+                    })
+            })
+            .max_by_key(|other| events.fields[*other].position)
+            .is_some_and(|other| events.fields[other].grant);
+        if live {
+            removed.remove(&index);
+            kept.insert(index);
+        }
+    }
+    kept
 }
 
 fn setup_revocations(
     events: &EventIndex,
     pending_positions: &BTreeSet<Position>,
     stale_resources: &BTreeSet<Uuid>,
+    kept_revokes: &BTreeSet<usize>,
 ) -> Vec<PermissionRevocation> {
     let mut revocations = Vec::new();
     for position in pending_positions {
@@ -480,6 +547,7 @@ fn setup_revocations(
                 continue;
             };
             if events.active[index]
+                && !kept_revokes.contains(&index)
                 && fields.permission
                 && fields.revocation
                 && stale_resources.contains(&resource_id)

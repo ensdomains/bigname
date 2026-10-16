@@ -1058,93 +1058,217 @@ fn a_registration_after_writes_it_does_not_take_over_leaves_no_holder() -> anyho
     assert_no_failures(failures)
 }
 
-/// A numeric registration whose transaction then hands the token and the record on. The
-/// BaseRegistrar mints to HOLDER and writes the registry to HOLDER, HOLDER transfers the token to
-/// TRANSFEREE, which selects the registry-only authority with HOLDER as its holder, and then sets
-/// the registry owner to TRANSFEREE, which the lease takes over. The block reconcile treats the
-/// transaction's registry writes as the registration's setup and drops their rows, but keeps the
-/// transfer's grant to HOLDER, so the reconciled rows end the block with HOLDER on the resource
-/// where the first pass left no one. The holder state is rebuilt from the reconciled rows, so
-/// TRANSFEREE's next write revokes HOLDER and grants only its owner, in every layout.
+/// A registrar controller that registers to itself before it hands the name to its registrant.
+const REGISTERING_CONTROLLER: &str = "0x00000000000000000000000000000000000000c7";
+
+/// Where TRANSFEREE's next registry write, to AWAY_OWNER, lands after a hand-on.
+#[derive(Clone, Copy)]
+enum NextWrite {
+    SameTransaction,
+    LaterTransaction,
+    NextBlock,
+}
+
+/// The hand-on transaction at block 2: HOLDER, a contract registrant, registers `leased.eth`,
+/// then transfers the token to TRANSFEREE and sets the registry owner to TRANSFEREE. `numeric`
+/// emits the registration as the BaseRegistrar's numeric `NameRegistered`, as Sepolia admits
+/// it. Otherwise it is the controller's `NameRegistered`, as mainnet admits it. With a zero
+/// resolver the controller registers straight to HOLDER. With a resolver it registers to
+/// itself, writes the record to HOLDER with the resolver and transfers the token to HOLDER
+/// first.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L287-L317 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L333-L341 @ ens_v1@91c966f)
+fn handed_on(numeric: bool, resolver: bool) -> Vec<RawLogInput> {
+    const EXPIRES: u64 = 4_000_000_000;
+    let mut logs = Vec::new();
+    let mut log_index = 0;
+    let mut push = |raw: fn(i64) -> RawLogInput| {
+        logs.push(raw(log_index));
+        log_index += 1;
+    };
+    if resolver {
+        push(|index| lease_transfer(2, index, ZERO, REGISTERING_CONTROLLER));
+        push(|index| new_owner_under(node(&["eth"]), 2, index, "leased", REGISTERING_CONTROLLER));
+        if numeric {
+            push(|index| numeric_registered(2, index, REGISTERING_CONTROLLER, EXPIRES));
+        }
+        push(|index| registry_transfer(2, index, leased(), HOLDER));
+        push(|index| new_resolver(2, index, leased(), RESOLVER));
+        push(|index| lease_transfer(2, index, REGISTERING_CONTROLLER, HOLDER));
+        if !numeric {
+            push(|index| registered(2, index, HOLDER, EXPIRES));
+        }
+    } else {
+        push(|index| lease_transfer(2, index, ZERO, HOLDER));
+        push(|index| new_owner_under(node(&["eth"]), 2, index, "leased", HOLDER));
+        if numeric {
+            push(|index| numeric_registered(2, index, HOLDER, EXPIRES));
+        } else {
+            push(|index| registered(2, index, HOLDER, EXPIRES));
+        }
+    }
+    push(|index| lease_transfer(2, index, HOLDER, TRANSFEREE));
+    push(|index| registry_transfer(2, index, leased(), TRANSFEREE));
+    logs
+}
+
+/// One row of the hand-on table: the hand-on, then TRANSFEREE's registry write to AWAY_OWNER at
+/// `next`. AWAY_OWNER ends as the only holder, with `resolver_control` when the registration
+/// set a resolver, and no row on the resource names HOLDER after the hand-on.
+fn hand_on_row(row: &'static str, numeric: bool, resolver: bool, next: NextWrite) -> HolderRow {
+    let mut hand_on = handed_on(numeric, resolver);
+    let last = hand_on.last().map_or(0, |raw| raw.log_index);
+    let steps = match next {
+        NextWrite::SameTransaction => {
+            hand_on.push(registry_transfer(2, last + 1, leased(), AWAY_OWNER));
+            vec![hand_on]
+        }
+        NextWrite::LaterTransaction => {
+            hand_on.push(in_transaction(
+                registry_transfer(2, last + 1, leased(), AWAY_OWNER),
+                1,
+            ));
+            vec![hand_on]
+        }
+        NextWrite::NextBlock => vec![hand_on, vec![registry_transfer(3, 0, leased(), AWAY_OWNER)]],
+    };
+    HolderRow::new(
+        row,
+        vec![new_owner_under(B256::ZERO, 1, 0, "eth", CONTRACT)],
+        steps,
+        registry_only_of(&leased_hex()),
+        held_by(AWAY_OWNER, resolver.then_some(RESOLVER)),
+    )
+    .forbid(move |event| {
+        about(event, HOLDER)
+            && (event.block_number, event.transaction_index, event.log_index)
+                > (Some(2), Some(0), Some(last))
+    })
+}
+
+/// A contract registrant can hand its name on in the registration's own transaction, with
+/// public calls only: `register` checks no caller, the token's owner may transfer it, and the
+/// registry owner may write the record whoever holds the token. The transfer to TRANSFEREE
+/// selects the registry-only authority with HOLDER as its holder, and TRANSFEREE's registry
+/// write, which the lease takes over, ends HOLDER. TRANSFEREE's next write then leaves its
+/// owner as the only holder, wherever it lands.
 ///
-/// Synthetic: no admitted controller makes this sequence. Mainnet has no whole-transaction
-/// registration window, because a controller's `NameRegistered` comes after its own
-/// `transferFrom` to the owner, so no write after the transfer falls before it. On Sepolia the
-/// numeric `NameRegistered` is the only admitted registration, and `_register` mints, writes the
-/// registry and emits it with nothing in between, while the ENS controllers' `register` only
-/// sets the resolver after it. A transfer before the registration in the same transaction is
-/// impossible: `ownerOf` reverts past expiry, so `transferFrom` needs a live token, while
-/// `_register` needs `available`, which is past expiry and grace. After the ENSv1→ENSv2
-/// activation the Graveyard is the only registering controller, and its `_clear` registers to
-/// itself and is left out of the registrations and the reconcile. Only a third-party contract
-/// composing a controller's `register`, `transferFrom` and `setOwner` in one Sepolia transaction
-/// could reach it.
-/// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L312-L341 @ ens_v1@91c966f)
+/// On Sepolia the numeric `NameRegistered` reconciles its whole transaction. It drops HOLDER's
+/// rows at the registry writes it treats as the registration's setup, but keeps the revoke that
+/// ends the transfer's grant to HOLDER, so the reconciled rows hold what the first pass
+/// committed and a block replay rebuilds it. Mainnet's controller `NameRegistered` reconciles
+/// only the logs before it, and HOLDER's calls come after it. Row 2 of the table is
+/// `a_block_replay_after_a_hand_on_keeps_one_holder`.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L247-L260 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L49 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f)
-/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L74 @ ens_v1@91c966f)
-/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L103 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L16-L21 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f)
-/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/Graveyard.sol:L157-L164 @ ens_v2_sepolia_20261001@07e55a05)
 #[test]
-fn a_registration_that_hands_its_name_on_keeps_the_holder_with_its_rows() -> anyhow::Result<()> {
-    let failures = holder_row_failures(
-        &numeric_batch,
-        vec![
-            HolderRow::new(
-                "registration handed on in its transaction, then a registry write",
-                vec![new_owner_under(B256::ZERO, 1, 0, "eth", CONTRACT)],
-                vec![
-                    handed_on(),
-                    vec![registry_transfer(3, 0, leased(), AWAY_OWNER)],
-                ],
-                registry_only_of(&leased_hex()),
-                held_by(AWAY_OWNER, None),
-            )
-            .lookahead(),
-        ],
-    )?;
+fn a_registration_handed_on_in_its_transaction_leaves_one_holder() -> anyhow::Result<()> {
+    use NextWrite::{LaterTransaction, NextBlock, SameTransaction};
+    // Sepolia admits the BaseRegistrar's numeric `NameRegistered`, mainnet the controller's.
+    let (sepolia, mainnet) = (true, false);
+    let rows = [
+        (
+            sepolia,
+            "1 Sepolia, zero resolver, next write in its transaction",
+            false,
+            SameTransaction,
+        ),
+        (
+            sepolia,
+            "3 Sepolia, zero resolver, next write in the next block",
+            false,
+            NextBlock,
+        ),
+        (
+            mainnet,
+            "4 mainnet, zero resolver, next write in its transaction",
+            false,
+            SameTransaction,
+        ),
+        (
+            mainnet,
+            "5 mainnet, zero resolver, next write later in its block",
+            false,
+            LaterTransaction,
+        ),
+        (
+            mainnet,
+            "6 mainnet, zero resolver, next write in the next block",
+            false,
+            NextBlock,
+        ),
+        (
+            sepolia,
+            "7 Sepolia, resolver, next write in its transaction",
+            true,
+            SameTransaction,
+        ),
+        (
+            sepolia,
+            "8 Sepolia, resolver, next write later in its block",
+            true,
+            LaterTransaction,
+        ),
+        (
+            sepolia,
+            "9 Sepolia, resolver, next write in the next block",
+            true,
+            NextBlock,
+        ),
+        (
+            mainnet,
+            "10 mainnet, resolver, next write in its transaction",
+            true,
+            SameTransaction,
+        ),
+        (
+            mainnet,
+            "11 mainnet, resolver, next write later in its block",
+            true,
+            LaterTransaction,
+        ),
+        (
+            mainnet,
+            "12 mainnet, resolver, next write in the next block",
+            true,
+            NextBlock,
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (numeric, row, resolver, next) in rows {
+        let build: &dyn Fn(Vec<RawLogInput>) -> BatchInput = if numeric {
+            &numeric_batch
+        } else {
+            &lease_batch
+        };
+        let mut holder_row = hand_on_row(row, numeric, resolver, next);
+        if numeric && !resolver && matches!(next, NextBlock) {
+            holder_row = holder_row.lookahead();
+        }
+        match holder_row_failures(build, vec![holder_row]) {
+            Ok(found) => failures.extend(found),
+            Err(error) => failures.push(format!("{row}: {error:#}")),
+        }
+    }
     assert_no_failures(failures)
 }
 
-/// The transaction of `a_registration_that_hands_its_name_on_keeps_the_holder_with_its_rows` at
-/// block 2: the mint and the registry write to HOLDER, the numeric `NameRegistered`, the token
-/// transfer to TRANSFEREE and TRANSFEREE's registry write.
-fn handed_on() -> Vec<RawLogInput> {
-    vec![
-        lease_transfer(2, 0, ZERO, HOLDER),
-        new_owner_under(node(&["eth"]), 2, 1, "leased", HOLDER),
-        numeric_registered(2, 2, HOLDER, 4_000_000_000),
-        lease_transfer(2, 3, HOLDER, TRANSFEREE),
-        registry_transfer(2, 4, leased(), TRANSFEREE),
-    ]
-}
-
-/// The block reconcile's replay of a block fails when the reconciled rows leave two live
-/// holders, rather than keep the holder it had before the block. Synthetic, as the transaction
-/// it starts from: after `handed_on`, TRANSFEREE gives the record to AWAY_OWNER in a later
-/// transaction of the same block. The first pass saw no holder there and grants AWAY_OWNER, while
-/// the reconciled rows keep the transfer's grant to HOLDER, so the replay finds both. The
-/// batch's own commit would also find them, so the row checks that the failure names the block
-/// replay.
+/// Row 2 of the hand-on table: on Sepolia, with a zero resolver, TRANSFEREE gives the record to
+/// AWAY_OWNER in a later transaction of the hand-on's block. The first pass grants AWAY_OWNER
+/// with no holder left to revoke, and the block replay rebuilds the same single holder from the
+/// reconciled rows.
 #[test]
-fn a_block_replay_with_two_live_holders_fails() -> anyhow::Result<()> {
-    let mut logs = vec![new_owner_under(B256::ZERO, 1, 0, "eth", CONTRACT)];
-    logs.extend(handed_on());
-    logs.push(in_transaction(
-        registry_transfer(2, 5, leased(), AWAY_OWNER),
-        1,
-    ));
-    let error = interpret_test_batch_incremental(numeric_batch(logs), None)
-        .err()
-        .map(|error| format!("{error:#}"));
-    assert!(
-        error
-            .as_deref()
-            .is_some_and(|error| error.contains("replaying reconciled block 2")
-                && error.contains("more than one live holder")),
-        "the block replay did not fail on two live holders: {error:?}"
-    );
-    Ok(())
+fn a_block_replay_after_a_hand_on_keeps_one_holder() -> anyhow::Result<()> {
+    let row = "2 Sepolia, zero resolver, next write later in its block";
+    let failures = holder_row_failures(
+        &numeric_batch,
+        vec![hand_on_row(row, true, false, NextWrite::LaterTransaction)],
+    )
+    .unwrap_or_else(|error| vec![format!("{row}: {error:#}")]);
+    assert_no_failures(failures)
 }
 
 /// A registrant that registers its lapsed name again directly keeps the registry-only resource

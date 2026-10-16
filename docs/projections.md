@@ -1116,6 +1116,15 @@ the holder's `resolver_control` to the new resolver.
 Each row on the resource keeps its retained state under its subject, its scope kind and its
 resolver. A restore reads the newest row of each and rebuilds the same holder. A restore
 that finds two live holders, or `resolver_control` outside the holder, fails.
+
+A contract registrant can hand its name on in the registration's own transaction: it
+transfers the token, which makes it the holder, and then writes the record to the new owner,
+which the lease takes over and so ends it. On Sepolia the numeric `NameRegistered`
+reconciles its whole transaction and drops the registrant's rows at the registry writes it
+treats as setup. It keeps a revoke that ends a grant it keeps, so the reconciled rows hold
+the holder the first pass committed and a block replay rebuilds it.
+(upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L287-L292 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L49 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L16-L21 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
