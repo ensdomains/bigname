@@ -962,9 +962,9 @@ it. Other widenings in the same change are judged on their own:
   of another family, that starts at or below the published head makes manifest
   synchronization refuse the change.
 
-Until the bounded adoption mode lands (TYR-356), the authority change still
-records the marker and still needs the exact token-attested full-range
-Interpret redo and the stamped Project redo. A root-registry change gains
+Until TYR-356 lands a redo bounded to an admission's first effect, the
+authority change still records the marker and still needs the exact
+token-attested full-range Interpret redo and the stamped Project redo. A root-registry change gains
 nothing from the timing, because it applies at every block.
 
 Manifest synchronization records a [manifest-authority
