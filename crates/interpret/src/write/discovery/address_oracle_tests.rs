@@ -561,12 +561,12 @@ async fn run(database: &TestDatabase, reference: bool) -> TestResult<Vec<Outcome
             }
         }
         let rows: Vec<Value> = sqlx::query_scalar(
-            "SELECT to_jsonb(address) - 'admitted_at' - 'deactivated_at' - 'contract_instance_id'
+            "SELECT to_jsonb(stored) - 'admitted_at' - 'deactivated_at' - 'contract_instance_id'
                     || jsonb_build_object(
-                        'instance', address.contract_instance_id = $2,
+                        'instance', stored.contract_instance_id = $2,
                         'admitted', dense_rank() OVER (ORDER BY admitted_at),
                         'deactivated', deactivated_at IS NOT NULL)
-             FROM contract_instance_addresses address
+             FROM contract_instance_addresses stored
              WHERE chain_id = $1
              ORDER BY contract_instance_address_id",
         )
