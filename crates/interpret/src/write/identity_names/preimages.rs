@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bigname_adapters::schema_v2::{BatchOutput, LabelPreimage};
 
-use crate::{InterpretError, NORMALIZATION_STATE_REPAIR_REASON, Result};
+use crate::{InterpretError, Result};
 
 /// Fold only the mutable source evidence: bytes and normalization must agree in
 /// every observation. The SQL writer keeps the greatest priority and the last
@@ -37,10 +37,8 @@ pub(super) fn deduplicate(output: &BatchOutput) -> Result<Vec<&LabelPreimage>> {
             || prior.normalized_under_version != preimage.normalized_under_version
             || prior.normalization_error != preimage.normalization_error
         {
-            return Err(InterpretError::data_integrity(format!(
-                "label hashes are already bound to different raw bytes or normalization state; conflicting batch row [{index}={}]; {}",
-                preimage.labelhash, NORMALIZATION_STATE_REPAIR_REASON
-            )));
+            let row = format!("{index}={}", preimage.labelhash);
+            return Err(super::conflicting_preimages(&row));
         }
         if preimage.source_priority >= prior.source_priority {
             selected[position] = preimage;

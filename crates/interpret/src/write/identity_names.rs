@@ -117,14 +117,16 @@ async fn write_preimages(
             .map(|(offset, preimage)| format!("{}={}", start + offset, preimage.labelhash))
             .collect::<Vec<_>>();
         if !conflicting.is_empty() {
-            return Err(InterpretError::data_integrity(format!(
-                "label hashes are already bound to different raw bytes or normalization state; conflicting batch rows [{}]; {}",
-                conflicting.join(", "),
-                NORMALIZATION_STATE_REPAIR_REASON
-            )));
+            return Err(conflicting_preimages(&conflicting.join(", ")));
         }
     }
     Ok(())
+}
+
+fn conflicting_preimages(rows: &str) -> InterpretError {
+    InterpretError::data_integrity(format!(
+        "label hashes are already bound to different raw bytes or normalization state; conflicting batch rows [{rows}]; {NORMALIZATION_STATE_REPAIR_REASON}"
+    ))
 }
 
 fn preimages_for_submission(
