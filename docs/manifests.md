@@ -1882,6 +1882,39 @@ that phase consumes the repaired events. A history-triggered invalidation uses
 the same manifest-authority marker and attested full Interpret redo as an
 authority change.
 
+Manifest synchronization writes `SourceManifestUpdated` with no block position,
+so the manifest set has none either. Every block Project composes takes the
+latest active set ([active
+manifest set](glossary.md#active-manifest-set-family-block)). A manifest change
+therefore applies at every block of the redo that adopts it, not from the block
+it was synchronized at, and following the chain head never adopts one. Two
+cases follow:
+
+- A change to the admitted ENSv2 root registry, the contract an
+  `ens_v2_root_l1` manifest declares with the role `root_registry`, changes the
+  composition of every `.eth` name at every block. The [Universal Resolver
+  cutover](glossary.md#universal-resolver-cutover) and the registry the ENSv2
+  path walk starts at both come from that declaration. The Project redo that the
+  full Interpret redo stamps recomposes every name. It starts at the first
+  ingested block, below the kept [family undo
+  journal](glossary.md#family-undo-journal) on any chain with more history than
+  the journal keeps, so Project clears its families and rebuilds them under the
+  new set ([ordering and undo](projections.md#ordering-and-undo)).
+- A declared contract's `start_block` is a Project [work
+  block](glossary.md#work-block). Project classifies a declared resolver again
+  at its start block and takes the declaration's `read_features` from that
+  block on, with or without an event there. An edit to `read_features`, or a
+  declared start at or below the published head, can change derived rows from
+  that block on with no event to mark it.
+
+Admit a planned contract before it goes live, while its declared
+`start_block`, its first event and the first event that names its address all
+lie above the published head. Its first effect then lands above every block
+already derived. The authority change still records a manifest-authority marker
+and still needs the attested full Interpret redo and the Project redo it
+stamps. A root-registry change gains nothing from the timing, because it
+applies at every block.
+
 The legacy resolver-profile authority journal, input queue, and reconciliation tables remain only in immutable migration history. Their Rust APIs and consumers have been deleted. Current manifests and schema-v2 discovery edges are the admission truth; legacy rows do not gate synchronization or interpretation.
 
 ERC-1967 `Upgraded(address)` logs from manifest-declared and event-announced contracts produce `Upgraded` normalized history on the emitting contract. (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/interfaces/IERC1967.sol:L13 @ basenames@1809bbc) Manifest synchronization does not infer upgrades from code-hash drift and does not synthesize drift-alert normalized events.

@@ -931,6 +931,27 @@ no stamp, no attestation token, and no Base Interpret redo, and it does not
 appear in the pending-redo listing.
 An unchanged interpreter hash therefore does not waive authority-transition re-derivation.
 
+The manifest set has no block, so a manifest change applies at every block of
+the redo that adopts it ([manifest change
+propagation](manifests.md#manifest-change-propagation)). A change to the
+admitted ENSv2 root registry changes every `.eth` name at every block, and the
+stamped Project redo recomposes every name from the first ingested block. A
+declared `start_block` is a Project [work block](glossary.md#work-block): a
+declared resolver is classified again there and takes the declaration's
+`read_features` from it, even when no event lands on that block.
+
+Admit a planned contract before it goes live. Sync its manifest while its
+declared `start_block`, its first event and the first event that names its
+address all lie above the published head, so its first effect lands above
+every block already derived. Its own address watches then start above the
+published head too, and manifest synchronization stamps no Ingest redo for a
+[watch-plan](glossary.md#watch-plan--watched-tuple) widening that starts above
+it. Another widening in the same change still stamps one. A new all-emitter
+event is such a widening, because it compiles from block zero. The authority
+change still records the marker and still needs the exact token-attested
+full-range Interpret redo and the stamped Project redo. A root-registry change
+gains nothing from the timing, because it applies at every block.
+
 Manifest synchronization records a [manifest-authority
 marker](glossary.md#manifest-authority-marker) when its authority changes. Every
 Interpret redo that would discharge that marker uses this operator flow:
