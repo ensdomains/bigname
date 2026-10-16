@@ -1949,10 +1949,12 @@ async fn begin_search_family_rebuild(
         },
         bigname_project::families::FamilyMode::Rebuild,
         &token,
+        // The empty composition pass of a rebuild with no range takes one block of the budget,
+        // and one block is applied.
         &bigname_project::families::FamilyOptions::new(
             bigname_content_hash::PROJECTION_CONTENT_HASH,
         )
-        .with_max_blocks_per_run(1),
+        .with_max_blocks_per_run(2),
     )
     .await?;
     assert!(outcome.reset);

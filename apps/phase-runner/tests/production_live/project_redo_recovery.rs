@@ -139,16 +139,55 @@ async fn a_real_rebuild_has_truthful_bounded_progress_and_resumes_without_anothe
 async fn undo_of_a_range_transaction_records_its_actual_predecessor() -> Result<()> {
     let chain = "project-ranged-undo";
     let (scratch, fixture) = ready(chain).await?;
-    let token = bigname_project::families::input_token(scratch.pool(), chain).await?;
     let target = bigname_project::Marker {
         number: HEAD,
         hash: block_hash(1, HEAD),
     };
+    // A rebuild range before the composition pass journals nothing, so only a range after it can
+    // be undone. Rebuild the blocks through 20 in ranges and end the pass there, one block of
+    // budget a run. The next run then rebuilds the rest in ranges after the pass, which compose
+    // and journal.
+    let mut composed: Option<i64> = None;
+    for attempt in 0..100 {
+        let token = bigname_project::families::input_token(scratch.pool(), chain).await?;
+        let (_, error) = bigname_project::families::run(
+            scratch.pool(),
+            chain,
+            &target,
+            if attempt == 0 {
+                FamilyMode::Rebuild
+            } else {
+                FamilyMode::Normal
+            },
+            &token,
+            &FamilyOptions::new(PROJECTION_CONTENT_HASH)
+                .with_rebuild_ranges(RebuildRanges::Through(20))
+                .with_max_blocks_per_run(1),
+        )
+        .await;
+        if let Some(error) = error {
+            return Err(error.into());
+        }
+        composed = sqlx::query_scalar(
+            "SELECT composed_block FROM project_repair_record WHERE chain_id = $1",
+        )
+        .bind(chain)
+        .fetch_one(scratch.pool())
+        .await?;
+        if composed.is_some() {
+            break;
+        }
+    }
+    assert!(
+        composed.is_some_and(|block| block <= 20),
+        "the pass ends at or below block 20: {composed:?}"
+    );
+    let token = bigname_project::families::input_token(scratch.pool(), chain).await?;
     let (_, error) = bigname_project::families::run(
         scratch.pool(),
         chain,
         &target,
-        FamilyMode::Rebuild,
+        FamilyMode::Normal,
         &token,
         &FamilyOptions::new(PROJECTION_CONTENT_HASH)
             .with_rebuild_ranges(RebuildRanges::Through(HEAD)),
