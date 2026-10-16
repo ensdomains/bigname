@@ -27,8 +27,8 @@ const ALICE: &str = "0x00000000000000000000000000000000000000aa";
 const CAROL: &str = "0x00000000000000000000000000000000000000cc";
 /// The namehash of a registrar name no surface names, transferred unnamed at blocks 160 and 180.
 const TRANSFERRED: &str = "0x00000000000000000000000000000000000000000000000000000000000f01d0";
-/// The nodes an unnamed resource pointer names at block 165, then at block 185. Neither has a
-/// surface.
+/// The nodes an unnamed ENSv2 resource pointer names at block 165, then at block 185. Neither
+/// has a surface, and only the interpreted events still hold the first.
 const MOVED_FROM: &str = "0x000000000000000000000000000000000000000000000000000000000000a0a0";
 const MOVED_TO: &str = "0x000000000000000000000000000000000000000000000000000000000000b0b0";
 
@@ -165,6 +165,7 @@ async fn seeded(prefix: &str) -> Result<Fixture> {
             R1,
         )
         .await?;
+    // An ENSv2 registry's pointer, so no ENSv1 registry node pointer keeps the node it left.
     let pointer = uuid(902);
     for (block, at) in [(165, MOVED_FROM), (185, MOVED_TO)] {
         fixture
@@ -172,7 +173,7 @@ async fn seeded(prefix: &str) -> Result<Fixture> {
                 block,
                 7,
                 "ResolverChanged",
-                "ens_v1_registry_l1",
+                "ens_v2_registry_l1",
                 None,
                 Some(&pointer),
                 json!({"node": at, "resolver": R1}),
