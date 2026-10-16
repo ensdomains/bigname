@@ -1065,7 +1065,9 @@ fn unsurfaced_transfer(block: i64, log_index: i64, from: &str, to: &str) -> RawL
 /// hand-back is the holder's, which every other registry-only row follows whether or not the
 /// name has a surface. When the registration's registry write was its own transaction the owner
 /// already holds the resource and the release adds no row, and a Graveyard owner is granted
-/// nothing. U5 is the Sepolia route, a numeric-only registration with no label.
+/// nothing. U5 is a guard, not this route: a Sepolia numeric-only registration names no label,
+/// but the registry write before it already materialized the node's surface, so its release
+/// hands back through the surface path.
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f)
 #[test]
 fn a_lapsed_lease_on_a_surface_unknown_name_hands_the_resource_back_to_its_registry_owner()
@@ -1137,8 +1139,8 @@ fn a_lapsed_lease_on_a_surface_unknown_name_hands_the_resource_back_to_its_regis
             .forbid(|event| about(event, GRAVEYARD)),
         ],
     )?);
-    // Sepolia's route: the numeric `NameRegistered` names no label, so the name has no surface
-    // unless one is learnt elsewhere.
+    // `_register` writes the registry before the numeric `NameRegistered`, and that write
+    // materializes the node's surface, so the registration's surface is known.
     let numeric_registration = vec![
         lease_transfer(2, 0, ZERO, HOLDER),
         new_owner_under(node(&["eth"]), 2, 1, "leased", HOLDER),
@@ -1148,7 +1150,7 @@ fn a_lapsed_lease_on_a_surface_unknown_name_hands_the_resource_back_to_its_regis
     failures.extend(holder_row_failures(
         &numeric_batch,
         vec![HolderRow::new(
-            "U5 a release after a Sepolia numeric-only registration, with a resolver set",
+            "U5 a release after a Sepolia numeric-only registration, which keeps its surface",
             vec![new_owner_under(B256::ZERO, 1, 0, "eth", CONTRACT)],
             vec![
                 numeric_registration,

@@ -4488,8 +4488,8 @@ What changes for names:
   write leaves the next owner as the only holder.
 - When a lease on a name with no surface lapses, the registry owner becomes the holder of the
   resource, as for a name with a surface. Before, no one held it until the next registry
-  write. Names with no surface are common on Sepolia, where numeric-only registrations carry
-  no label, and on every chain for labels that do not normalize.
+  write. A name has no surface when the label its registration carries does not normalize,
+  which every chain's registrar controllers allow.
 - `GET /v1/events?type=permission` no longer serves a second grant to an owner that already
   holds the resource: at a registrar transfer back to the registry owner, at a `registerOnly`
   registration, and at a lease release.
