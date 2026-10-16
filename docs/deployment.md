@@ -566,7 +566,8 @@ one block timestamp cannot be split across batches. The setting must not change
 stored output or the interpreter content hash, so it can be changed between runs
 without a redo.
 
-A one-shot `phase-runner redo` can instead size each Interpret redo batch with
+A one-shot `phase-runner redo --phase interpret` or `--phase all` can instead
+size each Interpret redo batch with
 [`--interpret-adaptive`](development.md#adaptive-interpret-batches). The planner
 adds whole canonical blocks until the next block would pass a raw log count or an
 estimated raw input size, and a block over either target runs alone. Without the

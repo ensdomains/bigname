@@ -7,6 +7,17 @@ pub(super) fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
         .adaptive
         .resolve(args.capacity.explicit_interpret_blocks_per_batch())?;
     let phase = parse_redo_phase(&args.phase)?;
+    if interpret_adaptive.is_some()
+        && !matches!(
+            phase,
+            RedoPhase::Phase(PhaseName::Interpret) | RedoPhase::All
+        )
+    {
+        return Err(RunnerError::new(
+            ErrorKind::Configuration,
+            "--interpret-adaptive applies only to an interpret or all-phase redo",
+        ));
+    }
     let range = BlockRange::new(args.from_block, args.to_block)?;
     let watch_set_coverage_attestations = watch_set_attestation::resolve(
         &args.attest_watch_set_coverage,

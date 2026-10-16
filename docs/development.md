@@ -253,10 +253,13 @@ shorter batches and sparse history longer ones.
 | `--interpret-target-input-mib` | 128 | Estimated raw input MiB per batch |
 | `--interpret-adaptive-max-blocks` | 131072 | Most canonical blocks one batch spans |
 
-The options require `--interpret-adaptive`, and each must be positive. An
-explicit `--interpret-blocks-per-batch`, or `BIGNAME_INTERPRET_BLOCKS_PER_BATCH`,
-lowers the block span further. The implicit 500-block default does not. A block
-is never split: one block over a target runs alone and is logged as oversized.
+Other redo phases and the supervised `run` refuse the flag. The options require
+`--interpret-adaptive`, and each must be positive. An explicit
+`--interpret-blocks-per-batch`, or `BIGNAME_INTERPRET_BLOCKS_PER_BATCH`, lowers
+the block span further. The implicit 500-block default does not. A block is never
+split: one block over a target runs alone and is logged as oversized. Normal
+Interpret batches that the redo runs after a discovery repair keep the fixed
+length.
 
 The planner reads a raw log count and an input estimate for up to the maximum
 span of blocks at once, and reuses them for the following batches. Each batch

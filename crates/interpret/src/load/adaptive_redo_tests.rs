@@ -2,7 +2,7 @@
 //! [0] and [1] alone (14 and 5 logs, both over 4), [2, 3, 4] at the five-block planning
 //! horizon, [5..=8] before block 9's logs would pass 4, then [9] and [10, 11]: an oversized
 //! first and middle block, a log split, a horizon edge and sparse spans. Only the stored
-//! rows are compared with fixed batches; the boundaries are what may differ.
+//! rows are compared with fixed batches. The boundaries are what may differ.
 use std::{
     collections::BTreeMap,
     io::{self, Write},

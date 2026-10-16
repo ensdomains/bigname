@@ -26,7 +26,7 @@ pub(super) struct AdaptiveInterpretArgs {
         long,
         requires = "interpret_adaptive",
         value_name = "MIB",
-        help = "target estimated raw input MiB per adaptive Interpret batch (default: 128; not an RSS cap)"
+        help = "target estimated raw input MiB per adaptive Interpret batch (default: 128, not an RSS cap)"
     )]
     interpret_target_input_mib: Option<NonZeroU64>,
 

@@ -3,16 +3,25 @@ use clap::{CommandFactory, Parser};
 
 use crate::cli::{Cli, ResolvedCommand};
 
-fn arguments(extra: &[&str]) -> Vec<String> {
+const SOURCE_ENV: &str = "BIGNAME_TEST_ADAPTIVE_REDO_SOURCE_ENDPOINT";
+
+fn redo_arguments(phase: &str, extra: &[&str]) -> Vec<String> {
+    // SAFETY: every caller writes the same value to this test-only environment key.
+    unsafe { std::env::set_var(SOURCE_ENV, "https://adaptive-redo-source.invalid") };
+    let source = format!("ethereum-mainnet:rpc:drpc:ethereum_head:0={SOURCE_ENV}");
     let mut args: Vec<String> = [
         "phase-runner",
         "redo",
         "--database-url",
         "postgres://fixture.invalid/target",
+        "--verification-database-url",
+        "postgres://fixture.invalid/verification",
         "--chain",
         "ethereum-mainnet",
+        "--source",
+        &source,
         "--phase",
-        "recompute-flags",
+        phase,
         "--from-block",
         "0",
         "--to-block",
@@ -23,6 +32,10 @@ fn arguments(extra: &[&str]) -> Vec<String> {
     .collect();
     args.extend(extra.iter().map(|value| (*value).to_owned()));
     args
+}
+
+fn arguments(extra: &[&str]) -> Vec<String> {
+    redo_arguments("interpret", extra)
 }
 
 fn resolved(extra: &[&str]) -> ResolvedCommand {
@@ -130,6 +143,39 @@ fn adaptive_knobs_require_opt_in_and_positive_values() {
         ])
         .contains("too large to express in bytes")
     );
+}
+
+#[test]
+fn adaptive_batching_requires_a_redo_that_runs_interpret() {
+    for phase in ["interpret", "all"] {
+        assert!(
+            Cli::try_parse_from(redo_arguments(phase, &["--interpret-adaptive"]))
+                .unwrap()
+                .resolve()
+                .is_ok(),
+            "{phase}"
+        );
+    }
+    for phase in ["ingest", "project", "verify", "live", "recompute-flags"] {
+        let error = match Cli::try_parse_from(redo_arguments(phase, &["--interpret-adaptive"]))
+            .unwrap()
+            .resolve()
+        {
+            Ok(_) => panic!("{phase} accepted adaptive batching"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("only to an interpret or all-phase redo"),
+            "{phase}: {error}"
+        );
+        assert!(
+            Cli::try_parse_from(redo_arguments(phase, &[]))
+                .unwrap()
+                .resolve()
+                .is_ok(),
+            "{phase} without the flag"
+        );
+    }
 }
 
 #[test]
