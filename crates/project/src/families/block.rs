@@ -257,6 +257,13 @@ pub(crate) async fn publish(
         raw_name: prior.token.revision() != token.revision(),
         admission: prior.admission != composition.admission,
     };
+    // A followed sweep is counted before anything is composed. A reset's first publication
+    // composes the same names anyway (`after` is -1), so only a prior block's marker is capped.
+    if sweeps.admission && prior.current.is_some() {
+        let cap = options.max_admission_sweep_names;
+        super::derived::refuse_oversized_admission_sweep(&mut transaction, chain_id, &block, cap)
+            .await?;
+    }
     let mut stats = write(
         &mut transaction,
         chain_id,

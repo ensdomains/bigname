@@ -1107,3 +1107,107 @@ async fn a_withdrawn_root_moves_a_live_entry_name_back_to_its_lease() -> Result<
         rebuilt,
     )
 }
+
+/// The names an admission sweep at `block` composes again: every surface at or below it and
+/// every stored summary and lookup name.
+async fn swept_names(fixture: &Fixture, block: i64) -> Result<u64> {
+    let swept: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM (
+             SELECT logical_name_id FROM name_surfaces WHERE chain_id = $1 AND block_number <= $2
+             UNION SELECT logical_name_id FROM project_name_summary WHERE chain_id = $1
+             UNION SELECT logical_name_id FROM project_lookup_name WHERE chain_id = $1
+         ) swept",
+    )
+    .bind(CHAIN)
+    .bind(block)
+    .fetch_one(&fixture.pool)
+    .await?;
+    let swept = u64::try_from(swept)?;
+    ensure!(swept > 1, "the sweep at {block} names {swept} names");
+    Ok(swept)
+}
+
+fn capped(names: u64) -> FamilyOptions {
+    FamilyOptions::new(CONTENT_HASH).with_max_admission_sweep_names(names)
+}
+
+// Row 19, the cap. Row 1's chain, with the swept-name cap one below the names the publication at
+// block 7 composes again. The publication is refused as a data-integrity halt that names the full
+// Project redo, and its transaction rolls back: the marker stays on block 6 and no family row
+// moves. With the cap at exactly that count, the next run publishes block 7 as row 1 does.
+#[tokio::test]
+async fn a_sweep_above_the_cap_is_refused_and_one_at_the_cap_publishes() -> Result<()> {
+    let fixture = Fixture::new("families_admission_reread_cap", 9).await?;
+    let names = v1_names(&fixture).await?;
+    follow(&fixture, 0, 6).await?;
+    sync(&fixture, None, "ens_v2_root_l1", "active", root(ROOT)).await?;
+    let swept = swept_names(&fixture, 7).await?;
+    let before = fixture.exact().await?;
+    let refused = fixture
+        .apply_with(7, FamilyMode::Normal, &capped(swept - 1))
+        .await;
+    let mut failures = Vec::new();
+    match &refused {
+        Ok(outcome) => failures.push(format!("block 7 published above the cap: {outcome:?}")),
+        Err(error) => {
+            let message = error.to_string();
+            let wanted = [
+                format!("would compose {swept} names again in one transaction"),
+                format!("above the cap of {}", swept - 1),
+                "redo the full range of phase project alone".to_owned(),
+                format!("phase-runner redo --chain {CHAIN} --phase project"),
+            ];
+            if error.kind() != bigname_project::ErrorKind::DataIntegrity
+                || wanted.iter().any(|part| !message.contains(part.as_str()))
+            {
+                failures.push(format!("refusal {:?}: {message}", error.kind()));
+            }
+        }
+    }
+    if refused.is_err() {
+        if fixture.marker().await?.0 != Some(6) {
+            failures.push("the refused publication moved the marker".to_owned());
+        }
+        if fixture.exact().await? != before {
+            failures.push("the refused publication left family rows".to_owned());
+        }
+        if let Err(error) = fixture
+            .apply_with(7, FamilyMode::Normal, &capped(swept))
+            .await
+        {
+            failures.push(format!("at the cap of {swept}: {error}"));
+        }
+    }
+    let stale = composed_otherwise(&fixture, &names.all(), true).await?;
+    if !stale.is_empty() {
+        failures.push(format!("after the sweep at the cap: {stale:?}"));
+    }
+    let rebuilt = assert_pass_equals_rebuild(&fixture, 7).await;
+    fixture.cleanup().await?;
+    verdict(failures, "the cap", rebuilt)
+}
+
+// Row 20, the cap on a reset. A rebuild's first publication follows a reset marker with no
+// admission, so the key fires there, but `after` is -1 and the publication composes every name
+// it would sweep anyway. A cap of one name does not refuse it.
+#[tokio::test]
+async fn a_rebuild_under_an_admission_is_not_capped() -> Result<()> {
+    let fixture = Fixture::new("families_admission_reread_cap_reset", 9).await?;
+    let names = v1_names(&fixture).await?;
+    sync(&fixture, None, "ens_v2_root_l1", "active", root(ROOT)).await?;
+    let swept = swept_names(&fixture, 7).await?;
+    let options = FamilyOptions::new(CONTENT_HASH)
+        .with_rebuild_ranges(RebuildRanges::Through(7))
+        .with_max_admission_sweep_names(1);
+    let rebuilt = fixture
+        .apply_with(7, FamilyMode::Rebuild, &options)
+        .await
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!("a rebuild over {swept} names under a cap of 1: {error}"));
+    let stale = match rebuilt {
+        Ok(()) => composed_otherwise(&fixture, &names.all(), true).await?,
+        Err(_) => Vec::new(),
+    };
+    fixture.cleanup().await?;
+    verdict(stale, "after the capped rebuild", rebuilt)
+}

@@ -30,6 +30,46 @@ pub(crate) struct Sweeps {
     pub(crate) admission: bool,
 }
 
+/// The names of chain `$1` an admission sweep at block `$2` composes again, the summary refresh's
+/// (`summary::ADMISSION_SWEEP`) and the lookup refresh's (`lookup::work`) together.
+const ADMISSION_SWEEP_COUNT: &str = "/* project:families.derived.admission_sweep_count */
+    SELECT count(*) FROM (
+        SELECT logical_name_id FROM name_surfaces WHERE chain_id = $1 AND block_number <= $2
+        UNION SELECT logical_name_id FROM project_name_summary WHERE chain_id = $1
+        UNION SELECT logical_name_id FROM project_lookup_name WHERE chain_id = $1
+    ) swept";
+
+/// Refuse the publication of `block` when its admission sweep would compose more than `cap`
+/// names in its one transaction (`families::MAX_ADMISSION_SWEEP_NAMES`). It runs before any
+/// composition, and the refusal rolls the publication's transaction back.
+pub(super) async fn refuse_oversized_admission_sweep(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    block: &input::BlockHeader,
+    cap: u64,
+) -> Result<()> {
+    let swept: i64 = sqlx::query_scalar(ADMISSION_SWEEP_COUNT)
+        .bind(chain_id)
+        .bind(block.number)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database("failed to count the names of an admission change", error)
+        })?;
+    let swept = u64::try_from(swept).unwrap_or_default();
+    if swept <= cap {
+        return Ok(());
+    }
+    Err(ProjectError::data_integrity(format!(
+        "refusing the family publication of block {} of chain {chain_id}: its ENSv2 root \
+         registry admission differs from the family marker's, so it would compose {swept} names \
+         again in one transaction, above the cap of {cap}; redo the full range of phase project \
+         alone: rerun `phase-runner redo --chain {chain_id} --phase project` with the full \
+         range's `--from-block` and `--to-block`",
+        block.number
+    )))
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Touched {
     /// The block whose journal named the keys.
