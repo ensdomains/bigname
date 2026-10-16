@@ -8,11 +8,13 @@
 //! sqlx prepares the statement, and the phase runner's pool keeps `plan_cache_mode = auto`
 //! (apps/phase-runner/tests/bootstrap.rs), so after five executions the runner may get the
 //! generic plan. Each case runs the prepared statement under `auto` (six executions, then the
-//! plan of the seventh) and under the two forced modes. On this seed every mode probes the
-//! primary key. On the mainnet replay, with 11.3M rows, a custom plan with 424 literal leases
-//! walked `project_lifecycle_event_decoded_name_idx` instead, a choice the runner's prepared
-//! path does not make there. Forcing custom plans on the runner's pool would bring that walk
-//! back for this statement.
+//! plan of the seventh) and under the two forced modes. The first two always probe the primary
+//! key. The custom plan does too here, except on a small chain without unnamed events, where it
+//! may read the chain's rows with no decoded name through
+//! `project_lifecycle_event_decoded_name_idx`. On the mainnet replay, with 11.3M rows, a custom
+//! plan with 424 literal leases walked that index for the whole chain, a choice the runner's
+//! prepared path does not make there. Forcing custom plans on the runner's pool would bring that
+//! walk back for this statement.
 mod families_support;
 
 use std::collections::BTreeSet;
@@ -193,27 +195,57 @@ fn probes_primary_key(label: &str, plan: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// The rows equal the seed's in every mode, then the plan probes the primary key in every mode.
+/// What a case asserts about the plans once its rows match.
+#[derive(Clone, Copy, PartialEq)]
+enum Plans {
+    Unchecked,
+    /// A primary key probe in every mode.
+    Probe,
+    /// A primary key probe under `auto` and the generic plan. The custom plan is recorded: it may
+    /// instead read the chain's rows with no decoded name through
+    /// `project_lifecycle_event_decoded_name_idx`.
+    ProbeRecordingCustom,
+}
+
+/// The custom plan seeks the decoded name index on the chain's rows with no decoded name.
+fn seeks_undecoded_rows(plan: &[String]) -> bool {
+    plan.windows(2).any(|lines| {
+        lines[0].contains("using project_lifecycle_event_decoded_name_idx on")
+            && lines[1].contains("Index Cond:")
+            && lines[1].contains("(decoded_logical_name_id IS NULL)")
+    })
+}
+
+/// The rows equal the seed's in every mode, then the plans are checked as `plans` says.
 async fn assert_case(
     connection: &mut PgConnection,
     label: &str,
     chain: &str,
     leases: &[u32],
     expected_rows: &BTreeSet<(String, String)>,
-    check_plan: bool,
+    plans: Plans,
 ) -> Result<()> {
-    let mut plans = Vec::new();
+    let mut observed = Vec::new();
     for mode in MODES {
         let (plan, rows) = run(connection, mode, chain, leases).await?;
         ensure!(
             &rows == expected_rows,
             "{label} {mode}: rows differ from the seed's unnamed rows\nexpected {expected_rows:?}\nobserved {rows:?}"
         );
-        plans.push((mode, plan));
+        observed.push((mode, plan));
     }
-    if check_plan {
-        let failures: Vec<String> = plans
+    if plans != Plans::Unchecked {
+        let failures: Vec<String> = observed
             .iter()
+            .filter(|(mode, plan)| {
+                let recorded = plans == Plans::ProbeRecordingCustom
+                    && *mode == "force_custom_plan"
+                    && seeks_undecoded_rows(plan);
+                if recorded {
+                    eprintln!("{label} {mode}, recorded:\n{}", plan.join("\n"));
+                }
+                !recorded
+            })
             .filter_map(|(mode, plan)| probes_primary_key(&format!("{label} {mode}"), plan).err())
             .map(|error| error.to_string())
             .collect();
@@ -235,7 +267,15 @@ async fn one_lease_probes_the_primary_key() -> Result<()> {
     let (fixture, mut connection) = seeded("unnamed_rows_one").await?;
     let leases = [1];
     let rows = expected(MAINNET, &leases);
-    let result = assert_case(&mut connection, "1 lease", MAINNET, &leases, &rows, true).await;
+    let result = assert_case(
+        &mut connection,
+        "1 lease",
+        MAINNET,
+        &leases,
+        &rows,
+        Plans::Probe,
+    )
+    .await;
     finish(fixture, connection, result).await
 }
 
@@ -244,7 +284,15 @@ async fn twenty_five_leases_probe_the_primary_key() -> Result<()> {
     let (fixture, mut connection) = seeded("unnamed_rows_25").await?;
     let leases = mixed(15, 10);
     let rows = expected(MAINNET, &leases);
-    let result = assert_case(&mut connection, "25 leases", MAINNET, &leases, &rows, true).await;
+    let result = assert_case(
+        &mut connection,
+        "25 leases",
+        MAINNET,
+        &leases,
+        &rows,
+        Plans::Probe,
+    )
+    .await;
     finish(fixture, connection, result).await
 }
 
@@ -255,7 +303,15 @@ async fn four_hundred_sixty_leases_probe_the_primary_key() -> Result<()> {
     let (fixture, mut connection) = seeded("unnamed_rows_460").await?;
     let leases = mixed(400, 60);
     let rows = expected(MAINNET, &leases);
-    let result = assert_case(&mut connection, "460 leases", MAINNET, &leases, &rows, true).await;
+    let result = assert_case(
+        &mut connection,
+        "460 leases",
+        MAINNET,
+        &leases,
+        &rows,
+        Plans::Probe,
+    )
+    .await;
     finish(fixture, connection, result).await
 }
 
@@ -267,7 +323,15 @@ async fn rows_are_the_unnamed_lease_events_of_the_leases() -> Result<()> {
             let label = format!("{} leases", leases.len());
             let rows = expected(MAINNET, &leases);
             ensure!(!rows.is_empty());
-            assert_case(&mut connection, &label, MAINNET, &leases, &rows, false).await?;
+            assert_case(
+                &mut connection,
+                &label,
+                MAINNET,
+                &leases,
+                &rows,
+                Plans::Unchecked,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -275,6 +339,8 @@ async fn rows_are_the_unnamed_lease_events_of_the_leases() -> Result<()> {
     finish(fixture, connection, result).await
 }
 
+/// PostgreSQL expects few rows with no decoded name on this small chain, so a custom plan may
+/// read them all through the decoded name index rather than probe each lease.
 #[tokio::test]
 async fn a_chain_with_only_named_lease_events_returns_nothing() -> Result<()> {
     let (fixture, mut connection) = seeded("unnamed_rows_named_chain").await?;
@@ -285,7 +351,7 @@ async fn a_chain_with_only_named_lease_events_returns_nothing() -> Result<()> {
         NAMED_ONLY,
         &leases,
         &BTreeSet::new(),
-        true,
+        Plans::ProbeRecordingCustom,
     )
     .await;
     finish(fixture, connection, result).await
@@ -299,7 +365,7 @@ async fn each_chain_reads_only_its_own_unnamed_events() -> Result<()> {
         for chain in [MAINNET, SEPOLIA] {
             let rows = expected(chain, &leases);
             ensure!(!rows.is_empty());
-            assert_case(&mut connection, chain, chain, &leases, &rows, true).await?;
+            assert_case(&mut connection, chain, chain, &leases, &rows, Plans::Probe).await?;
         }
         Ok(())
     }
@@ -321,7 +387,7 @@ async fn repeated_leases_return_each_row_once() -> Result<()> {
         MAINNET,
         &leases,
         &rows,
-        true,
+        Plans::Probe,
     )
     .await;
     finish(fixture, connection, result).await
@@ -337,7 +403,7 @@ async fn leases_without_rows_probe_the_primary_key() -> Result<()> {
         MAINNET,
         &leases,
         &BTreeSet::new(),
-        true,
+        Plans::Probe,
     )
     .await;
     finish(fixture, connection, result).await
@@ -357,7 +423,7 @@ async fn named_lease_events_are_not_returned() -> Result<()> {
             MAINNET,
             &leases,
             &rows,
-            false,
+            Plans::Unchecked,
         )
         .await
     }
