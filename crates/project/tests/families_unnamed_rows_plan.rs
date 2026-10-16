@@ -19,10 +19,11 @@ use std::collections::BTreeSet;
 
 use anyhow::{Result, ensure};
 use families_support::{Fixture, uuid};
-use sqlx::{PgConnection, Row, raw_sql};
+use sqlx::{PgConnection, Postgres, Row, pool::PoolConnection, raw_sql};
 
 /// The statement as decode.rs sends it, byte for byte.
-const UNNAMED_ROWS: &str = "/* project:families.decode.unnamed_rows */ SELECT state_key, event_identity
+const UNNAMED_ROWS: &str =
+    "/* project:families.decode.unnamed_rows */ SELECT state_key, event_identity
          FROM project_lifecycle_event
          WHERE chain_id = $1 AND state_kind = 'resource' AND state_key = ANY($2)
            AND source_family = 'ens_v1_registrar_l1'
@@ -34,9 +35,9 @@ const SEPOLIA: &str = "ethereum-sepolia";
 const NAMED_ONLY: &str = "base-mainnet";
 const MODES: [&str; 3] = ["auto", "force_generic_plan", "force_custom_plan"];
 
-/// Mainnet: 400,000 events. Every 50th is an unnamed registrar lease event (8,000 over leases
-/// 1-6,000, leases 1-2,000 with two), the next a named one (leases 3,001-11,000), the rest named
-/// registry triple events. Each predicate column alone matches about 2-4% of the table, so
+/// Mainnet: 200,000 events. Every 50th is an unnamed registrar lease event (4,000 over leases
+/// 1-3,000, leases 1-1,000 with two), the next a named one (leases 1,501-5,500), the rest named
+/// registry triple events. Each predicate column alone matches about 2-5% of the table, so
 /// PostgreSQL multiplies them to about one row. Sepolia: 20,000 events, 2,000 unnamed on leases
 /// 1-2,000 shared with mainnet. base-mainnet: 2,000 named lease events on leases 1-2,000.
 const SEED: &str = r#"
@@ -52,9 +53,9 @@ SELECT chain_id, CASE WHEN lease IS NULL THEN 'triple' ELSE 'resource' END,
        CASE WHEN lease IS NULL THEN 'ens_v1_registry_l1' ELSE 'ens_v1_registrar_l1' END
 FROM (
     SELECT 'ethereum-mainnet' AS chain_id, i, 'a-' || i AS event, i % 50 = 0 AS unnamed,
-           CASE i % 50 WHEN 0 THEN CASE WHEN i / 50 < 6000 THEN i / 50 + 1 ELSE i / 50 - 5999 END
-                       WHEN 1 THEN i / 50 + 3001 END AS lease
-    FROM generate_series(0, 399999) AS i
+           CASE i % 50 WHEN 0 THEN CASE WHEN i / 50 < 3000 THEN i / 50 + 1 ELSE i / 50 - 2999 END
+                       WHEN 1 THEN i / 50 + 1501 END AS lease
+    FROM generate_series(0, 199999) AS i
     UNION ALL
     SELECT 'ethereum-sepolia', i, 'b-' || i, i % 10 = 0,
            CASE WHEN i % 10 = 0 THEN i / 10 + 1 WHEN i % 50 = 1 THEN 100000 + i END
@@ -71,10 +72,10 @@ fn expected(chain: &str, leases: &[u32]) -> BTreeSet<(String, String)> {
     let mut rows = BTreeSet::new();
     for &lease in leases {
         match chain {
-            MAINNET if (1..=6000).contains(&lease) => {
+            MAINNET if (1..=3000).contains(&lease) => {
                 rows.insert((uuid(lease), format!("a-{}", 50 * (lease - 1))));
-                if lease <= 2000 {
-                    rows.insert((uuid(lease), format!("a-{}", 50 * (lease + 5999))));
+                if lease <= 1000 {
+                    rows.insert((uuid(lease), format!("a-{}", 50 * (lease + 2999))));
                 }
             }
             SEPOLIA if (1..=2000).contains(&lease) => {
@@ -92,16 +93,32 @@ fn misses(count: u32) -> Vec<u32> {
     (0..count).map(|n| MISS + n).collect()
 }
 
-/// `hits` leases with unnamed rows spread over mainnet's 1-6,000, then `missing` with none.
+/// `hits` leases with unnamed rows spread over mainnet's 1-3,000, then `missing` with none.
 fn mixed(hits: u32, missing: u32) -> Vec<u32> {
-    let step = 6000 / hits;
-    (0..hits).map(|n| 1 + n * step).chain(misses(missing)).collect()
+    let step = 3000 / hits;
+    (0..hits)
+        .map(|n| 1 + n * step)
+        .chain(misses(missing))
+        .collect()
 }
 
-async fn seeded(prefix: &str) -> Result<Fixture> {
+/// A seeded database and its one connection, where the prepared statement lives.
+async fn seeded(prefix: &str) -> Result<(Fixture, PoolConnection<Postgres>)> {
     let fixture = Fixture::new(prefix, 0).await?;
     raw_sql(SEED).execute(&fixture.pool).await?;
-    Ok(fixture)
+    let connection = fixture.pool.acquire().await?;
+    Ok((fixture, connection))
+}
+
+/// Drops the database whether the case passed or not: each one holds a seeded table.
+async fn finish(
+    fixture: Fixture,
+    connection: PoolConnection<Postgres>,
+    result: Result<()>,
+) -> Result<()> {
+    drop(connection);
+    fixture.cleanup().await?;
+    result
 }
 
 /// The plan and the rows of the prepared statement in `mode`, with the compose files' planner
@@ -157,9 +174,13 @@ fn probes_primary_key(label: &str, plan: &[String]) -> Result<()> {
     let probe = plan.windows(2).any(|lines| {
         lines[0].contains("using project_lifecycle_event_pkey on project_lifecycle_event")
             && lines[1].contains("Index Cond:")
-            && ["(chain_id = ", "(state_kind = 'resource'::text)", "(state_key = ANY "]
-                .iter()
-                .all(|condition| lines[1].contains(condition))
+            && [
+                "(chain_id = ",
+                "(state_kind = 'resource'::text)",
+                "(state_key = ANY ",
+            ]
+            .iter()
+            .all(|condition| lines[1].contains(condition))
     });
     let filtered = plan
         .iter()
@@ -211,118 +232,135 @@ fn the_statement_is_the_one_decode_sends() {
 
 #[tokio::test]
 async fn one_lease_probes_the_primary_key() -> Result<()> {
-    let fixture = seeded("unnamed_rows_one").await?;
-    let mut connection = fixture.pool.acquire().await?;
+    let (fixture, mut connection) = seeded("unnamed_rows_one").await?;
     let leases = [1];
-    assert_case(&mut connection, "1 lease", MAINNET, &leases, &expected(MAINNET, &leases), true)
-        .await?;
-    drop(connection);
-    fixture.cleanup().await
+    let rows = expected(MAINNET, &leases);
+    let result = assert_case(&mut connection, "1 lease", MAINNET, &leases, &rows, true).await;
+    finish(fixture, connection, result).await
 }
 
 #[tokio::test]
 async fn twenty_five_leases_probe_the_primary_key() -> Result<()> {
-    let fixture = seeded("unnamed_rows_25").await?;
-    let mut connection = fixture.pool.acquire().await?;
+    let (fixture, mut connection) = seeded("unnamed_rows_25").await?;
     let leases = mixed(15, 10);
-    assert_case(&mut connection, "25 leases", MAINNET, &leases, &expected(MAINNET, &leases), true)
-        .await?;
-    drop(connection);
-    fixture.cleanup().await
+    let rows = expected(MAINNET, &leases);
+    let result = assert_case(&mut connection, "25 leases", MAINNET, &leases, &rows, true).await;
+    finish(fixture, connection, result).await
 }
 
 /// The custom plan here is the measured case of the module comment: a primary key probe on this
 /// seed.
 #[tokio::test]
 async fn four_hundred_sixty_leases_probe_the_primary_key() -> Result<()> {
-    let fixture = seeded("unnamed_rows_460").await?;
-    let mut connection = fixture.pool.acquire().await?;
+    let (fixture, mut connection) = seeded("unnamed_rows_460").await?;
     let leases = mixed(400, 60);
-    assert_case(&mut connection, "460 leases", MAINNET, &leases, &expected(MAINNET, &leases), true)
-        .await?;
-    drop(connection);
-    fixture.cleanup().await
+    let rows = expected(MAINNET, &leases);
+    let result = assert_case(&mut connection, "460 leases", MAINNET, &leases, &rows, true).await;
+    finish(fixture, connection, result).await
 }
 
 #[tokio::test]
 async fn rows_are_the_unnamed_lease_events_of_the_leases() -> Result<()> {
-    let fixture = seeded("unnamed_rows_rows").await?;
-    let mut connection = fixture.pool.acquire().await?;
-    for leases in [vec![1], mixed(15, 10), mixed(400, 60)] {
-        let label = format!("{} leases", leases.len());
-        let rows = expected(MAINNET, &leases);
-        ensure!(!rows.is_empty());
-        assert_case(&mut connection, &label, MAINNET, &leases, &rows, false).await?;
+    let (fixture, mut connection) = seeded("unnamed_rows_rows").await?;
+    let result = async {
+        for leases in [vec![1], mixed(15, 10), mixed(400, 60)] {
+            let label = format!("{} leases", leases.len());
+            let rows = expected(MAINNET, &leases);
+            ensure!(!rows.is_empty());
+            assert_case(&mut connection, &label, MAINNET, &leases, &rows, false).await?;
+        }
+        Ok(())
     }
-    drop(connection);
-    fixture.cleanup().await
+    .await;
+    finish(fixture, connection, result).await
 }
 
 #[tokio::test]
 async fn a_chain_with_only_named_lease_events_returns_nothing() -> Result<()> {
-    let fixture = seeded("unnamed_rows_named_chain").await?;
-    let mut connection = fixture.pool.acquire().await?;
+    let (fixture, mut connection) = seeded("unnamed_rows_named_chain").await?;
     let leases: Vec<u32> = (1..=25).collect();
-    assert_case(&mut connection, "named-only chain", NAMED_ONLY, &leases, &BTreeSet::new(), true)
-        .await?;
-    drop(connection);
-    fixture.cleanup().await
+    let result = assert_case(
+        &mut connection,
+        "named-only chain",
+        NAMED_ONLY,
+        &leases,
+        &BTreeSet::new(),
+        true,
+    )
+    .await;
+    finish(fixture, connection, result).await
 }
 
 #[tokio::test]
 async fn each_chain_reads_only_its_own_unnamed_events() -> Result<()> {
-    let fixture = seeded("unnamed_rows_two_chains").await?;
-    let mut connection = fixture.pool.acquire().await?;
+    let (fixture, mut connection) = seeded("unnamed_rows_two_chains").await?;
     let leases: Vec<u32> = (1..=25).collect();
-    for chain in [MAINNET, SEPOLIA] {
-        let rows = expected(chain, &leases);
-        ensure!(!rows.is_empty());
-        assert_case(&mut connection, chain, chain, &leases, &rows, true).await?;
+    let result = async {
+        for chain in [MAINNET, SEPOLIA] {
+            let rows = expected(chain, &leases);
+            ensure!(!rows.is_empty());
+            assert_case(&mut connection, chain, chain, &leases, &rows, true).await?;
+        }
+        Ok(())
     }
-    drop(connection);
-    fixture.cleanup().await
+    .await;
+    finish(fixture, connection, result).await
 }
 
 /// decode.rs passes the block's candidate leases without removing repeats.
 #[tokio::test]
 async fn repeated_leases_return_each_row_once() -> Result<()> {
-    let fixture = seeded("unnamed_rows_repeats").await?;
-    let mut connection = fixture.pool.acquire().await?;
+    let (fixture, mut connection) = seeded("unnamed_rows_repeats").await?;
     let distinct = mixed(15, 10);
     let mut leases = distinct.clone();
     leases.extend_from_slice(&distinct[..10]);
-    assert_case(
+    let rows = expected(MAINNET, &distinct);
+    let result = assert_case(
         &mut connection,
         "repeated leases",
         MAINNET,
         &leases,
-        &expected(MAINNET, &distinct),
+        &rows,
         true,
     )
-    .await?;
-    drop(connection);
-    fixture.cleanup().await
+    .await;
+    finish(fixture, connection, result).await
 }
 
 #[tokio::test]
 async fn leases_without_rows_probe_the_primary_key() -> Result<()> {
-    let fixture = seeded("unnamed_rows_misses").await?;
-    let mut connection = fixture.pool.acquire().await?;
+    let (fixture, mut connection) = seeded("unnamed_rows_misses").await?;
     let leases = misses(25);
-    assert_case(&mut connection, "25 misses", MAINNET, &leases, &BTreeSet::new(), true).await?;
-    drop(connection);
-    fixture.cleanup().await
+    let result = assert_case(
+        &mut connection,
+        "25 misses",
+        MAINNET,
+        &leases,
+        &BTreeSet::new(),
+        true,
+    )
+    .await;
+    finish(fixture, connection, result).await
 }
 
-/// Leases 3,001-3,025 have one unnamed and one named event each, leases 6,001-6,025 only named.
+/// Leases 1,501-1,525 have one unnamed and one named event each, leases 3,001-3,025 only named.
 #[tokio::test]
 async fn named_lease_events_are_not_returned() -> Result<()> {
-    let fixture = seeded("unnamed_rows_named").await?;
-    let mut connection = fixture.pool.acquire().await?;
-    let leases: Vec<u32> = (3001..=3025).chain(6001..=6025).collect();
+    let (fixture, mut connection) = seeded("unnamed_rows_named").await?;
+    let leases: Vec<u32> = (1501..=1525).chain(3001..=3025).collect();
     let rows = expected(MAINNET, &leases);
-    ensure!(rows.len() == 25);
-    assert_case(&mut connection, "named leases", MAINNET, &leases, &rows, false).await?;
-    drop(connection);
-    fixture.cleanup().await
+    let result = async {
+        ensure!(rows.len() == 25);
+        assert_case(
+            &mut connection,
+            "named leases",
+            MAINNET,
+            &leases,
+            &rows,
+            false,
+        )
+        .await
+    }
+    .await;
+    finish(fixture, connection, result).await
 }
