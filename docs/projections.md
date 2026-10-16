@@ -2008,7 +2008,10 @@ with a stored summary or lookup row. Above 50,000 such names a followed
 publication is refused before it composes any, on every attempt. The error
 names the full Project redo, which composes them in ranges. The supervised
 runner retries and logs that instruction until the redo runs. A one-shot
-`phase-runner redo` halts on it. A rebuild's first publication is not capped.
+`phase-runner redo` halts on it. A rebuild's first publication is not capped,
+and neither is a rebuild range before its
+[composition pass](glossary.md#composition-pass): such a range composes nothing,
+so it sweeps nothing, and the pass composes every name once, in chunks.
 An undo restores the earlier admission
 with the marker, and the replayed block composes every name again. A followed
 publication therefore leaves the rows a rebuild under the same manifest set

@@ -131,6 +131,40 @@ async fn seeded(prefix: &str) -> Result<Fixture> {
             )
             .await?;
     }
+    // Two names bound to one resource serve their records from one inventory.
+    let shared = uuid(903);
+    let (first, second) = (format!("ens:{}", node(901)), format!("ens:{}", node(902)));
+    fixture
+        .binding(&uuid(904), &first, &shared, "ens_v1", 140, 0, None)
+        .await?;
+    fixture
+        .binding(&uuid(905), &second, &shared, "ens_v1", 140, 0, None)
+        .await?;
+    fixture
+        .write(
+            140,
+            1,
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            Some(&first),
+            Some(&shared),
+            json!({"authority_kind": "registrar", "status": "registered", "registrant": ALICE,
+                   "expiry": 2_000_000_000u64}),
+            R1,
+        )
+        .await?;
+    fixture
+        .write(
+            140,
+            2,
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            Some(&first),
+            Some(&shared),
+            json!({"node": node(901), "resolver": R1}),
+            R1,
+        )
+        .await?;
     let pointer = uuid(902);
     for (block, at) in [(165, MOVED_FROM), (185, MOVED_TO)] {
         fixture
@@ -303,9 +337,8 @@ async fn a_rebuild_in_ranges_composes_once_what_block_by_block_composes() -> Res
         ),
         (
             "an inventory two names serve from",
-            "SELECT count(*) FROM (SELECT record_serving_resource_id FROM project_lookup_name
-             WHERE record_serving_resource_id IS NOT NULL
-             GROUP BY 1 HAVING count(*) > 1) shared",
+            "SELECT count(*) - 1 FROM project_lookup_name
+             WHERE core::text LIKE '%00000000-0000-0000-0000-000000000387%'",
         ),
         (
             "resource anchors",
@@ -481,9 +514,13 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
             .filter(|run| run.stream.as_i64() == Some(stream))
             .map(|run| &run.cursor)
             .collect();
+        // The names stream and the windows took several runs each. The two record streams
+        // hold one key each here, so each was entered and done in one run.
+        let runs = if stream == 0 || stream == 3 { 2 } else { 0 };
         ensure!(
-            cursors.iter().filter(|cursor| !cursor.is_null()).count() > 1,
-            "stream {stream} took more than one run: {cursors:?}"
+            !cursors.is_empty()
+                && cursors.iter().filter(|cursor| !cursor.is_null()).count() >= runs,
+            "stream {stream} ran: {cursors:?}"
         );
         let texts: Vec<String> = cursors
             .iter()
@@ -525,17 +562,17 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
             && journalled.iter().skip(1).all(|block| *block > SWITCH),
         "the pass's marker row, then the single blocks: {journalled:?}"
     );
-    let lookup_journal = count(
+    let single_journal = count(
         &fixture,
         &format!(
             "SELECT count(*) FROM project_family_undo WHERE chain_id = '{CHAIN}'
-             AND block_number > {SWITCH} AND family LIKE 'project_lookup_%'"
+             AND block_number > {SWITCH} AND family <> 'marker'"
         ),
     )
     .await?;
     ensure!(
-        lookup_journal > 0,
-        "a single block journals the lookup rows it composes"
+        single_journal > 0,
+        "a single block journals the rows it writes"
     );
     fixture.cleanup().await
 }
@@ -784,21 +821,32 @@ async fn ranges_cut_by_the_event_cap_or_the_budget_compose_nothing() -> Result<(
     fixture.cleanup().await
 }
 
-// A rebuild that stops in the pass, a redo resuming it carries the pass over: the record moves to
-// the rerun's attempt with its stream and cursor, and the pass continues from them. One that stops
-// after the pass keeps its composed block, and the target follows. A redo that does not resume, or
-// one over a moved input revision, rebuilds from the start with the pass fields cleared. Each
-// finished rebuild equals the block-by-block one.
+/// Where a budgeted redo's rebuild stopped.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Stop {
+    Ranges,
+    Pass,
+    AfterPass,
+}
+
+// A rebuild that stops in its ranges or in its pass, a redo resuming it carries it over: the
+// record moves to the rerun's attempt with its stream and cursor, and the ranges or the pass
+// continue from where they stopped. One that stops after the pass keeps its composed block, and
+// the target follows. A redo that does not resume, or one over a moved input revision, rebuilds
+// from the start with the pass fields cleared. Each finished rebuild equals the block-by-block
+// one.
 #[tokio::test]
 async fn a_redo_resumes_or_restarts_a_rebuild_in_its_pass() -> Result<()> {
-    for (case, in_pass, resumes, moved) in [
-        ("in the pass, resumed", true, true, false),
-        ("after the pass, resumed", false, true, false),
-        ("in the pass, not resumed", true, false, false),
-        ("after the pass, not resumed", false, false, false),
-        ("in the pass, moved revision", true, true, true),
-        ("after the pass, moved revision", false, true, true),
+    for (stop, resumes, moved) in [
+        (Stop::Ranges, true, false),
+        (Stop::Pass, true, false),
+        (Stop::AfterPass, true, false),
+        (Stop::Pass, false, false),
+        (Stop::AfterPass, false, false),
+        (Stop::Pass, true, true),
+        (Stop::AfterPass, true, true),
     ] {
+        let case = format!("stopped {stop:?}, resumed {resumes}, moved revision {moved}");
         let fixture = Fixture::new("families_compose_redo", 30).await?;
         for block in 11..=25 {
             fixture
@@ -815,12 +863,13 @@ async fn a_redo_resumes_or_restarts_a_rebuild_in_its_pass() -> Result<()> {
                 .with_max_blocks_per_run(budget)
                 .with_resumed_redo(resumes)
         };
-        // The 15 work blocks in ranges and one chunk of the pass.
+        // Five of the 15 work blocks, or all 15 and one chunk of the pass.
+        let budget = if stop == Stop::Ranges { 5 } else { 16 };
         let first = fixture
-            .apply_with(30, redo.clone(), &ranged(16, false))
+            .apply_with(30, redo.clone(), &ranged(budget, false))
             .await?;
         ensure!(first.reset && first.budget_exhausted, "{case}: {first:?}");
-        if !in_pass {
+        if stop == Stop::AfterPass {
             while pass_state(&fixture).await?.3.is_null() {
                 fixture
                     .apply_with(30, FamilyMode::Normal, &ranged(1, false))
@@ -828,19 +877,15 @@ async fn a_redo_resumes_or_restarts_a_rebuild_in_its_pass() -> Result<()> {
             }
         }
         let before = pass_state(&fixture).await?;
-        if in_pass {
-            ensure!(
-                before.0 == "composing" && before.2.is_string(),
-                "{case}: stopped in the pass: {before:?}"
-            );
-        } else {
-            ensure!(
-                before.0 == "rebuilding"
-                    && before.3 == json!(25)
-                    && fixture.marker().await?.0 == Some(25),
-                "{case}: stopped after the pass: {before:?}"
-            );
-        }
+        let marker = fixture.marker().await?.0;
+        let stopped = match stop {
+            Stop::Ranges => before.0 == "rebuilding" && before.3.is_null() && marker < Some(25),
+            Stop::Pass => before.0 == "composing" && before.2.is_string(),
+            Stop::AfterPass => {
+                before.0 == "rebuilding" && before.3 == json!(25) && marker == Some(25)
+            }
+        };
+        ensure!(stopped, "{case}: {before:?} at {marker:?}");
         fixture
             .project_row(8, Some((0, 30, "operator redo")))
             .await?;
@@ -855,17 +900,16 @@ async fn a_redo_resumes_or_restarts_a_rebuild_in_its_pass() -> Result<()> {
             ensure!(!second.reset, "{case}: carried over: {second:?}");
             let record = fixture.repair_record().await?.unwrap_or_default();
             ensure!(record["attempt"] == json!(8), "{case}: {record}");
-            if in_pass {
-                ensure!(
-                    second.compose_chunks == 1 && (&after.1, &after.2) != (&before.1, &before.2),
-                    "{case}: the pass continued from its cursor: {before:?} then {after:?}"
-                );
-            } else {
-                ensure!(
-                    after.3 == json!(25) && second.blocks == 1,
-                    "{case}: the composed block is kept and the target applied: {after:?}"
-                );
-            }
+            let continued = match stop {
+                Stop::Ranges => {
+                    second.ranges == 1 && fixture.marker().await?.0 > marker && after.3.is_null()
+                }
+                Stop::Pass => {
+                    second.compose_chunks == 1 && (&after.1, &after.2) != (&before.1, &before.2)
+                }
+                Stop::AfterPass => after.3 == json!(25) && second.blocks == 1,
+            };
+            ensure!(continued, "{case}: {before:?} then {after:?}, {second:?}");
         } else {
             ensure!(second.reset, "{case}: rebuilt from the start: {second:?}");
             ensure!(
@@ -885,6 +929,77 @@ async fn a_redo_resumes_or_restarts_a_rebuild_in_its_pass() -> Result<()> {
             .apply_with(30, FamilyMode::Rebuild, &options(RebuildRanges::Off))
             .await?;
         require_equal(&fixture, &rebuilt, &case).await?;
+        fixture.cleanup().await?;
+    }
+    Ok(())
+}
+
+/// A manifest update as manifest sync writes it, with no block: a manifest row and its
+/// SourceManifestUpdated event.
+async fn sync_manifest(fixture: &Fixture) -> Result<()> {
+    let payload = json!({"contracts": [{"role": "universal_resolver",
+        "address": "0x00000000000000000000000000000000000000f7", "start_block": 0}]});
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO manifest_versions (manifest_version, namespace, source_family, chain_id,
+             deployment_label, rollout_status, normalizer_version, file_path, manifest_payload)
+         VALUES (1, 'ens', 'ens_execution', $1, 'fixture', 'active', 'fixture',
+             'fixture/ens_execution.toml', $2) RETURNING manifest_id",
+    )
+    .bind(CHAIN)
+    .bind(&payload)
+    .fetch_one(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+             manifest_version, source_manifest_id, chain_id, derivation_kind,
+             canonicality_state, after_state)
+         VALUES ($1, 'ens', 'SourceManifestUpdated', 'ens_execution', 1, $2, $3,
+             'manifest_sync', 'finalized',
+             jsonb_build_object('rollout_status', 'active', 'manifest_payload', $4::jsonb))",
+    )
+    .bind(format!("sync:{id}"))
+    .bind(id)
+    .bind(CHAIN)
+    .bind(payload)
+    .execute(&fixture.pool)
+    .await?;
+    Ok(())
+}
+
+// A manifest sync lands while a rebuild in ranges is stopped before its pass. Sync writes the
+// update with no block and moves the Interpret input hash in the same transaction, so the next
+// run sees a moved input revision and rebuilds from the start under the new set, as it does
+// today. The pass composes with the set its marker recorded: were the run's set to differ from it
+// with the revision unmoved, which sync never writes, the pass refuses it rather than composing a
+// mix of the two.
+#[tokio::test]
+async fn a_manifest_sync_before_the_pass_rebuilds_under_the_new_set() -> Result<()> {
+    for moved in [true, false] {
+        let fixture = Fixture::new("families_compose_manifest", 30).await?;
+        for block in 11..=25 {
+            fixture
+                .resolver_changed(block, 1, block.unsigned_abs() % 4, R1)
+                .await?;
+        }
+        fixture.interpret_row("h1", 1, false).await?;
+        let ranged = options(RebuildRanges::Through(25));
+        let first = run_to(&fixture, 30, true, &ranged.clone().with_max_blocks_per_run(15)).await?;
+        ensure!(
+            first.budget_exhausted && pass_state(&fixture).await?.1.is_null(),
+            "stopped after the ranges, before the pass: {first:?}"
+        );
+        sync_manifest(&fixture).await?;
+        if moved {
+            fixture.interpret_row("h2", 1, false).await?;
+            let next = run_to(&fixture, 30, false, &ranged).await?;
+            ensure!(next.reset, "moved {moved}: rebuilt from the start: {next:?}");
+            fixture.assert_rebuild_equal(30).await?;
+        } else {
+            let error = run_to(&fixture, 30, false, &ranged)
+                .await
+                .expect_err("the pass refuses a set its marker did not record");
+            ensure!(error.to_string().contains("manifest set"), "{error}");
+        }
         fixture.cleanup().await?;
     }
     Ok(())
@@ -1098,4 +1213,40 @@ async fn a_reorg_at_or_below_the_pass_block_rebuilds() -> Result<()> {
         fixture.cleanup().await?;
     }
     Ok(())
+}
+
+// The ENSv2 root admission changes at a block inside the ranges before the pass, here a
+// fixture's manifest update positioned at block 6 (production manifest sync writes no block).
+// Main's publication sweeps every name for it and refuses a followed sweep above the swept-name
+// cap. A range before the pass composes nothing, so it sweeps nothing and is not capped, even with
+// a cap of one name: the pass composes every name once with the marker's admission, and the
+// rebuild equals the block-by-block one.
+#[tokio::test]
+async fn an_admission_change_before_the_pass_is_neither_swept_nor_capped() -> Result<()> {
+    let fixture = Fixture::new("families_compose_admission", 14).await?;
+    ens_v2_path::history(&fixture).await?;
+    let positioned = sqlx::query(
+        "UPDATE normalized_events SET block_number = 6, block_hash = $2
+         WHERE chain_id = $1 AND event_kind = 'SourceManifestUpdated'
+           AND source_family = 'ens_v2_root_l1'",
+    )
+    .bind(CHAIN)
+    .bind(hash(6))
+    .execute(&fixture.pool)
+    .await?;
+    ensure!(positioned.rows_affected() > 0, "the root admission is positioned");
+    fixture
+        .apply_with(13, FamilyMode::Rebuild, &options(RebuildRanges::Off))
+        .await?;
+    let expected = fixture.exact().await?;
+    let capped = options(RebuildRanges::Through(13)).with_max_admission_sweep_names(1);
+    let outcome = fixture
+        .apply_with(13, FamilyMode::Rebuild, &capped)
+        .await?;
+    ensure!(
+        outcome.ranges > 1 && outcome.compose_chunks > 0,
+        "ranges across block 6, then the pass: {outcome:?}"
+    );
+    require_equal(&fixture, &expected, "an admission change before the pass").await?;
+    fixture.cleanup().await
 }

@@ -4571,3 +4571,28 @@ admission changes (see
 - It adds no schema-migration, table, manifest or setting. The
   manifest-authority fingerprint and the compiled watch plan are unchanged, so
   stamp no Ingest redo.
+
+## A family rebuild in ranges composes once, in a composition pass
+
+The build whose rebuild ranges compose nothing and whose
+[composition pass](glossary.md#composition-pass) composes every name once
+changes `crates/project/src` and adds a schema-migration. It is an input of the
+[projection content hash](glossary.md#projection-content-hash) only.
+
+- The projection content hash rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, under
+  matching runner and API binaries. The change rides the next re-derivation
+  release and shares that release's Project redo.
+- The schema-migration `20261016120000_project_repair_record_composing.sql`
+  adds the repair record state `composing` and the columns `composed_block`,
+  `compose_stream` and `compose_cursor`. It must run before the new runner
+  binary: without it the record refuses `composing` and the family run fails
+  before its pass.
+- During the rebuild the composed tables (name summaries, lookup rows, address
+  indexes and the history catalogue) read zero rows until the pass. During the
+  pass the [family marker](glossary.md#family-marker) stays on one block while
+  the [repair record](glossary.md#repair-record)'s `compose_stream` and
+  `compose_cursor` move ([pipeline monitoring](runbooks/pipeline-monitoring.md)).
+- It adds no table, manifest or setting. The manifest-authority fingerprint and
+  the compiled watch plan are unchanged, so stamp no Ingest redo.
