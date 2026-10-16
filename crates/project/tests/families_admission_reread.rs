@@ -369,19 +369,30 @@ impl V1Names {
     }
 }
 
-// Row 1, with row 9 (the history catalogue tables are among the compared families). The chain
-// follows to block 6 with no ENSv2 root registry admitted, manifest sync then admits one, and
-// block 7 names none of the names. A `.eth` name ENSv1 decides with no live ENSv2 entry resolves
-// to nothing on a cut-over chain (crates/storage/src/families/name/resolvability.rs), so every
-// name serves `no_live_ens_v2_entry` after block 7, as a rebuild under the new set composes them.
+// Row 1, with row 9 and the loss half of row 16 (the history catalogue and the lookup inventory
+// tables are among the compared families). The chain follows to block 6 with no ENSv2 root registry
+// admitted, manifest sync then admits one, and block 7 names none of the names. A `.eth` name ENSv1
+// decides with no live ENSv2 entry resolves to nothing on a cut-over chain
+// (crates/storage/src/families/name/resolvability.rs), so every name serves `no_live_ens_v2_entry`
+// after block 7, as a rebuild under the new set composes them. The lease of `quiet.eth` then serves
+// no name, so its inventory and dependency rows go. `late.eth` is a surface Interpret wrote at
+// block 8, above the block that sees the admission: the publication at 7 composes nothing for it,
+// as the rebuild at 7 does not.
 #[tokio::test]
 async fn an_admitted_root_recomposes_every_untouched_name_at_the_next_block() -> Result<()> {
-    let fixture = Fixture::new("families_admission_reread_admit", 8).await?;
+    let fixture = Fixture::new("families_admission_reread_admit", 9).await?;
     let names = v1_names(&fixture).await?;
+    let late = ens_v2_path::surface_at(&fixture, "late.eth", 8).await?;
     follow(&fixture, 0, 6).await?;
     sync(&fixture, None, "ens_v2_root_l1", "active", root(ROOT)).await?;
     follow(&fixture, 7, 7).await?;
-    let stale = composed_otherwise(&fixture, &names.all(), true).await?;
+    let mut stale = composed_otherwise(&fixture, &names.all(), true).await?;
+    let early = stored_name_rows(&fixture, &late).await?;
+    if early != (0, 0) {
+        stale.push(format!(
+            "late.eth, whose surface is at block 8: (summary rows, lookup rows) {early:?} at 7"
+        ));
+    }
     let rebuilt = assert_pass_equals_rebuild(&fixture, 7).await;
     fixture.cleanup().await?;
     verdict(
@@ -391,18 +402,23 @@ async fn an_admitted_root_recomposes_every_untouched_name_at_the_next_block() ->
     )
 }
 
-// Row 2, with row 16 (the lookup inventory tables are among the compared families). The ENSv2
-// path history is cut over under root A from block 0, and `quiet.eth`, which no resolver
-// reaches, holds a live entry in the `.eth` registry under A. Manifest sync deprecates A and
-// admits a replacement root with no entries, and block 13 names none of the names: every path
-// the walk took from A is gone.
+// Row 2. The ENSv2 path history is cut over under root A from block 0. Manifest sync deprecates A
+// and admits a replacement root with no entries, and block 13 names none of the names: every path
+// the walk took from A is gone. The names of the history point at a classified resolver, so the
+// resolver classification that every manifest sync runs again already composes them and their
+// subtrees again (crates/project/src/families/resolution_paths/selection.rs). `quiet.lone.eth` is
+// the name only the admission reaches: an ENSv1 subname with no resolver under `lone.eth`, which
+// has none either. Its walk from A leaves a `recompose_at` on its summary that the walk from the
+// replacement root, which reads no entry, does not leave
+// (crates/storage/src/families/name/resolution_path.rs).
 #[tokio::test]
 async fn a_replaced_root_moves_every_path_to_the_new_root() -> Result<()> {
     let fixture = Fixture::new("families_admission_reread_replace", 14).await?;
     ens_v2_path::history(&fixture).await?;
-    quiet(&fixture, "quiet.eth", 7, 1).await?;
-    v2_registration(&fixture, 6, "quiet").await?;
+    quiet(&fixture, "lone.eth", 8, 1).await?;
+    let walked = unresolved_subname(&fixture, "quiet.lone.eth", 9, 2).await?;
     follow(&fixture, 0, 12).await?;
+    let before = recompose_at(&fixture, &walked).await?;
     let (old, contracts) = path_root_manifest(&fixture).await?;
     sync(
         &fixture,
@@ -421,13 +437,95 @@ async fn a_replaced_root_moves_every_path_to_the_new_root() -> Result<()> {
     )
     .await?;
     follow(&fixture, 13, 13).await?;
+    let after = recompose_at(&fixture, &walked).await?;
     let rebuilt = assert_pass_equals_rebuild(&fixture, 13).await;
     fixture.cleanup().await?;
-    rebuilt
+    let stale = match before {
+        None => vec!["quiet.lone.eth: the walk from the old root stored no recompose_at".into()],
+        Some(_) if after == before => {
+            vec![format!(
+                "quiet.lone.eth: recompose_at {after:?} from the old root's walk"
+            )]
+        }
+        Some(_) => Vec::new(),
+    };
+    verdict(
+        stale,
+        "after the replacement, a path keeps the old root's walk",
+        rebuilt,
+    )
 }
 
-// Row 3. The same history and `quiet.eth` entry, and manifest sync deprecates the root with no
-// replacement: the chain is no longer cut over and every name composes through ENSv1 again.
+/// An ENSv1 subname with node resource `n` and no resolver, written as a binding and an
+/// `AuthorityTransferred` to `OWNER` of source family `ens_v1_registry_l1` at `block`. Returns
+/// its logical name id.
+async fn unresolved_subname(fixture: &Fixture, name: &str, n: u32, block: i64) -> Result<String> {
+    let logical_name_id = ens_v2_path::surface(fixture, name).await?;
+    let node = uuid(0x3000 + n);
+    fixture
+        .binding(
+            &uuid(300 + n),
+            &logical_name_id,
+            &node,
+            "ens_v1",
+            block,
+            (50 + n).into(),
+            None,
+        )
+        .await?;
+    fixture
+        .event(
+            Event::new(
+                &format!("owned-{name}"),
+                block,
+                (50 + n).into(),
+                "AuthorityTransferred",
+                "ens_v1_registry_l1",
+            )
+            .name(&logical_name_id)
+            .resource(&node)
+            .after(
+                json!({"authority_kind": "registry", "owner": ens_v2_path::OWNER,
+                          "registry_owner": ens_v2_path::OWNER,
+                          "node": logical_name_id.trim_start_matches("ens:")}),
+            )
+            .raw(json!({"emitting_address": V1_REGISTRY})),
+        )
+        .await?;
+    Ok(logical_name_id)
+}
+
+/// How many name summary rows and lookup name rows the chain stores for `logical_name_id`.
+async fn stored_name_rows(fixture: &Fixture, logical_name_id: &str) -> Result<(i64, i64)> {
+    Ok(sqlx::query_as(
+        "SELECT (SELECT count(*) FROM project_name_summary
+                 WHERE chain_id = $1 AND logical_name_id = $2),
+                (SELECT count(*) FROM project_lookup_name
+                 WHERE chain_id = $1 AND logical_name_id = $2)",
+    )
+    .bind(CHAIN)
+    .bind(logical_name_id)
+    .fetch_one(&fixture.pool)
+    .await?)
+}
+
+/// The stored next recomposition time of the name summary of `logical_name_id`.
+async fn recompose_at(fixture: &Fixture, logical_name_id: &str) -> Result<Option<i64>> {
+    Ok(sqlx::query_scalar(
+        "SELECT recompose_at FROM project_name_summary
+         WHERE chain_id = $1 AND logical_name_id = $2",
+    )
+    .bind(CHAIN)
+    .bind(logical_name_id)
+    .fetch_optional(&fixture.pool)
+    .await?
+    .flatten())
+}
+
+// Row 3, with the gain half of row 16. The history of row 2 and `quiet.eth`, an ENSv1 lease with
+// an entry in the `.eth` registry and no resolver, and manifest sync deprecates the root with no
+// replacement: the chain is no longer cut over and every name composes through ENSv1 again. The
+// lease of `quiet.eth` serves its name again, so it gains its inventory and dependency rows.
 #[tokio::test]
 async fn a_withdrawn_root_composes_every_name_as_ens_v1_again() -> Result<()> {
     let fixture = Fixture::new("families_admission_reread_withdraw", 14).await?;
@@ -471,7 +569,7 @@ async fn undo_through_the_pass_restores_and_replay_sweeps_again() -> Result<()> 
 
 // Row 6. A root admission written at block 6, with filler work blocks around it so a rebuild in
 // ranges folds block 6 inside a range. Production manifest sync writes no block, so this shape
-// exists only in fixtures; it is one guard on the range path, which publishes once for its
+// exists only in fixtures. It is one guard on the range path, which publishes once for its
 // blocks.
 #[tokio::test]
 async fn an_admission_change_inside_a_range_equals_block_by_block() -> Result<()> {
@@ -673,9 +771,9 @@ const HISTORY_CATALOGUE: [&str; 4] = [
 // Row 9. The withdrawal of row 3 moves names decided through the ENSv2 arm back to ENSv1
 // (crates/storage/src/families/control/lifecycle/canonical.rs), and with them the relations the
 // history catalogue indexes: `quiet.eth` is leased through ENSv1 and registered in the `.eth`
-// registry, with no resolver to reach it. The followed block refreshes the catalogue for every name with the
-// marker's block before it as its window, where the rebuild's last publication uses no window
-// at all; the stored catalogue rows must still be the rebuild's.
+// registry, with no resolver to reach it. The followed block refreshes the catalogue for every name
+// with the marker's block before it as its window, where the rebuild's last publication uses no
+// window at all. The stored catalogue rows must still be the rebuild's.
 #[tokio::test]
 async fn the_history_catalogue_after_the_pass_equals_the_rebuild() -> Result<()> {
     let fixture = Fixture::new("families_admission_reread_catalogue", 14).await?;
@@ -725,10 +823,13 @@ async fn the_history_catalogue_after_the_pass_equals_the_rebuild() -> Result<()>
     Ok(())
 }
 
-// Row 4. A manifest sync that leaves the admission as it was changes the set key, so the
-// resolver classification runs again (crates/project/src/families/classification.rs), but no
-// name the block does not touch is composed again for the admission: the owner planted on the
-// summary of `quiet.eth`, which no resolver reaches, survives the block.
+// Row 4, with the no-sweep half of row 13. A manifest sync that leaves the admission as it was
+// changes the set key, so the resolver classification runs again
+// (crates/project/src/families/classification.rs), but no name the block does not touch is
+// composed again for the admission: the owner planted on the summary of `quiet.eth`, which no
+// resolver reaches, survives the block. The chain admits no root before or after the sync, so
+// both markers record no admission. The other half of row 13, the first publication of a
+// rebuild after a reset, is in every `assert_pass_equals_rebuild`.
 #[tokio::test]
 async fn an_unrelated_manifest_edit_does_not_sweep() -> Result<()> {
     let fixture = Fixture::new("families_admission_reread_unrelated", 8).await?;
