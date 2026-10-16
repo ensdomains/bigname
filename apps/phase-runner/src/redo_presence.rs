@@ -47,10 +47,15 @@ impl InterpretReplayNotice {
                 "the manifest change's first effect is block {block} (docs/deployment.md § \
                  Manifest-authority marker)"
             ),
-            Some(_) => format!(
-                "the manifest change's first effect is at or above block {}, where the redo \
-                 starts (docs/deployment.md § Manifest-authority marker)",
+            Some(Some(block)) => format!(
+                "the redo runs from block {}, and the manifest change's first effect is block \
+                 {block} (docs/deployment.md § Manifest-authority marker)",
                 self.executed.from
+            ),
+            Some(None) => format!(
+                "the manifest change has no first effect at or below block {}, so the redo \
+                 replays that block alone (docs/deployment.md § Manifest-authority marker)",
+                self.executed.to
             ),
             None => "Interpret replays through the recorded interpreted head, not to --to-block \
                      (docs/runbooks/production-docker.md § Stop and escalate an interpreter \
@@ -223,7 +228,7 @@ pub(crate) async fn require_interpret_raw_data(
 #[cfg(test)]
 mod tests {
     use super::InterpretReplayNotice;
-    use crate::phase::BlockRange;
+    use crate::{phase::BlockRange, redo_first_effect::FirstEffect};
 
     #[test]
     fn notice_names_both_ranges_only_when_they_differ() {
@@ -235,5 +240,85 @@ mod tests {
             .message("1");
         assert!(message.contains("requested 0..=11714440 but runs 0..=11840386"));
         assert!(message.contains("production-docker.md § Stop and escalate"));
+    }
+
+    fn effect(block: Option<i64>) -> Option<FirstEffect> {
+        Some(FirstEffect {
+            declared_start: block,
+            ..FirstEffect::default()
+        })
+    }
+
+    #[test]
+    fn notice_names_the_first_effect_where_the_redo_starts() {
+        let requested = BlockRange::new(100, 200).unwrap();
+        let message = InterpretReplayNotice::new(
+            requested,
+            BlockRange::new(140, 200).unwrap(),
+            effect(Some(140)),
+        )
+        .expect("a narrowed range is reported")
+        .message("1");
+        assert!(
+            message.ends_with(
+                "requested 100..=200 but runs 140..=200: the manifest change's first effect is \
+                 block 140 (docs/deployment.md § Manifest-authority marker)"
+            ),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn notice_names_both_blocks_when_the_redo_starts_elsewhere() {
+        let requested = BlockRange::new(100, 150).unwrap();
+        // Raised to the first ingested block, above a declaration with no start.
+        let message = InterpretReplayNotice::new(
+            requested,
+            BlockRange::new(100, 200).unwrap(),
+            effect(Some(0)),
+        )
+        .expect("a widened range is reported")
+        .message("1");
+        assert!(
+            message.ends_with(
+                "requested 100..=150 but runs 100..=200: the redo runs from block 100, and the \
+                 manifest change's first effect is block 0 (docs/deployment.md § \
+                 Manifest-authority marker)"
+            ),
+            "{message}"
+        );
+        // Lowered to a pending Interpret redo's start, below the first effect.
+        let message = InterpretReplayNotice::new(
+            requested,
+            BlockRange::new(120, 200).unwrap(),
+            effect(Some(160)),
+        )
+        .expect("a moved range is reported")
+        .message("1");
+        assert!(
+            message.contains(
+                "the redo runs from block 120, and the manifest change's first effect is block 160"
+            ),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn notice_says_when_the_change_has_no_first_effect() {
+        let message = InterpretReplayNotice::new(
+            BlockRange::new(100, 200).unwrap(),
+            BlockRange::new(200, 200).unwrap(),
+            effect(None),
+        )
+        .expect("a one-block replay is reported")
+        .message("1");
+        assert!(
+            message.ends_with(
+                "requested 100..=200 but runs 200..=200: the manifest change has no first effect \
+                 at or below block 200, so the redo replays that block alone (docs/deployment.md \
+                 § Manifest-authority marker)"
+            ),
+            "{message}"
+        );
     }
 }

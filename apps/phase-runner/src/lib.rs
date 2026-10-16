@@ -60,6 +60,8 @@ mod verify_store;
 
 pub use bigname_content_hash::{INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH};
 pub use progress_monitor::RunnerPhaseProgress;
+#[doc(hidden)]
+pub use redo_first_effect::first_effect_statements;
 pub use transitions::expected_content_hash;
 
 pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");

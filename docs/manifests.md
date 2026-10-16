@@ -1879,8 +1879,12 @@ reconciliation writers no longer participate; phase redo applies the current
 authority to discovery and projection state. Repairing Ethereum Mainnet
 `basenames_execution` history also invalidates the Base project phase because
 that phase consumes the repaired events. A history-triggered invalidation uses
-the same manifest-authority marker and attested full Interpret redo as an
-authority change.
+the same manifest-authority marker and attested Interpret redo as an authority
+change, bounded the same way ([manifest-authority
+marker](deployment.md#manifest-authority-marker)). A repaired event whose
+payload equals the published one replays one block, a changed payload starts
+the redo at the change's first effect, and a repair that leaves the published
+set as it was keeps the full range.
 
 Manifest synchronization writes `SourceManifestUpdated` with no block position,
 so the manifest set has none either. Every block Project composes takes the

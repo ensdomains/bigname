@@ -31,12 +31,7 @@ pub(crate) async fn refusal(
         ));
     };
     if recorded_phase != PhaseName::Project {
-        let bounded = if crate::redo_manifest_attestation::has_marker_prefix(&recorded) {
-            "; that redo starts at the manifest change's first effect where it can, and says so \
-             (docs/deployment.md § Manifest-authority marker)"
-        } else {
-            ""
-        };
+        let bounded = marker_hint(&recorded);
         return Ok(RunnerError::new(
             ErrorKind::ContentHashMismatch,
             format!(
@@ -118,4 +113,30 @@ pub(crate) fn stale_project_redo_instruction(
             row.requested_redo_range()
         )
     )
+}
+
+/// What the refusal adds when `recorded` is a manifest-authority marker: the redo it asks for
+/// starts at the manifest change's first effect where the runner can bound it.
+fn marker_hint(recorded: &str) -> &'static str {
+    if crate::redo_manifest_attestation::has_marker_prefix(recorded) {
+        "; that redo starts at the manifest change's first effect where it can, and says so \
+         (docs/deployment.md § Manifest-authority marker)"
+    } else {
+        ""
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::marker_hint;
+
+    #[test]
+    fn a_marker_refusal_says_the_redo_starts_at_the_first_effect() {
+        assert_eq!(
+            marker_hint("manifest-authority:fingerprint:token"),
+            "; that redo starts at the manifest change's first effect where it can, and says so \
+             (docs/deployment.md § Manifest-authority marker)"
+        );
+        assert_eq!(marker_hint(crate::INTERPRETER_CONTENT_HASH), "");
+    }
 }

@@ -1946,10 +1946,9 @@ fingerprint identifies the desired manifest set. The database mints a new
 invalidation token for every invalidation,
 including a later return to the same desired set. The marker poisons ordinary
 hash adoption until the attested redo begins. That redo starts at the change's
-first effect when the interpreter content hash is unchanged and the change
-leaves the ENSv2 root, registry and migration families alone, and otherwise
-covers the full range ([manifest-authority
-marker](deployment.md#manifest-authority-marker)). It proves that derived
+first effect where [docs/deployment.md § Manifest-authority
+marker](deployment.md#manifest-authority-marker) allows it, and otherwise
+covers the full range. It proves that derived
 results must be redone under the named authority; it does not itself prove the
 manifest set changed or that facts required by a widened watch plan were
 fetched. When manifest synchronization detects that the desired watch plan

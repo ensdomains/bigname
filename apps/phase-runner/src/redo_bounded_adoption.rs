@@ -190,8 +190,15 @@ pub(crate) async fn plan(
                 "manifest {manifest_id} changed `{field}`, which Interpret reads at every block"
             )));
         }
-        if before.or(after).is_some_and(|row| row.2 != chain_id) {
-            continue;
+        // Base Project reads the Ethereum Mainnet `basenames_execution` manifest at every block
+        // and has no Interpret redo of its own to bound (docs/manifests.md § Discovery
+        // admission).
+        if let Some(row) = before.or(after).filter(|row| row.2 != chain_id) {
+            return Ok(Plan::Full(format!(
+                "manifest {manifest_id} is on chain {}, whose change this chain's Project reads \
+                 at every block",
+                row.2
+            )));
         }
         diff.add(old.as_ref(), new.as_ref());
     }

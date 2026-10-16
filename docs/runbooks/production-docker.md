@@ -1173,7 +1173,7 @@ in the same step.
    `--attest-watch-set-coverage <token>`. Where it can, the runner narrows that
    redo to the manifest change's first effect and logs
    `requested A..=B but runs C..=D`. The Project redo it stamps then starts at
-   the same block ([manifest-authority
+   the same block, or at Project's head when that is lower ([manifest-authority
    marker](../deployment.md#manifest-authority-marker)). If no marker exists,
    let the unflagged redo complete. Include `--metrics-bind-addr 0.0.0.0:9465` on this and the
    matching Project redo. Never invent a token, reuse one after completion, or

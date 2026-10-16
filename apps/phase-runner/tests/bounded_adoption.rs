@@ -54,6 +54,8 @@ const OWNER: &str = "0x0000000000000000000000000000000000200001";
 const SENDER: &str = "0x0000000000000000000000000000000000200002";
 const RESOLVER_FILE: &str = "ethereum/ens/ens_v1_resolver_l1/v1.toml";
 const EXECUTION_FILE: &str = "ethereum/ens/ens_execution/v1.toml";
+const BASE: &str = "base-mainnet";
+const BASENAMES_EXECUTION_FILE: &str = "ethereum/basenames/basenames_execution/v2.toml";
 const HYDRATION_WORK: [&str; 2] = [
     "project_text_hydration_work",
     "project_reverse_hydration_work",
@@ -700,6 +702,268 @@ async fn a_universal_resolver_implementation_change_keeps_the_full_range() -> Re
     fixture.cleanup().await
 }
 
+// Row 23. An Ethereum Mainnet `basenames_execution` change invalidates Base's Project, which reads
+// that manifest at every block and has no Interpret redo to bound its own. The Base Project redo
+// keeps the full range and says why.
+#[tokio::test]
+async fn a_basenames_execution_change_keeps_the_base_project_redo_full() -> Result<()> {
+    let fixture = Fixture::new("bounded_base_project", 59).await?;
+    fixture.seed_chain(BASE, "base_seam").await?;
+    fixture
+        .run(None, None)
+        .runner
+        .redo(
+            &base_chain()?,
+            RedoPhase::Phase(PhaseName::Project),
+            BlockRange::new(START, fixture.head)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    fixture.edit(BASENAMES_EXECUTION_FILE, |manifest| {
+        manifest.replacen("the frozen exact-surface", "the exact-surface", 1)
+    })?;
+    sync_schema_v2_repository(fixture.pool(), &load_repository(&fixture.profile)?).await?;
+    let marker: Option<String> = sqlx::query_scalar(
+        "SELECT input_content_hash FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(BASE)
+    .fetch_one(fixture.pool())
+    .await?;
+    ensure!(
+        marker
+            .as_deref()
+            .is_some_and(|hash| hash.starts_with("manifest-authority:")),
+        "the sync marks Base's Project: {marker:?}"
+    );
+    let error = fixture
+        .run(None, None)
+        .runner
+        .redo(
+            &base_chain()?,
+            RedoPhase::Phase(PhaseName::Project),
+            BlockRange::new(START + 1, fixture.head)?,
+            CancellationToken::new(),
+        )
+        .await
+        .err()
+        .context("a Base Project redo short of the full range is refused")?;
+    let message = error.to_string();
+    let expected = format!(
+        "redo the full range {START}..={}, because manifest",
+        fixture.head
+    );
+    ensure!(message.contains(&expected), "{expected:?} not in {message}");
+    ensure!(
+        message.contains(
+            "is on chain ethereum-mainnet, whose change this chain's Project reads at every block"
+        ),
+        "{message}"
+    );
+    fixture.cleanup().await
+}
+
+// Row 24. A floor repair beside a payload change. The repair's Ingest redo leaves an Interpret
+// stamp from the first ingested block, which R4 cannot see because the set changed too. The
+// bounded start is lowered to that stamp, and the tables equal the full pair's.
+#[tokio::test]
+async fn a_pending_interpret_stamp_lowers_the_bounded_start() -> Result<()> {
+    let fixture = Fixture::new("bounded_pending_stamp", 59).await?;
+    let start = START + 20;
+    fixture
+        .log(start + 1, 0, RESOLVER, &addr_changed()?)
+        .await?;
+    fixture.initial_pair().await?;
+    fixture.add_resolver("public_resolver_fixture", RESOLVER, start)?;
+    let token = fixture.sync().await?;
+    // The stamp a completed Ingest redo leaves on Interpret (`redo_stamp.rs`, `create_stamp`).
+    let stamped = sqlx::query(
+        "UPDATE chain_phase_state
+         SET redo_attempt_generation = redo_attempt_generation + 1,
+             phase_status = 'running', redo_in_progress = true, redo_mode = 'redo',
+             redo_previous_phase_status = phase_status,
+             redo_previous_last_error = last_error,
+             redo_previous_started_at = started_at,
+             redo_previous_finished_at = finished_at,
+             redo_from_block_number = $2, redo_to_block_number = $3,
+             last_error = 'required downstream redo: ingest redo completed',
+             started_at = now(), finished_at = NULL, updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'interpret' AND NOT redo_in_progress",
+    )
+    .bind(CHAIN)
+    .bind(START)
+    .bind(fixture.head)
+    .execute(fixture.pool())
+    .await?;
+    ensure!(
+        stamped.rows_affected() == 1,
+        "the Interpret row takes the stamp"
+    );
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(START, START)?;
+    ensure!(fixture.audits().await? == vec![(START, fixture.head)]);
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// Row 25. An edit to a declaration whose start lies below the first ingested block. The redo
+// starts at the first ingested block, above the first effect, whatever end was requested, and
+// replays through the recorded head. The notice it logs names both blocks
+// (`redo_presence.rs`, `notice_names_both_blocks_when_the_redo_starts_elsewhere`).
+#[tokio::test]
+async fn a_first_effect_below_the_cursor_start_redoes_from_the_cursor_start() -> Result<()> {
+    let fixture = Fixture::new("bounded_effect_below_cursor", 59).await?;
+    fixture.initial_pair().await?;
+    fixture.edit(RESOLVER_FILE, |manifest| {
+        manifest.replacen(
+            "address = \"0xDaaF96c344f63131acadD0Ea35170E7892d3dfBA\"\nproxy_kind = \"none\"\n",
+            "address = \"0xDaaF96c344f63131acadD0Ea35170E7892d3dfBA\"\nproxy_kind = \"none\"\n\
+             read_features = [\"ensip19_default_address\"]\n",
+            1,
+        )
+    })?;
+    let token = fixture.sync().await?;
+    fixture
+        .assert_bounded_refusal(&token, START)
+        .await
+        .context("the first effect lies below the cursor start")?;
+    let run = fixture.run(Some(&token), None);
+    run.runner
+        .redo(
+            &chain()?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(START, fixture.head - 10)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    run.assert_ranges(START, START)?;
+    ensure!(fixture.audits().await? == vec![(START, fixture.head)]);
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// The first-effect statements read the indexes they are written for. Over a corpus of 20,000 logs
+// from 200 emitters on 20 topics, 2,000 contract instances and 10,000 edges, the generic plan a
+// prepared statement settles on probes each address's own logs, each topic's own logs, and each
+// instance's edges at both ends. None walks a whole table, or a shared topic for an address
+// watch, inside the locked begin.
+#[tokio::test]
+async fn the_first_effect_statements_read_their_indexes() -> Result<()> {
+    let fixture = Fixture::new("bounded_statement_plans", 1_999).await?;
+    for corpus in [
+        "INSERT INTO raw_logs (chain_id, block_hash, block_number, transaction_hash,
+             transaction_index, log_index, emitting_address, topics, data)
+         SELECT $1, $1 || '-block-' || height, height, $1 || '-transaction-' || height, 0,
+                slot, '0x' || lpad(to_hex(4096 + (height * 10 + slot) % 200), 40, '0'),
+                ARRAY['0x' || lpad(to_hex((height + slot) % 20), 64, '0')], ''::bytea
+         FROM generate_series($2::bigint, $3::bigint) height
+         CROSS JOIN generate_series(1, 10) slot",
+        "INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+         SELECT md5($1 || n)::uuid, $1, 'contract' FROM generate_series(1, 2000) n",
+        "INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address)
+         SELECT md5($1 || n)::uuid, $1, '0x' || lpad(to_hex(8192 + n), 40, '0')
+         FROM generate_series(1, 2000) n",
+        "INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id,
+             to_contract_instance_id, discovery_source, admission_basis,
+             active_from_block_number, active_from_block_hash, canonicality_state)
+         SELECT $1, 'resolver', md5($1 || (1 + n % 2000))::uuid,
+                md5($1 || (1 + (7 * n + 1) % 2000))::uuid, 'NewResolver', 'corpus',
+                $2 + n % 2000, $1 || '-block-' || ($2 + n % 2000), 'canonical'
+         FROM generate_series(1, 10000) n",
+    ] {
+        sqlx::query(corpus)
+            .bind(CHAIN)
+            .bind(START)
+            .bind(fixture.head)
+            .execute(fixture.pool())
+            .await?;
+    }
+    sqlx::raw_sql(
+        "ANALYZE raw_logs, chain_lineage, contract_instances, contract_instance_addresses,
+             discovery_edges",
+    )
+    .execute(fixture.pool())
+    .await?;
+    let head = fixture.head;
+    let address = "ARRAY['0x0000000000000000000000000000000000001001']::text[]";
+    let instance = "ARRAY['0x0000000000000000000000000000000000002001']::text[]";
+    let topic =
+        "ARRAY['0x0000000000000000000000000000000000000000000000000000000000000005']::text[]";
+    let cases: [(&str, String, &[&str]); 4] = [
+        (
+            "emitted log",
+            format!("'{CHAIN}', {address}, {head}"),
+            &[
+                "raw_logs_emitter_idx",
+                "lower(emitting_address) = target.address",
+            ],
+        ),
+        (
+            "mentioned edge",
+            format!("'{CHAIN}', {head}, {instance}"),
+            &[
+                "contract_instance_addresses_active_idx",
+                "from_contract_instance_id = instance.contract_instance_id",
+                "to_contract_instance_id = instance.contract_instance_id",
+            ],
+        ),
+        (
+            "watched address log",
+            format!("'{CHAIN}', {address}, {topic}, ARRAY[0]::bigint[], {head}"),
+            &[
+                "raw_logs_emitter_idx",
+                "lower(emitting_address) = watch.address",
+            ],
+        ),
+        (
+            "watched topic log",
+            format!("'{CHAIN}', {topic}, ARRAY[0]::bigint[], {head}"),
+            &["raw_logs_topic_idx", "lower(topics[1]) = watch.topic0"],
+        ),
+    ];
+    for ((name, statement), (case, arguments, expected)) in phase_runner::first_effect_statements()
+        .into_iter()
+        .zip(cases)
+    {
+        ensure!(name == case, "statement {name} is not case {case}");
+        let mut transaction = fixture.pool().begin().await?;
+        sqlx::query("SET LOCAL plan_cache_mode = force_generic_plan")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::raw_sql(&format!("PREPARE first_effect AS {statement}"))
+            .execute(&mut *transaction)
+            .await?;
+        let plan = sqlx::query_scalar::<_, String>(&format!(
+            "EXPLAIN (COSTS OFF) EXECUTE first_effect({arguments})"
+        ))
+        .fetch_all(&mut *transaction)
+        .await?
+        .join("\n");
+        sqlx::raw_sql("DEALLOCATE first_effect")
+            .execute(&mut *transaction)
+            .await?;
+        transaction.rollback().await?;
+        println!("{name}:\n{plan}\n");
+        // An index condition, not a filter, names each probe.
+        for text in expected {
+            ensure!(
+                plan.lines()
+                    .any(|line| line.contains(text) && !line.contains("Filter:")),
+                "{name} does not probe {text}:\n{plan}"
+            );
+        }
+        for table in ["raw_logs", "discovery_edges", "contract_instance_addresses"] {
+            ensure!(
+                !plan.contains(&format!("Seq Scan on {table}")),
+                "{name} scans {table} whole:\n{plan}"
+            );
+        }
+    }
+    fixture.cleanup().await
+}
+
 struct Fixture {
     scratch: ScratchDatabase,
     profile: PathBuf,
@@ -737,6 +1001,22 @@ impl Fixture {
             head,
         };
         sync_schema_v2_repository(fixture.pool(), &load_repository(&fixture.profile)?).await?;
+        fixture.seed_chain(CHAIN, "ethereum_head").await?;
+        let registered = NewOwner {
+            node: namehash(&[b"eth"]),
+            label: keccak256(b"alice"),
+            owner: OWNER.parse()?,
+        }
+        .encode_log_data();
+        fixture.log(START + 1, 0, REGISTRY, &registered).await?;
+        Ok(fixture)
+    }
+
+    /// Blocks `START..=head` of `chain` canonical with one transaction each, an ingest cursor
+    /// seeded on `basis`, and every phase completed through the head under this binary's hashes
+    /// with nothing derived yet.
+    async fn seed_chain(&self, chain: &str, basis: &str) -> Result<()> {
+        let head = self.head;
         sqlx::query(
             "WITH lineage AS (
                  INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
@@ -751,27 +1031,28 @@ impl Fixture {
              SELECT $1, block_hash, block_number, $1 || '-transaction-' || block_number, 0, $4, $5
              FROM lineage",
         )
-        .bind(CHAIN)
+        .bind(chain)
         .bind(START)
         .bind(head)
         .bind(SENDER)
         .bind(REGISTRY)
-        .execute(fixture.pool())
+        .execute(self.pool())
         .await?;
         sqlx::query(
             "INSERT INTO ingest_cursors (chain_id, source_key, source_kind, seed_basis,
                  start_block_number, next_block_number, target_block_number,
                  last_processed_block_number, last_processed_block_hash)
-             VALUES ($1, 'source', 'test', 'ethereum_head', $2, $3 + 1, $3, $3, $4)",
+             VALUES ($1, 'source', 'test', $5, $2, $3 + 1, $3, $3, $4)",
         )
-        .bind(CHAIN)
+        .bind(chain)
         .bind(START)
         .bind(head)
-        .bind(block_hash(head))
-        .execute(fixture.pool())
+        .bind(chain_block_hash(chain, head))
+        .bind(basis)
+        .execute(self.pool())
         .await?;
-        PhaseStore::new(fixture.pool().clone())
-            .initialize_chain(CHAIN)
+        PhaseStore::new(self.pool().clone())
+            .initialize_chain(chain)
             .await?;
         sqlx::query(
             "UPDATE chain_phase_state
@@ -784,31 +1065,24 @@ impl Fixture {
                  started_at = now(), finished_at = now()
              WHERE chain_id = $1 AND phase_name IN ('ingest', 'interpret', 'project')",
         )
-        .bind(CHAIN)
+        .bind(chain)
         .bind(head)
-        .bind(block_hash(head))
+        .bind(chain_block_hash(chain, head))
         .bind(INTERPRETER_CONTENT_HASH)
         .bind(PROJECTION_CONTENT_HASH)
-        .execute(fixture.pool())
+        .execute(self.pool())
         .await?;
         publish_heads(
-            fixture.pool(),
-            CHAIN,
+            self.pool(),
+            chain,
             &HeadMarkers {
-                latest: BlockMarker::new(head, block_hash(head))?,
+                latest: BlockMarker::new(head, chain_block_hash(chain, head))?,
                 safe: None,
                 finalized: None,
             },
         )
         .await?;
-        let registered = NewOwner {
-            node: namehash(&[b"eth"]),
-            label: keccak256(b"alice"),
-            owner: OWNER.parse()?,
-        }
-        .encode_log_data();
-        fixture.log(START + 1, 0, REGISTRY, &registered).await?;
-        Ok(fixture)
+        Ok(())
     }
 
     fn pool(&self) -> &sqlx::PgPool {
@@ -1464,8 +1738,27 @@ fn chain() -> RunnerResult<ChainConfig> {
     )
 }
 
+fn base_chain() -> RunnerResult<ChainConfig> {
+    ChainConfig::new(
+        BASE,
+        vec![SourceConfig::new(
+            BASE,
+            "source",
+            "test",
+            SeedBasis::BaseSeam,
+            START,
+            "http://source.invalid",
+        )?],
+        false,
+    )
+}
+
 fn block_hash(number: i64) -> String {
-    format!("{CHAIN}-block-{number}")
+    chain_block_hash(CHAIN, number)
+}
+
+fn chain_block_hash(chain: &str, number: i64) -> String {
+    format!("{chain}-block-{number}")
 }
 
 fn namehash(labels: &[&[u8]]) -> B256 {

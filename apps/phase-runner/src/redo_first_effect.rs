@@ -162,26 +162,28 @@ fn start_block(value: &Value) -> i64 {
     }
 }
 
-/// The lowest block of each kind of first effect, at or below the recorded head.
+/// The lowest block of each kind of first effect, at or below the recorded head. The scan reads
+/// the cheapest arms first, and each later arm looks only below the lowest block found so far, so
+/// an arm that could not lower the result reads `None`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct FirstEffect {
-    /// A canonical log matching a newly watched tuple.
-    pub(crate) watched_log: Option<i64>,
+    /// A changed declaration's start.
+    pub(crate) declared_start: Option<i64>,
     /// A canonical log emitted by a changed address.
     pub(crate) emitted_log: Option<i64>,
     /// A discovery edge to or from an instance of a changed address.
     pub(crate) edge: Option<i64>,
-    /// A changed declaration's start.
-    pub(crate) declared_start: Option<i64>,
+    /// A canonical log matching a newly watched tuple.
+    pub(crate) watched_log: Option<i64>,
 }
 
 impl FirstEffect {
     pub(crate) fn block(&self) -> Option<i64> {
         [
-            self.watched_log,
+            self.declared_start,
             self.emitted_log,
             self.edge,
-            self.declared_start,
+            self.watched_log,
         ]
         .into_iter()
         .flatten()
@@ -191,22 +193,8 @@ impl FirstEffect {
 
 const READABLE: &str = "lineage.canonicality_state IN ('canonical', 'safe', 'finalized')";
 
-/// The first canonical log at or above each new watch entry's start that matches its emitter and
-/// topic0. Served by `raw_logs_emitter_idx` and `raw_logs_topic_idx`.
-const WATCHED_LOG: &str = "SELECT min(hit.block_number)
-    FROM unnest($2::text[], $3::text[], $4::bigint[]) AS watch(address, topic0, start)
-    CROSS JOIN LATERAL (
-        SELECT log.block_number FROM raw_logs log
-        JOIN chain_lineage lineage ON lineage.chain_id = log.chain_id
-         AND lineage.block_hash = log.block_hash AND lineage.block_number = log.block_number
-        WHERE log.chain_id = $1 AND cardinality(log.topics) > 0
-          AND lower(log.topics[1]) = watch.topic0
-          AND (watch.address IS NULL OR lower(log.emitting_address) = watch.address)
-          AND log.block_number BETWEEN watch.start AND $5 AND {READABLE}
-        ORDER BY log.block_number LIMIT 1
-    ) hit";
-
-/// The first canonical log each changed address emitted. Served by `raw_logs_emitter_idx`.
+/// The first canonical log each changed address emitted, at or below `$3`. Each address walks
+/// `raw_logs_emitter_idx` over its own logs only.
 const EMITTED_LOG: &str = "SELECT min(hit.block_number)
     FROM unnest($2::text[]) AS target(address)
     CROSS JOIN LATERAL (
@@ -218,19 +206,93 @@ const EMITTED_LOG: &str = "SELECT min(hit.block_number)
         ORDER BY log.block_number LIMIT 1
     ) hit";
 
-/// The first block of a discovery edge to or from an instance of a changed address. Served by
-/// `discovery_edges_active_from_idx` and `discovery_edges_active_to_idx`.
+/// The first block, at or below `$2`, of a live discovery edge to or from a live instance of a
+/// changed address. Orphaned and deactivated rows are read on neither pair. The instances come
+/// from `contract_instance_addresses_active_idx`, and each instance's edges from the partial
+/// `deactivated_at IS NULL` indexes on either end.
 const MENTIONED_EDGE: &str = "SELECT min(edge.active_from_block_number)
-    FROM discovery_edges edge
-    WHERE edge.chain_id = $1 AND edge.active_from_block_number <= $2
-      AND EXISTS (
-          SELECT 1 FROM contract_instance_addresses instance
-          WHERE instance.chain_id = $1 AND lower(instance.address) = ANY($3)
-            AND instance.contract_instance_id IN (
-                edge.from_contract_instance_id, edge.to_contract_instance_id))";
+    FROM contract_instance_addresses instance
+    CROSS JOIN LATERAL (
+        SELECT from_edge.active_from_block_number FROM discovery_edges from_edge
+        WHERE from_edge.chain_id = $1
+          AND from_edge.from_contract_instance_id = instance.contract_instance_id
+          AND from_edge.deactivated_at IS NULL AND from_edge.canonicality_state <> 'orphaned'
+          AND from_edge.active_from_block_number <= $2
+        UNION ALL
+        SELECT to_edge.active_from_block_number FROM discovery_edges to_edge
+        WHERE to_edge.chain_id = $1
+          AND to_edge.to_contract_instance_id = instance.contract_instance_id
+          AND to_edge.deactivated_at IS NULL AND to_edge.canonicality_state <> 'orphaned'
+          AND to_edge.active_from_block_number <= $2
+    ) edge
+    WHERE instance.chain_id = $1 AND lower(instance.address) = ANY($3)
+      AND instance.deactivated_at IS NULL";
+
+/// The first canonical log at or above each new address watch's start and at or below `$5` that
+/// its address emitted with its topic0. Each entry walks `raw_logs_emitter_idx` over that
+/// address's own logs, with the topic as a filter. The statement leaves out the
+/// `cardinality(topics) > 0` predicate of the partial `raw_logs_topic_idx`, so the planner cannot
+/// walk a shared topic instead: a log with no topics has no `topics[1]` and matches no watch.
+const WATCHED_ADDRESS_LOG: &str = "SELECT min(hit.block_number)
+    FROM unnest($2::text[], $3::text[], $4::bigint[]) AS watch(address, topic0, start)
+    CROSS JOIN LATERAL (
+        SELECT log.block_number FROM raw_logs log
+        JOIN chain_lineage lineage ON lineage.chain_id = log.chain_id
+         AND lineage.block_hash = log.block_hash AND lineage.block_number = log.block_number
+        WHERE log.chain_id = $1 AND lower(log.emitting_address) = watch.address
+          AND log.block_number BETWEEN watch.start AND $5
+          AND lower(log.topics[1]) = watch.topic0 AND {READABLE}
+        ORDER BY log.block_number LIMIT 1
+    ) hit";
+
+/// The first canonical log at or above each new any-emitter watch's start and at or below `$4`
+/// with its topic0. Each entry walks `raw_logs_topic_idx`.
+const WATCHED_TOPIC_LOG: &str = "SELECT min(hit.block_number)
+    FROM unnest($2::text[], $3::bigint[]) AS watch(topic0, start)
+    CROSS JOIN LATERAL (
+        SELECT log.block_number FROM raw_logs log
+        JOIN chain_lineage lineage ON lineage.chain_id = log.chain_id
+         AND lineage.block_hash = log.block_hash AND lineage.block_number = log.block_number
+        WHERE log.chain_id = $1 AND cardinality(log.topics) > 0
+          AND lower(log.topics[1]) = watch.topic0
+          AND log.block_number BETWEEN watch.start AND $4 AND {READABLE}
+        ORDER BY log.block_number LIMIT 1
+    ) hit";
+
+/// Each first-effect statement as `scan` sends it, by name, so a test can pin its plan.
+#[doc(hidden)]
+pub fn first_effect_statements() -> [(&'static str, String); 4] {
+    let readable = |sql: &str| sql.replace("{READABLE}", READABLE);
+    [
+        ("emitted log", readable(EMITTED_LOG)),
+        ("mentioned edge", MENTIONED_EDGE.to_owned()),
+        ("watched address log", readable(WATCHED_ADDRESS_LOG)),
+        ("watched topic log", readable(WATCHED_TOPIC_LOG)),
+    ]
+}
+
+/// Whether `address` is a 20-byte hex address, the only form the log and instance tables hold.
+fn is_address(address: &str) -> bool {
+    address.len() == 42
+        && address.starts_with("0x")
+        && address[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Refuse a diff naming something other than an address: its logs and edges cannot be read, and
+/// dropping it could raise the first effect.
+fn require_addresses(diff: &ManifestDiff, chain_id: &str) -> RunnerResult<()> {
+    match diff.addresses.iter().find(|address| !is_address(address)) {
+        Some(address) => Err(RunnerError::data_integrity(format!(
+            "a changed manifest declaration names {address:?}, which is not a 20-byte hex \
+             address, so the first effect of the change on chain {chain_id} cannot be read"
+        ))),
+        None => Ok(()),
+    }
+}
 
 /// The first effect of `diff` on chain `chain_id` at or below `head`, against canonical lineage
-/// only, in the redo's locked begin transaction.
+/// only, in the redo's locked begin transaction. Each arm after the declared starts looks only
+/// below the lowest block found so far, and is skipped when nothing below it can matter.
 pub(crate) async fn scan(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -240,54 +302,79 @@ pub(crate) async fn scan(
     let database = |error: sqlx::Error| {
         RunnerError::database("failed to scan a manifest change's first effect", error)
     };
-    let readable = |sql: &str| sql.replace("{READABLE}", READABLE);
-    let addresses: Vec<String> = diff
-        .addresses
-        .iter()
-        .filter(|address| {
-            address.len() == 42
-                && address.starts_with("0x")
-                && address[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
-        })
-        .cloned()
-        .collect();
+    require_addresses(diff, chain_id)?;
+    let addresses: Vec<String> = diff.addresses.iter().cloned().collect();
     let mut effect = FirstEffect {
         declared_start: diff.starts.iter().copied().find(|start| *start <= head),
         ..FirstEffect::default()
     };
-    if !diff.watches.is_empty() {
-        let (mut emitters, mut topics, mut starts) = (Vec::new(), Vec::new(), Vec::new());
-        for (address, topic0, start) in &diff.watches {
-            emitters.push(address.clone());
-            topics.push(topic0.clone());
-            starts.push(*start);
-        }
-        effect.watched_log = sqlx::query_scalar(&readable(WATCHED_LOG))
+    // The highest block a later arm can return and still lower the first effect.
+    let below = |effect: &FirstEffect| effect.block().map_or(head, |block| block - 1);
+    if !addresses.is_empty() && below(&effect) >= 0 {
+        effect.emitted_log = sqlx::query_scalar(&EMITTED_LOG.replace("{READABLE}", READABLE))
             .bind(chain_id)
-            .bind(emitters)
-            .bind(topics)
-            .bind(starts)
-            .bind(head)
+            .bind(&addresses)
+            .bind(below(&effect))
             .fetch_one(&mut **transaction)
             .await
             .map_err(database)?;
     }
-    if !addresses.is_empty() {
-        effect.emitted_log = sqlx::query_scalar(&readable(EMITTED_LOG))
-            .bind(chain_id)
-            .bind(&addresses)
-            .bind(head)
-            .fetch_one(&mut **transaction)
-            .await
-            .map_err(database)?;
+    if !addresses.is_empty() && below(&effect) >= 0 {
         effect.edge = sqlx::query_scalar(MENTIONED_EDGE)
             .bind(chain_id)
-            .bind(head)
+            .bind(below(&effect))
             .bind(&addresses)
             .fetch_one(&mut **transaction)
             .await
             .map_err(database)?;
     }
+    // A watch starting above the bound cannot lower the first effect: skip it, and skip a
+    // statement left with no entries.
+    let limit = below(&effect);
+    let (mut emitters, mut address_topics, mut address_starts) =
+        (Vec::new(), Vec::new(), Vec::new());
+    let mut any_emitter = Vec::new();
+    for (address, topic0, start) in diff.watches.iter().filter(|watch| watch.2 <= limit) {
+        match address {
+            Some(address) => {
+                emitters.push(address.clone());
+                address_topics.push(topic0.clone());
+                address_starts.push(*start);
+            }
+            None => any_emitter.push((topic0.clone(), *start)),
+        }
+    }
+    let address_hit: Option<i64> = if emitters.is_empty() {
+        None
+    } else {
+        sqlx::query_scalar(&WATCHED_ADDRESS_LOG.replace("{READABLE}", READABLE))
+            .bind(chain_id)
+            .bind(emitters)
+            .bind(address_topics)
+            .bind(address_starts)
+            .bind(limit)
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(database)?
+    };
+    let limit = address_hit.map_or(limit, |hit| hit - 1);
+    let (topics, topic_starts): (Vec<String>, Vec<i64>) = any_emitter
+        .into_iter()
+        .filter(|(_, start)| *start <= limit)
+        .unzip();
+    let topic_hit: Option<i64> = if topics.is_empty() {
+        None
+    } else {
+        sqlx::query_scalar(&WATCHED_TOPIC_LOG.replace("{READABLE}", READABLE))
+            .bind(chain_id)
+            .bind(topics)
+            .bind(topic_starts)
+            .bind(limit)
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(database)?
+    };
+    effect.watched_log = topic_hit.or(address_hit);
     Ok(effect)
 }
 
@@ -295,7 +382,7 @@ pub(crate) async fn scan(
 mod tests {
     use serde_json::json;
 
-    use super::{ManifestDiff, Side};
+    use super::{ManifestDiff, Side, require_addresses};
 
     fn side<'a>(status: &'a str, payload: &'a serde_json::Value) -> Side<'a> {
         Side {
@@ -360,5 +447,21 @@ mod tests {
         );
         assert_eq!(diff.starts.into_iter().collect::<Vec<_>>(), [9]);
         assert_eq!(diff.addresses.into_iter().collect::<Vec<_>>(), ["0x02"]);
+    }
+
+    #[test]
+    fn a_diff_naming_something_other_than_an_address_is_refused() {
+        let mut diff = ManifestDiff::default();
+        diff.addresses
+            .insert("0xab00000000000000000000000000000000000001".to_owned());
+        assert!(require_addresses(&diff, "chain").is_ok());
+        diff.addresses.insert("0x02".to_owned());
+        let error = require_addresses(&diff, "chain").expect_err("0x02 is not an address");
+        assert!(
+            error.to_string().contains(
+                "a changed manifest declaration names \"0x02\", which is not a 20-byte hex address"
+            ),
+            "{error}"
+        );
     }
 }

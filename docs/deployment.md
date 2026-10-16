@@ -919,9 +919,10 @@ Project redo before deploying the matching API. A new Project-owned table is
 such a change: see [child registration events](#child-registration-events-in-name-history).
 `read_features` can change the manifest-authority fingerprint while the interpreter content hash remains byte-identical.
 On an initialized chain, that authority change still blocks
-ordinary derived work until the exact token-attested full-range Interpret redo
-and downstream stamped Project redo complete; if it widened the watch plan,
-complete the stamped Ingest redo first.
+ordinary derived work until the token-attested Interpret redo and the
+downstream stamped Project redo complete, bounded as
+[Manifest-authority marker](#manifest-authority-marker) says. If it widened the
+watch plan, complete the stamped Ingest redo first.
 When the active Ethereum Mainnet `basenames_execution` authority changes,
 Ethereum Mainnet follows the rule above and, in addition, the Base Project phase
 is invalidated on its own ([cross-chain
