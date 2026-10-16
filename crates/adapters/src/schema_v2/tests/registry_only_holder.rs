@@ -1062,16 +1062,22 @@ fn unsurfaced_transfer(block: i64, log_index: i64, from: &str, to: &str) -> RawL
 
 /// A lapsed unwrapped lease on a surface-unknown name hands the resource back to its registry
 /// owner, as on a name with a surface. The release binds no surface for such a name, but the
-/// hand-back is the holder's, which every other registry-only row follows whether or not the
-/// name has a surface. When the registration's registry write was its own transaction the owner
-/// already holds the resource and the release adds no row, and a Graveyard owner is granted
-/// nothing. U5 is a guard, not this route: a Sepolia numeric-only registration names no label,
-/// but the registry write before it already materialized the node's surface, so its release
-/// hands back through the surface path. U6 are guards too: `registerOnly` skips the registry
-/// write, so its registration has no surface unless a registry write gives it one. With no write
-/// the registry owner is the zero address and there is no one to hand back to. A write in the
-/// same transaction, or before it, materializes the surface, so the release hands back through
-/// the surface path.
+/// hand-back is the holder's, which every other registry-only row follows whether or not the name
+/// has a surface. When the registration's registry write was its own transaction the owner already
+/// holds the resource and the release adds no row, and a Graveyard owner is granted nothing. U5 is
+/// a guard, not this route: a Sepolia numeric-only registration names no label, but the registry
+/// write before it already materialized the node's surface, so its release hands back through the
+/// surface path. U6 are guards too: `registerOnly` skips the registry write, so its registration
+/// has no surface unless a registry write gives it one. On a node never written the registry owner
+/// is the zero address and there is no one to hand back to. On a lapsed name `registerOnly` keeps
+/// the previous registry owner. A `NewOwner` in the same transaction, or before it, materializes
+/// the surface, so the release hands back through the surface path. U7 covers any surface-unknown
+/// registry-only next authority, not a known chain shape: no `NewOwner` ever names the node, so the
+/// registry `setOwner` the lease takes over gives it an owner but no surface. Its input needs a
+/// node created before the registry's admission and a `registerOnly` that no pinned ENSv1 contract
+/// calls. Among the registration paths in the pinned registrar and controllers, a registration
+/// leaves the surface unknown only through a label the normalizer rejects or through
+/// `registerOnly`.
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L152 @ ens_v1@91c966f)
 #[test]
 fn a_lapsed_lease_on_a_surface_unknown_name_hands_the_resource_back_to_its_registry_owner()
@@ -1203,6 +1209,21 @@ fn a_lapsed_lease_on_a_surface_unknown_name_hands_the_resource_back_to_its_regis
                     lease_transfer(3, 0, ZERO, HOLDER),
                     numeric_registered(3, 1, HOLDER, 10),
                 ],
+                held_by(HOLDER, Some(RESOLVER)),
+            ),
+            HolderRow::new(
+                "U7 a release after a registerOnly registration and a setOwner with no NewOwner",
+                numeric_eth.clone(),
+                vec![
+                    vec![
+                        lease_transfer(2, 0, ZERO, HOLDER),
+                        numeric_registered(2, 1, HOLDER, 10),
+                    ],
+                    vec![registry_transfer(3, 0, leased(), HOLDER)],
+                    vec![new_resolver(4, 0, leased(), RESOLVER)],
+                    numeric_release.clone(),
+                ],
+                registry_only_of(&leased_hex()),
                 held_by(HOLDER, Some(RESOLVER)),
             ),
         ],
