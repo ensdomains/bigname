@@ -56,6 +56,17 @@ impl ManifestAuthorityAttestationAudit {
         self.replayed
     }
 
+    pub(crate) fn generation_token(&self) -> &str {
+        &self.generation_token
+    }
+
+    pub(crate) const fn range(&self) -> BlockRange {
+        BlockRange {
+            from: self.redo_from_block_number,
+            to: self.redo_to_block_number,
+        }
+    }
+
     pub(crate) fn emit(&self) {
         tracing::error!(
             event = "manifest_authority_watch_set_coverage_attested",
@@ -181,6 +192,30 @@ pub(crate) async fn pending_for_restart_locked(
         )
     })?;
     Ok(row.map(|row| from_row(row, true)))
+}
+
+/// The range the Interpret redo that discharged invalidation token `generation_token` attested.
+pub(crate) async fn attested_range(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    generation_token: &str,
+) -> RunnerResult<Option<BlockRange>> {
+    let row: Option<(i64, i64)> = sqlx::query_as(
+        "SELECT redo_from_block_number, redo_to_block_number
+         FROM manifest_authority_attestations
+         WHERE chain_id = $1 AND phase_name = 'interpret' AND generation_token = $2",
+    )
+    .bind(chain_id)
+    .bind(generation_token)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|error| {
+        RunnerError::database(
+            format!("failed to load the attested manifest-authority range for chain {chain_id}"),
+            error,
+        )
+    })?;
+    row.map(|(from, to)| BlockRange::new(from, to)).transpose()
 }
 
 pub(crate) async fn pending_generation(

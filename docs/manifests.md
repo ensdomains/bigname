@@ -1917,10 +1917,14 @@ already derived, and its own address watches start above the head, so they
 need no historical fetch. A watch in the change whose declaration has no
 `start_block` compiles from block zero and still stamps the [mandatory
 historical fetch](#mandatory-historical-fetch-after-watch-plan-widening), and
-an all-emitter event always does. Today the authority change still records a
-manifest-authority marker and still needs the attested full Interpret redo and
-the Project redo it stamps. A root-registry change gains nothing from the
-timing, because it applies at every block.
+an all-emitter event always does. The authority change still records a
+manifest-authority marker, and the attested Interpret redo and the Project
+redo it stamps start at the change's first effect
+([manifest-authority marker](deployment.md#manifest-authority-marker)). A
+contract admitted above the head, or a declaration moved between manifests
+with no effect at or below the head, costs one block. A change to the ENSv2
+root, registry or migration family gains nothing from the timing, because
+stored rows of every name read it, so its redo stays the full range.
 
 The legacy resolver-profile authority journal, input queue, and reconciliation tables remain only in immutable migration history. Their Rust APIs and consumers have been deleted. Current manifests and schema-v2 discovery edges are the admission truth; legacy rows do not gate synchronization or interpretation.
 

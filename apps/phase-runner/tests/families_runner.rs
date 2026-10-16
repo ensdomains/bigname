@@ -339,6 +339,104 @@ async fn run_redo(
     Ok(result)
 }
 
+// The swept-name cap's refusal (crates/project/src/families/derived.rs) on the supervised runner.
+// Two names are published through block 10, then an ENSv2 root is admitted with no block. The
+// next publication would compose both again, above a cap of one: Project refuses it, and the
+// runner reports a data-integrity error that is not retried, retry policy or not, so the chain
+// stops once instead of retrying. Under the default cap the publication goes through. The
+// refusal is the real one, so a change of its wording fails here (TYR-356).
+#[tokio::test]
+async fn the_sweep_cap_refusal_is_not_retried_under_supervision() -> Result<()> {
+    let scratch = ready("families_sweep_cap").await?;
+    for label in ["alpha", "beta"] {
+        let namehash = format!(
+            "0x{:064x}",
+            label.len() * 1_000 + usize::from(label.as_bytes()[0])
+        );
+        sqlx::query(
+            "INSERT INTO name_surfaces (logical_name_id, namespace, namehash, labelhashes,
+                 normalizer_version, visibility_state, chain_id, block_hash, block_number,
+                 canonicality_state)
+             VALUES ('ens:' || $1, 'ens', $1, ARRAY[$1], 'fixture', 'active', $2,
+                 $2 || '-block-1', 1, 'canonical')",
+        )
+        .bind(&namehash)
+        .bind(CHAIN)
+        .execute(scratch.pool())
+        .await?;
+    }
+    let published = head_marker(&scratch, 10).await?;
+    let supervised = ProjectPhase::new(scratch.pool().clone());
+    supervised.run_batch(context(&published, None)).await?;
+    ensure!(marker(&scratch).await? == Some(10));
+    let payload = serde_json::json!({
+        "manifest_version": 1, "namespace": "ens", "source_family": "ens_v2_root_l1",
+        "chain": CHAIN, "rollout_status": "active",
+        "contracts": [{"role": "root_registry", "proxy_kind": "none", "start_block": 0,
+            "address": "0x00000000000000000000000000000000000000b4"}],
+    });
+    let manifest_id: i64 = sqlx::query_scalar(
+        "INSERT INTO manifest_versions (manifest_version, namespace, source_family, chain_id,
+             deployment_label, rollout_status, normalizer_version, file_path, manifest_payload)
+         VALUES (1, 'ens', 'ens_v2_root_l1', $1, 'fixture', 'active', 'fixture',
+             'fixture/root.toml', $2)
+         RETURNING manifest_id",
+    )
+    .bind(CHAIN)
+    .bind(&payload)
+    .fetch_one(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+             manifest_version, source_manifest_id, chain_id, derivation_kind,
+             canonicality_state, after_state)
+         VALUES ('fixture:root', 'ens', 'SourceManifestUpdated', 'ens_v2_root_l1', 1, $1, $2,
+             'manifest_sync', 'finalized',
+             jsonb_build_object('rollout_status', 'active', 'manifest_payload', $3::jsonb))",
+    )
+    .bind(manifest_id)
+    .bind(CHAIN)
+    .bind(&payload)
+    .execute(scratch.pool())
+    .await?;
+    let head = head_marker(&scratch, HEAD).await?;
+    for retry_family_failures in [true, false] {
+        let capped =
+            ProjectPhase::new(scratch.pool().clone()).with_family_settings(FamilySettings {
+                retry_family_failures,
+                max_admission_sweep_names: 1,
+                ..FamilySettings::default()
+            });
+        let error = match capped.run_batch(context(&head, Some(&published))).await {
+            Ok(outcome) => anyhow::bail!("the sweep above the cap published: {outcome:?}"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        ensure!(
+            error.kind() == phase_runner::error::ErrorKind::DataIntegrity
+                && !error.is_retryable()
+                && message.contains("above the cap of 1")
+                && message.contains("redo the full range of phase project alone"),
+            "retry {retry_family_failures}: {:?} retryable {}: {message}",
+            error.kind(),
+            error.is_retryable()
+        );
+        ensure!(
+            marker(&scratch).await? == Some(10),
+            "the refusal published nothing"
+        );
+    }
+    let outcome = supervised
+        .run_batch(context(&head, Some(&published)))
+        .await?;
+    ensure!(
+        matches!(outcome, PhaseBatchOutcome::Complete(_)),
+        "under the default cap the sweep publishes: {outcome:?}"
+    );
+    ensure!(marker(&scratch).await? == Some(HEAD));
+    scratch.cleanup().await
+}
+
 fn context(head: &BlockMarker, resume: Option<&BlockMarker>) -> PhaseContext {
     PhaseContext {
         chain_id: CHAIN.to_owned(),

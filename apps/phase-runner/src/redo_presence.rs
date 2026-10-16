@@ -4,6 +4,7 @@ use crate::{
     config::{SourceConfig, normalized_source_kind},
     error::{RunnerError, RunnerResult},
     phase::BlockRange,
+    redo_first_effect::FirstEffect,
     redo_manifest_attestation::{AttestedManifestAuthority, ManifestAuthorityAttestation},
     transitions::PhaseStateRow,
 };
@@ -23,22 +24,41 @@ pub(crate) fn interpret_replay_range(
 pub(crate) struct InterpretReplayNotice {
     requested: BlockRange,
     executed: BlockRange,
+    /// The redo discharges a manifest-authority marker from the manifest change's first effect.
+    first_effect: Option<FirstEffect>,
 }
 
 impl InterpretReplayNotice {
-    pub(crate) fn new(requested: BlockRange, executed: BlockRange) -> Option<Self> {
+    pub(crate) fn new(
+        requested: BlockRange,
+        executed: BlockRange,
+        first_effect: Option<FirstEffect>,
+    ) -> Option<Self> {
         (requested != executed).then_some(Self {
             requested,
             executed,
+            first_effect,
         })
     }
 
     fn message(&self, chain_id: &str) -> String {
+        let reason = match self.first_effect.map(|effect| effect.block()) {
+            Some(Some(block)) if block == self.executed.from => format!(
+                "the manifest change's first effect is block {block} (docs/deployment.md § \
+                 Manifest-authority marker)"
+            ),
+            Some(_) => format!(
+                "the manifest change's first effect is at or above block {}, where the redo \
+                 starts (docs/deployment.md § Manifest-authority marker)",
+                self.executed.from
+            ),
+            None => "Interpret replays through the recorded interpreted head, not to --to-block \
+                     (docs/runbooks/production-docker.md § Stop and escalate an interpreter \
+                     mismatch, step 6)"
+                .to_owned(),
+        };
         format!(
-            "interpret redo on chain {chain_id} requested {}..={} but runs {}..={}: Interpret \
-             replays through the recorded interpreted head, not to --to-block \
-             (docs/runbooks/production-docker.md § Stop and escalate an interpreter mismatch, \
-             step 6)",
+            "interpret redo on chain {chain_id} requested {}..={} but runs {}..={}: {reason}",
             self.requested.from, self.requested.to, self.executed.from, self.executed.to,
         )
     }
@@ -208,9 +228,9 @@ mod tests {
     #[test]
     fn notice_names_both_ranges_only_when_they_differ() {
         let requested = BlockRange::new(0, 11_714_440).unwrap();
-        assert_eq!(InterpretReplayNotice::new(requested, requested), None);
+        assert_eq!(InterpretReplayNotice::new(requested, requested, None), None);
         let executed = BlockRange::new(0, 11_840_386).unwrap();
-        let message = InterpretReplayNotice::new(requested, executed)
+        let message = InterpretReplayNotice::new(requested, executed, None)
             .expect("a widened range is reported")
             .message("1");
         assert!(message.contains("requested 0..=11714440 but runs 0..=11840386"));

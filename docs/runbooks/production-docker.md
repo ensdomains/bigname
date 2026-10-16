@@ -1170,8 +1170,12 @@ in the same step.
    print an invalidation token, run the required historical fetch for a widened
    watch plan, or complete the required review proving that the watch plan did
    not widen, then rerun the same chain and block range with
-   `--attest-watch-set-coverage <token>`. If no marker exists, let the unflagged
-   redo complete. Include `--metrics-bind-addr 0.0.0.0:9465` on this and the
+   `--attest-watch-set-coverage <token>`. Where it can, the runner narrows that
+   redo to the manifest change's first effect and logs
+   `requested A..=B but runs C..=D`. The Project redo it stamps then starts at
+   the same block ([manifest-authority
+   marker](../deployment.md#manifest-authority-marker)). If no marker exists,
+   let the unflagged redo complete. Include `--metrics-bind-addr 0.0.0.0:9465` on this and the
    matching Project redo. Never invent a token, reuse one after completion, or
    use one for another redo. Do not use the unattended `run` path for an attestation.
    Optionally, as soon as every chain on the database whose Project has advanced shows

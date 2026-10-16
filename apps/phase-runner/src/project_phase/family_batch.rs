@@ -95,6 +95,7 @@ impl ProjectPhase {
         let options = FamilyOptions::new(bigname_content_hash::PROJECTION_CONTENT_HASH)
             .with_max_blocks_per_run(self.families.max_blocks_per_run)
             .with_rebuild_ranges(self.families.rebuild_ranges)
+            .with_max_admission_sweep_names(self.families.max_admission_sweep_names)
             .with_resumed_redo(
                 context
                     .redo_attempt

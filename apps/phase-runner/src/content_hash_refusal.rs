@@ -31,13 +31,19 @@ pub(crate) async fn refusal(
         ));
     };
     if recorded_phase != PhaseName::Project {
+        let bounded = if crate::redo_manifest_attestation::has_marker_prefix(&recorded) {
+            "; that redo starts at the manifest change's first effect where it can, and says so \
+             (docs/deployment.md § Manifest-authority marker)"
+        } else {
+            ""
+        };
         return Ok(RunnerError::new(
             ErrorKind::ContentHashMismatch,
             format!(
                 "refusing derived writes for chain {chain_id} phase {phase}: binary \
                  interpretation-input hash {} differs from recorded {recorded} on phase \
                  {recorded_phase}; start the interpreter content-hash rotation with a full-range \
-                 Interpret redo",
+                 Interpret redo{bounded}",
                 expected_content_hash(recorded_phase)
             ),
         ));

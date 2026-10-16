@@ -31,6 +31,8 @@ pub struct FamilySettings {
     /// follows the head and needs it; the one-shot redo only undoes and replays, which never
     /// reads RPC, and leaves the refresh to the runner.
     pub require_hydration_url: bool,
+    /// Most names an ENSv2 root admission change may compose again in one publication.
+    pub max_admission_sweep_names: u64,
 }
 
 impl Default for FamilySettings {
@@ -40,6 +42,7 @@ impl Default for FamilySettings {
             retry_family_failures: true,
             rebuild_ranges: RebuildRanges::BelowSafe,
             require_hydration_url: true,
+            max_admission_sweep_names: bigname_project::families::MAX_ADMISSION_SWEEP_NAMES,
         }
     }
 }
@@ -98,7 +101,7 @@ impl ProjectPhase {
         standing: &FamilyOutcome,
         error: &ProjectError,
     ) -> RunnerError {
-        let retry = self.families.retry_family_failures;
+        let retry = self.families.retry_family_failures && !is_sweep_cap_refusal(error);
         let kind = match error.kind() {
             ProjectErrorKind::Configuration => ErrorKind::Configuration,
             ProjectErrorKind::DataIntegrity if !retry => ErrorKind::DataIntegrity,
@@ -128,6 +131,19 @@ impl Phase for ProjectPhase {
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
         Box::pin(self.run_family_batch(context))
     }
+}
+
+/// Whether `error` is Project's refusal of an admission sweep above the cap
+/// (`crates/project/src/families/derived.rs`, `refuse_oversized_admission_sweep`). Every retry
+/// would meet it again, so the supervised runner stops the chain on it once instead.
+/// Temporary: the match on its wording is replaced by a typed refusal kind in the next Project
+/// change that rotates the projection content hash. `tests/families_runner.rs` reaches the real
+/// refusal, so a change of that wording fails there.
+fn is_sweep_cap_refusal(error: &ProjectError) -> bool {
+    let message = error.to_string();
+    error.kind() == ProjectErrorKind::DataIntegrity
+        && message.contains("admission differs from the family marker's")
+        && message.contains("redo the full range of phase project alone")
 }
 
 fn project_marker(marker: &BlockMarker) -> Marker {
