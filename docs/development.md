@@ -255,14 +255,16 @@ shorter batches and sparse history longer ones.
 
 Other redo phases and the supervised `run` refuse the flag. The options require
 `--interpret-adaptive`, and each must be positive. An explicit
-`--interpret-blocks-per-batch`, or `BIGNAME_INTERPRET_BLOCKS_PER_BATCH`, lowers
-the block span further. The implicit 500-block default does not. A block is never
+`--interpret-blocks-per-batch`, or `BIGNAME_INTERPRET_BLOCKS_PER_BATCH`, caps
+the block span. The implicit 500-block default does not. A block is never
 split: one block over a target runs alone and is logged as oversized. Normal
 Interpret batches that the redo runs after a discovery repair keep the fixed
 length.
 
 The planner reads a raw log count and an input estimate for up to the maximum
-span of blocks at once, and reuses them for the following batches. Each batch
+span of blocks at once, and reuses them for the following batches. The end of
+that span is itself a batch boundary, so a batch that starts partway into it ends
+there even when it is under its targets. Each batch
 still reads its blocks again inside its own database snapshot. A chain
 reorganization between planning and loading therefore fails that batch with a
 retryable error before it writes anything, and the retry plans from fresh
@@ -271,7 +273,10 @@ batch boundaries may differ from an uninterrupted run while its stored rows do
 not.
 
 The estimate covers raw input only. It does not bound adapter state, the prior
-history the loader restores, or PostgreSQL memory. To compare with fixed batches,
+history the loader restores, or PostgreSQL memory. The runner records its
+database phase heartbeat between batches, so `phase_runner_heartbeat_age_seconds`
+keeps growing through a long adaptive batch and can pass its stale threshold.
+That is a metric only, and nothing acts on it. To compare with fixed batches,
 run the same redo on the same restored database with and without the flag, and
 compare the Interpret phase time, peak memory and the
 `planned adaptive whole-block batch` log lines. An Interpret redo also performs
