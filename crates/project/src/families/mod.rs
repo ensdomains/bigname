@@ -6,6 +6,7 @@ mod block;
 mod child_registrations;
 mod classification;
 pub use child_registrations::EXCLUDED_CHILD_REGISTRATION_PARENTS;
+mod compose;
 mod decode;
 mod derived;
 mod driver;
@@ -86,6 +87,11 @@ pub const MAX_RANGE_BLOCKS: u64 = 1024;
 /// about twice Sepolia's densest block (2,147 events), which keeps the working set to tens of
 /// megabytes while leaving dense stretches a few blocks per range.
 pub const MAX_RANGE_EVENTS: u64 = 4096;
+
+/// The keys one chunk of a rebuild's composition pass composes: names, or index pairs. A name
+/// chunk composes the summaries, lookup rows and catalogue of up to this many names, the working
+/// set one summary composition already holds.
+pub const COMPOSE_CHUNK_KEYS: usize = 1000;
 
 /// Which work blocks a rebuild applies several to a transaction. A range folds its blocks one
 /// by one exactly as single blocks would, then journals, writes and advances the marker once, to
@@ -208,8 +214,11 @@ pub struct FamilyOptions {
     /// Work blocks one rebuild range applies at most, and never more than the run's budget has
     /// left; zero counts as one.
     pub max_range_blocks: u64,
-    /// Events one rebuild range applies at most, unless its first block alone holds more.
+    /// Events one rebuild range applies at most, unless its first block alone holds more; also
+    /// the events of one catalogue window of the composition pass.
     pub max_range_events: u64,
+    /// Keys one chunk of the composition pass composes; zero counts as one.
+    pub compose_chunk_keys: usize,
     /// The redo this run serves resumes an interrupted redo of the same range under the same
     /// projection content hash (the runner kept its saved progress). A rebuild the interrupted
     /// attempt left then resumes rather than starting again.
@@ -227,6 +236,7 @@ impl FamilyOptions {
             rebuild_ranges: RebuildRanges::BelowSafe,
             max_range_blocks: MAX_RANGE_BLOCKS,
             max_range_events: MAX_RANGE_EVENTS,
+            compose_chunk_keys: COMPOSE_CHUNK_KEYS,
             resumes_interrupted_redo: false,
         }
     }
@@ -255,6 +265,11 @@ impl FamilyOptions {
     pub fn with_range_caps(mut self, blocks: u64, events: u64) -> Self {
         self.max_range_blocks = blocks.max(1);
         self.max_range_events = events.max(1);
+        self
+    }
+
+    pub fn with_compose_chunk_keys(mut self, keys: usize) -> Self {
+        self.compose_chunk_keys = keys.max(1);
         self
     }
 
@@ -301,6 +316,8 @@ pub struct FamilyOutcome {
     pub duplicate_anomalies: u64,
     /// Times a rebuild refreshed the planner statistics of the family tables.
     pub statistics_refreshes: u64,
+    /// Chunks of a rebuild's composition pass committed; each spent one block of the budget.
+    pub compose_chunks: u64,
     /// Elapsed milliseconds of the whole run.
     pub elapsed_ms: u64,
     /// What hydration did: its RPC calls, a failed block's included, and the rows it committed.
@@ -411,6 +428,7 @@ pub async fn run(
         marker_block = outcome.marker.as_ref().map(|marker| marker.number),
         blocks = outcome.blocks,
         ranges = outcome.ranges,
+        compose_chunks = outcome.compose_chunks,
         undone_blocks = outcome.undone_blocks,
         reset = outcome.reset,
         rows = ?outcome.rows,

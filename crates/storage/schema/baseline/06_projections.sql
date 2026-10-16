@@ -197,16 +197,23 @@ CREATE TABLE IF NOT EXISTS project_repair_record (
     updated_at timestamptz NOT NULL DEFAULT now(),
     prefix_recorded boolean NOT NULL DEFAULT false,
     reset_sequence bigint,
+    composed_block bigint,
+    compose_stream smallint,
+    compose_cursor text,
     PRIMARY KEY (chain_id),
     CHECK (reason IN ('required_redo_range', 'orphaned_lineage', 'content_hash_rebuild', 'operator_redo')),
-    CHECK (state IN ('undoing', 'replaying', 'rebuilding', 'complete')),
+    CHECK (state IN ('undoing', 'replaying', 'rebuilding', 'composing', 'complete')),
     CHECK ((state = 'complete') = (completed_sequence IS NOT NULL AND completed_marker_number IS NOT NULL AND completed_marker_hash IS NOT NULL AND completed_input_hash IS NOT NULL)),
     CHECK (state = 'complete' OR (completed_sequence IS NULL AND completed_marker_number IS NULL AND completed_marker_hash IS NULL AND completed_input_hash IS NULL)),
     CHECK (state <> 'undoing' OR (prefix_interpret_input_content_hash IS NULL AND prefix_interpret_redo_attempt IS NULL)),
     CHECK ((trusted_base_number IS NULL) = (trusted_base_hash IS NULL)),
-    CHECK (state <> 'rebuilding' OR trusted_base_number IS NULL),
+    CONSTRAINT project_repair_record_rebuild_base_check
+        CHECK (state NOT IN ('rebuilding', 'composing') OR trusted_base_number IS NULL),
     CONSTRAINT project_repair_record_prefix_recorded_check
-        CHECK (state <> 'undoing' OR NOT prefix_recorded)
+        CHECK (state <> 'undoing' OR NOT prefix_recorded),
+    CONSTRAINT project_repair_record_compose_check
+        CHECK ((state = 'composing') = (compose_stream IS NOT NULL)
+            AND (state = 'composing' OR compose_cursor IS NULL))
 );
 COMMENT ON TABLE project_repair_record IS
     'Project-owned repair record: the durable description of the latest family undo-then-replay or rebuild of a chain, its attempt, reason, trusted base, replay target, state, input revision and completion identity. Undo never rewrites it.';
@@ -225,7 +232,7 @@ COMMENT ON COLUMN project_repair_record.replay_target_number IS
 COMMENT ON COLUMN project_repair_record.replay_target_hash IS
     'This value is the replay target''s hash when captured.';
 COMMENT ON COLUMN project_repair_record.state IS
-    'This value is undoing, replaying, rebuilding or complete.';
+    'This value is undoing, replaying, rebuilding, composing or complete. A rebuild in ranges is composing while its composition pass runs.';
 COMMENT ON COLUMN project_repair_record.prefix_interpret_input_content_hash IS
     'This value is the Interpret input_content_hash of the input revision the replay started from; null while undoing.';
 COMMENT ON COLUMN project_repair_record.prefix_interpret_redo_attempt IS
@@ -246,6 +253,12 @@ COMMENT ON COLUMN project_repair_record.updated_at IS
     'This value is when the record last changed.';
 COMMENT ON COLUMN project_repair_record.reset_sequence IS
     'This value is the family marker generation the rebuild''s reset wrote; null for an undo-then-replay.';
+COMMENT ON COLUMN project_repair_record.composed_block IS
+    'This value is the block a rebuild''s composition pass composed at, -1 when it composed nothing; null before the pass and for an undo-then-replay. Every rebuild generation above it composes and journals.';
+COMMENT ON COLUMN project_repair_record.compose_stream IS
+    'This value is the composition pass stream under way: 0 names, 1 record nodes, 2 record ids, 3 history windows; null unless composing.';
+COMMENT ON COLUMN project_repair_record.compose_cursor IS
+    'This value is the last key the composition pass committed in its stream; null at a stream''s start and unless composing.';
 COMMENT ON COLUMN project_repair_record.prefix_recorded IS
     'This value is true once the replay or rebuild captured its input revision in prefix_interpret_input_content_hash and prefix_interpret_redo_attempt, which may both be null when the chain has no Interpret row; false while undoing.';
 

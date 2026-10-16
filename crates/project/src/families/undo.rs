@@ -19,8 +19,8 @@ use super::{
 use crate::{ProjectError, Result};
 
 /// Undo the block `expected` stands on under the repair `attempt`. Returns the restored marker,
-/// or `None` when the journal no longer holds the block (it was pruned or never written), which
-/// leaves everything untouched.
+/// or `None` when the journal no longer holds the block (it was pruned or never written) or
+/// ends at it (`ENDS_JOURNAL`), which leaves everything untouched.
 pub(crate) async fn undo_block(
     pool: &PgPool,
     chain_id: &str,
@@ -57,6 +57,9 @@ pub(crate) async fn undo_block(
     else {
         return Ok(None);
     };
+    if ends_journal(&prior) {
+        return Ok(None);
+    }
 
     let mut hydration_images = super::hydrate::work::Images::new();
     let mut by_table: BTreeMap<&str, (Vec<Value>, Vec<Value>)> = BTreeMap::new();
@@ -185,16 +188,26 @@ pub(crate) async fn start_replay(
     Ok(revision)
 }
 
+/// The field of a marker journal row that ends the journal at its block: the composition pass of
+/// a rebuild in ranges writes it (driver/compose.rs). The generations at and below that block
+/// journalled nothing, so an undo that would reach below it rebuilds instead.
+pub(crate) const ENDS_JOURNAL: &str = "families_journalled";
+
+fn ends_journal(image: &Value) -> bool {
+    image.get(ENDS_JOURNAL) == Some(&Value::Bool(false))
+}
+
 /// Where undo can take the families: from `current` down the chain of journalled prior markers
 /// to the highest marker at or below `limit` that stands on the readable lineage. `None` when the
-/// journal runs out first (pruned, or the families began there), which means a rebuild.
+/// journal runs out first (pruned, the families began there, or a composition pass ended it),
+/// which means a rebuild.
 pub(crate) async fn undo_target(
     pool: &PgPool,
     chain_id: &str,
     current: &crate::Marker,
     limit: i64,
 ) -> Result<Option<crate::Marker>> {
-    type Step = (i64, String, Option<i64>, Option<String>, bool, bool);
+    type Step = (i64, String, Option<i64>, Option<String>, bool, bool, bool);
     // Walk the journalled prior markers down from `current` in SQL, stopping below the first
     // readable marker at or under `limit`, so a shallow undo reads a few rows however much
     // journal a chain without finality heads has kept.
@@ -202,20 +215,22 @@ pub(crate) async fn undo_target(
         "/* project:families.undo.path */ WITH RECURSIVE step AS (
              SELECT journal.block_number, journal.block_hash,
                     (journal.before_image ->> 'current_block_number')::bigint AS prior_number,
-                    journal.before_image ->> 'current_block_hash' AS prior_hash
+                    journal.before_image ->> 'current_block_hash' AS prior_hash,
+                    journal.before_image -> 'families_journalled' = 'false'::jsonb IS TRUE AS ends
              FROM project_family_undo journal
              WHERE journal.chain_id = $1 AND journal.family = 'marker'
                AND journal.block_number = $2 AND journal.block_hash = $3
              UNION
              SELECT journal.block_number, journal.block_hash,
                     (journal.before_image ->> 'current_block_number')::bigint,
-                    journal.before_image ->> 'current_block_hash'
+                    journal.before_image ->> 'current_block_hash',
+                    journal.before_image -> 'families_journalled' = 'false'::jsonb IS TRUE
              FROM step
              JOIN project_family_undo journal
                ON journal.chain_id = $1 AND journal.family = 'marker'
               AND journal.block_number = step.prior_number
               AND journal.block_hash = step.prior_hash
-             WHERE NOT (step.block_number <= $4 AND EXISTS (
+             WHERE NOT step.ends AND NOT (step.block_number <= $4 AND EXISTS (
                  SELECT 1 FROM chain_lineage lineage
                  WHERE lineage.chain_id = $1
                    AND lineage.block_number = step.block_number
@@ -236,7 +251,8 @@ pub(crate) async fn undo_target(
                       AND lineage.block_number = step.prior_number
                       AND lineage.block_hash = step.prior_hash
                       AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-                )
+                ),
+                step.ends
          FROM step",
     )
     .bind(chain_id)
@@ -248,9 +264,10 @@ pub(crate) async fn undo_target(
     .map_err(|error| ProjectError::database("failed to read the family undo path", error))?;
     let mut path = BTreeMap::new();
     let mut readable = BTreeMap::new();
-    for (number, hash, prior_number, prior_hash, block_readable, prior_readable) in steps {
+    for (number, hash, prior_number, prior_hash, block_readable, prior_readable, ends) in steps {
         let prior = prior_number
             .zip(prior_hash)
+            .filter(|_| !ends)
             .map(|(number, hash)| crate::Marker { number, hash });
         if let Some(prior) = &prior {
             readable.insert((prior.number, prior.hash.clone()), prior_readable);

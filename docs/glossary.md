@@ -2788,7 +2788,9 @@ redo attempt, mode and range) and the [active manifest
 set](#active-manifest-set-family-block) key. A single block records its own
 token and set key. A range records the token fields it read at its opening
 fence and its final block's set key. A block, range or undo applies only
-against the generation it planned from.
+against the generation it planned from. A rebuild's [composition
+pass](#composition-pass) leaves the marker where the ranges left it, block and
+generation alike, while the [repair record](#repair-record)'s cursor moves.
 
 The marker is what the API serves from: snapshot selection and the verified lookup's
 admission accept a chain's publication only while its marker is `live` (never
@@ -2855,8 +2857,11 @@ the rows of `project_family_undo`: for every owned key family row a block
 changed, the row as it was before the block (or nothing, when the block
 created it), plus the family marker before the block. Undoing the block puts
 those images back and returns the marker. A [rebuild range](#rebuild-range)
-journals the same way under its last block, with the images from before the
-range, so it is undone as one step. Rows are kept back to the lowest of
+formed after the rebuild's [composition pass](#composition-pass) journals the
+same way under its last block, with the images from before the range, so it is
+undone as one step. A range before the pass journals nothing, and the pass's
+marker row, marked `families_journalled: false`, ends the journal at its block:
+an undo that would go below it rebuilds instead. Rows are kept back to the lowest of
 256 blocks below the marker, the finalized block, the safe block and an active
 repair's floor ([projections](projections.md#owned-key-families)).
 
@@ -2879,9 +2884,11 @@ are four of them.
 several [work blocks](#work-block) of an owned key family rebuild applied in
 one transaction: the blocks at or below the chain's safe block minus 5 (or 256
 blocks below the target with no safe block). The range folds its blocks one by one exactly as
-single blocks would, then journals, writes and advances the [family
+single blocks would, then writes and advances the [family
 marker](#family-marker) once, to its last block, as one generation
-([projections](projections.md#owned-key-families)). The first range after the
+([projections](projections.md#owned-key-families)). A range before the
+rebuild's [composition pass](#composition-pass) composes and journals nothing.
+One formed after it composes and journals once, under its last block. The first range after the
 rebuild's reset holds one block, and each next range asks for twice the blocks
 the last one applied; a run that resumes the rebuild starts with a range of up
 to its whole remaining budget, 256 blocks by default.
@@ -2891,9 +2898,26 @@ to its whole remaining budget, 256 blocks by default.
 `project_repair_record`: the latest undo-then-replay or rebuild of a chain's
 owned key families, with the Project redo attempt that caused it, its reason,
 the block it trusts, the block it replays to, its state (`undoing`,
-`replaying`, `rebuilding` or `complete`) and, when complete, the marker,
-generation and input content hash it finished with. Each state change commits
-in the same transaction as the reset, undo or block it describes.
+`replaying`, `rebuilding`, `composing` or `complete`), the block a rebuild's
+[composition pass](#composition-pass) composed at (`composed_block`, -1 when
+the rebuild applied no range), the pass's stream and cursor while it is
+`composing`, and, when complete, the marker, generation and input content hash
+it finished with. Each state change commits in the same transaction as the
+reset, undo, block or pass chunk it describes.
+
+## Composition pass
+
+the step of an owned key family rebuild that composes, once, everything its
+[rebuild ranges](#rebuild-range) left uncomposed: the name summaries, lookup
+rows, address indexes and address history catalogue the ranges' blocks would
+each have composed. It runs before the rebuild's first generation above the
+switch point, at the block the last range left the [family
+marker](#family-marker) on, in chunks of up to 1,000 keys, each a transaction
+of its own that counts as one block of the run's budget. The [repair
+record](#repair-record) is `composing` while it runs and records its stream and
+cursor, so a run that stops resumes it. It ends with one marker journal row
+that ends the [undo journal](#family-undo-journal) at its block
+([projections](projections.md#owned-key-families)).
 
 ## Family input token
 

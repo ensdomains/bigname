@@ -8,8 +8,8 @@
 //! (`summary.rs`); those are journalled, so an undo restores them with the other families.
 mod summary;
 pub(crate) use summary::{
-    WORK_LIST as SUMMARY_WORK_LIST, replace_chunk as replace_summary_chunk,
-    retire_null_resolver_divergences,
+    CHUNK as SUMMARY_CHUNK, WORK_LIST as SUMMARY_WORK_LIST, compose as compose_summaries,
+    replace_chunk as replace_summary_chunk, retire_null_resolver_divergences,
 };
 #[cfg(test)]
 mod summary_plan_tests;
@@ -35,6 +35,25 @@ pub(crate) struct Touched {
     nodes: Vec<String>,
     id_resolvers: Vec<String>,
     record_ids: Vec<String>,
+}
+
+impl Touched {
+    /// Index keys a rebuild's composition pass derives from the base rows (driver/compose.rs):
+    /// names, (resolver, node) pairs and (resolver, record id) pairs, with no summary refresh.
+    pub(crate) fn keys(
+        names: Vec<String>,
+        (node_resolvers, nodes): (Vec<String>, Vec<String>),
+        (id_resolvers, record_ids): (Vec<String>, Vec<String>),
+    ) -> Self {
+        Self {
+            names,
+            node_resolvers,
+            nodes,
+            id_resolvers,
+            record_ids,
+            ..Self::default()
+        }
+    }
 }
 
 /// The names, (resolver, node) pairs and (resolver, record id) pairs block `number` touched.

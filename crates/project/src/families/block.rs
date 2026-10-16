@@ -6,6 +6,10 @@
 //! before-images and the prior marker, write, advance the marker with the token and manifest set
 //! it used, prune the journal below the retention floor, complete a repair whose target this
 //! block publishes, and commit.
+//!
+//! A rebuild generation applied before the rebuild's composition pass (driver/compose.rs), which
+//! the repair record says by its unset `composed_block`, writes the family rows only: it composes
+//! nothing and journals nothing, not even the prior marker.
 use std::{collections::BTreeMap, time::Instant};
 
 use serde_json::{Value, json};
@@ -247,6 +251,14 @@ pub(crate) async fn publish(
     } = opened;
     let after = prior.current.as_ref().map_or(-1, |marker| marker.number);
     let composition = marker::Composition::of(chain_id, &manifests)?;
+    let composes = !matches!(plan.role, Role::Rebuild { .. })
+        || record.as_ref().is_some_and(|record| record.composed_block.is_some());
+    if !composes && matches!(plan.role, Role::Rebuild { completes: true, .. }) {
+        return Err(ProjectError::data_integrity(format!(
+            "chain {chain_id}'s rebuild reached its target {} before its composition pass",
+            block.number
+        )));
+    }
     // The first block under an input revision the prior block did not read (a completed
     // Interpret redo attempt, or a reset) checks every stored raw name against its surface: a
     // redo can withdraw a surface's raw bytes in place, below any block it replays.
@@ -258,11 +270,13 @@ pub(crate) async fn publish(
         after,
         rows,
         &composition,
-        raw_name_sweep,
+        (raw_name_sweep, composes),
     )
     .await?;
-    journal_marker(&mut transaction, chain_id, &block, &prior).await?;
-    stats.undo_rows += 1;
+    if composes {
+        journal_marker(&mut transaction, chain_id, &block, &prior).await?;
+        stats.undo_rows += 1;
+    }
     let next = FamilyMarker {
         current: Some(Marker {
             number: block.number,
@@ -276,7 +290,10 @@ pub(crate) async fn publish(
         admission: composition.admission,
         bootstrap: plan.bootstrap,
     };
-    super::history_catalogue::stamp(&mut transaction, chain_id, &block, &next, &mut stats).await?;
+    if composes {
+        super::history_catalogue::stamp(&mut transaction, chain_id, &block, &next, &mut stats)
+            .await?;
+    }
     marker::advance(&mut transaction, chain_id, &next).await?;
     let floor = retention_floor(
         &mut transaction,
@@ -315,7 +332,7 @@ pub(crate) async fn publish(
 
 /// Journal every changed row's pre-block image, then write the changes table by table. `after`
 /// is the block of the family marker the write follows, -1 with none. `composition` is the
-/// manifest set and admission the block publishes.
+/// manifest set and admission the block publishes. Without `composes` the rows are written only.
 async fn write(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -323,10 +340,13 @@ async fn write(
     after: i64,
     rows: &store::RowSet,
     composition: &marker::Composition,
-    raw_name_sweep: bool,
+    (raw_name_sweep, composes): (bool, bool),
 ) -> Result<BlockStats> {
     let changes = rows.written();
     let mut stats = BlockStats::default();
+    if changes.is_empty() && !composes {
+        return Ok(stats);
+    }
     if changes.is_empty() {
         // The name summaries follow the block clock too, which moves with no row changing.
         super::derived::refresh_block(
@@ -340,17 +360,19 @@ async fn write(
         .await?;
         return Ok(stats);
     }
-    let journal = changes
-        .iter()
-        .map(|change| {
-            json!({
-                "family": change.table.name,
-                "key": change.key,
-                "before_image": change.before.cloned().map(Value::Object),
+    if composes {
+        let journal = changes
+            .iter()
+            .map(|change| {
+                json!({
+                    "family": change.table.name,
+                    "key": change.key,
+                    "before_image": change.before.cloned().map(Value::Object),
+                })
             })
-        })
-        .collect::<Vec<_>>();
-    stats.undo_rows += insert_journal(transaction, chain_id, block, journal).await?;
+            .collect::<Vec<_>>();
+        stats.undo_rows += insert_journal(transaction, chain_id, block, journal).await?;
+    }
 
     let mut by_table: BTreeMap<&'static str, (Vec<Value>, Vec<Value>)> = BTreeMap::new();
     for change in &changes {
@@ -370,6 +392,9 @@ async fn write(
     hydration
         .refresh(transaction, chain_id, block.number)
         .await?;
+    if !composes {
+        return Ok(stats);
+    }
     super::derived::refresh_block(
         transaction,
         chain_id,
@@ -391,6 +416,9 @@ pub(crate) async fn insert_journal(
     block: &input::BlockHeader,
     journal: Vec<Value>,
 ) -> Result<u64> {
+    if !block.journal {
+        return Ok(0);
+    }
     Ok(sqlx::query(
         "/* project:families.block.insert_journal */ INSERT INTO project_family_undo (
              chain_id, block_number, block_hash, family, key, before_image

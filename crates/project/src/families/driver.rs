@@ -3,6 +3,7 @@
 //! per transaction, stopping when the run's block budget is spent. The repair record says which
 //! of these is under way, so a run that stops between two blocks is resumed by the next; every
 //! transaction fences on the marker generation and on the repair record it planned from.
+mod compose;
 mod planning;
 mod ranges;
 mod transitions;
@@ -92,7 +93,7 @@ pub(super) async fn run(
         return Ok(());
     }
 
-    let rebuilding = active.filter(|record| record.state == State::Rebuilding);
+    let rebuilding = active.filter(|record| record.state.rebuilds());
     // The same redo rerun after a stop (the runner kept its range, projection hash and saved
     // progress) finds the rebuild the attempt just before it left. A rebuild depends on its input,
     // not on its attempt: carry it over to this attempt and resume it. Another range, a moved
@@ -411,10 +412,12 @@ impl Run<'_> {
                 self.undo_then_replay(attempt, base.number, token, outcome)
                     .await
             }
-            State::Rebuilding | State::Complete => Err(ProjectError::data_integrity(format!(
-                "chain {}'s repair record cannot resume from {:?}",
-                self.chain_id, record.state
-            ))),
+            State::Rebuilding | State::Composing | State::Complete => {
+                Err(ProjectError::data_integrity(format!(
+                    "chain {}'s repair record cannot resume from {:?}",
+                    self.chain_id, record.state
+                )))
+            }
         }
     }
 

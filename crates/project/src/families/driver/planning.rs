@@ -29,7 +29,7 @@ pub(super) fn rebuild_reason(
     options: &FamilyOptions,
 ) -> Option<Reason> {
     let recorded = record.map_or(0, |record| record.attempt);
-    let rebuilding = record.is_some_and(|record| record.state == State::Rebuilding);
+    let rebuilding = record.is_some_and(|record| record.state.rebuilds());
     match mode {
         FamilyMode::Rebuild => Some(Reason::ContentHashRebuild),
         // Required redo unions every pending invalidation. Its generation advances for each
@@ -80,9 +80,7 @@ pub async fn redo_extent(
     // Both a new and a resumed rebuild can need any retained work block. A changed prefix or
     // orphaned rebuild marker restarts population, so its envelope still starts at zero.
     let lower = if rebuild
-        || record
-            .as_ref()
-            .is_some_and(|record| record.state == State::Rebuilding)
+        || record.as_ref().is_some_and(|record| record.state.rebuilds())
     {
         0
     } else {

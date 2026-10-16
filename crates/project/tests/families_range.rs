@@ -86,8 +86,9 @@ async fn marker_state(fixture: &Fixture) -> Result<String> {
     )
 }
 
-// One key written in consecutive blocks of one range keeps the last block's row, and the range
-// journals it once, under the range's last block.
+// One key written in consecutive blocks of one range keeps the last block's row. The ranges
+// come before the rebuild's composition pass and journal nothing: the journal holds the pass's
+// marker row at 13, the last range's block, and the target.
 #[tokio::test]
 async fn a_key_written_in_consecutive_blocks_of_a_range_keeps_the_last_write() -> Result<()> {
     let fixture = Fixture::new("families_range_same_key", 20).await?;
@@ -104,7 +105,7 @@ async fn a_key_written_in_consecutive_blocks_of_a_range_keeps_the_last_write() -
         (5, 3),
         "ranges [10], [11, 12] and [13], then the target on its own"
     );
-    assert_eq!(fixture.journalled_blocks().await?, vec![10, 12, 13, 14]);
+    assert_eq!(fixture.journalled_blocks().await?, vec![13, 14]);
     let undo_rows: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM project_family_undo
          WHERE chain_id = $1 AND block_number = 12 AND family = 'project_resource_pointer'",
@@ -121,8 +122,8 @@ async fn a_key_written_in_consecutive_blocks_of_a_range_keeps_the_last_write() -
     .await?;
     assert_eq!(
         (undo_rows, registry_rows),
-        (0, 1),
-        "name 1's pointer, written at 11 and 12, is journalled once with its pre-range image"
+        (0, 0),
+        "the range [11, 12] journals neither pointer"
     );
     fixture.cleanup().await
 }
@@ -236,8 +237,8 @@ async fn a_binding_and_its_registry_only_epoch_in_one_range_take_the_retained_gr
     let outcome = rebuild_equal(&fixture, 15, &in_ranges(15)).await?;
     assert_eq!(
         fixture.journalled_blocks().await?,
-        vec![6, 8, 13, 14, 15],
-        "blocks 10 to 13 share one range, 14 is the next"
+        vec![14, 15],
+        "the composition pass at 14, the last range's block, then the target"
     );
     assert_eq!(outcome.ranges, 4);
     fixture.cleanup().await
@@ -418,8 +419,8 @@ async fn a_manifest_change_and_an_activation_inside_a_range_classify_at_their_bl
     rebuild_equal(&fixture, 15, &in_ranges(15)).await?;
     assert_eq!(
         fixture.journalled_blocks().await?,
-        vec![1, 3, 14, 15],
-        "blocks 10 to 14 share one range"
+        vec![14, 15],
+        "blocks 10 to 14 share one range, the last, and the pass composes at 14"
     );
     fixture.cleanup().await
 }
@@ -480,8 +481,8 @@ async fn a_resolver_deleted_earlier_in_a_range_stays_deleted_through_a_manifest_
     rebuild_equal(&fixture, 8, &in_ranges(8)).await?;
     assert_eq!(
         fixture.journalled_blocks().await?,
-        vec![1, 3, 7, 8],
-        "ranges [1], [2, 3] and [4 to 7], then the target"
+        vec![7, 8],
+        "ranges [1], [2, 3] and [4 to 7] journal nothing, the pass composes at 7, then the target"
     );
     fixture.assert_rebuild_equal(8).await?;
     fixture.cleanup().await
@@ -542,8 +543,8 @@ async fn a_registrant_refold_reads_the_latest_grant_from_earlier_in_the_range() 
     rebuild_equal(&fixture, 9, &in_ranges(9)).await?;
     assert_eq!(
         fixture.journalled_blocks().await?,
-        vec![2, 4, 8, 9],
-        "ranges [2], [3, 4] and [5 to 8], then the target"
+        vec![8, 9],
+        "ranges [2], [3, 4] and [5 to 8] journal nothing, the pass composes at 8, then the target"
     );
     fixture.assert_rebuild_equal(9).await?;
     fixture.cleanup().await
@@ -592,7 +593,7 @@ async fn an_observation_reaches_the_resource_current_at_its_own_block() -> Resul
         .collect();
     assert_eq!(target, vec![json!(bound_resource)]);
     rebuild_equal(&fixture, 14, &in_ranges(14)).await?;
-    assert_eq!(fixture.journalled_blocks().await?, vec![6, 8, 13, 14]);
+    assert_eq!(fixture.journalled_blocks().await?, vec![13, 14]);
     fixture.cleanup().await
 }
 
@@ -644,7 +645,7 @@ async fn an_unnamed_grant_and_its_wrapper_candidate_in_one_range_name_the_grant(
         .collect();
     assert_eq!(decoded, vec![json!(name(1))]);
     rebuild_equal(&fixture, 14, &in_ranges(14)).await?;
-    assert_eq!(fixture.journalled_blocks().await?, vec![6, 8, 13, 14]);
+    assert_eq!(fixture.journalled_blocks().await?, vec![13, 14]);
     fixture.cleanup().await
 }
 
@@ -678,7 +679,7 @@ async fn an_event_identity_in_two_blocks_of_a_range_is_kept_in_each() -> Result<
     follow(&fixture, 10, 13).await?;
     let outcome = rebuild_equal(&fixture, 13, &in_ranges(13)).await?;
     assert_eq!(outcome.duplicate_anomalies, 0);
-    assert_eq!(fixture.journalled_blocks().await?, vec![10, 12, 13]);
+    assert_eq!(fixture.journalled_blocks().await?, vec![12, 13]);
     let pointer: Vec<Value> = fixture
         .rows("project_registry_pointer")
         .await?
@@ -701,8 +702,8 @@ async fn pointers(fixture: &Fixture, blocks: std::ops::RangeInclusive<i64>) -> R
 }
 
 // A range spends one block of the run's budget per work block it applies and never more than
-// the budget holds; the marker stands on a range's last block, still bootstrap_pending, and the
-// rebuild's journal has one marker row per range.
+// the budget holds; the marker stands on a range's last block, still bootstrap_pending. The
+// ranges come before the composition pass, so they write no journal row and no composed row.
 #[tokio::test]
 async fn a_budgeted_range_rebuild_stops_on_a_range_end_in_bootstrap() -> Result<()> {
     let fixture = Fixture::new("families_range_budget", 40).await?;
@@ -719,7 +720,12 @@ async fn a_budgeted_range_rebuild_stops_on_a_range_end_in_bootstrap() -> Result<
     let (block, _, _) = fixture.marker().await?;
     assert_eq!(block, Some(14));
     assert_eq!(marker_state(&fixture).await?, "bootstrap_pending");
-    assert_eq!(fixture.journalled_blocks().await?, vec![10, 12, 14]);
+    assert_eq!(fixture.journalled_blocks().await?, Vec::<i64>::new());
+    assert_eq!(
+        fixture.composed_rows().await?,
+        0,
+        "no range before the pass composes"
+    );
     fixture.cleanup().await
 }
 
@@ -773,7 +779,7 @@ async fn a_resumed_range_rebuild_starts_with_a_range_of_its_whole_budget() -> Re
         (first.blocks, first.ranges, first.budget_exhausted),
         (8, 4, true)
     );
-    assert_eq!(fixture.journalled_blocks().await?, vec![10, 12, 16, 17]);
+    assert_eq!(fixture.journalled_blocks().await?, Vec::<i64>::new());
     let second = fixture.apply_with(30, FamilyMode::Normal, &options).await?;
     assert_eq!(
         (second.blocks, second.ranges, second.reset),
@@ -785,12 +791,9 @@ async fn a_resumed_range_rebuild_starts_with_a_range_of_its_whole_budget() -> Re
     assert_eq!(
         (third.blocks, third.ranges),
         (5, 1),
-        "[26 to 29], then the target on its own"
+        "[26 to 29], the composition pass at 29, then the target on its own"
     );
-    assert_eq!(
-        fixture.journalled_blocks().await?,
-        vec![10, 12, 16, 17, 25, 29, 30]
-    );
+    assert_eq!(fixture.journalled_blocks().await?, vec![29, 30]);
     assert_eq!(marker_state(&fixture).await?, "live");
     let rebuilt = fixture.exact().await?;
     for ((table, was), (_, now)) in incremental.iter().zip(&rebuilt) {
@@ -812,17 +815,19 @@ async fn a_range_cap_of_zero_counts_as_one_block() -> Result<()> {
     let outcome = rebuild_equal(&fixture, 14, &options).await?;
     assert_eq!((outcome.blocks, outcome.ranges), (5, 4));
     assert_eq!(marker_state(&fixture).await?, "live");
-    assert_eq!(fixture.journalled_blocks().await?, vec![10, 11, 12, 13, 14]);
+    assert_eq!(fixture.journalled_blocks().await?, vec![13, 14]);
     let off = FamilyOptions::new(CONTENT_HASH).with_rebuild_ranges(RebuildRanges::Off);
     let outcome = rebuild_equal(&fixture, 14, &off).await?;
     assert_eq!((outcome.blocks, outcome.ranges), (5, 0));
     fixture.cleanup().await
 }
 
-// Undo to a block inside a range lands on the range's predecessor, since the range journals as
-// one step; replaying from there block by block equals a fresh rebuild.
+// The ranges before the composition pass journal nothing, and the pass's marker row ends the
+// journal at the last range's block: an undo to a block inside the ranges undoes nothing and
+// leaves every row as it was, so the caller rebuilds. The target above the pass block undoes as
+// a single block always did, and replaying it equals a block-by-block rebuild.
 #[tokio::test]
-async fn an_undo_into_a_range_lands_on_its_predecessor_and_replays_to_a_rebuild() -> Result<()> {
+async fn an_undo_into_the_ranges_stops_at_the_composition_pass() -> Result<()> {
     let fixture = Fixture::new("families_range_undo", 40).await?;
     pointers(&fixture, 10..=20).await?;
     fixture
@@ -830,17 +835,23 @@ async fn an_undo_into_a_range_lands_on_its_predecessor_and_replays_to_a_rebuild(
         .await?;
     assert_eq!(
         fixture.journalled_blocks().await?,
-        vec![10, 12, 16, 20, 21],
-        "ranges [10], [11, 12], [13 to 16] and [17 to 20], then 21"
+        vec![20, 21],
+        "ranges [10], [11, 12], [13 to 16] and [17 to 20] journal nothing, the pass composes at \
+         20, then 21"
     );
+    let before = fixture.exact().await?;
     let undone = families::undo_to(&fixture.pool, CHAIN, 14).await?;
-    assert_eq!(
-        undone, 3,
-        "21, the range ending at 20 and the range ending at 16"
-    );
-    assert_eq!(fixture.marker().await?.0, Some(12));
+    assert_eq!(undone, 0, "the walk to 14 crosses the pass block");
+    assert_eq!(fixture.marker().await?.0, Some(21));
+    assert_eq!(fixture.exact().await?, before, "no row moved");
+    let undone = families::undo_to(&fixture.pool, CHAIN, 20).await?;
+    assert_eq!(undone, 1, "21 alone");
+    assert_eq!(fixture.marker().await?.0, Some(20));
+    let undone = families::undo_to(&fixture.pool, CHAIN, 19).await?;
+    assert_eq!(undone, 0, "the pass's marker row restores nothing");
+    assert_eq!(fixture.marker().await?.0, Some(20));
     let replayed = fixture.apply(21, FamilyMode::Normal).await?;
-    assert_eq!(replayed.blocks, 9, "13 to 21, block by block");
+    assert_eq!(replayed.blocks, 1, "21 again");
     let incremental = fixture.exact().await?;
     fixture
         .apply_with(
@@ -865,7 +876,7 @@ async fn ranges_stop_five_blocks_below_the_safe_block() -> Result<()> {
     fixture.heads(40, 25, 20).await?;
     follow(&fixture, 10, 30).await?;
     rebuild_equal(&fixture, 30, &FamilyOptions::new(CONTENT_HASH)).await?;
-    let mut expected = vec![10, 12, 16, 20];
+    let mut expected = vec![20];
     expected.extend(21..=30);
     assert_eq!(fixture.journalled_blocks().await?, expected);
     fixture.cleanup().await
@@ -881,13 +892,13 @@ async fn without_a_safe_block_ranges_stop_256_blocks_below_the_target() -> Resul
     let rebuilt = fixture
         .apply_with(300, FamilyMode::Rebuild, &FamilyOptions::new(CONTENT_HASH))
         .await?;
-    let mut expected = vec![10, 30, 40];
+    let mut expected = vec![40];
     expected.extend((50..=290).step_by(10));
     expected.push(300);
     assert_eq!(
         fixture.journalled_blocks().await?,
         expected,
-        "ranges [10], [20, 30] and [40] at or below 44, then block by block"
+        "ranges [10], [20, 30] and [40] at or below 44, the pass at 40, then block by block"
     );
     assert_eq!(rebuilt.ranges, 3);
     fixture.cleanup().await
@@ -907,8 +918,8 @@ async fn a_range_ends_before_the_block_past_its_event_cap() -> Result<()> {
     assert_eq!(rebuilt.ranges, 11);
     assert_eq!(
         fixture.journalled_blocks().await?,
-        vec![10, 12, 14, 16, 17, 19, 21, 23, 25, 27, 29, 30],
-        "two events a range: [10], then pairs, and block 17's three events alone"
+        vec![29, 30],
+        "the pass at 29, the last range's block, then the target"
     );
     fixture.cleanup().await
 }
