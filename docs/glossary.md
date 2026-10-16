@@ -2650,7 +2650,10 @@ and a manifest change is adopted by a full redo, never while following the
 chain head. Each family publication records on `project_family_marker` the
 manifest set it read and the admission that set declares. Reads take the
 admission from there, not from the current manifests. Between a manifest sync
-and the redo they keep serving the previous publication's admission. The API
+and the redo they keep serving the previous publication's admission. A
+publication whose admission differs from the one the marker before it recorded
+composes every name again
+([reorg and redo](projections.md#reorg-and-redo)). The API
 reference lists the other
 [manifest reads](api-v1.md#manifest-reads-and-the-publication) the set bounds.
 An admitted chain therefore reads as cut over for its whole retained history. On Sepolia that includes the blocks before the managed

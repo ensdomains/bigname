@@ -8,6 +8,7 @@ pub(in crate::families) async fn prepare(
     chain: &str,
     block: &BlockHeader,
     after: i64,
+    admission_sweep: bool,
 ) -> Result<()> {
     let started = bigname_storage::families::records::seams::lookup_work_timer();
     sqlx::query("/* project:families.lookup.create_name_work */ CREATE TEMP TABLE bigname_lookup_name_work (logical_name_id text COLLATE \"C\" PRIMARY KEY) ON COMMIT DROP")
@@ -35,6 +36,22 @@ pub(in crate::families) async fn prepare(
     .execute(&mut **transaction)
     .await
     .map_err(|e| ProjectError::database("failed to capture lookup path and relation work", e))?;
+    if admission_sweep {
+        // Every lookup name, as the summary refresh sweeps them (derived/summary.rs,
+        // `ADMISSION_SWEEP`). Inventories follow the names whose serving resource moves.
+        sqlx::query(
+            "/* project:families.lookup.admission_name_work */
+            INSERT INTO pg_temp.bigname_lookup_name_work
+            SELECT logical_name_id FROM name_surfaces WHERE chain_id=$1 AND block_number<=$2
+            UNION SELECT logical_name_id FROM project_lookup_name WHERE chain_id=$1
+            ON CONFLICT DO NOTHING",
+        )
+        .bind(chain)
+        .bind(block.number)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|e| ProjectError::database("failed to capture lookup admission work", e))?;
+    }
     sqlx::query(include_str!("inventory_work.sql"))
         .bind(chain)
         .bind(block.number)
