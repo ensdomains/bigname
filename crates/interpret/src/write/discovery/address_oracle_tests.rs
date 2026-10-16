@@ -336,6 +336,23 @@ fn shapes() -> Vec<Shape> {
             ]),
         ),
         shape(
+            "invalid JSON on a manifest-declared row that keeps its metadata",
+            &[r#"INSERT INTO contract_instance_addresses (
+                contract_instance_id, chain_id, address, source_manifest_id, provenance
+            ) VALUES ('{one}', '{chain}', '0x00000000000000000000000000000000000000ab', 99,
+                      '{"source":"manifest_declaration","kept":true}')"#],
+            one_write(vec![
+                seen(1, LOWER, 20, 1),
+                seen_with(
+                    1,
+                    LOWER,
+                    20,
+                    2,
+                    json!({"source":"raw_log","bad":"nul\u{0}"}),
+                ),
+            ]),
+        ),
+        shape(
             "an observation carrying manifest provenance freezes later metadata",
             &[ACTIVE_20],
             one_write(vec![

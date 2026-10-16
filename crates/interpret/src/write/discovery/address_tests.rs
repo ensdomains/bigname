@@ -116,11 +116,10 @@ async fn manifest_noops_do_not_rewrite_rows_or_hide_invalid_json() -> TestResult
         let mut invalid = observation(30, 2);
         invalid.provenance = provenance;
         let mut tx = db.pool().begin().await?;
-        assert!(
-            write(&mut tx, &[observation(20, 1), invalid])
-                .await
-                .is_err()
-        );
+        let error = write(&mut tx, &[observation(20, 1), invalid])
+            .await
+            .expect_err("PostgreSQL rejects the provenance as jsonb input");
+        assert_eq!(error.kind(), crate::ErrorKind::Transient);
         tx.rollback().await?;
     }
     db.cleanup().await?;

@@ -274,10 +274,13 @@ submitted to `label_preimages` once. Every observation must carry the same bytes
 normalization verdict, or the write fails as it would row by row. The submitted
 source is the highest-priority observation, and the last one wins a tie, which is
 the row the row-by-row upserts would leave. Discovered addresses are written in
-batch order. A later observation of an address reuses the row the transaction
-already locked or inserted for it instead of reading it again, and an update that
-would change nothing is skipped. An address without an active row is read again on
-each observation. The stored rows are the ones the row-by-row writes produce.
+batch order. A later observation with the same spelling of an address reuses the
+row the transaction already locked or inserted for it instead of reading it again.
+A different spelling of the same address reads and locks the row again. An update
+that would change nothing is skipped when the observation's provenance is flat
+JSON, which every provenance the adapters build is. An address without an active
+row is read again on each observation. The stored rows are the ones the row-by-row
+writes produce.
 
 After changing the source rows, the writer refreshes the affected documents. It first
 writes the affected names once into a temporary table. These are the names it changed

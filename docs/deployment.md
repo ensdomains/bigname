@@ -4641,7 +4641,8 @@ observes `eth`, and a busy contract emits many logs in one batch.
 - `crates/interpret/src/write` is an input of the
   [interpreter content hash](glossary.md#interpreter-content-hash), so the hash rotates for
   every chain, and the [projection content hash](glossary.md#projection-content-hash) moves
-  with it. An existing deployment finishes the full-history Interpret redo and the Project
-  redo it installs before the matching API serves. The change rides the next re-derivation
-  release and shares that release's one Interpret and Project redo pair with its other
-  hash-rotating changes.
+  with it. Every chain needs a full-history Interpret redo, then the Project redo it
+  installs, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+  matching runner and API binaries. The change rides the next re-derivation release and
+  shares that release's one Interpret and Project redo pair with its other hash-rotating
+  changes. Do not mark old rows ready under the new hash.
