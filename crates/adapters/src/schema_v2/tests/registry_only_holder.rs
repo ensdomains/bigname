@@ -1067,8 +1067,12 @@ fn unsurfaced_transfer(block: i64, log_index: i64, from: &str, to: &str) -> RawL
 /// already holds the resource and the release adds no row, and a Graveyard owner is granted
 /// nothing. U5 is a guard, not this route: a Sepolia numeric-only registration names no label,
 /// but the registry write before it already materialized the node's surface, so its release
-/// hands back through the surface path.
-/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f)
+/// hands back through the surface path. U6 are guards too: `registerOnly` skips the registry
+/// write, so its registration has no surface unless a registry write gives it one. With no write
+/// the registry owner is the zero address and there is no one to hand back to. A write in the
+/// same transaction, or before it, materializes the surface, so the release hands back through
+/// the surface path.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L152 @ ens_v1@91c966f)
 #[test]
 fn a_lapsed_lease_on_a_surface_unknown_name_hands_the_resource_back_to_its_registry_owner()
 -> anyhow::Result<()> {
@@ -1147,24 +1151,61 @@ fn a_lapsed_lease_on_a_surface_unknown_name_hands_the_resource_back_to_its_regis
         numeric_registered(2, 2, HOLDER, 10),
         new_resolver(3, 0, leased(), RESOLVER),
     ];
+    let numeric_eth = vec![new_owner_under(B256::ZERO, 1, 0, "eth", CONTRACT)];
+    let numeric_release = vec![new_owner_under(
+        node(&["eth"]),
+        RELEASED,
+        0,
+        "other",
+        AWAY_OWNER,
+    )];
+    let numeric_row = |name, registration, expected| {
+        HolderRow::new(
+            name,
+            numeric_eth.clone(),
+            vec![registration, numeric_release.clone()],
+            registry_only_of(&leased_hex()),
+            expected,
+        )
+    };
+    // `registerOnly` emits the numeric `NameRegistered` with no registry write.
     failures.extend(holder_row_failures(
         &numeric_batch,
-        vec![HolderRow::new(
-            "U5 a release after a Sepolia numeric-only registration, which keeps its surface",
-            vec![new_owner_under(B256::ZERO, 1, 0, "eth", CONTRACT)],
-            vec![
+        vec![
+            numeric_row(
+                "U5 a release after a Sepolia numeric-only registration, which keeps its surface",
                 numeric_registration,
-                vec![new_owner_under(
-                    node(&["eth"]),
-                    RELEASED,
-                    0,
-                    "other",
-                    AWAY_OWNER,
-                )],
-            ],
-            registry_only_of(&leased_hex()),
-            held_by(HOLDER, Some(RESOLVER)),
-        )],
+                held_by(HOLDER, Some(RESOLVER)),
+            ),
+            numeric_row(
+                "U6a a release after a registerOnly registration with no registry write",
+                vec![
+                    lease_transfer(2, 0, ZERO, HOLDER),
+                    numeric_registered(2, 1, HOLDER, 10),
+                ],
+                LiveGrants::new(),
+            ),
+            numeric_row(
+                "U6b a release after a registerOnly registration and a reclaim in its transaction",
+                vec![
+                    lease_transfer(2, 0, ZERO, HOLDER),
+                    numeric_registered(2, 1, HOLDER, 10),
+                    new_owner_under(node(&["eth"]), 2, 2, "leased", HOLDER),
+                    new_resolver(3, 0, leased(), RESOLVER),
+                ],
+                held_by(HOLDER, Some(RESOLVER)),
+            ),
+            numeric_row(
+                "U6c a release after a registerOnly registration on a node already written",
+                vec![
+                    new_owner_under(node(&["eth"]), 2, 0, "leased", HOLDER),
+                    new_resolver(2, 1, leased(), RESOLVER),
+                    lease_transfer(3, 0, ZERO, HOLDER),
+                    numeric_registered(3, 1, HOLDER, 10),
+                ],
+                held_by(HOLDER, Some(RESOLVER)),
+            ),
+        ],
     )?);
     assert_no_failures(failures)
 }
