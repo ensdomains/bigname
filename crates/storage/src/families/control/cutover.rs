@@ -7,7 +7,9 @@
 //! (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/UniversalResolverV2.sol:L55-L63 @ ens_v2_sepolia_20261001@07e55a05)
 //!
 //! The flag has no block. Manifest sync carries no block position and a manifest change is
-//! adopted by a full redo, so an admitted chain reads as cut over at every block. The
+//! adopted by a full redo, so an admitted chain reads as cut over at every block. A family
+//! publication that composes with another admission than the marker before it composes every
+//! name again, so a followed block leaves the rows a rebuild under the same set leaves. The
 //! client-facing Universal Resolver proxy and its `Upgraded` events are not an input. Project
 //! keeps them for monitoring only (`crate::resolution_state`).
 use anyhow::{Context, Result};

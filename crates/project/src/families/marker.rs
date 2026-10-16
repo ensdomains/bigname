@@ -23,8 +23,12 @@ pub(crate) struct Composition {
 }
 
 impl Composition {
-    /// The composition of the captured set `set`: its key, and the admission its active `ens`
-    /// `ens_v2_root_l1` rows declare. No statement reads the current manifests.
+    /// The composition of the captured set `set`: its key, and the admission its `ens`
+    /// `ens_v2_root_l1` rows declare. No statement reads the current manifests. The rows filter
+    /// only by namespace and family: `ActiveSet::rows` holds only the active manifests with a
+    /// payload (`manifests.rs`, `History::at`), so a deprecated or shadow root admits nothing.
+    /// A publication whose admission differs from the prior marker's composes every name again
+    /// (block.rs, `Sweeps::admission`), so that filter decides when every name is composed.
     pub(crate) fn of(chain_id: &str, set: &ActiveSet) -> Result<Self> {
         let payloads: Vec<Value> = set
             .rows
