@@ -1146,6 +1146,41 @@ fn hand_on_row(row: &'static str, numeric: bool, resolver: bool, next: NextWrite
     })
 }
 
+/// Where a Sepolia zero-resolver hand-on's two rows about HOLDER miss the registry-only
+/// resource, in any layout of `row`: the grant at HOLDER's token transfer and the revoke at
+/// TRANSFEREE's registry write must each appear once, both on that resource. The reconcile keeps
+/// the grant, and keeps the revoke as the first pass emitted it.
+fn hand_on_pair_failures(row: &HolderRow) -> anyhow::Result<Vec<String>> {
+    let hand_on = handed_on(true, false);
+    let write = hand_on.last().map_or(0, |raw| raw.log_index);
+    let transfer = write - 1;
+    let mut failures = Vec::new();
+    for (layout, outputs) in every_layout(&numeric_batch, &row.prefix, &row.steps)? {
+        for (log_index, granted, kept) in [(transfer, true, "grant"), (write, false, "revoke")] {
+            let resources = outputs
+                .iter()
+                .flat_map(|output| output.normalized_events.iter())
+                .filter(|event| {
+                    event.event_kind == "PermissionChanged"
+                        && about(event, HOLDER)
+                        && event.after_state["scope"]["kind"] == "resource"
+                        && (event.block_number, event.transaction_index, event.log_index)
+                            == (Some(2), Some(0), Some(log_index))
+                        && is_grant(event) == granted
+                })
+                .map(|event| event.resource_id)
+                .collect::<Vec<_>>();
+            if resources != vec![Some(row.resource)] {
+                failures.push(format!(
+                    "{}, {layout}: the kept {kept} of HOLDER at log {log_index} is on {resources:?}, expected only {:?}",
+                    row.row, row.resource
+                ));
+            }
+        }
+    }
+    Ok(failures)
+}
+
 /// A contract registrant can hand its name on in the registration's own transaction, with
 /// public calls only: `register` checks no caller, the token's owner may transfer it, and the
 /// registry owner may write the record whoever holds the token. The transfer to TRANSFEREE
@@ -1248,6 +1283,12 @@ fn a_registration_handed_on_in_its_transaction_leaves_one_holder() -> anyhow::Re
         if numeric && !resolver && matches!(next, NextBlock) {
             holder_row = holder_row.lookahead();
         }
+        if numeric && !resolver {
+            match hand_on_pair_failures(&holder_row) {
+                Ok(found) => failures.extend(found),
+                Err(error) => failures.push(format!("{row}: {error:#}")),
+            }
+        }
         match holder_row_failures(build, vec![holder_row]) {
             Ok(found) => failures.extend(found),
             Err(error) => failures.push(format!("{row}: {error:#}")),
@@ -1263,11 +1304,16 @@ fn a_registration_handed_on_in_its_transaction_leaves_one_holder() -> anyhow::Re
 #[test]
 fn a_block_replay_after_a_hand_on_keeps_one_holder() -> anyhow::Result<()> {
     let row = "2 Sepolia, zero resolver, next write later in its block";
-    let failures = holder_row_failures(
-        &numeric_batch,
-        vec![hand_on_row(row, true, false, NextWrite::LaterTransaction)],
-    )
-    .unwrap_or_else(|error| vec![format!("{row}: {error:#}")]);
+    let mut failures =
+        hand_on_pair_failures(&hand_on_row(row, true, false, NextWrite::LaterTransaction))
+            .unwrap_or_else(|error| vec![format!("{row}: {error:#}")]);
+    failures.extend(
+        holder_row_failures(
+            &numeric_batch,
+            vec![hand_on_row(row, true, false, NextWrite::LaterTransaction)],
+        )
+        .unwrap_or_else(|error| vec![format!("{row}: {error:#}")]),
+    );
     assert_no_failures(failures)
 }
 
