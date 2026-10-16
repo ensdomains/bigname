@@ -910,3 +910,200 @@ async fn request_time_reads_follow_the_marker_after_the_pass() -> Result<()> {
     );
     Ok(())
 }
+
+/// The reservation the ENSv2 registry adapter writes for a `LabelReserved` log of `label` in the
+/// root's `.eth` registry: a `RegistrationReserved` that carries the name the registry's suffix
+/// gives it and the reservation's own resource
+/// (crates/adapters/src/schema_v2/protocol/v2_registry.rs:311-343, 370-404). `logical_name_id`
+/// is that name, reserved until `expiry`.
+async fn reservation(
+    fixture: &Fixture,
+    block: i64,
+    label: &str,
+    logical_name_id: &str,
+    expiry: u64,
+) -> Result<()> {
+    let eth: String = sqlx::query_scalar(
+        "SELECT after_state ->> 'subregistry' FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'SubregistryChanged'
+           AND source_family = 'ens_v2_root_l1'",
+    )
+    .bind(CHAIN)
+    .fetch_one(&fixture.pool)
+    .await?;
+    let labelhash = alloy_primitives::keccak256(label);
+    let token = format!(
+        "{:#066x}",
+        alloy_primitives::U256::from_be_bytes(*labelhash) >> 32 << 32
+    );
+    let mut instance = [0_u8; 16];
+    instance.copy_from_slice(&alloy_primitives::keccak256(&eth)[..16]);
+    let instance = ::uuid::Uuid::from_bytes(instance).to_string();
+    let resource = ens_v2_path::entry_resource(&eth, label);
+    fixture.resource(&resource).await?;
+    fixture
+        .event(
+            Event::new(
+                &format!("reserved-{label}"),
+                block,
+                600,
+                "RegistrationReserved",
+                "ens_v2_registry_l1",
+            )
+            .name(logical_name_id)
+            .resource(&resource)
+            .after(json!({"source_event": "LabelReserved", "expiry": expiry,
+                "sender": ens_v2_path::OWNER, "label": label,
+                "labelhash": format!("{labelhash:#x}"), "token_id": token,
+                "status": "reserved", "resource_pending": false,
+                "registry_contract_instance_id": instance, "upstream_resource": token,
+                "resource_id": resource, "reservation_resource": true}))
+            .raw(json!({"emitting_address": eth})),
+        )
+        .await?;
+    Ok(())
+}
+
+/// What the stored lookup row of `logical_name_id` serves (`project_lookup_name`, the body of
+/// `POST /v1/lookup`): expiry, grace end, owner, resolver and the two resolution reasons.
+async fn served(fixture: &Fixture, logical_name_id: &str) -> Result<Value> {
+    let summary: Option<Value> = sqlx::query_scalar(
+        "SELECT core -> 'declared_summary' FROM project_lookup_name
+         WHERE chain_id = $1 AND logical_name_id = $2",
+    )
+    .bind(CHAIN)
+    .bind(logical_name_id)
+    .fetch_optional(&fixture.pool)
+    .await?
+    .flatten();
+    let summary = summary.unwrap_or(Value::Null);
+    Ok(json!({
+        "expiry": summary["registration"]["expiry"],
+        "grace_ends_at": summary["registration"]["grace_ends_at"],
+        "owner": summary["control"]["owner"],
+        "resolver": summary["resolver"]["address"],
+        "unresolvable_reason": summary["unresolvable_reason"],
+        "resolution_unsupported_reason": summary["resolution_unsupported_reason"],
+    }))
+}
+
+/// The reservation's expiry, before the lease's (`FAR`), so the two schedules differ.
+const RESERVED_UNTIL: u64 = 1_850_000_000;
+
+/// `alice.eth`, an ENSv1 lease with no resolver that the root's `.eth` registry reserves, and
+/// `pay.alice.eth`, an ENSv1 subname with no resolver under it. Neither points at a resolver, so
+/// no classification reaches them. Returns their ids once the chain has followed to block 12
+/// under root A, with the reservation shown live. On a cut-over chain alice serves the
+/// reservation's expiry with no ENSv1 grace
+/// (crates/storage/src/families/control/lifecycle/expiry.rs:69-94, `choose`), and the walk from
+/// A reads her entry, which names no resolver.
+async fn reserved_names(fixture: &Fixture) -> Result<(String, String)> {
+    ens_v2_path::history(fixture).await?;
+    let alice = quiet(fixture, "alice.eth", 8, 1).await?;
+    reservation(fixture, 4, "alice", &alice, RESERVED_UNTIL).await?;
+    let pay = unresolved_subname(fixture, "pay.alice.eth", 9, 2).await?;
+    follow(fixture, 0, 12).await?;
+    let live = json!({"expiry": RESERVED_UNTIL.to_string(),
+        "grace_ends_at": RESERVED_UNTIL.to_string(), "owner": ens_v2_path::OWNER,
+        "resolver": null, "unresolvable_reason": null, "resolution_unsupported_reason": null});
+    let alice_served = served(fixture, &alice).await?;
+    ensure!(
+        alice_served == live,
+        "under root A alice.eth does not serve its live reservation: {alice_served}"
+    );
+    let pay_served = served(fixture, &pay).await?;
+    ensure!(
+        pay_served["unresolvable_reason"] == json!("ens_v2_path_no_resolver"),
+        "under root A the walk for pay.alice.eth does not end at alice's entry: {pay_served}"
+    );
+    Ok((alice, pay))
+}
+
+// Row 18, the served-observable row. Under root A, `alice.eth` has a live reservation in the
+// `.eth` registry and the walk for `pay.alice.eth` ends at it with no resolver. Manifest sync
+// replaces A with a root that holds no entries, and block 13 names neither name. The live entry
+// is chosen whatever the root is, since composition reads only whether the chain is cut over
+// (crates/storage/src/families/control/lifecycle/load.rs:321-322, 481), so alice serves the same
+// fields. The walk starts at the new root (crates/storage/src/families/name/batch.rs:363-371),
+// which this chain does not project: `pay.alice.eth` now serves `ens_v2_path_not_projected`.
+#[tokio::test]
+async fn a_replaced_root_moves_what_a_name_under_a_live_entry_serves() -> Result<()> {
+    let fixture = Fixture::new("families_admission_reread_served", 14).await?;
+    let (alice, pay) = reserved_names(&fixture).await?;
+    let alice_before = served(&fixture, &alice).await?;
+    let (old, contracts) = path_root_manifest(&fixture).await?;
+    sync(
+        &fixture,
+        Some(old),
+        "ens_v2_root_l1",
+        "deprecated",
+        contracts,
+    )
+    .await?;
+    sync(
+        &fixture,
+        None,
+        "ens_v2_root_l1",
+        "active",
+        root(REPLACEMENT_ROOT),
+    )
+    .await?;
+    follow(&fixture, 13, 13).await?;
+    let mut stale = Vec::new();
+    let alice_after = served(&fixture, &alice).await?;
+    if alice_after != alice_before {
+        stale.push(format!("alice.eth: {alice_before} became {alice_after}"));
+    }
+    let pay_after = served(&fixture, &pay).await?;
+    if pay_after["unresolvable_reason"] != Value::Null
+        || pay_after["resolution_unsupported_reason"] != json!("ens_v2_path_not_projected")
+    {
+        stale.push(format!("pay.alice.eth: {pay_after}"));
+    }
+    let rebuilt = assert_pass_equals_rebuild(&fixture, 13).await;
+    fixture.cleanup().await?;
+    verdict(
+        stale,
+        "after the replacement, the lookup rows serve the old root",
+        rebuilt,
+    )
+}
+
+// Row 18, the withdrawal half. The same names, and manifest sync deprecates A with no
+// replacement. The chain is no longer cut over, so alice serves her ENSv1 lease: its expiry and
+// the ENSv1 grace after it. `pay.alice.eth` is walked no more.
+#[tokio::test]
+async fn a_withdrawn_root_moves_a_live_entry_name_back_to_its_lease() -> Result<()> {
+    let fixture = Fixture::new("families_admission_reread_served_withdraw", 14).await?;
+    let (alice, pay) = reserved_names(&fixture).await?;
+    let (old, contracts) = path_root_manifest(&fixture).await?;
+    sync(
+        &fixture,
+        Some(old),
+        "ens_v2_root_l1",
+        "deprecated",
+        contracts,
+    )
+    .await?;
+    follow(&fixture, 13, 13).await?;
+    let mut stale = Vec::new();
+    let alice_after = served(&fixture, &alice).await?;
+    if alice_after["expiry"] != json!(FAR.to_string())
+        || alice_after["grace_ends_at"] == json!(FAR.to_string())
+    {
+        stale.push(format!("alice.eth: {alice_after}"));
+    }
+    let pay_after = served(&fixture, &pay).await?;
+    if pay_after["unresolvable_reason"] != Value::Null
+        || pay_after["resolution_unsupported_reason"] != Value::Null
+    {
+        stale.push(format!("pay.alice.eth: {pay_after}"));
+    }
+    let rebuilt = assert_pass_equals_rebuild(&fixture, 13).await;
+    fixture.cleanup().await?;
+    verdict(
+        stale,
+        "after the withdrawal, the lookup rows serve the old root",
+        rebuilt,
+    )
+}
