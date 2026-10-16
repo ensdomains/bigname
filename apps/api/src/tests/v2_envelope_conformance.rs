@@ -603,6 +603,40 @@ fn v2_permission_additive_vocabulary_census_rejects_unknown_relation_and_malform
     assert!(assert_permission_additive_vocabulary(&malformed).is_err());
 }
 
+/// The two operator forms of docs/api-v1.md `grant_relation`: the account-scope registry
+/// operator row, and the per-name NameWrapper operator rows at the scope of the holder row they
+/// expand. With `include=lineage` a NameWrapper row names its `ApprovalForAll` relation.
+#[test]
+fn v2_permission_additive_vocabulary_admits_both_operator_forms_and_nothing_else() {
+    let account = json!({"grant_relation":"operator","grant_scope":{"kind":"account","detail":{
+        "chain_id":1,"authority_kind":"registry","authority_contract":"0xregistry","owner":"0xowner"
+    }},"powers":["registry_control"]});
+    let registration = json!({"grant_relation":"operator",
+        "grant_scope":{"kind":"registration","detail":{}},"powers":["registration_control","set_ttl"],
+        "lineage":{"grant":{"kind":"ens_v1_authority","relation":"operator"}}});
+    let resolver = json!({"grant_relation":"operator","grant_scope":{"kind":"resolver","detail":{
+        "resolver":{"chain_id":1,"address":"0xresolver"}}},"powers":["resolver_control"]});
+    for valid in [&account, &registration, &resolver] {
+        assert_eq!(assert_permission_additive_vocabulary(valid), Ok(()), "{valid}");
+    }
+    let with = |row: &Value, pointer: &str, value: Value| {
+        let mut row = row.clone();
+        *row.pointer_mut(pointer).expect("fixture field") = value;
+        row
+    };
+    for invalid in [
+        with(&registration, "/lineage/grant/relation", json!("holder")),
+        with(&registration, "/lineage/grant/relation", json!("token_approval")),
+        with(&registration, "/lineage/grant/kind", json!("event")),
+        with(&registration, "/powers", json!([])),
+        with(&resolver, "/powers", json!(["set_resolver"])),
+        with(&registration, "/grant_scope/kind", json!("root")),
+        with(&account, "/powers", json!(["registration_control"])),
+    ] {
+        assert!(assert_permission_additive_vocabulary(&invalid).is_err(), "{invalid}");
+    }
+}
+
 fn assert_permission_additive_vocabulary(value: &Value) -> std::result::Result<(), String> {
     match value {
         Value::Object(object) => {
@@ -611,17 +645,34 @@ fn assert_permission_additive_vocabulary(value: &Value) -> std::result::Result<(
                     return Err(format!("unknown grant_relation {relation}"));
                 }
                 let scope = object.get("grant_scope").ok_or("missing grant_scope")?;
-                if scope["kind"] != "account" {
-                    return Err("operator must use account scope".to_owned());
-                }
-                let detail = scope["detail"].as_object().ok_or("account detail must be object")?;
-                for key in ["chain_id", "authority_kind", "authority_contract", "owner"] {
-                    if !detail.contains_key(key) {
-                        return Err(format!("account detail missing {key}"));
+                match scope["kind"].as_str() {
+                    Some("account") => {
+                        let detail = scope["detail"].as_object().ok_or("account detail must be object")?;
+                        for key in ["chain_id", "authority_kind", "authority_contract", "owner"] {
+                            if !detail.contains_key(key) {
+                                return Err(format!("account detail missing {key}"));
+                            }
+                        }
+                        if detail.len() != 4 || object.get("powers") != Some(&json!(["registry_control"])) {
+                            return Err("operator scope or powers are outside the additive vocabulary".to_owned());
+                        }
                     }
-                }
-                if detail.len() != 4 || object.get("powers") != Some(&json!(["registry_control"])) {
-                    return Err("operator scope or powers are outside the additive vocabulary".to_owned());
+                    // A NameWrapper operator's copy of a holder row. The served row carries no
+                    // grant source, so its `ApprovalForAll` relation shows only in lineage.
+                    Some(kind @ ("registration" | "resolver")) => {
+                        let powers = object.get("powers").and_then(Value::as_array);
+                        if powers.is_none_or(|powers| powers.is_empty())
+                            || (kind == "resolver" && object.get("powers") != Some(&json!(["resolver_control"])))
+                        {
+                            return Err(format!("operator powers are outside the {kind} holder row"));
+                        }
+                        if let Some(grant) = object.get("lineage").and_then(|lineage| lineage.get("grant"))
+                            && grant != &json!({"kind":"ens_v1_authority","relation":"operator"})
+                        {
+                            return Err(format!("operator lineage grant {grant} is not an ApprovalForAll"));
+                        }
+                    }
+                    _ => return Err("operator must use account, registration or resolver scope".to_owned()),
                 }
             }
             for child in object.values() {

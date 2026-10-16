@@ -22,7 +22,7 @@ use crate::{
         api_error_to_v2_for_resource, default_requested_records,
         name_records::{
             NameRecords, ensure_default_record_limit, indexed_record_answer,
-            records_include_inventory,
+            inventory_only_request, records_include_inventory,
         },
         name_records_inventory::{fill_records_route_abi_content_types, inventory_summary},
         parse_record_keys, resolve_v2_snapshot_for, snapshot_meta,
@@ -78,12 +78,8 @@ pub(crate) async fn get_resolver_records(
     if params.source != RequestSource::Indexed {
         return Err(V2Error::invalid_input("source must be indexed"));
     }
-    let inventory_only = params.values == Some(false);
-    if inventory_only && params.keys.is_some() {
-        return Err(V2Error::invalid_input(
-            "keys must be omitted when values=false",
-        ));
-    }
+    let inventory_only =
+        inventory_only_request(params.values, params.source, params.keys.as_deref())?;
     let explicit_records = parse_record_keys(params.keys.as_deref())?;
     let include_inventory = records_include_inventory(&params.include)? || inventory_only;
     // The inventory container describes the whole row, so only a keyed read without it is

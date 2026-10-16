@@ -14,6 +14,8 @@
         "tags": [
           "addresses"
         ],
+        "x-fern-sdk-group-name": "addresses",
+        "x-fern-sdk-method-name": "addresses_address_history",
         "description": "See [GET /v1/addresses/{address}/history](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1addressesaddresshistory).",
         "parameters": [
           {
@@ -401,6 +403,8 @@
         "tags": [
           "addresses"
         ],
+        "x-fern-sdk-group-name": "addresses",
+        "x-fern-sdk-method-name": "addresses_address_names",
         "description": "See [GET /v1/addresses/{address}/names](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1addressesaddressnames).",
         "parameters": [
           {
@@ -741,7 +745,7 @@
             }
           },
           "422": {
-            "description": "`unsupported`: A requested expansion exceeds its bounded permission budget, or a coin_type=evm row would carry more than 100 matches.",
+            "description": "`unsupported`: include=role_summary exceeds its 1,000 grant-row budget: omit the include and page GET /v1/permissions?registration_id= for each row's permission_resource_id. Or a coin_type=evm row would carry more than 100 matches: read one decimal coin_type at a time.",
             "content": {
               "application/json": {
                 "schema": {
@@ -836,6 +840,8 @@
         "tags": [
           "addresses"
         ],
+        "x-fern-sdk-group-name": "addresses",
+        "x-fern-sdk-method-name": "addresses_address_primary_name",
         "description": "See [GET /v1/addresses/{address}/primary-name](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1addressesaddressprimary-name).",
         "parameters": [
           {
@@ -1128,6 +1134,8 @@
         "tags": [
           "events"
         ],
+        "x-fern-sdk-group-name": "events",
+        "x-fern-sdk-method-name": "events",
         "description": "See [GET /v1/events](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1events).",
         "parameters": [
           {
@@ -1538,6 +1546,8 @@
         "tags": [
           "names"
         ],
+        "x-fern-sdk-group-name": "names",
+        "x-fern-sdk-method-name": "names",
         "description": "See [GET /v1/names](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1names).",
         "parameters": [
           {
@@ -1901,6 +1911,8 @@
         "tags": [
           "names"
         ],
+        "x-fern-sdk-group-name": "names",
+        "x-fern-sdk-method-name": "names_name",
         "description": "See [GET /v1/names/{name}](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1namesname).",
         "parameters": [
           {
@@ -2249,6 +2261,8 @@
         "tags": [
           "names"
         ],
+        "x-fern-sdk-group-name": "names",
+        "x-fern-sdk-method-name": "names_name_history",
         "description": "See [GET /v1/names/{name}/history](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1namesnamehistory).",
         "parameters": [
           {
@@ -2616,6 +2630,8 @@
         "tags": [
           "names"
         ],
+        "x-fern-sdk-group-name": "names",
+        "x-fern-sdk-method-name": "names_name_records",
         "description": "See [GET /v1/names/{name}/records](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1namesnamerecords).",
         "parameters": [
           {
@@ -2659,7 +2675,7 @@
             "name": "source",
             "in": "query",
             "required": false,
-            "description": "Answer origin.",
+            "description": "Answer origin. values=false accepts indexed or auto and reads the indexed inventory.",
             "schema": {
               "type": "string",
               "enum": [
@@ -2674,7 +2690,7 @@
             "name": "keys",
             "in": "query",
             "required": false,
-            "description": "Comma-separated record selectors: addr:<decimal>, text:<key>, contenthash or avatar; omitted/blank uses the inventory-derived default keys. At most 200 keys.",
+            "description": "Comma-separated record selectors: addr:<decimal>, text:<key>, contenthash or avatar; omitted/blank uses the inventory-derived default keys when values is true; keys must be omitted or blank when values is false. At most 200 value keys.",
             "schema": {
               "type": "array",
               "items": {
@@ -2685,6 +2701,16 @@
             },
             "style": "form",
             "explode": false
+          },
+          {
+            "name": "values",
+            "in": "query",
+            "required": false,
+            "description": "False returns the name's inventory and records: {}, without per-key answers or the 200-value-key limit. Omitted, true or blank preserves value answers. source=verified and nonblank keys conflict with false before key parsing.",
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
           },
           {
             "name": "include",
@@ -2861,7 +2887,7 @@
             }
           },
           "422": {
-            "description": "`unsupported`: The inventory-derived default record-key set exceeds the 200-key limit.",
+            "description": "`unsupported`: In value mode, the inventory-derived default record-key set exceeds the 200-key limit. values=false returns the whole inventory without that limit.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2985,6 +3011,8 @@
         "tags": [
           "names"
         ],
+        "x-fern-sdk-group-name": "names",
+        "x-fern-sdk-method-name": "names_name_subnames",
         "description": "See [GET /v1/names/{name}/subnames](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1namesnamesubnames).",
         "parameters": [
           {
@@ -3314,6 +3342,8 @@
         "tags": [
           "namespaces"
         ],
+        "x-fern-sdk-group-name": "namespaces",
+        "x-fern-sdk-method-name": "namespaces_namespace",
         "description": "See [GET /v1/namespaces/{namespace}](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1namespacesnamespace).",
         "parameters": [
           {
@@ -3491,6 +3521,8 @@
         "tags": [
           "permissions"
         ],
+        "x-fern-sdk-group-name": "permissions",
+        "x-fern-sdk-method-name": "permissions",
         "description": "See [GET /v1/permissions](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1permissions).",
         "parameters": [
           {
@@ -3793,6 +3825,8 @@
         "tags": [
           "registries"
         ],
+        "x-fern-sdk-group-name": "registries",
+        "x-fern-sdk-method-name": "registries_chain_id_address",
         "description": "See [GET /v1/registries/{chain_id}/{address}](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1registrieschain_idaddress).",
         "parameters": [
           {
@@ -4066,6 +4100,8 @@
         "tags": [
           "registries"
         ],
+        "x-fern-sdk-group-name": "registries",
+        "x-fern-sdk-method-name": "registries_chain_id_address_labels",
         "description": "See [GET /v1/registries/{chain_id}/{address}/labels](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1registrieschain_idaddresslabels).",
         "parameters": [
           {
@@ -4359,6 +4395,8 @@
         "tags": [
           "resolvers"
         ],
+        "x-fern-sdk-group-name": "resolvers",
+        "x-fern-sdk-method-name": "resolvers_chain_id_address",
         "description": "See [GET /v1/resolvers/{chain_id}/{address}](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1resolverschain_idaddress).",
         "parameters": [
           {
@@ -4660,6 +4698,8 @@
         "tags": [
           "resolvers"
         ],
+        "x-fern-sdk-group-name": "resolvers",
+        "x-fern-sdk-method-name": "resolvers_chain_id_address_links",
         "description": "See [GET /v1/resolvers/{chain_id}/{address}/links](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1resolverschain_idaddresslinks-and-roles).",
         "parameters": [
           {
@@ -4916,6 +4956,8 @@
         "tags": [
           "resolvers"
         ],
+        "x-fern-sdk-group-name": "resolvers",
+        "x-fern-sdk-method-name": "resolvers_chain_id_address_records",
         "description": "See [GET /v1/resolvers/{chain_id}/{address}/records](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1resolverschain_idaddressrecords).",
         "parameters": [
           {
@@ -5006,7 +5048,7 @@
             "name": "values",
             "in": "query",
             "required": false,
-            "description": "False returns the full inventory and records: {}, without per-key answers or the 200-value-key limit. Omitted, true or blank preserves value answers. Nonblank keys conflict with false before key parsing. Only this route accepts the flag.",
+            "description": "False returns the full inventory and records: {}, without per-key answers or the 200-value-key limit. Omitted, true or blank preserves value answers. Nonblank keys conflict with false before key parsing. The name records route accepts the same flag.",
             "schema": {
               "type": "boolean",
               "default": true
@@ -5187,7 +5229,7 @@
             }
           },
           "422": {
-            "description": "`unsupported`: In value mode, the inventory-derived default record-key set exceeds the 200-key limit.",
+            "description": "`unsupported`: In value mode, the inventory-derived default record-key set exceeds the 200-key limit. values=false returns the full inventory without that limit.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5282,6 +5324,8 @@
         "tags": [
           "resolvers"
         ],
+        "x-fern-sdk-group-name": "resolvers",
+        "x-fern-sdk-method-name": "resolvers_chain_id_address_roles",
         "description": "See [GET /v1/resolvers/{chain_id}/{address}/roles](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1resolverschain_idaddresslinks-and-roles).",
         "parameters": [
           {
@@ -5538,6 +5582,8 @@
         "tags": [
           "search"
         ],
+        "x-fern-sdk-group-name": "search",
+        "x-fern-sdk-method-name": "search",
         "description": "See [GET /v1/search](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1search).",
         "parameters": [
           {
@@ -5807,6 +5853,8 @@
         "tags": [
           "status"
         ],
+        "x-fern-sdk-group-name": "status",
+        "x-fern-sdk-method-name": "status",
         "description": "See [GET /v1/status](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1status).",
         "parameters": [],
         "responses": {
@@ -5945,6 +5993,8 @@
         "tags": [
           "lookup"
         ],
+        "x-fern-sdk-group-name": "lookup",
+        "x-fern-sdk-method-name": "lookup",
         "description": "See [POST /v1/lookup](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#post-v1lookup).",
         "parameters": [],
         "responses": {
@@ -6142,6 +6192,7 @@
           "registration_control",
           "resolver_control",
           "registry_control",
+          "wrapper_control",
           "set_resolver",
           "set_ttl",
           "create_subnames",
@@ -6200,6 +6251,7 @@
           "registration_control": "ENSv1/Basenames control Storage `resource_control`. Held by the account that controls the registration's authority object: the registrar token owner (`RegistrationGranted`, registrar `Transfer`), the registry owner of a registry-only resource (`NewOwner`/`Transfer`), or the NameWrapper token holder (`TokenControlTransferred`). Masked away while the wrapper is `locked`.",
           "resolver_control": "ENSv1/Basenames control Held by the same account, scoped to the registration's current nonzero resolver (`grant_scope.kind = resolver`); revoked and re-granted on `ResolverChanged` and `RegistrationGranted`. Masked by `CANNOT_SET_RESOLVER` (8).",
           "registry_control": "ENSv1/Basenames registry operator Held by an operator the registry owner approved through registry `ApprovalForAll`, on rows with `grant_relation = operator` and `grant_scope.kind = account`; applies only while the approving account owns the registration in that registry and the approval stands.",
+          "wrapper_control": "ENSv1 NameWrapper operator Carried by a NameWrapper `ApprovalForAll` event row (`operator_approval_changed`, `grant_scope.kind = account`, `authority_kind = wrapper`) while the approval stands. Permission rows never carry it: an approved operator holds the holder's masked powers on each name the approving account holds in that NameWrapper.",
           "set_resolver": "ENSv2 registry; wrapper mask Registry `ROLE_SET_RESOLVER` (bit 24). On a wrapped ENSv1 name the mask removes it under `CANNOT_SET_RESOLVER` (8).",
           "set_ttl": "wrapper mask Removed under `CANNOT_SET_TTL` (16).",
           "create_subnames": "wrapper mask Removed under `CANNOT_CREATE_SUBDOMAIN` (32).",
@@ -7906,7 +7958,7 @@
         "properties": {
           "grant_relation": {
             "$ref": "#/components/schemas/GrantRelation",
-            "description": "`operator` for an effective account approval or `holder` for a derived WrapperRegistry parent owner; direct grants omit it."
+            "description": "`operator` marks a grant that exists through an `ApprovalForAll`: the account-scope row for a registry operator, and the per-name effective rows for a NameWrapper operator. `holder` marks a derived WrapperRegistry parent owner. Direct grants omit it."
           },
           "grant_scope": {
             "$ref": "#/components/schemas/GrantScope",
@@ -7953,11 +8005,11 @@
             "additionalProperties": {
               "$ref": "#/components/schemas/RecordAnswer"
             },
-            "description": "Per-key resolver answers; empty with values=false on the resolver-anchored records route."
+            "description": "Per-key resolver answers; empty with values=false on either records route."
           },
           "inventory": {
             "$ref": "#/components/schemas/RecordInventory",
-            "description": "Record inventory requested with `include=inventory`, or implied by `values=false` on the resolver-anchored records route."
+            "description": "Record inventory requested with `include=inventory`, or implied by `values=false` on either records route."
           }
         },
         "additionalProperties": false,
@@ -8515,7 +8567,7 @@
         "properties": {
           "grant_relation": {
             "$ref": "#/components/schemas/GrantRelation",
-            "description": "`operator` for an effective account approval or `holder` for a derived WrapperRegistry parent owner; direct grants omit it."
+            "description": "`operator` marks a grant that exists through an `ApprovalForAll`: the account-scope row for a registry operator, and the per-name effective rows for a NameWrapper operator. `holder` marks a derived WrapperRegistry parent owner. Direct grants omit it."
           },
           "grant_scope": {
             "$ref": "#/components/schemas/GrantScope",

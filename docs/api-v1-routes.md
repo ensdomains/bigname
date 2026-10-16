@@ -18,7 +18,7 @@ prefix in #315, and the public edge serves it.
 versioned product routes. The landing page and the API reference are a
 separate static site ([`site/`](../site/README.md)) outside the API binary;
 both describe this contract and neither is part of it. The API answers `GET /`
-and `GET /docs` like any unknown route. `GET /openapi.json` serves the generated OpenAPI 3.1 reference for the 19
+and `GET /docs` like any unknown route. `GET /openapi.json` serves the generated OpenAPI 3.1 reference for the 20
 product operations below. It is a static contract artifact, outside the product envelope, and excludes
 the six diagnostic operations.
 
@@ -1183,8 +1183,9 @@ its value map:
 | `namespace` | query | string | no | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
 | `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
-| `source` | query | enum `indexed`, `verified`, `auto` | no | `indexed` | Answer origin. |
-| `keys` | query | array [0, 200] of string | no | none | Comma-separated record selectors: addr:<decimal>, text:<key>, contenthash or avatar; omitted/blank uses the inventory-derived default keys. At most 200 keys. |
+| `source` | query | enum `indexed`, `verified`, `auto` | no | `indexed` | Answer origin. values=false accepts indexed or auto and reads the indexed inventory. |
+| `keys` | query | array [0, 200] of string | no | none | Comma-separated record selectors: addr:<decimal>, text:<key>, contenthash or avatar; omitted/blank uses the inventory-derived default keys when values is true; keys must be omitted or blank when values is false. At most 200 value keys. |
+| `values` | query | boolean | no | `true` | False returns the name's inventory and records: {}, without per-key answers or the 200-value-key limit. Omitted, true or blank preserves value answers. source=verified and nonblank keys conflict with false before key parsing. |
 | `include` | query | array of enum `inventory` | no | none | Comma-separated expansion names; unlisted values are invalid. |
 | `If-None-Match` | header | string | no | none | ETag validator from an earlier response, a comma-separated validator list, or *; evaluated only for a cacheable indexed read. |
 
@@ -1198,7 +1199,7 @@ its value map:
 | 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
 | 409 | object ErrorEnvelope | `conflict` | none | The explicit snapshot selector cannot form a canonical snapshot or, for lookup, its selected positions cannot be combined. |
 | 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
-| 422 | object ErrorEnvelope | `unsupported` | none | The inventory-derived default record-key set exceeds the 200-key limit. |
+| 422 | object ErrorEnvelope | `unsupported` | none | In value mode, the inventory-derived default record-key set exceeds the 200-key limit. values=false returns the whole inventory without that limit. |
 | 429 | object ErrorEnvelope | `rate_limited` | none | The enabled verified-execution client rate limit rejected this request. |
 | 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
 | 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
@@ -1216,10 +1217,38 @@ its value map:
   reports what a given resolver holds for the name's node, without a
   resolution claim.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`,
-  `source=indexed|verified|auto`, `keys`, `include=inventory`.
+  `source=indexed|verified|auto`, `keys`, `values`, `include=inventory`.
+- Inventory only: `values=false` returns `records: {}` and the name's
+  record inventory, the container `include=inventory` returns, including when
+  it holds more than 200 product keys. It reads a name's inventory without
+  first finding its resolver address, and it carries the meaning `values=false`
+  has on [`GET /v1/resolvers/{chain_id}/{address}/records`](#get-v1resolverschain_idaddressrecords),
+  for the name's served resolver.
+  - It implies inventory, so a redundant `include=inventory` is accepted. The
+    container gains no requested keys.
+  - `source=indexed` and `source=auto` both read the indexed inventory and
+    report `meta.source=indexed`. `source=verified` returns `400
+    invalid_input` with `source must be indexed or auto when values=false`.
+    A `values=false&source=auto` response carries neither caching header, as
+    for every `source=auto` read
+    ([caching headers](#caching-headers-on-indexed-single-resource-reads)).
+  - Omitted, empty or whitespace `keys` is accepted. After the source check,
+    any nonblank `keys` returns `400 invalid_input` with `keys must be omitted
+    when values=false`, before key parsing, even for a malformed or oversized
+    key list. Invalid `include` remains an error.
+  - Boolean spelling, duplicate `values` fields, and omitted, `true`, empty or
+    whitespace `values` follow the resolver records route.
+  - The `inventory` field is present exactly when `include=inventory` would
+    return it, under the rules below. A name with no current registration,
+    such as a released name, has none. An unsupported inventory row lists its
+    keys under `unsupported_keys`. A declared ENSv1 mirror resolver serves
+    what its registry walk selects. A name bigname does not hold returns `404
+    not_found`.
+
+  For example: `GET /v1/names/alice.eth/records?values=false`.
 - Response shape: `data` returns `namespace`, `resolver`, and route-local
-  `records`, plus `inventory` with `include=inventory`. `records` is the only
-  value shape on this route and is always present in a successful response:
+  `records`, plus `inventory` with `include=inventory` or `values=false`.
+  `records` is the only value shape on this route and is always present in a successful response:
   an object keyed by record key whose values are
   `{status, value?, unsupported_reason?, failure_reason?, meta?}`. It is not
   the [grouped records](#grouped-name-profile-records) object of
@@ -1548,8 +1577,8 @@ its value map:
   than 200 keys, every source (`indexed`, `verified`, and `auto`) returns
   `422 unsupported` before any lookup or provider call; a set of exactly 200
   keys is served. The route never truncates the set; callers can supply `keys`
-  to select a smaller one. For the verified flat
-  name-profile, the limit applies to inventory-derived selectors before the
+  to select a smaller one, or read the whole inventory with `values=false`.
+  For the verified flat name-profile, the limit applies to inventory-derived selectors before the
   route adds its synthetic primary-address request. A 200-selector inventory
   may therefore produce 201 provider keys when `addr:60` was absent; an
   inventory with more than 200 selectors still returns `422 unsupported`.
@@ -2270,7 +2299,7 @@ There is no action query parameter; the existing type, kind and record-key filte
 | Retained row | Type / action and additional fields |
 | --- | --- |
 | Explicit wrap / unwrap authority epoch | `authority` / `name_wrapped` or `name_unwrapped`: owner, node, retained fuses and expiry. Literal zero owner is preserved. A validated later completion may supply these wrap fields at the actual mint position. The derived wrap transfer row is selected only for two different proven nonzero owners; actual token transfers remain independent rows. |
-| Account-wide operator approval | `permission` / `operator_approval_changed`: owner, operator as address, approved, account grant_scope and retained powers. No token-specific powers are inferred. |
+| Account-wide operator approval | `permission` / `operator_approval_changed`: owner, operator as address, approved, account grant_scope and retained powers (`registry_control` for an ENSv1 or Basenames registry, `wrapper_control` for the NameWrapper, and no power for an ENSv2 registry, whose operator acts with the token owner's roles on each token (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)). No token-specific powers are inferred. |
 | Reservation | `reservation` / `registration_reserved`: exact token_id, proven canonical_id, retained expiry/node. A topology restatement uses `reservation_became_reachable`, describing the triggering reachability event rather than a new reserve transaction. |
 | Resolver record link | `resolver` / `resolver_record_linked`: resolver, node, exact record_id and retained dns_encoded_name. Record ID "0" is an unlink and remains present. A link is not a record write or a resolver pointer change. |
 | Token regeneration | `token` / `token_regenerated`: exact old_token_id and new_token_id. The retained registration association remains stable. |
@@ -2997,8 +3026,13 @@ introduces it rebuilds Project from full history before serving the option; see
   rows carry the holder's powers because NameWrapper authorizes the holder and
   its operators identically; the delegate carries only
   `extend_subname_expiry`; every row applies the expiry-effective fuse mask, and
-  rows revoke on transfer, unwrap, approval revocation, and expiry. Request-
-  relative completeness metadata below remains authoritative.
+  rows revoke on transfer, unwrap, approval revocation, and expiry. An operator
+  row keeps the scope of the holder row it expands, `registration` or
+  `resolver`, and carries `grant_relation=operator`. Its powers are the
+  operator's on this one name, derived from the owner-wide approval, so
+  `grant_scope` still names the protocol scope the powers apply to. The holder and delegate rows are direct
+  rows and omit `grant_relation`. Request-relative completeness metadata below
+  remains authoritative.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L214-L238 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L37-L47 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L105-L117 @ ens_v1@91c966f)
@@ -3033,10 +3067,13 @@ introduces it rebuilds Project from full history before serving the option; see
   `{resolver: {chain_id, address}}` for `resolver` with numeric `chain_id`;
   `{chain_id, manager}` for `record_manager`; and
   `{chain_id, authority_kind, authority_contract, owner}` for the
-  [`account` permission scope](glossary.md#account-permission-scope). Effective
-  account rows carry `grant_relation=operator`. An ENSv1 or Basenames registry
-  operator has `powers=["registry_control"]`; an ENSv2 registry operator has
-  the powers of the token owner's own row on that registration. Direct rows
+  [`account` permission scope](glossary.md#account-permission-scope).
+  `grant_relation=operator` marks a grant that exists through an
+  `ApprovalForAll`: the account-scope row for a registry operator, and the
+  per-name effective rows for a NameWrapper operator.
+  An ENSv1 or Basenames registry operator has `powers=["registry_control"]`; an
+  ENSv2 registry operator has the powers of the token owner's own row on that
+  registration. Direct rows
   omit `grant_relation` and are otherwise byte-for-byte compatible. For
   example, a direct row remains:
 
@@ -3428,7 +3465,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | 404 | object ErrorEnvelope | `not_found` | none | The requested namespace is not a supported public namespace. |
 | 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
 | 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
-| 422 | object ErrorEnvelope | `unsupported` | none | A requested expansion exceeds its bounded permission budget, or a coin_type=evm row would carry more than 100 matches. |
+| 422 | object ErrorEnvelope | `unsupported` | none | include=role_summary exceeds its 1,000 grant-row budget: omit the include and page GET /v1/permissions?registration_id= for each row's permission_resource_id. Or a coin_type=evm row would carry more than 100 matches: read one decimal coin_type at a time. |
 | 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
 | 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
 
@@ -3777,7 +3814,10 @@ introduces it rebuilds Project from full history before serving the option; see
   `GET /v1/permissions`. Direct grants omit `grant_relation`; effective
   registry-operator grants carry `grant_relation=operator`, the account scope,
   and `powers=["registry_control"]` for an ENSv1 or Basenames registry or the
-  token owner's powers for an ENSv2 registry. Operator grants expand roles for resources
+  token owner's powers for an ENSv2 registry. NameWrapper operator grants carry
+  `grant_relation=operator` with the scope and powers of the holder grant they
+  expand, `registration` or `resolver`.
+  Operator grants expand roles for resources
   already on the page but never add or remove address-name membership rows.
   The registry root holders a permissions read of one ENSv2 registration lists
   are not repeated in `role_summary`: they are the same for every name of a
@@ -4988,7 +5028,7 @@ For a registrar lease first identified by a later readable observation, registra
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `source` | query | enum `indexed` | no | `indexed` | Answer origin. Only indexed answers are served. |
 | `keys` | query | array [0, 200] of string | no | none | Comma-separated record selectors: addr:<decimal>, text:<key>, contenthash or avatar; omitted/blank uses the inventory-derived default keys when values is true; keys must be omitted or blank when values is false. At most 200 value keys. |
-| `values` | query | boolean | no | `true` | False returns the full inventory and records: {}, without per-key answers or the 200-value-key limit. Omitted, true or blank preserves value answers. Nonblank keys conflict with false before key parsing. Only this route accepts the flag. |
+| `values` | query | boolean | no | `true` | False returns the full inventory and records: {}, without per-key answers or the 200-value-key limit. Omitted, true or blank preserves value answers. Nonblank keys conflict with false before key parsing. The name records route accepts the same flag. |
 | `include` | query | array of enum `inventory` | no | none | Comma-separated expansion names; unlisted values are invalid. |
 | `If-None-Match` | header | string | no | none | ETag validator from an earlier response, a comma-separated validator list, or *; evaluated only for a cacheable indexed read. |
 
@@ -5002,7 +5042,7 @@ For a registrar lease first identified by a later readable observation, registra
 | 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
 | 409 | object ErrorEnvelope | `conflict` | none | The explicit snapshot selector cannot form a canonical snapshot or, for lookup, its selected positions cannot be combined. |
 | 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
-| 422 | object ErrorEnvelope | `unsupported` | none | In value mode, the inventory-derived default record-key set exceeds the 200-key limit. |
+| 422 | object ErrorEnvelope | `unsupported` | none | In value mode, the inventory-derived default record-key set exceeds the 200-key limit. values=false returns the full inventory without that limit. |
 | 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure. |
 | 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling is exhausted. |
 
@@ -5045,7 +5085,8 @@ For a registrar lease first identified by a later readable observation, registra
     `keys must be omitted when values=false`, even for malformed or oversized
     key lists. Invalid `include` remains an error. Boolean spelling is `true`
     or `false`, with surrounding whitespace trimmed; other spellings or duplicate
-    `values` fields return `400 invalid_input`. Other routes reject `values`.
+    `values` fields return `400 invalid_input`. The name records route accepts
+    the same flag, and other routes reject `values`.
     For example: `GET /v1/resolvers/1/0x0000000000000000000000000000000000000abc/records?name=alice.eth&values=false`.
     The mode skips per-key answer construction; full inventory still reads
     stored record facts and makes no claim of avoiding value-column reads.

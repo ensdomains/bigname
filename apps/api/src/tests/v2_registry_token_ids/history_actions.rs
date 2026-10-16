@@ -14,6 +14,8 @@ mod registry;
 mod resolver;
 #[path = "history_actions/wrapper.rs"]
 mod wrapper;
+#[path = "history_actions/wrapper_operator.rs"]
+mod wrapper_operator;
 
 async fn page(database: &TestDatabase, route: &str) -> Result<Value> {
     let (status, body) = read_family_response(

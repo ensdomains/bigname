@@ -104,7 +104,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `scope` (history) | `name`, `registration`, `both` | `surface`, `resource`, `both` |
 | `subject` (history) | on name history with `include=child_registrations` only: the row's relation to the requested name, `name` for the name's own rows and `child` for a [direct child registration](api-v1-routes.md#direct-child-registrations-includechild_registrations) | comparing a row's `name` with the requested name |
 | `grant_scope` | the protocol scope of a permission row: `root`, `registry`, `registration`, `resolver`, `record_manager`, or [`account`](glossary.md#account-permission-scope) | permission-row `scope` (renamed so history `scope` and permission scope are two names for two concepts) |
-| `grant_relation` | optional explicit [grant relation](glossary.md#grant-relation); `operator` identifies an account approval and `holder` a derived WrapperRegistry parent owner; direct permission rows omit the field | new in v2 |
+| `grant_relation` | optional explicit [grant relation](glossary.md#grant-relation). `operator` marks a grant that exists through an `ApprovalForAll`: the account-scope row for a registry operator, and the per-name effective rows for a NameWrapper operator. `holder` marks a derived WrapperRegistry parent owner. Direct permission rows omit the field | new in v2 |
 | `verification` | typed checked-answer summary for claimed-vs-verified answers | `verified_state`, `verified_primary_name` section wrappers |
 | `status` | one result vocabulary: `ok`, `not_found`, `invalid_name`, `mismatch`, `unsupported`, `stale`, `failed` | `ResultStatus`, `IdentityStatus`, `NameRecordStatus`, `unnormalizable_input` (folds into `invalid_name`); `mismatch` kept for verification results |
 | `unsupported_reason` | reason code or short reason string required with `status=unsupported` | `coverage.unsupported_reason`, route-specific unsupported details |
@@ -578,8 +578,9 @@ them.
 
 ### Permission powers vocabulary
 
-`powers` (on `GET /v1/permissions` rows, `include=role_summary` grants, and
-lineage objects) is a list of snake_case names drawn from four producers. The
+`powers` (on `GET /v1/permissions` rows, `include=role_summary` grants,
+lineage objects, and `permission` event rows) is a list of snake_case names
+drawn from five producers. The
 table is the complete vocabulary the code can serve; a test
 (`documented_powers_vocabulary_matches_code` in
 `apps/api/src/v2/permission_values.rs`) fails when this table and the producing
@@ -597,6 +598,12 @@ them.
   carries `registry_control` alone, applied at read time to the registrations
   the approving account currently owns in that registry.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
+- **ENSv1 NameWrapper operator approvals** (adapter
+  `crates/adapters/src/schema_v2/protocol/standard_approvals.rs`). A NameWrapper
+  `ApprovalForAll` event row carries `wrapper_control` alone while the approval
+  stands. Only event rows serve it. Permission rows give the operator the
+  holder's masked powers on each wrapped name instead (see below).
+  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L105-L117 @ ens_v1@91c966f)
 - **ENSv1 NameWrapper fuse vocabulary** (read-time mask in
   `crates/storage/src/families/control/permissions/grants.rs`). The permission
   reader recognises these names and removes each one from a wrapped name's effective powers when
@@ -644,6 +651,7 @@ them.
 | `registration_control` | ENSv1/Basenames control | Storage `resource_control`. Held by the account that controls the registration's authority object: the registrar token owner (`RegistrationGranted`, registrar `Transfer`), the registry owner of a registry-only resource (`NewOwner`/`Transfer`), or the NameWrapper token holder (`TokenControlTransferred`). Masked away while the wrapper is `locked`. |
 | `resolver_control` | ENSv1/Basenames control | Held by the same account, scoped to the registration's current nonzero resolver (`grant_scope.kind = resolver`); revoked and re-granted on `ResolverChanged` and `RegistrationGranted`. Masked by `CANNOT_SET_RESOLVER` (8). |
 | `registry_control` | ENSv1/Basenames registry operator | Held by an operator the registry owner approved through registry `ApprovalForAll`, on rows with `grant_relation = operator` and `grant_scope.kind = account`; applies only while the approving account owns the registration in that registry and the approval stands. |
+| `wrapper_control` | ENSv1 NameWrapper operator | Carried by a NameWrapper `ApprovalForAll` event row (`operator_approval_changed`, `grant_scope.kind = account`, `authority_kind = wrapper`) while the approval stands. Permission rows never carry it: an approved operator holds the holder's masked powers on each name the approving account holds in that NameWrapper. |
 | `set_resolver` | ENSv2 registry; wrapper mask | Registry `ROLE_SET_RESOLVER` (bit 24). On a wrapped ENSv1 name the mask removes it under `CANNOT_SET_RESOLVER` (8). |
 | `set_ttl` | wrapper mask | Removed under `CANNOT_SET_TTL` (16). |
 | `create_subnames` | wrapper mask | Removed under `CANNOT_CREATE_SUBDOMAIN` (32). |
@@ -2900,7 +2908,11 @@ The generator derives the rest of each operation. The `operationId` is the
 lowercase method followed by the path segments with braces removed and hyphens
 turned into underscores, joined by underscores: `GET /v1/names/{name}` becomes
 `get_v1_names_name`. The single tag is the first path segment after `/v1`,
-such as `names`. The description is a link to the operation's section in
+such as `names`. Each operation also carries the `x-fern-sdk-group-name` and
+`x-fern-sdk-method-name` extensions, which SDK generators use to name a
+client's groups and methods: the group is the tag, and the method is the
+`operationId` without its method and `v1` prefix, such as `names_name`. No two
+operations share a group and method. The description is a link to the operation's section in
 [`api-v1-routes.md`](api-v1-routes.md). No summary is generated. Relative
 links in any description are resolved against the documentation base URL the
 generator is given.
@@ -3331,7 +3343,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 <!-- openapi:object AddressNameGrant -->
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
-| `grant_relation` | enum GrantRelation | optional | `operator` for an effective account approval or `holder` for a derived WrapperRegistry parent owner; direct grants omit it. |
+| `grant_relation` | enum GrantRelation | optional | `operator` marks a grant that exists through an `ApprovalForAll`: the account-scope row for a registry operator, and the per-name effective rows for a NameWrapper operator. `holder` marks a derived WrapperRegistry parent owner. Direct grants omit it. |
 | `grant_scope` | object GrantScope | always | Scope in which these powers apply. |
 | `powers` | array of enum PermissionPower | always | Product permission powers; see [permission powers vocabulary](#permission-powers-vocabulary). |
 
@@ -3343,8 +3355,8 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | `namespace` | string | always | Resolved public namespace slug. |
 | `canonical_name` | string | optional | The served path of the ENSv2 token an alias path reaches. Present only when the request named an [alias path](#alias-paths). |
 | `resolver` | nullable object ContractRef | always | Resolver contract for this answer. On `GET /v1/resolvers/{chain_id}/{address}/records` it is always the path resolver. |
-| `records` | map of string to object RecordAnswer | always | Per-key resolver answers; empty with values=false on the resolver-anchored records route. |
-| `inventory` | object RecordInventory | optional | Record inventory requested with `include=inventory`, or implied by `values=false` on the resolver-anchored records route. |
+| `records` | map of string to object RecordAnswer | always | Per-key resolver answers; empty with values=false on either records route. |
+| `inventory` | object RecordInventory | optional | Record inventory requested with `include=inventory`, or implied by `values=false` on either records route. |
 
 ### RecordAnswer
 
