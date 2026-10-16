@@ -437,6 +437,10 @@ rows. During the [composition pass](../glossary.md#composition-pass) the
 marker sits still on one block for hours while the repair record's
 `compose_stream`, `compose_cursor` and `compose_chunks` move. That is progress,
 not a stall, and the runner continues through runs that only compose.
+On a mainnet-sized corpus `BignamePhaseRunnerHeartbeatStale` can fire once as
+the pass begins, because the batch that begins it also lists every name to
+compose in the same transaction. It clears when that batch ends and needs no
+action.
 Failures leave the committed prefix available for resumption. A malformed
 journal is a data-integrity error to investigate, not an instruction to edit
 markers or silently discard it. Follow the recovery runbook for operator redo
