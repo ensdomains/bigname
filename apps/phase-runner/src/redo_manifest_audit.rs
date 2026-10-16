@@ -9,6 +9,9 @@ use crate::{
 
 type AuditRow = (String, String, String, String, i64, i64, String, String);
 
+// An active redo matches its audit when its range covers the audited one: a resume after a
+// deploy with another interpreter content hash widens the run to the full range and keeps the
+// audit row's attested range (`record_or_resume`).
 // PostgreSQL `now()` is the transaction timestamp, so `audit.attested_at` equals
 // `phase.started_at` because the audit insert and redo begin share one transaction.
 // No writer may change `started_at` while `redo_in_progress` remains true, including an
@@ -21,8 +24,8 @@ const PENDING_GENERATION_QUERY: &str = "SELECT audit.generation_token
        ON phase.chain_id = audit.chain_id
       AND phase.phase_name = audit.phase_name
       AND phase.redo_in_progress
-      AND phase.redo_from_block_number = audit.redo_from_block_number
-      AND phase.redo_to_block_number = audit.redo_to_block_number
+      AND phase.redo_from_block_number <= audit.redo_from_block_number
+      AND phase.redo_to_block_number >= audit.redo_to_block_number
       AND phase.started_at = audit.attested_at
      WHERE audit.chain_id = $1
      ORDER BY audit.attested_at DESC, audit.generation_token
@@ -144,7 +147,9 @@ pub(crate) async fn record_or_resume(
                  disappeared during locked redo begin"
             ))
         })?;
-    if !same_active_redo {
+    let covers = requested_range.from <= audit.redo_from_block_number
+        && requested_range.to >= audit.redo_to_block_number;
+    if !same_active_redo && !(covers && interpreter_rotated(transaction, chain_id).await?) {
         return Err(RunnerError::new(
             ErrorKind::Configuration,
             format!(
@@ -161,6 +166,31 @@ pub(crate) async fn record_or_resume(
     Ok(Some(audit))
 }
 
+/// Whether the Interpret row records another interpreter content hash than this binary's, not a
+/// marker: the redo resumes under a new binary, which runs the full range over the audited one.
+async fn interpreter_rotated(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+) -> RunnerResult<bool> {
+    let recorded: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT input_content_hash FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|error| {
+        RunnerError::database(
+            format!("failed to read the Interpret content hash of chain {chain_id}"),
+            error,
+        )
+    })?;
+    Ok(recorded.flatten().is_some_and(|hash| {
+        !crate::redo_manifest_attestation::has_marker_prefix(&hash)
+            && hash != crate::transitions::expected_content_hash(PhaseName::Interpret)
+    }))
+}
+
 pub(crate) async fn pending_for_restart_locked(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -175,8 +205,8 @@ pub(crate) async fn pending_for_restart_locked(
            ON phase.chain_id = audit.chain_id
           AND phase.phase_name = audit.phase_name
           AND phase.redo_in_progress
-          AND phase.redo_from_block_number = audit.redo_from_block_number
-          AND phase.redo_to_block_number = audit.redo_to_block_number
+          AND phase.redo_from_block_number <= audit.redo_from_block_number
+          AND phase.redo_to_block_number >= audit.redo_to_block_number
           AND phase.started_at = audit.attested_at
          WHERE audit.chain_id = $1
            AND audit.generation_token = $2",

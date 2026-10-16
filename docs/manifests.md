@@ -1928,7 +1928,12 @@ manifest-authority marker, and the attested Interpret redo and the Project
 redo it stamps start at the change's first effect
 ([manifest-authority marker](deployment.md#manifest-authority-marker)). A
 contract admitted above the head, or a declaration moved between manifests
-with no effect at or below the head, costs one block. A change to the ENSv2
+with no effect at or below the head, costs one block. What the old set
+produced counts as well as what the new one adds: a removed watch, the edges
+of a removed or narrowed discovery rule and a retired declaration are read from
+their old start. A move across namespaces retires one manifest and adds
+another, and is bounded the same way. Retiring a family that matches every
+emitter costs the full pair. A change to the ENSv2
 root, registry or migration family gains nothing from the timing, because
 stored rows of every name read it, so its redo stays the full range.
 

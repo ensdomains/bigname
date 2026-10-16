@@ -973,14 +973,22 @@ which the [family marker](glossary.md#family-marker) records, with the set
 active at the published head. The first effect is the earliest of:
 
 - the first retained log that matches a watch the change adds
+- the first retained log that matches a watch the change removes, or that a
+  watch starting later matched below its new start
 - the first retained log that an address the change declares, moves or removes
   emitted
 - the first discovery edge to or from an instance of such an address
+- for a changed discovery rule, the persisted floor of each address its
+  from-role declares, and the first edge of the rule's kind that address
+  produced, live or closed
 - the declared `start_block` of every changed declaration or discovery rule, on
   either side of the change. A declaration without a start reads as block zero.
 
 The redo runs from that block, or from a lower pending Interpret stamp such as
-the one an Ingest redo leaves, and never below the first ingested block. When
+the one an Ingest redo leaves, or from the start of an open Project redo. A
+completed Interpret redo leaves that Project redo open until Project publishes
+it, so a sync between the two halves still redoes what the first one changed.
+It never runs below the first ingested block. When
 no first effect lies at or below the published head, as for a contract admitted
 before it goes live, the redo replays the head block alone. Run the same full
 range command the fence error prints. The runner narrows it, and a requested
@@ -994,7 +1002,6 @@ The redo keeps the full range, and the refusal says why after "because", when:
   hash, or, for the Project redo only, another projection content hash
 - the change edits a manifest of the ENSv2 root, registry or migration family,
   whose declarations stored rows of every name read
-- a changed manifest moves its declaration namespace
 - the change edits `universal_resolver_implementations` or
   `correlation_addresses`, which Interpret reads at every block
 - the marker records no change of the published set, as when manifest sync
@@ -1002,7 +1009,10 @@ The redo keeps the full range, and the refusal says why after "because", when:
 - the family marker records no published set, as on a fresh corpus or after a
   cold restore.
 
-The bound applies only while the interpreter content hash is unchanged. A new
+Retiring a family that matches events from every emitter, such as
+`ens_v1_resolver_l1`, finds its first matched log near the family's start, so
+it is a full pair in practice. The bound applies only while the interpreter
+content hash is unchanged. A new
 family file that declares `[[abi.events]]` changes that hash and still takes
 the full Interpret and Project pair. A changed ENSv2 root registry reaches no
 full resync only when it is admitted in a release that already pays that pair.
@@ -1039,12 +1049,15 @@ attestation time. The audit row is committed in the same transaction that
 begins the marker-discharging redo and is unique for that chain, phase, and
 invalidation generation. A restart re-emits it only after the locked begin
 matches and commits the same active redo; rerunning the same token-valued
-command is valid only for that exact active, audited redo. If a binary upgrade
+command is valid only for that active, audited redo. If a binary upgrade
 changes the [interpreter content hash](glossary.md#interpreter-content-hash)
-while that redo is interrupted, use the same token and exact audited range. The
-locked begin keeps the audit association but discards progress written under
-the prior hash, so Interpret restarts the range from its beginning under the
-new hash. Later interruptions under the new hash resume normally. The locked
+while that redo is interrupted, rerun the full range the fence error prints
+with the same token. Interpret then runs the whole requested range, not the
+audited start, because the rows below that start were derived under the prior
+hash. The audit row keeps the range it attested, and the run covers at least
+that range. The locked begin keeps the audit association but discards progress
+written under the prior hash. Later interruptions under the new hash resume the
+widened range. The locked
 begin rejects a stale token, including one from an earlier transition to the
 same authority. Manifest synchronization detects manifest-authored watch-plan
 widening over retained Ingest coverage and stamps the exact required Ingest

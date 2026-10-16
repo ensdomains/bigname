@@ -1948,7 +1948,8 @@ including a later return to the same desired set. The marker poisons ordinary
 hash adoption until the attested redo begins. That redo starts at the change's
 first effect where [docs/deployment.md § Manifest-authority
 marker](deployment.md#manifest-authority-marker) allows it, and otherwise
-covers the full range. It proves that derived
+covers the full range. The first effect reads both sides of the change, what
+the old set produced as well as what the new one adds. It proves that derived
 results must be redone under the named authority; it does not itself prove the
 manifest set changed or that facts required by a widened watch plan were
 fetched. When manifest synchronization detects that the desired watch plan

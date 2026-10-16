@@ -57,6 +57,9 @@ const EXECUTION_FILE: &str = "ethereum/ens/ens_execution/v1.toml";
 const BASE: &str = "base-mainnet";
 const BASE_RESOLVER_FILE: &str = "base/basenames/basenames_base_resolver/v1.toml";
 const BASENAMES_EXECUTION_FILE: &str = "ethereum/basenames/basenames_execution/v2.toml";
+const REGISTRY_FILE: &str = "ethereum/ens/ens_v1_registry_l1/v3.toml";
+const MOVED_FILE: &str = "ethereum/basenames/ens_v1_resolver_l1/v1.toml";
+const UNDECLARED: &str = "0x0000000000000000000000000000000000100009";
 const HYDRATION_WORK: [&str; 2] = [
     "project_text_hydration_work",
     "project_reverse_hydration_work",
@@ -527,8 +530,8 @@ async fn the_stamped_project_half_survives_a_crash() -> Result<()> {
 }
 
 // Row 17. A Project rebuild stopped part way leaves the family marker bootstrapping when the
-// sync lands. The Interpret half is bounded, and the Project redo restarts the rebuild under the
-// new input revision.
+// sync lands. The open Project redo lowers the Interpret start to its own, the cursor start, and
+// the Project redo restarts the rebuild under the new input revision.
 #[tokio::test]
 async fn a_bounded_pair_on_a_rebuilding_chain_restarts_the_rebuild() -> Result<()> {
     let fixture = Fixture::new("bounded_rebuilding", 299).await?;
@@ -561,7 +564,7 @@ async fn a_bounded_pair_on_a_rebuilding_chain_restarts_the_rebuild() -> Result<(
     fixture.add_resolver("public_resolver_fixture", RESOLVER, start)?;
     let token = fixture.sync().await?;
     fixture.discharge(&token, None).await?;
-    ensure!(fixture.audits().await? == vec![(start, fixture.head)]);
+    ensure!(fixture.audits().await? == vec![(START, fixture.head)]);
     fixture.assert_hashes().await?;
     fixture.assert_equals_full_pair().await
 }
@@ -889,11 +892,268 @@ async fn a_combined_base_sync_bounds_only_the_base_interpret_redo() -> Result<()
     fixture.cleanup().await
 }
 
+// Row 29. A bounded Interpret redo stops after its start, and a deploy then rotates the
+// interpreter content hash. The rerun of the printed full range with the token runs that whole
+// range, since the rows below the audited start were derived by the prior interpreter, and the
+// Project redo it stamps is the full range too. The audit row keeps the range it attested.
+#[tokio::test]
+async fn a_resume_under_a_new_interpreter_hash_runs_the_full_requested_range() -> Result<()> {
+    let fixture = Fixture::new("bounded_resume_rotated", 59).await?;
+    let start = START + 20;
+    let token = fixture.interrupted_bounded_redo(start).await?;
+    fixture.rotate_interpreter_hash().await?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(START, START)?;
+    ensure!(fixture.audits().await? == vec![(start, fixture.head)]);
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// Row 30. Row 29's widened run stops too. The rerun finds the audit by its token again, because
+// the active range covers the audited one, and resumes the widened range.
+#[tokio::test]
+async fn a_widened_resume_is_found_by_its_token_again() -> Result<()> {
+    let fixture = Fixture::new("bounded_resume_rotated_twice", 59).await?;
+    let start = START + 20;
+    let token = fixture.interrupted_bounded_redo(start).await?;
+    fixture.rotate_interpreter_hash().await?;
+    fixture
+        .discharge(&token, Some(PhaseName::Interpret))
+        .await
+        .err()
+        .context("the widened attempt stops")?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(START, START)?;
+    ensure!(fixture.audits().await? == vec![(start, fixture.head)]);
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// Row 31. A bounded Interpret redo stops after its start, and a deploy then rotates only the
+// projection content hash. Interpret resumes its audited range, and the Project redo it stamps
+// is the full range.
+#[tokio::test]
+async fn a_projection_rotation_at_resume_keeps_interpret_bounded_and_project_full() -> Result<()> {
+    let fixture = Fixture::new("bounded_resume_projection_rotated", 59).await?;
+    let start = START + 20;
+    let token = fixture.interrupted_bounded_redo(start).await?;
+    sqlx::query(
+        "UPDATE project_family_marker SET input_content_hash = 'keccak256:prior-projection'
+         WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .execute(fixture.pool())
+    .await?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(start, START)?;
+    ensure!(fixture.audits().await? == vec![(start, fixture.head)]);
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// Row 32. After row 29's rotation a second sync lands before the rerun. The old token is
+// refused, and the new one keeps the full range, since the families were published under the
+// prior interpreter.
+#[tokio::test]
+async fn a_sync_after_a_rotated_interruption_keeps_the_full_range() -> Result<()> {
+    let fixture = Fixture::new("bounded_resume_rotated_sync", 59).await?;
+    let start = START + 20;
+    let stale = fixture.interrupted_bounded_redo(start).await?;
+    fixture.rotate_interpreter_hash().await?;
+    fixture.add_resolver("public_resolver_fixture_c", SECOND_RESOLVER, START + 40)?;
+    let token = fixture.sync().await?;
+    ensure!(token != stale, "the second sync mints a new token");
+    let refused = fixture
+        .discharge(&stale, None)
+        .await
+        .err()
+        .context("the old token is refused")?;
+    ensure!(refused.kind() == ErrorKind::Configuration, "{refused}");
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(START, START)?;
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// Row 33. Retiring a family that matches events from every emitter. Every declaration starts
+// above an undeclared emitter's `AddrChanged`, which the family's all-emitter watch matched. The
+// removed watch is read from its old start, so the redo starts at that log and the event goes,
+// as on the full pair.
+#[tokio::test]
+async fn a_retired_match_all_family_redoes_from_its_first_watched_log() -> Result<()> {
+    let fixture = Fixture::with("bounded_retired_match_all", 59, |profile| {
+        resolver_starts_at(profile, START + 30)
+    })
+    .await?;
+    fixture
+        .log(START + 5, 0, UNDECLARED, &addr_changed()?)
+        .await?;
+    fixture.initial_pair().await?;
+    fixture.edit(RESOLVER_FILE, |manifest| {
+        manifest.replacen(
+            "rollout_status = \"active\"",
+            "rollout_status = \"deprecated\"",
+            1,
+        )
+    })?;
+    let token = fixture.sync().await?;
+    let run = fixture.discharge(&token, None).await?;
+    fixture.assert_hashes().await?;
+    // The tables first, so a redo that starts too late shows the rows it kept.
+    let ranges = run.assert_ranges(START + 5, START + 5);
+    fixture.assert_equals_full_pair().await?;
+    ranges
+}
+
+// Row 34. A resolver discovery rule removed while its from-role address is also declared as a
+// root with a lower start, so the address was admitted below the rule's role start. The redo
+// starts no higher than the address's persisted floor (here the cursor start), and the tables
+// equal the full pair's. The ENSv1 registry's `NewResolver` creates no discovery edge, so the
+// floor, not a produced edge, sets the start here.
+#[tokio::test]
+async fn a_removed_discovery_rule_redoes_from_its_source_floor() -> Result<()> {
+    let fixture = Fixture::with("bounded_removed_rule", 59, |profile| {
+        registry_with_resolver_rule(profile, None, START + 30)
+    })
+    .await?;
+    fixture
+        .log(START + 10, 0, REGISTRY, &new_resolver(RESOLVER)?)
+        .await?;
+    fixture.initial_pair().await?;
+    fixture.edit(REGISTRY_FILE, remove_resolver_rule)?;
+    let token = fixture.sync().await?;
+    fixture
+        .assert_bounded_refusal(&token, START)
+        .await
+        .context("the source floor is the first effect")?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(START, START)?;
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// Row 35. A sync restores the published set between the halves of a bounded pair: the
+// Interpret half completed under the added declaration and Project has not published. The open
+// Project redo is the earlier bound, so the next Interpret redo starts there, and the tables
+// equal the full pair's.
+#[tokio::test]
+async fn a_restore_between_the_halves_redoes_from_the_earlier_discharge() -> Result<()> {
+    let fixture = Fixture::new("bounded_restore_between_halves", 59).await?;
+    let start = START + 20;
+    fixture
+        .log(start + 1, 0, RESOLVER, &addr_changed()?)
+        .await?;
+    fixture.initial_pair().await?;
+    let path = fixture.profile.join(RESOLVER_FILE);
+    let published = std::fs::read_to_string(&path)?;
+    fixture.add_resolver("public_resolver_fixture", RESOLVER, start)?;
+    let token = fixture.sync().await?;
+    fixture
+        .discharge(&token, Some(PhaseName::Project))
+        .await
+        .err()
+        .context("the Project half stops")?;
+    std::fs::write(&path, &published)?;
+    let token = fixture.sync().await?;
+    let run = fixture.discharge(&token, None).await?;
+    fixture.assert_hashes().await?;
+    // The tables first, so a redo that starts too late shows the rows it kept.
+    let ranges = run.assert_ranges(start, start);
+    fixture.assert_equals_full_pair().await?;
+    ranges
+}
+
+// Row 36. A resolver discovery rule removed after its from-role's declared start was raised
+// over the address's persisted floor. The floor stays, so the redo starts at it, not at the
+// raised role start.
+#[tokio::test]
+async fn a_removed_rule_after_a_raised_start_redoes_from_the_kept_floor() -> Result<()> {
+    let (floor, raised) = (START + 5, START + 30);
+    let fixture = Fixture::with("bounded_rule_kept_floor", 59, |profile| {
+        registry_with_resolver_rule(profile, Some(floor), floor)
+    })
+    .await?;
+    fixture
+        .log(START + 10, 0, REGISTRY, &new_resolver(RESOLVER)?)
+        .await?;
+    fixture.initial_pair().await?;
+    fixture.edit(REGISTRY_FILE, |manifest| {
+        manifest.replace(
+            &format!("start_block = {floor}"),
+            &format!("start_block = {raised}"),
+        )
+    })?;
+    let raise = fixture.sync().await?;
+    fixture.discharge(&raise, None).await?;
+    fixture.edit(REGISTRY_FILE, remove_resolver_rule)?;
+    let token = fixture.sync().await?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(floor, floor)?;
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// Row 37. A declaration moved across namespaces retires its manifest and adds another, so no
+// manifest changes namespace under one id. The move is bounded like any other, from the lowest
+// start of both sides, and every compared row, namespace columns included, equals the full
+// pair's.
+#[tokio::test]
+async fn a_cross_namespace_move_is_bounded() -> Result<()> {
+    let fixture = Fixture::new("bounded_namespace_move", 59).await?;
+    let start = START + 20;
+    fixture
+        .log(start + 5, 0, RESOLVER, &addr_changed()?)
+        .await?;
+    fixture.initial_pair().await?;
+    let path = fixture.profile.join(RESOLVER_FILE);
+    let published = std::fs::read_to_string(&path)?;
+    fixture.add_resolver("public_resolver_fixture", RESOLVER, start)?;
+    let token = fixture.sync().await?;
+    fixture.discharge(&token, None).await?;
+    std::fs::write(&path, &published)?;
+    let moved = fixture.profile.join(MOVED_FILE);
+    std::fs::create_dir_all(
+        moved
+            .parent()
+            .context("the moved manifest has a directory")?,
+    )?;
+    std::fs::write(
+        moved,
+        format!(
+            "manifest_version = 1\nnamespace = \"basenames\"\nsource_family = \
+             \"ens_v1_resolver_l1\"\nchain = \"{CHAIN}\"\ndeployment_epoch = \"ens_v1\"\n\
+             rollout_status = \"active\"\nnormalizer_version = \"ensip15@ens-normalize-0.1.1\"\n\
+             roots = []\ndiscovery_rules = []\n\n[capability_flags]\n\n[[contracts]]\nrole = \
+             \"public_resolver_fixture\"\naddress = \"{RESOLVER}\"\nproxy_kind = \"none\"\n\
+             start_block = {start}\n"
+        ),
+    )?;
+    let token = fixture.sync().await?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(start, start)?;
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
 // The first-effect statements read the indexes they are written for. Over a corpus of 20,000 logs
 // from 200 emitters on 20 topics, 2,000 contract instances and 10,000 edges, the generic plan a
-// prepared statement settles on probes each address's own logs, each topic's own logs, and each
-// instance's edges at both ends. None walks a whole table, or a shared topic for an address
-// watch, inside the locked begin.
+// prepared statement settles on probes each address's own logs, each topic's own logs, each
+// instance's edges at both ends, and a rule source's floor and produced edges. None walks a
+// whole table, or a shared topic for an address watch, inside the locked begin.
 #[tokio::test]
 async fn the_first_effect_statements_read_their_indexes() -> Result<()> {
     let fixture = Fixture::new("bounded_statement_plans", 1_999).await?;
@@ -936,7 +1196,7 @@ async fn the_first_effect_statements_read_their_indexes() -> Result<()> {
     let instance = "ARRAY['0x0000000000000000000000000000000000002001']::text[]";
     let topic =
         "ARRAY['0x0000000000000000000000000000000000000000000000000000000000000005']::text[]";
-    let cases: [(&str, String, &[&str]); 4] = [
+    let cases: [(&str, String, &[&str]); 6] = [
         (
             "emitted log",
             format!("'{CHAIN}', {address}, {head}"),
@@ -955,8 +1215,27 @@ async fn the_first_effect_statements_read_their_indexes() -> Result<()> {
             ],
         ),
         (
+            "rule source floor",
+            format!("'{CHAIN}', {instance}, {head}"),
+            &[
+                "contract_instance_addresses_active_idx",
+                "lower(address) = ANY",
+            ],
+        ),
+        (
+            "rule edge",
+            format!("'{CHAIN}', {instance}, ARRAY['resolver']::text[], {head}"),
+            &[
+                "contract_instance_addresses_active_idx",
+                "from_contract_instance_id = instance.contract_instance_id",
+                "edge_kind = rule.edge_kind",
+            ],
+        ),
+        (
             "watched address log",
-            format!("'{CHAIN}', {address}, {topic}, ARRAY[0]::bigint[], {head}"),
+            format!(
+                "'{CHAIN}', {address}, {topic}, ARRAY[0]::bigint[], ARRAY[NULL]::bigint[], {head}"
+            ),
             &[
                 "raw_logs_emitter_idx",
                 "lower(emitting_address) = watch.address",
@@ -964,7 +1243,7 @@ async fn the_first_effect_statements_read_their_indexes() -> Result<()> {
         ),
         (
             "watched topic log",
-            format!("'{CHAIN}', {topic}, ARRAY[0]::bigint[], {head}"),
+            format!("'{CHAIN}', {topic}, ARRAY[0]::bigint[], ARRAY[NULL]::bigint[], {head}"),
             &["raw_logs_topic_idx", "lower(topics[1]) = watch.topic0"],
         ),
     ];
@@ -1197,6 +1476,40 @@ impl Fixture {
         sync_schema_v2_repository(self.pool(), &load_repository(&self.profile)?).await?;
         self.complete_required_ingest().await?;
         self.token().await
+    }
+
+    /// A bounded Interpret redo of a resolver declared at `start`, with its own log above it,
+    /// stopped at its first batch. Returns its token.
+    async fn interrupted_bounded_redo(&self, start: i64) -> Result<String> {
+        self.log(start + 1, 0, RESOLVER, &addr_changed()?).await?;
+        self.initial_pair().await?;
+        self.add_resolver("public_resolver_fixture", RESOLVER, start)?;
+        let token = self.sync().await?;
+        self.discharge(&token, Some(PhaseName::Interpret))
+            .await
+            .err()
+            .context("the first attempt stops")?;
+        Ok(token)
+    }
+
+    /// A deploy with another interpreter content hash while a redo is interrupted: the Interpret
+    /// row and the family marker record the prior binary's hash.
+    async fn rotate_interpreter_hash(&self) -> Result<()> {
+        sqlx::query(
+            "UPDATE chain_phase_state SET input_content_hash = 'keccak256:prior'
+             WHERE chain_id = $1 AND phase_name = 'interpret'",
+        )
+        .bind(CHAIN)
+        .execute(self.pool())
+        .await?;
+        sqlx::query(
+            "UPDATE project_family_marker SET interpret_input_content_hash = 'keccak256:prior'
+             WHERE chain_id = $1",
+        )
+        .bind(CHAIN)
+        .execute(self.pool())
+        .await?;
+        Ok(())
     }
 
     async fn token(&self) -> Result<String> {
@@ -1747,6 +2060,62 @@ fn difference(table: &str, was: &str, now: &str) -> String {
 }
 
 /// `ens_execution` active, as the baseline of the cases that edit a family with no events.
+/// Every declaration of the resolver family starts at `start`.
+fn resolver_starts_at(profile: &Path, start: i64) -> Result<()> {
+    let path = profile.join(RESOLVER_FILE);
+    let manifest = std::fs::read_to_string(&path)?;
+    let edited: String = manifest
+        .lines()
+        .map(|line| {
+            if line.starts_with("start_block = ") {
+                format!("start_block = {start}\n")
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect();
+    ensure!(edited != manifest, "the resolver family declares starts");
+    std::fs::write(path, edited)?;
+    Ok(())
+}
+
+/// The registry gains a resolver discovery rule from its `registry` role, declared at
+/// `contract`. The registry root keeps its checked-in start, or starts at `root` when given.
+fn registry_with_resolver_rule(profile: &Path, root: Option<i64>, contract: i64) -> Result<()> {
+    let path = profile.join(REGISTRY_FILE);
+    let manifest = std::fs::read_to_string(&path)?;
+    let checked_in = "start_block = 9380380";
+    ensure!(
+        manifest.matches(checked_in).count() == 2,
+        "the registry root and contract start at 9380380"
+    );
+    let root_start = root.map_or_else(
+        || checked_in.to_owned(),
+        |root| format!("start_block = {root}"),
+    );
+    let edited = manifest
+        .replacen(checked_in, "ROOT_START", 1)
+        .replacen(checked_in, &format!("start_block = {contract}"), 1)
+        .replacen("ROOT_START", &root_start, 1)
+        .replacen(
+            "discovery_rules = []\n",
+            "discovery_rules = [{ edge_kind = \"resolver\", from_role = \"registry\", \
+             admission = \"reachable_from_root\" }]\n",
+            1,
+        );
+    std::fs::write(path, edited)?;
+    Ok(())
+}
+
+fn remove_resolver_rule(manifest: &str) -> String {
+    manifest.replacen(
+        "discovery_rules = [{ edge_kind = \"resolver\", from_role = \"registry\", admission = \
+         \"reachable_from_root\" }]\n",
+        "discovery_rules = []\n",
+        1,
+    )
+}
+
 fn active_execution(profile: &Path) -> Result<()> {
     let path = profile.join(EXECUTION_FILE);
     let manifest = std::fs::read_to_string(&path)?;

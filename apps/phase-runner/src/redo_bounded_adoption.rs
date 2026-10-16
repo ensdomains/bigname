@@ -170,13 +170,6 @@ pub(crate) async fn plan(
                 row.4
             )));
         }
-        if let (Some(before), Some(after)) = (before, after)
-            && before.3 != after.3
-        {
-            return Ok(Plan::Full(format!(
-                "manifest {manifest_id} changed its declaration namespace"
-            )));
-        }
         // A manifest with no state on one side reads as one without the field there.
         let field_of = |side: &Option<Side<'_>>, field: &str| {
             side.as_ref()
@@ -264,6 +257,15 @@ pub(crate) async fn require_adoption_range(
         .redo_in_progress
         .then(|| previous.requested_redo_range().map(|stamped| stamped.from))
         .flatten();
+    // An open Project redo is an earlier bound Project has not published yet: Interpret may
+    // already hold rows derived under a set newer than the family marker's from its start.
+    let pending = match phase {
+        PhaseName::Interpret => match open_project_redo_from(transaction, chain_id).await? {
+            Some(project) => Some(pending.map_or(project, |pending| pending.min(project))),
+            None => pending,
+        },
+        _ => pending,
+    };
     let (from, effect) = match (phase, plan) {
         (PhaseName::Interpret, Plan::Bounded { diff, .. }) => {
             let effect = crate::redo_first_effect::scan(transaction, chain_id, &diff, head).await?;
@@ -298,6 +300,8 @@ pub(crate) async fn require_adoption_range(
             phase = %phase,
             watched_log = effect.watched_log,
             emitted_log = effect.emitted_log,
+            rule_floor = effect.rule_floor,
+            rule_edge = effect.rule_edge,
             edge = effect.edge,
             declared_start = effect.declared_start,
             redo_from_block = from,
@@ -317,6 +321,29 @@ pub(crate) async fn require_adoption_range(
         ));
     }
     Ok(Some(BoundedStart { from, effect }))
+}
+
+/// The requested start of the Project row's open redo, the stamp a completed Interpret redo
+/// leaves until Project publishes it (`redo_hash_adoption::stamp_project_after_interpret`).
+async fn open_project_redo_from(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+) -> RunnerResult<Option<i64>> {
+    let from: Option<Option<i64>> = sqlx::query_scalar(
+        "SELECT COALESCE(redo_requested_from_block_number, redo_from_block_number)
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'project' AND redo_in_progress",
+    )
+    .bind(chain_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|error| {
+        RunnerError::database(
+            "failed to read the open Project redo of a bounded redo",
+            error,
+        )
+    })?;
+    Ok(from.flatten())
 }
 
 async fn full(
@@ -405,7 +432,9 @@ pub(crate) async fn interpret_execution_range(
 }
 
 /// The start of a resumed Interpret redo that an earlier attempt began with `token` and its
-/// audited range: the redo resumes that range, not a recomputed one.
+/// audited range: the redo resumes its active range, not a recomputed one. After a deploy with
+/// another interpreter content hash it resumes nothing and runs the requested full range, since
+/// the rows below the audited start were derived by the previous interpreter.
 async fn resumed_interpret_from(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -416,17 +445,17 @@ async fn resumed_interpret_from(
     let (Some(token), true) = (token, previous.redo_in_progress) else {
         return Ok(None);
     };
-    if previous
-        .input_content_hash
-        .as_deref()
-        .is_some_and(has_marker_prefix)
+    if previous.input_content_hash.as_deref()
+        != Some(crate::transitions::expected_content_hash(
+            PhaseName::Interpret,
+        ))
     {
         return Ok(None);
     }
     Ok(
         crate::redo_manifest_audit::pending_for_restart_locked(transaction, chain_id, token)
             .await?
-            .map(|audit| audit.range().from)
+            .and(previous.redo_from_block_number)
             .filter(|from| requested.from <= *from),
     )
 }
