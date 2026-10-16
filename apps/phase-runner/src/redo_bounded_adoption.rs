@@ -371,9 +371,10 @@ async fn full(
 }
 
 /// The start of the Project redo a completed bounded Interpret redo stamps: the Interpret redo's
-/// attested start, or Project's head below it. `None` when the Project redo must be the full
-/// range: its marker is not the one the Interpret redo discharged, or the plan is not bounded
-/// for Project.
+/// attested start, or Project's head below it. The caller lowers it to the start of the range
+/// the redo ran (`redo_hash_adoption::stamp_project_after_interpret`). `None` when the Project
+/// redo must be the full range: its marker is not the one the Interpret redo discharged, or the
+/// plan is not bounded for Project.
 pub(crate) async fn project_stamp_from(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,

@@ -980,7 +980,9 @@ active at the published head. The first effect is the earliest of:
 - the first discovery edge to or from an instance of such an address
 - for a changed discovery rule, the persisted floor of each address its
   from-role declares, and the first edge of the rule's kind that address
-  produced, live or closed
+  produced, live or closed. These addresses are the rule's edge sources. The
+  catalog can also apply a rule to a discovered emitter that has no role. No
+  manifest has that shape today.
 - the declared `start_block` of every changed declaration or discovery rule, on
   either side of the change. A declaration without a start reads as block zero.
 
@@ -994,7 +996,7 @@ before it goes live, the redo replays the head block alone. Run the same full
 range command the fence error prints. The runner narrows it, and a requested
 start above the first effect is refused with the full range and the block the
 redo runs from. The stamped Project redo then runs from the Interpret redo's
-attested start, or from Project's head when that is lower.
+start, or from Project's head when that is lower.
 
 The redo keeps the full range, and the refusal says why after "because", when:
 

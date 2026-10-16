@@ -290,7 +290,9 @@ const RULE_SOURCE_FLOOR: &str = "SELECT min(COALESCE(instance.active_from_block_
 /// is unique), live or closed with a finite end, the rows Interpret
 /// admits from (`crates/interpret/src/load.rs`), and never orphaned. Each instance probes an
 /// edge index by chain, from instance and edge kind that holds closed rows
-/// (`discovery_edges_observation_history_idx` or `discovery_edges_reopen_idx`).
+/// (`discovery_edges_observation_history_idx` or `discovery_edges_reopen_idx`). The sources are
+/// the named from-role's addresses. A rule applied to a discovered emitter with no role
+/// (`crates/adapters/src/schema_v2/catalog.rs`) is a shape no manifest has.
 const RULE_EDGE: &str = "SELECT min(edge.first)
     FROM unnest($2::text[], $3::text[]) AS rule(address, edge_kind)
     CROSS JOIN LATERAL (

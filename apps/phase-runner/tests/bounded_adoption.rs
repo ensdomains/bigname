@@ -23,7 +23,8 @@ use alloy_sol_types::{SolEvent, sol};
 use anyhow::{Context, Result, ensure};
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
 use phase_runner::{
-    CREATE_STAMP, INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH, REQUIRED_REDO_PREFIX,
+    CREATE_STAMP, EXTEND_STAMP, INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH,
+    REQUIRED_REDO_PREFIX,
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
     error::{ErrorKind, RunnerError, RunnerResult},
@@ -47,6 +48,7 @@ const CHAIN: &str = "ethereum-mainnet";
 /// The first block of the window: the ingest cursor's start, so the full range starts here.
 const START: i64 = 9_380_400;
 const REGISTRY: &str = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+const REGISTRY_OLD: &str = "0x314159265dd8dbb310642f98f50c066173c1259b";
 const RESOLVER: &str = "0x0000000000000000000000000000000000100001";
 const SECOND_RESOLVER: &str = "0x0000000000000000000000000000000000100002";
 const MANAGED_PROXY: &str = "0x0000000000000000000000000000000000100003";
@@ -1147,6 +1149,90 @@ async fn a_cross_namespace_move_is_bounded() -> Result<()> {
         .assert_ranges(start, start)?;
     fixture.assert_hashes().await?;
     fixture.assert_equals_full_pair().await
+}
+
+// Row 38. A required stamp merges into an interrupted bounded Interpret redo below its audited
+// start before the rerun. The rerun resumes the merged range under the same token, the audit
+// keeps its attested range, and Project is stamped from the start the Interpret redo ran.
+#[tokio::test]
+async fn a_stamp_merged_below_an_interrupted_bounded_redo_stamps_project_from_it() -> Result<()> {
+    let fixture = Fixture::new("bounded_merged_resume", 59).await?;
+    let start = START + 20;
+    let token = fixture.interrupted_bounded_redo(start).await?;
+    // The merge the runner writes when a required stamp lands on a redo in progress
+    // (`redo_stamp.rs`, `extend_active`), by the runner's own statement.
+    sqlx::query(EXTEND_STAMP)
+        .bind(CHAIN)
+        .bind(PhaseName::Interpret.as_str())
+        .bind(START)
+        .bind(fixture.head)
+        .bind(START)
+        .bind(fixture.head)
+        .execute(fixture.pool())
+        .await?;
+    let run = fixture.discharge(&token, None).await?;
+    ensure!(fixture.audits().await? == vec![(start, fixture.head)]);
+    fixture.assert_hashes().await?;
+    // The tables first, so a Project stamp that starts too late shows the rows it kept.
+    let ranges = run.assert_ranges(START, START);
+    fixture.assert_equals_full_pair().await?;
+    ranges
+}
+
+// Row 39. Row 36 with an edge of the rule's kind from the from-role's instance below the kept
+// floor, the row a rule produces. The redo starts at that edge, and the tables equal the full
+// pair's.
+#[tokio::test]
+async fn a_removed_rule_redoes_from_an_edge_it_produced_below_the_floor() -> Result<()> {
+    let (floor, raised, edge) = (START + 5, START + 30, START + 2);
+    let fixture = Fixture::with("bounded_rule_edge", 59, |profile| {
+        registry_with_resolver_rule(profile, Some(floor), floor)
+    })
+    .await?;
+    fixture
+        .log(START + 10, 0, REGISTRY, &new_resolver(RESOLVER)?)
+        .await?;
+    fixture.initial_pair().await?;
+    fixture.edit(REGISTRY_FILE, |manifest| {
+        manifest.replace(
+            &format!("start_block = {floor}"),
+            &format!("start_block = {raised}"),
+        )
+    })?;
+    let raise = fixture.sync().await?;
+    fixture.discharge(&raise, None).await?;
+    let inserted = sqlx::query(
+        "INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id,
+             to_contract_instance_id, discovery_source, admission_basis,
+             active_from_block_number, active_from_block_hash, canonicality_state)
+         SELECT $1, 'resolver',
+                (SELECT contract_instance_id FROM contract_instance_addresses
+                 WHERE chain_id = $1 AND lower(address) = lower($2) AND deactivated_at IS NULL
+                 LIMIT 1),
+                (SELECT contract_instance_id FROM contract_instance_addresses
+                 WHERE chain_id = $1 AND lower(address) = lower($3) AND deactivated_at IS NULL
+                 LIMIT 1),
+                'NewResolver', 'fixture', $4, $5, 'canonical'",
+    )
+    .bind(CHAIN)
+    .bind(REGISTRY)
+    .bind(REGISTRY_OLD)
+    .bind(edge)
+    .bind(block_hash(edge))
+    .execute(fixture.pool())
+    .await?;
+    ensure!(
+        inserted.rows_affected() == 1,
+        "the registry edge is planted"
+    );
+    fixture.edit(REGISTRY_FILE, remove_resolver_rule)?;
+    let token = fixture.sync().await?;
+    let run = fixture.discharge(&token, None).await?;
+    fixture.assert_hashes().await?;
+    // The tables first, so a redo that starts at the floor shows the edge it kept.
+    let ranges = run.assert_ranges(edge, edge);
+    fixture.assert_equals_full_pair().await?;
+    ranges
 }
 
 // The first-effect statements read the indexes they are written for. Over a corpus of 20,000 logs

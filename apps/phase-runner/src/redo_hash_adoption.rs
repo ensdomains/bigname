@@ -103,8 +103,8 @@ pub(crate) async fn require_full_hash_redo(
 /// That range can reach past Project's own head up to the Ingest handoff (Project behind
 /// Interpret when the release landed), so the stamp is not clipped to Project's head. Otherwise
 /// the stamp covers `range` up to Project's head, as before. A bounded Interpret discharge of the
-/// marker Project records stamps from its attested start instead
-/// (`redo_bounded_adoption::project_stamp_from`).
+/// marker Project records stamps from the Interpret redo's start instead, the lower of its
+/// attested start and the range it ran (`redo_bounded_adoption::project_stamp_from`).
 pub(crate) async fn stamp_project_after_interpret(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -141,7 +141,7 @@ pub(crate) async fn stamp_project_after_interpret(
             transaction,
             chain_id,
             PhaseName::Project,
-            BlockRange::new(from, range.to.max(from))?,
+            BlockRange::new(from.min(range.from), range.to.max(from))?,
             REASON,
         )
         .await;
