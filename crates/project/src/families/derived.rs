@@ -19,6 +19,57 @@ use sqlx::{Postgres, Transaction};
 use super::{block::BlockStats, input, marker, tables::NAME_SUMMARY};
 use crate::{ProjectError, Result};
 
+/// The names a publication composes again beyond the ones its block touched.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Sweeps {
+    /// Every name whose stored raw name its surface no longer carries
+    /// (`summary::RAW_NAME_SWEEP`).
+    pub(crate) raw_name: bool,
+    /// Every name with a surface or a stored row, when the publication composes with another
+    /// ENSv2 root registry admission than the prior marker recorded (`summary::ADMISSION_SWEEP`).
+    pub(crate) admission: bool,
+}
+
+/// The names of chain `$1` an admission sweep at block `$2` composes again, the summary refresh's
+/// (`summary::ADMISSION_SWEEP`) and the lookup refresh's (`lookup::work`) together.
+const ADMISSION_SWEEP_COUNT: &str = "/* project:families.derived.admission_sweep_count */
+    SELECT count(*) FROM (
+        SELECT logical_name_id FROM name_surfaces WHERE chain_id = $1 AND block_number <= $2
+        UNION SELECT logical_name_id FROM project_name_summary WHERE chain_id = $1
+        UNION SELECT logical_name_id FROM project_lookup_name WHERE chain_id = $1
+    ) swept";
+
+/// Refuse the publication of `block` when its admission sweep would compose more than `cap`
+/// names in its one transaction (`families::MAX_ADMISSION_SWEEP_NAMES`). It runs before any
+/// composition, and the refusal rolls the publication's transaction back.
+pub(super) async fn refuse_oversized_admission_sweep(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    block: &input::BlockHeader,
+    cap: u64,
+) -> Result<()> {
+    let swept: i64 = sqlx::query_scalar(ADMISSION_SWEEP_COUNT)
+        .bind(chain_id)
+        .bind(block.number)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database("failed to count the names of an admission change", error)
+        })?;
+    let swept = u64::try_from(swept).unwrap_or_default();
+    if swept <= cap {
+        return Ok(());
+    }
+    Err(ProjectError::data_integrity(format!(
+        "refusing the family publication of block {} of chain {chain_id}: its ENSv2 root \
+         registry admission differs from the family marker's, so it would compose {swept} names \
+         again in one transaction, above the cap of {cap}; redo the full range of phase project \
+         alone: rerun `phase-runner redo --chain {chain_id} --phase project` with the full \
+         range's `--from-block` and `--to-block`",
+        block.number
+    )))
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Touched {
     /// The block whose journal named the keys.
@@ -27,9 +78,8 @@ pub(crate) struct Touched {
     /// are composed again for the surfaces and registry events after it. `None` on an undo, whose
     /// journal restores the name summaries exactly.
     summaries_after: Option<i64>,
-    /// Whether the summary refresh also composes again every name whose stored raw name its
-    /// surface no longer carries (`summary::RAW_NAME_SWEEP`).
-    pub(crate) raw_name_sweep: bool,
+    /// The names the summary refresh composes again beyond the touched ones.
+    pub(crate) sweeps: Sweeps,
     names: Vec<String>,
     node_resolvers: Vec<String>,
     nodes: Vec<String>,
@@ -187,7 +237,7 @@ pub(crate) async fn refresh(
         chain_id,
         touched.number,
         after,
-        touched.raw_name_sweep,
+        touched.sweeps,
         composition,
     )
     .await
@@ -367,23 +417,22 @@ const RECORD_ID_INSERT: &str = "/* project:families.derived.record_id_insert */
     ON CONFLICT DO NOTHING";
 
 /// Refresh the derived rows of the keys a block touched after the family marker's block `after`,
-/// and count the name summaries it wrote and journalled like a family table's. With
-/// `raw_name_sweep` the summaries also take the stored raw names their surfaces lost
-/// (`summary::RAW_NAME_SWEEP`).
+/// and count the name summaries it wrote and journalled like a family table's. `sweeps` adds the
+/// names the summaries and the lookup names compose again beyond the touched ones.
 pub(super) async fn refresh_block(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     block: &input::BlockHeader,
-    (after, raw_name_sweep): (i64, bool),
+    (after, sweeps): (i64, Sweeps),
     composition: &marker::Composition,
     stats: &mut BlockStats,
 ) -> Result<()> {
     let root = composition.admission.as_ref();
     let root = root.map(|admission| admission.root_registry.as_str());
     super::resolution_paths::prepare(transaction, chain_id, block, after, root).await?;
-    super::lookup::prepare(transaction, chain_id, block, after).await?;
+    super::lookup::prepare(transaction, chain_id, block, after, sweeps.admission).await?;
     let mut touched = touched(transaction, chain_id, block.number, Some(after)).await?;
-    touched.raw_name_sweep = raw_name_sweep;
+    touched.sweeps = sweeps;
     let summary = refresh(transaction, chain_id, &touched, composition).await?;
     if summary.rows > 0 {
         stats.rows.insert(NAME_SUMMARY.name, summary.rows);

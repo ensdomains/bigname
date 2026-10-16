@@ -232,3 +232,73 @@ async fn v2_mirror_record_attribution_reads_the_published_manifest_set_until_the
     );
     database.cleanup().await
 }
+
+/// What a client reads of alice.eth through `alice_view`, plus the batch lookup's body.
+async fn alice_view_with_lookup(database: &TestDatabase) -> Result<Value> {
+    let mut view = alice_view(database).await?;
+    let lookup = v2_lookup_response_for_database(
+        database,
+        "/v1/lookup",
+        json!({"profile": "detail", "inputs": [{"name": "alice.eth"}]}),
+    )
+    .await?;
+    view["lookup_body"] = read_json(lookup).await?;
+    Ok(view)
+}
+
+/// R24. alice.eth is published on a chain that admits no ENSv2 root registry. Manifest sync then
+/// admits one, and the next block names nothing. The block's publication serves alice.eth as
+/// cut over, exactly as a rebuild at that block does, with no Interpret or Project redo between.
+#[tokio::test]
+async fn v2_a_root_admitted_by_manifest_sync_serves_at_the_next_block_as_its_rebuild()
+-> Result<()> {
+    const CHAIN: &str = "ethereum-mainnet";
+    let database = TestDatabase::new_migrated().await?;
+    seed_alice_name_inputs(&database).await?;
+    let payload = json!({"contracts": [{"role": "universal_resolver",
+        "address": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee", "start_block": 0}]});
+    let execution = database
+        .insert_manifest("ens", "ens_execution", CHAIN, "admission-sync", 1, "active", "test")
+        .await?;
+    sqlx::query("UPDATE manifest_versions SET manifest_payload = $2 WHERE manifest_id = $1")
+        .bind(execution)
+        .bind(&payload)
+        .execute(&database.pool)
+        .await?;
+    seed_fixture_manifest_update(&database.pool, execution, CHAIN, "ens", "ens_execution", &payload)
+        .await?;
+    rebuild_fixture_families(&database.pool, CHAIN, 21_000_003, "0xbinding").await?;
+    let before = alice_view(&database).await?;
+    assert_eq!(
+        before["namespace"]["protocol"],
+        json!("ens_v1"),
+        "before the admission: {before:#}"
+    );
+
+    admit_ens_v2_root_registry(&database, CHAIN).await?;
+    sqlx::query(
+        "INSERT INTO bigname_phase.chain_lineage
+             (chain_id, block_hash, parent_hash, block_number, block_timestamp, canonicality_state)
+         VALUES ($1, '0xfollow', '0xbinding', 21000004, '2026-04-17T00:00:15Z', 'canonical')",
+    )
+    .bind(CHAIN)
+    .execute(&database.pool)
+    .await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({"ethereum": {
+            "chain_id": CHAIN, "block_number": 21_000_004, "block_hash": "0xfollow",
+            "timestamp": "2026-04-17T00:00:15Z"}}))
+        .await?;
+    publish_test_families_on(&database.pool, CHAIN, 21_000_004).await?;
+    let followed = alice_view_with_lookup(&database).await?;
+
+    rebuild_fixture_families(&database.pool, CHAIN, 21_000_004, "0xfollow").await?;
+    let rebuilt = alice_view_with_lookup(&database).await?;
+    assert_eq!(
+        rebuilt["namespace"],
+        json!({"protocol": "ens_v2", "since_block": 0}),
+        "the rebuild serves the admission"
+    );
+    assert_eq!(followed, rebuilt, "the followed block against its rebuild");
+    database.cleanup().await
+}

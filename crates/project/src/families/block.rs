@@ -262,7 +262,22 @@ pub(crate) async fn publish(
     // The first block under an input revision the prior block did not read (a completed
     // Interpret redo attempt, or a reset) checks every stored raw name against its surface: a
     // redo can withdraw a surface's raw bytes in place, below any block it replays.
-    let raw_name_sweep = prior.token.revision() != token.revision();
+    // A block that composes with another ENSv2 root registry admission than the prior marker
+    // recorded (a manifest sync, an undo's restored marker, or a reset's empty one) composes
+    // every name again: the admission has no block of its own (`cutover.rs`).
+    let sweeps = super::derived::Sweeps {
+        raw_name: prior.token.revision() != token.revision(),
+        admission: prior.admission != composition.admission,
+    };
+    // A followed sweep is counted before anything is composed. A reset's first publication
+    // composes the same names anyway (`after` is -1), so only a prior block's marker is capped.
+    // A rebuild's range before its composition pass composes nothing, so it sweeps nothing, and
+    // the pass composes every name in chunks.
+    if composes && sweeps.admission && prior.current.is_some() {
+        let cap = options.max_admission_sweep_names;
+        super::derived::refuse_oversized_admission_sweep(&mut transaction, chain_id, &block, cap)
+            .await?;
+    }
     let mut stats = write(
         &mut transaction,
         chain_id,
@@ -270,7 +285,7 @@ pub(crate) async fn publish(
         after,
         rows,
         &composition,
-        (raw_name_sweep, composes),
+        (sweeps, composes),
     )
     .await?;
     if composes {
@@ -332,7 +347,8 @@ pub(crate) async fn publish(
 
 /// Journal every changed row's pre-block image, then write the changes table by table. `after`
 /// is the block of the family marker the write follows, -1 with none. `composition` is the
-/// manifest set and admission the block publishes. Without `composes` the rows are written only.
+/// manifest set and admission the block publishes, and `sweeps` the names it composes again
+/// beyond those it touched. Without `composes` the rows are written only.
 async fn write(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -340,7 +356,7 @@ async fn write(
     after: i64,
     rows: &store::RowSet,
     composition: &marker::Composition,
-    (raw_name_sweep, composes): (bool, bool),
+    (sweeps, composes): (super::derived::Sweeps, bool),
 ) -> Result<BlockStats> {
     let changes = rows.written();
     let mut stats = BlockStats::default();
@@ -353,7 +369,7 @@ async fn write(
             transaction,
             chain_id,
             block,
-            (after, raw_name_sweep),
+            (after, sweeps),
             composition,
             &mut stats,
         )
@@ -399,7 +415,7 @@ async fn write(
         transaction,
         chain_id,
         block,
-        (after, raw_name_sweep),
+        (after, sweeps),
         composition,
         &mut stats,
     )

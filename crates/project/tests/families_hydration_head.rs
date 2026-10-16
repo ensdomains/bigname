@@ -305,3 +305,88 @@ async fn a_target_or_redo_endpoint_below_the_readable_head_does_not_hydrate() ->
     assert_eq!(rpc.calls().last(), Some(&(hash(5), 1)));
     fixture.cleanup().await
 }
+
+/// What manifest sync writes for a new `ens` manifest of `family` on the hydrating chain: the
+/// row and a blockless finalized SourceManifestUpdated event carrying its payload.
+async fn manifest_sync(
+    fixture: &Fixture,
+    family: &str,
+    contracts: serde_json::Value,
+) -> Result<()> {
+    let payload = serde_json::json!({"manifest_version": 1, "namespace": "ens",
+        "source_family": family, "chain": CHAIN, "rollout_status": "active",
+        "contracts": contracts});
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO manifest_versions (manifest_version, namespace, source_family, chain_id,
+             deployment_label, rollout_status, normalizer_version, file_path, manifest_payload)
+         VALUES (1, 'ens', $1, $2, 'fixture', 'active', 'fixture', $3, $4)
+         RETURNING manifest_id",
+    )
+    .bind(family)
+    .bind(CHAIN)
+    .bind(format!("fixture/{family}.toml"))
+    .bind(&payload)
+    .fetch_one(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+             manifest_version, source_manifest_id, chain_id, derivation_kind,
+             canonicality_state, after_state)
+         VALUES ($1, 'ens', 'SourceManifestUpdated', $2, 1, $3, $4, 'manifest_sync',
+                 'finalized', jsonb_build_object('rollout_status', 'active',
+                     'manifest_payload', $5::jsonb))",
+    )
+    .bind(format!("sync:{family}:{id}"))
+    .bind(family)
+    .bind(id)
+    .bind(CHAIN)
+    .bind(&payload)
+    .execute(&fixture.pool)
+    .await?;
+    Ok(())
+}
+
+// A manifest sync that admits an ENSv2 root registry before the head block makes that block
+// compose every name again. Its hydration is what the same block hydrates after a sync that
+// leaves the admission alone: the same RPC reads, tuples and hydration work rows.
+#[tokio::test]
+async fn an_admission_change_at_the_head_hydrates_what_the_block_selects() -> Result<()> {
+    let root = serde_json::json!([{"role": "root_registry",
+        "address": "0x00000000000000000000000000000000000000b4", "proxy_kind": "none",
+        "start_block": 0}]);
+    let mut seen = Vec::new();
+    for (label, family, contracts) in [
+        (
+            "family_hydration_head_unrelated",
+            "ens_v2_migration_l1",
+            serde_json::json!([]),
+        ),
+        ("family_hydration_head_admitted", "ens_v2_root_l1", root),
+    ] {
+        let (fixture, rpc) = fixture(label, 3).await?;
+        run(&fixture, 0, FamilyMode::Normal, &rpc).await?;
+        seed(&fixture, 1, 1).await?;
+        run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
+        seed(&fixture, 2, 2).await?;
+        manifest_sync(&fixture, family, contracts).await?;
+        run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
+        let mut state = vec![format!("rpc {:?}", rpc.calls())];
+        for table in [
+            TUPLES,
+            "project_reverse_hydration_work",
+            "project_text_hydration_work",
+        ] {
+            state.push(format!(
+                "{table} {}",
+                serde_json::Value::Array(fixture.rows(table).await?)
+            ));
+        }
+        fixture.cleanup().await?;
+        seen.push(state);
+    }
+    assert_eq!(
+        seen[1], seen[0],
+        "the admitted head block hydrated otherwise than the unrelated sync's"
+    );
+    Ok(())
+}

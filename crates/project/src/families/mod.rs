@@ -59,6 +59,17 @@ pub const RETAINED_UNDO_DEPTH: i64 = 256;
 /// catch-up as a series of runs until the families reach the served marker.
 pub const MAX_BLOCKS_PER_RUN: u64 = 256;
 
+/// The most names a followed publication composes again for a change of the ENSv2 root registry
+/// admission (`derived::Sweeps::admission`). Above it the publication is refused before it
+/// composes anything, for a full Project redo, which composes every name in ranges. The sweep
+/// runs in the block's one transaction, and the runner writes no heartbeat inside a block, so
+/// past 900 s `BignamePhaseRunnerHeartbeatStale` fires (docs/runbooks/pipeline-monitoring.md).
+/// Measured on a mainnet replay, a name's summary, lookup and history catalogue cost 6.4 ms of
+/// statement time, and statements are 82% of the runner's wall time: 50,000 x 6.4 ms = 320 s,
+/// about 390 s of wall time. That leaves room for the per-name cost to double as the tables grow
+/// and stay under 900 s. Mainnet holds over 3M names, 6 to 15 hours in one transaction.
+pub const MAX_ADMISSION_SWEEP_NAMES: u64 = 50_000;
+
 /// A rebuild applies the work blocks at or below this many blocks under the chain's safe block
 /// in [ranges](RebuildRanges); the blocks above it and the target go one to a transaction, so a
 /// reorg near the head undoes single blocks. The switch point follows the safe block, not the
@@ -223,6 +234,9 @@ pub struct FamilyOptions {
     /// projection content hash (the runner kept its saved progress). A rebuild the interrupted
     /// attempt left then resumes rather than starting again.
     pub resumes_interrupted_redo: bool,
+    /// Names a followed publication composes again for an admission change at most; above it the
+    /// publication is refused ([`MAX_ADMISSION_SWEEP_NAMES`]).
+    pub max_admission_sweep_names: u64,
 }
 
 impl FamilyOptions {
@@ -238,6 +252,7 @@ impl FamilyOptions {
             max_range_events: MAX_RANGE_EVENTS,
             compose_chunk_keys: COMPOSE_CHUNK_KEYS,
             resumes_interrupted_redo: false,
+            max_admission_sweep_names: MAX_ADMISSION_SWEEP_NAMES,
         }
     }
 
@@ -280,6 +295,11 @@ impl FamilyOptions {
 
     pub fn with_retained_undo_depth(mut self, depth: i64) -> Self {
         self.retained_undo_depth = depth.max(1);
+        self
+    }
+
+    pub fn with_max_admission_sweep_names(mut self, names: u64) -> Self {
+        self.max_admission_sweep_names = names.max(1);
         self
     }
 }

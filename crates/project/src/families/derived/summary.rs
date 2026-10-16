@@ -24,7 +24,9 @@
 //! either, such as a normalizer recompute of a surface's visibility or a lineage readability
 //! flip, is covered by the rebuild: a recompute only happens with a code change that rotates
 //! the interpreter fingerprint, which rebuilds the families. A reorg goes through undo, which
-//! restores the summaries from the journal.
+//! restores the summaries from the journal. Two inputs that change in place are swept instead:
+//! a surface's raw bytes cleared by an Interpret redo (`RAW_NAME_SWEEP`), and the ENSv2 root
+//! registry admission, which has no block and reaches every name (`ADMISSION_SWEEP`).
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
@@ -57,7 +59,7 @@ pub(super) async fn refresh(
     chain_id: &str,
     number: i64,
     after: i64,
-    raw_name_sweep: bool,
+    sweeps: super::Sweeps,
     composition: &super::super::marker::Composition,
 ) -> Result<Refreshed> {
     let block = input::read_block(transaction, chain_id, number)
@@ -77,7 +79,7 @@ pub(super) async fn refresh(
         .map_err(|error| {
             ProjectError::database("failed to read the names a family block touched", error)
         })?;
-    if raw_name_sweep {
+    if sweeps.raw_name {
         let swept: Vec<String> = sqlx::query_scalar(RAW_NAME_SWEEP)
             .bind(chain_id)
             .fetch_all(&mut **transaction)
@@ -86,6 +88,19 @@ pub(super) async fn refresh(
                 ProjectError::database("failed to sweep the stored raw names", error)
             })?;
         names.extend(swept);
+    }
+    if sweeps.admission {
+        let swept: Vec<String> = sqlx::query_scalar(ADMISSION_SWEEP)
+            .bind(chain_id)
+            .bind(number)
+            .fetch_all(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to sweep the names of an admission change", error)
+            })?;
+        names.extend(swept);
+    }
+    if sweeps.raw_name || sweeps.admission {
         names.sort_unstable();
         names.dedup();
     }
@@ -212,7 +227,7 @@ pub(crate) async fn replace_chunk(
 /// fixed by the namehash, so the only change a stored raw name can miss is that clearing, which
 /// leaves a surface with no raw bytes: those surfaces are read through
 /// `name_surfaces_project_suffix_hash_idx`, one namespace at a time. A block runs it once per
-/// input revision (block.rs, `raw_name_sweep`).
+/// input revision (block.rs, `Sweeps::raw_name`).
 pub(crate) const RAW_NAME_SWEEP: &str = "/* project:families.derived.summary_raw_name_sweep */
     SELECT summary.logical_name_id
     FROM name_surfaces surface
@@ -230,6 +245,19 @@ pub(crate) const RAW_NAME_SWEEP: &str = "/* project:families.derived.summary_raw
       AND hash_array_extended(surface.raw_labels, 0) IS NULL
       AND surface.chain_id = $1 AND surface.raw_name IS NULL
       AND summary.raw_name IS NOT NULL";
+
+/// Every name of chain `$1` with a surface at or below block `$2` or a stored summary, composed
+/// again when the block composes with another ENSv2 root registry admission than the prior
+/// marker recorded (block.rs, `Sweeps::admission`). The admission reaches every name: the
+/// cutover flag selects the arm of any name with an ENSv2 instance and enters every composed
+/// expiry trace, and the root starts every ENSv2 path walk (`families::control::cutover`). A
+/// name whose surface no longer composes loses its stored row.
+pub(crate) const ADMISSION_SWEEP: &str = "/* project:families.derived.summary_admission_sweep */
+    SELECT surface.logical_name_id FROM name_surfaces surface
+    WHERE surface.chain_id = $1 AND surface.block_number <= $2
+    UNION
+    SELECT summary.logical_name_id FROM project_name_summary summary
+    WHERE summary.chain_id = $1";
 
 /// The names block `$2` (at time `$3`, in seconds) of chain `$1` touched, read from its journal (each changed row's
 /// before-image and key) and the changed rows as they now stand, with the names of the surfaces
