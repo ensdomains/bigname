@@ -269,6 +269,16 @@ posting set replacement commit atomically. An aborted import or Interpret write 
 none of those changes. Reorg re-anchoring and normalizer recompute use the same
 writer; retained verified preimages are not deleted with a chain observation.
 
+Within one Interpret write transaction, a label hash observed more than once is
+submitted to `label_preimages` once. Every observation must carry the same bytes and
+normalization verdict, or the write fails as it would row by row. The submitted
+source is the highest-priority observation, and the last one wins a tie, which is
+the row the row-by-row upserts would leave. Discovered addresses are written in
+batch order. A later observation of an address reuses the row the transaction
+already locked or inserted for it instead of reading it again, and an update that
+would change nothing is skipped. An address without an active row is read again on
+each observation. The stored rows are the ones the row-by-row writes produce.
+
 After changing the source rows, the writer refreshes the affected documents. It first
 writes the affected names once into a temporary table. These are the names it changed
 and every surface without raw bytes whose path holds a changed label. It then reads
@@ -295,13 +305,6 @@ of 30 minutes, and no pool sets another value. No crate may set `max_lifetime(No
 a pool that refreshes search. The phase runner's advisory-lock connection runs the
 refresh when a redo with a normalization-flag recompute completes. It is not a pool
 connection. It lives until the runner releases that phase lock and closes it.
-
-Within a publication, repeated label hashes are checked for incompatible evidence
-before being coalesced to their highest-priority observation (the last observation
-wins a priority tie). Discovered-address writes retain their original order and
-reuse only rows already locked or inserted by that transaction; absent addresses
-are not cached. These reductions preserve provenance and interval rules while
-avoiding repeated database work for the same label or address.
 
 Project extends its existing `project_name_summary` with `search_supported`,
 `search_fields` and `search_creation_transport_resource_id`. The supported payload

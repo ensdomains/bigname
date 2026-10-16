@@ -254,3 +254,7 @@ fn flat_jsonb_input(value: &Value) -> bool {
 #[cfg(test)]
 #[path = "address_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "address_oracle_tests.rs"]
+mod oracle_tests;
