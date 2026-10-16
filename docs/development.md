@@ -273,10 +273,18 @@ batch boundaries may differ from an uninterrupted run while its stored rows do
 not.
 
 The estimate covers raw input only. It does not bound adapter state, the prior
-history the loader restores, or PostgreSQL memory. The runner records its
-database phase heartbeat between batches, so `phase_runner_heartbeat_age_seconds`
-keeps growing through a long adaptive batch and can pass its stale threshold.
-That is a metric only, and nothing acts on it. To compare with fixed batches,
+history the loader restores, or PostgreSQL memory.
+
+The runner refreshes its database phase heartbeat only between batches. A long
+adaptive batch can therefore make [`GET /v1/status`](api-v1-routes.md#get-v1status)
+report the chain `stale` and can fire `BignamePhaseRunnerHeartbeatStale`. Before
+an adaptive redo, raise `BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS` on the API
+and `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS` on each scraped phase
+runner above the longest expected batch, as
+[phase-runner configuration](deployment.md#phase-runner-configuration)
+describes, or expect the stale status and the page until the redo ends.
+
+To compare with fixed batches,
 run the same redo on the same restored database with and without the flag, and
 compare the Interpret phase time, peak memory and the
 `planned adaptive whole-block batch` log lines. An Interpret redo also performs
