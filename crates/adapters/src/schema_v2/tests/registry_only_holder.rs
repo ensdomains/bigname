@@ -1019,6 +1019,126 @@ fn a_lease_release_hands_the_resource_back_to_the_registry_owner() -> anyhow::Re
     assert_no_failures(failures)
 }
 
+/// A label the registrar controllers accept but the normalizer rejects, so its name gets no
+/// surface. The controllers check only its length.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L191-L193 @ ens_v1@91c966f)
+/// (upstream: .refs/basenames/src/L2/RegistrarController.sol:L364-L366 @ basenames@1809bbc)
+const UNSURFACED: &str = "LEASED";
+
+fn unsurfaced() -> B256 {
+    node(&[UNSURFACED, "eth"])
+}
+
+/// A controller's `NameRegistered` of `LEASED.eth` for `owner`, as `lease_batch` watches it.
+fn unsurfaced_registered(block: i64, log_index: i64, owner: &str, expires: u64) -> RawLogInput {
+    raw_at(
+        NameRegistered {
+            name: UNSURFACED.to_owned(),
+            label: keccak256(UNSURFACED.as_bytes()),
+            owner: addr(owner),
+            expires: U256::from(expires),
+        }
+        .encode_log_data(),
+        block,
+        log_index,
+        CONTRACT,
+    )
+}
+
+/// The BaseRegistrar's `Transfer` of the `LEASED` token from `from` to `to`.
+fn unsurfaced_transfer(block: i64, log_index: i64, from: &str, to: &str) -> RawLogInput {
+    raw_at(
+        v1_registrar::Transfer {
+            from: addr(from),
+            to: addr(to),
+            tokenId: U256::from_be_bytes(keccak256(UNSURFACED.as_bytes()).0),
+        }
+        .encode_log_data(),
+        block,
+        log_index,
+        CONTRACT,
+    )
+}
+
+/// A lapsed unwrapped lease on a surface-unknown name hands the resource back to its registry
+/// owner, as on a name with a surface. The release binds no surface for such a name, but the
+/// hand-back is the holder's, which every other registry-only row follows whether or not the
+/// name has a surface. When the registration's registry write was its own transaction the owner
+/// already holds the resource and the release adds no row, and a Graveyard owner is granted
+/// nothing.
+#[test]
+fn a_lapsed_lease_on_a_surface_unknown_name_hands_the_resource_back_to_its_registry_owner()
+-> anyhow::Result<()> {
+    let resource = registry_only_of(&format!("{:#x}", unsurfaced()));
+    let eth = vec![new_owner_under(B256::ZERO, 1, 0, "eth", CONTRACT)];
+    let release = vec![new_owner_under(
+        node(&["eth"]),
+        RELEASED,
+        0,
+        "other",
+        AWAY_OWNER,
+    )];
+    let registration = |own_transaction: bool, resolver: bool| {
+        let mut write = new_owner_under(node(&["eth"]), 2, 0, UNSURFACED, HOLDER);
+        let mut registration = unsurfaced_registered(2, 1, HOLDER, 10);
+        if own_transaction {
+            write = in_transaction(write, 0);
+            registration = in_transaction(registration, 1);
+        }
+        let mut logs = vec![write, registration];
+        if resolver {
+            logs.push(new_resolver(3, 0, unsurfaced(), RESOLVER));
+        }
+        logs
+    };
+    let to_graveyard = vec![
+        unsurfaced_transfer(4, 0, HOLDER, GRAVEYARD),
+        registry_transfer(4, 1, unsurfaced(), GRAVEYARD),
+    ];
+    let mut failures = holder_row_failures(
+        &lease_batch,
+        vec![
+            HolderRow::new(
+                "U1 a release with a resolver set",
+                eth.clone(),
+                vec![registration(false, true), release.clone()],
+                resource,
+                held_by(HOLDER, Some(RESOLVER)),
+            ),
+            HolderRow::new(
+                "U2 a release with no resolver",
+                eth.clone(),
+                vec![registration(false, false), release.clone()],
+                resource,
+                held_by(HOLDER, None),
+            ),
+            HolderRow::new(
+                "U3 a release when the registry owner already holds the resource",
+                eth.clone(),
+                vec![registration(true, true), release.clone()],
+                resource,
+                held_by(HOLDER, Some(RESOLVER)),
+            )
+            .forbid(|event| event.block_number == Some(RELEASED)),
+        ],
+    )?;
+    let graveyard_build = |logs: Vec<RawLogInput>| with_graveyard(lease_batch(logs));
+    failures.extend(holder_row_failures(
+        &graveyard_build,
+        vec![
+            HolderRow::new(
+                "U4 a release to a Graveyard registry owner",
+                eth,
+                vec![registration(false, true), to_graveyard, release],
+                resource,
+                LiveGrants::new(),
+            )
+            .forbid(|event| about(event, GRAVEYARD)),
+        ],
+    )?);
+    assert_no_failures(failures)
+}
+
 /// A registration transaction that also holds writes the registration does not take over.
 /// CHILD_OWNER, the node's stale registry owner, hands the record to AWAY_OWNER and takes it back
 /// before `register` runs in the same transaction: the BaseRegistrar mints, writes the registry
