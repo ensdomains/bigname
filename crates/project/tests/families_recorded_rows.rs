@@ -156,6 +156,25 @@ async fn rebuilt(blocks: u64) -> Result<()> {
         covered,
         "the recorded digest must cover historical address membership"
     );
+    // A rebuild in ranges composes the ids with no surface in its composition pass, from the
+    // base rows and the interpreted events, so the digest must hold the empty rows block by block
+    // leaves for them.
+    let unsurfaced: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM project_lookup_name lookup WHERE lookup.core IS NULL
+                 AND NOT EXISTS (SELECT 1 FROM name_surfaces surface
+                                 WHERE surface.logical_name_id = lookup.logical_name_id)),
+                (SELECT count(*) FROM project_history_source source
+                 WHERE source.source_kind = 0 AND source.event_mask = 0
+                   AND NOT EXISTS (SELECT 1 FROM name_surfaces surface
+                                   WHERE surface.logical_name_id = source.source_key))",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    ensure!(
+        unsurfaced.0 > 0 && unsurfaced.1 > 0,
+        "the recorded digest must cover the lookup rows and name sources of ids with no surface: \
+         {unsurfaced:?}"
+    );
     let (digest, tables) = digest(&fixture, CHAIN, &PATH_TABLES, Some(&names.sub)).await?;
     ensure!(
         digest == RECORDED,
@@ -265,8 +284,8 @@ async fn a_mainnet_range_rebuild_resumed_after_budget_stops_equals_block_by_bloc
             "run {runs} restarted the rebuild"
         );
         ensure!(
-            runs == 0 || outcome.ranges > 0,
-            "run {runs} applied no range"
+            runs == 0 || outcome.ranges > 0 || outcome.compose_chunks > 0,
+            "run {runs} applied no range and no chunk of the composition pass"
         );
         runs += 1;
         mode = FamilyMode::Normal;

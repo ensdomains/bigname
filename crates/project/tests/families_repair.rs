@@ -833,23 +833,65 @@ async fn edge_starting_at(fixture: &Fixture, block: i64) -> Result<()> {
 // two events, and one case adds a discovery edge that starts on an event block: each block is
 // work once. Each case runs with ranges off and with every work block below the target in
 // ranges, on a fresh fixture each: the budget counts the blocks of a range as it counts single
-// blocks, so both see the same runs, and only the ranged runs that apply work below the target
-// commit ranges.
+// blocks, and only the ranged runs that apply work below the target commit ranges. The ranged
+// runs also spend the budget on the composition pass, one block a chunk and one for its end: here
+// a chunk of names and one catalogue window, three blocks in all, so they see their own runs.
 #[tokio::test]
 async fn a_rebuild_run_reads_one_work_block_past_its_budget() -> Result<()> {
-    // (work blocks, a discovery edge starting at, per run: marker, blocks applied, budget spent)
+    // (work blocks, a discovery edge starting at, per run with ranges off, then with ranges:
+    // marker, blocks applied, budget spent)
     type Run = (i64, u64, bool);
-    let cases: [(&[i64], Option<i64>, &[Run]); 7] = [
-        (&[5, 7], None, &[(12, 3, false)]),
-        (&[5, 7, 9], None, &[(9, 3, true), (12, 1, false)]),
-        (&[5, 7, 9, 11], None, &[(9, 3, true), (12, 2, false)]),
-        (&[5, 12], None, &[(12, 2, false)]),
-        (&[5, 7, 12], None, &[(12, 3, false)]),
-        (&[5, 7, 9, 12], None, &[(9, 3, true), (12, 1, false)]),
-        (&[5, 7, 9], Some(7), &[(9, 3, true), (12, 1, false)]),
+    type Case<'a> = (&'a [i64], Option<i64>, &'a [Run], &'a [Run]);
+    let cases: [Case<'_>; 7] = [
+        (
+            &[5, 7],
+            None,
+            &[(12, 3, false)],
+            &[(7, 2, true), (12, 1, false)],
+        ),
+        (
+            &[5, 7, 9],
+            None,
+            &[(9, 3, true), (12, 1, false)],
+            &[(9, 3, true), (9, 0, true), (12, 1, false)],
+        ),
+        (
+            &[5, 7, 9, 11],
+            None,
+            &[(9, 3, true), (12, 2, false)],
+            &[(9, 3, true), (11, 1, true), (12, 1, false)],
+        ),
+        (
+            &[5, 12],
+            None,
+            &[(12, 2, false)],
+            &[(5, 1, true), (12, 1, false)],
+        ),
+        (
+            &[5, 7, 12],
+            None,
+            &[(12, 3, false)],
+            &[(7, 2, true), (12, 1, false)],
+        ),
+        (
+            &[5, 7, 9, 12],
+            None,
+            &[(9, 3, true), (12, 1, false)],
+            &[(9, 3, true), (9, 0, true), (12, 1, false)],
+        ),
+        (
+            &[5, 7, 9],
+            Some(7),
+            &[(9, 3, true), (12, 1, false)],
+            &[(9, 3, true), (9, 0, true), (12, 1, false)],
+        ),
     ];
-    for (work, edge, runs) in cases {
-        for ranges in [RebuildRanges::Off, RebuildRanges::Through(12)] {
+    let mut every = Vec::new();
+    for (work, edge, off, ranged) in cases {
+        for (ranges, runs) in [
+            (RebuildRanges::Off, off),
+            (RebuildRanges::Through(12), ranged),
+        ] {
             let small = FamilyOptions::new(CONTENT_HASH)
                 .with_max_blocks_per_run(3)
                 .with_rebuild_ranges(ranges);
@@ -861,7 +903,8 @@ async fn a_rebuild_run_reads_one_work_block_past_its_budget() -> Result<()> {
                 edge_starting_at(&fixture, block).await?;
             }
             let mut seen = Vec::new();
-            for run in 0..runs.len() {
+            // Run until the marker reaches the target.
+            for run in 0..10 {
                 let mode = if run == 0 {
                     FamilyMode::Rebuild
                 } else {
@@ -887,11 +930,18 @@ async fn a_rebuild_run_reads_one_work_block_past_its_budget() -> Result<()> {
                     outcome.blocks
                 );
                 seen.push((marker, outcome.blocks, outcome.budget_exhausted));
+                if marker == 12 {
+                    break;
+                }
             }
-            assert_eq!(seen, runs, "work {work:?}, edge {edge:?}, {ranges:?}");
+            every.push((work, edge, ranges, seen == runs, seen));
             fixture.cleanup().await?;
         }
     }
+    assert!(
+        every.iter().all(|(.., equal, _)| *equal),
+        "work, edge, ranges, as expected, runs: {every:#?}"
+    );
     Ok(())
 }
 

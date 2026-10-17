@@ -39,13 +39,10 @@ pub(super) struct CapacityArgs {
     /// letting each chain choose the per-batch ENSv1 lookahead loader automatically.
     #[arg(long, env = "BIGNAME_INTERPRET_FORCE_FULL_STATE_LOADER")]
     interpret_force_full_state_loader: bool,
-    /// Canonical blocks per Interpret batch; at least 1. Smaller batches use less memory.
-    #[arg(
-        long,
-        env = "BIGNAME_INTERPRET_BLOCKS_PER_BATCH",
-        default_value_t = bigname_interpret::DEFAULT_INTERPRET_BLOCKS_PER_BATCH
-    )]
-    interpret_blocks_per_batch: NonZeroU32,
+    /// Canonical blocks per Interpret batch, at least 1 (default: 500). Smaller batches use
+    /// less memory. A value set here or in the environment also caps adaptive redo batches.
+    #[arg(long, env = "BIGNAME_INTERPRET_BLOCKS_PER_BATCH")]
+    interpret_blocks_per_batch: Option<NonZeroU32>,
     /// PostgreSQL statement timeout, in seconds, for the Interpret lookahead loader's reads.
     /// 0, the default, sets no timeout.
     #[arg(
@@ -77,6 +74,12 @@ pub(super) struct CapacityArgs {
     capacity_poll_ms: u64,
 }
 
+impl CapacityArgs {
+    pub(super) fn explicit_interpret_blocks_per_batch(&self) -> Option<NonZeroU32> {
+        self.interpret_blocks_per_batch
+    }
+}
+
 pub(super) fn resolve_capacity(args: CapacityArgs) -> RunnerResult<CapacityConfig> {
     if args.capacity_poll_ms == 0 {
         return Err(RunnerError::new(
@@ -96,7 +99,9 @@ pub(super) fn resolve_capacity(args: CapacityArgs) -> RunnerResult<CapacityConfi
     .with_rpc_chain_check(args.rpc_chain_check);
     Ok(CapacityConfig {
         ingest,
-        interpret_blocks_per_batch: args.interpret_blocks_per_batch,
+        interpret_blocks_per_batch: args
+            .interpret_blocks_per_batch
+            .unwrap_or(bigname_interpret::DEFAULT_INTERPRET_BLOCKS_PER_BATCH),
         interpret_force_full_state_loader: args.interpret_force_full_state_loader,
         interpret_lookahead_statement_timeout_secs: NonZeroU32::new(
             args.interpret_lookahead_statement_timeout_secs,

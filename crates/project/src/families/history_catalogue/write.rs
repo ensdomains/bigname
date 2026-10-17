@@ -44,6 +44,9 @@ pub(super) async fn replace(
     if keys.is_empty() {
         return Ok((0, 0));
     }
+    if !block.journal {
+        return Ok((store::replace(transaction, table, keys, rows).await?, 0));
+    }
     // Membership and its final source envelope can change the same anchor within one
     // publication. Keep the image from before the first change, never the intermediate row.
     let count = sqlx::query(

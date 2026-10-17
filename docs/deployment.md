@@ -566,6 +566,23 @@ one block timestamp cannot be split across batches. The setting must not change
 stored output or the interpreter content hash, so it can be changed between runs
 without a redo.
 
+A one-shot `phase-runner redo --phase interpret` or `--phase all` can instead
+size each Interpret redo batch with
+[`--interpret-adaptive`](development.md#adaptive-interpret-batches). The planner
+adds whole canonical blocks until the next block would pass a raw log count or an
+estimated raw input size, and a block over either target runs alone. Without the
+flag the fixed 500-block batch is unchanged. A `--interpret-blocks-per-batch` or
+`BIGNAME_INTERPRET_BLOCKS_PER_BATCH` value set by the operator also caps the
+adaptive block span. The supervised `run` does not accept the flag. Inside a redo
+it applies only to batches Interpret runs in redo mode, so a Normal Interpret run
+in the same process keeps fixed batches. Like the batch length, it does not
+change stored output or the interpreter content hash.
+
+The input estimate is not a memory limit. The lookahead loader also restores the prior
+history of every name a batch touches or that falls due within its time span, and
+the estimate does not count that history. A long sparse batch can therefore
+restore far more than its raw logs suggest.
+
 `BIGNAME_INTERPRET_LOOKAHEAD_STATEMENT_TIMEOUT_SECS`
 (`--interpret-lookahead-statement-timeout-secs`) sets a PostgreSQL
 `statement_timeout`, in seconds, on the lookahead loader's read transaction. It
@@ -4719,3 +4736,36 @@ observes `eth`, and a busy contract emits many logs in one batch.
   matching runner and API binaries. The change rides the next re-derivation release and
   shares that release's one Interpret and Project redo pair with its other hash-rotating
   changes. Do not mark old rows ready under the new hash.
+
+## A family rebuild in ranges composes once, in a composition pass
+
+The build whose rebuild ranges compose nothing and whose
+[composition pass](glossary.md#composition-pass) composes every name once
+changes `crates/project/src` and adds a schema-migration. It is an input of the
+[projection content hash](glossary.md#projection-content-hash) only.
+
+- The projection content hash rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, under
+  matching runner and API binaries. The change rides the next re-derivation
+  release and shares that release's Project redo.
+- The schema-migration `20261016130000_project_repair_record_composing.sql`
+  adds the repair record state `composing`, the columns `composed_block`,
+  `compose_stream`, `compose_cursor` and `compose_chunks`, and the pass's work
+  list table `project_compose_name_work`. It must run before the new runner
+  binary. Every family run of the new binary reads the new record columns, so
+  without the migration every family run fails, live follow included, not only
+  the pass.
+- Rolling the runner back mid-pass is safe. The previous binary resets the
+  chain under its own projection content hash and leaves the pass columns it
+  does not know, which the migration's constraint allows outside `composing`.
+  The new binary clears them when it next resets.
+- During the rebuild the composed tables (name summaries, lookup rows, address
+  indexes and the history catalogue) read zero rows until the pass. During the
+  pass the [family marker](glossary.md#family-marker) stays on one block while
+  the [repair record](glossary.md#repair-record)'s `compose_stream`,
+  `compose_cursor` and `compose_chunks` move
+  ([pipeline monitoring](runbooks/pipeline-monitoring.md)).
+- It adds no manifest or setting. Its only table is the pass's work list, which
+  holds rows only while a pass runs. The manifest-authority fingerprint and the
+  compiled watch plan are unchanged, so stamp no Ingest redo.

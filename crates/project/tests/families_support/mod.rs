@@ -21,6 +21,23 @@ pub const CHAIN: &str = "ethereum-sepolia";
 /// written by it, as the publication fence does.
 pub const CONTENT_HASH: &str = bigname_test_support::PROJECTION_CONTENT_HASH;
 
+/// The tables a rebuild composes in its composition pass rather than in its ranges.
+pub const COMPOSED_TABLES: [&str; 13] = [
+    "project_lookup_name",
+    "project_lookup_relation",
+    "project_lookup_inventory",
+    "project_lookup_record",
+    "project_lookup_dependency",
+    "project_name_summary",
+    "project_address_history_anchor",
+    "project_history_source",
+    "project_history_source_edge",
+    "project_history_catalogue_marker",
+    "project_address_name_index",
+    "project_address_record_node_index",
+    "project_address_record_id_index",
+];
+
 pub fn hash(block: i64) -> String {
     format!("0x{block:064x}")
 }
@@ -622,6 +639,19 @@ impl Fixture {
     }
 
     /// The repair record as JSON, without its update time.
+    /// Rows in the tables a rebuild's composition pass composes: the lookup rows, the name
+    /// summaries, the address history catalogue and the derived address indexes.
+    pub async fn composed_rows(&self) -> Result<i64> {
+        let mut rows = 0;
+        for table in COMPOSED_TABLES {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+                .fetch_one(&self.pool)
+                .await?;
+            rows += count;
+        }
+        Ok(rows)
+    }
+
     pub async fn repair_record(&self) -> Result<Option<Value>> {
         Ok(sqlx::query_scalar(
             "SELECT to_jsonb(record) - 'updated_at' - 'chain_id'

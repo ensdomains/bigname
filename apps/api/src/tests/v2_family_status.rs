@@ -78,6 +78,55 @@ async fn v2_status_degrades_during_a_family_rebuild() -> Result<()> {
 
     database.cleanup().await
 }
+/// The repair record of a family rebuild in ranges of `chain` in its composition pass, at the
+/// start of the names stream, or after it, with the pass's block recorded.
+async fn record_composition(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    target: i64,
+    in_pass: bool,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO bigname_phase.project_repair_record (
+             chain_id, attempt, reason, replay_target_number, replay_target_hash, state,
+             composed_block, compose_stream, compose_cursor
+         ) VALUES (
+             $1, 0, 'content_hash_rebuild', $2, 'target', $3,
+             CASE WHEN $4 THEN NULL ELSE $2 - 10 END, CASE WHEN $4 THEN 0 END,
+             CASE WHEN $4 THEN '5' END
+         )
+         ON CONFLICT (chain_id) DO UPDATE SET state = EXCLUDED.state,
+             composed_block = EXCLUDED.composed_block, compose_stream = EXCLUDED.compose_stream,
+             compose_cursor = EXCLUDED.compose_cursor, completed_sequence = NULL,
+             completed_marker_number = NULL, completed_marker_hash = NULL,
+             completed_input_hash = NULL, trusted_base_number = NULL, trusted_base_hash = NULL",
+    )
+    .bind(chain)
+    .bind(target)
+    .bind(if in_pass { "composing" } else { "rebuilding" })
+    .bind(in_pass)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+#[tokio::test]
+async fn v2_status_degrades_during_and_after_a_rebuilds_composition_pass() -> Result<()> {
+    for in_pass in [true, false] {
+        let database = TestDatabase::new_migrated().await?;
+        let state = seed_family_status_fixture(&database).await?;
+        sqlx::query("UPDATE bigname_phase.project_family_marker SET state = 'bootstrap_pending'")
+            .execute(&database.lookup_pool)
+            .await?;
+        record_composition(&database.lookup_pool, "ethereum-mainnet", 120, in_pass).await?;
+
+        let families = family_status_chain(&state).await?;
+        assert_eq!(families["status"], json!("degraded"), "in the pass: {in_pass}");
+        assert_eq!(families["indexed_block"], json!(119), "in the pass: {in_pass}");
+
+        database.cleanup().await?;
+    }
+    Ok(())
+}
 #[tokio::test]
 async fn v2_status_has_no_indexed_block_without_a_family_marker() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -154,6 +203,24 @@ async fn v2_verified_records_answer_stale_during_a_family_rebuild() -> Result<()
     assert_eq!(requests, 0, "a refused read calls no provider");
 
     database.cleanup().await
+}
+#[tokio::test]
+async fn v2_verified_records_answer_stale_during_and_after_a_rebuilds_composition_pass()
+-> Result<()> {
+    for in_pass in [true, false] {
+        let database = TestDatabase::new_migrated().await?;
+        seed_family_verified_records_fixture(&database, "bootstrap_pending").await?;
+        let lookup_pool = database.lookup_pool().await?;
+        record_composition(&lookup_pool, "ethereum-mainnet", 21_000_003, in_pass).await?;
+
+        let (status, payload, requests) = family_verified_records(&database).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "in the pass: {in_pass}: {payload}");
+        assert_eq!(payload["error"]["code"], json!("stale"), "in the pass: {in_pass}");
+        assert_eq!(requests, 0, "a refused read calls no provider");
+
+        database.cleanup().await?;
+    }
+    Ok(())
 }
 #[tokio::test]
 async fn v2_status_lag_is_unknown_during_an_interpret_redo() -> Result<()> {

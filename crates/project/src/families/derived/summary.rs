@@ -38,7 +38,7 @@ use crate::{
 };
 
 /// Names composed per call, to bound the working set of a rebuild range.
-const CHUNK: usize = 1000;
+pub(crate) const CHUNK: usize = 1000;
 
 /// What a summary refresh wrote: the `project_name_summary` rows written or removed, and the
 /// undo rows journalled for them.
@@ -111,27 +111,7 @@ pub(super) async fn refresh(
     let mut current_relations = Vec::new();
     let mut result = Refreshed::default();
     for chunk in names.chunks(CHUNK) {
-        let fresh = bigname_storage::families::name::compose_name_summary_publication(
-            transaction,
-            &publication,
-            chunk,
-        )
-        .await
-        .map_err(|error| {
-            let message = format!(
-                "failed to compose the name summaries of block {number} of chain {chain_id}: \
-                 {error:#}"
-            );
-            // A registered name that lost its required registry owner is not published.
-            if error
-                .downcast_ref::<bigname_storage::families::control::lifecycle::RequiredOwnerMissing>()
-                .is_some()
-            {
-                ProjectError::data_integrity(message)
-            } else {
-                ProjectError::transient(message)
-            }
-        })?;
+        let fresh = compose(transaction, &publication, chunk).await?;
         retire_null_resolver_divergences(transaction, chain_id, &fresh.null_resolver_names).await?;
         current_relations.extend(fresh.current_history_relations);
         let (rows, undo_rows) =
@@ -142,6 +122,35 @@ pub(super) async fn refresh(
     result.names = names;
     result.current_relations = current_relations;
     Ok(result)
+}
+
+/// Compose the summaries of `chunk` at `publication`.
+pub(crate) async fn compose(
+    transaction: &mut Transaction<'_, Postgres>,
+    publication: &bigname_storage::families::name::FamilyPublication,
+    chunk: &[String],
+) -> Result<bigname_storage::families::name::NameSummaryPublication> {
+    bigname_storage::families::name::compose_name_summary_publication(
+        transaction,
+        publication,
+        chunk,
+    )
+    .await
+    .map_err(|error| {
+        let message = format!(
+            "failed to compose the name summaries of block {} of chain {}: {error:#}",
+            publication.block_number, publication.chain_id
+        );
+        // A registered name that lost its required registry owner is not published.
+        if error
+            .downcast_ref::<bigname_storage::families::control::lifecycle::RequiredOwnerMissing>()
+            .is_some()
+        {
+            ProjectError::data_integrity(message)
+        } else {
+            ProjectError::transient(message)
+        }
+    })
 }
 
 pub(crate) async fn retire_null_resolver_divergences(

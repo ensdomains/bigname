@@ -240,6 +240,57 @@ empty. The
 orphaning and downstream repair stamps to normal head publication. See
 [`chain-intake.md`](chain-intake.md) for the phase boundary.
 
+### Adaptive Interpret batches
+
+An Interpret redo, alone or within `--phase all`, can opt into
+`--interpret-adaptive`. Each batch then holds whole canonical blocks until the
+next block would pass a target, instead of a fixed 500 blocks. Dense history gets
+shorter batches and sparse history longer ones.
+
+| Option | Default | Meaning |
+| --- | ---: | --- |
+| `--interpret-target-logs` | 200000 | Raw logs per batch |
+| `--interpret-target-input-mib` | 128 | Estimated raw input MiB per batch |
+| `--interpret-adaptive-max-blocks` | 131072 | Most canonical blocks one batch spans |
+
+Other redo phases and the supervised `run` refuse the flag. The options require
+`--interpret-adaptive`, and each must be positive. An explicit
+`--interpret-blocks-per-batch`, or `BIGNAME_INTERPRET_BLOCKS_PER_BATCH`, caps
+the block span. The implicit 500-block default does not. A block is never
+split: one block over a target runs alone and is logged as oversized. Normal
+Interpret batches that the redo runs after a discovery repair keep the fixed
+length.
+
+The planner reads a raw log count and an input estimate for up to the maximum
+span of blocks at once, and reuses them for the following batches. The end of
+that span is itself a batch boundary, so a batch that starts partway into it ends
+there even when it is under its targets. Each batch
+still reads its blocks again inside its own database snapshot. A chain
+reorganization between planning and loading therefore fails that batch with a
+retryable error before it writes anything, and the retry plans from fresh
+lineage. A restarted redo plans again from its last committed block, so its
+batch boundaries may differ from an uninterrupted run while its stored rows do
+not.
+
+The estimate covers raw input only. It does not bound adapter state, the prior
+history the loader restores, or PostgreSQL memory.
+
+The runner refreshes its database phase heartbeat only between batches. A long
+adaptive batch can therefore make [`GET /v1/status`](api-v1-routes.md#get-v1status)
+report the chain `stale` and can fire `BignamePhaseRunnerHeartbeatStale`. Before
+an adaptive redo, raise `BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS` on the API
+and `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS` on each scraped phase
+runner above the longest expected batch, as
+[phase-runner configuration](deployment.md#phase-runner-configuration)
+describes, or expect the stale status and the page until the redo ends.
+
+To compare with fixed batches,
+run the same redo on the same restored database with and without the flag, and
+compare the Interpret phase time, peak memory and the
+`planned adaptive whole-block batch` log lines. An Interpret redo also performs
+the Project work it requires, so time the completed Interpret boundary rather
+than the whole process.
+
 ## Live API execution configuration
 
 Supported verified-resolution product routes may execute an admitted selector

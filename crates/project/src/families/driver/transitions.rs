@@ -9,7 +9,7 @@ use crate::{
         input::{self, InputToken, Revision},
         manifests,
         marker::{self, FamilyMarker},
-        repair::{self, NewRepair, Reason, Record},
+        repair::{self, NewRepair, Reason, Record, State},
         tables,
     },
 };
@@ -30,9 +30,12 @@ impl Run<'_> {
         }
         let (reset, revision) = self.reset(reason, attempt, family, planned).await?;
         outcome.reset = true;
-        let reset_sequence = reset.sequence;
-        self.populate(reset, attempt, reset_sequence, &revision, outcome)
-            .await
+        let record = repair::read(self.pool, self.chain_id)
+            .await?
+            .ok_or_else(|| {
+                ProjectError::transient(format!("chain {} lost its repair record", self.chain_id))
+            })?;
+        self.populate(reset, record, &revision, outcome).await
     }
 
     /// Resume a rebuild the record says is under way; start it again when its input revision
@@ -62,16 +65,8 @@ impl Run<'_> {
                 .await;
         }
         let revision = revision.expect("checked equal to a recorded prefix");
-        // A record written before the reset generation was kept counts from this run.
-        let reset_sequence = record.reset_sequence.unwrap_or(family.sequence);
-        self.populate(
-            family.clone(),
-            record.attempt,
-            reset_sequence,
-            &revision,
-            outcome,
-        )
-        .await
+        self.populate(family.clone(), record.clone(), &revision, outcome)
+            .await
     }
 
     /// Carry the rebuild an interrupted attempt of the same redo left over to `attempt`, fenced on
@@ -101,16 +96,20 @@ impl Run<'_> {
 
     /// Populate from `family` to the target, visiting only the blocks that carry family work
     /// and then the target itself, so the marker ends at the target. The target's block
-    /// completes the record. `reset_sequence` is the marker generation the rebuild's reset wrote,
-    /// so the blocks rebuilt since the reset are the generations above it.
+    /// completes the record. The record's reset generation is the marker generation the
+    /// rebuild's reset wrote, so the blocks rebuilt since the reset are the generations above it.
+    /// The ranges before the composition pass compose nothing, and the pass runs before the
+    /// first generation that is not such a range (compose.rs).
     pub(super) async fn populate(
         &mut self,
         mut family: FamilyMarker,
-        attempt: i64,
-        reset_sequence: i64,
+        mut record: Record,
         revision: &Revision,
         outcome: &mut FamilyOutcome,
     ) -> Result<()> {
+        let attempt = record.attempt;
+        // A record written before the reset generation was kept counts from this run.
+        let reset_sequence = record.reset_sequence.unwrap_or(family.sequence);
         let from = family
             .current
             .as_ref()
@@ -155,6 +154,16 @@ impl Run<'_> {
         };
         let mut index = 0;
         while let Some(&number) = blocks.get(index) {
+            let uncomposed = record.composed_block.is_none();
+            if record.state == State::Composing || (uncomposed && !ranged(&number)) {
+                match self
+                    .compose(&family, &record, revision, &manifests, outcome)
+                    .await?
+                {
+                    Some(composed) => record = composed,
+                    None => return Ok(()),
+                }
+            }
             if !self.budget.take(outcome) {
                 return Ok(());
             }
@@ -236,7 +245,7 @@ impl Run<'_> {
             .iter()
             .map(|table| table.name)
             .chain(tables::DERIVED)
-            .chain(["project_family_undo"])
+            .chain(["project_family_undo", tables::COMPOSE_NAME_WORK])
         {
             sqlx::query(&format!(
                 "/* project:families.reset_{table} */ DELETE FROM {table} WHERE chain_id = $1"
@@ -361,13 +370,19 @@ pub(super) enum Transition {
 
 /// Refresh the planner statistics of every family table. A failure only costs plan quality, so
 /// it is logged and the rebuild continues.
-async fn analyze(pool: &sqlx::PgPool, chain_id: &str) {
-    for table in tables::JOURNALLED
+pub(super) async fn analyze(pool: &sqlx::PgPool, chain_id: &str) {
+    let tables: Vec<&'static str> = tables::JOURNALLED
         .iter()
         .map(|table| table.name)
         .chain(tables::DERIVED)
         .chain(["project_family_undo"])
-    {
+        .collect();
+    analyze_tables(pool, chain_id, &tables).await;
+}
+
+/// Refresh the planner statistics of `tables`, as `analyze` does.
+pub(super) async fn analyze_tables(pool: &sqlx::PgPool, chain_id: &str, tables: &[&'static str]) {
+    for &table in tables {
         if let Err(error) = sqlx::query(&format!(
             "/* project:families.rebuild.analyze */ ANALYZE {table}"
         ))

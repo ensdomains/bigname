@@ -29,6 +29,15 @@ impl InterpretPhase {
         Self { engine }
     }
 
+    /// Size redo batches by their whole blocks' raw input. Other runs keep fixed batches.
+    pub fn with_adaptive_batching(
+        mut self,
+        config: bigname_interpret::AdaptiveBatchConfig,
+    ) -> Self {
+        self.engine = self.engine.with_adaptive_batching(config);
+        self
+    }
+
     pub fn new(pool: PgPool) -> Self {
         Self {
             engine: Engine::new(pool),
