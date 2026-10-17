@@ -301,6 +301,9 @@ fn an_active_repair_keeps_the_undo_rows_above_its_trusted_base() {
         completed_marker: None,
         completed_input_hash: None,
         reset_sequence: None,
+        composed_block: None,
+        compose_stream: None,
+        compose_cursor: None,
     };
     assert_eq!(
         record.retention_floor(),
@@ -316,4 +319,8 @@ fn an_active_repair_keeps_the_undo_rows_above_its_trusted_base() {
         None,
         "a finished repair keeps nothing"
     );
+    for state in [State::Rebuilding, State::Composing] {
+        record.state = state;
+        assert_eq!(record.retention_floor(), None, "{state:?} keeps nothing");
+    }
 }

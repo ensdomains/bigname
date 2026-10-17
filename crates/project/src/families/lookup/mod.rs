@@ -4,7 +4,7 @@ mod inventories;
 mod names;
 mod replace;
 mod work;
-pub(super) use work::prepare;
+pub(super) use work::{prepare, prepare_names};
 
 use super::{block::BlockStats, input::BlockHeader};
 use crate::Result;

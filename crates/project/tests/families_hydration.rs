@@ -690,3 +690,70 @@ async fn hydrated_empty_name_serves_no_default() -> Result<()> {
     assert_eq!(served.row.claim_provenance["reverse_node"], node(1));
     fixture.cleanup().await
 }
+
+/// Rebuild to block 4 with `ranges` and return the outcome and both hydration work tables.
+async fn rebuilt_work(
+    prefix: &str,
+    ranges: families::RebuildRanges,
+) -> Result<(FamilyOutcome, Vec<String>)> {
+    let fixture = Fixture::new(prefix, 4).await?;
+    fixture.lineage(CHAIN, 4).await?;
+    let rpc = rpc::Rpc::new().await?;
+    for (block, index) in [(1, 1), (1, 2), (2, 3), (2, 4), (3, 1), (3, 5)] {
+        seed(&fixture, block, index).await?;
+    }
+    rpc::head(&fixture.pool, 4).await?;
+    let token = families::input_token(&fixture.pool, CHAIN).await?;
+    let (outcome, error) = families::run(
+        &fixture.pool,
+        CHAIN,
+        &marker(4),
+        FamilyMode::Rebuild,
+        &token,
+        &FamilyOptions::new(CONTENT_HASH)
+            .with_hydration(rpc.urls())
+            .with_rebuild_ranges(ranges),
+    )
+    .await;
+    if let Some(error) = error {
+        return Err(error.into());
+    }
+    let mut work = Vec::new();
+    for table in [
+        "project_reverse_hydration_work",
+        "project_text_hydration_work",
+    ] {
+        work.push(
+            sqlx::query_scalar(&format!(
+                "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]')::text
+                 FROM {table} t"
+            ))
+            .fetch_one(&fixture.pool)
+            .await?,
+        );
+    }
+    assert!(rpc.calls().is_empty(), "a rebuild makes no hydration call");
+    fixture.cleanup().await?;
+    Ok((outcome, work))
+}
+
+// A rebuild range before the composition pass composes nothing, but it still refreshes the
+// hydration work of the reverse tuples its blocks change, as a rebuild block by block does.
+#[tokio::test]
+async fn a_rebuild_in_ranges_leaves_the_hydration_work_of_a_rebuild_block_by_block() -> Result<()> {
+    let (off, expected) =
+        rebuilt_work("family_hydration_ranges_off", families::RebuildRanges::Off).await?;
+    let (ranged, work) = rebuilt_work(
+        "family_hydration_ranges",
+        families::RebuildRanges::Through(4),
+    )
+    .await?;
+    assert_eq!((off.ranges, off.compose_chunks), (0, 0));
+    assert!(
+        ranged.ranges > 0 && ranged.compose_chunks > 0,
+        "the rebuild ran in ranges and composed once: {ranged:?}"
+    );
+    assert_ne!(expected[0], "[]", "the history has reverse hydration work");
+    assert_eq!(work, expected);
+    Ok(())
+}

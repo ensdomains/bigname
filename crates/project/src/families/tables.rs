@@ -88,6 +88,26 @@ pub(crate) const DERIVED: [&str; 5] = [
     "project_address_record_id_index",
 ];
 
+/// The tables a rebuild's composition pass writes: the composed families and the address indexes.
+/// They grow from empty during the pass, so the pass refreshes their planner statistics.
+pub(crate) const COMPOSED: [&str; 12] = [
+    "project_lookup_name",
+    "project_lookup_relation",
+    "project_lookup_inventory",
+    "project_lookup_record",
+    "project_lookup_dependency",
+    "project_name_summary",
+    "project_address_history_anchor",
+    "project_history_source",
+    "project_history_source_edge",
+    "project_address_name_index",
+    "project_address_record_node_index",
+    "project_address_record_id_index",
+];
+
+/// The composition pass's name work list (families/compose.rs), cleared with the families.
+pub(crate) const COMPOSE_NAME_WORK: &str = "project_compose_name_work";
+
 /// The spec of a journalled table by name.
 pub(crate) fn spec(name: &str) -> &'static TableSpec {
     JOURNALLED

@@ -1949,9 +1949,12 @@ async fn begin_search_family_rebuild(
         },
         bigname_project::families::FamilyMode::Rebuild,
         &token,
+        // Block by block, so the one block applied composes its names: a rebuild range below
+        // the composition pass composes nothing.
         &bigname_project::families::FamilyOptions::new(
             bigname_content_hash::PROJECTION_CONTENT_HASH,
         )
+        .with_rebuild_ranges(bigname_project::families::RebuildRanges::Off)
         .with_max_blocks_per_run(1),
     )
     .await?;

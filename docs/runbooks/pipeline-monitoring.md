@@ -429,8 +429,18 @@ ordinary downstream Project redo; there is no special Project refresh stage.
 
 Inspect the family marker and repair record alongside phase progress. A
 `bootstrap_pending` marker means the rebuild has committed intermediate work
-but cannot yet serve. Repair states `undoing`, `replaying` and `rebuilding`
-identify the durable operation; `complete` records the accepted target.
+but cannot yet serve. Repair states `undoing`, `replaying`, `rebuilding` and
+`composing` identify the durable operation. `complete` records the accepted
+target. While a rebuild applies its ranges, the composed tables (name
+summaries, lookup rows, address indexes and the history catalogue) read zero
+rows. During the [composition pass](../glossary.md#composition-pass) the
+marker sits still on one block for hours while the repair record's
+`compose_stream`, `compose_cursor` and `compose_chunks` move. That is progress,
+not a stall, and the runner continues through runs that only compose.
+On a mainnet-sized corpus `BignamePhaseRunnerHeartbeatStale` can fire once as
+the pass begins, because the batch that begins it also lists every name to
+compose in the same transaction. It clears when that batch ends and needs no
+action.
 Failures leave the committed prefix available for resumption. A malformed
 journal is a data-integrity error to investigate, not an instruction to edit
 markers or silently discard it. Follow the recovery runbook for operator redo

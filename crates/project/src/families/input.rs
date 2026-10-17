@@ -71,6 +71,9 @@ pub(crate) struct BlockHeader {
     pub(crate) timestamp_seconds: i64,
     /// The block timestamp as `to_jsonb` renders it, for timestamp columns of family rows.
     pub(crate) timestamp: Value,
+    /// Whether a publication on this block journals the rows it writes. Only a rebuild's
+    /// composition pass, whose pass-end marker row ends the journal at its block, does not.
+    pub(crate) journal: bool,
 }
 
 /// Read block `number`'s readable lineage row and its predecessor's hash. It is a plain read,
@@ -107,6 +110,7 @@ pub(crate) async fn read_block(
             predecessor_hash,
             timestamp_seconds,
             timestamp,
+            journal: true,
         },
     ))
 }

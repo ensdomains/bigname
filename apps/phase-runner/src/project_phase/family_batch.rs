@@ -115,7 +115,11 @@ impl ProjectPhase {
         if outcome.lag_blocks() == 0 && outcome.marker.as_ref() == Some(&target) {
             return Ok(PhaseBatchOutcome::Complete(progress));
         }
-        if outcome.budget_exhausted && outcome.blocks + outcome.undone_blocks > 0 {
+        // A run that spent its budget made progress: blocks applied or undone, or steps of a
+        // rebuild's composition pass, which apply no block.
+        if outcome.budget_exhausted
+            && outcome.blocks + outcome.undone_blocks + outcome.compose_chunks > 0
+        {
             self.family_continuations
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())

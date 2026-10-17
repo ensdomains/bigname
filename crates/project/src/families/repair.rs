@@ -8,10 +8,15 @@
 //!   commit, capturing the input revision the replay must keep (`start_replay`);
 //! - a replay or rebuild block requires the state, the attempt and, for a replay, that revision;
 //! - the block that publishes the target sets the record complete in the same commit;
-//! - a rebuild's intent is written in the transaction that clears the families (`begin_rebuild`).
+//! - a rebuild's intent is written in the transaction that clears the families (`begin_rebuild`);
+//! - a rebuild in ranges composes once, in state composing, between its ranges and its single
+//!   blocks (`compose.rs`).
 //!
 //! Undo never rewrites the record's facts and never touches `chain_phase_state`.
 use sqlx::{Postgres, Transaction};
+
+mod compose;
+pub(crate) use compose::{begin_compose, compose_step, end_compose};
 
 use super::input::{InputToken, Revision};
 use crate::{Marker, ProjectError, Result};
@@ -58,6 +63,8 @@ pub(crate) enum State {
     Undoing,
     Replaying,
     Rebuilding,
+    /// A rebuild composing its ranges' families once (`compose.rs`).
+    Composing,
     Complete,
 }
 
@@ -67,8 +74,14 @@ impl State {
             Self::Undoing => "undoing",
             Self::Replaying => "replaying",
             Self::Rebuilding => "rebuilding",
+            Self::Composing => "composing",
             Self::Complete => "complete",
         }
+    }
+
+    /// A rebuild, before, during or after its composition pass.
+    pub(crate) const fn rebuilds(self) -> bool {
+        matches!(self, Self::Rebuilding | Self::Composing)
     }
 }
 
@@ -88,6 +101,12 @@ pub(crate) struct Record {
     pub(crate) completed_input_hash: Option<String>,
     /// The marker generation the rebuild's reset wrote; rebuilt blocks advance it one each.
     pub(crate) reset_sequence: Option<i64>,
+    /// The block the rebuild's composition pass composed at, -1 when it composed nothing; null
+    /// before the pass. Every generation of a rebuild above it composes and journals.
+    pub(crate) composed_block: Option<i64>,
+    /// While composing: the pass's stream (`compose::Stream`) and the last key it committed.
+    pub(crate) compose_stream: Option<i16>,
+    pub(crate) compose_cursor: Option<String>,
 }
 
 impl Record {
@@ -131,6 +150,9 @@ struct RecordRow {
     completed_marker_hash: Option<String>,
     completed_input_hash: Option<String>,
     reset_sequence: Option<i64>,
+    composed_block: Option<i64>,
+    compose_stream: Option<i16>,
+    compose_cursor: Option<String>,
 }
 
 impl From<RecordRow> for Record {
@@ -152,6 +174,7 @@ impl From<RecordRow> for Record {
                 "undoing" => State::Undoing,
                 "replaying" => State::Replaying,
                 "rebuilding" => State::Rebuilding,
+                "composing" => State::Composing,
                 _ => State::Complete,
             },
             prefix_revision: row.prefix_recorded.then_some((
@@ -164,6 +187,9 @@ impl From<RecordRow> for Record {
             completed_marker: marker(row.completed_marker_number, row.completed_marker_hash),
             completed_input_hash: row.completed_input_hash,
             reset_sequence: row.reset_sequence,
+            composed_block: row.composed_block,
+            compose_stream: row.compose_stream,
+            compose_cursor: row.compose_cursor,
         }
     }
 }
@@ -172,7 +198,7 @@ const RECORD_COLUMNS: &str = "attempt, reason, trusted_base_number, trusted_base
         replay_target_number, replay_target_hash, state, prefix_interpret_input_content_hash,
         prefix_interpret_redo_attempt, prefix_recorded, invalidation_from, pending_undo_target,
         completed_sequence, completed_marker_number, completed_marker_hash, completed_input_hash,
-        reset_sequence";
+        reset_sequence, composed_block, compose_stream, compose_cursor";
 
 pub(crate) async fn read(pool: &sqlx::PgPool, chain_id: &str) -> Result<Option<Record>> {
     let row: Option<RecordRow> = sqlx::query_as(&format!(
@@ -281,7 +307,8 @@ pub(crate) async fn begin_undo(
              prefix_recorded = false, invalidation_from = NULL,
              pending_undo_target = EXCLUDED.pending_undo_target, completed_sequence = NULL,
              completed_marker_number = NULL, completed_marker_hash = NULL,
-             completed_input_hash = NULL, reset_sequence = NULL, updated_at = now()",
+             completed_input_hash = NULL, reset_sequence = NULL, composed_block = NULL,
+             compose_stream = NULL, compose_cursor = NULL, compose_chunks = 0, updated_at = now()",
     )
     .bind(chain_id)
     .bind(repair.attempt)
@@ -401,7 +428,8 @@ pub(crate) async fn begin_rebuild(
              prefix_recorded = true, invalidation_from = NULL, pending_undo_target = NULL,
              completed_sequence = NULL, completed_marker_number = NULL,
              completed_marker_hash = NULL, completed_input_hash = NULL,
-             reset_sequence = EXCLUDED.reset_sequence, updated_at = now()",
+             reset_sequence = EXCLUDED.reset_sequence, composed_block = NULL,
+             compose_stream = NULL, compose_cursor = NULL, compose_chunks = 0, updated_at = now()",
     )
     .bind(chain_id)
     .bind(attempt)
@@ -418,7 +446,8 @@ pub(crate) async fn begin_rebuild(
 }
 
 /// Carry a rebuild over to `attempt`, the rerun of the interrupted redo that began it. Its facts
-/// (target, input revision, reset generation) stay; only the attempt later blocks fence on moves.
+/// (target, input revision, reset generation, composition pass) stay; only the attempt later
+/// blocks fence on moves.
 pub(crate) async fn adopt_rebuild(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -427,7 +456,7 @@ pub(crate) async fn adopt_rebuild(
     let updated = sqlx::query(
         "/* project:families.repair.adopt_rebuild */ UPDATE project_repair_record
          SET attempt = $2, updated_at = now()
-         WHERE chain_id = $1 AND state = 'rebuilding'",
+         WHERE chain_id = $1 AND state IN ('rebuilding', 'composing')",
     )
     .bind(chain_id)
     .bind(attempt)
@@ -436,7 +465,7 @@ pub(crate) async fn adopt_rebuild(
     .map_err(|error| ProjectError::database("failed to adopt the rebuild record", error))?
     .rows_affected();
     if updated != 1 {
-        return Err(fence_error(chain_id, "rebuilding", None));
+        return Err(fence_error(chain_id, "rebuilding or composing", None));
     }
     Ok(())
 }

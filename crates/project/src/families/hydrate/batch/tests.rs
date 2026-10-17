@@ -67,6 +67,7 @@ async fn waiting_work_gets_a_rounded_up_quarter_before_fresh_singletons() {
         predecessor_hash: None,
         timestamp_seconds: 0,
         timestamp: serde_json::Value::Null,
+        journal: true,
     };
     let urls = ChainRpcUrls::default();
     for (old, expected) in [
@@ -136,6 +137,7 @@ async fn yielding_reserved_calls_records_completed_old_splits_before_fresh_work(
         predecessor_hash: None,
         timestamp_seconds: 0,
         timestamp: serde_json::Value::Null,
+        journal: true,
     };
     let urls = ChainRpcUrls::default();
     let mut stats = HydrationOutcome::default();
@@ -193,6 +195,7 @@ async fn losing_the_block_at_the_reservation_boundary_does_not_defer_pending_hal
         predecessor_hash: None,
         timestamp_seconds: 0,
         timestamp: serde_json::Value::Null,
+        journal: true,
     };
     let urls = ChainRpcUrls::default();
     let mut stats = HydrationOutcome::default();

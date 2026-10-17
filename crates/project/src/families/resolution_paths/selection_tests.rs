@@ -634,6 +634,7 @@ impl World {
             predecessor_hash: None,
             timestamp_seconds: call.time(),
             timestamp: Value::Null,
+            journal: true,
         };
         prepare(&mut transaction, CHAIN, &block, call.after, call.root)
             .await

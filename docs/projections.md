@@ -2008,7 +2008,10 @@ with a stored summary or lookup row. Above 50,000 such names a followed
 publication is refused before it composes any, on every attempt. The error
 names the full Project redo, which composes them in ranges. The supervised
 runner retries and logs that instruction until the redo runs. A one-shot
-`phase-runner redo` halts on it. A rebuild's first publication is not capped.
+`phase-runner redo` halts on it. A rebuild's first publication is not capped,
+and neither is a rebuild range before its
+[composition pass](glossary.md#composition-pass): such a range composes nothing,
+so it sweeps nothing, and the pass composes every name once, in chunks.
 An undo restores the earlier admission
 with the marker, and the replayed block composes every name again. A followed
 publication therefore leaves the rows a rebuild under the same manifest set
@@ -2189,7 +2192,10 @@ registry's current mounts. Cutover changes and due clocks are dependencies.
 Ordinary record values, record links and version-only pointer updates do not
 expand descendants. The writer composes at most 1,000 affected names at a time,
 journals the first summary before-image and retires active direct-divergence
-evidence for withheld resolvers. It creates no persistent path cache or new
+evidence for withheld resolvers. A rebuild in ranges retires that evidence from
+its [composition pass](glossary.md#composition-pass) and from every block it
+composes after the pass, not from the ranges before the pass, which compose
+nothing. It creates no persistent path cache or new
 schema family. Normal publication and rebuild use the same decision. Undo
 restores the journalled summary rows.
 
@@ -2516,16 +2522,58 @@ and unnamed registrar rows of name decoding, and the lifecycle rows of F13's
 registrant fold. The classification read adds the resolvers the range stored;
 one the range removed still comes from the table, but with no candidate left it
 gets no row, as block by block. A block classifies resolvers and reads a name's
-current binding at its own height. The range then journals, for every row it
-changed, the row as it was before the range and the prior marker, under its
-last block, writes once, advances the marker to its last block still in
-`bootstrap_pending`, prunes and commits: one generation. An undo takes the
-whole range back at once, so undo to a block inside a range stops on the
-range's predecessor. The family tables, and the marker apart from its
-generation, equal applying the same blocks one by one
-(`crates/project/tests/families_range.rs`, and every test's rebuild comparison,
-which rebuilds both ways); the undo rows and the generation count differ by
-design. Redo replay and live follow stay one block to a transaction.
+current binding at its own height. The range then writes once, advances the
+marker to its last block still in `bootstrap_pending`, prunes and commits: one
+generation.
+
+A range applied before the rebuild's [composition
+pass](glossary.md#composition-pass), which the repair record says by an unset
+`composed_block`, writes the family rows only. It composes no name summary,
+lookup row, history catalogue row or address index, and it journals nothing,
+not even the prior marker. Nothing serves those rows while the marker is
+`bootstrap_pending`. Before the first generation that is not such a range (a
+work block above the switch point, or the target), the rebuild runs the pass:
+
+- A fenced transition moves the repair record to `composing` and lists, once,
+  every name the incremental path would have named for those blocks in the
+  work table `project_compose_name_work`, numbered in `COLLATE "C"` order. The
+  names come from the surfaces, the base families and the activated
+  interpreted events at or below the marker's block, never from the journal.
+  Nothing writes the families until the pass ends, so the list stays the one
+  its beginning found.
+- Chunks then compose, at the marker's block and with the manifest set the
+  marker recorded, the listed names by number, every address index key, and the
+  history catalogue over consecutive block windows. Each chunk is one
+  transaction fenced on the marker, the input revision and the record's stream
+  and cursor, and counts as one block against the run's budget, so a run stops
+  between chunks and the next continues from the record's cursor. After the
+  pass's 1st, 2nd, 4th, 8th and later powers of two of chunks, counted on the
+  record across runs, the pass refreshes the planner statistics of the tables it
+  composes.
+- A fenced transition ends the pass, which also counts as one block of the
+  budget. The record returns to `rebuilding` with `composed_block` set to the
+  marker's block, the work list is dropped, and one marker journal row under
+  that block, marked `families_journalled: false`, ends the undo journal there.
+
+The runner continues a run that spent its budget on chunks or the pass's end
+alone, as it continues one that applied blocks.
+
+Every later generation (the single blocks above the switch point, a range
+formed after the pass because the switch point rose between runs, and the
+target) composes and journals as a block always did. A rebuild with nothing in
+a range sets `composed_block` to -1 and composes block by block from the start.
+
+An undo takes a range formed after the pass back at once, so undo to a block
+inside it stops on the range's predecessor. An undo that would reach at or
+below the pass block finds the journal ended there and rebuilds instead, since
+the generations below it kept no before-images. That needs a fork point at
+least 5 blocks below the safe block. The family tables, and the marker apart
+from its generation, equal applying the same blocks one by one
+(`crates/project/tests/families_range.rs`,
+`crates/project/tests/families_compose.rs`, and every test's rebuild
+comparison, which rebuilds both ways). The undo rows and the generation count
+differ by design. Redo replay and live follow stay one block to a
+transaction.
 
 ### Ordering and undo
 
@@ -2538,8 +2586,9 @@ same reducers and ordering.
 Undo rows are kept back to the lowest of: 256 blocks below the family marker,
 the chain's finalized block, its safe block, and the block an active repair
 still has to undo to or replay from. Without a finalized and a safe block
-nothing is pruned. A rebuild range's undo rows are one journal entry under the
-range's last block.
+nothing is pruned. A rebuild range formed after the composition pass journals
+as one entry under the range's last block. The ranges before the pass journal
+nothing, and the pass's marker row ends the journal at the pass block.
 
 A Project redo undoes the families from their journal down to the block before
 the redo range and replays them to the frozen replay target. A marker left on a block
@@ -2567,11 +2616,14 @@ requested bounds, rather than those expanded execution bounds, select the undo
 floor on restart.
 The repair record describes the latest of these: its
 attempt, reason, trusted base, replay target, state (`undoing`, `replaying`,
-`rebuilding` or `complete`) and, once done, the marker, generation and input
-content hash it completed with. Each transition commits with the work it
-describes: the reset commits with the rebuild's intent, the last undo with the
-move to replaying, and the final replayed or rebuilt block with the
-completion. A run that stops between blocks is resumed by the next. Each
+`rebuilding`, `composing` or `complete`), the block a rebuild's composition
+pass composed at (`composed_block`), and, once done, the marker, generation and
+input content hash it completed with. A rebuild is `composing` while its
+composition pass runs, with the pass's stream, cursor and chunk count. Each transition
+commits with the work it describes: the reset commits with the rebuild's
+intent, the last undo with the move to replaying, each pass chunk with its
+cursor, and the final replayed or rebuilt block with the completion. A redo
+whose undo would reach at or below `composed_block` rebuilds. A run that stops between blocks is resumed by the next. Each
 start of a Project redo moves the Project row to a new redo attempt, so a
 rebuild records the attempt it began under. When the runner reruns an
 interrupted redo with the same requested range while the Project row still records the
@@ -2579,7 +2631,9 @@ running binary's [projection content hash](glossary.md#projection-content-hash) 
 authority invalidation marker in between), keeping its saved progress, a rebuild the attempt just before it left is
 carried over to the new attempt and resumes from the family marker, provided
 its input revision is unchanged and the families were written under this
-binary's content hash. Otherwise, including a rerun over another range, a
+binary's content hash. One carried over during its composition pass continues
+the pass from the record's cursor, and one carried over after it keeps
+`composed_block`. Otherwise, including a rerun over another range, a
 skipped attempt, an invalidation or a moved input revision, the redo rebuilds
 from the start. A
 redo retried after it completed is recognised only while the marker, its

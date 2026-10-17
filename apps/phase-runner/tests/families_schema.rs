@@ -9,6 +9,7 @@ const FAMILY_TABLES: &[&str] = &[
     "project_family_marker",
     "project_family_undo",
     "project_repair_record",
+    "project_compose_name_work",
     "project_name_state",
     "project_binding_candidate",
     "project_lifecycle_key_state",

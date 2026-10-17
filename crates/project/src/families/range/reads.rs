@@ -57,6 +57,7 @@ pub(super) async fn headers(
                     predecessor_hash,
                     timestamp_seconds,
                     timestamp,
+                    journal: true,
                 };
                 (number, header)
             },
