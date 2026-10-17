@@ -156,7 +156,8 @@ repair path, or checkpoint-promotion consumer for these records.
 
 the partition of one interpret walk into consecutive physical
 batches (500-block ranges unless the operator sets
-`BIGNAME_INTERPRET_BLOCKS_PER_BATCH`). Grids never split a block: the block is the
+`BIGNAME_INTERPRET_BLOCKS_PER_BATCH`, or ranges sized by their raw input in a
+redo run with `--interpret-adaptive`). Grids never split a block: the block is the
 atomic unit every grid loads. Where the boundaries fall is an execution
 detail, not an input to interpretation. After a walk completes, surviving identity rows,
 discovery edges, and normalized events must be identical across grids over identical input.

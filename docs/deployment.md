@@ -566,6 +566,23 @@ one block timestamp cannot be split across batches. The setting must not change
 stored output or the interpreter content hash, so it can be changed between runs
 without a redo.
 
+A one-shot `phase-runner redo --phase interpret` or `--phase all` can instead
+size each Interpret redo batch with
+[`--interpret-adaptive`](development.md#adaptive-interpret-batches). The planner
+adds whole canonical blocks until the next block would pass a raw log count or an
+estimated raw input size, and a block over either target runs alone. Without the
+flag the fixed 500-block batch is unchanged. A `--interpret-blocks-per-batch` or
+`BIGNAME_INTERPRET_BLOCKS_PER_BATCH` value set by the operator also caps the
+adaptive block span. The supervised `run` does not accept the flag. Inside a redo
+it applies only to batches Interpret runs in redo mode, so a Normal Interpret run
+in the same process keeps fixed batches. Like the batch length, it does not
+change stored output or the interpreter content hash.
+
+The input estimate is not a memory limit. The lookahead loader also restores the prior
+history of every name a batch touches or that falls due within its time span, and
+the estimate does not count that history. A long sparse batch can therefore
+restore far more than its raw logs suggest.
+
 `BIGNAME_INTERPRET_LOOKAHEAD_STATEMENT_TIMEOUT_SECS`
 (`--interpret-lookahead-statement-timeout-secs`) sets a PostgreSQL
 `statement_timeout`, in seconds, on the lookahead loader's read transaction. It
