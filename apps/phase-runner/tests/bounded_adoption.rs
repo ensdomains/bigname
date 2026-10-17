@@ -21,6 +21,7 @@ use std::{
 use alloy_primitives::{Address, B256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use anyhow::{Context, Result, ensure};
+use bigname_interpret::AdaptiveBatchConfig;
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
 use phase_runner::{
     CREATE_STAMP, EXTEND_STAMP, INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH,
@@ -1334,6 +1335,52 @@ async fn an_operator_project_range_wider_than_the_stamp_runs_from_the_bound() ->
     fixture.assert_equals_full_pair().await
 }
 
+// Row 42. The adaptive Interpret path, which sizes redo batches by raw input, opens the bounded
+// redo at the bound too. With one block per batch the discharge runs many Interpret batches, the
+// first engine request starts at the bound, the rows below it are left as they were, and the
+// tables equal the full pair's.
+#[tokio::test]
+async fn an_adaptive_bounded_interpret_redo_runs_from_the_bound() -> Result<()> {
+    let fixture = Fixture::new("bounded_adaptive", 59).await?;
+    let start = START + 20;
+    fixture
+        .log(START + 5, 0, REGISTRY, &new_resolver(RESOLVER)?)
+        .await?;
+    fixture
+        .log(start + 1, 0, RESOLVER, &addr_changed()?)
+        .await?;
+    fixture.initial_pair().await?;
+    fixture.add_resolver("public_resolver_fixture", RESOLVER, start)?;
+    let token = fixture.sync().await?;
+    let one_block = AdaptiveBatchConfig {
+        max_blocks: std::num::NonZeroU32::MIN,
+        ..AdaptiveBatchConfig::default()
+    };
+    let run = fixture
+        .redo(
+            fixture.run_with(CHAIN, Some(&token), None, None, Some(one_block)),
+            PhaseName::Interpret,
+            BlockRange::new(START, fixture.head)?,
+        )
+        .await?;
+    let batches = run
+        .batches
+        .lock()
+        .expect("batches lock")
+        .iter()
+        .filter(|(phase, _)| *phase == PhaseName::Interpret)
+        .count();
+    let blocks = usize::try_from(fixture.head - start + 1)?;
+    ensure!(
+        batches >= blocks,
+        "the adaptive redo ran {batches} Interpret batches for {blocks} blocks"
+    );
+    fixture.assert_hashes().await?;
+    let ranges = run.assert_ranges(start, start);
+    fixture.assert_equals_full_pair().await?;
+    ranges
+}
+
 // The first-effect statements read the indexes they are written for. Over a corpus of 20,000 logs
 // from 200 emitters on 20 topics, 2,000 contract instances and 10,000 edges, the generic plan a
 // prepared statement settles on probes each address's own logs, each topic's own logs, each
@@ -1859,6 +1906,24 @@ impl Fixture {
         stop: Option<PhaseName>,
         refuse: Option<PhaseName>,
     ) -> Run {
+        self.run_with(chain, token, stop, refuse, None)
+    }
+
+    /// `run_refusing`, with Interpret's redo batches sized by `adaptive` when given, as
+    /// `--interpret-adaptive` builds it.
+    fn run_with(
+        &self,
+        chain: &str,
+        token: Option<&str>,
+        stop: Option<PhaseName>,
+        refuse: Option<PhaseName>,
+        adaptive: Option<AdaptiveBatchConfig>,
+    ) -> Run {
+        let interpret = InterpretPhase::new(self.pool().clone());
+        let interpret = match adaptive {
+            Some(config) => interpret.with_adaptive_batching(config),
+            None => interpret,
+        };
         let batches = Arc::new(Mutex::new(Vec::new()));
         let recorded = |inner: Arc<dyn Phase>| -> Arc<dyn Phase> {
             Arc::new(Recorded {
@@ -1876,7 +1941,7 @@ impl Fixture {
         });
         let phases = PhaseSet::with_ingest_interpret_and_project(
             Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
-            recorded(Arc::new(InterpretPhase::new(self.pool().clone()))),
+            recorded(Arc::new(interpret)),
             recorded(Arc::new(project)),
         )
         .expect("the phase set is complete");
