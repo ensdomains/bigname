@@ -1338,7 +1338,9 @@ async fn an_operator_project_range_wider_than_the_stamp_runs_from_the_bound() ->
 // Row 42. The adaptive Interpret path, which sizes redo batches by raw input, opens the bounded
 // redo at the bound too. With one block per batch the discharge runs many Interpret batches, the
 // first engine request starts at the bound, the rows below it are left as they were, and the
-// tables equal the full pair's.
+// tables equal the full pair's. The start and the rows below are checked before the redo's own
+// outcome, so an engine that starts low fails here even when the store also refuses its
+// progress.
 #[tokio::test]
 async fn an_adaptive_bounded_interpret_redo_runs_from_the_bound() -> Result<()> {
     let fixture = Fixture::new("bounded_adaptive", 59).await?;
@@ -1356,13 +1358,20 @@ async fn an_adaptive_bounded_interpret_redo_runs_from_the_bound() -> Result<()> 
         max_blocks: std::num::NonZeroU32::MIN,
         ..AdaptiveBatchConfig::default()
     };
-    let run = fixture
-        .redo(
+    let (run, outcome) = fixture
+        .redo_outcome(
             fixture.run_with(CHAIN, Some(&token), None, None, Some(one_block)),
             PhaseName::Interpret,
             BlockRange::new(START, fixture.head)?,
         )
         .await?;
+    run.assert_rows_below(start, start)?;
+    let interpreted = run.ranges(PhaseName::Interpret);
+    ensure!(
+        interpreted.first().map(|range| range.from) == Some(start),
+        "Interpret ran {interpreted:?}, expected from {start}"
+    );
+    outcome?;
     let batches = run
         .batches
         .lock()
@@ -1814,18 +1823,32 @@ impl Fixture {
 
     /// `run` redoes `phase` over `range`, with every dated row snapshot before and after, so
     /// `Run::assert_ranges` can check the rows below each half's start were left as they were.
-    async fn redo(&self, mut run: Run, phase: PhaseName, range: BlockRange) -> RunnerResult<Run> {
+    async fn redo(&self, run: Run, phase: PhaseName, range: BlockRange) -> RunnerResult<Run> {
+        let (run, outcome) = self.redo_outcome(run, phase, range).await?;
+        outcome.map(|()| run)
+    }
+
+    /// `redo`, returning the run and the redo's own outcome apart, with the rows snapshot after
+    /// a failed redo too, so a row can check what the redo wrote before it asks how it ended.
+    async fn redo_outcome(
+        &self,
+        mut run: Run,
+        phase: PhaseName,
+        range: BlockRange,
+    ) -> RunnerResult<(Run, RunnerResult<()>)> {
         let before = self.dated_rows().await?;
-        run.runner
+        let outcome = run
+            .runner
             .redo(
                 &chain()?,
                 RedoPhase::Phase(phase),
                 range,
                 CancellationToken::new(),
             )
-            .await?;
+            .await
+            .map(|_| ());
         run.rows = Some((before, self.dated_rows().await?));
-        Ok(run)
+        Ok((run, outcome))
     }
 
     /// Every row of a compared table that carries a block, as (family table, block, row text),
