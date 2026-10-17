@@ -1425,6 +1425,215 @@ async fn an_adaptive_bounded_interpret_redo_runs_from_the_bound() -> Result<()> 
     ranges
 }
 
+// Row 43. A stamped bounded Project redo begins and stops before its first batch. The operator
+// repeats the full range for Project. The retry resumes the recorded range in the same epoch: the
+// family driver is asked from the bound, the redo keeps its recorded request and start time, and
+// the run that completes it undoes from the bound, leaves the rows below it untouched and equals
+// the full pair.
+#[tokio::test]
+async fn a_repeated_wider_project_redo_resumes_the_recorded_range() -> Result<()> {
+    let (fixture, start) = stamped_bounded_project("bounded_project_repeat").await?;
+    let full = BlockRange::new(START, fixture.head)?;
+    let bound = BlockRange::new(start, fixture.head)?;
+    let (first, outcome) = fixture
+        .redo_outcome(
+            fixture.run(None, Some(PhaseName::Project)),
+            PhaseName::Project,
+            full,
+        )
+        .await?;
+    ensure!(
+        outcome.is_err(),
+        "the first attempt stops before its first batch"
+    );
+    ensure!(
+        first.ranges(PhaseName::Project).first() == Some(&bound),
+        "the first attempt asked the family driver for {:?}",
+        first.ranges(PhaseName::Project)
+    );
+    let epoch = project_epoch(fixture.pool()).await?;
+    let (retry, outcome) = fixture
+        .redo_outcome(
+            fixture.run(None, Some(PhaseName::Project)),
+            PhaseName::Project,
+            full,
+        )
+        .await?;
+    ensure!(outcome.is_err(), "the retry stops before its first batch");
+    let projected = retry.ranges(PhaseName::Project);
+    ensure!(
+        projected.first() == Some(&bound),
+        "the family driver was asked for {projected:?}, expected from {start}"
+    );
+    let resumed = project_epoch(fixture.pool()).await?;
+    ensure!(
+        resumed == epoch,
+        "the retry began another epoch: {epoch:?} became {resumed:?}"
+    );
+    let run = fixture
+        .redo(fixture.run(None, None), PhaseName::Project, full)
+        .await?;
+    let repair = repair_record(fixture.pool()).await?;
+    ensure!(
+        repair.0 == "complete" && repair.1.is_some_and(|base| (START..start).contains(&base)),
+        "the family repair is not an undo stopping in {START}..{start}: {repair:?}"
+    );
+    let projected = run.ranges(PhaseName::Project);
+    ensure!(
+        projected.first() == Some(&bound),
+        "the completing run asked the family driver for {projected:?}, expected from {start}"
+    );
+    run.assert_rows_below(fixture.head + 1, start)?;
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// Row 43b. The same stamped bounded Project redo stops after its first batch, with its undo
+// record open. The repeated full range resumes the recorded range: the family driver is asked
+// from the bound, the repair keeps the trusted base the first attempt recorded, the rows below
+// the bound are untouched, and the tables equal the full pair's.
+#[tokio::test]
+async fn a_repeated_wider_project_redo_keeps_the_open_repair_base() -> Result<()> {
+    let (fixture, start) = stamped_bounded_project("bounded_project_repeat_open").await?;
+    let full = BlockRange::new(START, fixture.head)?;
+    fixture.stop_project_redo(full).await?;
+    let open = repair_record(fixture.pool()).await?;
+    ensure!(
+        open.0 != "complete" && open.1.is_some(),
+        "the first attempt left an open undo: {open:?}"
+    );
+    let run = fixture
+        .redo(fixture.run(None, None), PhaseName::Project, full)
+        .await?;
+    let repair = repair_record(fixture.pool()).await?;
+    ensure!(
+        repair.0 == "complete" && repair.1 == open.1,
+        "the repair base moved from the first attempt's {open:?}: {repair:?}"
+    );
+    let projected = run.ranges(PhaseName::Project);
+    ensure!(
+        projected.first() == Some(&BlockRange::new(start, fixture.head)?),
+        "the family driver was asked for {projected:?}, expected from {start}"
+    );
+    run.assert_rows_below(fixture.head + 1, start)?;
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// Row 44. A retry over the stamped bounded Project redo that does not cover its recorded range is
+// refused by the interrupted-redo coverage check, and the recorded request and epoch stay.
+#[tokio::test]
+async fn a_noncovering_project_retry_over_the_stamp_is_refused() -> Result<()> {
+    let (fixture, start) = stamped_bounded_project("bounded_project_noncovering").await?;
+    let full = BlockRange::new(START, fixture.head)?;
+    let (_, outcome) = fixture
+        .redo_outcome(
+            fixture.run(None, Some(PhaseName::Project)),
+            PhaseName::Project,
+            full,
+        )
+        .await?;
+    ensure!(
+        outcome.is_err(),
+        "the first attempt stops before its first batch"
+    );
+    let epoch = project_epoch(fixture.pool()).await?;
+    let refused = fixture
+        .redo(
+            fixture.run(None, None),
+            PhaseName::Project,
+            BlockRange::new(start + 1, fixture.head)?,
+        )
+        .await
+        .err()
+        .context("the non-covering retry was accepted")?;
+    ensure!(
+        refused.to_string().contains("has an interrupted redo"),
+        "{refused}"
+    );
+    let kept = project_epoch(fixture.pool()).await?;
+    ensure!(
+        kept == epoch,
+        "the refusal changed the redo: {epoch:?} became {kept:?}"
+    );
+    fixture.cleanup().await
+}
+
+// Row 45. A reorg recovery stamps a required Project redo while no manifest change is pending. An
+// operator Project redo over a wider range keeps its own range: the family driver is asked from
+// the operator's start, not the stamp's, and the redo completes.
+#[tokio::test]
+async fn a_project_redo_over_a_reorg_stamp_keeps_its_own_range() -> Result<()> {
+    let fixture = Fixture::new("bounded_reorg_stamp", 59).await?;
+    fixture.initial_pair().await?;
+    sqlx::query(CREATE_STAMP)
+        .bind(CHAIN)
+        .bind(PhaseName::Project.as_str())
+        .bind(START + 30)
+        .bind(fixture.head)
+        .bind(format!(
+            "{REQUIRED_REDO_PREFIX}canonical head publication orphaned previously readable blocks"
+        ))
+        .execute(fixture.pool())
+        .await?;
+    let full = BlockRange::new(START, fixture.head)?;
+    let run = fixture
+        .redo(fixture.run(None, None), PhaseName::Project, full)
+        .await?;
+    let projected = run.ranges(PhaseName::Project);
+    ensure!(
+        projected.first() == Some(&full),
+        "the family driver was asked for {projected:?}, expected {full:?}"
+    );
+    fixture.assert_hashes().await?;
+    fixture.cleanup().await
+}
+
+/// A fixture whose bounded Interpret discharge stamped Project from the bound `START + 20`, with
+/// the Project redo refused before it began, as a binary stopped there leaves it.
+async fn stamped_bounded_project(prefix: &str) -> Result<(Fixture, i64)> {
+    let fixture = Fixture::new(prefix, 59).await?;
+    let start = START + 20;
+    fixture
+        .log(start + 1, 0, RESOLVER, &addr_changed()?)
+        .await?;
+    fixture.initial_pair().await?;
+    fixture.add_resolver("public_resolver_fixture", RESOLVER, start)?;
+    let token = fixture.sync().await?;
+    fixture
+        .redo(
+            fixture.run_refusing(CHAIN, Some(&token), None, Some(PhaseName::Project)),
+            PhaseName::Interpret,
+            BlockRange::new(START, fixture.head)?,
+        )
+        .await
+        .err()
+        .context("the Project redo does not begin")?;
+    Ok((fixture, start))
+}
+
+/// The Project row's redo epoch: its recorded request and the start time a resumed epoch keeps.
+async fn project_epoch(pool: &sqlx::PgPool) -> Result<(Option<i64>, Option<i64>, Option<String>)> {
+    Ok(sqlx::query_as(
+        "SELECT redo_requested_from_block_number, redo_requested_to_block_number,
+                started_at::text
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(CHAIN)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// The family repair record's state and trusted base.
+async fn repair_record(pool: &sqlx::PgPool) -> Result<(String, Option<i64>)> {
+    Ok(sqlx::query_as(
+        "SELECT state, trusted_base_number FROM project_repair_record WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .fetch_one(pool)
+    .await?)
+}
+
 // The first-effect statements read the indexes they are written for. Over a corpus of 20,000 logs
 // from 200 emitters on 20 topics, 2,000 contract instances and 10,000 edges, the generic plan a
 // prepared statement settles on probes each address's own logs, each topic's own logs, each
