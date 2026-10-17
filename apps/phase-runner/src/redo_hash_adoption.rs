@@ -55,6 +55,7 @@ pub(crate) async fn require_full_hash_redo(
     mode: &RunMode,
     recorded_head: Option<i64>,
     interrupted_redo: bool,
+    reason: Option<&str>,
 ) -> RunnerResult<()> {
     let Some(full) = full_hash_range(
         transaction,
@@ -85,8 +86,12 @@ pub(crate) async fn require_full_hash_redo(
             ErrorKind::ContentHashMismatch,
             format!(
                 "cannot adopt a new interpretation-input hash for chain {chain_id} phase {phase} \
-                 with range {}..={}; redo the full range {}..={}",
-                range.from, range.to, full.from, full.to
+                 with range {}..={}; redo the full range {}..={}{}",
+                range.from,
+                range.to,
+                full.from,
+                full.to,
+                reason.map_or_else(String::new, |reason| format!(", because {reason}"))
             ),
         ));
     }
@@ -97,11 +102,14 @@ pub(crate) async fn require_full_hash_redo(
 /// another projection content hash, its redo must adopt this one, which needs the full range.
 /// That range can reach past Project's own head up to the Ingest handoff (Project behind
 /// Interpret when the release landed), so the stamp is not clipped to Project's head. Otherwise
-/// the stamp covers `range` up to Project's head, as before.
+/// the stamp covers `range` up to Project's head, as before. A bounded Interpret discharge of the
+/// marker Project records stamps from the Interpret redo's start instead, the lower of its
+/// attested start and the range it ran (`redo_bounded_adoption::project_stamp_from`).
 pub(crate) async fn stamp_project_after_interpret(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     range: BlockRange,
+    audit: Option<&crate::redo_manifest_audit::ManifestAuthorityAttestationAudit>,
 ) -> RunnerResult<bool> {
     const REASON: &str = "interpret redo completed";
     let project: Option<(Option<i64>, Option<String>)> = sqlx::query_as(
@@ -119,6 +127,25 @@ pub(crate) async fn stamp_project_after_interpret(
             error,
         )
     })?;
+    if let Some((Some(head), hash)) = &project
+        && let Some(from) = crate::redo_bounded_adoption::project_stamp_from(
+            transaction,
+            chain_id,
+            hash.as_deref(),
+            *head,
+            audit,
+        )
+        .await?
+    {
+        return crate::redo_stamp::stamp_required_in_transaction(
+            transaction,
+            chain_id,
+            PhaseName::Project,
+            BlockRange::new(from.min(range.from), range.to.max(from))?,
+            REASON,
+        )
+        .await;
+    }
     if let Some((Some(head), hash)) = project
         && hash.as_deref() != Some(bigname_content_hash::PROJECTION_CONTENT_HASH)
         && let Some(full) =

@@ -5,9 +5,48 @@ use crate::{
     phase::{BlockRange, PhaseName},
 };
 
-pub(crate) const REQUIRED_REDO_PREFIX: &str = "required downstream redo: ";
+pub const REQUIRED_REDO_PREFIX: &str = "required downstream redo: ";
 pub(crate) const REQUIRED_REDO_ACTIVE_PREFIX: &str = "required downstream redo active: ";
 const REQUIRED_REDO_OWNER_PREFIX: &str = "required downstream redo";
+
+/// The statement that stamps a required redo on a phase row with none in progress: `$1` the
+/// chain, `$2` the phase, `$3..=$4` the range and `$5` the error text, which starts with
+/// `REQUIRED_REDO_PREFIX`.
+#[doc(hidden)]
+pub const CREATE_STAMP: &str = "UPDATE chain_phase_state
+     SET redo_attempt_generation = redo_attempt_generation + 1,
+         phase_status = 'running', redo_in_progress = true, redo_mode = 'redo',
+         redo_previous_phase_status = phase_status,
+         redo_previous_last_error = last_error,
+         redo_previous_started_at = started_at,
+         redo_previous_finished_at = finished_at,
+         redo_from_block_number = $3, redo_to_block_number = $4,
+         redo_requested_from_block_number = CASE WHEN phase_name = 'project' THEN $3 END,
+         redo_requested_to_block_number = CASE WHEN phase_name = 'project' THEN $4 END,
+         redo_current_block_number = NULL, redo_current_block_hash = NULL,
+         redo_target_block_number = NULL, redo_target_block_hash = NULL,
+         redo_source_boundary_markers = NULL,
+         redo_manifest_authority_fingerprint = NULL,
+         last_error = $5, started_at = now(), finished_at = NULL, updated_at = now()
+     WHERE chain_id = $1 AND phase_name = $2
+       AND current_block_number >= $3 AND NOT redo_in_progress";
+
+/// The statement that merges a required redo into the one in progress on a phase row: `$1` the
+/// chain, `$2` the phase, `$3..=$4` the merged range and `$5..=$6` the requested range.
+#[doc(hidden)]
+pub const EXTEND_STAMP: &str = "UPDATE chain_phase_state
+     SET redo_attempt_generation = redo_attempt_generation + 1,
+         redo_requested_from_block_number = CASE WHEN phase_name = 'project'
+             THEN LEAST(COALESCE(redo_requested_from_block_number, redo_from_block_number), $5) END,
+         redo_requested_to_block_number = CASE WHEN phase_name = 'project'
+             THEN GREATEST(COALESCE(redo_requested_to_block_number, redo_to_block_number), $6) END,
+         redo_from_block_number = $3, redo_to_block_number = $4,
+         redo_current_block_number = NULL, redo_current_block_hash = NULL,
+         redo_target_block_number = NULL, redo_target_block_hash = NULL,
+         redo_source_boundary_markers = NULL,
+         redo_manifest_authority_fingerprint = NULL,
+         updated_at = now()
+     WHERE chain_id = $1 AND phase_name = $2 AND redo_in_progress";
 
 pub(crate) fn owns_required_redo(message: &str) -> bool {
     message.starts_with(REQUIRED_REDO_OWNER_PREFIX)
@@ -187,35 +226,21 @@ async fn extend_active(
     let to = active_to
         .ok_or_else(|| RunnerError::data_integrity("active redo is missing its end block"))?
         .max(through);
-    sqlx::query(
-        "UPDATE chain_phase_state
-         SET redo_attempt_generation = redo_attempt_generation + 1,
-             redo_requested_from_block_number = CASE WHEN phase_name = 'project'
-                 THEN LEAST(COALESCE(redo_requested_from_block_number, redo_from_block_number), $5) END,
-             redo_requested_to_block_number = CASE WHEN phase_name = 'project'
-                 THEN GREATEST(COALESCE(redo_requested_to_block_number, redo_to_block_number), $6) END,
-             redo_from_block_number = $3, redo_to_block_number = $4,
-             redo_current_block_number = NULL, redo_current_block_hash = NULL,
-             redo_target_block_number = NULL, redo_target_block_hash = NULL,
-             redo_source_boundary_markers = NULL,
-             redo_manifest_authority_fingerprint = NULL,
-             updated_at = now()
-         WHERE chain_id = $1 AND phase_name = $2 AND redo_in_progress",
-    )
-    .bind(chain_id)
-    .bind(phase.as_str())
-    .bind(from)
-    .bind(to)
-    .bind(requested_from)
-    .bind(through)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| {
-        RunnerError::database(
-            format!("failed to extend redo stamp for chain {chain_id} phase {phase}"),
-            error,
-        )
-    })?;
+    sqlx::query(EXTEND_STAMP)
+        .bind(chain_id)
+        .bind(phase.as_str())
+        .bind(from)
+        .bind(to)
+        .bind(requested_from)
+        .bind(through)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            RunnerError::database(
+                format!("failed to extend redo stamp for chain {chain_id} phase {phase}"),
+                error,
+            )
+        })?;
     Ok(())
 }
 
@@ -227,37 +252,19 @@ async fn create_stamp(
     to: i64,
     reason: &str,
 ) -> RunnerResult<bool> {
-    let result = sqlx::query(
-        "UPDATE chain_phase_state
-         SET redo_attempt_generation = redo_attempt_generation + 1,
-             phase_status = 'running', redo_in_progress = true, redo_mode = 'redo',
-             redo_previous_phase_status = phase_status,
-             redo_previous_last_error = last_error,
-             redo_previous_started_at = started_at,
-             redo_previous_finished_at = finished_at,
-             redo_from_block_number = $3, redo_to_block_number = $4,
-             redo_requested_from_block_number = CASE WHEN phase_name = 'project' THEN $3 END,
-             redo_requested_to_block_number = CASE WHEN phase_name = 'project' THEN $4 END,
-             redo_current_block_number = NULL, redo_current_block_hash = NULL,
-             redo_target_block_number = NULL, redo_target_block_hash = NULL,
-             redo_source_boundary_markers = NULL,
-             redo_manifest_authority_fingerprint = NULL,
-             last_error = $5, started_at = now(), finished_at = NULL, updated_at = now()
-         WHERE chain_id = $1 AND phase_name = $2
-           AND current_block_number >= $3 AND NOT redo_in_progress",
-    )
-    .bind(chain_id)
-    .bind(phase.as_str())
-    .bind(from)
-    .bind(to)
-    .bind(format!("{REQUIRED_REDO_PREFIX}{reason}"))
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| {
-        RunnerError::database(
-            format!("failed to stamp required redo for chain {chain_id} phase {phase}"),
-            error,
-        )
-    })?;
+    let result = sqlx::query(CREATE_STAMP)
+        .bind(chain_id)
+        .bind(phase.as_str())
+        .bind(from)
+        .bind(to)
+        .bind(format!("{REQUIRED_REDO_PREFIX}{reason}"))
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            RunnerError::database(
+                format!("failed to stamp required redo for chain {chain_id} phase {phase}"),
+                error,
+            )
+        })?;
     Ok(result.rows_affected() == 1)
 }

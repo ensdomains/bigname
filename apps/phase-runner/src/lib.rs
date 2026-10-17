@@ -22,10 +22,12 @@ pub mod phase;
 pub mod phase_lock;
 mod progress_monitor;
 pub mod project_phase;
+mod redo_bounded_adoption;
 mod redo_completion;
 mod redo_discovery_authorization;
 mod redo_extent;
 mod redo_failure;
+mod redo_first_effect;
 mod redo_hash_adoption;
 mod redo_manifest_attestation;
 mod redo_manifest_audit;
@@ -58,6 +60,10 @@ mod verify_store;
 
 pub use bigname_content_hash::{INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH};
 pub use progress_monitor::RunnerPhaseProgress;
+#[doc(hidden)]
+pub use redo_first_effect::first_effect_statements;
+#[doc(hidden)]
+pub use redo_stamp::{CREATE_STAMP, EXTEND_STAMP, REQUIRED_REDO_PREFIX};
 pub use transitions::expected_content_hash;
 
 pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");

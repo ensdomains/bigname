@@ -63,6 +63,20 @@ async fn covering_restart(rebuild: bool) -> Result<()> {
         HEAD,
         "a covering restart must restore the outstanding publication before clearing redo"
     );
+    if !rebuild {
+        // A covering restart runs its own wider request: its undo reaches below its own start
+        // 8, not the interrupted request's 10.
+        let base: Option<i64> = sqlx::query_scalar(
+            "SELECT trusted_base_number FROM project_repair_record WHERE chain_id = $1",
+        )
+        .bind(chain)
+        .fetch_one(scratch.pool())
+        .await?;
+        assert!(
+            base.is_some_and(|base| base < 8),
+            "the covering restart did not widen: trusted base {base:?}"
+        );
+    }
     assert_eq!(pointers(&scratch, chain).await?, before);
     let active: bool = sqlx::query_scalar(
         "SELECT redo_in_progress FROM chain_phase_state WHERE chain_id=$1 AND phase_name='project'",

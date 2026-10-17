@@ -936,9 +936,10 @@ Project redo before deploying the matching API. A new Project-owned table is
 such a change: see [child registration events](#child-registration-events-in-name-history).
 `read_features` can change the manifest-authority fingerprint while the interpreter content hash remains byte-identical.
 On an initialized chain, that authority change still blocks
-ordinary derived work until the exact token-attested full-range Interpret redo
-and downstream stamped Project redo complete; if it widened the watch plan,
-complete the stamped Ingest redo first.
+ordinary derived work until the token-attested Interpret redo and the
+downstream stamped Project redo complete, bounded as
+[Manifest-authority marker](#manifest-authority-marker) says. If it widened the
+watch plan, complete the stamped Ingest redo first.
 When the active Ethereum Mainnet `basenames_execution` authority changes,
 Ethereum Mainnet follows the rule above and, in addition, the Base Project phase
 is invalidated on its own ([cross-chain
@@ -979,10 +980,67 @@ it. Other widenings in the same change are judged on their own:
   of another family, that starts at or below the published head makes manifest
   synchronization refuse the change.
 
-Until TYR-356 lands a redo bounded to an admission's first effect, the
-authority change still records the marker and still needs the exact
-token-attested full-range Interpret redo and the stamped Project redo. A root-registry change gains
-nothing from the timing, because it applies at every block.
+### Manifest-authority marker
+
+A manifest sync whose authority change keeps the interpreter content hash
+records the marker, and the token-attested Interpret redo that discharges it
+starts at the change's first effect where the runner can bound it. The runner
+compares the manifest set the owned key families were last published under,
+which the [family marker](glossary.md#family-marker) records, with the set
+active at the published head. The first effect is the earliest of:
+
+- the first retained log that matches a watch the change adds
+- the first retained log that matches a watch the change removes, or that a
+  watch starting later matched below its new start
+- the first retained log that an address the change declares, moves or removes
+  emitted
+- the first discovery edge to or from an instance of such an address
+- for a changed discovery rule, the persisted floor of each address its
+  from-role declares, and the first edge of the rule's kind that address
+  produced, live or closed. These addresses are the rule's edge sources. The
+  catalog can also apply a rule to a discovered emitter that has no role. No
+  manifest has that shape today.
+- the declared `start_block` of every changed declaration or discovery rule, on
+  either side of the change. A declaration without a start reads as block zero.
+
+The redo runs from that block, or from a lower pending Interpret stamp such as
+the one an Ingest redo leaves, or from the start of an open Project redo.
+Interpret's engine resets and rewrites only from that start, so its rows below
+it stay as they are. A
+completed Interpret redo leaves that Project redo open until Project publishes
+it, so a sync between the two halves still redoes what the first one changed.
+It never runs below the first ingested block. When
+no first effect lies at or below the published head, as for a contract admitted
+before it goes live, the redo replays the head block alone. Run the same full
+range command the fence error prints. The runner narrows it, and a requested
+start above the first effect is refused with the full range and the block the
+redo runs from. The stamped Project redo then runs from the Interpret redo's
+start, or from Project's head when that is lower.
+
+The redo keeps the full range, and the refusal says why after "because", when:
+
+- the owned key families were last published under another interpreter content
+  hash, or, for the Project redo only, another projection content hash
+- the change edits a manifest of the ENSv2 root, registry or migration family,
+  whose declarations stored rows of every name read
+- the change edits `universal_resolver_implementations` or
+  `correlation_addresses`, which Interpret reads at every block
+- the marker records no change of the published set, as when manifest sync
+  repaired an address floor
+- the family marker records no published set, as on a fresh corpus or after a
+  cold restore.
+
+Retiring a family that matches events from every emitter, such as
+`ens_v1_resolver_l1`, finds its first matched log near the family's start, so
+it is a full pair in practice. The bound applies only while the interpreter
+content hash is unchanged. A new
+family file that declares `[[abi.events]]` changes that hash and still takes
+the full Interpret and Project pair. A changed ENSv2 root registry reaches no
+full resync only when it is admitted in a release that already pays that pair.
+The Base Project redo that an Ethereum Mainnet `basenames_execution` change
+requires stays the full range. A Base Interpret redo in the same sync still
+starts at the first effect of the Base change, because Base Interpret does not
+read `basenames_execution`.
 
 Manifest synchronization records a [manifest-authority
 marker](glossary.md#manifest-authority-marker) when its authority changes. Every
@@ -996,6 +1054,17 @@ Interpret redo that would discharge that marker uses this operator flow:
    with `--attest-watch-set-coverage <token>`. For a multi-chain redo, repeat
    `--attest-watch-set-coverage <chain>=<token>` for each affected chain.
 
+When the runner narrows the redo, it logs
+`interpret redo on chain <chain> requested A..=B but runs C..=D` and names the
+manifest change's first effect. A manifest sync is refused while any phase
+lock of the chain is held, so it cannot land inside a running redo. A rerun after an interruption restarts the same audited
+range with the same token. A sync between attempts mints a new token, the old
+one is refused, and the next attempt computes the first effect again over both
+changes. A crash after the Interpret redo completes leaves the stamped Project
+range, so run that Project redo as recorded. An interrupted Project redo
+resumes when repeated with the recorded range the runner printed, or under the
+supervisor. A wider repeat runs the wider range: extra work, no wrong data.
+
 Without the flag, the redo fails closed. With it, the runner logs an error-level
 structured event from an immutable audit row containing the chain, phase, redo
 range, authority fingerprint, invalidation token, runner instance ID, and
@@ -1003,12 +1072,15 @@ attestation time. The audit row is committed in the same transaction that
 begins the marker-discharging redo and is unique for that chain, phase, and
 invalidation generation. A restart re-emits it only after the locked begin
 matches and commits the same active redo; rerunning the same token-valued
-command is valid only for that exact active, audited redo. If a binary upgrade
+command is valid only for that active, audited redo. If a binary upgrade
 changes the [interpreter content hash](glossary.md#interpreter-content-hash)
-while that redo is interrupted, use the same token and exact audited range. The
-locked begin keeps the audit association but discards progress written under
-the prior hash, so Interpret restarts the range from its beginning under the
-new hash. Later interruptions under the new hash resume normally. The locked
+while that redo is interrupted, rerun the full range the fence error prints
+with the same token. Interpret then runs the whole requested range, not the
+audited start, because the rows below that start were derived under the prior
+hash. The audit row keeps the range it attested, and the run covers at least
+that range. The locked begin keeps the audit association but discards progress
+written under the prior hash. Later interruptions under the new hash resume the
+widened range. The locked
 begin rejects a stale token, including one from an earlier transition to the
 same authority. Manifest synchronization detects manifest-authored watch-plan
 widening over retained Ingest coverage and stamps the exact required Ingest
@@ -4582,8 +4654,10 @@ admission changes (see
   error that names the full-range Project redo to run
   (`phase-runner redo --chain <chain> --phase project`).
 - A manifest sync still moves the manifest-authority fingerprint, so the runner
-  still asks for a full redo before it follows again. A followed chain therefore
-  meets a changed admission only inside that redo, which composes every name
+  asks for the attested redo before it follows again. A change to the ENSv2
+  root, registry or migration family keeps that redo the full range
+  ([manifest-authority marker](#manifest-authority-marker)), so a followed
+  chain meets a changed admission only inside a redo that composes every name
   anyway.
 - It adds no schema-migration, table, manifest or setting. The
   manifest-authority fingerprint and the compiled watch plan are unchanged, so

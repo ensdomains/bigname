@@ -2007,17 +2007,19 @@ transaction: every name with a surface at or below its block, and every name
 with a stored summary or lookup row. Above 50,000 such names a followed
 publication is refused before it composes any, on every attempt. The error
 names the full Project redo, which composes them in ranges. The supervised
-runner retries and logs that instruction until the redo runs. A one-shot
-`phase-runner redo` halts on it. A rebuild's first publication is not capped,
-and neither is a rebuild range before its
+runner halts on it once, without retrying, even when family failures are
+retried, and so does a one-shot `phase-runner redo`. A rebuild's first
+publication is not capped, and neither is a rebuild range before its
 [composition pass](glossary.md#composition-pass): such a range composes nothing,
 so it sweeps nothing, and the pass composes every name once, in chunks.
 An undo restores the earlier admission
 with the marker, and the replayed block composes every name again. A followed
 publication therefore leaves the rows a rebuild under the same manifest set
-leaves at the same block. Manifest sync still moves the phase hashes, so a full
-Interpret and Project redo still adopts every manifest change, a root admission
-included.
+leaves at the same block. Manifest sync still moves the phase hashes, so an
+attested Interpret and Project redo adopts every manifest change. It starts at
+the change's first effect, except that a change to the ENSv2 root, registry or
+migration family keeps the full range
+([manifest-authority marker](deployment.md#manifest-authority-marker)).
 
 ## Owned key families
 

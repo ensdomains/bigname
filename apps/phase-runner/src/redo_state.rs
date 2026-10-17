@@ -16,6 +16,7 @@ pub(crate) struct RedoSession {
     previous: PhaseStateRow,
     interrupted_before_redo: bool,
     range: BlockRange,
+    pub(crate) project_request: Option<BlockRange>,
     attempt_generation: i64,
     resumes_interrupted: bool,
     recompute_flags: bool,
@@ -82,17 +83,16 @@ pub(crate) async fn begin(
         || (status != PhaseStatus::Idle && recorded_hash.is_none());
     let adopts_new_hash =
         matches!(phase, PhaseName::Interpret | PhaseName::Project) && hash_requires_full_redo;
-    if adopts_new_hash {
-        crate::redo_hash_adoption::require_full_hash_redo(
-            &mut transaction,
-            chain_id,
-            phase,
-            mode,
-            previous.current_block_number,
-            previous.redo_in_progress,
-        )
-        .await?;
-    }
+    let bounded = crate::redo_bounded_adoption::require_adoption_range(
+        &mut transaction,
+        chain_id,
+        phase,
+        mode,
+        &previous,
+        adopts_new_hash,
+    )
+    .await?;
+    let range = crate::redo_bounded_adoption::project_range(phase, bounded.as_ref(), range)?;
     crate::redo_extent::require_recorded_extent(
         &mut transaction,
         chain_id,
@@ -116,7 +116,15 @@ pub(crate) async fn begin(
         )
         .await?
     } else if phase == PhaseName::Interpret && matches!(mode, RunMode::Redo(_)) {
-        crate::redo_presence::interpret_replay_range(&previous, range)?
+        crate::redo_bounded_adoption::interpret_execution_range(
+            &mut transaction,
+            chain_id,
+            &previous,
+            range,
+            bounded.as_ref(),
+            supplied_manifest_authority_generation,
+        )
+        .await?
     } else {
         range
     };
@@ -297,6 +305,7 @@ pub(crate) async fn begin(
         interrupted_before_redo: matches!(status, PhaseStatus::Running | PhaseStatus::Paused),
         previous,
         range: execution_range,
+        project_request: (phase == PhaseName::Project).then_some(range),
         attempt_generation,
         resumes_interrupted: resume_same_epoch,
         recompute_flags: matches!(mode, RunMode::RecomputeFlags(_)),
@@ -304,7 +313,13 @@ pub(crate) async fn begin(
         manifest_authority_audit: attestation_audit,
         interpret_replay_notice: (phase == PhaseName::Interpret
             && matches!(mode, RunMode::Redo(_)))
-        .then(|| crate::redo_presence::InterpretReplayNotice::new(range, execution_range))
+        .then(|| {
+            crate::redo_presence::InterpretReplayNotice::new(
+                mode.range().unwrap_or(range),
+                execution_range,
+                bounded.and_then(|start| start.effect),
+            )
+        })
         .flatten(),
     })
 }
@@ -354,7 +369,7 @@ pub(crate) async fn finish(
     lock_connection: &mut PgConnection,
     chain_id: &str,
     phase: PhaseName,
-    session: RedoSession,
+    mut session: RedoSession,
     outcome: RedoOutcome<'_>,
 ) -> RunnerResult<()> {
     let progress = match outcome {
@@ -374,6 +389,7 @@ pub(crate) async fn finish(
     } else {
         session.previous.verification_level.clone()
     };
+    let audit = session.manifest_authority_audit.take();
     let RedoSession {
         previous,
         interrupted_before_redo,
@@ -551,8 +567,13 @@ pub(crate) async fn finish(
         .await?;
     }
     if phase == PhaseName::Interpret && !recompute_flags {
-        crate::redo_hash_adoption::stamp_project_after_interpret(&mut transaction, chain_id, range)
-            .await?;
+        crate::redo_hash_adoption::stamp_project_after_interpret(
+            &mut transaction,
+            chain_id,
+            range,
+            audit.as_ref(),
+        )
+        .await?;
     }
     let stamped_ranges = crate::redo_recompute::stamp_transitions_and_load_ranges(
         &mut transaction,

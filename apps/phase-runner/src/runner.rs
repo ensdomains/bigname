@@ -309,6 +309,11 @@ impl PhaseRunner {
             None
         };
         let redo_attempt = redo_session.as_ref().map(|session| session.attempt_fence());
+        // The batches run the request the redo begin stored (`RedoSession::batch_mode`).
+        let mode = match &redo_session {
+            Some(session) => session.batch_mode(mode),
+            None => mode,
+        };
         // The lock probe after the transition is an unbounded `SELECT 1` on the
         // lock's own connection, so it is raced with the heartbeat start.
         let heartbeat = until_cancelled(&cancellation, async {
