@@ -86,7 +86,10 @@ const INTERPRET_TABLES: [&str; 13] = [
 /// The compared tables the rows-below snapshot (`Fixture::dated_rows`) leaves out, each with why.
 /// A table with no block column cannot date a write: a start too low rewrites its rows with the
 /// same content, and the snapshot drops write times on purpose. Any other compared table without
-/// a block column fails the snapshot, so a new one is listed here, not skipped.
+/// a block column fails the snapshot, so a new one is listed here, not skipped. Project's family
+/// rows are keyed upserts, so the family half of the snapshot catches only content changes: a
+/// Project start too low shows in the recorded driver request and in the repair record's trusted
+/// base (row 41).
 const UNDATED: [(&str, &str); 16] = [
     ("contract_instances", "no block column"),
     ("name_search_documents", "no block column"),
@@ -1306,8 +1309,8 @@ async fn rows_below_the_bounded_start_are_untouched() -> Result<()> {
 // Row 41. A bounded Interpret discharge stamps Project from the bound, and the binary stops before
 // the Project redo begins. The operator then types the full range for Project instead of the
 // stamp. The runner narrows the request to the bound and the family driver runs from it: the
-// repair record is an undo with a trusted base below the bound, not a rebuild, the family rows
-// below the bound are left as they were, and the tables equal the full pair's.
+// repair record is an undo that stops below the bound and at or above START, not a rebuild, the
+// family rows below the bound are left as they were, and the tables equal the full pair's.
 #[tokio::test]
 async fn an_operator_project_range_wider_than_the_stamp_runs_from_the_bound() -> Result<()> {
     let fixture = Fixture::new("bounded_operator_project", 59).await?;
@@ -1342,20 +1345,24 @@ async fn an_operator_project_range_wider_than_the_stamp_runs_from_the_bound() ->
             BlockRange::new(START, fixture.head)?,
         )
         .await?;
-    let projected = run.ranges(PhaseName::Project);
-    ensure!(
-        projected.first() == Some(&BlockRange::new(start, fixture.head)?),
-        "the family driver was asked for {projected:?}, expected from {start}"
-    );
     let repair: (String, Option<i64>) = sqlx::query_as(
         "SELECT state, trusted_base_number FROM project_repair_record WHERE chain_id = $1",
     )
     .bind(CHAIN)
     .fetch_one(fixture.pool())
     .await?;
+    // The driver's trusted base is the block below the requested start, or the lower block its
+    // undo stops on at a journal generation boundary (`crates/project/src/families/driver.rs`).
+    // From the bound it stays at or above START. A driver asked from START undoes below START,
+    // or rebuilds and records no base.
     ensure!(
-        repair.0 == "complete" && repair.1.is_some_and(|base| base < start),
-        "the family repair is an undo below the bound: {repair:?}"
+        repair.0 == "complete" && repair.1.is_some_and(|base| (START..start).contains(&base)),
+        "the family repair is not an undo stopping in {START}..{start}: {repair:?}"
+    );
+    let projected = run.ranges(PhaseName::Project);
+    ensure!(
+        projected.first() == Some(&BlockRange::new(start, fixture.head)?),
+        "the family driver was asked for {projected:?}, expected from {start}"
     );
     run.assert_rows_below(fixture.head + 1, start)?;
     fixture.assert_hashes().await?;
