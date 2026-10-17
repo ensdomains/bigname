@@ -93,6 +93,19 @@ sol! {
 // S..=H, and the Project redo it stamps starts at S.
 #[tokio::test]
 async fn a_declared_resolver_below_head_redoes_from_its_start() -> Result<()> {
+    // While a single scoped dispatch exists, tracing-core takes a callsite's interest from the
+    // default of whichever thread reaches it first, so a parallel test reaching the notice first
+    // leaves it disabled here. A second, silent dispatch alive for the test makes every callsite
+    // take its interest from both.
+    let logs = CapturedLogs::default();
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(logs.clone())
+            .finish(),
+    );
+    let _silent = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let fixture = Fixture::new("bounded_resolver_below_head", 59).await?;
     let start = START + 20;
     fixture
@@ -104,15 +117,9 @@ async fn a_declared_resolver_below_head_redoes_from_its_start() -> Result<()> {
     fixture.initial_pair().await?;
     fixture.add_resolver("public_resolver_fixture", RESOLVER, start)?;
     let token = fixture.sync().await?;
-    let logs = CapturedLogs::default();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(logs.clone())
-        .finish();
     let run = fixture
         .discharge(&token, None)
-        .with_subscriber(subscriber)
+        .with_subscriber(dispatch)
         .await?;
     let notice = format!(
         "interpret redo on chain {CHAIN} requested {START}..={} but runs {start}..={}: the \
@@ -1268,6 +1275,65 @@ async fn rows_below_the_bounded_start_are_untouched() -> Result<()> {
     ranges
 }
 
+// Row 41. A bounded Interpret discharge stamps Project from the bound, and the binary stops before
+// the Project redo begins. The operator then types the full range for Project instead of the
+// stamp. The runner narrows the request to the bound and the family driver runs from it: the
+// repair record is an undo with a trusted base below the bound, not a rebuild, the family rows
+// below the bound are left as they were, and the tables equal the full pair's.
+#[tokio::test]
+async fn an_operator_project_range_wider_than_the_stamp_runs_from_the_bound() -> Result<()> {
+    let fixture = Fixture::new("bounded_operator_project", 59).await?;
+    let start = START + 20;
+    fixture
+        .log(start + 1, 0, RESOLVER, &addr_changed()?)
+        .await?;
+    fixture.initial_pair().await?;
+    fixture.add_resolver("public_resolver_fixture", RESOLVER, start)?;
+    let token = fixture.sync().await?;
+    fixture
+        .redo(
+            fixture.run_refusing(CHAIN, Some(&token), None, Some(PhaseName::Project)),
+            PhaseName::Interpret,
+            BlockRange::new(START, fixture.head)?,
+        )
+        .await
+        .err()
+        .context("the Project redo does not begin")?;
+    let stamp: (bool, Option<i64>) = sqlx::query_as(
+        "SELECT redo_in_progress, redo_requested_from_block_number FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(CHAIN)
+    .fetch_one(fixture.pool())
+    .await?;
+    ensure!(stamp == (true, Some(start)), "the Project stamp: {stamp:?}");
+    let run = fixture
+        .redo(
+            fixture.run(None, None),
+            PhaseName::Project,
+            BlockRange::new(START, fixture.head)?,
+        )
+        .await?;
+    let projected = run.ranges(PhaseName::Project);
+    ensure!(
+        projected.first() == Some(&BlockRange::new(start, fixture.head)?),
+        "the family driver was asked for {projected:?}, expected from {start}"
+    );
+    let repair: (String, Option<i64>) = sqlx::query_as(
+        "SELECT state, trusted_base_number FROM project_repair_record WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .fetch_one(fixture.pool())
+    .await?;
+    ensure!(
+        repair.0 == "complete" && repair.1.is_some_and(|base| base < start),
+        "the family repair is an undo below the bound: {repair:?}"
+    );
+    run.assert_rows_below(fixture.head + 1, start)?;
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
 // The first-effect statements read the indexes they are written for. Over a corpus of 20,000 logs
 // from 200 emitters on 20 topics, 2,000 contract instances and 10,000 edges, the generic plan a
 // prepared statement settles on probes each address's own logs, each topic's own logs, each
@@ -1691,16 +1757,89 @@ impl Fixture {
     /// The printed full-range Interpret redo with `token`, and the Project redo it stamps. A
     /// `stop` phase fails its first batch, as a stopped binary leaves it.
     async fn discharge(&self, token: &str, stop: Option<PhaseName>) -> RunnerResult<Run> {
-        let run = self.run(Some(token), stop);
+        self.redo(
+            self.run(Some(token), stop),
+            PhaseName::Interpret,
+            BlockRange::new(START, self.head)?,
+        )
+        .await
+    }
+
+    /// `run` redoes `phase` over `range`, with every dated row snapshot before and after, so
+    /// `Run::assert_ranges` can check the rows below each half's start were left as they were.
+    async fn redo(&self, mut run: Run, phase: PhaseName, range: BlockRange) -> RunnerResult<Run> {
+        let before = self.dated_rows().await?;
         run.runner
             .redo(
                 &chain()?,
-                RedoPhase::Phase(PhaseName::Interpret),
-                BlockRange::new(START, self.head)?,
+                RedoPhase::Phase(phase),
+                range,
                 CancellationToken::new(),
             )
             .await?;
+        run.rows = Some((before, self.dated_rows().await?));
         Ok(run)
+    }
+
+    /// Every row of a compared table that carries a block, as (family table, block, row text),
+    /// the text without write times. Ids stay in, so a row rewritten in place shows.
+    async fn dated_rows(&self) -> RunnerResult<Vec<(bool, i64, String)>> {
+        let database = |error: sqlx::Error| {
+            RunnerError::data_integrity(format!("failed to snapshot the dated rows: {error}"))
+        };
+        let tables = INTERPRET_TABLES
+            .into_iter()
+            .map(|table| (false, table))
+            .chain(
+                bigname_project::families::family_tables()
+                    .filter(|table| !HYDRATION_WORK.contains(table))
+                    .map(|table| (true, table)),
+            );
+        let mut rows = Vec::new();
+        // A manifest set change reclassifies a resolver without moving its row, which keeps the
+        // block of the latest event that named it (`crates/project/src/families/classification.rs`),
+        // so that block does not date the write.
+        for (family, table) in
+            tables.filter(|(_, table)| *table != "project_resolver_classification")
+        {
+            let columns: Vec<(String, bool)> = sqlx::query_as(
+                "SELECT column_name::text,
+                        COALESCE(column_default LIKE '%now()%', false)
+                            OR data_type LIKE 'timestamp%' OR column_name = 'deactivated_at'
+                 FROM information_schema.columns
+                 WHERE table_schema = current_schema() AND table_name = $1",
+            )
+            .bind(table)
+            .fetch_all(self.pool())
+            .await
+            .map_err(database)?;
+            let Some(block) = ["block_number", "active_from_block_number"]
+                .into_iter()
+                .find(|block| columns.iter().any(|(name, _)| name == block))
+            else {
+                continue;
+            };
+            let volatile: Vec<String> = columns
+                .into_iter()
+                .filter(|(_, volatile)| *volatile)
+                .map(|(name, _)| name)
+                .collect();
+            let dated: Vec<(i64, String)> = sqlx::query_as(&format!(
+                "SELECT {block}, (to_jsonb(t) - $1::text[])::text FROM {table} t
+                 WHERE {block} IS NOT NULL"
+            ))
+            .bind(&volatile)
+            .fetch_all(self.pool())
+            .await
+            .map_err(database)?;
+            rows.extend(
+                dated
+                    .into_iter()
+                    .map(|(number, row)| (family, number, format!("{table} {row}"))),
+            );
+        }
+        rows.sort();
+        Ok(rows)
     }
 
     fn run(&self, token: Option<&str>, stop: Option<PhaseName>) -> Run {
@@ -1709,10 +1848,22 @@ impl Fixture {
 
     /// The runner, attesting `token` for `chain` when given.
     fn run_on(&self, chain: &str, token: Option<&str>, stop: Option<PhaseName>) -> Run {
+        self.run_refusing(chain, token, stop, None)
+    }
+
+    /// `run_on`, with the redo of `refuse` refused before it begins.
+    fn run_refusing(
+        &self,
+        chain: &str,
+        token: Option<&str>,
+        stop: Option<PhaseName>,
+        refuse: Option<PhaseName>,
+    ) -> Run {
         let batches = Arc::new(Mutex::new(Vec::new()));
         let recorded = |inner: Arc<dyn Phase>| -> Arc<dyn Phase> {
             Arc::new(Recorded {
                 stop: stop == Some(inner.name()),
+                refuse: refuse == Some(inner.name()),
                 inner,
                 batches: Arc::clone(&batches),
                 calls: AtomicUsize::new(0),
@@ -1745,7 +1896,11 @@ impl Fixture {
             Some(token) => runner.with_watch_set_coverage_attestation(chain, token),
             None => runner,
         };
-        Run { runner, batches }
+        Run {
+            runner,
+            batches,
+            rows: None,
+        }
     }
 
     /// Run a Project redo over `range` one work block per batch and stop it at its second batch,
@@ -2010,7 +2165,11 @@ type Batches = Arc<Mutex<Vec<(PhaseName, Option<BlockRange>)>>>;
 struct Run {
     runner: PhaseRunner,
     batches: Batches,
+    /// The dated rows before and after the redo (`Fixture::redo`).
+    rows: Option<(DatedRows, DatedRows)>,
 }
+
+type DatedRows = Vec<(bool, i64, String)>;
 
 impl Run {
     /// The recorded range of each redo batch of `phase`, in order (`Recorded`).
@@ -2025,8 +2184,10 @@ impl Run {
     }
 
     /// The first Interpret engine request that opens the redo, and so its opening reset, starts at
-    /// `interpret`, and the first Project batch was requested from `project`.
+    /// `interpret`, and the first Project batch was requested from `project`. When the run
+    /// snapshot its rows, the rows below both starts are as they were (`assert_rows_below`).
     fn assert_ranges(&self, interpret: i64, project: i64) -> Result<()> {
+        self.assert_rows_below(interpret, project)?;
         let interpreted = self.ranges(PhaseName::Interpret);
         let projected = self.ranges(PhaseName::Project);
         ensure!(
@@ -2039,6 +2200,31 @@ impl Run {
         );
         Ok(())
     }
+
+    /// The Interpret rows below `interpret` and the family rows below `project` are as they were
+    /// before the run (`Fixture::redo`).
+    fn assert_rows_below(&self, interpret: i64, project: i64) -> Result<()> {
+        if let Some((before, after)) = &self.rows {
+            let below = |rows: &DatedRows| -> Vec<String> {
+                rows.iter()
+                    .filter(|(family, block, _)| *block < if *family { project } else { interpret })
+                    .map(|(_, _, row)| row.clone())
+                    .collect()
+            };
+            let (was, now) = (below(before), below(after));
+            let changed: Vec<&String> = was
+                .iter()
+                .filter(|row| !now.contains(row))
+                .chain(now.iter().filter(|row| !was.contains(row)))
+                .collect();
+            ensure!(
+                changed.is_empty(),
+                "the redo touched {} rows below its start: {changed:?}",
+                changed.len()
+            );
+        }
+        Ok(())
+    }
 }
 
 /// A phase that records each batch's range (the range Interpret's engine opens its redo over,
@@ -2047,6 +2233,8 @@ struct Recorded {
     inner: Arc<dyn Phase>,
     batches: Batches,
     stop: bool,
+    /// Refuse a redo's preflight, so the redo never begins, as a binary stopped before it would.
+    refuse: bool,
     calls: AtomicUsize,
 }
 
@@ -2061,6 +2249,9 @@ impl Phase for Recorded {
         sources: &[SourceConfig],
         mode: &RunMode,
     ) -> RunnerResult<()> {
+        if self.refuse && mode.is_redo() {
+            return Err(RunnerError::data_integrity("refused by the fixture"));
+        }
         self.inner.preflight(chain_id, sources, mode)
     }
 
@@ -2070,6 +2261,8 @@ impl Phase for Recorded {
         // range, which its family driver runs from.
         let range = match self.inner.name() {
             PhaseName::Interpret if context.mode.is_redo() => batch_request(&context)
+                .ok()
+                .flatten()
                 .filter(|request| request.resume_current.is_none())
                 .and_then(|request| BlockRange::new(request.from_block, request.to_block).ok()),
             PhaseName::Interpret => None,

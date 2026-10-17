@@ -1044,7 +1044,8 @@ lock of the chain is held, so it cannot land inside a running redo. A rerun afte
 range with the same token. A sync between attempts mints a new token, the old
 one is refused, and the next attempt computes the first effect again over both
 changes. A crash after the Interpret redo completes leaves the stamped Project
-range, so run that Project redo as recorded.
+range, so run that Project redo as recorded. A Project redo requested over a
+wider range still runs from the recorded start.
 
 Without the flag, the redo fails closed. With it, the runner logs an error-level
 structured event from an immutable audit row containing the chain, phase, redo

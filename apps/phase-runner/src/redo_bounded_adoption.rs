@@ -396,6 +396,18 @@ pub(crate) async fn project_stamp_from(
     })
 }
 
+impl crate::redo_state::RedoSession {
+    /// The mode a redo's batches run under. A Project redo runs the request its begin stored,
+    /// which `project_range` may have narrowed to a bounded start, so the family driver starts
+    /// where the row says. Every other phase runs `mode` as given.
+    pub(crate) fn batch_mode(&self, mode: RunMode) -> RunMode {
+        match (self.project_request, mode) {
+            (Some(request), RunMode::Redo(_)) => RunMode::Redo(request),
+            (_, mode) => mode,
+        }
+    }
+}
+
 /// A Project redo bounded to `bounded` runs from its start, whatever start was requested.
 pub(crate) fn project_range(
     phase: PhaseName,

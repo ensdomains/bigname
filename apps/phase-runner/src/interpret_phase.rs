@@ -49,7 +49,7 @@ impl Phase for InterpretPhase {
 
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
         Box::pin(async move {
-            let Some(request) = batch_request(&context) else {
+            let Some(request) = batch_request(&context)? else {
                 return Ok(PhaseBatchOutcome::Complete(PhaseProgress::default()));
             };
             let outcome = self.engine.run_batch(request).await.map_err(runner_error)?;
@@ -86,13 +86,22 @@ impl Phase for InterpretPhase {
 /// readable. A redo runs from its attempt's execution range, the start the runner settled at
 /// begin: a bounded start, a resumed audited one, or the requested one. The engine's opening
 /// reset, search reset and final refresh all cover `from_block..=to_block`, so nothing below
-/// that start is rewritten.
+/// that start is rewritten. A redo batch without its attempt is an internal error: the runner
+/// begins every redo before its first batch.
 #[doc(hidden)]
-pub fn batch_request(context: &PhaseContext) -> Option<BatchRequest> {
-    let available = context.available_heads.as_ref()?;
+pub fn batch_request(context: &PhaseContext) -> RunnerResult<Option<BatchRequest>> {
     let range = match (&context.mode, context.redo_attempt) {
         (RunMode::Redo(_), Some(attempt)) => Some(attempt.execution_range),
+        (RunMode::Redo(_), None) => {
+            return Err(RunnerError::data_integrity(format!(
+                "interpret redo batch for chain {} has no redo attempt",
+                context.chain_id
+            )));
+        }
         (mode, _) => mode.range(),
+    };
+    let Some(available) = context.available_heads.as_ref() else {
+        return Ok(None);
     };
     let from_block = range.map_or_else(
         || {
@@ -115,13 +124,13 @@ pub fn batch_request(context: &PhaseContext) -> Option<BatchRequest> {
         RunMode::Redo(_) => InterpretRunMode::Redo,
         RunMode::RecomputeFlags(_) => InterpretRunMode::RecomputeFlags,
     };
-    Some(BatchRequest {
+    Ok(Some(BatchRequest {
         chain_id: context.chain_id.clone(),
         from_block,
         to_block,
         resume_current: context.resume.current.as_ref().map(interpret_marker),
         mode,
-    })
+    }))
 }
 
 fn interpret_marker(marker: &BlockMarker) -> Marker {
