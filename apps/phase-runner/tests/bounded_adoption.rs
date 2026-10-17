@@ -83,6 +83,33 @@ const INTERPRET_TABLES: [&str; 13] = [
     "migration_candidate_identity_effects",
 ];
 
+/// The compared tables the rows-below snapshot (`Fixture::dated_rows`) leaves out, each with why.
+/// A table with no block column cannot date a write: a start too low rewrites its rows with the
+/// same content, and the snapshot drops write times on purpose. Any other compared table without
+/// a block column fails the snapshot, so a new one is listed here, not skipped.
+const UNDATED: [(&str, &str); 16] = [
+    ("contract_instances", "no block column"),
+    ("name_search_documents", "no block column"),
+    ("name_search_postings", "no block column"),
+    (
+        "project_resolver_classification",
+        "a set change reclassifies a resolver without moving its row, which keeps the block of the \
+         latest event that named it (crates/project/src/families/classification.rs)",
+    ),
+    ("project_lookup_name", "no block column"),
+    ("project_lookup_relation", "no block column"),
+    ("project_lookup_inventory", "no block column"),
+    ("project_lookup_record", "no block column"),
+    ("project_lookup_dependency", "no block column"),
+    ("project_name_summary", "no block column"),
+    ("project_address_history_anchor", "no block column"),
+    ("project_history_source", "no block column"),
+    ("project_history_source_edge", "no block column"),
+    ("project_address_name_index", "no block column"),
+    ("project_address_record_node_index", "no block column"),
+    ("project_address_record_id_index", "no block column"),
+];
+
 sol! {
     event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
     event NewResolver(bytes32 indexed node, address resolver);
@@ -1340,7 +1367,8 @@ async fn an_operator_project_range_wider_than_the_stamp_runs_from_the_bound() ->
 // first engine request starts at the bound, the rows below it are left as they were, and the
 // tables equal the full pair's. The start and the rows below are checked before the redo's own
 // outcome, so an engine that starts low fails here even when the store also refuses its
-// progress.
+// progress: the engine commits its opening reset before the runner records that progress, so
+// the snapshot taken after the failed redo still shows the rows below the bound rewritten.
 #[tokio::test]
 async fn an_adaptive_bounded_interpret_redo_runs_from_the_bound() -> Result<()> {
     let fixture = Fixture::new("bounded_adaptive", 59).await?;
@@ -1866,12 +1894,8 @@ impl Fixture {
                     .map(|table| (true, table)),
             );
         let mut rows = Vec::new();
-        // A manifest set change reclassifies a resolver without moving its row, which keeps the
-        // block of the latest event that named it (`crates/project/src/families/classification.rs`),
-        // so that block does not date the write.
-        for (family, table) in
-            tables.filter(|(_, table)| *table != "project_resolver_classification")
-        {
+        let undated = |table: &str| UNDATED.iter().any(|(name, _)| *name == table);
+        for (family, table) in tables.filter(|(_, table)| !undated(table)) {
             let columns: Vec<(String, bool)> = sqlx::query_as(
                 "SELECT column_name::text,
                         COALESCE(column_default LIKE '%now()%', false)
@@ -1887,7 +1911,9 @@ impl Fixture {
                 .into_iter()
                 .find(|block| columns.iter().any(|(name, _)| name == block))
             else {
-                continue;
+                return Err(RunnerError::data_integrity(format!(
+                    "compared table {table} has no block column and is not in UNDATED"
+                )));
             };
             let volatile: Vec<String> = columns
                 .into_iter()
