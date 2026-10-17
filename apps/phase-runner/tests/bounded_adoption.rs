@@ -90,7 +90,7 @@ const INTERPRET_TABLES: [&str; 13] = [
 /// rows are keyed upserts, so the family half of the snapshot catches only content changes: a
 /// Project start too low shows in the recorded driver request and in the repair record's trusted
 /// base (row 41).
-const UNDATED: [(&str, &str); 16] = [
+const UNDATED: [(&str, &str); 17] = [
     ("contract_instances", "no block column"),
     ("name_search_documents", "no block column"),
     ("name_search_postings", "no block column"),
@@ -111,6 +111,11 @@ const UNDATED: [(&str, &str); 16] = [
     ("project_address_name_index", "no block column"),
     ("project_address_record_node_index", "no block column"),
     ("project_address_record_id_index", "no block column"),
+    (
+        "project_history_catalogue_marker",
+        "one row per chain whose block is where the history catalogue stands, so it moves with \
+         every published block",
+    ),
 ];
 
 sol! {
@@ -1589,6 +1594,112 @@ async fn a_project_redo_over_a_reorg_stamp_keeps_its_own_range() -> Result<()> {
     fixture.cleanup().await
 }
 
+// Row 46a. A stamped bounded Project redo stops after its replay applied a block, so the family
+// marker carries the new manifest set and the change no longer reads as undischarged. A wider
+// repeat then rebuilds from the wider start, as docs/deployment.md says: the family driver is
+// asked from START and the repair records no trusted base. Extra work, and the tables still equal
+// the full pair's.
+#[tokio::test]
+async fn a_wider_repeat_after_the_replay_applied_a_block_rebuilds() -> Result<()> {
+    let (fixture, _) = stamped_bounded_project("bounded_project_late_wider").await?;
+    let full = BlockRange::new(START, fixture.head)?;
+    fixture.stop_project_redo_at(full, 4).await?;
+    let open = replaying_past_start(&fixture).await?;
+    let run = fixture
+        .redo(fixture.run(None, None), PhaseName::Project, full)
+        .await?;
+    let repair = repair_record(fixture.pool()).await?;
+    ensure!(
+        repair == ("complete".to_owned(), None),
+        "the wider repeat over {open:?} did not rebuild: {repair:?}"
+    );
+    let projected = run.ranges(PhaseName::Project);
+    ensure!(
+        projected.first() == Some(&full),
+        "the family driver was asked for {projected:?}, expected {full:?}"
+    );
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// Row 46b. The same stop, then the recorded range the runner printed. The retry resumes the
+// recorded range in the same epoch, the family driver is asked from the bound, and its repair
+// continues the replay from the block the stopped attempt reached: the trusted base is that
+// block, not an undo below it and not a rebuild. The tables equal the full pair's.
+#[tokio::test]
+async fn a_recorded_repeat_after_the_replay_applied_a_block_resumes() -> Result<()> {
+    let (fixture, start) = stamped_bounded_project("bounded_project_late_recorded").await?;
+    let full = BlockRange::new(START, fixture.head)?;
+    let bound = BlockRange::new(start, fixture.head)?;
+    fixture.stop_project_redo_at(full, 4).await?;
+    let (open, reached) = (
+        replaying_past_start(&fixture).await?,
+        family_marker(fixture.pool()).await?,
+    );
+    let epoch = project_epoch(fixture.pool()).await?;
+    let (_, outcome) = fixture
+        .redo_outcome(
+            fixture.run(None, Some(PhaseName::Project)),
+            PhaseName::Project,
+            bound,
+        )
+        .await?;
+    ensure!(outcome.is_err(), "the retry stops before its first batch");
+    let resumed = project_epoch(fixture.pool()).await?;
+    ensure!(
+        resumed == epoch,
+        "the recorded repeat began another epoch: {epoch:?} became {resumed:?}"
+    );
+    let run = fixture
+        .redo(fixture.run(None, None), PhaseName::Project, bound)
+        .await?;
+    let projected = run.ranges(PhaseName::Project);
+    ensure!(
+        projected.first() == Some(&bound),
+        "the family driver was asked for {projected:?}, expected {bound:?}"
+    );
+    let repair = repair_record(fixture.pool()).await?;
+    ensure!(
+        repair == ("complete".to_owned(), reached),
+        "the repair did not continue from the stopped replay at {reached:?} over {open:?}: \
+         {repair:?}"
+    );
+    run.assert_rows_below(fixture.head + 1, start)?;
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// Row 47. A stamped bounded Project redo stopped by a signal prints the recorded, narrowed range
+// to rerun, so an operator who repeats the printed command resumes the redo.
+#[tokio::test]
+async fn an_interrupted_bounded_project_redo_prints_its_recorded_range() -> Result<()> {
+    let (fixture, start) = stamped_bounded_project("bounded_project_printed").await?;
+    let error = fixture
+        .cancel_project_redo(BlockRange::new(START, fixture.head)?)
+        .await?
+        .to_string();
+    let rerun = format!(
+        "redo for chain {CHAIN} phase project is incomplete; the phase remains blocked from \
+         normal restart; rerun `phase-runner redo --chain {CHAIN} --phase project --from-block \
+         {start} --to-block {}`",
+        fixture.head
+    );
+    ensure!(error.starts_with(&rerun), "the runner printed: {error}");
+    fixture.cleanup().await
+}
+
+/// The stopped redo's repair record, after checking that its replay has applied a block past
+/// START and that the family marker carries the active manifest set.
+async fn replaying_past_start(fixture: &Fixture) -> Result<(String, Option<i64>)> {
+    let marker = family_marker(fixture.pool()).await?;
+    let open = repair_record(fixture.pool()).await?;
+    ensure!(
+        open.0 == "replaying" && marker.is_some_and(|block| block > START),
+        "the stopped redo is past its first replayed block: marker {marker:?}, repair {open:?}"
+    );
+    Ok(open)
+}
+
 /// A fixture whose bounded Interpret discharge stamped Project from the bound `START + 20`, with
 /// the Project redo refused before it began, as a binary stopped there leaves it.
 async fn stamped_bounded_project(prefix: &str) -> Result<(Fixture, i64)> {
@@ -1618,6 +1729,16 @@ async fn project_epoch(pool: &sqlx::PgPool) -> Result<(Option<i64>, Option<i64>,
         "SELECT redo_requested_from_block_number, redo_requested_to_block_number,
                 started_at::text
          FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(CHAIN)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// The block the owned key families stand at.
+async fn family_marker(pool: &sqlx::PgPool) -> Result<Option<i64>> {
+    Ok(sqlx::query_scalar(
+        "SELECT current_block_number FROM project_family_marker WHERE chain_id = $1",
     )
     .bind(CHAIN)
     .fetch_one(pool)
@@ -2236,6 +2357,47 @@ impl Fixture {
     /// Run a Project redo over `range` one work block per batch and stop it at its second batch,
     /// leaving its repair record and redo open.
     async fn stop_project_redo(&self, range: BlockRange) -> Result<()> {
+        self.stop_project_redo_at(range, 2).await
+    }
+
+    /// The same, stopped at its `at`-th batch.
+    async fn stop_project_redo_at(&self, range: BlockRange, at: usize) -> Result<()> {
+        let error = self
+            .one_block_project_runner(at)?
+            .redo(
+                &chain()?,
+                RedoPhase::Phase(PhaseName::Project),
+                range,
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("the Project redo stops at the fixture's batch");
+        ensure!(
+            error.to_string().contains("stopped by the fixture"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    /// Run a Project redo over `range` one work block per batch and cancel it at its first
+    /// progress write, as a stop signal does. Returns the error the runner prints.
+    async fn cancel_project_redo(&self, range: BlockRange) -> Result<RunnerError> {
+        let stop = CancellationToken::new();
+        let cancel = stop.clone();
+        let runner = self
+            .one_block_project_runner(usize::MAX)?
+            .with_before_redo_progress_write(move || {
+                let cancel = cancel.clone();
+                async move { cancel.cancel() }
+            });
+        Ok(runner
+            .redo(&chain()?, RedoPhase::Phase(PhaseName::Project), range, stop)
+            .await
+            .expect_err("the cancelled Project redo is incomplete"))
+    }
+
+    /// A runner whose Project phase applies one work block per batch and fails its `at`-th batch.
+    fn one_block_project_runner(&self, at: usize) -> Result<PhaseRunner> {
         let batches = Arc::new(Mutex::new(Vec::new()));
         let project = ProjectPhase::new(self.pool().clone()).with_family_settings(FamilySettings {
             max_blocks_per_run: 1,
@@ -2249,12 +2411,12 @@ impl Fixture {
             Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
             Arc::new(StopAt {
                 inner: Arc::new(project),
-                at: 2,
+                at,
                 calls: AtomicUsize::new(0),
                 batches,
             }),
         )?;
-        let error = PhaseRunner::new(
+        Ok(PhaseRunner::new(
             self.scratch.runner(),
             phases,
             CapacityGuard::system(CapacityConfig::default()),
@@ -2264,20 +2426,7 @@ impl Fixture {
                 maximum_backoff: Duration::from_millis(4),
                 live_poll_interval: Duration::from_millis(1),
             },
-        )?
-        .redo(
-            &chain()?,
-            RedoPhase::Phase(PhaseName::Project),
-            range,
-            CancellationToken::new(),
-        )
-        .await
-        .expect_err("the Project redo stops at its second batch");
-        ensure!(
-            error.to_string().contains("stopped by the fixture"),
-            "{error}"
-        );
-        Ok(())
+        )?)
     }
 
     /// Plant a SourceManifestUpdated event of an active manifest of `family`, as manifest sync
