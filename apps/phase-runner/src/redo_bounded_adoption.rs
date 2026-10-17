@@ -213,11 +213,9 @@ fn side(row: Option<&EventRow>) -> Option<Side<'_>> {
     })
 }
 
-/// Where a bounded discharge starts, and for Interpret the first effect that put it there. `to`
-/// is the recorded end of a resumed stamped Project redo (`resumed_stamped_project`).
+/// Where a bounded discharge starts, and for Interpret the first effect that put it there.
 pub(crate) struct BoundedStart {
     pub(crate) from: i64,
-    pub(crate) to: Option<i64>,
     pub(crate) effect: Option<FirstEffect>,
 }
 
@@ -233,7 +231,7 @@ pub(crate) async fn require_adoption_range(
     adopts_new_hash: bool,
 ) -> RunnerResult<Option<BoundedStart>> {
     if !adopts_new_hash {
-        return resumed_stamped_project(transaction, chain_id, phase, mode, previous).await;
+        return Ok(None);
     }
     let head = previous.current_block_number;
     let marker = previous
@@ -322,53 +320,7 @@ pub(crate) async fn require_adoption_range(
             ),
         ));
     }
-    Ok(Some(BoundedStart {
-        from,
-        to: None,
-        effect,
-    }))
-}
-
-/// A Project redo repeated over the stamped bounded redo still in progress resumes the recorded
-/// range, as an Interpret redo resumes its audited one. It applies when the row's redo is in
-/// progress in redo mode under this binary's projection content hash, the request covers the
-/// recorded range, and the manifest change is still undischarged for Project: the families'
-/// published manifest set differs from the active one and Project's plan is bounded. A request
-/// that does not cover the recorded range is refused by the interrupted-redo coverage check. A
-/// plain Project redo, such as one over a reorg recovery's required redo, may still widen.
-async fn resumed_stamped_project(
-    transaction: &mut Transaction<'_, Postgres>,
-    chain_id: &str,
-    phase: PhaseName,
-    mode: &RunMode,
-    previous: &PhaseStateRow,
-) -> RunnerResult<Option<BoundedStart>> {
-    let (Some(stored), Some(head), RunMode::Redo(requested)) = (
-        previous.requested_redo_range(),
-        previous.current_block_number,
-        mode,
-    ) else {
-        return Ok(None);
-    };
-    if phase != PhaseName::Project
-        || !previous.redo_in_progress
-        || previous.redo_mode.as_deref() != Some("redo")
-        || previous.input_content_hash.as_deref()
-            != Some(crate::transitions::expected_content_hash(phase))
-        || requested.from > stored.from
-        || requested.to < stored.to
-    {
-        return Ok(None);
-    }
-    let undischarged = matches!(
-        plan(transaction, chain_id, phase, head).await?,
-        Plan::Bounded { project: true, .. }
-    );
-    Ok(undischarged.then_some(BoundedStart {
-        from: stored.from,
-        to: Some(stored.to),
-        effect: None,
-    }))
+    Ok(Some(BoundedStart { from, effect }))
 }
 
 /// The requested start of the Project row's open redo, the stamp a completed Interpret redo
@@ -456,18 +408,16 @@ impl crate::redo_state::RedoSession {
     }
 }
 
-/// A Project redo bounded to `bounded` runs from its start, whatever start was requested, and a
-/// resumed stamped one through its recorded end.
+/// A Project redo bounded to `bounded` runs from its start, whatever start was requested.
 pub(crate) fn project_range(
     phase: PhaseName,
     bounded: Option<&BoundedStart>,
     requested: BlockRange,
 ) -> RunnerResult<BlockRange> {
     match bounded {
-        Some(start) if phase == PhaseName::Project => BlockRange::new(
-            start.from,
-            start.to.unwrap_or_else(|| requested.to.max(start.from)),
-        ),
+        Some(start) if phase == PhaseName::Project => {
+            BlockRange::new(start.from, requested.to.max(start.from))
+        }
         _ => Ok(requested),
     }
 }

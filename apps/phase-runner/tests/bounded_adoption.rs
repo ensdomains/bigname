@@ -1430,13 +1430,12 @@ async fn an_adaptive_bounded_interpret_redo_runs_from_the_bound() -> Result<()> 
     ranges
 }
 
-// Row 43. A stamped bounded Project redo begins and stops before its first batch. The operator
-// repeats the full range for Project. The retry resumes the recorded range in the same epoch: the
-// family driver is asked from the bound, the redo keeps its recorded request and start time, and
-// the run that completes it undoes from the bound, leaves the rows below it untouched and equals
-// the full pair.
+// Row 43. A stamped bounded Project redo begins from the bound and stops before its first batch.
+// The operator repeats the full range for Project. The repeat runs the wider range: the family
+// driver is asked from START, the registration below the bound is processed again, and the tables
+// equal the full pair's.
 #[tokio::test]
-async fn a_repeated_wider_project_redo_resumes_the_recorded_range() -> Result<()> {
+async fn a_repeated_wider_project_redo_runs_the_wider_range() -> Result<()> {
     let (fixture, start) = stamped_bounded_project("bounded_project_repeat").await?;
     let full = BlockRange::new(START, fixture.head)?;
     let bound = BlockRange::new(start, fixture.head)?;
@@ -1456,50 +1455,27 @@ async fn a_repeated_wider_project_redo_resumes_the_recorded_range() -> Result<()
         "the first attempt asked the family driver for {:?}",
         first.ranges(PhaseName::Project)
     );
-    let epoch = project_epoch(fixture.pool()).await?;
-    let (retry, outcome) = fixture
-        .redo_outcome(
-            fixture.run(None, Some(PhaseName::Project)),
-            PhaseName::Project,
-            full,
-        )
-        .await?;
-    ensure!(outcome.is_err(), "the retry stops before its first batch");
-    let projected = retry.ranges(PhaseName::Project);
-    ensure!(
-        projected.first() == Some(&bound),
-        "the family driver was asked for {projected:?}, expected from {start}"
-    );
-    let resumed = project_epoch(fixture.pool()).await?;
-    ensure!(
-        resumed == epoch,
-        "the retry began another epoch: {epoch:?} became {resumed:?}"
-    );
+    let owners = damage_registration(fixture.pool()).await?;
     let run = fixture
         .redo(fixture.run(None, None), PhaseName::Project, full)
         .await?;
-    let repair = repair_record(fixture.pool()).await?;
-    ensure!(
-        repair.0 == "complete" && repair.1.is_some_and(|base| (START..start).contains(&base)),
-        "the family repair is not an undo stopping in {START}..{start}: {repair:?}"
-    );
     let projected = run.ranges(PhaseName::Project);
     ensure!(
-        projected.first() == Some(&bound),
-        "the completing run asked the family driver for {projected:?}, expected from {start}"
+        projected.first() == Some(&full),
+        "the family driver was asked for {projected:?}, expected {full:?}"
     );
-    run.assert_rows_below(fixture.head + 1, start)?;
+    assert_reprocessed(fixture.pool(), &owners).await?;
     fixture.assert_hashes().await?;
     fixture.assert_equals_full_pair().await
 }
 
 // Row 43b. The same stamped bounded Project redo stops after its first batch, with its undo
-// record open. The repeated full range resumes the recorded range: the family driver is asked
-// from the bound, the repair keeps the trusted base the first attempt recorded, the rows below
-// the bound are untouched, and the tables equal the full pair's.
+// record open. The repeated full range runs the wider range: the family driver is asked from
+// START, the registration below the bound is processed again, and the tables equal the full
+// pair's.
 #[tokio::test]
-async fn a_repeated_wider_project_redo_keeps_the_open_repair_base() -> Result<()> {
-    let (fixture, start) = stamped_bounded_project("bounded_project_repeat_open").await?;
+async fn a_repeated_wider_project_redo_over_an_open_undo_runs_the_wider_range() -> Result<()> {
+    let (fixture, _) = stamped_bounded_project("bounded_project_repeat_open").await?;
     let full = BlockRange::new(START, fixture.head)?;
     fixture.stop_project_redo(full).await?;
     let open = repair_record(fixture.pool()).await?;
@@ -1507,20 +1483,16 @@ async fn a_repeated_wider_project_redo_keeps_the_open_repair_base() -> Result<()
         open.0 != "complete" && open.1.is_some(),
         "the first attempt left an open undo: {open:?}"
     );
+    let owners = damage_registration(fixture.pool()).await?;
     let run = fixture
         .redo(fixture.run(None, None), PhaseName::Project, full)
         .await?;
-    let repair = repair_record(fixture.pool()).await?;
-    ensure!(
-        repair.0 == "complete" && repair.1 == open.1,
-        "the repair base moved from the first attempt's {open:?}: {repair:?}"
-    );
     let projected = run.ranges(PhaseName::Project);
     ensure!(
-        projected.first() == Some(&BlockRange::new(start, fixture.head)?),
-        "the family driver was asked for {projected:?}, expected from {start}"
+        projected.first() == Some(&full),
+        "the family driver was asked for {projected:?}, expected {full:?}"
     );
-    run.assert_rows_below(fixture.head + 1, start)?;
+    assert_reprocessed(fixture.pool(), &owners).await?;
     fixture.assert_hashes().await?;
     fixture.assert_equals_full_pair().await
 }
@@ -1565,8 +1537,9 @@ async fn a_noncovering_project_retry_over_the_stamp_is_refused() -> Result<()> {
 }
 
 // Row 45. A reorg recovery stamps a required Project redo while no manifest change is pending. An
-// operator Project redo over a wider range keeps its own range: the family driver is asked from
-// the operator's start, not the stamp's, and the redo completes.
+// operator Project redo over a wider range runs its own range: the family driver is asked from
+// the operator's start, not the stamp's, the registration below the stamp is processed again,
+// and the tables equal the full pair's.
 #[tokio::test]
 async fn a_project_redo_over_a_reorg_stamp_keeps_its_own_range() -> Result<()> {
     let fixture = Fixture::new("bounded_reorg_stamp", 59).await?;
@@ -1581,6 +1554,7 @@ async fn a_project_redo_over_a_reorg_stamp_keeps_its_own_range() -> Result<()> {
         ))
         .execute(fixture.pool())
         .await?;
+    let owners = damage_registration(fixture.pool()).await?;
     let full = BlockRange::new(START, fixture.head)?;
     let run = fixture
         .redo(fixture.run(None, None), PhaseName::Project, full)
@@ -1590,34 +1564,30 @@ async fn a_project_redo_over_a_reorg_stamp_keeps_its_own_range() -> Result<()> {
         projected.first() == Some(&full),
         "the family driver was asked for {projected:?}, expected {full:?}"
     );
+    assert_reprocessed(fixture.pool(), &owners).await?;
     fixture.assert_hashes().await?;
-    fixture.cleanup().await
+    fixture.assert_equals_full_pair().await
 }
 
-// Row 46a. A stamped bounded Project redo stops after its replay applied a block, so the family
-// marker carries the new manifest set and the change no longer reads as undischarged. A wider
-// repeat then rebuilds from the wider start, as docs/deployment.md says: the family driver is
-// asked from START and the repair records no trusted base. Extra work, and the tables still equal
-// the full pair's.
+// Row 46a. A stamped bounded Project redo stops after its replay applied a block past START. A
+// wider repeat runs the wider range: the family driver is asked from START, the registration
+// below the bound is processed again, and the tables equal the full pair's.
 #[tokio::test]
-async fn a_wider_repeat_after_the_replay_applied_a_block_rebuilds() -> Result<()> {
+async fn a_wider_repeat_after_the_replay_applied_a_block_runs_the_wider_range() -> Result<()> {
     let (fixture, _) = stamped_bounded_project("bounded_project_late_wider").await?;
     let full = BlockRange::new(START, fixture.head)?;
     fixture.stop_project_redo_at(full, 4).await?;
-    let open = replaying_past_start(&fixture).await?;
+    replaying_past_start(&fixture).await?;
+    let owners = damage_registration(fixture.pool()).await?;
     let run = fixture
         .redo(fixture.run(None, None), PhaseName::Project, full)
         .await?;
-    let repair = repair_record(fixture.pool()).await?;
-    ensure!(
-        repair == ("complete".to_owned(), None),
-        "the wider repeat over {open:?} did not rebuild: {repair:?}"
-    );
     let projected = run.ranges(PhaseName::Project);
     ensure!(
         projected.first() == Some(&full),
         "the family driver was asked for {projected:?}, expected {full:?}"
     );
+    assert_reprocessed(fixture.pool(), &owners).await?;
     fixture.assert_hashes().await?;
     fixture.assert_equals_full_pair().await
 }
@@ -1669,8 +1639,9 @@ async fn a_recorded_repeat_after_the_replay_applied_a_block_resumes() -> Result<
     fixture.assert_equals_full_pair().await
 }
 
-// Row 47. A stamped bounded Project redo stopped by a signal prints the recorded, narrowed range
-// to rerun, so an operator who repeats the printed command resumes the redo.
+// Row 47. A stamped bounded Project redo requested over the full range and stopped by a signal
+// prints its recorded range, from the bound, so an operator who repeats the printed command
+// resumes the redo (row 46b).
 #[tokio::test]
 async fn an_interrupted_bounded_project_redo_prints_its_recorded_range() -> Result<()> {
     let (fixture, start) = stamped_bounded_project("bounded_project_printed").await?;
@@ -1688,8 +1659,109 @@ async fn an_interrupted_bounded_project_redo_prints_its_recorded_range() -> Resu
     fixture.cleanup().await
 }
 
+// Row 48. A bounded manifest change has completed over S..H, its undo stopping on block U at or
+// below S - 1 (S - 1 when each block is its own journal generation, lower here because the
+// initial pair projected in ranges). A separate ordinary Project redo of U + 1..H stops once its
+// undo reaches U, before its replay applies a block, so the family marker again carries the
+// manifest set from before the change. A repeat from START, below U, runs the wider range: the
+// family driver is asked from START, the registration below U is processed again, and the tables
+// equal the full pair's.
+#[tokio::test]
+async fn a_wider_repeat_after_an_undo_to_a_completed_change_runs_the_wider_range() -> Result<()> {
+    let (fixture, start) = stamped_bounded_project("bounded_project_after_change").await?;
+    let full = BlockRange::new(START, fixture.head)?;
+    fixture
+        .redo(
+            fixture.run(None, None),
+            PhaseName::Project,
+            BlockRange::new(start, fixture.head)?,
+        )
+        .await?;
+    fixture.assert_hashes().await?;
+    let (_, base) = repair_record(fixture.pool()).await?;
+    let base = base.context("the completed bounded redo recorded no trusted base")?;
+    ensure!(
+        base > START + 1 && base < start,
+        "the completed bounded redo's undo stopped on {base}"
+    );
+    let ordinary = BlockRange::new(base + 1, fixture.head)?;
+    let undone = u64::try_from(fixture.head - base)?;
+    fixture.stop_project_redo_with(ordinary, undone, 2).await?;
+    let (marker, open) = (
+        family_marker(fixture.pool()).await?,
+        repair_record(fixture.pool()).await?,
+    );
+    ensure!(
+        marker == Some(base) && open.0 == "replaying",
+        "the ordinary redo stops after its undo reached {base}: marker {marker:?}, repair {open:?}"
+    );
+    let owners = damage_registration(fixture.pool()).await?;
+    let run = fixture
+        .redo(fixture.run(None, None), PhaseName::Project, full)
+        .await?;
+    let projected = run.ranges(PhaseName::Project);
+    ensure!(
+        projected.first() == Some(&full),
+        "the family driver was asked for {projected:?}, expected {full:?}"
+    );
+    assert_reprocessed(fixture.pool(), &owners).await?;
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+/// The owner a damaged registry owner event holds (`damage_registration`).
+const DAMAGED_OWNER: &str = "0x000000000000000000000000000000000000dead";
+
+/// The registry owner events of the name registered at `START + 1`, below every bounded start,
+/// as (event identity, owner).
+async fn registration_owners(pool: &sqlx::PgPool) -> Result<Vec<(String, Option<String>)>> {
+    Ok(sqlx::query_as(
+        "SELECT event_identity, owner FROM project_registry_owner_event
+         WHERE chain_id = $1 AND block_number = $2 ORDER BY event_identity",
+    )
+    .bind(CHAIN)
+    .bind(START + 1)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Overwrite the owner of each registry owner event at `START + 1` and return what they held.
+/// Only a Project redo that processes that block again restores them.
+async fn damage_registration(pool: &sqlx::PgPool) -> Result<Vec<(String, Option<String>)>> {
+    let owners = registration_owners(pool).await?;
+    ensure!(
+        !owners.is_empty(),
+        "no registry owner event at {}",
+        START + 1
+    );
+    sqlx::query(
+        "UPDATE project_registry_owner_event SET owner = $3
+         WHERE chain_id = $1 AND block_number = $2",
+    )
+    .bind(CHAIN)
+    .bind(START + 1)
+    .bind(DAMAGED_OWNER)
+    .execute(pool)
+    .await?;
+    Ok(owners)
+}
+
+/// The redo processed `START + 1` again: the owners `damage_registration` overwrote are back.
+async fn assert_reprocessed(
+    pool: &sqlx::PgPool,
+    owners: &[(String, Option<String>)],
+) -> Result<()> {
+    let now = registration_owners(pool).await?;
+    ensure!(
+        now == owners,
+        "the redo did not process block {} again: its owner events hold {now:?}, not {owners:?}",
+        START + 1
+    );
+    Ok(())
+}
+
 /// The stopped redo's repair record, after checking that its replay has applied a block past
-/// START and that the family marker carries the active manifest set.
+/// START.
 async fn replaying_past_start(fixture: &Fixture) -> Result<(String, Option<i64>)> {
     let marker = family_marker(fixture.pool()).await?;
     let open = repair_record(fixture.pool()).await?;
@@ -2362,8 +2434,18 @@ impl Fixture {
 
     /// The same, stopped at its `at`-th batch.
     async fn stop_project_redo_at(&self, range: BlockRange, at: usize) -> Result<()> {
+        self.stop_project_redo_with(range, 1, at).await
+    }
+
+    /// The same, with `blocks` work blocks per batch.
+    async fn stop_project_redo_with(
+        &self,
+        range: BlockRange,
+        blocks: u64,
+        at: usize,
+    ) -> Result<()> {
         let error = self
-            .one_block_project_runner(at)?
+            .project_runner(blocks, at)?
             .redo(
                 &chain()?,
                 RedoPhase::Phase(PhaseName::Project),
@@ -2385,7 +2467,7 @@ impl Fixture {
         let stop = CancellationToken::new();
         let cancel = stop.clone();
         let runner = self
-            .one_block_project_runner(usize::MAX)?
+            .project_runner(1, usize::MAX)?
             .with_before_redo_progress_write(move || {
                 let cancel = cancel.clone();
                 async move { cancel.cancel() }
@@ -2396,11 +2478,12 @@ impl Fixture {
             .expect_err("the cancelled Project redo is incomplete"))
     }
 
-    /// A runner whose Project phase applies one work block per batch and fails its `at`-th batch.
-    fn one_block_project_runner(&self, at: usize) -> Result<PhaseRunner> {
+    /// A runner whose Project phase applies `blocks` work blocks per batch and fails its `at`-th
+    /// batch.
+    fn project_runner(&self, blocks: u64, at: usize) -> Result<PhaseRunner> {
         let batches = Arc::new(Mutex::new(Vec::new()));
         let project = ProjectPhase::new(self.pool().clone()).with_family_settings(FamilySettings {
-            max_blocks_per_run: 1,
+            max_blocks_per_run: blocks,
             retry_family_failures: false,
             rebuild_ranges: bigname_project::families::RebuildRanges::Off,
             require_hydration_url: false,

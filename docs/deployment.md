@@ -1061,11 +1061,9 @@ lock of the chain is held, so it cannot land inside a running redo. A rerun afte
 range with the same token. A sync between attempts mints a new token, the old
 one is refused, and the next attempt computes the first effect again over both
 changes. A crash after the Interpret redo completes leaves the stamped Project
-range, so run that Project redo as recorded. A repeated wider command resumes
-the recorded range until the redo applies its first block. After that, repeat
-the recorded range the runner printed, or start the supervisor, which uses the
-stamp. A wider repeat then rebuilds from the wider start: extra work, no wrong
-data.
+range, so run that Project redo as recorded. An interrupted Project redo
+resumes when repeated with the recorded range the runner printed, or under the
+supervisor. A wider repeat runs the wider range: extra work, no wrong data.
 
 Without the flag, the redo fails closed. With it, the runner logs an error-level
 structured event from an immutable audit row containing the chain, phase, redo

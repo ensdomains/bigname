@@ -64,8 +64,8 @@ async fn covering_restart(rebuild: bool) -> Result<()> {
         "a covering restart must restore the outstanding publication before clearing redo"
     );
     if !rebuild {
-        // A plain Project redo owns no required-redo stamp, so a covering restart widens: its
-        // undo reaches below its own start 8, not the interrupted request's 10.
+        // A covering restart runs its own wider request: its undo reaches below its own start
+        // 8, not the interrupted request's 10.
         let base: Option<i64> = sqlx::query_scalar(
             "SELECT trusted_base_number FROM project_repair_record WHERE chain_id = $1",
         )
