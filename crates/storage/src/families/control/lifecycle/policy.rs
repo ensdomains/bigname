@@ -7,15 +7,30 @@ use uuid::Uuid;
 use super::{NameFacts, TripleFacts};
 use crate::families::control::rows::LifecycleEvent;
 
-// This exact non-proxy ETHRegistry is governed by the reviewed ETHRegistrar / ETHRenewerV1
-// with 28-day grace. A custom registry at the same name depth has no inferred grace.
+// One row per reviewed deployment: its chain, its deployment label and its exact non-proxy
+// ETHRegistry, governed by that deployment's reviewed ETHRegistrar / ETHRenewerV1 with 28-day
+// grace. A custom registry at the same name depth has no inferred grace. A redeploy adds a row.
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ETHRegistry.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
-const REGISTRY: &str = "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4";
+// (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+const DEPLOYMENTS: [(&str, &str, &str); 2] = [
+    (
+        "ethereum-sepolia",
+        "ens_v2_sepolia_20261001",
+        "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4",
+    ),
+    (
+        "ethereum-mainnet",
+        "ens_v2_mainnet_20261002",
+        "0xf60aba43e1f7f3dab1186ff03b561401c9df85e2",
+    ),
+];
 
 // The grace is an immutable of the registrar contract, so a deprecated manifest's closed address
-// range still carries it for allocations made inside that range.
+// range still carries it for allocations made inside that range. The mainnet ETHRegistrar's
+// constructor arguments name this ETHRegistry (word 2) and a 2,419,200-second grace (word 5).
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/ETHRegistrar.sol:L43 @ ens_v2_sepolia_20261001@07e55a05)
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/ETHRegistrar.sol:L97 @ ens_v2_sepolia_20261001@07e55a05)
+// (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistrar.json:L1419 @ ens_v2_mainnet_20261002@b1f97b91)
 
 #[derive(Clone, Debug)]
 pub struct GraceRegistry {
@@ -41,41 +56,46 @@ async fn registries(
     chain: &str,
     ids: Vec<Uuid>,
 ) -> Result<Vec<GraceRegistry>> {
-    if ids.is_empty() || chain != "ethereum-sepolia" {
-        return Ok(Vec::new());
-    }
-    let rows: Vec<(Uuid, Option<i64>, Option<i64>, Value)> = sqlx::query_as(
-        "/* storage:families.control.lifecycle.grace_policy */
-         SELECT address.contract_instance_id, address.active_from_block_number,
-                address.active_to_block_number, manifest.manifest_payload
-         FROM bigname_phase.contract_instance_addresses address
-         JOIN bigname_phase.manifest_versions manifest ON manifest.manifest_id = address.source_manifest_id
-         WHERE address.chain_id = $1 AND address.contract_instance_id = ANY($2)
-           AND lower(address.address) = $3 AND manifest.chain_id = $1
-           AND manifest.namespace = 'ens' AND manifest.source_family = 'ens_v2_registry_l1'
-           AND manifest.deployment_label = 'ens_v2_sepolia_20261001'"
-    ).bind(chain).bind(ids).bind(REGISTRY).fetch_all(conn).await?;
     let mut out = Vec::new();
-    for (id, start, end, payload) in rows {
-        let Some(start) = start else { continue };
-        let contracts = payload["contracts"].as_array().into_iter().flatten();
-        let declared = contracts
-            .filter(|contract| {
-                contract["role"] == "registry"
-                    && contract["address"]
-                        .as_str()
-                        .is_some_and(|a| a.eq_ignore_ascii_case(REGISTRY))
-                    && contract["proxy_kind"] == "none"
-                    && contract["start_block"].as_i64().is_some_and(|b| b <= start)
-            })
-            .count()
-            == 1;
-        if declared {
-            out.push(GraceRegistry {
-                identifier: id.to_string(),
-                start,
-                end,
-            });
+    if ids.is_empty() {
+        return Ok(out);
+    }
+    for &(_, label, registry) in DEPLOYMENTS
+        .iter()
+        .filter(|(deployment_chain, ..)| *deployment_chain == chain)
+    {
+        let rows: Vec<(Uuid, Option<i64>, Option<i64>, Value)> = sqlx::query_as(
+            "/* storage:families.control.lifecycle.grace_policy */
+             SELECT address.contract_instance_id, address.active_from_block_number,
+                    address.active_to_block_number, manifest.manifest_payload
+             FROM bigname_phase.contract_instance_addresses address
+             JOIN bigname_phase.manifest_versions manifest ON manifest.manifest_id = address.source_manifest_id
+             WHERE address.chain_id = $1 AND address.contract_instance_id = ANY($2)
+               AND lower(address.address) = $3 AND manifest.chain_id = $1
+               AND manifest.namespace = 'ens' AND manifest.source_family = 'ens_v2_registry_l1'
+               AND manifest.deployment_label = $4"
+        ).bind(chain).bind(&ids).bind(registry).bind(label).fetch_all(&mut *conn).await?;
+        for (id, start, end, payload) in rows {
+            let Some(start) = start else { continue };
+            let contracts = payload["contracts"].as_array().into_iter().flatten();
+            let declared = contracts
+                .filter(|contract| {
+                    contract["role"] == "registry"
+                        && contract["address"]
+                            .as_str()
+                            .is_some_and(|a| a.eq_ignore_ascii_case(registry))
+                        && contract["proxy_kind"] == "none"
+                        && contract["start_block"].as_i64().is_some_and(|b| b <= start)
+                })
+                .count()
+                == 1;
+            if declared {
+                out.push(GraceRegistry {
+                    identifier: id.to_string(),
+                    start,
+                    end,
+                });
+            }
         }
     }
     Ok(out)
@@ -118,8 +138,9 @@ mod tests {
     }
 
     async fn check(pool: &sqlx::PgPool) -> Result<()> {
+        let (_, _, registry) = DEPLOYMENTS[0];
         let mut conn = pool.acquire().await?;
-        let payload = serde_json::json!({"contracts": [{"role": "registry", "address": REGISTRY,
+        let payload = serde_json::json!({"contracts": [{"role": "registry", "address": registry,
             "proxy_kind": "none", "start_block": 10}]});
         sqlx::raw_sql(
             "CREATE SCHEMA bigname_phase;
@@ -151,7 +172,7 @@ mod tests {
                  ($1,'ethereum-sepolia',$2,10,$3,$4)",
             )
             .bind(instance)
-            .bind(REGISTRY)
+            .bind(registry)
             .bind(end)
             .bind(manifest)
             .execute(&mut *conn)

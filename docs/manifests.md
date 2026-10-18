@@ -1044,6 +1044,19 @@ migration correlation and does not change correlated visibility. It may
 precede delayed initialization: ordinary `RegistryCreated` remains required
 to admit the proxy, and no pre-initialization approvals are added. Other
 uncorrelated migration-source observations remain omitted.
+The reviewed factory and implementation pairs are listed per
+[deployment epoch](glossary.md#deployment-epoch) in
+`crates/adapters/src/schema_v2/migration/registry_origin.rs`. A pair applies only
+while the active migration manifest has that epoch and declares the factory and the
+implementation. The `ens_v2_mainnet_20261002` row names factory
+`0x77510ba162dfea3d8989e3f0928a691b345730d2` and implementations
+`0xcf3edb3f5501de63b57254d910b6782ee370039b` (Wrapper) and
+`0x75ff9adbcfce2469b097ac68f6ae650eae1351bb` (UserRegistry). Earlier mainnet
+WrapperRegistry implementations are not listed, so a proxy that names one keeps no
+origin. A redeploy adds a row.
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/VerifiableFactory.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/WrapperRegistryImpl.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UserRegistryImpl.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
 The existing watch compiler adds two address-scoped entries for this UserRegistry
 implementation: the migration family's `ProxyDeployed` and `NameRenewed` topics,
 from `11820439`; its existing 16 entries remain unchanged. This is a watch-plan

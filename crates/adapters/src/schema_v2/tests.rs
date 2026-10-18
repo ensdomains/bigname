@@ -16,6 +16,9 @@ mod migration;
 #[path = "tests/record_id_resolver.rs"]
 mod record_id_resolver;
 
+#[path = "tests/registry_origin.rs"]
+mod registry_origin;
+
 #[path = "tests/resolver_announcements.rs"]
 mod resolver_announcements;
 
