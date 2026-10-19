@@ -1,0 +1,44 @@
+# Official 2026-10-02 mainnet ENSv2 deployment, as the pinned deployments/mainnet folder lists it.
+# No manifest declares the contracts that the 2026-10-13 and 2026-10-18 redeploys replaced
+# (docs/mainnet-deployment.md).
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/.deployment.json:L4 @ ens_v2_mainnet_20261002@b1f97b91)
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v2_registrar_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v2_mainnet_20261002"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+discovery_rules = []
+
+[capability_flags]
+exact_name_profile = { status = "supported", notes = "namespace capability declaration for /v1/namespaces; whether a name is served follows its authority decision, not this flag" }
+name_history = "supported"
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistrar.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+[[roots]]
+name = "ETHRegistrar"
+address = "0xd6d8369e55c94ae8afa714e6cf7ab5be54d5cc81"
+start_block = 26183999
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistrar.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistrar.json:L1427 @ ens_v2_mainnet_20261002@b1f97b91)
+[[contracts]]
+role = "registrar"
+address = "0xd6d8369e55c94ae8afa714e6cf7ab5be54d5cc81"
+proxy_kind = "none"
+start_block = 26183999
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistrar.json:L261 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "NameRegistered"
+fragment = "event NameRegistered(uint256 indexed tokenId, string label, address owner, address subregistry, address resolver, uint64 duration, address paymentToken, bytes32 indexed referrer, uint256 base, uint256 premium)"
+emitter_roles = ["registrar"]
+normalized_events = ["RegistrarNameRegistered", "PreimageObserved"]
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistrar.json:L310 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "NameRenewed"
+fragment = "event NameRenewed(uint256 indexed tokenId, string label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 indexed referrer, uint256 amount)"
+emitter_roles = ["registrar"]
+normalized_events = ["RegistrationRenewed", "PreimageObserved"]

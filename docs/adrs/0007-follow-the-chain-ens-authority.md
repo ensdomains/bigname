@@ -347,11 +347,12 @@ an ENSv2 root registry, for its whole retained history. The
 
 Doc-first. This ADR and the contract docs change first; the Project authority
 selection follows in the same pull request. The rule applies to every ENS
-[deployment profile](../glossary.md#deployment-profile). The Mainnet manifest
-profile admits no ENSv2 source family today (`manifests/mainnet/ethereum/ens/`
-declares only ENSv1 families and `ens_execution`), so Mainnet names have no
-ENSv2 facts and nothing changes there. Once ENSv2 sources are admitted on
-Mainnet, the same rule applies.
+[deployment profile](../glossary.md#deployment-profile). When this ADR was
+adopted the Mainnet manifest profile admitted no ENSv2 source family
+(`manifests/mainnet/ethereum/ens/` declared only ENSv1 families and
+`ens_execution`), so Mainnet names had no ENSv2 facts and nothing changed there.
+The Mainnet profile now admits the official 2026-10-02 ENSv2 deployment
+([mainnet deployment](../mainnet-deployment.md)), and the same rule applies.
 
 ## Alternatives considered
 

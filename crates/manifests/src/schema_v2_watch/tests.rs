@@ -293,24 +293,80 @@ fn an_event_start_is_refused_where_no_family_wide_entry_compiles() -> Result<()>
     Ok(())
 }
 
+/// No ENSv2 registry was admitted on mainnet before the declared ETHRegistry, so its family-wide
+/// approval watch starts at that registry's own start, and no other event of the profile
+/// declares a start.
 #[test]
-fn the_mainnet_deployment_profile_declares_no_ens_v2_approval_and_no_event_start() -> Result<()> {
+fn the_mainnet_deployment_profile_starts_registry_approvals_at_the_declared_eth_registry()
+-> Result<()> {
+    const ETH_REGISTRY: &str = "0xf60aba43e1f7f3dab1186ff03b561401c9df85e2";
+    const ETH_REGISTRY_START: u64 = 26_105_621;
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let repository = crate::load_repository(workspace_root.join("manifests/mainnet"))?;
+    let topic0 = approval_for_all_topic0();
+    let mut starts = Vec::new();
     for loaded in repository.manifests() {
-        assert!(
-            !loaded.manifest.source_family.starts_with("ens_v2_"),
-            "mainnet declares no ENSv2 family"
-        );
-        for event in &loaded.manifest.abi.events {
-            assert_eq!(event.start_block, None, "{}", event.name);
-        }
-        for entry in compile_watch_scope(&loaded.manifest)? {
-            if matches!(entry.emitter, WatchEmitter::Family { .. }) {
-                assert_eq!(entry.start, 0);
+        let manifest = &loaded.manifest;
+        for event in &manifest.abi.events {
+            if let Some(start) = event.start_block {
+                starts.push((manifest.source_family.as_str(), event.name.as_str(), start));
             }
         }
+        for entry in compile_watch_scope(manifest)? {
+            if !matches!(entry.emitter, WatchEmitter::Family { .. }) {
+                continue;
+            }
+            let expected = if manifest.source_family == crate::ENS_V2_REGISTRY_SOURCE_FAMILY
+                && entry.topic0 == topic0
+            {
+                ETH_REGISTRY_START
+            } else {
+                0
+            };
+            assert_eq!(
+                entry.start, expected,
+                "{} {}",
+                manifest.source_family, entry.topic0
+            );
+        }
     }
+    assert_eq!(
+        starts,
+        [(
+            crate::ENS_V2_REGISTRY_SOURCE_FAMILY,
+            "ApprovalForAll",
+            ETH_REGISTRY_START
+        )]
+    );
+    let registry = repository
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == crate::ENS_V2_REGISTRY_SOURCE_FAMILY)
+        .context("mainnet registry manifest")?;
+    let declared = compile_watch_scope(&registry.manifest)?
+        .into_iter()
+        .filter(|entry| entry.topic0 == topic0)
+        .map(|entry| (entry.emitter, entry.start))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        declared,
+        BTreeSet::from([
+            (
+                WatchEmitter::Family {
+                    namespace: "ens".to_owned(),
+                    family: crate::ENS_V2_REGISTRY_SOURCE_FAMILY.to_owned(),
+                },
+                ETH_REGISTRY_START,
+            ),
+            (
+                WatchEmitter::Address {
+                    family: crate::ENS_V2_REGISTRY_SOURCE_FAMILY.to_owned(),
+                    address: ETH_REGISTRY.to_owned(),
+                },
+                ETH_REGISTRY_START,
+            ),
+        ])
+    );
     Ok(())
 }
 

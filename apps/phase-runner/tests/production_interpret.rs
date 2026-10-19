@@ -21,6 +21,8 @@ use bigname_project::families::FamilyMode;
 #[path = "production_interpret/families.rs"]
 mod family_reads;
 use family_reads::*;
+#[path = "production_interpret/mainnet_admission.rs"]
+mod mainnet_admission;
 #[path = "production_interpret/sepolia_redeploy.rs"]
 mod sepolia_redeploy;
 #[path = "production_interpret/statistics.rs"]

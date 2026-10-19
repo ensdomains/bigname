@@ -15,7 +15,7 @@ manifests/sepolia/ethereum/<namespace>/<source_family>/v1.toml
 manifests/sepolia/base/<namespace>/<source_family>/v1.toml
 ```
 
-Bootstrap seed manifests are checked in for the first ENS, ENSv2 Sepolia, and Basenames source families.
+Bootstrap seed manifests are checked in for the first ENS, ENSv2 Sepolia, ENSv2 mainnet, and Basenames source families.
 
 Current policy:
 
@@ -25,3 +25,5 @@ Current policy:
 - a runtime selects exactly one manifest profile root; `manifests/mainnet/` and `manifests/sepolia/` must not be loaded into the same canonical corpus, watch plan, discovery graph, or projection set
 
 The Sepolia profile now selects the [official 2026-10-01 redeploy](../docs/sepolia-deployment.md). The 2026-09-15 deployment and the earlier Sepolia and hackathon manifests are removed.
+
+The mainnet profile selects the [official 2026-10-02 mainnet ENSv2 deployment](../docs/mainnet-deployment.md). No manifest declares the contracts the 2026-10-13 and 2026-10-18 redeploys replaced.

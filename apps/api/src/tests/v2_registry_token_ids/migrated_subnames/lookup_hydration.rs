@@ -8,6 +8,11 @@ use std::sync::{Arc, Mutex};
 const LEGACY: &str = "0x4976fb03c32e5b8cfe2b6ccb31c09ba78ebaba41";
 const CHAIN: &str = "ethereum-mainnet";
 const CHILD: &str = "hydrate259.eth";
+/// The checked-in mainnet profile admits ENSv2, so the name is served only with a live ENSv2
+/// entry. Premigration reserves it on the ETHRegistry, which needs heights above the ENSv2
+/// deployment. The live ENSv1 lease still decides the resolver.
+const BASE: i64 = 26_216_000;
+const ETH_REGISTRY: &str = "0xf60aba43e1f7f3dab1186ff03b561401c9df85e2";
 sol! {
     // This deployed ABI's TextChanged has no value; setText writes one for text() to return.
     // (upstream: .refs/ens_subgraph/subgraph.yaml:L109-L110 @ ens_subgraph@723f1b6)
@@ -216,6 +221,17 @@ async fn lookup_precomputation_publishes_successful_failed_and_undone_text_hydra
                     owner,
                     cost: U256::from(1),
                     expires: U256::from(2_000_000_000u64),
+                }
+                .encode_log_data(),
+            ),
+            (
+                ETH_REGISTRY.parse()?,
+                LabelReserved {
+                    tokenId: label_token("hydrate259"),
+                    labelHash: label,
+                    label: "hydrate259".into(),
+                    expiry: 2_000_000_000,
+                    sender: owner,
                 }
                 .encode_log_data(),
             ),

@@ -2663,13 +2663,15 @@ reference lists the other
 [manifest reads](api-v1.md#manifest-reads-and-the-publication) the set bounds.
 An admitted chain therefore reads as cut over for its whole retained history. On Sepolia that includes the blocks before the managed
 proxy moved to UniversalResolverV2 at `11821680`
-([known divergence](upstream.md#known-divergences)). Mainnet is not cut over
-until its ENSv2 manifests are admitted
-([deployment](deployment.md#cutover-at-ensv2-admission)).
+([known divergence](upstream.md#known-divergences)). Mainnet is cut over
+because its profile admits the official 2026-10-02 ENSv2 deployment, including
+the blocks before the DAO proposal points the client-facing proxy at ENSv2
+([mainnet deployment](mainnet-deployment.md)).
 
 `GET /v1/namespaces/{namespace}` reports the state per network as
 `resolution` ([namespace route](api-v1-routes.md#get-v1namespacesnamespace)).
-Its `since_block` is the admitted root registry's declared start block.
+Its `since_block` is the admitted root registry's declared start block. On
+mainnet that is `26183742`, the RootRegistry's deployment receipt.
 
 ## Verified lookup
 

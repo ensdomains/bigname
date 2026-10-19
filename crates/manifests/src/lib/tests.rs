@@ -862,7 +862,7 @@ fn checked_in_manifest_trees_pass_repository_validation() -> Result<()> {
 }
 
 #[test]
-fn mainnet_execution_manifest_defaults_to_ensv1() -> Result<()> {
+fn mainnet_execution_manifest_declares_both_arms() -> Result<()> {
     let profile = "manifests/mainnet";
     let repository = load_repository(checked_in_manifest_root(profile))?;
     let execution = repository
@@ -872,17 +872,15 @@ fn mainnet_execution_manifest_defaults_to_ensv1() -> Result<()> {
         .collect::<Vec<_>>();
     assert_eq!(execution.len(), 1, "{profile}: one ens_execution manifest");
     let manifest = &execution[0].manifest;
-    assert_eq!(manifest.verified_authority_arms, None, "{profile}");
     assert_eq!(
         manifest.verified_authority_arms(),
-        DEFAULT_VERIFIED_AUTHORITY_ARMS,
+        ["ens_v1", "ens_v2"],
         "{profile}"
     );
-    assert_eq!(manifest.verified_authority_arms(), ["ens_v1"], "{profile}");
-    let payload = serde_json::to_value(manifest)?;
-    assert!(
-        payload.get("verified_authority_arms").is_none(),
-        "{profile}: an absent declaration must not appear in the synced payload"
+    assert_eq!(
+        serde_json::to_value(manifest)?["verified_authority_arms"],
+        json!(["ens_v1", "ens_v2"]),
+        "{profile}: the declaration reaches the synced payload"
     );
     Ok(())
 }
@@ -1279,6 +1277,20 @@ fn checked_in_adapter_owned_approval_inventory_is_exact() -> Result<()> {
             ens_v2_approval_for_all,
             &['i'][..],
         ),
+        (
+            "mainnet",
+            "ethereum/ens/ens_v2_registry_l1/v1.toml",
+            "ApprovalForAll",
+            ens_v2_approval_for_all,
+            &['a'][..],
+        ),
+        (
+            "mainnet",
+            "ethereum/ens/ens_v2_root_l1/v1.toml",
+            "ApprovalForAll",
+            ens_v2_approval_for_all,
+            &['i'][..],
+        ),
     ];
     let role_sets = std::collections::BTreeMap::from([
         ('a', &["registry"][..]),
@@ -1349,7 +1361,7 @@ fn checked_in_adapter_owned_approval_inventory_is_exact() -> Result<()> {
         })
         .count();
     assert_eq!(
-        declared, 21,
+        declared, 23,
         "approval declaration inventory must stay exact"
     );
     Ok(())

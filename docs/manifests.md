@@ -451,7 +451,7 @@ Capability ownership attaches to the declaring `source_family`. It is never impl
 
 ### ENS mainnet
 
-`ens_execution` owns verified resolution at the ENS Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` with `verified_resolution = "supported"` and `rollout_status = "shadow"`.[^ens-docs-univ][^v1-ur-deploy][^v1-ursol-l8] The pinned `.refs/` artifact is the implementation/ABI anchor; the lookup entry is the proxy address. Public ENS verified-resolution support is gated by the route-level support classes in `docs/api-v1-routes.md` and `docs/execution.md`, not by this manifest flag. The manifest declares no [`verified_authority_arms`](#verified_authority_arms), so it admits the default `["ens_v1"]`: the Mainnet profile has no ENSv2 arm to verify.
+`ens_execution` owns verified resolution at the ENS Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` with `verified_resolution = "supported"` and `rollout_status = "active"`.[^ens-docs-univ][^v1-ur-deploy][^v1-ursol-l8] The pinned `.refs/` artifact is the implementation/ABI anchor. The lookup entry is the proxy address. Public ENS verified-resolution support is gated by the route-level support classes in `docs/api-v1-routes.md` and `docs/execution.md`, not by this manifest flag. The manifest declares [`verified_authority_arms`](#verified_authority_arms) `["ens_v1", "ens_v2"]`, and the Mainnet profile admits the official ENSv2 deployment the ENSv2 arm verifies ([ENS execution, `mainnet`](#ens-execution-mainnet-deployment-profile)).
 
 The ENS primary-name route does not introduce a second manifest capability. `ens_execution` supplies the manifest selection for the request-scoped, hash-pinned ENS/60 missing-tuple lookup under the same owner manifest, without turning `verified_resolution` into a route-level primary-name support flag. Indexed exact-tuple claim state lives in the family reverse claims (`bigname_phase.project_reverse_tuple` and `project_reverse_node_claim`); provider lookup responses are not persisted as execution outcomes or traces.
 
@@ -492,6 +492,38 @@ profile declares `DataResolver` composition, so that event admission does not
 confer `DataResolver`-family support; unknown resolver profiles remain
 `pending`. The generic `resolver_record` fact is an observation bucket; it does
 not act as a catch-all for unknown families.
+
+### ENSv2 (`mainnet` deployment profile)
+
+The mainnet profile admits the official 2026-10-02 mainnet ENSv2 deployment under
+`deployment_epoch = "ens_v2_mainnet_20261002"`, as the pinned `deployments/mainnet`
+folder lists it. The five ENSv2 families ship as version 1 and copy the Sepolia
+families' event blocks, discovery rules and capability flags. The one edited event
+start is the registry family's `ApprovalForAll`, which starts at the ETHRegistry's
+receipt block `26105621`. No manifest declares the contracts the 2026-10-13 and
+2026-10-18 redeploys replaced, and none of them names a name.
+The [complete deployment inventory](mainnet-deployment.md) records every address,
+its admission or explicit exclusion, and how an existing database moves to it.
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/.deployment.json:L4 @ ens_v2_mainnet_20261002@b1f97b91)
+
+### ENS execution (`mainnet` deployment profile)
+
+`ens_execution` moves to version 2 under the same epoch and is active. It declares
+the client-facing proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` from block
+`26105292`, the deployment's first block, and the managed proxy
+`0xcffd2ae680cd110d28739a70922636b5937b022b` from its creation block `26105675`.
+It admits both proxies' `Upgraded` event, declares
+`verified_authority_arms = ["ens_v1", "ens_v2"]` and lists the deployment's
+UniversalResolverV2 `0x06fdd07f007adac667177b46ab2eb9a75132cfd5` in
+`universal_resolver_implementations`. Neither proxy has emitted `Upgraded`, so
+the first proxy row appears at DAO proposal call 15 or at the managed proxy's
+upgrade to UniversalResolverV2, whichever comes first (`docs/upstream.md`,
+"Mainnet Universal Resolver proxies admitted from chain evidence"). Mainnet is
+cut over from the admission of the `ens_v2_root_l1` root registry, for its whole
+retained history. Version 1, the shadow manifest with the default `["ens_v1"]`
+arm, is deleted. Its row stays `shadow`, which nothing watches or interprets.
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ManagedUniversalResolverProxy.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UniversalResolverV2.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
 
 ### ENSv2 (`sepolia` deployment profile)
 
@@ -1445,8 +1477,8 @@ ENSv2 resolver events that declare `emitter_roles` are watched only at the
 declared role's address: on Sepolia, `AddrChanged`, `AddressChanged`,
 `TextChanged`, `ContenthashChanged`, and `VersionChanged` are read from the
 declared `public_resolver_v2` contract only, no longer from every declared
-resolver contract. Mainnet declares no ENSv2 family, so its watch plan is
-unchanged.
+resolver contract. The mainnet profile's ENSv2 resolver family follows the same
+rule at its own `public_resolver_v2`.
 `ResolverUpdated` supplies name-binding history only. Its topology edges do
 not widen the watch plan and must not cause historical fetching. Project's
 [declaration precedence](architecture.md#discovery-graph) is a different

@@ -1,0 +1,79 @@
+# Official 2026-10-02 mainnet ENSv2 deployment, as the pinned deployments/mainnet folder lists it.
+# No manifest declares the contracts that the 2026-10-13 and 2026-10-18 redeploys replaced
+# (docs/mainnet-deployment.md).
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/.deployment.json:L4 @ ens_v2_mainnet_20261002@b1f97b91)
+manifest_version = 2
+namespace = "ens"
+source_family = "ens_execution"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v2_mainnet_20261002"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+roots = []
+discovery_rules = []
+# Both arms dispatch through the client-facing proxy declared below. The pinned artifacts prove
+# that the UniversalResolverV2 implementation was constructed with the declared RootRegistry, not
+# that either proxy targets it. Before the DAO proposal executes, both proxies forward to the
+# pre-ENSv2 Universal Resolver (docs/mainnet-deployment.md, "Universal Resolver proxies").
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UniversalResolverV2.json:L1634 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/RootRegistry.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+verified_authority_arms = ["ens_v1", "ens_v2"]
+# The UniversalResolverV2 implementation of the admitted deployment. The proxies below are
+# reported against this list for monitoring (docs/manifests.md §
+# `universal_resolver_implementations`). The list does not decide the Universal Resolver cutover,
+# which is the admission of the ENSv2 root registry. This implementation was constructed with
+# the admitted RootRegistry as its immutable ROOT_REGISTRY (constructor argument 0). The managed
+# proxy upgrades to it in a deployment step the pinned migration record has not run yet. The
+# pre-ENSv2 implementation 0xED73a03F…, the UniversalResolverV1 builds and the UniversalResolverV2
+# builds that later redeploys replaced are not listed.
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UniversalResolverV2.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/universalResolver/UniversalResolverV2.sol:L20 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/.migrations.json:L1 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deploy/universalResolver/05_setup_ManagedUniversalResolverProxyToUniversalResolverImplementation.ts:L26-L46 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v1/deployments/mainnet/UniversalResolver.json:L2 @ ens_v1@91c966f)
+universal_resolver_implementations = ["0x06fdd07f007adac667177b46ab2eb9a75132cfd5"]
+
+[capability_flags]
+verified_resolution = { status = "supported", notes = "verified resolution through the official mainnet Universal Resolver for both ENSv1 and ENSv2 authority" }
+
+# The client-facing Universal Resolver proxy. Its `Upgraded` events are admitted so that the
+# monitoring reads where clients resolve from chain data. The pinned artifact has no receipt. The
+# start block is the first block of this deployment, the ENSV1Resolver receipt, not the proxy's
+# creation block as on Sepolia. The proxy has never emitted `Upgraded`, so an earlier start reads
+# nothing more (docs/upstream.md, "Mainnet Universal Resolver proxies admitted from chain
+# evidence"). `proxy_kind` stays "none": lookup calls the proxy itself, and its implementation is
+# not a contract bigname indexes.
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UpgradableUniversalResolverProxy.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/docs/universalResolver.md:L7-L17 @ ens_v2_mainnet_20261002@b1f97b91)
+[[contracts]]
+role = "universal_resolver"
+address = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"
+proxy_kind = "none"
+start_block = 26105292
+
+# The managed (intermediate) Universal Resolver proxy. DAO call 15 points the client-facing proxy
+# at it. Its constructor took the client-facing proxy's implementation without an event
+# (constructor argument 2), and its start block is its creation receipt.
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ManagedUniversalResolverProxy.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ManagedUniversalResolverProxy.json:L316 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ManagedUniversalResolverProxy.json:L324 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/dao/proposal.md:L177-L186 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/docs/universalResolver.md:L7-L17 @ ens_v2_mainnet_20261002@b1f97b91)
+[[contracts]]
+role = "universal_resolver_managed"
+address = "0xcffd2ae680cd110d28739a70922636b5937b022b"
+proxy_kind = "none"
+start_block = 26105675
+
+# `upgradeTo` emits Upgraded with the new implementation. The constructor sets the first
+# implementation without an event, so a proxy with no Upgraded yet has no reported implementation.
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L30 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L71-L75 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L163-L165 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L111-L115 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UpgradableUniversalResolverProxy.json:L127 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "Upgraded"
+fragment = "event Upgraded(address indexed implementation)"
+emitter_roles = ["universal_resolver", "universal_resolver_managed"]
+normalized_events = ["Upgraded"]

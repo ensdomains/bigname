@@ -4233,9 +4233,9 @@ introduces it rebuilds Project from full history before serving the option; see
   Moving the wrapped token to the graveyard therefore freezes ordinary writes
   by the former name owner, but it does not revoke those separately trusted
   callers.
-  This locked-name `CANNOT_SET_RESOLVER` case is not reachable under the
-  Mainnet profile, which has no ENSv2 arm. Under the Sepolia profile, whose
-  verified route executes through the Sepolia Universal Resolver, a name outside
+  This locked-name `CANNOT_SET_RESOLVER` case is reachable under both the
+  Mainnet and the Sepolia profile, whose verified routes execute through each
+  chain's Universal Resolver with the ENSv2 arm admitted. A name outside
   indexed coverage is admitted and can verify those retained records. Inside
   coverage, the name's `ens_v2`-selected row causes the refusal above, so the
   exposure closes as indexing coverage completes.
