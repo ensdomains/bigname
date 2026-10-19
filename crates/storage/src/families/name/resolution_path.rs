@@ -182,7 +182,13 @@ impl Walk {
                     .min();
                 match eligibility.eligible {
                     Some(true) => {
-                        nearest = Some((wrapper::MIRROR.into(), depth));
+                        // The mirror is the publication's declared one, so an undeclared
+                        // deployment is unknown rather than another deployment's mirror.
+                        let Some(mirror) = self.declarations.mirror_resolver(publication) else {
+                            outcome.decision = Decision::Unknown;
+                            return Ok(outcome);
+                        };
+                        nearest = Some((mirror, depth));
                         break;
                     }
                     None => {

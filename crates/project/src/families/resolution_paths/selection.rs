@@ -12,7 +12,8 @@
 //! the planner runs once per outer row and cannot turn into a join over every surface.
 //!
 //! Three cases read every observed ENS surface, because they can move every name: a changed
-//! registry, a classification change of the v1 fallback resolver, and a prefix of no labels.
+//! registry, a classification change of a declared ENSv1 mirror resolver (the v1 fallback),
+//! and a prefix of no labels.
 //! A prefix whose first label hash is null has no entry key to look up and also reads them all.
 //! Missing/current/former membership and divergence evidence never restrict this candidate set.
 //! SourceManifestUpdated has no block position. Supported manifest sync invalidates phase hashes
@@ -197,7 +198,14 @@ pub(super) fn statement(normal_work: &str) -> String {
            OR current.unsupported_reason IS DISTINCT FROM journal.before_image->>'unsupported_reason'
            OR to_jsonb(current.manifest_id) IS DISTINCT FROM journal.before_image->'manifest_id'
     ), global_change AS MATERIALIZED (
-        SELECT 1 FROM changed_resolvers WHERE resolver='0x322b7581ca210a69c6d0e0d7c88a7688d2789cb0'
+        -- Any ENSv1 mirror resolver an ENSv2 resolver manifest of the chain declares. The walk
+        -- reads the publication's own declaration, one of these (resolution_path.rs).
+        SELECT 1 FROM changed_resolvers changed
+        JOIN manifest_contract_instances declared ON declared.chain_id=$1
+         AND declared.declaration_kind='contract' AND declared.role='ensv1_mirror_resolver'
+         AND lower(declared.declared_address)=changed.resolver
+        JOIN manifest_versions manifest ON manifest.manifest_id=declared.manifest_id
+         AND manifest.chain_id=declared.chain_id AND manifest.source_family='ens_v2_resolver_l1'
     ), source_names AS MATERIALIZED (
         SELECT logical_name_id FROM normal
         WHERE logical_name_id IN (SELECT logical_name_id FROM names_whose_change_can_move_descendants)

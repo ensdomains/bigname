@@ -200,6 +200,75 @@ async fn check(pool: &sqlx::PgPool) -> Result<()> {
     Ok(())
 }
 
+/// The marker rule holds per reviewed deployment: a registry token reads under its own chain's
+/// deployment label only.
+#[tokio::test]
+async fn history_token_ids_apply_per_reviewed_deployment() -> Result<()> {
+    let database =
+        TestDatabase::create(TestDatabaseConfig::new("history_token_id_deployments")).await?;
+    let result = async {
+        let mut conn = database.pool().acquire().await?;
+        sqlx::raw_sql(
+            "CREATE SCHEMA bigname_phase;
+             SET search_path=bigname_phase;
+             CREATE TABLE manifest_versions (manifest_id bigint PRIMARY KEY, chain_id text,
+                 source_family text, manifest_version bigint, deployment_label text);
+             CREATE TABLE chain_lineage (chain_id text, block_hash text, block_number bigint,
+                 canonicality_state text, PRIMARY KEY(chain_id,block_hash));
+             CREATE TABLE normalized_events (normalized_event_id bigint GENERATED ALWAYS AS
+                 IDENTITY PRIMARY KEY, source_manifest_id bigint, manifest_version bigint,
+                 resource_id uuid, chain_id text, block_hash text, block_number bigint,
+                 transaction_index bigint, log_index bigint, source_family text, event_kind text,
+                 consumer_visibility text, canonicality_state text, after_state jsonb);",
+        )
+        .execute(&mut *conn)
+        .await?;
+        // (chain, deployment label, read)
+        let cases = [
+            ("ethereum-mainnet", "ens_v2_mainnet_20261002", true),
+            ("ethereum-sepolia", "ens_v2_sepolia_20261001", true),
+            ("ethereum-sepolia", "ens_v2_sepolia_post_audit", true),
+            ("ethereum-sepolia", "ens_v2_mainnet_20261002", false),
+            ("ethereum-mainnet", "ens_v2_sepolia_20261001", false),
+            ("ethereum-mainnet", "ens_v2_sepolia_post_audit", false),
+        ];
+        let mut failures = Vec::new();
+        for (manifest, (chain, label, read)) in (1_i64..).zip(cases) {
+            let resource = manifest as u128;
+            sqlx::query("INSERT INTO manifest_versions VALUES ($1,$2,'ens_v2_registry_l1',2,$3)")
+                .bind(manifest)
+                .bind(chain)
+                .bind(label)
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query(
+                "INSERT INTO chain_lineage VALUES ($1,'10',10,'canonical') ON CONFLICT DO NOTHING",
+            )
+            .bind(chain)
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query("INSERT INTO normalized_events (source_manifest_id,manifest_version,resource_id,chain_id,block_hash,block_number,transaction_index,log_index,source_family,event_kind,consumer_visibility,canonicality_state,after_state) VALUES ($1,2,$2,$3,'10',10,0,1,'ens_v2_registry_l1','TokenRegenerated','activated','canonical','{\"new_token_id\":\"0x10000000a\"}')")
+                .bind(manifest).bind(Uuid::from_u128(resource)).bind(chain).execute(&mut *conn).await?;
+            let id: i64 = sqlx::query_scalar("INSERT INTO normalized_events (source_manifest_id,manifest_version,resource_id,chain_id,block_hash,block_number,transaction_index,log_index,source_family,event_kind,consumer_visibility,canonicality_state,after_state) VALUES ($1,2,$2,$3,'10',10,0,2,'ens_v2_registry_l1','PermissionChanged','activated','canonical','{}') RETURNING normalized_event_id")
+                .bind(manifest).bind(Uuid::from_u128(resource)).bind(chain).fetch_one(&mut *conn).await?;
+            let mut target = row(id, resource, 0, 2);
+            target.chain_id = Some(chain.into());
+            target.source_manifest_id = Some(manifest);
+            let bounds = BTreeMap::from([(chain.to_owned(), 10)]);
+            let values = load_history_token_ids(&mut *conn, &[target], &bounds).await?;
+            let expected = read.then(|| "4294967306".to_owned());
+            if values.get(&id).cloned() != expected {
+                failures.push(format!("{chain} {label}: {values:?}"));
+            }
+        }
+        ensure!(failures.is_empty(), "{}", failures.join("\n"));
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
 fn target(row: &HistoryEvent) -> Value {
     json!({"event_id":row.normalized_event_id,"chain_id":row.chain_id,"resource_id":row.resource_id,
         "block_number":row.block_number,"block_hash":row.block_hash,"transaction_index":row.transaction_index,"log_index":row.log_index})

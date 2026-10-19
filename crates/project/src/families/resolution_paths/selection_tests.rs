@@ -587,6 +587,63 @@ impl World {
         self.mount(ROOT, &labelhash("eth"), ETH).await
     }
 
+    /// An ENSv2 resolver manifest of `label` that declares `mirror` as its ENSv1 mirror
+    /// resolver, as the manifest sync writes the catalog.
+    async fn declare_mirror(&self, label: &str, mirror: &str) -> Result<()> {
+        let manifest: i64 = sqlx::query_scalar(
+            "INSERT INTO manifest_versions (manifest_version, namespace, source_family, chain_id,
+                 deployment_label, rollout_status, normalizer_version, file_path,
+                 manifest_payload)
+             VALUES (1, 'ens', 'ens_v2_resolver_l1', $1, $2, 'active', 'fixture', $2, '{}')
+             RETURNING manifest_id",
+        )
+        .bind(CHAIN)
+        .bind(label)
+        .fetch_one(&self.pool)
+        .await?;
+        let instance: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+             VALUES (gen_random_uuid(), $1, 'contract') RETURNING contract_instance_id",
+        )
+        .bind(CHAIN)
+        .fetch_one(&self.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO manifest_contract_instances (manifest_id, chain_id, declaration_kind,
+                 declaration_name, contract_instance_id, declared_address, role, proxy_kind,
+                 start_block_number)
+             VALUES ($1, $2, 'contract', 'ensv1_mirror_resolver', $3, $4,
+                     'ensv1_mirror_resolver', 'none', 0)",
+        )
+        .bind(manifest)
+        .bind(CHAIN)
+        .bind(instance)
+        .bind(mirror)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A classification change of `resolver` in the publication at block 5.
+    async fn reclassify(&self, resolver: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO project_resolver_classification (chain_id, resolver_address, block_number,
+                 event_identity, support_status)
+             VALUES ($1, $2, 5, 'classified', 'supported')",
+        )
+        .bind(CHAIN)
+        .bind(resolver)
+        .execute(&self.pool)
+        .await?;
+        self.journal(
+            5,
+            "project_resolver_classification",
+            json!([CHAIN, resolver]),
+            Some(json!({"support_status": "unsupported"})),
+        )
+        .await
+    }
+
     /// An ENSv1 to ENSv2 migration of `name`, applied at `block`, whose evidence is the
     /// creation of `registry` at block 1.
     async fn migrated(&self, name: &str, registry: &str, block: i64) -> Result<()> {
@@ -1393,23 +1450,10 @@ async fn a_global_change_selects_every_eth_name() -> Result<()> {
     world.eth().await?;
     let every = ["eth", "foo.eth", "a.foo.eth", "bar.eth"];
 
-    sqlx::query(
-        "INSERT INTO project_resolver_classification (chain_id, resolver_address, block_number,
-             event_identity, support_status)
-         VALUES ($1, $2, 5, 'classified', 'supported')",
-    )
-    .bind(CHAIN)
-    .bind(FALLBACK)
-    .execute(&world.pool)
-    .await?;
     world
-        .journal(
-            5,
-            "project_resolver_classification",
-            json!([CHAIN, FALLBACK]),
-            Some(json!({"support_status": "unsupported"})),
-        )
+        .declare_mirror("ens_v2_sepolia_20261001", FALLBACK)
         .await?;
+    world.reclassify(FALLBACK).await?;
     let classified = Call {
         block: 5,
         after: 4,
@@ -1436,6 +1480,49 @@ async fn a_global_change_selects_every_eth_name() -> Result<()> {
     };
     world.assert_selects(upgraded, &every).await?;
     world.cleanup().await
+}
+
+// The fallback is the mirror resolver a manifest declares, so a classification change of the
+// mainnet deployment's mirror selects every `.eth` name, and one of an undeclared address
+// selects none.
+// (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ENSV1Resolver.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+#[tokio::test]
+async fn a_declared_mirror_change_selects_every_eth_name() -> Result<()> {
+    const MAINNET_MIRROR: &str = "0x394d8eb4a4fdf599384deab25f31d111d755c398";
+    const SEPOLIA_MIRROR: &str = "0x322b7581ca210a69c6d0e0d7c88a7688d2789cb0";
+    let call = Call {
+        block: 5,
+        after: 4,
+        root: Some(ROOT),
+    };
+    for (declared, changed, selected) in [
+        (Some(MAINNET_MIRROR), MAINNET_MIRROR, true),
+        (None, SEPOLIA_MIRROR, false),
+        (Some(MAINNET_MIRROR), SEPOLIA_MIRROR, false),
+    ] {
+        let mut world = World::new().await?;
+        world
+            .surfaces(&["eth", "foo.eth", "bar.eth", "xyz"])
+            .await?;
+        world.eth().await?;
+        if let Some(mirror) = declared {
+            world
+                .declare_mirror("ens_v2_mainnet_20261002", mirror)
+                .await?;
+        }
+        world.reclassify(changed).await?;
+        let expected: &[&str] = if selected {
+            &["eth", "foo.eth", "bar.eth"]
+        } else {
+            &[]
+        };
+        world
+            .assert_selects(call, expected)
+            .await
+            .with_context(|| format!("declared {declared:?}, changed {changed}"))?;
+        world.cleanup().await?;
+    }
+    Ok(())
 }
 
 // The indexes carry no chain, and the probes keep the chain and namespace tests. A surface

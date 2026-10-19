@@ -138,6 +138,18 @@ fn registration_with_expiry(
     ]
 }
 
+/// The history token rule is read per (chain, deployment label), so the Sepolia registry
+/// manifest relocated to `CHAIN` carries the mainnet deployment's label. The Sepolia rows are
+/// checked on Sepolia in `crates/storage/src/history/token_ids/tests.rs`.
+fn on_chain_epoch(manifest: &mut ManifestInput) -> Result<()> {
+    const CHAIN_EPOCH: &str = "ens_v2_mainnet_20261002";
+    let mut payload: serde_json::Value = serde_json::from_str(&manifest.payload_json)?;
+    payload["deployment_epoch"] = CHAIN_EPOCH.into();
+    manifest.payload_json = payload.to_string();
+    manifest.deployment_label = CHAIN_EPOCH.into();
+    Ok(())
+}
+
 fn fixture(historical: bool) -> Result<(ManifestInput, BatchOutput, Vec<RawLogInput>)> {
     let holder: Address = HOLDER.parse()?;
     let mut logs = vec![raw(
@@ -265,6 +277,7 @@ fn fixture(historical: bool) -> Result<(ManifestInput, BatchOutput, Vec<RawLogIn
     ]);
     logs.extend(registration(5, 3, 134));
     let (mut manifest, mut rules) = v2_history_bounded_regeneration::manifest_and_rules();
+    on_chain_epoch(&mut manifest)?;
     if historical {
         // Copied without edits from the admitted pre-audit manifest in main before #896;
         // this fixture activates it only in its isolated database, not current admission.

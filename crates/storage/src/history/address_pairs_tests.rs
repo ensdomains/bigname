@@ -21,7 +21,7 @@ use super::super::{
 const VALUE_A: &str = "0x000000000000000000000000000000000000000a";
 const VALUE_B: &str = "0x000000000000000000000000000000000000000b";
 const ZERO: &str = "0x0000000000000000000000000000000000000000";
-const GENERATIONS: [(&str, &str, &str, &str, bool); 7] = [
+const GENERATIONS: [(&str, &str, &str, &str, bool); 8] = [
     (
         "ethereum-mainnet",
         "ens_v1_resolver_l1",
@@ -69,6 +69,13 @@ const GENERATIONS: [(&str, &str, &str, &str, bool); 7] = [
         "ens_v2_resolver_l1",
         "public_resolver_v2",
         "0xdc4a563d00f5c3012b699794eb9e13a561be386f",
+        true,
+    ),
+    (
+        "ethereum-mainnet",
+        "ens_v2_resolver_l1",
+        "public_resolver_v2",
+        "0x66f9f566ff2f26309c1bd9134388478a801da3e1",
         true,
     ),
 ];
@@ -156,6 +163,17 @@ async fn address_pair_source_generations_and_empty_clears_are_exact() -> Result<
                 .collect::<BTreeSet<_>>(),
             expected
         );
+        // The declared PublicResolverV2 of an unreviewed mainnet deployment label stays
+        // uncollapsed, though its role and address match.
+        let mainnet_v2 = GENERATIONS.len() - 1;
+        sqlx::query("UPDATE manifest_versions SET deployment_label='ens_v2_mainnet_unreviewed' WHERE manifest_id=$1")
+            .bind(mainnet_v2 as i64 + 1)
+            .execute(&mut *conn)
+            .await?;
+        let visible = walk(&mut conn, &EventHistoryReadFilter::default()).await?;
+        assert!(visible.contains(&identity(mainnet_v2, 1)));
+        assert!(visible.contains(&identity(mainnet_v2, 3)));
+        assert!(!visible.contains(&identity(mainnet_v2 - 1, 1)));
         // A missing source declaration is not inferred from a known address or ABI.
         sqlx::query("DELETE FROM manifest_contract_instances WHERE manifest_id=1")
             .execute(&mut *conn)
@@ -163,6 +181,55 @@ async fn address_pair_source_generations_and_empty_clears_are_exact() -> Result<
         let visible = walk(&mut conn, &EventHistoryReadFilter::default()).await?;
         assert!(visible.contains(&identity(0, 1)));
         assert!(visible.contains(&identity(0, 3)));
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+async fn a_reviewed_label_does_not_prove_another_public_resolver_v2() -> Result<()> {
+    let database = TestDatabase::create(TestDatabaseConfig::new("history_pair_v2_address")).await?;
+    let result = async {
+        let mut conn = database.pool().acquire().await?;
+        install(&mut conn).await?;
+        // Each manifest keeps its official deployment label but declares, and emits from,
+        // another public_resolver_v2 address. Its adjacent pair stays two writes.
+        let other = "0x00000000000000000000000000000000000000ee";
+        let v2 = [GENERATIONS.len() - 2, GENERATIONS.len() - 1];
+        for generation in v2 {
+            let manifest = generation as i64 + 1;
+            pair(&mut conn, generation, 0, VALUE_A, false).await?;
+            sqlx::query(
+                "UPDATE manifest_contract_instances SET declared_address=$1 WHERE manifest_id=$2",
+            )
+            .bind(other)
+            .bind(manifest)
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query("UPDATE normalized_events SET raw_fact_ref=jsonb_set(raw_fact_ref,'{emitting_address}',to_jsonb($1::text)),after_state=jsonb_set(after_state,'{resolver}',to_jsonb($1::text)) WHERE source_manifest_id=$2")
+                .bind(other)
+                .bind(manifest)
+                .execute(&mut *conn)
+                .await?;
+        }
+        let filter = EventHistoryReadFilter::default();
+        let visible = walk(&mut conn, &filter).await?;
+        let mut failures = Vec::new();
+        for generation in v2 {
+            let (chain, ..) = GENERATIONS[generation];
+            for log in [0, 1] {
+                if !visible.contains(&identity(generation, log)) {
+                    failures.push(format!("{chain}: write {log} collapsed"));
+                }
+            }
+        }
+        let total = count(&mut conn, &filter, None).await?;
+        if total != 4 {
+            failures.push(format!("count {total}, expected 4"));
+        }
+        anyhow::ensure!(failures.is_empty(), "{}", failures.join("\n"));
         Ok(())
     }
     .await;
@@ -303,8 +370,14 @@ async fn install(conn: &mut PgConnection) -> Result<()> {
         let id = generation as i64 + 1;
         let instance = Uuid::from_u128(id as u128);
         sqlx::query("INSERT INTO contract_instances(contract_instance_id,chain_id,contract_kind) VALUES($1,$2,'contract')").bind(instance).bind(chain).execute(&mut *conn).await?;
-        sqlx::query("INSERT INTO manifest_versions(manifest_version,namespace,source_family,chain_id,deployment_label,rollout_status,normalizer_version,file_path,manifest_payload) VALUES(1,$1,$2,$3,$4,'shadow','test',$4,'{}')")
-            .bind(if family.starts_with("basenames"){"basenames"}else{"ens"}).bind(family).bind(chain).bind(format!("generation-{id}")).execute(&mut *conn).await?;
+        // An ENSv2 generation applies only under its chain's reviewed deployment label.
+        let label = match (*chain, *family) {
+            ("ethereum-sepolia", "ens_v2_resolver_l1") => "ens_v2_sepolia_20261001".to_owned(),
+            ("ethereum-mainnet", "ens_v2_resolver_l1") => "ens_v2_mainnet_20261002".to_owned(),
+            _ => format!("generation-{id}"),
+        };
+        sqlx::query("INSERT INTO manifest_versions(manifest_version,namespace,source_family,chain_id,deployment_label,rollout_status,normalizer_version,file_path,manifest_payload) VALUES(1,$1,$2,$3,$4,'shadow','test',$5,'{}')")
+            .bind(if family.starts_with("basenames"){"basenames"}else{"ens"}).bind(family).bind(chain).bind(label).bind(format!("generation-{id}")).execute(&mut *conn).await?;
         sqlx::query("INSERT INTO manifest_contract_instances(manifest_id,chain_id,declaration_kind,declaration_name,contract_instance_id,declared_address,role,proxy_kind,start_block_number) VALUES($1,$2,'contract',$3,$4,$5,$3,'none',0)")
             .bind(id).bind(chain).bind(role).bind(instance).bind(address).execute(&mut *conn).await?;
     }

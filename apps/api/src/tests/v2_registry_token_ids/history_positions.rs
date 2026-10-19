@@ -151,6 +151,8 @@ async fn v2_history_historical_models_keep_direct_words_and_proven_permission_to
             manifest.manifest_version = old.manifest_version as i64;
             manifest.deployment_label = old.deployment_epoch.clone();
             manifest.payload_json = serde_json::to_string(&old)?;
+            // Relocated to `CHAIN`, it carries that chain's deployment label as well.
+            on_chain_epoch(&mut manifest)?;
         }
         let database = TestDatabase::new_migrated().await?;
         seed_v2_history_blocks(&database, 119..=134).await?;

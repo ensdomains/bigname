@@ -67,6 +67,11 @@ fn producer(
             .manifest
             .clone();
         manifest.chain = chain.into();
+        // A reviewed deployment row applies only on its own chain, so the mainnet copy
+        // carries the mainnet deployment epoch.
+        if chain == "ethereum-mainnet" {
+            manifest.deployment_epoch = "ens_v2_mainnet_20261002".into();
+        }
         for root in &mut manifest.roots {
             root.start_block = Some(0);
         }

@@ -2115,12 +2115,15 @@ outcome. The outer lookup result retains its existing `status`. There is no
 | Wrapper-only, plain wrapped | while wrapped | never | never |
 
 Here E is `expires_at` and G is `grace_ends_at`. ENSv1 and Basenames add
-7,776,000 seconds. The exact admitted October 1 Sepolia ETHRegistry uses its
-reviewed registrar's 2,419,200 seconds. A custom registry gets no inferred grace
-from a `.eth` suffix. Equality follows the respective contract comparisons.
+7,776,000 seconds. An ENSv2 registry carries registrar grace only when it is a
+reviewed ETHRegistry deployment: the October 1 Sepolia one, or the October 2
+mainnet one once its manifests are admitted. Each uses its reviewed registrar's
+2,419,200 seconds. A custom registry gets no inferred grace from a `.eth` suffix.
+Equality follows the respective contract comparisons.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
 (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L294-L297 @ basenames@1809bbc)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/ETHRegistrar.sol:L275-L292 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistrar.json:L1419 @ ens_v2_mainnet_20261002@b1f97b91)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
 
 A wrapper-only registration is a wrapped name with no registrar lease, such as a

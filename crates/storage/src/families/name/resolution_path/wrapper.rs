@@ -13,7 +13,6 @@ use alloy_primitives::{Address, B256, keccak256};
 use anyhow::Result;
 use serde_json::Value;
 use sqlx::{PgConnection, Row};
-pub(super) const MIRROR: &str = "0x322b7581ca210a69c6d0e0d7c88a7688d2789cb0";
 
 pub(super) async fn original_node(
     conn: &mut PgConnection,
