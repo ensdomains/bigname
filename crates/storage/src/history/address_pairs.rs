@@ -5,9 +5,9 @@ use sqlx::{Postgres, QueryBuilder};
 
 // Each row binds a deployed, non-proxy generation to its declared manifest role. A generic
 // match-all ABI admission is insufficient. Empty clears are supported only by modern source.
-// A row without an address takes the address its manifest declares in the role. These are the
-// ENSv2 PublicResolverV2 rows, one per (chain, deployment label) whose compiler input was
-// reviewed. A row with an address applies under any of its chain's manifests.
+// A row without a deployment label applies under any of its chain's manifests. The ENSv2
+// PublicResolverV2 rows, one per (chain, deployment label) whose compiler input was reviewed,
+// need both the exact reviewed address and their deployment label.
 // (upstream: .refs/ens_v1/deployments/mainnet/PublicResolver.json:L2 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/deployments/sepolia/PublicResolver.json:L2 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L65 @ ens_v1@91c966f)
@@ -20,8 +20,10 @@ use sqlx::{Postgres, QueryBuilder};
 // (upstream: .refs/basenames/test/Fork/BaseMainnetConstants.sol:L9 @ basenames@1809bbc)
 // (upstream: .refs/basenames/src/L2/L2Resolver.sol:L5-L32 @ basenames@1809bbc)
 // (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/AddrResolver.sol:L45-L76 @ basenames@1809bbc)
+// (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/PublicResolverV2.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/PublicResolverV2.json:L1271-L1272 @ ens_v2_sepolia_20261001@07e55a05)
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/build-info/solc-0_8_25-b30e6dc9a03b37f6a0b89af5d02a73d3993944f7.json:L852-L854 @ ens_v2_sepolia_20261001@07e55a05)
+// (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PublicResolverV2.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
 // (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PublicResolverV2.json:L1287-L1288 @ ens_v2_mainnet_20261002@b1f97b91)
 // (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/build-info/solc-0_8_25-8550fee9a7d7605147b869f3868c3d2bc5861ae7.json:L389-L391 @ ens_v2_mainnet_20261002@b1f97b91)
 const PROVEN_GENERATIONS: &str = "(VALUES
@@ -30,8 +32,8 @@ const PROVEN_GENERATIONS: &str = "(VALUES
  ('ethereum-mainnet','ens_v1_resolver_l1','public_resolver_231b0ee','0x231b0ee14048e9dccd1d247744d114a4eb5e8e63',NULL,false),
  ('ethereum-sepolia','ens_v1_resolver_l1','public_resolver_8948458','0x8948458626811dd0c23eb25cc74291247077cc51',NULL,false),
  ('ethereum-sepolia','ens_v1_resolver_l1','public_resolver_8fade66','0x8fade66b79cc9f707ab26799354482eb93a5b7dd',NULL,false),
- ('ethereum-sepolia','ens_v2_resolver_l1','public_resolver_v2',NULL,'ens_v2_sepolia_20261001',true),
- ('ethereum-mainnet','ens_v2_resolver_l1','public_resolver_v2',NULL,'ens_v2_mainnet_20261002',true),
+ ('ethereum-sepolia','ens_v2_resolver_l1','public_resolver_v2','0xdc4a563d00f5c3012b699794eb9e13a561be386f','ens_v2_sepolia_20261001',true),
+ ('ethereum-mainnet','ens_v2_resolver_l1','public_resolver_v2','0x66f9f566ff2f26309c1bd9134388478a801da3e1','ens_v2_mainnet_20261002',true),
  ('base-mainnet','basenames_base_resolver','resolver','0xc6d566a56a1aff6508b41f6c90ff131615583bcd',NULL,false)
 )";
 
@@ -45,8 +47,7 @@ pub(super) fn push_address_pair_filter_for_alias(
     query.push(PROVEN_GENERATIONS);
     query.push(aliased(r#" AS generation(chain, family, role, address, label, empty_clear)
       ON generation.chain = @ROW@.chain_id AND generation.family = @ROW@.source_family
-         AND (generation.address IS NULL
-              OR generation.address = lower(@ROW@.raw_fact_ref ->> 'emitting_address'))
+         AND generation.address = lower(@ROW@.raw_fact_ref ->> 'emitting_address')
       JOIN bigname_phase.manifest_contract_instances declared
         ON declared.manifest_id = @ROW@.source_manifest_id AND declared.chain_id = @ROW@.chain_id
        AND declared.contract_instance_id::text = @ROW@.after_state ->> 'resolver_contract_instance_id'
