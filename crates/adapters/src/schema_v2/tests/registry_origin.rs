@@ -12,6 +12,7 @@ sol! {
 }
 
 struct Deployment {
+    chain: &'static str,
     label: &'static str,
     factory: &'static str,
     wrapper: &'static str,
@@ -22,6 +23,7 @@ struct Deployment {
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/WrapperRegistryImpl.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UserRegistryImpl.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
 const SEPOLIA: Deployment = Deployment {
+    chain: "ethereum-sepolia",
     label: "ens_v2_sepolia_20261001",
     factory: "0xda70306c98e97ece36f997a21368e53298572991",
     wrapper: "0xbe768b63e5fbbfbb0ae97e9064e0002df8001880",
@@ -32,6 +34,7 @@ const SEPOLIA: Deployment = Deployment {
 // (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/WrapperRegistryImpl.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
 // (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UserRegistryImpl.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
 const MAINNET: Deployment = Deployment {
+    chain: "ethereum-mainnet",
     label: "ens_v2_mainnet_20261002",
     factory: "0x77510ba162dfea3d8989e3f0928a691b345730d2",
     wrapper: "0xcf3edb3f5501de63b57254d910b6782ee370039b",
@@ -54,9 +57,11 @@ fn role_at(instance: u128, role: &str, address: &str, start: i64) -> AddressAdmi
     value
 }
 
-/// A migration manifest under `label` that declares `deployment`'s factory and implementations,
-/// and one factory log naming `implementation`. Returns the `ContractDiscovered` rows kept.
+/// A migration manifest on `chain` under `label` that declares `deployment`'s factory and
+/// implementations, and one factory log naming `implementation`. Returns the
+/// `ContractDiscovered` rows kept.
 fn kept_origins(
+    chain: &str,
     label: &str,
     deployment: &Deployment,
     implementation: &str,
@@ -69,8 +74,10 @@ fn kept_origins(
         &["verifiable_factory"],
         &["ContractDiscovered"],
     );
+    manifest.chain_id = chain.to_owned();
     manifest.deployment_label = label.to_owned();
     let mut payload: serde_json::Value = serde_json::from_str(&manifest.payload_json)?;
+    payload["chain"] = json!(chain);
     payload["correlation_addresses"] = json!({
         "ens_v1_name_wrapper": "0x00000000000000000000000000000000000000e1",
         "ens_v1_base_registrar": "0x00000000000000000000000000000000000000e2",
@@ -99,7 +106,7 @@ fn kept_origins(
         role_at(5, "wrapper_registry_implementation", deployment.wrapper, 1),
         role_at(6, "user_registry_implementation", deployment.user, 1),
     ];
-    let deployed = raw_at(
+    let mut deployed = raw_at(
         ProxyDeployed {
             sender: "0x0000000000000000000000000000000000000055".parse()?,
             proxyAddress: PROXY.parse()?,
@@ -111,8 +118,9 @@ fn kept_origins(
         0,
         deployment.factory,
     );
+    deployed.chain_id = chain.to_owned();
     let output = interpret_test_batch(BatchInput {
-        chain_id: CHAIN.to_owned(),
+        chain_id: chain.to_owned(),
         manifests: vec![manifest],
         discovery_rules: Vec::new(),
         admissions,
@@ -149,7 +157,7 @@ fn kept(implementation: &str) -> Vec<(String, String)> {
 fn mainnet_factory_origins_of_the_reviewed_implementations_are_kept() -> anyhow::Result<()> {
     for implementation in [MAINNET.wrapper, MAINNET.user] {
         assert_eq!(
-            kept_origins(MAINNET.label, &MAINNET, implementation)?,
+            kept_origins(MAINNET.chain, MAINNET.label, &MAINNET, implementation)?,
             kept(implementation),
             "{implementation}"
         );
@@ -161,14 +169,14 @@ fn mainnet_factory_origins_of_the_reviewed_implementations_are_kept() -> anyhow:
 fn mainnet_factory_origins_of_archived_implementations_are_not_kept() -> anyhow::Result<()> {
     for archived in ARCHIVED {
         // The log names an archived generation while the manifest declares the current one.
-        let current = kept_origins(MAINNET.label, &MAINNET, archived)?;
+        let current = kept_origins(MAINNET.chain, MAINNET.label, &MAINNET, archived)?;
         assert!(current.is_empty(), "{archived}: {current:?}");
         // Even a manifest that declared the archived generation in the role cannot admit it.
         let declaring = Deployment {
             wrapper: archived,
             ..MAINNET
         };
-        let declared = kept_origins(MAINNET.label, &declaring, archived)?;
+        let declared = kept_origins(MAINNET.chain, MAINNET.label, &declaring, archived)?;
         assert!(declared.is_empty(), "{archived}: {declared:?}");
     }
     Ok(())
@@ -178,7 +186,7 @@ fn mainnet_factory_origins_of_archived_implementations_are_not_kept() -> anyhow:
 fn sepolia_factory_origins_are_unchanged() -> anyhow::Result<()> {
     for implementation in [SEPOLIA.wrapper, SEPOLIA.user] {
         assert_eq!(
-            kept_origins(SEPOLIA.label, &SEPOLIA, implementation)?,
+            kept_origins(SEPOLIA.chain, SEPOLIA.label, &SEPOLIA, implementation)?,
             kept(implementation),
             "{implementation}"
         );
@@ -190,8 +198,19 @@ fn sepolia_factory_origins_are_unchanged() -> anyhow::Result<()> {
 fn a_deployment_row_applies_only_under_its_own_label() -> anyhow::Result<()> {
     for (label, deployment) in [(SEPOLIA.label, &MAINNET), (MAINNET.label, &SEPOLIA)] {
         for implementation in [deployment.wrapper, deployment.user] {
-            let origins = kept_origins(label, deployment, implementation)?;
+            let origins = kept_origins(deployment.chain, label, deployment, implementation)?;
             assert!(origins.is_empty(), "{label} {implementation}: {origins:?}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_deployment_row_applies_only_on_its_own_chain() -> anyhow::Result<()> {
+    for (chain, deployment) in [(MAINNET.chain, &SEPOLIA), (SEPOLIA.chain, &MAINNET)] {
+        for implementation in [deployment.wrapper, deployment.user] {
+            let origins = kept_origins(chain, deployment.label, deployment, implementation)?;
+            assert!(origins.is_empty(), "{chain} {implementation}: {origins:?}");
         }
     }
     Ok(())

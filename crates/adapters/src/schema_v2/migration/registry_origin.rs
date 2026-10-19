@@ -5,9 +5,9 @@ use serde_json::Value;
 use super::{CANDIDATE, Catalog, MIGRATION_FAMILY, NormalizedEvent};
 
 // The exact reviewed implementations, never a role-only assertion about arbitrary future code.
-// One row per reviewed deployment, keyed by its deployment label: the VerifiableFactory and the
-// registry implementations it deploys. A row is inert until that deployment's migration
-// manifest declares the factory and the implementation.
+// One row per reviewed deployment, keyed by its chain and deployment label: the
+// VerifiableFactory and the registry implementations it deploys. A row is inert until that
+// deployment's migration manifest on that chain declares the factory and the implementation.
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/VerifiableFactory.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/WrapperRegistryImpl.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UserRegistryImpl.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
@@ -17,10 +17,12 @@ use super::{CANDIDATE, Catalog, MIGRATION_FAMILY, NormalizedEvent};
 type Deployment = (
     &'static str,
     &'static str,
+    &'static str,
     [(&'static str, &'static str); 2],
 );
 const DEPLOYMENTS: [Deployment; 2] = [
     (
+        "ethereum-sepolia",
         "ens_v2_sepolia_20261001",
         "0xda70306c98e97ece36f997a21368e53298572991",
         [
@@ -35,6 +37,7 @@ const DEPLOYMENTS: [Deployment; 2] = [
         ],
     ),
     (
+        "ethereum-mainnet",
         "ens_v2_mainnet_20261002",
         "0x77510ba162dfea3d8989e3f0928a691b345730d2",
         [
@@ -79,9 +82,9 @@ fn supported_origin(catalog: &Catalog, event: &NormalizedEvent) -> bool {
     {
         return false;
     }
-    let Some((_, factory, implementations)) = DEPLOYMENTS
+    let Some((.., factory, implementations)) = DEPLOYMENTS
         .iter()
-        .find(|(label, ..)| *label == source.deployment_label)
+        .find(|(chain, label, ..)| *chain == source.chain_id && *label == source.deployment_label)
     else {
         return false;
     };

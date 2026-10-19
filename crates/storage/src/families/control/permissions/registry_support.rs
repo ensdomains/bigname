@@ -40,6 +40,9 @@ const DEPLOYMENTS: [Deployment; 2] = [
     },
 ];
 
+/// The ENS namespace every reviewed ENSv2 root, registry and resolver manifest declares under.
+const NAMESPACE: &str = "ens";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Model {
     Declared,
@@ -152,7 +155,7 @@ impl Declarations {
                 source.active(
                     &publication.chain_id,
                     "ens_v2_resolver_l1",
-                    &source.namespace,
+                    NAMESPACE,
                     source.manifest_version,
                 )
             })
@@ -171,7 +174,7 @@ impl Declarations {
                 source.active(
                     &publication.chain_id,
                     "ens_v2_resolver_l1",
-                    &source.namespace,
+                    NAMESPACE,
                     source.manifest_version,
                 ) && source.declares("ensv1_mirror_resolver", address, publication.block_number)
             })
@@ -209,7 +212,7 @@ impl Declarations {
                     source.active(
                         &publication.chain_id,
                         family,
-                        &source.namespace,
+                        NAMESPACE,
                         source.manifest_version,
                     ) && source.declares(role, registry, publication.block_number)
                 })

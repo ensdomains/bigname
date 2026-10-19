@@ -43,7 +43,7 @@ the other's.
 The script checks this before the drops and again after them, and takes no phase lock, so
 nothing stops an Interpret redo completing while the drops run. Run it as the walk or redo
 starts, with Interpret's whole range still ahead. The one-hour timeout bounds each drop, not
-the script, so there is no fixed limit on the whole sequence. Allow for all 30 drops before
+the script, so there is no fixed limit on the whole sequence. Allow for all 32 drops before
 Interpret can complete. The second check sees only the state when it runs: if a chain meets
 the condition then, for example because its Project started during the drops and is still
 running, it fails after the receipt, naming the chains, and `psql` exits non-zero; run

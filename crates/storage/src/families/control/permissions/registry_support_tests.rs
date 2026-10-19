@@ -330,6 +330,60 @@ fn the_mirror_is_the_one_its_deployments_resolver_manifest_declares() -> Result<
     Ok(())
 }
 
+/// The same declaration under another namespace than `ens`.
+fn other_namespace(mut declaration: Declaration) -> Declaration {
+    declaration.namespace = "basenames".into();
+    declaration.after_state["manifest_payload"]["namespace"] = json!("basenames");
+    declaration
+}
+
+#[test]
+fn a_declaration_under_another_namespace_is_not_read() -> Result<()> {
+    let instance = Uuid::from_u128(7);
+    let mut failures = Vec::new();
+    for (case, family, role, address) in [
+        (
+            "an ETHRegistry",
+            "ens_v2_registry_l1",
+            "registry",
+            MAINNET_ETH,
+        ),
+        (
+            "a RootRegistry",
+            "ens_v2_root_l1",
+            "root_registry",
+            MAINNET_ROOT,
+        ),
+    ] {
+        let declarations = Declarations(vec![other_namespace(declaration(
+            1,
+            family,
+            MAINNET,
+            MAINNET_EPOCH,
+            json!([contract(role, address)]),
+        ))]);
+        let model = declarations
+            .declared(&publication(MAINNET)?, address, instance)
+            .map(|registry| registry.model);
+        if model.is_some() {
+            failures.push(format!("{case}: {model:?}"));
+        }
+    }
+    let mirror = Declarations(vec![other_namespace(declaration(
+        1,
+        "ens_v2_resolver_l1",
+        MAINNET,
+        MAINNET_EPOCH,
+        json!([contract("ensv1_mirror_resolver", MAINNET_MIRROR)]),
+    ))])
+    .mirror_resolver(&publication(MAINNET)?);
+    if mirror.is_some() {
+        failures.push(format!("a mirror: {mirror:?}"));
+    }
+    ensure!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
 /// One manifest catalog row, which the retained facts reference.
 async fn manifest(connection: &mut PgConnection, chain: &str, family: &str) -> Result<i64> {
     Ok(sqlx::query_scalar(
