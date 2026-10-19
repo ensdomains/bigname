@@ -50,6 +50,9 @@ const NAME: &str = "premigrated.eth";
 const REGISTERED: u64 = 1_700_000_000;
 const RESERVED: u64 = 1_790_000_000;
 const LEASE: u64 = 2_000_000_000;
+/// The ETHRegistry reservation's expiry. It is below the ENSv1 lease's, so a served `expires_at`
+/// of this value comes from the ENSv2 entry, neither from the lease nor from the later of the two.
+const RESERVATION_EXPIRY: u64 = 1_950_000_000;
 const DAY: u64 = 86_400;
 
 type Logs = Vec<(&'static str, alloy_primitives::LogData)>;
@@ -148,7 +151,7 @@ fn reservation() -> Result<Logs> {
                 tokenId: token,
                 labelHash: keccak256(label().as_bytes()),
                 label: label().into(),
-                expiry: LEASE,
+                expiry: RESERVATION_EXPIRY,
                 sender,
             }
             .encode_log_data(),
@@ -373,10 +376,14 @@ async fn the_mainnet_admission_serves_a_premigrated_lease() -> Result<()> {
         REGISTERED.to_string(),
         "{detail:#}"
     );
-    assert_eq!(record["expires_at"], LEASE.to_string(), "{detail:#}");
+    assert_eq!(
+        record["expires_at"],
+        RESERVATION_EXPIRY.to_string(),
+        "{detail:#}"
+    );
     assert_eq!(
         record["grace_ends_at"],
-        (LEASE + 28 * DAY).to_string(),
+        (RESERVATION_EXPIRY + 28 * DAY).to_string(),
         "{detail:#}"
     );
     assert_eq!(

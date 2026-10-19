@@ -29,9 +29,10 @@ const GRAVEYARD: &str = "0xda021a2c1c2f99574d861ef8c6fa745851beb7f6";
 const CLIENT_PROXY: &str = "0xeeeeeeee14d718c2b47d9923deab1335e144eeee";
 const MANAGED_PROXY: &str = "0xcffd2ae680cd110d28739a70922636b5937b022b";
 const UNIVERSAL_RESOLVER_V2: &str = "0x06fdd07f007adac667177b46ab2eb9a75132cfd5";
-/// The ENSv1 UniversalResolver both proxies forward to before the DAO proposal executes.
+/// The pre-ENSv2 Universal Resolver implementation both proxies forward to before the DAO proposal
+/// executes.
 /// (upstream: .refs/ens_v1/deployments/mainnet/UniversalResolver.json:L2 @ ens_v1@91c966f)
-const UNIVERSAL_RESOLVER_V1: &str = "0xed73a03f19e8d849e44a39252d222c6ad5217e1e";
+const PRE_ENSV2_UNIVERSAL_RESOLVER: &str = "0xed73a03f19e8d849e44a39252d222c6ad5217e1e";
 const NICK_RESERVATION: i64 = 26_105_700;
 const NICK_EXPIRY: u64 = 1_900_000_000;
 const FRESH_REGISTRATION: i64 = 26_216_500;
@@ -768,12 +769,12 @@ async fn either_proxy_order_reads_admitted_and_an_unlisted_implementation_pages(
     let (scratch, states) = follow(
         "production_interpret_mainnet_proxy_unlisted",
         DAO,
-        vec![(DAO, CLIENT_PROXY, upgraded(UNIVERSAL_RESOLVER_V1)?)],
+        vec![(DAO, CLIENT_PROXY, upgraded(PRE_ENSV2_UNIVERSAL_RESOLVER)?)],
     )
     .await?;
     assert_eq!(
         states,
-        [state(CLIENT_PROXY, UNIVERSAL_RESOLVER_V1, DAO, true)]
+        [state(CLIENT_PROXY, PRE_ENSV2_UNIVERSAL_RESOLVER, DAO, true)]
     );
     scratch.cleanup().await
 }

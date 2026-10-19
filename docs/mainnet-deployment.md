@@ -68,7 +68,7 @@ manifest, so the only path that reaches one is a registry's `RegistryCreated` se
 The replaced RootRegistry `0x51bbc58b3dae7d45b14fba8cf31b7c8f7904a750` was created at block
 `26105295` and announced itself there. The registry family's watch entries, `RegistryCreated`
 included, start at the ETHRegistry's block `26105621`, but that start bounds only the stamped
-Ingest redo. Runtime
+Ingest redo and the first-effect scan that stamps the Interpret redo. Runtime
 intake reads `RegistryCreated` from every emitter over the whole redo range, which includes block
 `26105295`, so the announcement is fetched and, like any self-announced registry, the address is
 indexed. It is an unnamed registry that nothing admitted reaches, so its entries, its own `eth`

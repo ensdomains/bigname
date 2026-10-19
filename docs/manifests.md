@@ -350,9 +350,10 @@ ABI entries use Alloy-parseable human-readable Solidity fragments, not handwritt
   role-scoped event, or any event of a family without discovered emitters,
   refuses it. It bounds the
   [required Ingest redo](#mandatory-historical-fetch-after-watch-plan-widening)
-  that adding the event stamps, and nothing else. Runtime intake and Interpret
-  keep each emitter's own active range, and intake still reads an all-emitter
-  event from every emitter over the whole range it fetches. Like every other
+  that adding the event stamps, and the first-effect scan that sets the start
+  of the Interpret and Project redo a manifest change stamps. Runtime intake and
+  Interpret keep each emitter's own active range, and intake still reads an
+  all-emitter event from every emitter over the whole range it fetches. Like every other
   `start_block` it must fit a signed 64-bit integer.
 - `status` — optional `unsupported` | `shadow` | `supported` marker for the ABI entry.
 - `notes` — optional reviewer-facing context.
@@ -2147,12 +2148,12 @@ Watch-plan expansion starts from active manifest roots by `contract_instance_id`
   Interpret applies the start.
   (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Utils.sol:L69-L86 @ basenames@1809bbc)
 - An `[[abi.events]]` entry's `start_block` is the start of that event's
-  family-wide compiled entry, block zero when omitted. It bounds the compiled
-  plan, and so a required Ingest redo; runtime intake still watches each
-  discovered emitter over its own active range, so an emitter admitted after
-  the start is fetched from its admission and one admitted before it is not
-  refetched below the start. The value is the earliest admitted emitter's
-  start for the family, re-derived as
+  family-wide or all-emitter compiled entry, block zero when omitted. It bounds
+  the compiled plan, and so a required Ingest redo and the first-effect scan.
+  Runtime intake still watches each discovered emitter over its own active
+  range, so an emitter admitted after the start is fetched from its admission
+  and one admitted before it is not refetched below the start. The value is the
+  earliest admitted emitter's start for the family, re-derived as
   [ENSv2 registry operator approvals](#ensv2-registry-operator-approvals)
   describes.
 - Legacy watch rows may denormalize address and code-hash state, but their durable explanation path is `manifest root → discovery edge(s) → contract_instance_id`; schema-v2 resolver classification does not read that denormalization.
