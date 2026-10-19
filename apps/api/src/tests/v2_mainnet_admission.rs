@@ -1,7 +1,7 @@
 //! TYR-363: the checked-in mainnet profile admits the official 2026-10-02 ENSv2 deployment. Raw
 //! logs at the mainnet addresses run through Engine and Project, and the public routes serve the
 //! admission and a premigrated name whose ENSv1 lease is live.
-use super::v2_sepolia_redeploy::get;
+use super::v2_sepolia_redeploy::{get, lookup, token};
 use super::*;
 use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
@@ -15,6 +15,8 @@ sol! {
     event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value);
     event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender);
     event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender);
+    event RegistryCreated();
+    event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender);
 }
 
 mod controller {
@@ -41,6 +43,9 @@ const BATCH_REGISTRAR: &str = "0xf0ccfbf6dba1e01ccb833ced6d551a8f000e9721";
 /// The ENSV1Resolver, the ENSv2 resolver premigration gives each reserved name.
 const MIRROR_RESOLVER: &str = "0x394d8eb4a4fdf599384deab25f31d111d755c398";
 const OWNER: &str = "0x0000000000000000000000000000000000000051";
+/// The RootRegistry the 2026-10-13 redeploy replaced. No manifest declares it.
+const REPLACED_ROOT: &str = "0x51bbc58b3dae7d45b14fba8cf31b7c8f7904a750";
+const ARCHIVED_OWNER: &str = "0x0000000000000000000000000000000000000052";
 const NAME: &str = "premigrated.eth";
 const REGISTERED: u64 = 1_700_000_000;
 const RESERVED: u64 = 1_790_000_000;
@@ -158,6 +163,28 @@ fn reservation() -> Result<Logs> {
             .encode_log_data(),
         ),
     ])
+}
+
+/// The replaced RootRegistry announces itself and registers `eth` and a top-level `archived`,
+/// as a root that was current before the redeploy would.
+fn replaced_root() -> Result<Logs> {
+    let owner: Address = ARCHIVED_OWNER.parse()?;
+    let mut logs = vec![(REPLACED_ROOT, RegistryCreated {}.encode_log_data())];
+    for label in ["eth", "archived"] {
+        logs.push((
+            REPLACED_ROOT,
+            LabelRegistered {
+                tokenId: token(label),
+                labelHash: keccak256(label.as_bytes()),
+                label: label.into(),
+                owner,
+                expiry: u64::MAX,
+                sender: owner,
+            }
+            .encode_log_data(),
+        ));
+    }
+    Ok(logs)
 }
 
 /// The checked-in mainnet profile synced, one Engine batch per block ending at `HEAD`, then a
@@ -376,5 +403,125 @@ async fn the_mainnet_admission_serves_a_premigrated_lease() -> Result<()> {
     )
     .await?;
     assert_eq!(mirror["data"]["records"], served, "{mirror:#}");
+    database.cleanup().await
+}
+
+/// `body` with every spelling of the top-level `label` replaced by the matching spelling of
+/// `neverseen`.
+fn as_never_seen(body: &Value, label: &str) -> Result<Value> {
+    let mut text = body.to_string();
+    let node =
+        |label: &str| keccak256([B256::ZERO.as_slice(), keccak256(label).as_slice()].concat());
+    for (seen, never) in [
+        (node(label), node("neverseen")),
+        (keccak256(label.as_bytes()), keccak256(b"neverseen")),
+    ] {
+        text = text
+            .replace(&format!("{seen:#x}"), &format!("{never:#x}"))
+            .replace(&format!("{seen:x}"), &format!("{never:x}"));
+    }
+    Ok(serde_json::from_str(&text.replace(label, "neverseen"))?)
+}
+
+fn names(body: &Value) -> Vec<String> {
+    body["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row["name"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// The replaced RootRegistry's announcement is fetched, so its logs are indexed as a registry's,
+/// but nothing admitted reaches it. No derived event names a name, and every route serves its
+/// `archived` entry as a name never seen and lists nothing for its owner or for the registry.
+#[tokio::test]
+async fn the_replaced_root_registry_names_nothing() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    publish(
+        &database,
+        vec![
+            (REGISTERED - 60, replaced_root()?),
+            (REGISTERED, lease()?),
+            (RESERVED, reservation()?),
+            (RESERVED + DAY, vec![]),
+        ],
+    )
+    .await?;
+
+    let (events, named): (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(logical_name_id) FROM normalized_events
+         WHERE chain_id = $1 AND lower(raw_fact_ref ->> 'emitting_address') = $2",
+    )
+    .bind(CHAIN)
+    .bind(REPLACED_ROOT)
+    .fetch_one(&database.pool)
+    .await?;
+    assert!(events > 0, "the replaced root's logs are indexed");
+    assert_eq!(named, 0);
+
+    let (never_status, never) = get(&database, "/v1/names/neverseen").await?;
+    let (status, archived) = get(&database, "/v1/names/archived").await?;
+    assert_eq!(
+        (status, as_never_seen(&archived, "archived")?),
+        (never_status, never),
+        "{archived:#}"
+    );
+    let (_, eth) = get(&database, "/v1/names/eth?namespace=ens").await?;
+    assert!(!eth.to_string().contains(ARCHIVED_OWNER), "{eth:#}");
+
+    let mut collections = vec![
+        "/v1/names?namespace=ens&expires_after=0&page_size=200".to_owned(),
+        "/v1/search?q=archived&namespace=ens".to_owned(),
+    ];
+    for address in [ARCHIVED_OWNER, REPLACED_ROOT] {
+        for relation in ["any", "role_holder", "former_owner", "resolves_to"] {
+            collections.push(format!(
+                "/v1/addresses/{address}/names?namespace=ens&relation={relation}"
+            ));
+        }
+    }
+    for uri in collections {
+        let body = ok(&database, &uri).await?;
+        assert!(
+            !names(&body)
+                .iter()
+                .any(|name| name == "archived" || name == "eth")
+                && !body.to_string().contains("archived"),
+            "{uri}: {body:#}"
+        );
+    }
+    let listing = ok(
+        &database,
+        "/v1/names?namespace=ens&expires_after=0&page_size=200",
+    )
+    .await?;
+    assert!(
+        names(&listing).iter().any(|name| name == NAME),
+        "{listing:#}"
+    );
+
+    for profile in ["feed", "detail"] {
+        let (status, answer) = lookup(
+            &database,
+            json!({"profile": profile, "inputs": [
+                {"name": "archived"},
+                {"name": "neverseen"},
+                {"address": ARCHIVED_OWNER, "relation": "any"},
+            ]}),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{answer:#}");
+        let mut archived = answer["data"][0].clone();
+        archived["input"] = Value::Null;
+        let mut never = answer["data"][1].clone();
+        never["input"] = Value::Null;
+        assert_eq!(as_never_seen(&archived, "archived")?, never, "{answer:#}");
+        let reverse = answer["data"][2].to_string();
+        assert!(
+            !reverse.contains("archived") && !reverse.contains("\"eth\""),
+            "{answer:#}"
+        );
+    }
     database.cleanup().await
 }

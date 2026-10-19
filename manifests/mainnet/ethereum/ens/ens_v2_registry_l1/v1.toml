@@ -2,6 +2,10 @@
 # No manifest declares the contracts that the 2026-10-13 and 2026-10-18 redeploys replaced
 # (docs/mainnet-deployment.md).
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/.deployment.json:L4 @ ens_v2_mainnet_20261002@b1f97b91)
+# Every event that compiles a family-wide or all-emitter watch entry starts at 26105621, the
+# declared ETHRegistry's start and this family's first declaration. The start bounds only the
+# Ingest redo that admitting these events stamps (docs/manifests.md, "Mandatory historical fetch
+# after watch-plan widening").
 manifest_version = 1
 namespace = "ens"
 source_family = "ens_v2_registry_l1"
@@ -47,6 +51,7 @@ admission = "reachable_from_root"
 name = "RegistryCreated"
 fragment = "event RegistryCreated()"
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "RegistryCreated"]
+start_block = 26105621
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L461 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
@@ -54,6 +59,7 @@ name = "LabelRegistered"
 fragment = "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)"
 emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "RegistrationGranted", "PreimageObserved", "ResolverChanged", "SubregistryChanged"]
+start_block = 26105621
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L498 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
@@ -61,6 +67,7 @@ name = "LabelReserved"
 fragment = "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)"
 emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "RegistrationReserved", "PreimageObserved", "ResolverChanged", "SubregistryChanged"]
+start_block = 26105621
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L517 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
@@ -68,6 +75,7 @@ name = "LabelUnregistered"
 fragment = "event LabelUnregistered(uint256 indexed tokenId, address indexed sender)"
 emitter_roles = ["registry"]
 normalized_events = ["RegistrationReleased", "SurfaceUnbound", "ResolverChanged", "SubregistryChanged"]
+start_block = 26105621
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L418 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
@@ -75,6 +83,7 @@ name = "ExpiryUpdated"
 fragment = "event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender)"
 emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "ExpiryChanged", "RegistrationRenewed", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ResolverChanged", "SubregistryChanged"]
+start_block = 26105621
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L598 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
@@ -82,6 +91,7 @@ name = "SubregistryUpdated"
 fragment = "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)"
 emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "SubregistryChanged", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged", "ResolverChanged"]
+start_block = 26105621
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L573 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
@@ -89,6 +99,7 @@ name = "ResolverUpdated"
 fragment = "event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)"
 emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "ResolverChanged"]
+start_block = 26105621
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L636 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
@@ -96,6 +107,7 @@ name = "TokenResource"
 fragment = "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)"
 emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenResourceLinked", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged"]
+start_block = 26105621
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L710 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
@@ -103,6 +115,7 @@ name = "TransferSingle"
 fragment = "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)"
 emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenControlTransferred"]
+start_block = 26105621
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L673 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
@@ -110,6 +123,7 @@ name = "TransferBatch"
 fragment = "event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)"
 emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenControlTransferred"]
+start_block = 26105621
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L393 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
@@ -117,6 +131,7 @@ name = "EACRolesChanged"
 fragment = "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)"
 emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "PermissionChanged", "RootPermissionChanged"]
+start_block = 26105621
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L617 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
@@ -124,6 +139,7 @@ name = "TokenRegenerated"
 fragment = "event TokenRegenerated(uint256 indexed oldTokenId, uint256 indexed newTokenId)"
 emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenRegenerated", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged", "ResolverChanged", "SubregistryChanged"]
+start_block = 26105621
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L542 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
@@ -131,6 +147,7 @@ name = "ParentUpdated"
 fragment = "event ParentUpdated(address indexed parent, string label, address indexed sender)"
 emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "ParentChanged", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged", "ResolverChanged", "SubregistryChanged"]
+start_block = 26105621
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UserRegistryImpl.json:L843 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
@@ -138,6 +155,7 @@ name = "Upgraded"
 fragment = "event Upgraded(address indexed implementation)"
 emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "Upgraded"]
+start_block = 26105621
 
 # Each registry keeps its own ERC-1155 owner-to-operator approvals, and an approved operator
 # gets the roles the current token owner holds on a token's own resource.

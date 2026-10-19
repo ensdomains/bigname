@@ -342,15 +342,18 @@ ABI entries use Alloy-parseable human-readable Solidity fragments, not handwritt
   empty list with a `registry_announcement` rule and may match without address admission. Other
   events without `emitter_roles` fail manifest validation.
 - `normalized_events` — optional normalized event kinds produced from the event.
-- `start_block` — optional inclusive first block of the event's family-wide
-  entry in the [compiled watch plan](glossary.md#compiled-watch-plan); block
-  zero when omitted. It is valid only where such an entry compiles: an event
-  with `emitter_roles`, in a source family whose emitters discovery admits,
-  that is not an all-emitter event. It bounds the
+- `start_block` — optional inclusive first block of the event's family-wide or
+  all-emitter entry in the [compiled watch plan](glossary.md#compiled-watch-plan).
+  Without it the entry starts at block zero. It is valid only where such an
+  entry compiles, that is for an event of a source family whose emitters
+  discovery admits, when the event is not scoped to declared roles. A
+  role-scoped event, or any event of a family without discovered emitters,
+  refuses it. It bounds the
   [required Ingest redo](#mandatory-historical-fetch-after-watch-plan-widening)
-  that adding the event stamps and nothing else: runtime intake and Interpret
-  keep each emitter's own active range. Like every other `start_block` it must
-  fit a signed 64-bit integer.
+  that adding the event stamps, and nothing else. Runtime intake and Interpret
+  keep each emitter's own active range, and intake still reads an all-emitter
+  event from every emitter over the whole range it fetches. Like every other
+  `start_block` it must fit a signed 64-bit integer.
 - `status` — optional `unsupported` | `shadow` | `supported` marker for the ABI entry.
 - `notes` — optional reviewer-facing context.
 
@@ -498,9 +501,12 @@ not act as a catch-all for unknown families.
 The mainnet profile admits the official 2026-10-02 mainnet ENSv2 deployment under
 `deployment_epoch = "ens_v2_mainnet_20261002"`, as the pinned `deployments/mainnet`
 folder lists it. The five ENSv2 families ship as version 1 and copy the Sepolia
-families' event blocks, discovery rules and capability flags. The one edited event
-start is the registry family's `ApprovalForAll`, which starts at the ETHRegistry's
-receipt block `26105621`. No manifest declares the contracts the 2026-10-13 and
+families' event blocks, discovery rules and capability flags. Only the event
+starts differ. Every family-wide and all-emitter event of the registry family
+starts at the ETHRegistry's receipt block `26105621`, and every one of the
+resolver family at the ENSv1 mirror resolver's `26105292`. So the Ingest redo
+that admitting them stamps runs from the deployment's first block, not from
+block zero. No manifest declares the contracts the 2026-10-13 and
 2026-10-18 redeploys replaced, and none of them names a name.
 The [complete deployment inventory](mainnet-deployment.md) records every address,
 its admission or explicit exclusion, and how an existing database moves to it.
@@ -1605,14 +1611,19 @@ omitted), clamped to its ingest start, and mints a manifest-authority
 marker, so its Interpret redo must be run as the attested full-range redo
 described below.
 
-An event's family-wide entry starts at the event's own `start_block`, or block
-zero when it has none. Adding an event with a `start_block` therefore widens
-from that block rather than from block zero, and the same start-later and
-start-earlier rules apply to it as to an implementation entry. The Sepolia
-`ens_v2_registry_l1` `ApprovalForAll` declaration is the one such event: its
-first synchronization stamps the required Ingest redo from block `10893181`,
-clamped to the chain's first ingest cursor
-([ENSv2 registry operator approvals](#ensv2-registry-operator-approvals)).
+An event's family-wide or all-emitter entry starts at the event's own
+`start_block`, or block zero when it has none. Adding an event with a
+`start_block` therefore widens from that block rather than from block zero,
+and the same start-later and start-earlier rules apply to it as to an
+implementation entry. The Sepolia `ens_v2_registry_l1` `ApprovalForAll`
+declaration is one such event. Its first synchronization stamps the required
+Ingest redo from block `10893181`, clamped to the chain's first ingest cursor
+([ENSv2 registry operator approvals](#ensv2-registry-operator-approvals)). On
+mainnet every family-wide and all-emitter event of `ens_v2_registry_l1` starts
+at `26105621` and every one of `ens_v2_resolver_l1` at `26105292`, each
+family's first declaration. Admitting the mainnet ENSv2 families therefore
+stamps the required Ingest redo from `26105292`
+([ENSv2, `mainnet`](#ensv2-mainnet-deployment-profile)).
 
 For each newly widened direct-address watch, synchronization checks the
 continuous union of [persisted Ingest

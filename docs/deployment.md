@@ -2518,21 +2518,24 @@ only active manifests, so its row stays `shadow`, which nothing watches or
 interprets. The contracts the 2026-10-13 and 2026-10-18 redeploys replaced
 are declared by no manifest.
 
-The manifest change rotates the
-[interpreter content hash](glossary.md#interpreter-content-hash) for every
-chain. It adds no schema-migration. On first start, manifest synchronization
-records a [manifest-authority marker](glossary.md#manifest-authority-marker) on
-mainnet's Interpret and Project rows and stamps a required Ingest redo from the
-chain's first ingest cursor to the published head. The five ENSv2 families are
-new on mainnet, and their family-wide event entries declare no `start_block`, so
-the compiled watch plan widens from block zero
-([watch-plan expansion](manifests.md#watch-plan-expansion)). Size the refetch
-from the stamped range before the release. Complete that Ingest
-redo, then the full-history Interpret redo with `--attest-watch-set-coverage`,
-then the Project redo it installs, before the matching API serves. Sepolia
-changes no manifest, so it gets no marker and no Ingest redo, but the hash
-rotation gives it the Interpret and Project redo pair as well, with no visible
-change.
+The manifests and the watch-plan compiler change, which lets an all-emitter
+event carry a `start_block`, rotate the
+[interpreter content hash](glossary.md#interpreter-content-hash) and the
+[projection content hash](glossary.md#projection-content-hash) for every
+chain. The build adds no schema-migration. On first start, manifest
+synchronization records a
+[manifest-authority marker](glossary.md#manifest-authority-marker) on
+mainnet's Interpret and Project rows and stamps a required Ingest redo from
+block `26105292`, the deployment's first block, to the published head. Every
+family-wide and all-emitter event of the new registry and resolver families
+starts at its family's first declaration, `26105621` and `26105292`, and every
+other new entry starts at its declaration
+([watch-plan widening](manifests.md#mandatory-historical-fetch-after-watch-plan-widening)).
+Complete that Ingest redo, then the full-history Interpret redo with
+`--attest-watch-set-coverage`, then the Project redo it installs, before the
+matching API serves. Sepolia changes no manifest and its compiled watch plan is
+unchanged, so it gets no marker and no Ingest redo. The hash rotation gives it
+the Interpret and Project redo pair as well, with no visible change.
 
 After the redo, mainnet is cut over for its whole retained history
 ([Cutover at ENSv2 admission](#cutover-at-ensv2-admission)).
@@ -2548,9 +2551,10 @@ After the redo, mainnet is cut over for its whole retained history
   chain reads admitted once the managed proxy's `Upgraded(0x06fd…)` exists
   ([mainnet deployment](mainnet-deployment.md#resolver-and-discovery-coverage)).
 - The 2026-10-13 RootRegistry `0x51bbc58b…` announced itself at block
-  `26105295`. The redo fetches that announcement, so like any self-announced
-  registry it is indexed, but nothing admitted reaches it and its entries name
-  no `.eth` name. Check that no normalized event from it carries a logical name.
+  `26105295`, inside the redo range. The redo fetches that announcement, so like
+  any self-announced registry it is indexed, but nothing admitted reaches it and
+  its entries name nothing. Check that no normalized event from it carries a
+  logical name.
 - Check that a premigrated `.eth` name with a live ENSv1 lease serves its lease
   owner and registration time, the reservation's `expires_at` with a 28-day
   `grace_ends_at`, and the resolver its ENSv1 registry record names. Count the

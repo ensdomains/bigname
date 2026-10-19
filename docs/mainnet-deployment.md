@@ -66,10 +66,13 @@ The pin keeps the contracts the 2026-10-13 root redeploy and the 2026-10-18 rede
 them. Interpret admits an address only through a declaration or a discovery edge from an active
 manifest, so the only path that reaches one is a registry's `RegistryCreated` self-announcement.
 The replaced RootRegistry `0x51bbc58b3dae7d45b14fba8cf31b7c8f7904a750` was created at block
-`26105295` and announced itself there. The registry family watches `RegistryCreated` from every
-emitter over the whole fetched range, so the announcement is fetched, and like any self-announced
-registry the address is indexed. Nothing admitted reaches it, so its entries, its own `eth` entry
-included, name nothing, as Sepolia's dropped registries do
+`26105295` and announced itself there. The registry family's watch entries, `RegistryCreated`
+included, start at the ETHRegistry's block `26105621`, but that start bounds only the stamped
+Ingest redo. Runtime
+intake reads `RegistryCreated` from every emitter over the whole redo range, which includes block
+`26105295`, so the announcement is fetched and, like any self-announced registry, the address is
+indexed. It is an unnamed registry that nothing admitted reaches, so its entries, its own `eth`
+entry included, name nothing, as Sepolia's dropped registries do
 ([Sepolia deployment](sepolia-deployment.md#historical-intake-and-deployment-replacement)). A
 read-only `eth_getLogs` on 2026-10-19 found exactly two `RegistryCreated` logs from block
 `26105000` to `26105621`: that one (transaction
@@ -106,8 +109,10 @@ derive `RegistrationRenewed` on `label.eth` from its declared `ens_v1_renewal_br
 A database that already indexed mainnet under the ENSv1-only profile does not need a reset.
 Manifest synchronization stamps the Ingest, Interpret and Project redo that re-derives mainnet
 with the ENSv2 families. The deleted shadow `ens_execution` version 1 keeps its `shadow` row,
-which nothing watches or interprets. The Ingest redo starts at the chain's first ingest cursor,
-because the new families' family-wide event entries declare no start. The release entry in
+which nothing watches or interprets. The Ingest redo runs from block `26105292`, the
+deployment's first block, to the head. The registry and resolver families' family-wide and
+all-emitter events start at each family's first declaration, `26105621` and `26105292`, and every
+other new watch entry starts at its declaration. The release entry in
 [`deployment.md`](deployment.md#mainnet-ensv2-admission-of-2026-10-02) gives the order and the
 stamped range. Premigration had reserved every live `.eth` name when the manifests were admitted,
 so no live name is expected to lose resolution

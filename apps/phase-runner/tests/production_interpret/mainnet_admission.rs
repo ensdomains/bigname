@@ -13,8 +13,10 @@ use bigname_storage::{
 const CHAIN: &str = "ethereum-mainnet";
 const FIRST: i64 = 26_105_000;
 const HEAD: i64 = 26_217_000;
-/// The intake cursor's start in `seed_chain`.
+/// The intake cursor's start in `seed_chain`, below the deployment.
 const INGEST_CURSOR_START: i64 = 0;
+/// The deployment's first declared start, the ENSv1 mirror resolver's.
+const DEPLOYMENT_START: i64 = 26_105_292;
 const ROOT: &str = "0x2553c09be6447beffdb86fa622ad41fb8f77a91e";
 const ROOT_START: i64 = 26_183_742;
 /// The RootRegistry the 2026-10-13 redeploy replaced, created at 26105295.
@@ -459,6 +461,10 @@ async fn the_mainnet_admission_cuts_the_chain_over_through_the_stamped_redo() ->
     let (true, Some(redo_from), Some(redo_to)) = ingest_redo else {
         panic!("no required Ingest redo: {ingest_redo:?}");
     };
+    // Each new family-wide and all-emitter entry starts at its family's first declaration, so the
+    // stamped Ingest redo runs from the deployment's first block, the ENSv1 mirror resolver's
+    // 26105292, to the head, not from the first ingest cursor.
+    assert_eq!((redo_from, redo_to), (DEPLOYMENT_START, HEAD));
     // Sync retires only active manifests. The deleted shadow manifest keeps its row, and a shadow
     // manifest is watched and interpreted by nothing.
     let execution: Vec<(String, String)> = sqlx::query_as(
@@ -534,11 +540,6 @@ async fn the_mainnet_admission_cuts_the_chain_over_through_the_stamped_redo() ->
     // Before the DAO proposal neither proxy has an `Upgraded`, so there is no proxy row: the
     // unadmitted gauge reads 0 because nothing was observed, not because the chain is admitted.
     assert_eq!(resolution(pool).await?, None);
-
-    // The five ENSv2 families are new on mainnet and their family-wide event entries declare no
-    // start, so the compiled plan widens from block zero, and the stamped Ingest redo runs from
-    // the first ingest cursor, block 0 here, not from the deployment's first block.
-    assert_eq!((redo_from, redo_to), (INGEST_CURSOR_START, HEAD));
 
     std::fs::remove_dir_all(previous)?;
     scratch.cleanup().await

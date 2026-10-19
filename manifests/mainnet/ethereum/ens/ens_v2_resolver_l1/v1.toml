@@ -2,6 +2,10 @@
 # No manifest declares the contracts that the 2026-10-13 and 2026-10-18 redeploys replaced
 # (docs/mainnet-deployment.md).
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/.deployment.json:L4 @ ens_v2_mainnet_20261002@b1f97b91)
+# Every event that compiles a family-wide or all-emitter watch entry starts at 26105292, the ENSv1
+# mirror resolver's start and this family's first declaration. The start bounds only the Ingest
+# redo that admitting these events stamps (docs/manifests.md, "Mandatory historical fetch after
+# watch-plan widening").
 manifest_version = 1
 namespace = "ens"
 source_family = "ens_v2_resolver_l1"
@@ -59,72 +63,84 @@ read_features = ["ensip19_default_address"]
 name = "ResolverCreated"
 fragment = "event ResolverCreated()"
 normalized_events = ["ContractDiscovered"]
+start_block = 26105292
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L436 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
 name = "Linked"
 fragment = "event Linked(uint256 indexed recordId, bytes32 indexed node, bytes name)"
 normalized_events = ["ResolverRecordLinked", "PreimageObserved"]
+start_block = 26105292
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L279 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
 name = "AddressUpdated"
 fragment = "event AddressUpdated(uint256 indexed recordId, uint256 coinType, bytes addressBytes)"
 normalized_events = ["RecordChanged"]
+start_block = 26105292
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L311 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
 name = "ContenthashUpdated"
 fragment = "event ContenthashUpdated(uint256 indexed recordId, bytes hash)"
 normalized_events = ["RecordChanged"]
+start_block = 26105292
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L254 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
 name = "ABIUpdated"
 fragment = "event ABIUpdated(uint256 indexed recordId, uint256 indexed contentType)"
 normalized_events = ["RecordChanged"]
+start_block = 26105292
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L411 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
 name = "InterfaceUpdated"
 fragment = "event InterfaceUpdated(uint256 indexed recordId, bytes4 indexed interfaceId, address implementer)"
 normalized_events = ["RecordChanged"]
+start_block = 26105292
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L511 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
 name = "TextUpdated"
 fragment = "event TextUpdated(uint256 indexed recordId, string indexed keyHash, string key, string value)"
 normalized_events = ["RecordChanged"]
+start_block = 26105292
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L342 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
 name = "DataUpdated"
 fragment = "event DataUpdated(uint256 indexed recordId, string indexed keyHash, string key, bytes value)"
 normalized_events = ["RecordChanged"]
+start_block = 26105292
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L455 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
 name = "NameUpdated"
 fragment = "event NameUpdated(uint256 indexed recordId, string primaryName)"
 normalized_events = ["RecordChanged", "PreimageObserved"]
+start_block = 26105292
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L480 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
 name = "ResourceArgument"
 fragment = "event ResourceArgument(uint256 indexed resource, bytes arg)"
 normalized_events = ["ResolverPermissionArgument"]
+start_block = 26105292
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L373 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
 name = "EACRolesChanged"
 fragment = "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)"
 normalized_events = ["PermissionChanged"]
+start_block = 26105292
 
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L524 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
 name = "Upgraded"
 fragment = "event Upgraded(address indexed implementation)"
 normalized_events = ["Upgraded"]
+start_block = 26105292
 
 # PublicResolverV2 composes ENS's ABIResolver profile and emits its standard ABI-change event.
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/PublicResolverV2.sol:L26 @ ens_v2_mainnet_20261002@b1f97b91)
