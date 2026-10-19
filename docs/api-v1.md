@@ -2205,9 +2205,11 @@ Both the Mainnet and the Sepolia profile admit one. On a chain admitted before
 premigration has reserved every live `.eth` name, the unreserved names read
 unresolvable until they are reserved or registered on ENSv2. That window is a
 deployment decision
-([deployment notes](deployment.md#cutover-at-ensv2-admission)). Mainnet was
-admitted with premigration complete
-([mainnet deployment](mainnet-deployment.md)).
+([deployment notes](deployment.md#cutover-at-ensv2-admission)). On Mainnet
+the window holds the `.eth` names registered through ENSv1 after the last
+reservation batch and before the DAO proposal removes the ENSv1 registrar
+controllers
+([mainnet deployment](mainnet-deployment.md#historical-intake-and-the-upgrade)).
 
 After cutover, an ENSv1-selected descendant also follows the current ENSv2 registry
 path at the published block. A live parent alone does not establish that the

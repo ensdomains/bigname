@@ -2827,11 +2827,15 @@ changes.
 
 Mainnet admission. [Mainnet ENSv2 admission of 2026-10-02](#mainnet-ensv2-admission-of-2026-10-02)
 admits the mainnet ENSv2 manifests, and that admission is mainnet's cutover. A
-`.eth` name loses resolution when it has no live ENSv2 entry at admission,
-meaning no reservation or registration on the admitted ETHRegistry. From that
-redo it serves no resolver and no records, and neither does any name below it.
-Premigration had reserved every live `.eth` name when the manifests were
-admitted, so the window is expected to be empty.
+`.eth` name loses resolution while it has no live ENSv2 entry, meaning no
+reservation or registration on the admitted ETHRegistry. From that redo it
+serves no resolver and no records, and neither does any name below it.
+Premigration reserves in batches, so the window holds the `.eth` names
+registered through ENSv1 after the last reservation batch and before the DAO
+proposal removes the ENSv1 registrar controllers. Until the route reaches
+`UniversalResolverV2` the live Universal Resolver still answers them through
+ENSv1. From then the two agree
+([mainnet deployment](mainnet-deployment.md#historical-intake-and-the-upgrade)).
 
 Before promoting the staging seed, count those names on the staging API, which
 admits the manifests. A live name is one whose grace has not ended. The script

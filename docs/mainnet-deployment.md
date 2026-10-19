@@ -115,9 +115,18 @@ deployment's first block, to the head. The registry and resolver families' famil
 all-emitter events start at each family's first declaration, `26105621` and `26105292`, and every
 other new watch entry starts at its declaration. The release entry in
 [`deployment.md`](deployment.md#mainnet-ensv2-admission-of-2026-10-02) gives the order and the
-stamped range. Premigration had reserved every live `.eth` name when the manifests were admitted,
-so no live name is expected to lose resolution
-([Cutover at ENSv2 admission](deployment.md#cutover-at-ensv2-admission)).
+stamped range.
+
+Premigration reserves `.eth` names in batches, and ENSv1 registration stays open until the DAO
+proposal removes the ENSv1 registrar controllers. A `.eth` name registered through ENSv1 after the
+last reservation batch and before that removal has no ENSv2 entry. bigname serves it with
+`unresolvable_reason` `no_live_ens_v2_entry` and no resolver or records, while the live Universal
+Resolver still answers it through ENSv1. The divergence lasts until a later batch reserves the
+name, or until the DAO proposal has removed the controllers and the client-facing proxy reaches
+`UniversalResolverV2` ([below](#resolver-and-discovery-coverage)). From then bigname and the live
+Universal Resolver agree: the name is reserved and served by both, or absent from both
+([known divergence](upstream.md#ensv2-resolution-modelled-from-manifest-admission),
+[Cutover at ENSv2 admission](deployment.md#cutover-at-ensv2-admission)).
 
 ## Resolver and discovery coverage
 
@@ -171,7 +180,7 @@ The route does not decide the
 [Universal Resolver cutover](glossary.md#universal-resolver-cutover). Mainnet is cut over because
 its profile admits the deployment's root registry, and it reads as cut over for its whole retained
 history, including the blocks before the DAO proposal executes, while clients still resolve through
-the pre-ENSv2 implementation ([known divergence](upstream.md#known-divergences)). A premigrated
+the pre-ENSv2 implementation ([known divergence](upstream.md#ensv2-resolution-modelled-from-manifest-admission)). A premigrated
 `.eth` name with a live ENSv1 lease keeps the lease's owner and registration time, takes its expiry
 and the 28-day grace from its ENSv2 entry, and is served through the resolver its ENSv1 registry
 record names. The `ENSV1Resolver` route reads the same records.
