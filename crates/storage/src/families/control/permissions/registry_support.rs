@@ -199,6 +199,9 @@ impl Declarations {
         // (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ETHRegistry.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
         // The registry is whichever address the active root or registry manifest declares in its
         // root role. `declares` matches the address, so no other registry passes as either.
+        // For these walk roles the reviewed deployment epoch and the active manifest's declaration
+        // prove the code, as the e2e harness relies on. A declaration under an unreviewed epoch
+        // is not read.
         let matching: Vec<_> = self
             .0
             .iter()

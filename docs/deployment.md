@@ -4833,8 +4833,10 @@ registrar grace and token ID rule per
 [deployment epoch](glossary.md#deployment-epoch), with rows for the October 1 Sepolia deployment and the October 2
 mainnet deployment, changes `crates/adapters/src`, the storage families' lifecycle policy,
 registry support and resolution path, Project's resolution path selection, and two API
-history readers. It reads the ENSv1 mirror resolver and the PublicResolverV2 address from
-their manifest declarations instead of naming the Sepolia addresses. The adapter file is an
+history readers. It reads the ENSv1 mirror resolver from its manifest declaration instead of
+naming the Sepolia address. The PublicResolverV2 address pair rows list each reviewed
+deployment's exact address with its deployment label, and a pair collapses only when the
+manifest under that label declares that address. The adapter file is an
 input of the [interpreter content hash](glossary.md#interpreter-content-hash). The storage
 family and Project files are inputs of the
 [projection content hash](glossary.md#projection-content-hash). The history readers are
@@ -4846,8 +4848,8 @@ inputs of neither.
   API binaries. The change rides the release that admits the mainnet ENSv2 manifests and
   shares that release's one Interpret and Project redo pair.
 - No Sepolia result changes. The Sepolia rows keep the reviewed factory, implementations
-  and ETHRegistry as before, and the Sepolia manifests declare the same mirror and
-  PublicResolverV2 the readers named. A mainnet row applies only to addresses that a mainnet
+  and ETHRegistry as before, the Sepolia manifests declare the same mirror the reader named,
+  and the Sepolia PublicResolverV2 row keeps its address. A mainnet row applies only to addresses that a mainnet
   manifest under the `ens_v2_mainnet_20261002` epoch declares, so until those manifests
   are admitted it changes nothing on mainnet.
 - Schema-migration `20261019120000_registry_permission_mainnet_departure_indexes.sql`

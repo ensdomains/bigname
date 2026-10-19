@@ -71,7 +71,6 @@ const GENERATIONS: [(&str, &str, &str, &str, bool); 8] = [
         "0xdc4a563d00f5c3012b699794eb9e13a561be386f",
         true,
     ),
-    // The mainnet row has no address of its own: the declaration supplies it.
     (
         "ethereum-mainnet",
         "ens_v2_resolver_l1",
@@ -182,6 +181,55 @@ async fn address_pair_source_generations_and_empty_clears_are_exact() -> Result<
         let visible = walk(&mut conn, &EventHistoryReadFilter::default()).await?;
         assert!(visible.contains(&identity(0, 1)));
         assert!(visible.contains(&identity(0, 3)));
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+async fn a_reviewed_label_does_not_prove_another_public_resolver_v2() -> Result<()> {
+    let database = TestDatabase::create(TestDatabaseConfig::new("history_pair_v2_address")).await?;
+    let result = async {
+        let mut conn = database.pool().acquire().await?;
+        install(&mut conn).await?;
+        // Each manifest keeps its official deployment label but declares, and emits from,
+        // another public_resolver_v2 address. Its adjacent pair stays two writes.
+        let other = "0x00000000000000000000000000000000000000ee";
+        let v2 = [GENERATIONS.len() - 2, GENERATIONS.len() - 1];
+        for generation in v2 {
+            let manifest = generation as i64 + 1;
+            pair(&mut conn, generation, 0, VALUE_A, false).await?;
+            sqlx::query(
+                "UPDATE manifest_contract_instances SET declared_address=$1 WHERE manifest_id=$2",
+            )
+            .bind(other)
+            .bind(manifest)
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query("UPDATE normalized_events SET raw_fact_ref=jsonb_set(raw_fact_ref,'{emitting_address}',to_jsonb($1::text)),after_state=jsonb_set(after_state,'{resolver}',to_jsonb($1::text)) WHERE source_manifest_id=$2")
+                .bind(other)
+                .bind(manifest)
+                .execute(&mut *conn)
+                .await?;
+        }
+        let filter = EventHistoryReadFilter::default();
+        let visible = walk(&mut conn, &filter).await?;
+        let mut failures = Vec::new();
+        for generation in v2 {
+            let (chain, ..) = GENERATIONS[generation];
+            for log in [0, 1] {
+                if !visible.contains(&identity(generation, log)) {
+                    failures.push(format!("{chain}: write {log} collapsed"));
+                }
+            }
+        }
+        let total = count(&mut conn, &filter, None).await?;
+        if total != 4 {
+            failures.push(format!("count {total}, expected 4"));
+        }
+        anyhow::ensure!(failures.is_empty(), "{}", failures.join("\n"));
         Ok(())
     }
     .await;
