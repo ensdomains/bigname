@@ -182,7 +182,7 @@ event. `upgradeTo` (L111-L115) is the only `Upgraded` emitter, at L114. As of 20
 full-history, address-filtered log scan of the client-facing proxy found no `Upgraded` at any
 block and exactly one `AdminChanged`, at block `23085558`, while the implementation slot held the
 constructor-set `0xed73a03f19e8d849e44a39252d222c6ad5217e1e`. The constructor also calls
-`_setAdmin` (L74), which emits `AdminChanged` (L170), so that single log is consistent with the
+`_setAdmin` (L74), which emits `AdminChanged` (L171), so that single log is consistent with the
 constructor's own log. It is still not provable as the creation block, because the deployment
 artifact records no receipt or transaction hash, and `AdminChanged` is not a declared event.
 Served names never read the proxies, so no proxy history, read or unread, changes what bigname
@@ -193,7 +193,7 @@ none.
 (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L71-L75 @ ens_v2_mainnet_20261002@b1f97b91)
 (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L163-L165 @ ens_v2_mainnet_20261002@b1f97b91)
 (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L111-L115 @ ens_v2_mainnet_20261002@b1f97b91)
-(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L170 @ ens_v2_mainnet_20261002@b1f97b91)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L171 @ ens_v2_mainnet_20261002@b1f97b91)
 
 A constructor-set implementation is invisible to bigname. Mainnet's first proxy row appears at DAO
 proposal call 15 or at the managed proxy's upgrade to `UniversalResolverV2`, whichever comes first.
