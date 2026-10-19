@@ -265,9 +265,10 @@ the route consults it before live execution so unsupported exact-name coverage
 or an unverifiable selected [authority arm](glossary.md#authority-epoch) can
 refuse the forward call. An arm is verifiable when the selected `ens_execution`
 manifest lists it in `verified_authority_arms` (`manifests.md` §
-`verified_authority_arms`; absent means `["ens_v1"]`, the Mainnet
-declaration; the official `sepolia` manifest lists `ens_v2` as well, as documented
-in the [deployment inventory](sepolia-deployment.md)). After the reverse leg, the same exact-name
+`verified_authority_arms`, and absent means `["ens_v1"]`. The official `mainnet` and
+`sepolia` manifests list `ens_v2` as well, as documented in the
+[mainnet](mainnet-deployment.md) and [Sepolia](sepolia-deployment.md) deployment
+inventories). After the reverse leg, the same exact-name
 gate applies to the live claim. An absent readable exact-name row admits the
 forward call.
 The live reverse claim must already be byte-normalized, and the route accepts it

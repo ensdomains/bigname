@@ -278,9 +278,10 @@ fences on, so an in-flight verified read that started under the previous
 declaration is rejected as concurrent state rather than served across the
 change.
 
-When the field is absent the manifest admits `["ens_v1"]`, as Mainnet does.
-The official `sepolia` profile declares `["ens_v1", "ens_v2"]`; its proxy route
-and root binding are covered by the [deployment inventory](sepolia-deployment.md).
+When the field is absent the manifest admits `["ens_v1"]`. The official
+`mainnet` and `sepolia` profiles declare `["ens_v1", "ens_v2"]`. Their proxy
+routes and root bindings are covered by the [mainnet](mainnet-deployment.md) and
+[Sepolia](sepolia-deployment.md) deployment inventories.
 Listing `ens_v1` on an ENSv2 profile keeps the status quo: ENSv1-arm names
 remain verifiable through that profile's Universal Resolver. The loader rejects
 the field on any other source family, an empty list, an arm outside

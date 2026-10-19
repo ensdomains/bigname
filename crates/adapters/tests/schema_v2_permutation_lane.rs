@@ -51,9 +51,9 @@ use permutation::{
     pool_v2,
     scenario::{self, BurstPhase},
     world::{
-        BlockSpec, ENS_V1_MAINNET, ENS_V1_SEPOLIA, ENS_V2_SEPOLIA, GeneratedLog, Wiring, World,
-        assert_pins_are_current, assert_worlds_cover_deployments, checked_in_manifests,
-        declared_event_kinds, declared_event_topics,
+        BlockSpec, ENS_V1_MAINNET, ENS_V1_SEPOLIA, ENS_V2_MAINNET, ENS_V2_SEPOLIA, GeneratedLog,
+        Wiring, World, assert_pins_are_current, assert_worlds_cover_deployments,
+        checked_in_manifests, declared_event_kinds, declared_event_topics,
     },
 };
 
@@ -69,7 +69,12 @@ const DEFAULT_SEED: u64 = 0x6e0d_5eed;
 /// `generated_scenarios_are_reproducible_from_their_seed`.
 const CASE_STRIDE: u64 = 0xd134_2543_de82_ef95;
 const SPLIT_SALT: u64 = 0xa076_1d64_78bd_642f;
-const WORLDS: [&World; 3] = [&ENS_V1_MAINNET, &ENS_V1_SEPOLIA, &ENS_V2_SEPOLIA];
+const WORLDS: [&World; 4] = [
+    &ENS_V1_MAINNET,
+    &ENS_V1_SEPOLIA,
+    &ENS_V2_SEPOLIA,
+    &ENS_V2_MAINNET,
+];
 /// Any timestamp works for coverage; the axes decide which events a pool contains, not the clock.
 const SETTLE_TIMESTAMP: i64 = 1_700_000_000;
 
@@ -3600,6 +3605,36 @@ const REQUIRED_EVENT_KINDS: &[(&str, &[&str])] = &[
             "Upgraded",
         ],
     ),
+    (
+        ENS_V2_MAINNET.label,
+        &[
+            "AuthorityTransferred",
+            "ContractDiscovered",
+            "ExpiryChanged",
+            "ParentChanged",
+            "PermissionChanged",
+            "PreimageObserved",
+            "RecordChanged",
+            "RecordVersionChanged",
+            "RegistrarNameRegistered",
+            "RegistrationGranted",
+            "RegistrationReleased",
+            "RegistrationRenewed",
+            "RegistrationReserved",
+            "RegistryCreated",
+            "ResolverChanged",
+            "ResolverRecordLinked",
+            "ResolverPermissionArgument",
+            "RootPermissionChanged",
+            "SubregistryChanged",
+            "SurfaceBound",
+            "SurfaceUnbound",
+            "TokenControlTransferred",
+            "TokenRegenerated",
+            "TokenResourceLinked",
+            "Upgraded",
+        ],
+    ),
 ];
 
 /// The batch-boundary differences the default corpus reproduces exactly, keyed as
@@ -3611,8 +3646,8 @@ const REQUIRED_EVENT_KINDS: &[(&str, &[&str])] = &[
 /// `rebased_anchors:resources` fell 60 to 0), so any class that appears here is a batch-boundary
 /// regression.
 ///
-/// Pinned per world, because the three can diverge independently: a single cross-world total would
-/// read the same if one world stopped while the other started.
+/// Pinned per world, because the worlds can diverge independently: a single cross-world total
+/// would read the same if one world stopped while another started.
 ///
 /// A class missing from a row means the default corpus does not reach it, not that it cannot
 /// happen — `counts` omits zero-count classes. The 600-case sweep agrees with the fix on the
@@ -3623,6 +3658,7 @@ const EXPECTED_ARTIFACTS: &[(&str, &[(&str, usize)])] = &[
     (ENS_V1_MAINNET.label, &[]),
     (ENS_V1_SEPOLIA.label, &[]),
     (ENS_V2_SEPOLIA.label, &[]),
+    (ENS_V2_MAINNET.label, &[]),
 ];
 
 /// The first thing to rule out when a pinned count moves: these are counts over the sequences one
@@ -3641,6 +3677,7 @@ const EXPECTED_SUBREGISTRY_DETACHES: &[(&str, usize)] = &[
     (ENS_V1_MAINNET.label, 0),
     (ENS_V1_SEPOLIA.label, 0),
     (ENS_V2_SEPOLIA.label, 51),
+    (ENS_V2_MAINNET.label, 51),
 ];
 
 /// Per-world corpus volume floors — minimum raw-log and normalized-event totals the default
@@ -3652,11 +3689,14 @@ const EXPECTED_SUBREGISTRY_DETACHES: &[(&str, usize)] = &[
 /// from the default-corpus run that introduced them — ens_v1_mainnet 1446 raw logs and 4554
 /// normalized events, ens_v1_sepolia 1067 and 3634, and ens_v2_sepolia 965 and 1946 — with each
 /// new floor at 70% of that run, truncated. The ENSv2 normalized-event floor retains its
-/// pre-existing stricter value, originally 70% of the earlier 1987-event baseline.
+/// pre-existing stricter value, originally 70% of the earlier 1987-event baseline. ens_v2_mainnet
+/// runs ens_v2_sepolia's pool over the mainnet manifests and takes its floors: its first run
+/// produced the same totals, 1909 raw logs and 3767 normalized events.
 const MINIMUM_VOLUMES: &[(&str, usize, usize)] = &[
     (ENS_V1_MAINNET.label, 1012, 3187),
     (ENS_V1_SEPOLIA.label, 746, 2543),
     (ENS_V2_SEPOLIA.label, 675, 1390),
+    (ENS_V2_MAINNET.label, 675, 1390),
 ];
 
 /// The pre-registration burst axis's reach at the default corpus, per world: how many cases the
@@ -3685,6 +3725,7 @@ const EXPECTED_BURST_REACH: &[(&str, usize, [usize; BurstPhase::COUNT], usize)] 
     (ENS_V1_MAINNET.label, 8, [14, 14, 14], 5),
     (ENS_V1_SEPOLIA.label, 0, [0, 0, 0], 0),
     (ENS_V2_SEPOLIA.label, 0, [0, 0, 0], 0),
+    (ENS_V2_MAINNET.label, 0, [0, 0, 0], 0),
 ];
 
 /// The resolver-creation axis's reach at the default corpus, per world: how many cases it fired
@@ -3697,6 +3738,7 @@ const EXPECTED_RESOLVER_CREATION_REACH: &[(&str, usize, usize)] = &[
     (ENS_V1_MAINNET.label, 0, 0),
     (ENS_V1_SEPOLIA.label, 0, 0),
     (ENS_V2_SEPOLIA.label, 18, 8),
+    (ENS_V2_MAINNET.label, 18, 8),
 ];
 
 #[derive(Clone, Copy, Debug, Default)]

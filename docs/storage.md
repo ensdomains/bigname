@@ -3042,7 +3042,7 @@ Basenames and ENSv2 histories through either loader, scans `normalized_events` s
 nowhere without the drop list and stores the same rows. That test shows each statement keeps
 an index path, not that the path is keyed: a name-only read falls back to a range of
 `normalized_events_chain_block_number_idx`, which is why `normalized_events_name_history_idx`
-stays although the ENSv1-only Mainnet walk never read it.
+stays although a walk over ENSv1-only history never reads it.
 
 ## Projection publication
 

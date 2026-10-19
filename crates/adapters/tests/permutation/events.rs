@@ -302,8 +302,22 @@ pub fn declared_events() -> Vec<DeclaredEvent> {
                 V2RecordResolver::NameUpdated,
                 V2RecordResolver::ResourceArgument,
             ]
-        ));
-    v1.into_iter().chain(v1_sepolia).chain(v2).collect()
+        ))
+        .collect::<Vec<_>>();
+    // The mainnet ENSv2 families declare the Sepolia events, so the same pool emits the same
+    // fragments there.
+    let v2_mainnet = v2
+        .iter()
+        .map(|event| DeclaredEvent {
+            world: "ens_v2_mainnet",
+            ..event.clone()
+        })
+        .collect::<Vec<_>>();
+    v1.into_iter()
+        .chain(v1_sepolia)
+        .chain(v2)
+        .chain(v2_mainnet)
+        .collect()
 }
 
 pub fn encoded_topics(encoded: &LogData) -> Vec<String> {

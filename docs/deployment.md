@@ -2744,7 +2744,8 @@ in place, `GET /v1/namespaces/ens` on Sepolia serves `resolution` with
 the admitted root registry's declared start block, `11820291` on Sepolia, and
 no longer the block of a proxy upgrade
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/RootRegistry.json:L2995 @ ens_v2_sepolia_20261001@07e55a05).
-Mainnet's profile admits no ENSv2 root registry, so the network serves
+Until the [mainnet ENSv2 admission of 2026-10-02](#mainnet-ensv2-admission-of-2026-10-02),
+mainnet's profile admitted no ENSv2 root registry, so the network served
 `{"protocol": "ens_v1", "since_block": null}`.
 
 ### Parent filter on names by address

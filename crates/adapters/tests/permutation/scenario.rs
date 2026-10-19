@@ -364,8 +364,8 @@ pub fn generate(world: &'static World, wiring: &Wiring, seed: u64) -> Scenario {
     let mut dimensions = Dimensions::draw(&mut rng);
     dimensions.pre_registration_burst = world.label == "ens_v1_mainnet"
         && Rng::new(seed ^ PRE_REGISTRATION_BURST_SALT).chance(1, 4);
-    dimensions.resolver_creation =
-        world.label == "ens_v2_sepolia" && Rng::new(seed ^ RESOLVER_CREATION_SALT).chance(1, 3);
+    dimensions.resolver_creation = matches!(world.label, "ens_v2_sepolia" | "ens_v2_mainnet")
+        && Rng::new(seed ^ RESOLVER_CREATION_SALT).chance(1, 3);
     let blocks = draw_blocks(&mut rng);
     let settle_timestamp = blocks.last().expect("scenario has blocks").timestamp;
     let mut actions = pool(world, wiring, &dimensions, settle_timestamp);
@@ -418,7 +418,7 @@ pub fn pool(
     match world.label {
         "ens_v1_mainnet" => pool_v1::build(wiring, dimensions, settle_timestamp),
         "ens_v1_sepolia" => pool_v1_sepolia::build(wiring, dimensions, settle_timestamp),
-        "ens_v2_sepolia" => pool_v2::build(wiring, dimensions, settle_timestamp),
+        "ens_v2_sepolia" | "ens_v2_mainnet" => pool_v2::build(wiring, dimensions, settle_timestamp),
         label => panic!("unknown permutation world {label}"),
     }
 }

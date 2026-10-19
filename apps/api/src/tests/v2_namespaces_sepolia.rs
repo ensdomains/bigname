@@ -248,11 +248,13 @@ async fn v2_namespace_ens_reports_the_resolution_protocol_across_sepolia_upgrade
     database.cleanup().await
 }
 
-/// Mainnet ENS has an execution entrypoint and no admitted ENSv2 root registry, so once
-/// published it reads ENSv1 with no start. Basenames networks have no ENSv1/ENSv2 split and
-/// carry no `resolution`.
+/// The mainnet profile admits the official 2026-10-02 ENSv2 root registry, so once published
+/// the mainnet network reads `ens_v2`, dated by the root registry's declared start block, at a
+/// block below that start as at any other: the cutover has no block. Basenames networks have no
+/// ENSv1/ENSv2 split and carry no `resolution`.
 #[tokio::test]
-async fn v2_namespace_resolution_is_ens_v1_on_mainnet_and_absent_for_basenames() -> Result<()> {
+async fn v2_namespace_resolution_follows_the_mainnet_root_admission_and_is_absent_for_basenames()
+-> Result<()> {
     let database = TestDatabase::new(true).await?;
     sync_checked_in_manifests(&database, "mainnet").await?;
     publish_resolution_block(&database.pool, "ethereum-mainnet", 23_000_000, None).await?;
@@ -264,7 +266,7 @@ async fn v2_namespace_resolution_is_ens_v1_on_mainnet_and_absent_for_basenames()
         json!([{
             "network": "ethereum",
             "chain_id": 1,
-            "resolution": { "protocol": "ens_v1", "since_block": null }
+            "resolution": { "protocol": "ens_v2", "since_block": 26183742 }
         }])
     );
     let (status, basenames) = read_family_response(&database, "/v1/namespaces/basenames").await?;
