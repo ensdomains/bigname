@@ -350,11 +350,16 @@ ABI entries use Alloy-parseable human-readable Solidity fragments, not handwritt
   role-scoped event, or any event of a family without discovered emitters,
   refuses it. It bounds the
   [required Ingest redo](#mandatory-historical-fetch-after-watch-plan-widening)
-  that adding the event stamps, and the first-effect scan that sets the start
-  of the Interpret and Project redo a manifest change stamps. Runtime intake and
-  Interpret keep each emitter's own active range, and intake still reads an
-  all-emitter event from every emitter over the whole range it fetches. Like every other
-  `start_block` it must fit a signed 64-bit integer.
+  that adding the event stamps, and the first-effect scan of that change. The
+  scan can bound the Interpret and Project redo only where the runner bounds
+  them ([Manifest-authority marker](deployment.md#manifest-authority-marker)),
+  which it never does for a change to an ENSv2 root, registry or migration
+  manifest. Adding or editing an event block also rotates the
+  [interpreter content hash](glossary.md#interpreter-content-hash), so the
+  Interpret and Project redo that follow run over the full range. Runtime
+  intake and Interpret keep each emitter's own active range, and intake still
+  reads an all-emitter event from every emitter over the whole range it
+  fetches. Like every other `start_block` it must fit a signed 64-bit integer.
 - `status` — optional `unsupported` | `shadow` | `supported` marker for the ABI entry.
 - `notes` — optional reviewer-facing context.
 
@@ -2149,7 +2154,9 @@ Watch-plan expansion starts from active manifest roots by `contract_instance_id`
   (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Utils.sol:L69-L86 @ basenames@1809bbc)
 - An `[[abi.events]]` entry's `start_block` is the start of that event's
   family-wide or all-emitter compiled entry, block zero when omitted. It bounds
-  the compiled plan, and so a required Ingest redo and the first-effect scan.
+  the compiled plan, and so a required Ingest redo and the first-effect scan
+  of the change. Setting it rotates the interpreter content hash, so it never
+  bounds the Interpret or Project redo.
   Runtime intake still watches each discovered emitter over its own active
   range, so an emitter admitted after the start is fetched from its admission
   and one admitted before it is not refetched below the start. The value is the

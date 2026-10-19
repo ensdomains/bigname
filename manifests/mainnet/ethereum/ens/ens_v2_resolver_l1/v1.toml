@@ -4,8 +4,10 @@
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/.deployment.json:L4 @ ens_v2_mainnet_20261002@b1f97b91)
 # Every event that compiles a family-wide or all-emitter watch entry starts at 26105292, the ENSv1
 # mirror resolver's start and this family's first declaration. The start bounds the Ingest redo
-# that admitting these events stamps and the first-effect scan, not runtime intake
-# (docs/manifests.md, "Mandatory historical fetch after watch-plan widening").
+# that admitting these events stamps and the first-effect scan of that change, not runtime
+# intake. Event blocks are part of the interpreter content hash, so the Interpret and Project
+# redo that follow run over the full range (docs/manifests.md, "Mandatory historical fetch after
+# watch-plan widening").
 manifest_version = 1
 namespace = "ens"
 source_family = "ens_v2_resolver_l1"
