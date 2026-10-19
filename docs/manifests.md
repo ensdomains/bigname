@@ -659,7 +659,7 @@ permission events and are not ownership evidence.
 
 ENSv2 terminal lifecycle events also close interpreter-owned state. `LabelUnregistered` is emitted before upstream expires the entry and has no paired zero-target subregistry or resolver updates, so the ENSv2 interpreter closes the current surface binding and emits terminal discovery observations at that log position. It also emits null `SubregistryChanged` and `ResolverChanged` boundaries for any attached roles so full and incremental projections retire the old topology. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L199 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L206 @ ens_v2@a971bd64) A replacement registration or reservation can bump the token version and overwrite the stored subregistry and resolver, while upstream emits follow-up target updates only for nonzero replacements; the adapter therefore closes the prior discovery targets before accepting the successor lifecycle and emits the same null role boundaries. Replacement registration lets the following `TokenResource` close the old surface at the successor start; replacement reservation has no successor resource, so it closes immediately and emits `SurfaceUnbound` as position-specific reorg-repair evidence. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L455 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L462 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L478 @ ens_v2@a971bd64)
 
-`RegistryCreated` is admitted as registry-instance history and discovery input. `URIUpdated`, the `PermissionedResolver` `DataChanged` / `NamedDataResource` pair, and a resolver's ERC-1155 `ApprovalForAll` remain outside the active normalized behavior.[^v2-events-created][^v2-events-uri][^v2-pres-data] A registry's `ApprovalForAll` is an account fact ([ENSv2 registry operator approvals](#ensv2-registry-operator-approvals)); it is not treated as token ownership or an ENSv2 resource-role grant. (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L336 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L341 @ ens_v2@a971bd64) The official Sepolia profile directly admits the exact `PublicResolverV2` described below; Mainnet has no such declaration. PermissionedResolver proxy support still requires canonical implementation evidence.
+`RegistryCreated` is admitted as registry-instance history and discovery input. `URIUpdated`, the `PermissionedResolver` `DataChanged` / `NamedDataResource` pair, and a resolver's ERC-1155 `ApprovalForAll` remain outside the active normalized behavior.[^v2-events-created][^v2-events-uri][^v2-pres-data] A registry's `ApprovalForAll` is an account fact ([ENSv2 registry operator approvals](#ensv2-registry-operator-approvals)); it is not treated as token ownership or an ENSv2 resource-role grant. (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L336 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L341 @ ens_v2@a971bd64) The official Sepolia and Mainnet profiles each directly admit an exact `PublicResolverV2`, as described below. PermissionedResolver proxy support still requires canonical implementation evidence.
 
 #### ENSv2 registry operator approvals
 
@@ -693,8 +693,8 @@ It becomes an `ExpiryChanged` with no name and no resource and
 `token_state_absent = true`, changes no name state, is omitted from product
 event reads, and exists so that the
 [registry entry](projections.md#ensv2-registry-entries) row keeps the entry's
-expiry. The Mainnet deployment profile declares no
-ENSv2 family and is unchanged.
+expiry. The Mainnet `ens_v2_registry_l1` and `ens_v2_root_l1` manifests
+declare the same `ApprovalForAll` for the same roles.
 
 The registry declaration compiles one family-wide watch entry, which covers
 the registries that announced themselves: the targets of
@@ -732,7 +732,7 @@ lowering it widens the plan from the new start, and raising it stamps nothing.
 An owned-chain manifest may declare an exact local deployment using role
 `public_resolver_v2`, source family `ens_v2_resolver_l1`, and `proxy_kind = "none"`.
 The declaration must preserve its deployment address, applicable `start_block`,
-namespace, and local deployment provenance. The [official Sepolia deployment](sepolia-deployment.md) uses this same exact direct role. Source
+namespace, and local deployment provenance. The official [Sepolia](sepolia-deployment.md) and [mainnet](mainnet-deployment.md) deployments use this same exact direct role. Source
 availability alone does not admit any public-chain address or replace
 `PermissionedResolver` implementation metadata. The source
 contract composes the node-keyed ABI, address, name, text, and contenthash profiles.

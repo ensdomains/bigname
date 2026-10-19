@@ -87,9 +87,11 @@ arm-scoped. The supported topology classes are:
   ENS names whose binding resource has inventory, copying that inventory's record
   boundary (`projections.md` § Exact-name projection); a bound row without an
   inventory row has no topology and is `unsupported` with
-  `verified_records_not_supported`. On Mainnet the
-  arm gate admits only `ens_v1` names; the official Sepolia profile admits
-  both arms, and its UniversalResolverV2 resolves them by walking
+  `verified_records_not_supported`. The official
+  Mainnet and Sepolia profiles admit both arms. Sepolia's UniversalResolverV2,
+  and Mainnet's once its proxies upgrade to it
+  ([mainnet deployment](mainnet-deployment.md#resolver-and-discovery-coverage)),
+  resolves them by walking
   root→leaf through `getSubregistry`, keeping the deepest nonzero
   `getResolver`, and accepting an ancestor-selected resolver only when it
   implements ENSIP-10

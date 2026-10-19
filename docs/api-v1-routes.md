@@ -1416,9 +1416,9 @@ its value map:
   `exact_name_authority_not_verifiable` when the row's selected
   [authority arm](glossary.md#authority-epoch) is outside the
   `verified_authority_arms` the selected `ens_execution` manifest declares
-  (`manifests.md` § `verified_authority_arms`; absent means `["ens_v1"]`, so
-  an `ens_v2`-selected name is refused on Mainnet and
-  admitted on the official `sepolia` profile). A name served as
+  (`manifests.md` § `verified_authority_arms`; absent means `["ens_v1"]`, and
+  the official `mainnet` and `sepolia` profiles list both arms, so both admit
+  an `ens_v2`-selected name). A name served as
   `authority=ens_v0` is on the stored `ens_v1` arm and is admitted wherever
   `ens_v1` is. Neither refusal dispatches a provider call.
   A name whose surface stores no raw label bytes is verified only when every
@@ -4173,15 +4173,14 @@ introduces it rebuilds Project from full history before serving the option; see
   A missing readable row cannot generally hide a later authority arm from the
   execution this route performs. Live ENS/60 primary-name verification executes
   against the Ethereum L1 of the selected [deployment
-  profile](glossary.md#deployment-profile): Mainnet, whose profile admits no
-  ENSv2 registry, so there is no later arm to hide; or Sepolia, through the
-  Sepolia profile's `ens_execution` Universal Resolver and `ens_v1_registry_l1`
-  registry declarations, with the same reverse leg, the same pre-forward
-  authority gate, the same hash pinning to the Sepolia family publication's
-  block, and the
-  same provider limits. The official Sepolia manifest admits both `ens_v1` and `ens_v2`
-  through its Universal Resolver proxy; the [deployment inventory](sepolia-deployment.md)
-  records the root binding and rollout verification. The
+  profile](glossary.md#deployment-profile), Mainnet or Sepolia, through that
+  profile's `ens_execution` Universal Resolver and `ens_v1_registry_l1`
+  registry declarations, with one reverse leg, one pre-forward authority gate,
+  hash pinning to that profile's family publication block, and one set of
+  provider limits. The official Mainnet and Sepolia manifests admit both
+  `ens_v1` and `ens_v2` through their Universal Resolver proxies; the
+  [mainnet](mainnet-deployment.md) and [Sepolia](sepolia-deployment.md)
+  deployment inventories record the root bindings and rollout verification. The
   Sepolia evidence below explains the projected authority and the ENSv1-path
   behavior that route relies on. An
   unwrapped ENSv1→ENSv2 migration clears the migrated node's ENSv1 resolver
@@ -4275,8 +4274,8 @@ introduces it rebuilds Project from full history before serving the option; see
   anomaly and returns `exact_name_authority_not_verifiable`. A claim the
   projection supports whose selected authority arm is not listed in the
   selected `ens_execution` manifest's `verified_authority_arms` returns that
-  same reason. Mainnet lists only `ens_v1`; the official Sepolia manifest
-  lists both arms and therefore admits an `ens_v2`-selected claim. An
+  same reason. The official Mainnet and Sepolia manifests list both arms and
+  therefore admit an `ens_v2`-selected claim. An
   `ens_v2`-selected name is supported whenever its authority selection carries
   no refusal, whichever registry or registrar recorded it and whatever the
   `exact_name_profile` flag says, so such a claim reaches the arm check: it
