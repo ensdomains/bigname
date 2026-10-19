@@ -2210,6 +2210,9 @@ the window holds the `.eth` names registered through ENSv1 after the last
 reservation batch and before the DAO proposal removes the ENSv1 registrar
 controllers
 ([mainnet deployment](mainnet-deployment.md#historical-intake-and-the-upgrade)).
+In the same window an ENSv1 renewal does not move a reservation's expiry until
+a later batch does, so a premigrated name can serve an earlier expiry than its
+live lease.
 
 After cutover, an ENSv1-selected descendant also follows the current ENSv2 registry
 path at the published block. A live parent alone does not establish that the

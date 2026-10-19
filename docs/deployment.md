@@ -2836,6 +2836,10 @@ proposal removes the ENSv1 registrar controllers. Until the route reaches
 `UniversalResolverV2` the live Universal Resolver still answers them through
 ENSv1. From then the two agree
 ([mainnet deployment](mainnet-deployment.md#historical-intake-and-the-upgrade)).
+The same window applies to expiry. A reservation carries the expiry written at
+its batch, and a renewal made through ENSv1 after that batch does not move it
+until a later batch does. bigname serves the reservation's expiry, so it can
+show an earlier expiry than the live lease until then.
 
 Before promoting the staging seed, count those names on the staging API, which
 admits the manifests. A live name is one whose grace has not ended. The script

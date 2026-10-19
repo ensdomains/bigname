@@ -124,9 +124,18 @@ last reservation batch and before that removal has no ENSv2 entry. bigname serve
 Resolver still answers it through ENSv1. The divergence lasts until a later batch reserves the
 name, or until the DAO proposal has removed the controllers and the client-facing proxy reaches
 `UniversalResolverV2` ([below](#resolver-and-discovery-coverage)). From then bigname and the live
-Universal Resolver agree: the name is reserved and served by both, or absent from both
+Universal Resolver agree: the name is reserved and served by both, or unresolved in both
 ([known divergence](upstream.md#ensv2-resolution-modelled-from-manifest-admission),
 [Cutover at ENSv2 admission](deployment.md#cutover-at-ensv2-admission)).
+
+The same window applies to expiry. An ENSv2 reservation carries the expiry written at its batch,
+and a later batch renews a reserved name only to a later expiry. A renewal made through ENSv1
+after a name's batch and before the controllers are removed does not move that expiry until a
+later batch does. bigname takes a premigrated name's expiry from its ENSv2 entry, so it can show
+the earlier expiry while the live ENSv1 lease runs longer. Once the controllers are removed and
+the client-facing proxy reaches `UniversalResolverV2`, the chain's ENSv2 state holds the same
+expiry bigname serves.
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registrar/BatchRegistrar.sol:L61-L71 @ ens_v2_mainnet_20261002@b1f97b91)
 
 ## Resolver and discovery coverage
 
