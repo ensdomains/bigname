@@ -4773,12 +4773,17 @@ changes `crates/project/src` and adds a schema-migration. It is an input of the
 
 ## Reviewed ENSv2 deployment tables keyed by deployment epoch
 
-The build that lists the reviewed ENSv2 factory origins and registrar grace per
+The build that lists the reviewed ENSv2 factory origins, registry implementations,
+registrar grace and token ID rule per
 [deployment epoch](glossary.md#deployment-epoch), with rows for the October 1 Sepolia deployment and the October 2
-mainnet deployment, changes `crates/adapters/src` and the storage families' lifecycle
-policy. The adapter file is an input of the
-[interpreter content hash](glossary.md#interpreter-content-hash) and the policy file of
-the [projection content hash](glossary.md#projection-content-hash).
+mainnet deployment, changes `crates/adapters/src`, the storage families' lifecycle policy,
+registry support and resolution path, Project's resolution path selection, and two API
+history readers. It reads the ENSv1 mirror resolver and the PublicResolverV2 address from
+their manifest declarations instead of naming the Sepolia addresses. The adapter file is an
+input of the [interpreter content hash](glossary.md#interpreter-content-hash). The storage
+family and Project files are inputs of the
+[projection content hash](glossary.md#projection-content-hash). The history readers are
+inputs of neither.
 
 - Both hashes rotate for every chain. Every chain needs a full-history Interpret redo,
   then the Project redo it installs, at a planned
@@ -4786,8 +4791,24 @@ the [projection content hash](glossary.md#projection-content-hash).
   API binaries. The change rides the release that admits the mainnet ENSv2 manifests and
   shares that release's one Interpret and Project redo pair.
 - No Sepolia result changes. The Sepolia rows keep the reviewed factory, implementations
-  and ETHRegistry as before. A mainnet row applies only to addresses that a mainnet
+  and ETHRegistry as before, and the Sepolia manifests declare the same mirror and
+  PublicResolverV2 the readers named. A mainnet row applies only to addresses that a mainnet
   manifest under the `ens_v2_mainnet_20261002` epoch declares, so until those manifests
   are admitted it changes nothing on mainnet.
-- It adds no schema-migration, table, index, manifest or setting. The manifest-authority
+- Schema-migration `20261019120000_registry_permission_mainnet_departure_indexes.sql`
+  installs two read-only sparse normalized-event indexes,
+  `normalized_events_mainnet_wrapper_departure_idx` and
+  `normalized_events_mainnet_user_registry_departure_idx`, the upgrade-disqualifier probes
+  for the mainnet WrapperRegistry and UserRegistry implementations. A populated
+  `normalized_events` requires both. Before applying the migration on an initialized
+  database, run
+  [`ops/registry-permission-indexes/install.sql`](../ops/registry-permission-indexes/install.sql)
+  outside a transaction. It builds missing indexes concurrently and validates the whole set.
+  Follow its [ordered prebuild, headroom and recovery instructions](../ops/registry-permission-indexes/README.md).
+  The schema-migration validates both indexes against `normalized_events`, refuses a
+  populated table with a missing index or any invalid definition, then adopts the pair
+  without rebuilding or changing their OIDs. Empty schemas build directly.
+  `ops/walk-index-set/drop.sql` drops both with the other Project and API indexes, and its
+  `install.sql` rebuilds them.
+- It adds no table, manifest or setting. The manifest-authority
   fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.

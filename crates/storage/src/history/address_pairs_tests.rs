@@ -21,7 +21,7 @@ use super::super::{
 const VALUE_A: &str = "0x000000000000000000000000000000000000000a";
 const VALUE_B: &str = "0x000000000000000000000000000000000000000b";
 const ZERO: &str = "0x0000000000000000000000000000000000000000";
-const GENERATIONS: [(&str, &str, &str, &str, bool); 7] = [
+const GENERATIONS: [(&str, &str, &str, &str, bool); 8] = [
     (
         "ethereum-mainnet",
         "ens_v1_resolver_l1",
@@ -69,6 +69,14 @@ const GENERATIONS: [(&str, &str, &str, &str, bool); 7] = [
         "ens_v2_resolver_l1",
         "public_resolver_v2",
         "0xdc4a563d00f5c3012b699794eb9e13a561be386f",
+        true,
+    ),
+    // The mainnet row has no address of its own: the declaration supplies it.
+    (
+        "ethereum-mainnet",
+        "ens_v2_resolver_l1",
+        "public_resolver_v2",
+        "0x66f9f566ff2f26309c1bd9134388478a801da3e1",
         true,
     ),
 ];

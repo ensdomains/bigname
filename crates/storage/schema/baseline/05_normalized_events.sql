@@ -958,3 +958,19 @@ CREATE INDEX IF NOT EXISTS normalized_events_user_registry_departure_idx
       AND lower(after_state ->> 'implementation') IS DISTINCT FROM '0x9bd8a88719068d09ecee662f36c0e3856708366a';
 COMMENT ON INDEX normalized_events_user_registry_departure_idx IS
     'This sparse index checks for a canonical departure from the supported UserRegistry implementation without visiting benign same-code upgrades.';
+
+CREATE INDEX IF NOT EXISTS normalized_events_mainnet_wrapper_departure_idx
+    ON normalized_events (chain_id, lower(after_state ->> 'proxy_address'), block_number)
+    WHERE source_family = 'ens_v2_registry_l1' AND event_kind = 'Upgraded'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND lower(after_state ->> 'implementation') IS DISTINCT FROM '0xcf3edb3f5501de63b57254d910b6782ee370039b';
+COMMENT ON INDEX normalized_events_mainnet_wrapper_departure_idx IS
+    'This sparse index checks for a canonical departure from the supported mainnet WrapperRegistry implementation without visiting benign same-code upgrades.';
+
+CREATE INDEX IF NOT EXISTS normalized_events_mainnet_user_registry_departure_idx
+    ON normalized_events (chain_id, lower(after_state ->> 'proxy_address'), block_number)
+    WHERE source_family = 'ens_v2_registry_l1' AND event_kind = 'Upgraded'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND lower(after_state ->> 'implementation') IS DISTINCT FROM '0x75ff9adbcfce2469b097ac68f6ae650eae1351bb';
+COMMENT ON INDEX normalized_events_mainnet_user_registry_departure_idx IS
+    'This sparse index checks for a canonical departure from the supported mainnet UserRegistry implementation without visiting benign same-code upgrades.';

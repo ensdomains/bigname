@@ -1,15 +1,18 @@
 # Registry permission history indexes
 
-These five read-only indexes serve exact factory-origin, ordinary-announcement, sparse
-unsupported-upgrade and parent root-grant checks for WrapperRegistry permissions. Four index
+These seven read-only indexes serve exact factory-origin, ordinary-announcement, sparse
+unsupported-upgrade and parent root-grant checks for WrapperRegistry permissions. Six index
 `bigname_phase.normalized_events`; `project_grant_registry_parent_idx` indexes
-`bigname_phase.project_grant`. They add no Project table or derived holder rows and
-rewrite no event. All use their final names and must be valid, ready, live, on their
-reviewed target relation, and have the reviewed definitions before a populated
-upgrade can apply `20261005200000_registry_permission_history_indexes.sql`.
+`bigname_phase.project_grant`. Four of the six are the sparse departure indexes, two for the
+Sepolia implementations and two for the mainnet implementations. They add no Project table
+or derived holder rows and rewrite no event. All use their final names and must be valid,
+ready, live, on their reviewed target relation, and have the reviewed definitions before a
+populated upgrade can apply `20261005200000_registry_permission_history_indexes.sql`, which
+checks the first five, and `20261019120000_registry_permission_mainnet_departure_indexes.sql`,
+which checks the two mainnet departure indexes.
 
-Before applying that migration on an initialized database, complete preceding migrations,
-reserve disk for the five final indexes plus temporary build space and WAL, and run:
+Before applying either migration on an initialized database, complete preceding migrations,
+reserve disk for the final indexes it checks plus temporary build space and WAL, and run:
 
 ```sh
 psql -X -v ON_ERROR_STOP=1 "$DATABASE_URL" -f ops/registry-permission-indexes/install.sql
@@ -24,8 +27,9 @@ indexes still scan the heap during construction; final index size alone is not p
 headroom. Save the printed definitions, state flags, sizes and elapsed build times.
 
 After prebuild, apply the release's ordered schema migrations with the API, phase runner
-and redo processes stopped, following the normal planned migration boundary. The migration
-takes short write-blocking locks on the two target tables, validates the complete set and adopts it without
+and redo processes stopped, following the normal planned migration boundary. Each migration
+takes short write-blocking locks on its target tables, both for the first and only
+`normalized_events` for the mainnet one, validates its complete set and adopts it without
 rebuilding or changing index OIDs. A populated target table requires its own indexes even when the other target is
 empty. Any missing required member or invalid definition refuses the migration
 before index creation. Empty and migration-first databases keep the

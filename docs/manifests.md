@@ -772,6 +772,16 @@ The official `sepolia` profile declares `ENSV1Resolver` at
 `0x322b7581ca210a69c6d0e0d7c88a7688d2789cb0`, receipt block `11820288`,
 with the canonical ENSv1 registry correlation. (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ENSV1Resolver.json:L749 @ ens_v2_sepolia_20261001@07e55a05)
 
+No reader names a mirror address. The ENSv2 resolution path takes the WrapperRegistry
+fallback's mirror from the `ensv1_mirror_resolver` contract of the active
+`ens_v2_resolver_l1` manifest the publication was composed with, under a reviewed
+[deployment epoch](glossary.md#deployment-epoch) of the chain. A path that reaches the
+fallback with no such declaration, or with two, is unknown. Project's resolution path
+selection treats a classification change of any mirror a chain's ENSv2 resolver manifest
+declares as a change of every `.eth` name. The mainnet deployment's mirror is
+`0x394d8eb4a4fdf599384deab25f31d111d755c398`, and it applies once a mainnet manifest declares
+it. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ENSV1Resolver.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+
 #### ENSv2 migration-family admission plan
 
 The ENSv1→ENSv2 migration family is a fixed-address, log-driven extension of the current
@@ -1053,7 +1063,11 @@ implementation. The `ens_v2_mainnet_20261002` row names factory
 `0xcf3edb3f5501de63b57254d910b6782ee370039b` (Wrapper) and
 `0x75ff9adbcfce2469b097ac68f6ae650eae1351bb` (UserRegistry). Earlier mainnet
 WrapperRegistry implementations are not listed, so a proxy that names one keeps no
-origin. A redeploy adds a row.
+origin. A redeploy adds a row. The permission reader keeps the same rows, with the
+deployment's chain, in `crates/storage/src/families/control/permissions/registry_support.rs`.
+It reads a factory origin only under its own chain's row, and reads a root or registry
+declaration as whichever registry an active root or registry manifest of a reviewed epoch
+declares.
 (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/VerifiableFactory.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
 (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/WrapperRegistryImpl.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
 (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UserRegistryImpl.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)

@@ -122,6 +122,10 @@ fn decimal_token(word: &str) -> Result<String> {
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L280-L287 @ ens_v2_sepolia_20261001@07e55a05)
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L577-L587 @ ens_v2_sepolia_20261001@07e55a05)
 // (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/PermissionedRegistry.sol:L529-L538 @ ens_v2_sepolia_20260629@ccaeb58b)
+// The rule holds per reviewed deployment, a (chain, deployment label) row each. The October 2
+// mainnet registries have the same order.
+// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/access-control/EnhancedAccessControl.sol:L280-L287 @ ens_v2_mainnet_20261002@b1f97b91)
+// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registry/PermissionedRegistry.sol:L577-L587 @ ens_v2_mainnet_20261002@b1f97b91)
 const TOKEN_IDS_SQL: &str = "/* storage:history.token_ids */
     SELECT target.normalized_event_id, token.token_id
     FROM jsonb_to_recordset($1::jsonb) requested(event_id bigint, chain_id text,
@@ -134,7 +138,10 @@ const TOKEN_IDS_SQL: &str = "/* storage:history.token_ids */
     JOIN bigname_phase.manifest_versions manifest ON manifest.manifest_id = target.source_manifest_id
       AND manifest.chain_id = target.chain_id AND manifest.source_family = target.source_family
       AND manifest.manifest_version = target.manifest_version
-      AND manifest.deployment_label IN ('ens_v2_sepolia_20261001', 'ens_v2_sepolia_post_audit')
+      AND (manifest.chain_id, manifest.deployment_label) IN (
+          ('ethereum-sepolia', 'ens_v2_sepolia_20261001'),
+          ('ethereum-sepolia', 'ens_v2_sepolia_post_audit'),
+          ('ethereum-mainnet', 'ens_v2_mainnet_20261002'))
     JOIN bigname_phase.chain_lineage target_lineage
       ON target_lineage.chain_id = target.chain_id AND target_lineage.block_hash = target.block_hash
      AND target_lineage.block_number = target.block_number

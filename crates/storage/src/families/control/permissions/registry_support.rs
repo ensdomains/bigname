@@ -6,13 +6,39 @@ use uuid::Uuid;
 
 use crate::{families::name::FamilyPublication, identity::ens_v2_registry_root_resource_id};
 
-// Exact reviewed implementations; a manifest role alone cannot establish a code model.
+// One row per reviewed deployment: its chain, its deployment epoch, its VerifiableFactory and the
+// exact registry implementations whose code model the reader supports. A manifest role alone
+// cannot establish a code model. A row is inert until a manifest of that epoch declares it.
+// (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/VerifiableFactory.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/WrapperRegistryImpl.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UserRegistryImpl.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
-const WRAPPER: &str = "0xbe768b63e5fbbfbb0ae97e9064e0002df8001880";
-const USER: &str = "0x9bd8a88719068d09ecee662f36c0e3856708366a";
-const FACTORY: &str = "0xda70306c98e97ece36f997a21368e53298572991";
-const EPOCH: &str = "ens_v2_sepolia_20261001";
+// (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/VerifiableFactory.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+// (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/WrapperRegistryImpl.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+// (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UserRegistryImpl.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+struct Deployment {
+    chain: &'static str,
+    epoch: &'static str,
+    factory: &'static str,
+    wrapper: &'static str,
+    user: &'static str,
+}
+
+const DEPLOYMENTS: [Deployment; 2] = [
+    Deployment {
+        chain: "ethereum-sepolia",
+        epoch: "ens_v2_sepolia_20261001",
+        factory: "0xda70306c98e97ece36f997a21368e53298572991",
+        wrapper: "0xbe768b63e5fbbfbb0ae97e9064e0002df8001880",
+        user: "0x9bd8a88719068d09ecee662f36c0e3856708366a",
+    },
+    Deployment {
+        chain: "ethereum-mainnet",
+        epoch: "ens_v2_mainnet_20261002",
+        factory: "0x77510ba162dfea3d8989e3f0928a691b345730d2",
+        wrapper: "0xcf3edb3f5501de63b57254d910b6782ee370039b",
+        user: "0x75ff9adbcfce2469b097ac68f6ae650eae1351bb",
+    },
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Model {
@@ -51,7 +77,14 @@ impl Declaration {
             && payload["chain"] == chain
             && payload["namespace"] == namespace
             && payload["source_family"] == family
-            && payload["deployment_epoch"] == EPOCH
+            && self.deployment(chain).is_some()
+    }
+
+    fn deployment(&self, chain: &str) -> Option<&'static Deployment> {
+        let epoch = &self.after_state["manifest_payload"]["deployment_epoch"];
+        DEPLOYMENTS
+            .iter()
+            .find(|deployment| deployment.chain == chain && *epoch == deployment.epoch)
     }
 
     fn declares(&self, role: &str, address: &str, block: i64) -> bool {
@@ -91,7 +124,8 @@ impl Declarations {
                     namespace, source_family, after_state
              FROM bigname_phase.normalized_events
              WHERE chain_id = $1 AND event_kind = 'SourceManifestUpdated'
-               AND source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_migration_l1')
+               AND source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_migration_l1',
+                                     'ens_v2_resolver_l1')
                AND source_manifest_id IS NOT NULL AND consumer_visibility = 'activated'
                AND canonicality_state IN ('canonical', 'safe', 'finalized')
                AND normalized_event_id = ANY($2)
@@ -103,6 +137,45 @@ impl Declarations {
         .await
         .context("failed to read published registry declarations")?;
         Ok(Self(rows))
+    }
+
+    /// The ENSv1 mirror resolver the publication's active ENSv2 resolver manifest declares for
+    /// a reviewed deployment, as a non-proxy contract started by the publication's block.
+    /// `None` unless exactly one is declared.
+    /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ENSV1Resolver.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
+    /// (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ENSV1Resolver.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+    pub(crate) fn mirror_resolver(&self, publication: &FamilyPublication) -> Option<String> {
+        let declared: Vec<String> = self
+            .0
+            .iter()
+            .filter(|source| {
+                source.active(
+                    &publication.chain_id,
+                    "ens_v2_resolver_l1",
+                    &source.namespace,
+                    source.manifest_version,
+                )
+            })
+            .filter_map(|source| source.after_state["manifest_payload"]["contracts"].as_array())
+            .flatten()
+            .filter(|contract| contract["role"] == "ensv1_mirror_resolver")
+            .filter_map(|contract| contract["address"].as_str())
+            .map(str::to_ascii_lowercase)
+            .collect();
+        let [address] = declared.as_slice() else {
+            return None;
+        };
+        self.0
+            .iter()
+            .any(|source| {
+                source.active(
+                    &publication.chain_id,
+                    "ens_v2_resolver_l1",
+                    &source.namespace,
+                    source.manifest_version,
+                ) && source.declares("ensv1_mirror_resolver", address, publication.block_number)
+            })
+            .then(|| address.clone())
     }
 
     fn source(&self, id: Option<i64>) -> Option<&Declaration> {
@@ -121,22 +194,25 @@ impl Declarations {
         // from the current Project entry fact; the retained manifest proves the exact code.
         // (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/RootRegistry.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
         // (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ETHRegistry.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
-        // The root is whichever address the active root manifest declares. `declares` below
-        // matches the address, so no other registry passes as the root.
-        let (family, role) = match registry {
-            "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4" => ("ens_v2_registry_l1", "registry"),
-            _ => ("ens_v2_root_l1", "root_registry"),
-        };
+        // The registry is whichever address the active root or registry manifest declares in its
+        // root role. `declares` matches the address, so no other registry passes as either.
         let matching: Vec<_> = self
             .0
             .iter()
             .filter(|source| {
-                source.active(
-                    &publication.chain_id,
-                    family,
-                    &source.namespace,
-                    source.manifest_version,
-                ) && source.declares(role, registry, publication.block_number)
+                [
+                    ("ens_v2_registry_l1", "registry"),
+                    ("ens_v2_root_l1", "root_registry"),
+                ]
+                .iter()
+                .any(|(family, role)| {
+                    source.active(
+                        &publication.chain_id,
+                        family,
+                        &source.namespace,
+                        source.manifest_version,
+                    ) && source.declares(role, registry, publication.block_number)
+                })
             })
             .collect();
         let [source] = matching.as_slice() else {
@@ -227,22 +303,35 @@ pub(crate) async fn load(
     let [origin] = origins.as_slice() else {
         return Ok(None);
     };
-    let (model, implementation, role) = match origin.implementation.as_deref() {
-        Some(WRAPPER) => (Model::Wrapper, WRAPPER, "wrapper_registry_implementation"),
-        Some(USER) => (Model::User, USER, "user_registry_implementation"),
-        _ => return Ok(None),
-    };
     let Some(source) = declarations.source(origin.source_manifest_id) else {
         return Ok(None);
     };
-    if origin.emitter.as_deref() != Some(FACTORY)
+    let Some(deployment) = source.deployment(&publication.chain_id) else {
+        return Ok(None);
+    };
+    let (model, implementation, role) = match origin.implementation.as_deref() {
+        Some(code) if code == deployment.wrapper => (
+            Model::Wrapper,
+            deployment.wrapper,
+            "wrapper_registry_implementation",
+        ),
+        Some(code) if code == deployment.user => {
+            (Model::User, deployment.user, "user_registry_implementation")
+        }
+        _ => return Ok(None),
+    };
+    if origin.emitter.as_deref() != Some(deployment.factory)
         || !source.active(
             &publication.chain_id,
             "ens_v2_migration_l1",
             &origin.namespace,
             origin.manifest_version,
         )
-        || !source.declares("verifiable_factory", FACTORY, origin.block_number)
+        || !source.declares(
+            "verifiable_factory",
+            deployment.factory,
+            origin.block_number,
+        )
         || !source.declares(role, implementation, origin.block_number)
     {
         return Ok(None);
@@ -296,3 +385,7 @@ pub(crate) async fn load(
         model,
     }))
 }
+
+#[cfg(test)]
+#[path = "registry_support_tests.rs"]
+mod tests;

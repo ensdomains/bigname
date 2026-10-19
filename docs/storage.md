@@ -580,11 +580,16 @@ avoids scanning unrelated registry history, including when no announcement exist
 `registry_support_departure` uses
 `normalized_events_wrapper_departure_idx` or
 `normalized_events_user_registry_departure_idx` for a `NOT EXISTS`-equivalent
-probe of canonical upgrades away from the exact supported implementation.
+probe of canonical upgrades away from the exact supported Sepolia implementation.
+Schema-migration `20261019120000_registry_permission_mainnet_departure_indexes.sql`
+and the phase baseline add `normalized_events_mainnet_wrapper_departure_idx` and
+`normalized_events_mainnet_user_registry_departure_idx`, the same probe for the
+mainnet deployment's two implementations. The probe names the implementation of the
+registry's own deployment row as its literal.
 Their literal partial predicates match the production queries under generic
 plans, include malformed/null targets, and deliberately do not filter consumer
 visibility. They change no Interpret row. A same-code upgrade contributes to
-the other model's sparse index only; other upgrades contribute to both.
+every other implementation's sparse index only. Other upgrades contribute to all four.
 The F16 reverse parent-entry index finds only registries associated with an
 ownership/approval candidate. The same schema-migration adds
 `project_grant_registry_parent_idx` on Project-owned `project_grant`: chain,
@@ -3007,7 +3012,7 @@ The 17 kept indexes and the statements that read them:
 | `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |
 | `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows |
 
-The other 30 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
+The other 32 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
 these: `normalized_events_history_account_owner_idx`,
 `normalized_events_history_account_subject_idx`, `normalized_events_history_reverse_address_idx`,
 `normalized_events_history_registrar_lease_idx`, `normalized_events_registry_token_idx`,
@@ -3019,7 +3024,8 @@ these: `normalized_events_history_account_owner_idx`,
 `normalized_events_history_discovery_resource_idx`,
 `normalized_events_resolver_upgrade_history_idx`, `normalized_events_registry_origin_idx`,
 `normalized_events_registry_announcement_idx`, `normalized_events_wrapper_departure_idx`,
-`normalized_events_user_registry_departure_idx`,
+`normalized_events_user_registry_departure_idx`, `normalized_events_mainnet_wrapper_departure_idx`,
+`normalized_events_mainnet_user_registry_departure_idx`,
 `normalized_events_pointer_after_resolver_history_idx`,
 `normalized_events_pointer_before_resolver_history_idx`, `normalized_events_project_name_node_idx`,
 `normalized_events_project_name_child_idx`, `normalized_events_address_registrant_match_idx`,
