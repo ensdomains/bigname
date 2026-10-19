@@ -164,6 +164,17 @@ async fn address_pair_source_generations_and_empty_clears_are_exact() -> Result<
                 .collect::<BTreeSet<_>>(),
             expected
         );
+        // The declared PublicResolverV2 of an unreviewed mainnet deployment label stays
+        // uncollapsed, though its role and address match.
+        let mainnet_v2 = GENERATIONS.len() - 1;
+        sqlx::query("UPDATE manifest_versions SET deployment_label='ens_v2_mainnet_unreviewed' WHERE manifest_id=$1")
+            .bind(mainnet_v2 as i64 + 1)
+            .execute(&mut *conn)
+            .await?;
+        let visible = walk(&mut conn, &EventHistoryReadFilter::default()).await?;
+        assert!(visible.contains(&identity(mainnet_v2, 1)));
+        assert!(visible.contains(&identity(mainnet_v2, 3)));
+        assert!(!visible.contains(&identity(mainnet_v2 - 1, 1)));
         // A missing source declaration is not inferred from a known address or ABI.
         sqlx::query("DELETE FROM manifest_contract_instances WHERE manifest_id=1")
             .execute(&mut *conn)
@@ -311,8 +322,14 @@ async fn install(conn: &mut PgConnection) -> Result<()> {
         let id = generation as i64 + 1;
         let instance = Uuid::from_u128(id as u128);
         sqlx::query("INSERT INTO contract_instances(contract_instance_id,chain_id,contract_kind) VALUES($1,$2,'contract')").bind(instance).bind(chain).execute(&mut *conn).await?;
-        sqlx::query("INSERT INTO manifest_versions(manifest_version,namespace,source_family,chain_id,deployment_label,rollout_status,normalizer_version,file_path,manifest_payload) VALUES(1,$1,$2,$3,$4,'shadow','test',$4,'{}')")
-            .bind(if family.starts_with("basenames"){"basenames"}else{"ens"}).bind(family).bind(chain).bind(format!("generation-{id}")).execute(&mut *conn).await?;
+        // An ENSv2 generation applies only under its chain's reviewed deployment label.
+        let label = match (*chain, *family) {
+            ("ethereum-sepolia", "ens_v2_resolver_l1") => "ens_v2_sepolia_20261001".to_owned(),
+            ("ethereum-mainnet", "ens_v2_resolver_l1") => "ens_v2_mainnet_20261002".to_owned(),
+            _ => format!("generation-{id}"),
+        };
+        sqlx::query("INSERT INTO manifest_versions(manifest_version,namespace,source_family,chain_id,deployment_label,rollout_status,normalizer_version,file_path,manifest_payload) VALUES(1,$1,$2,$3,$4,'shadow','test',$5,'{}')")
+            .bind(if family.starts_with("basenames"){"basenames"}else{"ens"}).bind(family).bind(chain).bind(label).bind(format!("generation-{id}")).execute(&mut *conn).await?;
         sqlx::query("INSERT INTO manifest_contract_instances(manifest_id,chain_id,declaration_kind,declaration_name,contract_instance_id,declared_address,role,proxy_kind,start_block_number) VALUES($1,$2,'contract',$3,$4,$5,$3,'none',0)")
             .bind(id).bind(chain).bind(role).bind(instance).bind(address).execute(&mut *conn).await?;
     }

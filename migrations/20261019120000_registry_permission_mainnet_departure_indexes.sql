@@ -1,8 +1,8 @@
 -- Permission-reader indexes only: no fact rewrite or serving hash change here.
 -- The two sparse departure indexes of the reviewed mainnet registry implementations.
 -- Populated upgrades require ops/registry-permission-indexes/install.sql first.
--- Validate the whole set before building anything. A prebuilt set is adopted in place;
--- only an empty target table may build its missing indexes in this transaction.
+-- Validate the whole set before building anything. A prebuilt set is adopted in place.
+-- Only an empty target table may build its missing indexes in this transaction.
 DO $migration$
 DECLARE
     checked record;

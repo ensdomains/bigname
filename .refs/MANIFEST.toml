@@ -93,7 +93,7 @@ authoritative_for = [
 [refs.ens_v2_mainnet_20261002]
 repo = "https://github.com/ensdomains/namechain"
 commit = "b1f97b91f4b28e28d8a61fa13f09da70fdca6c6a"
-purpose = "Official 2026-10-02 mainnet ENSv2 deployment artifacts, receipts, compiler inputs and matching ENSv2 source; mainnet ENSv2 deployment authority."
+purpose = "Official 2026-10-02 mainnet ENSv2 deployment artifacts, receipts, compiler inputs and matching ENSv2 source. It is the mainnet ENSv2 deployment authority."
 authoritative_for = [
   "Official mainnet addresses, deployment starts, proxy wiring, event ABI and contract implementation evidence",
 ]

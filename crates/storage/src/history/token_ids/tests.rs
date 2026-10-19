@@ -227,6 +227,7 @@ async fn history_token_ids_apply_per_reviewed_deployment() -> Result<()> {
         let cases = [
             ("ethereum-mainnet", "ens_v2_mainnet_20261002", true),
             ("ethereum-sepolia", "ens_v2_sepolia_20261001", true),
+            ("ethereum-sepolia", "ens_v2_sepolia_post_audit", true),
             ("ethereum-sepolia", "ens_v2_mainnet_20261002", false),
             ("ethereum-mainnet", "ens_v2_sepolia_20261001", false),
             ("ethereum-mainnet", "ens_v2_sepolia_post_audit", false),

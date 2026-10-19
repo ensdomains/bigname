@@ -5,8 +5,9 @@ use sqlx::{Postgres, QueryBuilder};
 
 // Each row binds a deployed, non-proxy generation to its declared manifest role. A generic
 // match-all ABI admission is insufficient. Empty clears are supported only by modern source.
-// A row without an address takes the address its chain's manifest declares in the role: the
-// ENSv2 PublicResolverV2 rows, one per chain whose deployment's compiler input was reviewed.
+// A row without an address takes the address its manifest declares in the role. These are the
+// ENSv2 PublicResolverV2 rows, one per (chain, deployment label) whose compiler input was
+// reviewed. A row with an address applies under any of its chain's manifests.
 // (upstream: .refs/ens_v1/deployments/mainnet/PublicResolver.json:L2 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/deployments/sepolia/PublicResolver.json:L2 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L65 @ ens_v1@91c966f)
@@ -24,14 +25,14 @@ use sqlx::{Postgres, QueryBuilder};
 // (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PublicResolverV2.json:L1287-L1288 @ ens_v2_mainnet_20261002@b1f97b91)
 // (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/build-info/solc-0_8_25-8550fee9a7d7605147b869f3868c3d2bc5861ae7.json:L389-L391 @ ens_v2_mainnet_20261002@b1f97b91)
 const PROVEN_GENERATIONS: &str = "(VALUES
- ('ethereum-mainnet','ens_v1_resolver_l1','public_resolver','0xf29100983e058b709f3d539b0c765937b804ac15',true),
- ('ethereum-sepolia','ens_v1_resolver_l1','public_resolver','0xe99638b40e4fff0129d56f03b55b6bbc4bbe49b5',true),
- ('ethereum-mainnet','ens_v1_resolver_l1','public_resolver_231b0ee','0x231b0ee14048e9dccd1d247744d114a4eb5e8e63',false),
- ('ethereum-sepolia','ens_v1_resolver_l1','public_resolver_8948458','0x8948458626811dd0c23eb25cc74291247077cc51',false),
- ('ethereum-sepolia','ens_v1_resolver_l1','public_resolver_8fade66','0x8fade66b79cc9f707ab26799354482eb93a5b7dd',false),
- ('ethereum-sepolia','ens_v2_resolver_l1','public_resolver_v2',NULL,true),
- ('ethereum-mainnet','ens_v2_resolver_l1','public_resolver_v2',NULL,true),
- ('base-mainnet','basenames_base_resolver','resolver','0xc6d566a56a1aff6508b41f6c90ff131615583bcd',false)
+ ('ethereum-mainnet','ens_v1_resolver_l1','public_resolver','0xf29100983e058b709f3d539b0c765937b804ac15',NULL,true),
+ ('ethereum-sepolia','ens_v1_resolver_l1','public_resolver','0xe99638b40e4fff0129d56f03b55b6bbc4bbe49b5',NULL,true),
+ ('ethereum-mainnet','ens_v1_resolver_l1','public_resolver_231b0ee','0x231b0ee14048e9dccd1d247744d114a4eb5e8e63',NULL,false),
+ ('ethereum-sepolia','ens_v1_resolver_l1','public_resolver_8948458','0x8948458626811dd0c23eb25cc74291247077cc51',NULL,false),
+ ('ethereum-sepolia','ens_v1_resolver_l1','public_resolver_8fade66','0x8fade66b79cc9f707ab26799354482eb93a5b7dd',NULL,false),
+ ('ethereum-sepolia','ens_v2_resolver_l1','public_resolver_v2',NULL,'ens_v2_sepolia_20261001',true),
+ ('ethereum-mainnet','ens_v2_resolver_l1','public_resolver_v2',NULL,'ens_v2_mainnet_20261002',true),
+ ('base-mainnet','basenames_base_resolver','resolver','0xc6d566a56a1aff6508b41f6c90ff131615583bcd',NULL,false)
 )";
 
 pub(super) fn push_address_pair_filter_for_alias(
@@ -42,7 +43,7 @@ pub(super) fn push_address_pair_filter_for_alias(
     // keys use normalized_events_block_idx; a block's publication and lineage apply to both.
     query.push(aliased(" AND NOT (@ROW@.event_kind = 'RecordChanged' AND @ROW@.after_state @> '{\"source_event\":\"AddrChanged\",\"record_key\":\"addr:60\",\"selector_key\":\"60\"}'::jsonb AND @ROW@.canonicality_state IN ('canonical','safe','finalized') AND EXISTS (SELECT 1 FROM bigname_phase.normalized_events paired JOIN ", row_alias));
     query.push(PROVEN_GENERATIONS);
-    query.push(aliased(r#" AS generation(chain, family, role, address, empty_clear)
+    query.push(aliased(r#" AS generation(chain, family, role, address, label, empty_clear)
       ON generation.chain = @ROW@.chain_id AND generation.family = @ROW@.source_family
          AND (generation.address IS NULL
               OR generation.address = lower(@ROW@.raw_fact_ref ->> 'emitting_address'))
@@ -52,6 +53,11 @@ pub(super) fn push_address_pair_filter_for_alias(
        AND declared.declaration_kind = 'contract' AND declared.role = generation.role
        AND declared.proxy_kind = 'none'
        AND lower(declared.declared_address) = lower(@ROW@.raw_fact_ref ->> 'emitting_address')
+       AND (generation.label IS NULL OR EXISTS (
+            SELECT 1 FROM bigname_phase.manifest_versions manifest
+            WHERE manifest.manifest_id = declared.manifest_id
+              AND manifest.chain_id = declared.chain_id
+              AND manifest.deployment_label = generation.label))
        AND (declared.start_block_number IS NULL OR declared.start_block_number <= @ROW@.block_number)
       WHERE paired.chain_id = @ROW@.chain_id AND paired.block_hash = @ROW@.block_hash
         AND paired.transaction_index = @ROW@.transaction_index AND paired.log_index = @ROW@.log_index - 1
