@@ -2506,6 +2506,61 @@ so the "ENSv1 lease date on name rows" check stands as written. Also check that
 an ENSv1-only `.eth` name with no entry on the new ETHRegistry serves
 `unresolvable_reason` `no_live_ens_v2_entry`.
 
+### Mainnet ENSv2 admission of 2026-10-02
+
+The build that admits the official 2026-10-02 mainnet ENSv2 deployment (TYR-363, see
+the [deployment inventory](mainnet-deployment.md)) adds the five mainnet ENSv2
+families (root, registry, registrar, resolver and migration) as version 1 under
+`deployment_epoch = "ens_v2_mainnet_20261002"`, and moves `ens_execution` to an
+active version 2 under the same epoch. Version 1 of `ens_execution`, the shadow
+manifest with the default `["ens_v1"]` arm, is deleted. Synchronization retires
+only active manifests, so its row stays `shadow`, which nothing watches or
+interprets. The contracts the 2026-10-13 and 2026-10-18 redeploys replaced
+are declared by no manifest.
+
+The manifests and the watch-plan compiler change, which lets an all-emitter
+event carry a `start_block`, rotate the
+[interpreter content hash](glossary.md#interpreter-content-hash) and the
+[projection content hash](glossary.md#projection-content-hash) for every
+chain. The build adds no schema-migration. On first start, manifest
+synchronization records a
+[manifest-authority marker](glossary.md#manifest-authority-marker) on
+mainnet's Interpret and Project rows and stamps a required Ingest redo from
+block `26105292`, the deployment's first block, to the published head. Every
+family-wide and all-emitter event of the new registry and resolver families
+starts at its family's first declaration, `26105621` and `26105292`, and every
+other new entry starts at its declaration
+([watch-plan widening](manifests.md#mandatory-historical-fetch-after-watch-plan-widening)).
+Complete that Ingest redo, then the full-history Interpret redo with
+`--attest-watch-set-coverage`, then the Project redo it installs, before the
+matching API serves. Sepolia changes no manifest and its compiled watch plan is
+unchanged, so it gets no marker and no Ingest redo. The hash rotation gives it
+the Interpret and Project redo pair as well, with no visible change.
+
+After the redo, mainnet is cut over for its whole retained history
+([Cutover at ENSv2 admission](#cutover-at-ensv2-admission)).
+
+- `GET /v1/namespaces/ens` serves `resolution.protocol` `ens_v2` on mainnet with
+  `since_block` `26183742`, the RootRegistry's declared start block.
+- `phase_runner_universal_resolver_cut_over` reads `1` on mainnet.
+- `phase_runner_universal_resolver_unadmitted` reads `0` on mainnet, and
+  `BignameUniversalResolverUnadmitted` does not page. Neither proxy has emitted
+  `Upgraded`, so the chain has no proxy row. That `0` means no proxy event, not an
+  admitted implementation. The first row appears at DAO proposal call 15 or at
+  the managed proxy's upgrade to UniversalResolverV2, whichever comes first. The
+  chain reads admitted once the managed proxy's `Upgraded(0x06fd…)` exists
+  ([mainnet deployment](mainnet-deployment.md#resolver-and-discovery-coverage)).
+- The 2026-10-13 RootRegistry `0x51bbc58b…` announced itself at block
+  `26105295`, inside the redo range. The redo fetches that announcement, so like
+  any self-announced registry it is indexed, but nothing admitted reaches it and
+  its entries name nothing. Check that no normalized event from it carries a
+  logical name.
+- Check that a premigrated `.eth` name with a live ENSv1 lease serves its lease
+  owner and registration time, the reservation's `expires_at` with a 28-day
+  `grace_ends_at`, and the resolver its ENSv1 registry record names. Count the
+  live names that serve `no_live_ens_v2_entry` with the script under
+  [Cutover at ENSv2 admission](#cutover-at-ensv2-admission).
+
 ### Authority and filters on the names-by-expiry listing
 
 The build that adds `authority` to [`GET /v1/names`](api-v1-routes.md#get-v1names)
@@ -2689,7 +2744,8 @@ in place, `GET /v1/namespaces/ens` on Sepolia serves `resolution` with
 the admitted root registry's declared start block, `11820291` on Sepolia, and
 no longer the block of a proxy upgrade
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/RootRegistry.json:L2995 @ ens_v2_sepolia_20261001@07e55a05).
-Mainnet's profile admits no ENSv2 root registry, so the network serves
+Until the [mainnet ENSv2 admission of 2026-10-02](#mainnet-ensv2-admission-of-2026-10-02),
+mainnet's profile admitted no ENSv2 root registry, so the network served
 `{"protocol": "ens_v1", "since_block": null}`.
 
 ### Parent filter on names by address
@@ -2769,13 +2825,21 @@ changes.
   and that an ENSv1-only `.eth` name serves `unresolvable_reason`
   `no_live_ens_v2_entry`.
 
-Mainnet precondition. Mainnet has no ENSv2 manifests yet and keeps reading
-ENSv1. Admitting its ENSv2 manifests is the cutover. A `.eth` name loses
-resolution when it has no live ENSv2 entry at admission, meaning no reservation
-or registration on the admitted ETHRegistry. From that redo it serves no
-resolver and no records, and neither does any name below it. Admit the
-manifests once premigration has reserved every live `.eth` name, or accept that
-window knowingly.
+Mainnet admission. [Mainnet ENSv2 admission of 2026-10-02](#mainnet-ensv2-admission-of-2026-10-02)
+admits the mainnet ENSv2 manifests, and that admission is mainnet's cutover. A
+`.eth` name loses resolution while it has no live ENSv2 entry, meaning no
+reservation or registration on the admitted ETHRegistry. From that redo it
+serves no resolver and no records, and neither does any name below it.
+Premigration reserves in batches, so the window holds the `.eth` names
+registered through ENSv1 after the last reservation batch and before the DAO
+proposal removes the ENSv1 registrar controllers. Until the route reaches
+`UniversalResolverV2` the live Universal Resolver still answers them through
+ENSv1. From then the two agree
+([mainnet deployment](mainnet-deployment.md#historical-intake-and-the-upgrade)).
+The same window applies to expiry. A reservation carries the expiry written at
+its batch, and a renewal made through ENSv1 after that batch does not move it
+until a later batch does. bigname serves the reservation's expiry, so it can
+show an earlier expiry than the live lease until then.
 
 Before promoting the staging seed, count those names on the staging API, which
 admits the manifests. A live name is one whose grace has not ended. The script

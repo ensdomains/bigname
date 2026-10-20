@@ -48,5 +48,8 @@ pub use watch_policy::*;
 pub(crate) use repository::normalize_address;
 
 #[cfg(test)]
+#[path = "lib/official_mainnet_tests.rs"]
+mod official_mainnet_tests;
+#[cfg(test)]
 #[path = "lib/official_sepolia_tests.rs"]
 mod official_sepolia_tests;

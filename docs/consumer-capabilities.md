@@ -159,9 +159,10 @@ arm](glossary.md#authority-epoch): a bound ENS name of either arm with a
 non-null exact resolver carries a direct topology, and the verified read
 executes only when the deployment profile's `ens_execution` manifest lists the
 name's selected arm in `verified_authority_arms` (`manifests.md` §
-`verified_authority_arms`). Mainnet admits `ens_v1` only; an unlisted arm reports
+`verified_authority_arms`). An unlisted arm reports
 `exact_name_authority_not_verifiable` under `source=verified` (and its indexed
-answer under `source=auto`). The official `sepolia` profile admits both arms.
+answer under `source=auto`). The official `mainnet` and `sepolia` profiles admit
+both arms.
 
 The flagged deployments are the current ENS PublicResolver on mainnet, the
 current Sepolia PublicResolver at `0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5`,

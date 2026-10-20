@@ -87,9 +87,11 @@ arm-scoped. The supported topology classes are:
   ENS names whose binding resource has inventory, copying that inventory's record
   boundary (`projections.md` § Exact-name projection); a bound row without an
   inventory row has no topology and is `unsupported` with
-  `verified_records_not_supported`. On Mainnet the
-  arm gate admits only `ens_v1` names; the official Sepolia profile admits
-  both arms, and its UniversalResolverV2 resolves them by walking
+  `verified_records_not_supported`. The official
+  Mainnet and Sepolia profiles admit both arms. Sepolia's UniversalResolverV2,
+  and Mainnet's once its proxies upgrade to it
+  ([mainnet deployment](mainnet-deployment.md#resolver-and-discovery-coverage)),
+  resolves them by walking
   root→leaf through `getSubregistry`, keeping the deepest nonzero
   `getResolver`, and accepting an ancestor-selected resolver only when it
   implements ENSIP-10
@@ -265,9 +267,10 @@ the route consults it before live execution so unsupported exact-name coverage
 or an unverifiable selected [authority arm](glossary.md#authority-epoch) can
 refuse the forward call. An arm is verifiable when the selected `ens_execution`
 manifest lists it in `verified_authority_arms` (`manifests.md` §
-`verified_authority_arms`; absent means `["ens_v1"]`, the Mainnet
-declaration; the official `sepolia` manifest lists `ens_v2` as well, as documented
-in the [deployment inventory](sepolia-deployment.md)). After the reverse leg, the same exact-name
+`verified_authority_arms`, and absent means `["ens_v1"]`. The official `mainnet` and
+`sepolia` manifests list `ens_v2` as well, as documented in the
+[mainnet](mainnet-deployment.md) and [Sepolia](sepolia-deployment.md) deployment
+inventories). After the reverse leg, the same exact-name
 gate applies to the live claim. An absent readable exact-name row admits the
 forward call.
 The live reverse claim must already be byte-normalized, and the route accepts it

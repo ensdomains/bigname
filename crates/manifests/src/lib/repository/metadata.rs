@@ -138,8 +138,9 @@ pub(super) fn validate_start_block_fits_i64(
     Ok(())
 }
 
-/// An event `start_block` bounds only the family-wide watch entry, so it is refused where the
-/// compiled watch plan has no such entry for the event.
+/// An event `start_block` bounds only the event's family-wide or all-emitter watch entry, so it is
+/// refused where the compiled watch plan has neither for the event: a role-scoped event, or a
+/// family whose emitters discovery does not admit.
 pub(super) fn validate_event_start_block(
     manifest: &SourceManifest,
     event: &ManifestAbiEvent,
@@ -150,20 +151,16 @@ pub(super) fn validate_event_start_block(
     }
     validate_start_block_fits_i64(event.start_block, "ABI event", &event.name, path)?;
     let parsed = event.parsed_event_view()?;
-    let topic0 = parsed.topic0().map(|topic| topic.to_ascii_lowercase());
-    let family_wide = crate::uses_discovered_emitters(&manifest.source_family)
+    let compiles_unscoped_entry = crate::uses_discovered_emitters(&manifest.source_family)
         && !crate::is_role_scoped_event(
             &manifest.source_family,
             &parsed.canonical_signature(),
             &event.emitter_roles,
         )
-        && topic0.is_some_and(|topic0| {
-            crate::all_emitter_topic0s(&manifest.source_family, std::slice::from_ref(&topic0))
-                .is_empty()
-        });
-    if !family_wide {
+        && parsed.topic0().is_some();
+    if !compiles_unscoped_entry {
         bail!(
-            "manifest ABI event {} in {} sets start_block, but source family {} compiles no family-wide watch entry for it",
+            "manifest ABI event {} in {} sets start_block, but source family {} compiles no family-wide or all-emitter watch entry for it",
             event.name,
             path.display(),
             manifest.source_family

@@ -1,0 +1,199 @@
+# Official 2026-10-02 mainnet ENSv2 deployment, as the pinned deployments/mainnet folder lists it.
+# No manifest declares the contracts that the 2026-10-13 and 2026-10-18 redeploys replaced
+# (docs/mainnet-deployment.md).
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/.deployment.json:L4 @ ens_v2_mainnet_20261002@b1f97b91)
+# Every event that compiles a family-wide or all-emitter watch entry starts at 26105292, the ENSv1
+# mirror resolver's start and this family's first declaration. The start bounds the Ingest redo
+# that admitting these events stamps and the first-effect scan of that change, not runtime
+# intake. Event blocks are part of the interpreter content hash, so the Interpret and Project
+# redo that follow run over the full range (docs/manifests.md, "Mandatory historical fetch after
+# watch-plan widening").
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v2_resolver_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v2_mainnet_20261002"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+# `start_block` is the implementation's creation block from its deployment receipt.
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L2250 @ ens_v2_mainnet_20261002@b1f97b91)
+# `ensip19_default_address`: PermissionedResolver inherits AbstractRecordResolver, whose address
+# getter returns the default EVM coin-type entry when the requested EVM coin type is empty.
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/PermissionedResolver.sol:L80-L83 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/AbstractRecordResolver.sol:L169-L178 @ ens_v2_mainnet_20261002@b1f97b91)
+resolver_implementations = [ { role = "permissioned_resolver", address = "0x565b0f456a04ac9b48758190e90030623cff57c5", start_block = 26105631, read_features = [ "ensip19_default_address" ] } ]
+roots = []
+discovery_rules = []
+
+# Constructor argument 3 (`registryV1`) of the declared ENSV1Resolver is the ENSv1 registry the
+# mirror resolver reads; it is the mainnet ENSv1 registry deployment.
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/ENSV1Resolver.sol:L29-L33 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ENSV1Resolver.json:L749 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v1/deployments/mainnet/ENSRegistry.json:L2 @ ens_v1@91c966f)
+[correlation_addresses]
+ens_v1_registry = "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e"
+
+[capability_flags]
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ENSV1Resolver.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ENSV1Resolver.json:L757 @ ens_v2_mainnet_20261002@b1f97b91)
+[[contracts]]
+role = "ensv1_mirror_resolver"
+address = "0x394d8eb4a4fdf599384deab25f31d111d755c398"
+proxy_kind = "none"
+start_block = 26105292
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PublicResolverV2.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PublicResolverV2.json:L2183 @ ens_v2_mainnet_20261002@b1f97b91)
+# `ensip19_default_address`: PublicResolverV2 composes the ENSv1 `AddrResolver` profile. The
+# profile source in this deployment's compiler input returns `addrs[COIN_TYPE_DEFAULT]` when the
+# requested EVM coin type is empty (the cited line holds that whole source file).
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/PublicResolverV2.sol:L23-L35 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PublicResolverV2.json:L1288 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/build-info/solc-0_8_25-8550fee9a7d7605147b869f3868c3d2bc5861ae7.json:L390 @ ens_v2_mainnet_20261002@b1f97b91)
+[[contracts]]
+role = "public_resolver_v2"
+address = "0x66f9f566ff2f26309c1bd9134388478a801da3e1"
+proxy_kind = "none"
+start_block = 26216323
+read_features = ["ensip19_default_address"]
+
+# Creation precedes initializer record writes, including on a proxy.
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/PermissionedResolver.sol:L121 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "ResolverCreated"
+fragment = "event ResolverCreated()"
+normalized_events = ["ContractDiscovered"]
+start_block = 26105292
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L436 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "Linked"
+fragment = "event Linked(uint256 indexed recordId, bytes32 indexed node, bytes name)"
+normalized_events = ["ResolverRecordLinked", "PreimageObserved"]
+start_block = 26105292
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L279 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "AddressUpdated"
+fragment = "event AddressUpdated(uint256 indexed recordId, uint256 coinType, bytes addressBytes)"
+normalized_events = ["RecordChanged"]
+start_block = 26105292
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L311 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "ContenthashUpdated"
+fragment = "event ContenthashUpdated(uint256 indexed recordId, bytes hash)"
+normalized_events = ["RecordChanged"]
+start_block = 26105292
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L254 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "ABIUpdated"
+fragment = "event ABIUpdated(uint256 indexed recordId, uint256 indexed contentType)"
+normalized_events = ["RecordChanged"]
+start_block = 26105292
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L411 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "InterfaceUpdated"
+fragment = "event InterfaceUpdated(uint256 indexed recordId, bytes4 indexed interfaceId, address implementer)"
+normalized_events = ["RecordChanged"]
+start_block = 26105292
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L511 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "TextUpdated"
+fragment = "event TextUpdated(uint256 indexed recordId, string indexed keyHash, string key, string value)"
+normalized_events = ["RecordChanged"]
+start_block = 26105292
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L342 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "DataUpdated"
+fragment = "event DataUpdated(uint256 indexed recordId, string indexed keyHash, string key, bytes value)"
+normalized_events = ["RecordChanged"]
+start_block = 26105292
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L455 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "NameUpdated"
+fragment = "event NameUpdated(uint256 indexed recordId, string primaryName)"
+normalized_events = ["RecordChanged", "PreimageObserved"]
+start_block = 26105292
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L480 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "ResourceArgument"
+fragment = "event ResourceArgument(uint256 indexed resource, bytes arg)"
+normalized_events = ["ResolverPermissionArgument"]
+start_block = 26105292
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L373 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "EACRolesChanged"
+fragment = "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)"
+normalized_events = ["PermissionChanged"]
+start_block = 26105292
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L524 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "Upgraded"
+fragment = "event Upgraded(address indexed implementation)"
+normalized_events = ["Upgraded"]
+start_block = 26105292
+
+# PublicResolverV2 composes ENS's ABIResolver profile and emits its standard ABI-change event.
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/PublicResolverV2.sol:L26 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PublicResolverV2.json:L95 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "ABIChanged"
+fragment = "event ABIChanged(bytes32 indexed node, uint256 indexed contentType)"
+normalized_events = ["RecordChanged"]
+emitter_roles = ["public_resolver_v2"]
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PublicResolverV2.json:L114 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "AddrChanged"
+fragment = "event AddrChanged(bytes32 indexed node, address a)"
+normalized_events = ["RecordChanged"]
+emitter_roles = ["public_resolver_v2"]
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PublicResolverV2.json:L139 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "AddressChanged"
+fragment = "event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress)"
+normalized_events = ["RecordChanged"]
+emitter_roles = ["public_resolver_v2"]
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PublicResolverV2.json:L426 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "TextChanged"
+fragment = "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)"
+normalized_events = ["RecordChanged"]
+emitter_roles = ["public_resolver_v2"]
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PublicResolverV2.json:L214 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "ContenthashChanged"
+fragment = "event ContenthashChanged(bytes32 indexed node, bytes hash)"
+normalized_events = ["RecordChanged"]
+emitter_roles = ["public_resolver_v2"]
+
+# PublicResolverV2 composes ENS's NameResolver profile; `setName` stores the name and emits
+# `NameChanged`, which is also what the ENSv1 reverse path reads through a reverse node's resolver.
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/PublicResolverV2.sol:L32 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PublicResolverV2.json:L370 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "NameChanged"
+fragment = "event NameChanged(bytes32 indexed node, string name)"
+normalized_events = ["RecordChanged"]
+emitter_roles = ["public_resolver_v2"]
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PublicResolverV2.json:L445 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "VersionChanged"
+fragment = "event VersionChanged(bytes32 indexed node, uint64 newVersion)"
+normalized_events = ["RecordVersionChanged"]
+emitter_roles = ["public_resolver_v2"]

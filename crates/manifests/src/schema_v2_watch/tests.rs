@@ -260,57 +260,213 @@ fn adding_ens_v2_registry_approvals_widens_from_the_event_start() -> Result<()> 
 }
 
 #[test]
-fn an_event_start_is_refused_where_no_family_wide_entry_compiles() -> Result<()> {
+fn an_event_start_is_refused_where_no_family_wide_or_all_emitter_entry_compiles() -> Result<()> {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = workspace_root.join("manifests/sepolia/ethereum/ens");
+    let load_with_start =
+        |family: &str, event: &str| -> Result<Result<crate::ManifestRepository>> {
+            let root = std::env::temp_dir().join(format!(
+                "bigname-event-start-{family}-{}",
+                std::process::id()
+            ));
+            let directory = root.join("ethereum/ens").join(family);
+            std::fs::create_dir_all(&directory)?;
+            let manifest = std::fs::read_to_string(source.join(family).join("v2.toml"))?;
+            let edited = manifest.replacen(event, &format!("{event}\nstart_block = 5"), 1);
+            assert_ne!(edited, manifest);
+            std::fs::write(directory.join("v2.toml"), edited)?;
+            let loaded = crate::load_repository(&root);
+            std::fs::remove_dir_all(&root)?;
+            Ok(loaded)
+        };
     for (family, event) in [
         // Not a discovered-emitter family.
         ("ens_v2_root_l1", "name = \"ApprovalForAll\""),
-        // An all-emitter event.
-        ("ens_v2_registry_l1", "name = \"RegistryCreated\""),
+        // A role-scoped event of a discovered-emitter family.
+        ("ens_v2_resolver_l1", "name = \"ABIChanged\""),
     ] {
-        let root = std::env::temp_dir().join(format!(
-            "bigname-event-start-{family}-{}",
-            std::process::id()
-        ));
-        let directory = root.join("ethereum/ens").join(family);
-        std::fs::create_dir_all(&directory)?;
-        let manifest = std::fs::read_to_string(source.join(family).join("v2.toml"))?;
-        let edited = manifest.replacen(event, &format!("{event}\nstart_block = 5"), 1);
-        assert_ne!(edited, manifest);
-        std::fs::write(directory.join("v2.toml"), edited)?;
-        let error = crate::load_repository(&root)
+        let error = load_with_start(family, event)?
             .err()
             .map(|error| format!("{error:#}"));
-        std::fs::remove_dir_all(&root)?;
         assert!(
-            error
-                .as_deref()
-                .is_some_and(|error| error.contains("compiles no family-wide watch entry")),
+            error.as_deref().is_some_and(|error| {
+                error.contains("compiles no family-wide or all-emitter watch entry")
+            }),
             "{family}: {error:?}"
         );
     }
+    // An all-emitter event accepts a start, and its all-emitter entry compiles from it.
+    let topic0 = crate::registry_announcement_topic0();
+    let repository = load_with_start("ens_v2_registry_l1", "name = \"RegistryCreated\"")??;
+    let registry = &repository
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == crate::ENS_V2_REGISTRY_SOURCE_FAMILY)
+        .context("edited registry manifest")?
+        .manifest;
+    let all = compile_watch_scope(registry)?
+        .into_iter()
+        .filter(|entry| entry.emitter == WatchEmitter::All && entry.topic0 == topic0)
+        .map(|entry| entry.start)
+        .collect::<Vec<_>>();
+    assert_eq!(all, [5]);
     Ok(())
 }
 
+/// An all-emitter entry compiles from its event's start. Raising that start over an entry the
+/// previous plan compiled from block zero is covered and stamps no Ingest redo. Lowering it widens
+/// from the new start, and the started entry does not cover an address entry below it.
 #[test]
-fn the_mainnet_deployment_profile_declares_no_ens_v2_approval_and_no_event_start() -> Result<()> {
+fn a_started_all_emitter_entry_covers_from_its_start_only() -> Result<()> {
+    const START: u64 = 26_105_621;
+    let chain_id = "ethereum-mainnet";
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let repository = crate::load_repository(workspace_root.join("manifests/mainnet"))?;
-    for loaded in repository.manifests() {
-        assert!(
-            !loaded.manifest.source_family.starts_with("ens_v2_"),
-            "mainnet declares no ENSv2 family"
-        );
-        for event in &loaded.manifest.abi.events {
-            assert_eq!(event.start_block, None, "{}", event.name);
-        }
-        for entry in compile_watch_scope(&loaded.manifest)? {
-            if matches!(entry.emitter, WatchEmitter::Family { .. }) {
-                assert_eq!(entry.start, 0);
+    let registry = repository
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == crate::ENS_V2_REGISTRY_SOURCE_FAMILY)
+        .context("mainnet registry manifest")?
+        .manifest
+        .clone();
+    let with_start = |start: Option<u64>| {
+        let mut manifest = registry.clone();
+        for event in &mut manifest.abi.events {
+            if event.name == "RegistryCreated" {
+                event.start_block = start;
             }
         }
+        manifest
+    };
+    let snapshot = |manifest: &SourceManifest| -> Result<Snapshot> {
+        let mut snapshot = Snapshot::default();
+        record(&mut snapshot, manifest, &manifest_payload(manifest)?)?;
+        Ok(snapshot)
+    };
+    let widened = |previous: Option<u64>, desired: Option<u64>| -> Result<Option<u64>> {
+        widening_start(
+            &snapshot(&with_start(previous))?,
+            &snapshot(&with_start(desired))?,
+            chain_id,
+            &PersistedWatchCoverage::new(),
+            false,
+        )
+    };
+    let all = WatchKey {
+        emitter: WatchEmitter::All,
+        topic0: crate::registry_announcement_topic0(),
+    };
+    let started = snapshot(&with_start(Some(START)))?;
+    assert_eq!(started.watch_by_chain[chain_id].get(&all), Some(&START));
+    assert_eq!(
+        widened(None, Some(START))?,
+        None,
+        "a later start is covered"
+    );
+    assert_eq!(widened(Some(START), Some(START - 100))?, Some(START - 100));
+
+    let address = WatchKey {
+        emitter: WatchEmitter::Address {
+            family: crate::ENS_V2_REGISTRY_SOURCE_FAMILY.to_owned(),
+            address: "0x0000000000000000000000000000000000000001".to_owned(),
+        },
+        topic0: all.topic0.clone(),
+    };
+    let from_zero = BTreeMap::from([(all.clone(), 0)]);
+    let from_start = BTreeMap::from([(all.clone(), START)]);
+    assert!(watch_is_covered(Some(&from_zero), &all, START));
+    assert!(!watch_is_covered(Some(&from_start), &address, START - 1));
+    assert!(watch_is_covered(Some(&from_start), &address, START));
+    Ok(())
+}
+
+/// The mainnet ENSv2 registry and resolver families are new to the profile, so each family-wide
+/// and all-emitter watch entry starts at its family's earliest declaration: the ETHRegistry for
+/// the registry family and the ENSv1 mirror resolver for the resolver family. No other event of
+/// the profile declares a start.
+#[test]
+fn the_mainnet_deployment_profile_starts_new_family_entries_at_each_family_s_first_declaration()
+-> Result<()> {
+    const ETH_REGISTRY: &str = "0xf60aba43e1f7f3dab1186ff03b561401c9df85e2";
+    const ETH_REGISTRY_START: u64 = 26_105_621;
+    const MIRROR_RESOLVER_START: u64 = 26_105_292;
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let repository = crate::load_repository(workspace_root.join("manifests/mainnet"))?;
+    let topic0 = approval_for_all_topic0();
+    let mut starts = Vec::new();
+    for loaded in repository.manifests() {
+        let manifest = &loaded.manifest;
+        for event in &manifest.abi.events {
+            if let Some(start) = event.start_block {
+                starts.push((manifest.source_family.as_str(), event.name.as_str(), start));
+            }
+        }
+        for entry in compile_watch_scope(manifest)? {
+            if !matches!(
+                entry.emitter,
+                WatchEmitter::Family { .. } | WatchEmitter::All
+            ) {
+                continue;
+            }
+            let expected = match manifest.source_family.as_str() {
+                crate::ENS_V2_REGISTRY_SOURCE_FAMILY => ETH_REGISTRY_START,
+                crate::ENS_V2_RESOLVER_SOURCE_FAMILY => MIRROR_RESOLVER_START,
+                _ => 0,
+            };
+            assert_eq!(
+                entry.start, expected,
+                "{} {}",
+                manifest.source_family, entry.topic0
+            );
+        }
     }
+    let mut declared_starts = BTreeSet::new();
+    for (family, name, start) in &starts {
+        let expected = match *family {
+            crate::ENS_V2_REGISTRY_SOURCE_FAMILY => ETH_REGISTRY_START,
+            crate::ENS_V2_RESOLVER_SOURCE_FAMILY => MIRROR_RESOLVER_START,
+            _ => 0,
+        };
+        assert_eq!(*start, expected, "{family} {name}");
+        declared_starts.insert(*family);
+    }
+    assert_eq!(starts.len(), 27, "{starts:?}");
+    assert_eq!(
+        declared_starts,
+        BTreeSet::from([
+            crate::ENS_V2_REGISTRY_SOURCE_FAMILY,
+            crate::ENS_V2_RESOLVER_SOURCE_FAMILY
+        ])
+    );
+    let registry = repository
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == crate::ENS_V2_REGISTRY_SOURCE_FAMILY)
+        .context("mainnet registry manifest")?;
+    let declared = compile_watch_scope(&registry.manifest)?
+        .into_iter()
+        .filter(|entry| entry.topic0 == topic0)
+        .map(|entry| (entry.emitter, entry.start))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        declared,
+        BTreeSet::from([
+            (
+                WatchEmitter::Family {
+                    namespace: "ens".to_owned(),
+                    family: crate::ENS_V2_REGISTRY_SOURCE_FAMILY.to_owned(),
+                },
+                ETH_REGISTRY_START,
+            ),
+            (
+                WatchEmitter::Address {
+                    family: crate::ENS_V2_REGISTRY_SOURCE_FAMILY.to_owned(),
+                    address: ETH_REGISTRY.to_owned(),
+                },
+                ETH_REGISTRY_START,
+            ),
+        ])
+    );
     Ok(())
 }
 

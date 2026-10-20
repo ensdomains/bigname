@@ -56,7 +56,7 @@ const MANAGED_PROXY: &str = "0x0000000000000000000000000000000000100003";
 const OWNER: &str = "0x0000000000000000000000000000000000200001";
 const SENDER: &str = "0x0000000000000000000000000000000000200002";
 const RESOLVER_FILE: &str = "ethereum/ens/ens_v1_resolver_l1/v1.toml";
-const EXECUTION_FILE: &str = "ethereum/ens/ens_execution/v1.toml";
+const EXECUTION_FILE: &str = "ethereum/ens/ens_execution/v2.toml";
 const BASE: &str = "base-mainnet";
 const BASE_RESOLVER_FILE: &str = "base/basenames/basenames_base_resolver/v1.toml";
 const BASENAMES_EXECUTION_FILE: &str = "ethereum/basenames/basenames_execution/v2.toml";
@@ -226,11 +226,12 @@ async fn a_mention_below_the_declared_start_still_equals_the_full_pair() -> Resu
     fixture.assert_equals_full_pair().await
 }
 
-// Row 4. A declaration added to a family whose manifest declares no events (`ens_execution`,
-// active in this baseline), with a start below the head. The redo starts at the start.
+// Row 4. A declaration added to a family whose manifest declares no events (`ens_execution`
+// without its managed proxy and `Upgraded` block in this baseline), with a start below the head.
+// The redo starts at the start.
 #[tokio::test]
 async fn a_declaration_only_family_is_bounded() -> Result<()> {
-    let fixture = Fixture::with("bounded_declaration_only", 59, active_execution).await?;
+    let fixture = Fixture::with("bounded_declaration_only", 59, declaration_only_execution).await?;
     let start = START + 15;
     fixture.initial_pair().await?;
     fixture.append(
@@ -725,19 +726,12 @@ async fn a_fresh_corpus_is_never_bounded() -> Result<()> {
 // remaining arm of the first-effect scan finds that log.
 #[tokio::test]
 async fn a_universal_resolver_implementation_change_keeps_the_full_range() -> Result<()> {
-    let fixture = Fixture::with(
-        "bounded_universal_resolver_implementations",
-        59,
-        active_execution,
-    )
-    .await?;
+    let fixture = Fixture::new("bounded_universal_resolver_implementations", 59).await?;
     fixture.initial_pair().await?;
     fixture.edit(EXECUTION_FILE, |manifest| {
         manifest.replacen(
-            "discovery_rules = []\n",
-            &format!(
-                "discovery_rules = []\nuniversal_resolver_implementations = [\"{MANAGED_PROXY}\"]\n"
-            ),
+            "universal_resolver_implementations = [\"",
+            &format!("universal_resolver_implementations = [\"{MANAGED_PROXY}\", \""),
             1,
         )
     })?;
@@ -2513,8 +2507,18 @@ impl Fixture {
     }
 
     /// Plant a SourceManifestUpdated event of an active manifest of `family`, as manifest sync
-    /// writes one. Returns the manifest id.
-    async fn plant_manifest(&self, family: &str, contracts: Value) -> Result<i64> {
+    /// writes one, in place of the family's checked-in active manifest. Returns the planted
+    /// manifest's id and the ids it displaced.
+    async fn plant_manifest(&self, family: &str, contracts: Value) -> Result<(i64, Vec<i64>)> {
+        let displaced: Vec<i64> = sqlx::query_scalar(
+            "UPDATE manifest_versions SET rollout_status = 'deprecated'
+             WHERE chain_id = $1 AND source_family = $2 AND rollout_status = 'active'
+             RETURNING manifest_id",
+        )
+        .bind(CHAIN)
+        .bind(family)
+        .fetch_all(self.pool())
+        .await?;
         let payload = json!({
             "manifest_version": 1, "namespace": "ens", "source_family": family, "chain": CHAIN,
             "deployment_epoch": "fixture", "rollout_status": "active", "roots": [],
@@ -2547,10 +2551,10 @@ impl Fixture {
         .bind(&payload)
         .execute(self.pool())
         .await?;
-        Ok(manifest_id)
+        Ok((manifest_id, displaced))
     }
 
-    async fn remove_planted(&self, manifest_id: i64) -> Result<()> {
+    async fn remove_planted(&self, (manifest_id, displaced): (i64, Vec<i64>)) -> Result<()> {
         sqlx::query("DELETE FROM normalized_events WHERE source_manifest_id = $1")
             .bind(manifest_id)
             .execute(self.pool())
@@ -2559,6 +2563,12 @@ impl Fixture {
             .bind(manifest_id)
             .execute(self.pool())
             .await?;
+        sqlx::query(
+            "UPDATE manifest_versions SET rollout_status = 'active' WHERE manifest_id = ANY($1)",
+        )
+        .bind(&displaced)
+        .execute(self.pool())
+        .await?;
         Ok(())
     }
 
@@ -3009,19 +3019,19 @@ fn remove_resolver_rule(manifest: &str) -> String {
     )
 }
 
-fn active_execution(profile: &Path) -> Result<()> {
+/// The checked-in `ens_execution` manifest up to its managed proxy: the client-facing proxy only,
+/// and no event block, as the mainnet profile declared before the ENSv2 admission.
+fn declaration_only_execution(profile: &Path) -> Result<()> {
     let path = profile.join(EXECUTION_FILE);
     let manifest = std::fs::read_to_string(&path)?;
-    let active = manifest.replacen(
-        "rollout_status = \"shadow\"",
-        "rollout_status = \"active\"",
-        1,
-    );
+    let (declarations, _) = manifest
+        .split_once("\n# The managed (intermediate) Universal Resolver proxy.")
+        .context("the checked-in ens_execution manifest declares the managed proxy")?;
     ensure!(
-        active != manifest,
-        "ens_execution is shadow in the checked-in manifests"
+        !declarations.contains("[[abi.events]]"),
+        "the event block follows the managed proxy"
     );
-    std::fs::write(path, active)?;
+    std::fs::write(path, format!("{declarations}\n"))?;
     Ok(())
 }
 

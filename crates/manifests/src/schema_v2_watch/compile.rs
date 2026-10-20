@@ -42,7 +42,12 @@ pub(super) fn compile_watch_scope(manifest: &SourceManifest) -> Result<Vec<Compi
         .collect::<BTreeSet<_>>();
     let mut watch = BTreeMap::new();
     for topic0 in &all_emitter_topics {
-        insert_watch(&mut watch, WatchEmitter::All, topic0, 0);
+        insert_watch(
+            &mut watch,
+            WatchEmitter::All,
+            topic0,
+            family_starts.get(topic0).copied().unwrap_or(0),
+        );
     }
     if let Some(topic0) =
         implementation_announcement_topic0(&manifest.source_family, &family_topics)

@@ -278,9 +278,10 @@ fences on, so an in-flight verified read that started under the previous
 declaration is rejected as concurrent state rather than served across the
 change.
 
-When the field is absent the manifest admits `["ens_v1"]`, as Mainnet does.
-The official `sepolia` profile declares `["ens_v1", "ens_v2"]`; its proxy route
-and root binding are covered by the [deployment inventory](sepolia-deployment.md).
+When the field is absent the manifest admits `["ens_v1"]`. The official
+`mainnet` and `sepolia` profiles declare `["ens_v1", "ens_v2"]`. Their proxy
+routes and root bindings are covered by the [mainnet](mainnet-deployment.md) and
+[Sepolia](sepolia-deployment.md) deployment inventories.
 Listing `ens_v1` on an ENSv2 profile keeps the status quo: ENSv1-arm names
 remain verifiable through that profile's Universal Resolver. The loader rejects
 the field on any other source family, an empty list, an arm outside
@@ -342,15 +343,24 @@ ABI entries use Alloy-parseable human-readable Solidity fragments, not handwritt
   empty list with a `registry_announcement` rule and may match without address admission. Other
   events without `emitter_roles` fail manifest validation.
 - `normalized_events` — optional normalized event kinds produced from the event.
-- `start_block` — optional inclusive first block of the event's family-wide
-  entry in the [compiled watch plan](glossary.md#compiled-watch-plan); block
-  zero when omitted. It is valid only where such an entry compiles: an event
-  with `emitter_roles`, in a source family whose emitters discovery admits,
-  that is not an all-emitter event. It bounds the
+- `start_block` — optional inclusive first block of the event's family-wide or
+  all-emitter entry in the [compiled watch plan](glossary.md#compiled-watch-plan).
+  Without it the entry starts at block zero. It is valid only where such an
+  entry compiles, that is for an event of a source family whose emitters
+  discovery admits, when the event is not scoped to declared roles. A
+  role-scoped event, or any event of a family without discovered emitters,
+  refuses it. It bounds the
   [required Ingest redo](#mandatory-historical-fetch-after-watch-plan-widening)
-  that adding the event stamps and nothing else: runtime intake and Interpret
-  keep each emitter's own active range. Like every other `start_block` it must
-  fit a signed 64-bit integer.
+  that adding the event stamps, and the first-effect scan of that change. The
+  scan can bound the Interpret and Project redo only where the runner bounds
+  them ([Manifest-authority marker](deployment.md#manifest-authority-marker)),
+  which it never does for a change to an ENSv2 root, registry or migration
+  manifest. Adding or editing an event block also rotates the
+  [interpreter content hash](glossary.md#interpreter-content-hash), so the
+  Interpret and Project redo that follow run over the full range. Runtime
+  intake and Interpret keep each emitter's own active range, and intake still
+  reads an all-emitter event from every emitter over the whole range it
+  fetches. Like every other `start_block` it must fit a signed 64-bit integer.
 - `status` — optional `unsupported` | `shadow` | `supported` marker for the ABI entry.
 - `notes` — optional reviewer-facing context.
 
@@ -451,7 +461,7 @@ Capability ownership attaches to the declaring `source_family`. It is never impl
 
 ### ENS mainnet
 
-`ens_execution` owns verified resolution at the ENS Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` with `verified_resolution = "supported"` and `rollout_status = "shadow"`.[^ens-docs-univ][^v1-ur-deploy][^v1-ursol-l8] The pinned `.refs/` artifact is the implementation/ABI anchor; the lookup entry is the proxy address. Public ENS verified-resolution support is gated by the route-level support classes in `docs/api-v1-routes.md` and `docs/execution.md`, not by this manifest flag. The manifest declares no [`verified_authority_arms`](#verified_authority_arms), so it admits the default `["ens_v1"]`: the Mainnet profile has no ENSv2 arm to verify.
+`ens_execution` owns verified resolution at the ENS Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` with `verified_resolution = "supported"` and `rollout_status = "active"`.[^ens-docs-univ][^v1-ur-deploy][^v1-ursol-l8] The pinned `.refs/` artifact is the implementation/ABI anchor. The lookup entry is the proxy address. Public ENS verified-resolution support is gated by the route-level support classes in `docs/api-v1-routes.md` and `docs/execution.md`, not by this manifest flag. The manifest declares [`verified_authority_arms`](#verified_authority_arms) `["ens_v1", "ens_v2"]`, and the Mainnet profile admits the official ENSv2 deployment the ENSv2 arm verifies ([ENS execution, `mainnet`](#ens-execution-mainnet-deployment-profile)).
 
 The ENS primary-name route does not introduce a second manifest capability. `ens_execution` supplies the manifest selection for the request-scoped, hash-pinned ENS/60 missing-tuple lookup under the same owner manifest, without turning `verified_resolution` into a route-level primary-name support flag. Indexed exact-tuple claim state lives in the family reverse claims (`bigname_phase.project_reverse_tuple` and `project_reverse_node_claim`); provider lookup responses are not persisted as execution outcomes or traces.
 
@@ -492,6 +502,41 @@ profile declares `DataResolver` composition, so that event admission does not
 confer `DataResolver`-family support; unknown resolver profiles remain
 `pending`. The generic `resolver_record` fact is an observation bucket; it does
 not act as a catch-all for unknown families.
+
+### ENSv2 (`mainnet` deployment profile)
+
+The mainnet profile admits the official 2026-10-02 mainnet ENSv2 deployment under
+`deployment_epoch = "ens_v2_mainnet_20261002"`, as the pinned `deployments/mainnet`
+folder lists it. The five ENSv2 families ship as version 1 and copy the Sepolia
+families' event blocks, discovery rules and capability flags. Only the event
+starts differ. Every family-wide and all-emitter event of the registry family
+starts at the ETHRegistry's receipt block `26105621`, and every one of the
+resolver family at the ENSv1 mirror resolver's `26105292`. So the Ingest redo
+that admitting them stamps runs from the deployment's first block, not from
+block zero. No manifest declares the contracts the 2026-10-13 and
+2026-10-18 redeploys replaced, and none of them names a name.
+The [complete deployment inventory](mainnet-deployment.md) records every address,
+its admission or explicit exclusion, and how an existing database moves to it.
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/.deployment.json:L4 @ ens_v2_mainnet_20261002@b1f97b91)
+
+### ENS execution (`mainnet` deployment profile)
+
+`ens_execution` moves to version 2 under the same epoch and is active. It declares
+the client-facing proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` from block
+`26105292`, the deployment's first block, and the managed proxy
+`0xcffd2ae680cd110d28739a70922636b5937b022b` from its creation block `26105675`.
+It admits both proxies' `Upgraded` event, declares
+`verified_authority_arms = ["ens_v1", "ens_v2"]` and lists the deployment's
+UniversalResolverV2 `0x06fdd07f007adac667177b46ab2eb9a75132cfd5` in
+`universal_resolver_implementations`. Neither proxy has emitted `Upgraded`, so
+the first proxy row appears at DAO proposal call 15 or at the managed proxy's
+upgrade to UniversalResolverV2, whichever comes first (`docs/upstream.md`,
+"Mainnet Universal Resolver proxies admitted from chain evidence"). Mainnet is
+cut over from the admission of the `ens_v2_root_l1` root registry, for its whole
+retained history. Version 1, the shadow manifest with the default `["ens_v1"]`
+arm, is deleted. Its row stays `shadow`, which nothing watches or interprets.
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ManagedUniversalResolverProxy.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UniversalResolverV2.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
 
 ### ENSv2 (`sepolia` deployment profile)
 
@@ -614,7 +659,7 @@ permission events and are not ownership evidence.
 
 ENSv2 terminal lifecycle events also close interpreter-owned state. `LabelUnregistered` is emitted before upstream expires the entry and has no paired zero-target subregistry or resolver updates, so the ENSv2 interpreter closes the current surface binding and emits terminal discovery observations at that log position. It also emits null `SubregistryChanged` and `ResolverChanged` boundaries for any attached roles so full and incremental projections retire the old topology. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L199 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L206 @ ens_v2@a971bd64) A replacement registration or reservation can bump the token version and overwrite the stored subregistry and resolver, while upstream emits follow-up target updates only for nonzero replacements; the adapter therefore closes the prior discovery targets before accepting the successor lifecycle and emits the same null role boundaries. Replacement registration lets the following `TokenResource` close the old surface at the successor start; replacement reservation has no successor resource, so it closes immediately and emits `SurfaceUnbound` as position-specific reorg-repair evidence. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L455 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L462 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L478 @ ens_v2@a971bd64)
 
-`RegistryCreated` is admitted as registry-instance history and discovery input. `URIUpdated`, the `PermissionedResolver` `DataChanged` / `NamedDataResource` pair, and a resolver's ERC-1155 `ApprovalForAll` remain outside the active normalized behavior.[^v2-events-created][^v2-events-uri][^v2-pres-data] A registry's `ApprovalForAll` is an account fact ([ENSv2 registry operator approvals](#ensv2-registry-operator-approvals)); it is not treated as token ownership or an ENSv2 resource-role grant. (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L336 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L341 @ ens_v2@a971bd64) The official Sepolia profile directly admits the exact `PublicResolverV2` described below; Mainnet has no such declaration. PermissionedResolver proxy support still requires canonical implementation evidence.
+`RegistryCreated` is admitted as registry-instance history and discovery input. `URIUpdated`, the `PermissionedResolver` `DataChanged` / `NamedDataResource` pair, and a resolver's ERC-1155 `ApprovalForAll` remain outside the active normalized behavior.[^v2-events-created][^v2-events-uri][^v2-pres-data] A registry's `ApprovalForAll` is an account fact ([ENSv2 registry operator approvals](#ensv2-registry-operator-approvals)); it is not treated as token ownership or an ENSv2 resource-role grant. (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L336 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L341 @ ens_v2@a971bd64) The official Sepolia and Mainnet profiles each directly admit an exact `PublicResolverV2`, as described below. PermissionedResolver proxy support still requires canonical implementation evidence.
 
 #### ENSv2 registry operator approvals
 
@@ -648,8 +693,8 @@ It becomes an `ExpiryChanged` with no name and no resource and
 `token_state_absent = true`, changes no name state, is omitted from product
 event reads, and exists so that the
 [registry entry](projections.md#ensv2-registry-entries) row keeps the entry's
-expiry. The Mainnet deployment profile declares no
-ENSv2 family and is unchanged.
+expiry. The Mainnet `ens_v2_registry_l1` and `ens_v2_root_l1` manifests
+declare the same `ApprovalForAll` for the same roles.
 
 The registry declaration compiles one family-wide watch entry, which covers
 the registries that announced themselves: the targets of
@@ -687,7 +732,7 @@ lowering it widens the plan from the new start, and raising it stamps nothing.
 An owned-chain manifest may declare an exact local deployment using role
 `public_resolver_v2`, source family `ens_v2_resolver_l1`, and `proxy_kind = "none"`.
 The declaration must preserve its deployment address, applicable `start_block`,
-namespace, and local deployment provenance. The [official Sepolia deployment](sepolia-deployment.md) uses this same exact direct role. Source
+namespace, and local deployment provenance. The official [Sepolia](sepolia-deployment.md) and [mainnet](mainnet-deployment.md) deployments use this same exact direct role. Source
 availability alone does not admit any public-chain address or replace
 `PermissionedResolver` implementation metadata. The source
 contract composes the node-keyed ABI, address, name, text, and contenthash profiles.
@@ -1445,8 +1490,8 @@ ENSv2 resolver events that declare `emitter_roles` are watched only at the
 declared role's address: on Sepolia, `AddrChanged`, `AddressChanged`,
 `TextChanged`, `ContenthashChanged`, and `VersionChanged` are read from the
 declared `public_resolver_v2` contract only, no longer from every declared
-resolver contract. Mainnet declares no ENSv2 family, so its watch plan is
-unchanged.
+resolver contract. The mainnet profile's ENSv2 resolver family follows the same
+rule at its own `public_resolver_v2`.
 `ResolverUpdated` supplies name-binding history only. Its topology edges do
 not widen the watch plan and must not cause historical fetching. Project's
 [declaration precedence](architecture.md#discovery-graph) is a different
@@ -1573,14 +1618,19 @@ omitted), clamped to its ingest start, and mints a manifest-authority
 marker, so its Interpret redo must be run as the attested full-range redo
 described below.
 
-An event's family-wide entry starts at the event's own `start_block`, or block
-zero when it has none. Adding an event with a `start_block` therefore widens
-from that block rather than from block zero, and the same start-later and
-start-earlier rules apply to it as to an implementation entry. The Sepolia
-`ens_v2_registry_l1` `ApprovalForAll` declaration is the one such event: its
-first synchronization stamps the required Ingest redo from block `10893181`,
-clamped to the chain's first ingest cursor
-([ENSv2 registry operator approvals](#ensv2-registry-operator-approvals)).
+An event's family-wide or all-emitter entry starts at the event's own
+`start_block`, or block zero when it has none. Adding an event with a
+`start_block` therefore widens from that block rather than from block zero,
+and the same start-later and start-earlier rules apply to it as to an
+implementation entry. The Sepolia `ens_v2_registry_l1` `ApprovalForAll`
+declaration is one such event. Its first synchronization stamps the required
+Ingest redo from block `10893181`, clamped to the chain's first ingest cursor
+([ENSv2 registry operator approvals](#ensv2-registry-operator-approvals)). On
+mainnet every family-wide and all-emitter event of `ens_v2_registry_l1` starts
+at `26105621` and every one of `ens_v2_resolver_l1` at `26105292`, each
+family's first declaration. Admitting the mainnet ENSv2 families therefore
+stamps the required Ingest redo from `26105292`
+([ENSv2, `mainnet`](#ensv2-mainnet-deployment-profile)).
 
 For each newly widened direct-address watch, synchronization checks the
 continuous union of [persisted Ingest
@@ -2104,12 +2154,14 @@ Watch-plan expansion starts from active manifest roots by `contract_instance_id`
   Interpret applies the start.
   (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Utils.sol:L69-L86 @ basenames@1809bbc)
 - An `[[abi.events]]` entry's `start_block` is the start of that event's
-  family-wide compiled entry, block zero when omitted. It bounds the compiled
-  plan, and so a required Ingest redo; runtime intake still watches each
-  discovered emitter over its own active range, so an emitter admitted after
-  the start is fetched from its admission and one admitted before it is not
-  refetched below the start. The value is the earliest admitted emitter's
-  start for the family, re-derived as
+  family-wide or all-emitter compiled entry, block zero when omitted. It bounds
+  the compiled plan, and so a required Ingest redo and the first-effect scan
+  of the change. Setting it rotates the interpreter content hash, so it never
+  bounds the Interpret or Project redo.
+  Runtime intake still watches each discovered emitter over its own active
+  range, so an emitter admitted after the start is fetched from its admission
+  and one admitted before it is not refetched below the start. The value is the
+  earliest admitted emitter's start for the family, re-derived as
   [ENSv2 registry operator approvals](#ensv2-registry-operator-approvals)
   describes.
 - Legacy watch rows may denormalize address and code-hash state, but their durable explanation path is `manifest root → discovery edge(s) → contract_instance_id`; schema-v2 resolver classification does not read that denormalization.

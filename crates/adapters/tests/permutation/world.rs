@@ -210,15 +210,73 @@ pub const ENS_V2_SEPOLIA: World = World {
     chain_id: "ethereum-sepolia",
 };
 
+/// The official 2026-10-02 mainnet ENSv2 deployment. Its families declare the Sepolia events,
+/// discovery rules and capability flags, so the world has Sepolia's shape over the mainnet
+/// manifests, which carry the mainnet starts and the `ens_v2_mainnet_20261002` deployment tables.
+/// Like every world, its admitted addresses are synthetic.
+pub const ENS_V2_MAINNET: World = World {
+    label: "ens_v2_mainnet",
+    manifest_root: "mainnet",
+    deployment_epoch: "ens_v2_mainnet_20261002",
+    address_base: 0x0007_0000,
+    sources: &[
+        SourceSlot {
+            family: "ens_v2_root_l1",
+            version_file: "v1.toml",
+        },
+        SourceSlot {
+            family: "ens_v2_registry_l1",
+            version_file: "v1.toml",
+        },
+        SourceSlot {
+            family: "ens_v2_registrar_l1",
+            version_file: "v1.toml",
+        },
+        SourceSlot {
+            family: "ens_v2_resolver_l1",
+            version_file: "v1.toml",
+        },
+    ],
+    roles: &[
+        RoleSlot {
+            family: "ens_v2_root_l1",
+            role: "root_registry",
+        },
+        RoleSlot {
+            family: "ens_v2_registry_l1",
+            role: "registry",
+        },
+        RoleSlot {
+            family: "ens_v2_registrar_l1",
+            role: "registrar",
+        },
+        RoleSlot {
+            family: "ens_v2_resolver_l1",
+            role: "resolver",
+        },
+        RoleSlot {
+            family: "ens_v2_resolver_l1",
+            role: "public_resolver_v2",
+        },
+    ],
+    namespace: "ens",
+    chain_id: "ethereum-mainnet",
+};
+
 /// Active families whose event space is exercised by a dedicated corpus instead of the generic
 /// protocol permutation pool. Migration correlation is per name and path, so its decoded catalog
 /// fixtures are the authoritative generator rather than an uncorrelated source slot here. The
 /// Universal Resolver proxies' `Upgraded` (`ens_execution`) touches no name, resource or binding,
 /// so its decode test (`protocol/universal_resolver.rs`) and the Project cutover tests
-/// (`families_expiry_grace.rs`) cover it.
+/// (`families_expiry_grace.rs`) cover it. The mainnet rows run the same decoders and the same
+/// per-name correlation, and the mainnet admission test
+/// (`apps/phase-runner/tests/production_interpret/mainnet_admission.rs`) drives the mainnet
+/// proxies' `Upgraded`.
 const DEDICATED_CORPUS_FAMILIES: &[(&str, &str)] = &[
     ("ethereum-sepolia", "ens_v2_migration_l1"),
     ("ethereum-sepolia", "ens_execution"),
+    ("ethereum-mainnet", "ens_v2_migration_l1"),
+    ("ethereum-mainnet", "ens_execution"),
 ];
 
 pub struct Wiring {

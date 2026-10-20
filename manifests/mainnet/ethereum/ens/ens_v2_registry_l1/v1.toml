@@ -1,0 +1,187 @@
+# Official 2026-10-02 mainnet ENSv2 deployment, as the pinned deployments/mainnet folder lists it.
+# No manifest declares the contracts that the 2026-10-13 and 2026-10-18 redeploys replaced
+# (docs/mainnet-deployment.md).
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/.deployment.json:L4 @ ens_v2_mainnet_20261002@b1f97b91)
+# Every event that compiles a family-wide or all-emitter watch entry starts at 26105621, the
+# declared ETHRegistry's start and this family's first declaration. The start bounds the Ingest
+# redo that admitting these events stamps and the first-effect scan of that change, not runtime
+# intake. Event blocks are part of the interpreter content hash, so the Interpret and Project
+# redo that follow run over the full range (docs/manifests.md, "Mandatory historical fetch after
+# watch-plan widening").
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v2_registry_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v2_mainnet_20261002"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+
+[capability_flags]
+declared_children = { status = "supported", notes = "selected official mainnet ETHRegistry and discovered user registries are authoritative declared child inputs" }
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+[[roots]]
+name = "ETHRegistry"
+address = "0xf60aba43e1f7f3dab1186ff03b561401c9df85e2"
+start_block = 26105621
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L2995 @ ens_v2_mainnet_20261002@b1f97b91)
+[[contracts]]
+role = "registry"
+address = "0xf60aba43e1f7f3dab1186ff03b561401c9df85e2"
+proxy_kind = "none"
+start_block = 26105621
+
+[[discovery_rules]]
+edge_kind = "subregistry"
+from_role = "registry"
+admission = "reachable_from_root"
+
+[[discovery_rules]]
+edge_kind = "resolver"
+from_role = "registry"
+admission = "reachable_from_root"
+
+[[discovery_rules]]
+edge_kind = "registry_announcement"
+from_role = "registry"
+admission = "reachable_from_root"
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L548 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "RegistryCreated"
+fragment = "event RegistryCreated()"
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "RegistryCreated"]
+start_block = 26105621
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L461 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "LabelRegistered"
+fragment = "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)"
+emitter_roles = ["registry"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "RegistrationGranted", "PreimageObserved", "ResolverChanged", "SubregistryChanged"]
+start_block = 26105621
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L498 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "LabelReserved"
+fragment = "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)"
+emitter_roles = ["registry"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "RegistrationReserved", "PreimageObserved", "ResolverChanged", "SubregistryChanged"]
+start_block = 26105621
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L517 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "LabelUnregistered"
+fragment = "event LabelUnregistered(uint256 indexed tokenId, address indexed sender)"
+emitter_roles = ["registry"]
+normalized_events = ["RegistrationReleased", "SurfaceUnbound", "ResolverChanged", "SubregistryChanged"]
+start_block = 26105621
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L418 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "ExpiryUpdated"
+fragment = "event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender)"
+emitter_roles = ["registry"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "ExpiryChanged", "RegistrationRenewed", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ResolverChanged", "SubregistryChanged"]
+start_block = 26105621
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L598 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "SubregistryUpdated"
+fragment = "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)"
+emitter_roles = ["registry"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "SubregistryChanged", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged", "ResolverChanged"]
+start_block = 26105621
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L573 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "ResolverUpdated"
+fragment = "event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)"
+emitter_roles = ["registry"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "ResolverChanged"]
+start_block = 26105621
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L636 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "TokenResource"
+fragment = "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)"
+emitter_roles = ["registry"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenResourceLinked", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged"]
+start_block = 26105621
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L710 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "TransferSingle"
+fragment = "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)"
+emitter_roles = ["registry"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenControlTransferred"]
+start_block = 26105621
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L673 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "TransferBatch"
+fragment = "event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)"
+emitter_roles = ["registry"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenControlTransferred"]
+start_block = 26105621
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L393 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "EACRolesChanged"
+fragment = "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)"
+emitter_roles = ["registry"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "PermissionChanged", "RootPermissionChanged"]
+start_block = 26105621
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L617 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "TokenRegenerated"
+fragment = "event TokenRegenerated(uint256 indexed oldTokenId, uint256 indexed newTokenId)"
+emitter_roles = ["registry"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenRegenerated", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged", "ResolverChanged", "SubregistryChanged"]
+start_block = 26105621
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L542 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "ParentUpdated"
+fragment = "event ParentUpdated(address indexed parent, string label, address indexed sender)"
+emitter_roles = ["registry"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "ParentChanged", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged", "ResolverChanged", "SubregistryChanged"]
+start_block = 26105621
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UserRegistryImpl.json:L843 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "Upgraded"
+fragment = "event Upgraded(address indexed implementation)"
+emitter_roles = ["registry"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "Upgraded"]
+start_block = 26105621
+
+# Each registry keeps its own ERC-1155 owner-to-operator approvals, and an approved operator
+# gets the roles the current token owner holds on a token's own resource.
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/erc1155/ERC1155Singleton.sol:L73-L75 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_mainnet_20261002@b1f97b91)
+# A standard approval declaration: the list stays empty and the adapter maps the event to
+# AccountPermissionChanged. It is an ordinary family-wide event, so discovered user and
+# ENSv1→ENSv2 migration-created registries are watched as well as the declared ETHRegistry.
+# start_block bounds the family-wide watch entry of the compiled watch plan, and so the Ingest
+# redo that adding this event requires. It is a bigname coverage decision, not a deployment
+# fact: 26105621 is the declared ETHRegistry's start. No mainnet manifest admitted an ENSv2
+# registry before this one, so no retained `RegistryCreated` lowers the announcement watch below
+# the declared ETHRegistry. The RootRegistry that the 2026-10-13 redeploy replaced announced
+# itself at 26105295. Runtime intake fetches that announcement, so it is indexed as a registry
+# that names nothing (docs/mainnet-deployment.md, "Replaced contracts"). docs/manifests.md,
+# "Watch-plan expansion", says how to re-derive the value.
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet-root-20261013/RootRegistry.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet-root-20261013/RootRegistry.json:L2995 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L362 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UserRegistryImpl.json:L425 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/WrapperRegistryImpl.json:L520 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "ApprovalForAll"
+fragment = "event ApprovalForAll(address indexed account, address indexed operator, bool approved)"
+emitter_roles = ["registry"]
+normalized_events = []
+start_block = 26105621

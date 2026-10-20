@@ -2199,13 +2199,20 @@ resolves, through `ENSV1Resolver`, which reads the ENSv1 registry.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ETHRegistry.ts:L39-L51 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20261001@07e55a05)
 
-On a chain whose profile admits no ENSv2 root registry, such as Mainnet today,
-this rule does not apply
-([known divergence](upstream.md#ensv1-authority-without-an-ensv2-entry)). On a
-chain admitted before premigration has reserved every live `.eth` name, the
-unreserved names read unresolvable until they are reserved or registered on
-ENSv2. That window is a deployment decision
-([deployment notes](deployment.md#cutover-at-ensv2-admission)).
+On a chain whose profile admits no ENSv2 root registry, this rule does not
+apply ([known divergence](upstream.md#ensv1-authority-without-an-ensv2-entry)).
+Both the Mainnet and the Sepolia profile admit one. On a chain admitted before
+premigration has reserved every live `.eth` name, the unreserved names read
+unresolvable until they are reserved or registered on ENSv2. That window is a
+deployment decision
+([deployment notes](deployment.md#cutover-at-ensv2-admission)). On Mainnet
+the window holds the `.eth` names registered through ENSv1 after the last
+reservation batch and before the DAO proposal removes the ENSv1 registrar
+controllers
+([mainnet deployment](mainnet-deployment.md#historical-intake-and-the-upgrade)).
+In the same window an ENSv1 renewal does not move a reservation's expiry until
+a later batch does, so a premigrated name can serve an earlier expiry than its
+live lease.
 
 After cutover, an ENSv1-selected descendant also follows the current ENSv2 registry
 path at the published block. A live parent alone does not establish that the

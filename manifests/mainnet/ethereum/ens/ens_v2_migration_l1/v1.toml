@@ -1,0 +1,132 @@
+# Official 2026-10-02 mainnet ENSv2 deployment, as the pinned deployments/mainnet folder lists it.
+# No manifest declares the contracts that the 2026-10-13 and 2026-10-18 redeploys replaced
+# (docs/mainnet-deployment.md).
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/.deployment.json:L4 @ ens_v2_mainnet_20261002@b1f97b91)
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v2_migration_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v2_mainnet_20261002"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+roots = []
+discovery_rules = []
+
+# Constructor argument 1 (`nameWrapper`) of both declared migration controllers, and argument 7 of
+# the official ETHRenewerV1, fix the ENSv1 NameWrapper whose events are correlated. It is the
+# mainnet ENSv1 NameWrapper deployment. This is correlation metadata, not a watched contract.
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/UnlockedMigrationController.sol:L56-L67 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UnlockedMigrationController.json:L624 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/LockedMigrationController.json:L744 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRenewerV1.json:L949 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v1/deployments/mainnet/NameWrapper.json:L2 @ ens_v1@91c966f)
+# The unlocked controller and the Graveyard read their BaseRegistrar from
+# `nameWrapper.registrar()`, which the mainnet NameWrapper fixed at construction (constructor
+# argument 2) to the ENSv1 BaseRegistrar deployment.
+# BaseRegistrar logs are attributed by ens_v1_registrar_l1; this value does not widen the watch plan.
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/UnlockedMigrationController.sol:L66 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L78 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L59-L65 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/mainnet/NameWrapper.json:L1503-L1507 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/mainnet/BaseRegistrarImplementation.json:L2 @ ens_v1@91c966f)
+[correlation_addresses]
+ens_v1_name_wrapper = "0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401"
+ens_v1_base_registrar = "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85"
+
+[capability_flags]
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UnlockedMigrationController.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UnlockedMigrationController.json:L632 @ ens_v2_mainnet_20261002@b1f97b91)
+[[contracts]]
+role = "unlocked_migration_controller"
+address = "0xab821ca676cf2e0790fa273526a165cfa86aeb64"
+proxy_kind = "none"
+start_block = 26105642
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/LockedMigrationController.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/LockedMigrationController.json:L752 @ ens_v2_mainnet_20261002@b1f97b91)
+[[contracts]]
+role = "locked_migration_controller"
+address = "0xc46bf3b6c7ebcffd4ecfc3b012a1726a2463694d"
+proxy_kind = "none"
+start_block = 26216326
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/Graveyard.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/Graveyard.json:L439 @ ens_v2_mainnet_20261002@b1f97b91)
+[[contracts]]
+role = "graveyard"
+address = "0xda021a2c1c2f99574d861ef8c6fa745851beb7f6"
+proxy_kind = "none"
+start_block = 26105641
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRenewerV1.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRenewerV1.json:L957 @ ens_v2_mainnet_20261002@b1f97b91)
+[[contracts]]
+role = "ens_v1_renewal_bridge"
+address = "0x56c447f308f463a01121c41e72b0e7e7557fcb68"
+proxy_kind = "none"
+start_block = 26184001
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/VerifiableFactory.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/VerifiableFactory.json:L230 @ ens_v2_mainnet_20261002@b1f97b91)
+[[contracts]]
+role = "verifiable_factory"
+address = "0x77510ba162dfea3d8989e3f0928a691b345730d2"
+proxy_kind = "none"
+start_block = 26105299
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/MigrationHelper.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/MigrationHelper.json:L584 @ ens_v2_mainnet_20261002@b1f97b91)
+[[contracts]]
+role = "migration_helper"
+address = "0x0b92006fa187b4c98d0a7dfc9d3b918b6d243485"
+proxy_kind = "none"
+start_block = 26216328
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/WrapperRegistryImpl.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/WrapperRegistryImpl.json:L3936 @ ens_v2_mainnet_20261002@b1f97b91)
+[[contracts]]
+role = "wrapper_registry_implementation"
+address = "0xcf3edb3f5501de63b57254d910b6782ee370039b"
+proxy_kind = "none"
+start_block = 26216324
+
+# Implementation metadata for supported parent ownership reads; not registry admission.
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UserRegistryImpl.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UserRegistryImpl.json:L3269 @ ens_v2_mainnet_20261002@b1f97b91)
+[[contracts]]
+role = "user_registry_implementation"
+address = "0x75ff9adbcfce2469b097ac68f6ae650eae1351bb"
+proxy_kind = "none"
+start_block = 26105644
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/BatchRegistrar.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/BatchRegistrar.json:L280 @ ens_v2_mainnet_20261002@b1f97b91)
+[[contracts]]
+role = "batch_registrar"
+address = "0xf0ccfbf6dba1e01ccb833ced6d551a8f000e9721"
+proxy_kind = "none"
+start_block = 26105656
+
+# ABI layout:
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/VerifiableFactory.json:L48 @ ens_v2_mainnet_20261002@b1f97b91)
+# Meaning the interpreter relies on: `sender` is the contract that called the factory and `salt` is
+# the migrated name's namehash. The receiver passes `uint256(node)` as the salt after checking the
+# node is the name's namehash, and the factory emits `ProxyDeployed(msg.sender, proxy, salt, ...)`
+# (the build-info line holds the factory's whole source from this deployment's compiler input).
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/LockedWrapperReceiver.sol:L117-L121 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/LockedWrapperReceiver.sol:L149-L153 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/VerifiableFactory.json:L156 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/build-info/solc-0_8_25-b30e6dc9a03b37f6a0b89af5d02a73d3993944f7.json:L1564 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "ProxyDeployed"
+fragment = "event ProxyDeployed(address indexed sender, address indexed proxyAddress, uint256 salt, address implementation)"
+emitter_roles = ["verifiable_factory"]
+normalized_events = ["ContractDiscovered"]
+
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRenewerV1.json:L156 @ ens_v2_mainnet_20261002@b1f97b91)
+[[abi.events]]
+name = "NameRenewed"
+fragment = "event NameRenewed(uint256 indexed tokenId, string label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 indexed referrer, uint256 amount)"
+emitter_roles = ["ens_v1_renewal_bridge"]
+normalized_events = ["RegistrationRenewed", "PreimageObserved"]
