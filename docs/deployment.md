@@ -411,12 +411,14 @@ both interpolation inputs and the effective service/container configuration.
 The runner syncs every manifest in the
 [deployment profile](glossary.md#deployment-profile), whichever chains
 `BIGNAME_PHASE_RUNNER_CHAINS` names. The API's requests with no `namespace` cover
-only the namespaces on chains with phase-runner state or a stored head, so a
-namespace on a chain the deployment does not index stays out of their scope
+only the namespaces whose authority chain has phase-runner state or a stored head.
+A namespace whose authority chain the deployment does not index stays out of their
+scope, whatever manifests it holds on other chains
 (see [`docs/api-v1.md`](api-v1.md#parameters)). A deployment that follows a subset
 of the chains its manifests name runs `phase-runner redo` with explicit `--chain`
 values. `--all-chains` creates phase state for every manifest chain, and the
-requests with no `namespace` then need a publication on each of those chains.
+requests with no `namespace` then need a publication on every authority chain
+among them.
 A chain removed from `BIGNAME_PHASE_RUNNER_CHAINS` stays in that set and in
 `GET /v1/status`, because the
 [removal procedure](runbooks/pipeline-monitoring.md#removing-a-configured-chain)

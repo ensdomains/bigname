@@ -834,7 +834,7 @@ Rules:
 - Public reverse requests to `POST /v1/lookup` and all `GET /v1/search`
   requests disclose the chain scope selected by the request. A public reverse
   request or search without an explicit `namespace` accounts for the chains of
-  every active public namespace the deployment indexes (see
+  every public namespace whose authority chain the deployment indexes (see
   [Parameters](#parameters)); an explicit search namespace accounts only
   for that namespace's chains. Name-only lookup retains its inferred or
   explicit namespace scope. A chain with a readable position appears under
@@ -1273,12 +1273,15 @@ Common parameter rules:
 | `cursor`, `page_size` | every paginated route | opaque cursor; default 50, max 200 |
 
 For a cross-namespace read with no explicit `namespace`, the API accounts for
-every recognized public namespace with active
-[source manifests](manifests.md) on a chain the deployment indexes. Those are the
-chains with phase-runner state or a stored head, the chain set `GET /v1/status`
-reports. A namespace whose manifests name only chains outside that set is left out
-of the request's scope, as a namespace with no active manifests is. It is not
-disclosed under `meta.as_of_completeness`, because no indexing is under way for it.
+every recognized public namespace whose authority chain the deployment indexes
+and that has active [source manifests](manifests.md) on that chain. For ENS the
+authority chain is the Ethereum chain its manifests name, Ethereum Mainnet or
+Sepolia. For Basenames it is Base. Manifests a namespace holds on other chains do
+not bring it into scope. The indexed chains are those with phase-runner state or a
+stored head, the chain set `GET /v1/status` reports. A namespace whose authority
+chain is outside that set is left out of the request's scope, as a namespace with
+no active manifests is. It is not disclosed under `meta.as_of_completeness`,
+because no indexing is under way for it.
 The API separately determines which of those
 namespaces may serve rows: their active manifests must have a completed
 projection publication at the current head of the namespace's authority chain

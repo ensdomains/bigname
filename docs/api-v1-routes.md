@@ -123,9 +123,10 @@ stored-data fingerprint.
 Three distinct `409 stale` outcomes remain. A requested namespace with no publication
 returns "not available; retry after indexing is ready". A request with no `namespace`
 returns the same response when any namespace in its scope has no publication. That
-scope holds only the namespaces with active manifests on a chain the deployment
-indexes, the chain set `GET /v1/status` reports. A namespace whose manifests name
-only other chains is left out of the scope and never causes this refusal. Naming it
+scope holds only the namespaces whose authority chain the deployment indexes: Base
+for Basenames, and for ENS the Ethereum chain its manifests name (see
+[Parameters](api-v1.md#parameters)). Any other namespace is left out of the scope
+and never causes this refusal, whatever manifests it holds on other chains. Naming it
 explicitly still returns the refusal. An Interpret redo that is
 active or ran during the read returns the redo retry. Both are temporary: retry the
 same request and cursor. A pre-revision cursor or missing legacy position evidence
@@ -537,7 +538,8 @@ collection route carry neither header.
   invalid target, phase lag, readiness change, or other mid-request
   head/projection change returns the existing retryable `409 stale`, never a
   partial page. For a bare public reverse request, the request scope contains
-  every active public namespace's chains even when the readable namespace set
+  the chains of every public namespace such a request covers (see
+  [Parameters](api-v1.md#parameters)) even when the readable namespace set
   excludes one of them. Readable chains appear in `meta.as_of`; an excluded
   request-scope chain appears in `meta.as_of_completeness` with
   `completeness=unsupported` and
@@ -4492,7 +4494,8 @@ introduces it rebuilds Project from full history before serving the option; see
   request-scope chain in `meta.as_of_completeness` with
   `completeness=unsupported` and
   `unsupported_reason=temporarily_unavailable`. A bare request accounts for
-  every active public namespace's chains. An explicit namespace accounts only
+  the chains of every public namespace it covers (see
+  [Parameters](api-v1.md#parameters)). An explicit namespace accounts only
   for that namespace's chains, even when another public namespace is readable.
   Returned search rows do not change that denominator. The response omits
   `meta.as_of_token`, and its cursor carries no snapshot validity claim (see
