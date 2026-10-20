@@ -408,6 +408,26 @@ and no ceiling; the existing capacity poll interval remains five seconds.
 These settings are read at startup. Shell values override `--env-file`, so inspect
 both interpolation inputs and the effective service/container configuration.
 
+The runner syncs every manifest in the
+[deployment profile](glossary.md#deployment-profile), whichever chains
+`BIGNAME_PHASE_RUNNER_CHAINS` names. The API's requests with no `namespace` cover
+only the namespaces whose authority chain has phase-runner state or a stored head.
+A namespace whose authority chain the deployment does not index stays out of their
+scope, whatever manifests it holds on other chains
+(see [`docs/api-v1.md`](api-v1.md#parameters)). A deployment that follows a subset
+of the chains its manifests name runs `phase-runner redo` with explicit `--chain`
+values. `--all-chains` creates phase state for every manifest chain, and the
+requests with no `namespace` then need a publication on every authority chain
+among them.
+A chain removed from `BIGNAME_PHASE_RUNNER_CHAINS` stays in that set and in
+`GET /v1/status`, because the
+[removal procedure](runbooks/pipeline-monitoring.md#removing-a-configured-chain)
+preserves its rows so it can be re-added. Only a decommission cleanup that deletes
+its `chain_phase_state` and `chain_heads` rows takes it out, as the
+[readiness endpoint notes](development.md#readiness-endpoint) say. Until then
+the requests with no `namespace` keep it in scope, serving its last publication or
+refusing while it has none.
+
 `BIGNAME_DATABASE_URL` is the writer credential. Supervised `run` and a
 `verify` redo also require
 `BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL`, pointing at the same

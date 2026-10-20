@@ -140,6 +140,13 @@ async fn v2_lookup_name_only_refuses_while_interpret_redo_is_in_progress()
             )
             .await?;
     }
+    // ENS manifests on two followed chains are two deployment profiles
+    // (docs/glossary.md#deployment-profile) at once.
+    for chain in ["ethereum-mainnet", "ethereum-sepolia"] {
+        phase_runner::state::PhaseStore::new(database.pool.clone())
+            .initialize_chain(chain)
+            .await?;
+    }
     let state = AppState::new_with_rpc_urls(
         database.lookup_pool.clone(),
         bigname_lookup::ChainRpcUrls::default(),

@@ -310,6 +310,13 @@ async fn v2_search_explicit_namespace_bypasses_broken_public_derivation() -> Res
             )
             .await?;
     }
+    // ENS manifests on two followed chains are two deployment profiles
+    // (docs/glossary.md#deployment-profile) at once.
+    for chain in ["ethereum-mainnet", "ethereum-sepolia"] {
+        phase_runner::state::PhaseStore::new(database.pool.clone())
+            .initialize_chain(chain)
+            .await?;
+    }
     let state = AppState::new_with_rpc_urls(
         database.lookup_pool.clone(),
         bigname_lookup::ChainRpcUrls::default(),
@@ -461,6 +468,48 @@ async fn v2_search_bare_cursor_fails_closed_when_the_served_namespace_set_change
         read_json::<Value>(response).await?["error"]["code"],
         json!("invalid_input")
     );
+
+    database.cleanup().await
+}
+
+/// A bare search cursor binds the served namespaces, which a withheld namespace is not part of.
+/// A cursor minted while Base was in scope but withheld continues once Base is not followed, and
+/// the next page reports Ethereum's scope alone. The test override follows the production rule.
+#[tokio::test]
+async fn v2_search_bare_cursor_continues_when_a_withheld_namespace_is_no_longer_followed()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    begin_search_family_rebuild(&database, "base-mainnet", 211, "0xsearch-public-base").await?;
+    let first = v2_search_payload_for_database(&database, "/v1/search?q=al&page_size=1").await?;
+    assert_eq!(
+        v2_search_names(first["data"].as_array().context("first page")?),
+        vec!["alpha.eth"]
+    );
+    assert_search_meta_chains(&first, &["1"], &["8453"]);
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .context("the first page must continue")?;
+
+    // The DELETE stands in for a transition production never performs. The row proves the
+    // cursor's names binding, not the transition.
+    for table in ["chain_phase_state", "chain_heads"] {
+        sqlx::query(&format!(
+            "DELETE FROM bigname_phase.{table} WHERE chain_id = 'base-mainnet'"
+        ))
+        .execute(&database.pool)
+        .await?;
+    }
+    let next = v2_search_payload_for_database(
+        &database,
+        &format!("/v1/search?q=al&page_size=1&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(
+        v2_search_names(next["data"].as_array().context("next page")?),
+        vec!["alpine.eth"]
+    );
+    assert_search_meta_chains(&next, &["1"], &[]);
 
     database.cleanup().await
 }
