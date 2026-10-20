@@ -1,6 +1,7 @@
 #[path = "namespace_admission.rs"]
 mod admission;
 pub(crate) use admission::prepare_public_namespace_admission;
+use admission::public_namespace_snapshot_scope;
 
 #[path = "collection_publication.rs"]
 mod collections;
@@ -117,16 +118,14 @@ impl PublicNamespaceSet {
 
 pub(crate) async fn derive_public_namespace_set(state: &AppState) -> ApiResult<PublicNamespaceSet> {
     if let Some(namespaces) = state.public_namespaces_override() {
+        let followed = admission::load_followed_chains(&state.pool).await?;
         let mut deployments = Vec::new();
         let mut request_scope = Vec::new();
         for namespace in namespaces.iter() {
-            let active_chains = match namespace.as_str() {
-                "ens" => BTreeSet::from(["ethereum-mainnet"]),
-                BASENAMES_NAMESPACE => BTreeSet::from([BASENAMES_COMPAT_SOURCE_CHAIN_ID]),
-                _ => BTreeSet::new(),
-            };
+            let active_chains = admission::test_override_chains(namespace);
             if let Some(scope) =
-                public_namespace_snapshot_scope(&state.pool, namespace, &active_chains).await?
+                public_namespace_snapshot_scope(&state.pool, namespace, &active_chains, &followed)
+                    .await?
             {
                 let read_token = load_request_scope_snapshot(&state.pool, &scope).await?;
                 request_scope.push(RequestScopeSnapshot {
@@ -157,6 +156,7 @@ async fn derive_public_namespace_set_from_manifests(
     state: &AppState,
     manifest_tokens: Vec<PublicNamespaceManifestToken>,
 ) -> ApiResult<PublicNamespaceSet> {
+    let followed = admission::load_followed_chains(&state.pool).await?;
     let mut deployments = Vec::new();
     let mut request_scope = Vec::new();
     for manifest_token in &manifest_tokens {
@@ -165,9 +165,13 @@ async fn derive_public_namespace_set_from_manifests(
             .iter()
             .map(|manifest| manifest.chain.as_str())
             .collect::<BTreeSet<_>>();
-        let Some(scope) =
-            public_namespace_snapshot_scope(&state.pool, &manifest_token.namespace, &active_chains)
-                .await?
+        let Some(scope) = public_namespace_snapshot_scope(
+            &state.pool,
+            &manifest_token.namespace,
+            &active_chains,
+            &followed,
+        )
+        .await?
         else {
             continue;
         };
@@ -426,40 +430,6 @@ pub(crate) async fn load_selected_project_generations_on(
         generations.insert(position.chain_id.clone(), generation);
     }
     Ok(Some(generations))
-}
-
-async fn public_namespace_snapshot_scope(
-    pool: &PgPool,
-    namespace: &str,
-    active_chains: &BTreeSet<&str>,
-) -> ApiResult<Option<SnapshotSelectionScope>> {
-    let selector = match namespace {
-        "ens" => {
-            let chains = active_chains
-                .iter()
-                .copied()
-                .filter(|chain_id| matches!(*chain_id, "ethereum-mainnet" | "ethereum-sepolia"))
-                .collect::<Vec<_>>();
-            match chains.as_slice() {
-                [] => return Ok(None),
-                [chain_id] => ExactNameSnapshotSelector::from_at(chain_id),
-                _ => {
-                    return Err(ApiError::internal_error(
-                        "ENS manifests span multiple deployment profiles",
-                    ));
-                }
-            }
-        }
-        BASENAMES_NAMESPACE if active_chains.contains(BASENAMES_COMPAT_SOURCE_CHAIN_ID) => {
-            ExactNameSnapshotSelector::default()
-        }
-        BASENAMES_NAMESPACE => return Ok(None),
-        _ => return Ok(None),
-    };
-
-    exact_name_snapshot_scope(pool, namespace, selector, false)
-        .await
-        .map(Some)
 }
 
 #[derive(Clone, Copy, Debug, Default)]

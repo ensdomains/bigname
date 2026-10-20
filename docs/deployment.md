@@ -408,6 +408,16 @@ and no ceiling; the existing capacity poll interval remains five seconds.
 These settings are read at startup. Shell values override `--env-file`, so inspect
 both interpolation inputs and the effective service/container configuration.
 
+The runner syncs every manifest in the
+[deployment profile](glossary.md#deployment-profile), whichever chains
+`BIGNAME_PHASE_RUNNER_CHAINS` names. The API's requests with no `namespace` cover
+only the namespaces on chains with phase-runner state or a stored head, so a
+namespace on a chain the deployment does not index stays out of their scope
+(see [`docs/api-v1.md`](api-v1.md#parameters)). A deployment that follows a subset
+of the chains its manifests name runs `phase-runner redo` with explicit `--chain`
+values. `--all-chains` creates phase state for every manifest chain, and the
+requests with no `namespace` then need a publication on each of those chains.
+
 `BIGNAME_DATABASE_URL` is the writer credential. Supervised `run` and a
 `verify` redo also require
 `BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL`, pointing at the same

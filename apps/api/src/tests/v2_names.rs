@@ -1051,11 +1051,17 @@ async fn v2_collection_explicit_namespace_ignores_unavailable_other_namespace() 
     .await
     .expect("ENS publication is ready independently");
     ens.finish(&state).await.expect("ENS still ready");
+    crate::v2::collection_snapshot::CollectionSnapshot::capture(&state, None)
+        .await
+        .expect("Base is not followed, so the aggregate is ENS alone");
+    phase_runner::state::PhaseStore::new(database.pool.clone())
+        .initialize_chain("base-mainnet")
+        .await?;
     assert!(
         crate::v2::collection_snapshot::CollectionSnapshot::capture(&state, None)
             .await
             .is_err(),
-        "aggregate must not silently omit an unavailable namespace"
+        "aggregate must not silently omit an unavailable followed namespace"
     );
     database.cleanup().await
 }

@@ -121,7 +121,12 @@ requires a restart. This does not invalidate other collection cursors or rotate 
 stored-data fingerprint.
 
 Three distinct `409 stale` outcomes remain. A requested namespace with no publication
-returns "not available; retry after indexing is ready". An Interpret redo that is
+returns "not available; retry after indexing is ready". A request with no `namespace`
+returns the same response when any namespace in its scope has no publication. That
+scope holds only the namespaces with active manifests on a chain the deployment
+indexes, the chain set `GET /v1/status` reports. A namespace whose manifests name
+only other chains is left out of the scope and never causes this refusal. Naming it
+explicitly still returns the refusal. An Interpret redo that is
 active or ran during the read returns the redo retry. Both are temporary: retry the
 same request and cursor. A pre-revision cursor or missing legacy position evidence
 returns restart guidance. A parameter that pins a history walk to one block may be
