@@ -310,7 +310,8 @@ async fn v2_search_explicit_namespace_bypasses_broken_public_derivation() -> Res
             )
             .await?;
     }
-    // ENS manifests on two followed chains are two deployment profiles at once.
+    // ENS manifests on two followed chains are two deployment profiles
+    // (docs/glossary.md#deployment-profile) at once.
     for chain in ["ethereum-mainnet", "ethereum-sepolia"] {
         phase_runner::state::PhaseStore::new(database.pool.clone())
             .initialize_chain(chain)

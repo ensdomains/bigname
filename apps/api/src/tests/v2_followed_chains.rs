@@ -1,6 +1,7 @@
 //! A request with no `namespace` covers the namespaces whose chains this deployment follows: the
 //! chains with phase state or a stored head, the set `/v1/status` reports. The checked-in mainnet
-//! profile holds Base manifests for Basenames, and a mainnet deployment follows Ethereum only.
+//! deployment profile (docs/glossary.md#deployment-profile) holds Base manifests for Basenames,
+//! and a mainnet deployment follows Ethereum only.
 use super::v2_mainnet_admission::{NAME, OWNER, PUBLIC_RESOLVER, REGISTERED, lease, publish, text};
 use super::v2_sepolia_redeploy::{get, lookup};
 use super::*;
@@ -11,8 +12,8 @@ const BASE_HASH: &str = "0xfollowed-base";
 const NOT_AVAILABLE: &str =
     "collection publication is not available; retry after indexing is ready";
 
-/// The checked-in mainnet profile synced whole, Ethereum followed and published. `NAME` is
-/// `OWNER`'s. Nothing is written for Base.
+/// The checked-in mainnet deployment profile synced whole, Ethereum followed and published.
+/// `NAME` is `OWNER`'s. Nothing is written for Base.
 async fn mainnet() -> Result<TestDatabase> {
     let database = TestDatabase::new_migrated().await?;
     publish(
