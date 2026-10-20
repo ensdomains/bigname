@@ -6,13 +6,50 @@ use crate::v2::{AsOfCompleteness, Completeness, Meta, V2Result, api_error_to_v2,
 
 const TEMPORARILY_UNAVAILABLE: &str = "temporarily_unavailable";
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub(crate) struct ExplicitNamespaceRequestScope {
     meta: Meta,
     selected: Option<SelectedSnapshot>,
-    selected_heads: BTreeMap<String, Option<(i64, String)>>,
     project_generations: Option<BTreeMap<String, String>>,
-    interpret_redo_state: bigname_storage::SelectedInterpretRedoState,
+    interpret_redo_state: InterpretRedoCapture,
+}
+
+/// The Interpret redo state of the chains a request reads, captured before its read.
+#[derive(Clone, Debug)]
+pub(crate) struct InterpretRedoCapture {
+    chain_ids: Vec<String>,
+    state: bigname_storage::SelectedInterpretRedoState,
+}
+
+impl InterpretRedoCapture {
+    pub(crate) async fn load(pool: &PgPool, chain_ids: Vec<String>) -> V2Result<Self> {
+        let state = bigname_storage::load_selected_interpret_redo_state(pool, &chain_ids)
+            .await
+            .map_err(|_| {
+                crate::v2::V2Error::internal_error("failed to validate request-scope metadata")
+            })?;
+        Ok(Self { chain_ids, state })
+    }
+
+    fn in_progress(&self) -> bool {
+        self.state.changed_or_active(&self.state)
+    }
+
+    /// `409 stale` when a captured chain began, ran or finished an Interpret redo since the
+    /// capture.
+    pub(crate) async fn revalidate(&self, pool: &PgPool) -> V2Result<()> {
+        let current = Self::load(pool, self.chain_ids.clone()).await?;
+        if self.state.changed_or_active(&current.state) {
+            return Err(interpret_redo_in_progress());
+        }
+        Ok(())
+    }
+}
+
+fn interpret_redo_in_progress() -> crate::v2::V2Error {
+    crate::v2::V2Error::stale(
+        "served data is temporarily unavailable while Interpret redo is in progress",
+    )
 }
 
 impl ExplicitNamespaceRequestScope {
@@ -111,7 +148,6 @@ pub(crate) async fn explicit_namespace_request_scope(
     )
     .await
     .map_err(api_error_to_v2)?;
-    let selected_heads = request_scope_head_fingerprint(&state.pool, &scope).await?;
     let input = crate::v2::snapshots::selector_input(None, None, SnapshotConsistency::Head)
         .map_err(snapshot_selection_api_error)
         .map_err(api_error_to_v2)?;
@@ -126,14 +162,7 @@ pub(crate) async fn explicit_namespace_request_scope(
                     .values()
                     .map(|position| position.chain_id.clone())
                     .collect::<Vec<_>>();
-                let redo_state =
-                    bigname_storage::load_selected_interpret_redo_state(&state.pool, &chain_ids)
-                        .await
-                        .map_err(|_| {
-                            crate::v2::V2Error::internal_error(
-                                "failed to validate request-scope metadata",
-                            )
-                        })?;
+                let redo_state = InterpretRedoCapture::load(&state.pool, chain_ids).await?;
                 let readable_generations =
                     load_selected_project_generations_for_read(&state.pool, &selected, true)
                         .await
@@ -177,7 +206,6 @@ pub(crate) async fn explicit_namespace_request_scope(
             selected: selected.clone(),
         }])?,
         selected,
-        selected_heads,
         project_generations,
         interpret_redo_state,
     })
@@ -186,21 +214,15 @@ pub(crate) async fn explicit_namespace_request_scope(
 async fn load_explicit_namespace_interpret_redo_state(
     pool: &PgPool,
     scope: &SnapshotSelectionScope,
-) -> V2Result<bigname_storage::SelectedInterpretRedoState> {
+) -> V2Result<InterpretRedoCapture> {
     let chain_ids = scope
         .required_positions()
         .iter()
         .map(|position| position.chain_id.clone())
         .collect::<Vec<_>>();
-    let redo_state = bigname_storage::load_selected_interpret_redo_state(pool, &chain_ids)
-        .await
-        .map_err(|_| {
-            crate::v2::V2Error::internal_error("failed to validate request-scope metadata")
-        })?;
-    match redo_state.changed_or_active(&redo_state) {
-        true => Err(crate::v2::V2Error::stale(
-            "served data is temporarily unavailable while Interpret redo is in progress",
-        )),
+    let redo_state = InterpretRedoCapture::load(pool, chain_ids).await?;
+    match redo_state.in_progress() {
+        true => Err(interpret_redo_in_progress()),
         false => Ok(redo_state),
     }
 }
@@ -208,7 +230,7 @@ async fn load_explicit_namespace_interpret_redo_state(
 async fn load_unfenced_explicit_namespace_generations(
     pool: &PgPool,
     selected: &SelectedSnapshot,
-    expected_redo_state: &bigname_storage::SelectedInterpretRedoState,
+    expected_redo_state: &InterpretRedoCapture,
 ) -> V2Result<Option<BTreeMap<String, String>>> {
     #[cfg(test)]
     read_hooks::run_at(pool, ReadHookPoint::BeforeUnfencedGenerations).await?;
@@ -217,22 +239,7 @@ async fn load_unfenced_explicit_namespace_generations(
         .map_err(|_| {
             crate::v2::V2Error::internal_error("failed to validate request-scope metadata")
         })?;
-    let chain_ids = selected
-        .chain_positions
-        .as_map()
-        .values()
-        .map(|position| position.chain_id.clone())
-        .collect::<Vec<_>>();
-    let current_redo_state = bigname_storage::load_selected_interpret_redo_state(pool, &chain_ids)
-        .await
-        .map_err(|_| {
-            crate::v2::V2Error::internal_error("failed to validate request-scope metadata")
-        })?;
-    if expected_redo_state.changed_or_active(&current_redo_state) {
-        return Err(crate::v2::V2Error::stale(
-            "served data is temporarily unavailable while Interpret redo is in progress",
-        ));
-    }
+    expected_redo_state.revalidate(pool).await?;
     if generations.is_some() {
         return Err(crate::v2::V2Error::conflict(
             "search namespace readiness changed while the request was being read",
@@ -241,45 +248,16 @@ async fn load_unfenced_explicit_namespace_generations(
     Ok(None)
 }
 
-async fn request_scope_head_fingerprint(
-    pool: &PgPool,
-    scope: &SnapshotSelectionScope,
-) -> V2Result<BTreeMap<String, Option<(i64, String)>>> {
-    let mut heads = BTreeMap::new();
-    for requirement in scope.required_positions() {
-        let head = sqlx::query_as::<_, (i64, String)>(
-            "SELECT latest_block_number, latest_block_hash
-             FROM chain_heads
-             WHERE chain_id = $1",
-        )
-        .bind(&requirement.chain_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| crate::v2::V2Error::internal_error("failed to capture request-scope head"))?;
-        heads.insert(requirement.chain_id.clone(), head);
-    }
-    Ok(heads)
-}
-
+/// The page was read on a snapshot that still served the captured publication (`served_on`),
+/// so a head or publication that moved after it is not a refusal. A redo during the read is.
 pub(crate) async fn revalidate_explicit_namespace_request_scope(
     state: &AppState,
-    namespace: &str,
     expected: ExplicitNamespaceRequestScope,
 ) -> V2Result<Meta> {
-    let current = explicit_namespace_request_scope(state, namespace).await?;
-    if expected
+    expected
         .interpret_redo_state
-        .changed_or_active(&current.interpret_redo_state)
-    {
-        return Err(crate::v2::V2Error::stale(
-            "served data is temporarily unavailable while Interpret redo is in progress",
-        ));
-    }
-    if current != expected {
-        return Err(crate::v2::V2Error::conflict(
-            "search namespace position changed while the request was being read",
-        ));
-    }
+        .revalidate(&state.pool)
+        .await?;
     Ok(expected.meta)
 }
 
