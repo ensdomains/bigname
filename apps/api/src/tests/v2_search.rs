@@ -490,6 +490,8 @@ async fn v2_search_bare_cursor_continues_when_a_withheld_namespace_is_no_longer_
         .as_str()
         .context("the first page must continue")?;
 
+    // The DELETE stands in for a transition production never performs. The row proves the
+    // cursor's names binding, not the transition.
     for table in ["chain_phase_state", "chain_heads"] {
         sqlx::query(&format!(
             "DELETE FROM bigname_phase.{table} WHERE chain_id = 'base-mainnet'"

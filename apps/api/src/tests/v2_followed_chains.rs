@@ -217,6 +217,8 @@ async fn a_followed_unpublished_namespace_still_refuses() -> Result<()> {
     follow_base(&database).await?;
     assert_followed_base_withheld(&database).await?;
 
+    // The base case above is the production `initialize_chain` path. The variants only move
+    // the marker.
     for unservable in [
         "UPDATE bigname_phase.project_family_marker SET state = 'bootstrap_pending'
          WHERE chain_id = 'base-mainnet'",

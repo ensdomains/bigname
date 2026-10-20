@@ -77,6 +77,8 @@ pub(super) async fn public_namespace_snapshot_scope(
         .filter(|chain_id| followed_chains.contains(*chain_id))
         .collect::<BTreeSet<_>>();
     let selector = match namespace {
+        // The profile check guards a mis-synced profile and is judged on followed chains: a
+        // profile syncing both ENS chains while following one serves that chain, not a 500.
         "ens" => {
             let chains = active_chains
                 .iter()
