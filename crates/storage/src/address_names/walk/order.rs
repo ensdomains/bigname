@@ -1,30 +1,96 @@
 //! The walk's candidate order and its sort-key checks (`super`).
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{Context, Result};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::{PgConnection, Postgres, QueryBuilder, Row};
 
-use super::{AddressNamesPageRequest, WalkInputs};
+use super::relation::Composed;
 use crate::{
-    AddressNamesCurrentOrder, AddressNamesCurrentSort, AddressNamesCurrentSortedCursorValue,
-    address_names::{push_expires_at_timestamp_expr, push_registered_at_timestamp_expr},
-    families::{name::FamilyPublication, records::ComposedName},
+    AddressNamesCurrentOrder, AddressNamesCurrentSort, AddressNamesCurrentSortedCursor,
+    AddressNamesCurrentSortedCursorValue,
+    address_names::{
+        RowSource, push_expires_at_timestamp_expr, push_registered_at_timestamp_expr,
+        query::push_address_names_current_sortable_entries_cte,
+    },
+    families::name::FamilyPublication,
 };
 
+/// What the walk order reads of a request: its sort, direction and cursor.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OrderRequest<'a> {
+    pub(crate) sort: AddressNamesCurrentSort,
+    pub(crate) order: AddressNamesCurrentOrder,
+    pub(crate) cursor: Option<&'a AddressNamesCurrentSortedCursor>,
+}
+
 /// Every candidate in the page's order, and where the cursor puts the walk's start.
-pub(super) struct WalkOrder {
-    pub(super) ids: Vec<String>,
-    pub(super) start: usize,
+pub(crate) struct WalkOrder {
+    pub(crate) ids: Vec<String>,
+    pub(crate) start: usize,
     /// With `sort=name`, each name's walk key, which its composed row must serve.
     display: HashMap<String, String>,
+    /// With `sort=created_at`, each name's served first-observation time, as the page statement
+    /// computed it when the walk first composed every candidate
+    /// (`super::relation::read_every_candidate`).
+    created: HashMap<String, Option<String>>,
 }
 
 impl WalkOrder {
-    pub(super) fn agrees(&self, sort: AddressNamesCurrentSort, name: &ComposedName) -> bool {
-        sort.is_timestamp()
-            || self.display.get(&name.logical_name_id) == Some(&name.canonical_display_name)
+    pub(crate) fn agrees(&self, sort: AddressNamesCurrentSort, name: &Composed) -> bool {
+        sort.is_timestamp() || self.display.get(&name.logical_name_id) == Some(&name.display)
     }
+
+    /// Whether every composed name row serves the sort timestamp the walk ordered it by.
+    pub(crate) async fn keys_agree(
+        &self,
+        conn: &mut PgConnection,
+        sort: AddressNamesCurrentSort,
+        names: &[Value],
+    ) -> Result<bool> {
+        match sort {
+            AddressNamesCurrentSort::Name => Ok(true),
+            AddressNamesCurrentSort::CreatedAt => Ok(served_created_at(conn, names)
+                .await?
+                .into_iter()
+                .all(|(id, at)| self.created.get(&id) == Some(&at))),
+            AddressNamesCurrentSort::ExpiresAt | AddressNamesCurrentSort::RegisteredAt => {
+                timestamps_agree(conn, sort, names).await
+            }
+        }
+    }
+}
+
+/// Each name row's served `created_at` sort timestamp as exact numeric text, computed by the
+/// page statement's own `sortable_entries` expression over `names`.
+pub(crate) async fn served_created_at(
+    conn: &mut PgConnection,
+    names: &[Value],
+) -> Result<Vec<(String, Option<String>)>> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (rows, names) = (json!([]), Value::Array(names.to_vec()));
+    let source = RowSource::Composed {
+        rows: &rows,
+        names: &names,
+        parent: None,
+    };
+    let mut builder =
+        QueryBuilder::<Postgres>::new("/* storage:families.records.address_name_walk_created */");
+    source.push_with(&mut builder);
+    builder.push("entries AS (SELECT logical_name_id FROM composed_names)");
+    push_address_names_current_sortable_entries_cte(
+        &mut builder,
+        source.names(),
+        AddressNamesCurrentSort::CreatedAt,
+    );
+    builder.push(" SELECT logical_name_id, sort_timestamp::TEXT FROM sortable_entries");
+    builder
+        .build_query_as()
+        .fetch_all(&mut *conn)
+        .await
+        .context("failed to read the walked names' first observations")
 }
 
 /// `FROM` the candidates whose surface composition reads (`name::loaders::surfaces`), at or
@@ -63,22 +129,40 @@ fn push_servable_surfaces<'a>(
     ));
 }
 
-/// Orders every candidate by the page's sort key, then its name id.
-pub(super) async fn walk_order(
+/// Orders every candidate by the page's sort key, then its name id. `children` are the
+/// surface-less registry children by name id and served name. With `sort=created_at`,
+/// `created` holds the only candidates that can yield a row, keyed by their served time.
+pub(crate) async fn walk_order(
     conn: &mut PgConnection,
-    request: &AddressNamesPageRequest<'_>,
-    inputs: &WalkInputs<'_>,
+    request: OrderRequest<'_>,
+    publications: &BTreeMap<String, FamilyPublication>,
+    by_chain: &BTreeMap<String, BTreeSet<String>>,
+    children: &[(&str, &str)],
+    created: Option<HashMap<String, Option<String>>>,
 ) -> Result<Option<WalkOrder>> {
-    let ids: Vec<String> = inputs.by_chain.values().flatten().cloned().collect();
-    let children: Vec<String> = inputs.children.keys().map(|id| (*id).to_owned()).collect();
+    let ids: Vec<String> = by_chain.values().flatten().cloned().collect();
+    let child_ids: Vec<String> = children.iter().map(|(id, _)| (*id).to_owned()).collect();
     let mut display = HashMap::new();
     let mut builder =
         QueryBuilder::<Postgres>::new("/* storage:families.records.address_name_walk */ ");
-    if request.sort.is_timestamp() {
+    if let Some(created) = &created {
+        let (keyed_ids, keys): (Vec<String>, Vec<Option<String>>) = created
+            .iter()
+            .map(|(id, at)| (id.clone(), at.clone()))
+            .unzip();
+        builder.push("WITH keyed AS (SELECT * FROM UNNEST(");
+        builder.push_bind(keyed_ids);
+        builder.push("::text[], ");
+        builder.push_bind(keys);
+        builder.push(
+            "::text[]::numeric[]) AS keyed(logical_name_id, sort_timestamp)) \
+             SELECT logical_name_id, ",
+        );
+    } else if request.sort.is_timestamp() {
         builder.push("WITH keyed AS (SELECT surface.logical_name_id, ");
         push_walk_timestamp(&mut builder, request.sort);
         builder.push(" AS sort_timestamp FROM (SELECT surface.*");
-        push_servable_surfaces(&mut builder, ids, &inputs.publications);
+        push_servable_surfaces(&mut builder, ids, publications);
         builder.push(
             ") surface
              LEFT JOIN bigname_phase.project_name_summary summary
@@ -86,7 +170,7 @@ pub(super) async fn walk_order(
               AND summary.logical_name_id = surface.logical_name_id
              UNION ALL SELECT child.logical_name_id, NULL::NUMERIC FROM UNNEST(",
         );
-        builder.push_bind(children);
+        builder.push_bind(child_ids);
         builder.push("::text[]) AS child(logical_name_id)) SELECT logical_name_id, ");
     } else {
         // A surface without raw bytes sorts by the name it is served under.
@@ -96,7 +180,7 @@ pub(super) async fn walk_order(
                     surface.raw_name IS NULL AS rendered",
             name = crate::rendered_name::rendered_name_sql("surface"),
         ));
-        push_servable_surfaces(&mut surfaces, ids, &inputs.publications);
+        push_servable_surfaces(&mut surfaces, ids, publications);
         let rows = surfaces
             .build()
             .fetch_all(&mut *conn)
@@ -119,9 +203,9 @@ pub(super) async fn walk_order(
         }
         let mut keyed_ids: Vec<String> = display.keys().cloned().collect();
         let mut keys: Vec<String> = display.values().cloned().collect();
-        for (id, child) in &inputs.children {
+        for (id, name) in children {
             keyed_ids.push((*id).to_owned());
-            keys.push(child.row.display_name.clone());
+            keys.push((*name).to_owned());
         }
         builder.push("WITH keyed AS (SELECT * FROM UNNEST(");
         builder.push_bind(keyed_ids);
@@ -159,11 +243,13 @@ pub(super) async fn walk_order(
         start: start.unwrap_or(ordered.len()),
         ids: ordered,
         display,
+        created: created.unwrap_or_default(),
     }))
 }
 
 /// A candidate's stored sort timestamp in the page's units: the name summary's exact expiry
-/// seconds or registration time. The walk never runs for `sort=created_at` (`super`).
+/// seconds or registration time. `sort=created_at` has no stored key
+/// (`super::relation::read_every_candidate`).
 fn push_walk_timestamp(builder: &mut QueryBuilder<'_, Postgres>, sort: AddressNamesCurrentSort) {
     builder.push(match sort {
         AddressNamesCurrentSort::ExpiresAt => "summary.expires_at",
@@ -187,8 +273,8 @@ fn push_served_timestamp(builder: &mut QueryBuilder<'_, Postgres>, sort: Address
     }
 }
 
-/// Whether every composed name row serves the sort timestamp the walk ordered it by.
-pub(super) async fn timestamps_agree(
+/// Whether every composed name row serves the stored sort timestamp the walk ordered it by.
+async fn timestamps_agree(
     conn: &mut PgConnection,
     sort: AddressNamesCurrentSort,
     names: &[Value],
@@ -233,10 +319,7 @@ fn null_rank(column: &str, order: AddressNamesCurrentOrder) -> String {
 
 /// Whether a keyed candidate is at or after the cursor's sort position and name id in walk
 /// order: its own group can still follow the cursor, which the page statement decides.
-fn push_from_cursor<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    request: &AddressNamesPageRequest<'a>,
-) {
+fn push_from_cursor<'a>(builder: &mut QueryBuilder<'a, Postgres>, request: OrderRequest<'a>) {
     let Some(cursor) = request.cursor else {
         builder.push("TRUE");
         return;

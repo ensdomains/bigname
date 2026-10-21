@@ -12,8 +12,11 @@
 //! summary's expiry or registration time (`project_name_summary`, written with the page's own
 //! timestamp expressions), then the name id. `sort=created_at` has no stored equivalent:
 //! composition can date a name from an earlier registrar event that only a later binding named,
-//! which the name history (`project_name_history`) never backdates. Above the cap it reads every
-//! candidate, still with a null total. Registry children sort by the name they serve and have no timestamp.
+//! which the name history (`project_name_history`) never backdates. Above the cap it first
+//! composes every candidate a chunk at a time and keeps each kept name's served time, then
+//! walks in that order (`relation::read_every_candidate`). `include=total_count` above the cap
+//! reads every candidate the same way for its count, then walks. Registry children sort by the
+//! name they serve and have no timestamp.
 //! Postgres orders the keys, so the order is the page statement's under the database
 //! collation. For name grouping the walk starts with about a page and grows its steps
 //! (`batch`). Registration grouping retains the old four-page first step and doubling. It runs
@@ -22,12 +25,13 @@
 //! last row is a group the walk passed, with one more row after it, or once every candidate is
 //! gathered. With `dedupe=registration` a group spans every name bound to its resource; when the
 //! walk first reaches a resource it also composes the other candidates bound to it (F1 binding
-//! candidates), so every gathered group is whole.
+//! candidates), so every gathered group is whole. The step loop is `relation`'s, which
+//! `relation=resolves_to` shares.
 //!
 //! The walk trusts the stored keys of the names it has not composed. Every name it composes is
 //! checked against its stored key, and the page's rows against the walk order; on any
 //! disagreement, such as a name summary composition no longer matches, the page is read in
-//! full instead, still with a null total.
+//! full instead, with the exact total when `include=total_count` asks for it.
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{Context, Result};
@@ -37,8 +41,12 @@ use uuid::Uuid;
 
 mod batch;
 mod order;
+mod relation;
 
-use order::{WalkOrder, timestamps_agree, walk_order};
+pub(crate) use order::{OrderRequest, walk_order};
+pub(crate) use relation::{
+    Composed, Kind, WalkPage, WalkRequest, WalkSource, name_kinds, read_every_candidate, walk,
+};
 
 use super::{
     RowSource, load_address_names_filtered_ids_from, load_address_names_page_entries_from,
@@ -75,11 +83,6 @@ pub struct AddressNamesPageRequest<'a> {
     pub page_size: u64,
 }
 
-type PageEntries = (
-    Vec<AddressNameCurrentEntry>,
-    Option<AddressNamesCurrentSortedCursor>,
-);
-
 /// The page of `request`, with an exact total when `exact_total` asks for it or the address has
 /// at most the cap of candidate names, else a null total.
 pub async fn load_family_address_names_capped_page(
@@ -112,21 +115,22 @@ pub async fn load_family_address_names_capped_page(
         include_roles,
         with_history_evidence: false,
     };
-    let capped = !exact_total && candidates.len() > seams::exact_total_cap();
+    let capped = candidates.len() > seams::exact_total_cap();
     drop(candidates);
-    if capped && request.sort == AddressNamesCurrentSort::CreatedAt {
-        seams::note_address_name_path("full");
-    } else if capped {
-        if let Some((entries, next_cursor)) =
-            walk_page(&mut snapshot, request, &composer, &by_chain, &children).await?
+    if capped {
+        if let Some(page) = walk_page(
+            &mut snapshot,
+            request,
+            &composer,
+            &by_chain,
+            &children,
+            exact_total,
+        )
+        .await?
         {
             seams::note_address_name_path("walk");
             snapshot.close().await?;
-            return Ok(AddressNamesCurrentCappedPage {
-                entries,
-                next_cursor,
-                total_count: None,
-            });
+            return Ok(page);
         }
         seams::note_address_name_path("fallback");
     } else {
@@ -166,64 +170,8 @@ pub async fn load_family_address_names_capped_page(
     Ok(AddressNamesCurrentCappedPage {
         entries: page.entries,
         next_cursor: page.next_cursor,
-        total_count: (!capped).then_some(page.summary.grouped_entry_count),
+        total_count: (!capped || exact_total).then_some(page.summary.grouped_entry_count),
     })
-}
-
-/// A walk candidate: a name to compose on its index chain, or a registry child's prebuilt rows.
-enum Candidate {
-    Name(String),
-    Child,
-}
-
-/// The rows the walk has gathered, the names they come from and the resources whose
-/// `dedupe=registration` groups they hold whole.
-#[derive(Default)]
-struct Gathered {
-    rows: Vec<Value>,
-    names: Vec<Value>,
-    ids: HashSet<String>,
-    resources: HashSet<Uuid>,
-}
-
-/// One walk step's additions.
-#[derive(Default)]
-struct Step {
-    rows: Vec<Value>,
-    names: Vec<Value>,
-    opened: Vec<Uuid>,
-}
-
-impl Gathered {
-    /// Adds a registry child's rows unless they are already gathered.
-    fn admit_child(&mut self, step: &mut Step, address: &str, child: &WalkChild<'_>) {
-        if !self.ids.insert(child.row.logical_name_id.clone()) {
-            return;
-        }
-        if self.resources.insert(child.row.resource_id) {
-            step.opened.push(child.row.resource_id);
-        }
-        step.rows
-            .extend(registry_child_rows(address, child.publication, child.row));
-    }
-
-    /// Adds a walked name's rows unless they are already gathered.
-    fn admit_name(&mut self, step: &mut Step, name: ComposedName) -> Result<bool> {
-        if self.ids.contains(&name.logical_name_id) {
-            return Ok(true);
-        }
-        let Some(resource) = name.resource_id.as_deref() else {
-            return Ok(false);
-        };
-        let resource: Uuid = resource.parse()?;
-        if self.resources.insert(resource) {
-            step.opened.push(resource);
-        }
-        self.ids.insert(name.logical_name_id);
-        step.rows.extend(name.rows);
-        step.names.push(name.name);
-        Ok(true)
-    }
 }
 
 /// A surface-less registry child the walk can reach, with its chain's publication.
@@ -232,12 +180,144 @@ struct WalkChild<'a> {
     row: &'a RegistryChildRow,
 }
 
-/// What the walk reads its candidates from.
-struct WalkInputs<'a> {
+/// The ownership relations' candidates: names composed for the address and registry children.
+struct OwnershipWalk<'a> {
+    request: &'a AddressNamesPageRequest<'a>,
     composer: &'a AddressComposer<'a>,
     publications: BTreeMap<String, FamilyPublication>,
-    by_chain: &'a BTreeMap<String, BTreeSet<String>>,
     children: HashMap<&'a str, WalkChild<'a>>,
+}
+
+impl OwnershipWalk<'_> {
+    fn child(&self, id: &str, child: &WalkChild<'_>) -> Composed {
+        Composed {
+            logical_name_id: id.to_owned(),
+            display: child.row.display_name.clone(),
+            group: Some(child.row.resource_id),
+            rows: registry_child_rows(self.request.address, child.publication, child.row),
+            name: None,
+        }
+    }
+}
+
+impl WalkSource for OwnershipWalk<'_> {
+    async fn compose(
+        &self,
+        conn: &mut PgConnection,
+        chain_id: &str,
+        ids: &[String],
+    ) -> Result<Vec<Composed>> {
+        let publication = &self.publications[chain_id];
+        let names: Vec<ComposedName> = self.composer.compose(conn, publication, ids).await?;
+        names
+            .into_iter()
+            .map(|name| {
+                Ok(Composed {
+                    group: name.resource_id.as_deref().map(str::parse).transpose()?,
+                    logical_name_id: name.logical_name_id,
+                    display: name.canonical_display_name,
+                    rows: name.rows,
+                    name: Some(name.name),
+                })
+            })
+            .collect()
+    }
+
+    async fn group_members(
+        &self,
+        conn: &mut PgConnection,
+        chain_id: &str,
+        groups: &[Uuid],
+    ) -> Result<Vec<String>> {
+        sqlx::query_scalar(
+            "/* storage:families.records.address_name_walk_closure */
+             SELECT DISTINCT logical_name_id FROM bigname_phase.project_binding_candidate
+             WHERE chain_id = $1 AND resource_id = ANY($2::uuid[])",
+        )
+        .bind(chain_id)
+        .bind(groups)
+        .fetch_all(&mut *conn)
+        .await
+        .context("failed to load the names bound to the walked resources")
+    }
+
+    async fn kept(
+        &self,
+        conn: &mut PgConnection,
+        rows: &Value,
+        names: &Value,
+    ) -> Result<Vec<String>> {
+        let request = self.request;
+        load_address_names_filtered_ids_from(
+            conn,
+            RowSource::Composed {
+                rows,
+                names,
+                parent: request.parent,
+            },
+            request.address,
+            request.namespace,
+            request.relations,
+            request.dedupe_by,
+            request.q,
+            request.authority,
+            request.is_migrated,
+        )
+        .await
+    }
+
+    fn prebuilt_ids(&self) -> Vec<&str> {
+        self.children.keys().copied().collect()
+    }
+
+    fn prebuilt(&self, id: &str) -> Option<Composed> {
+        self.children.get(id).map(|child| self.child(id, child))
+    }
+
+    fn prebuilt_in(&self, groups: &[Uuid]) -> Vec<Composed> {
+        self.children
+            .iter()
+            .filter(|(_, child)| groups.contains(&child.row.resource_id))
+            .map(|(id, child)| self.child(id, child))
+            .collect()
+    }
+}
+
+impl WalkPage for OwnershipWalk<'_> {
+    type Entry = AddressNameCurrentEntry;
+
+    async fn page(
+        &self,
+        conn: &mut PgConnection,
+        rows: &Value,
+        names: &Value,
+    ) -> Result<(Vec<Self::Entry>, Option<AddressNamesCurrentSortedCursor>)> {
+        let request = self.request;
+        load_address_names_page_entries_from(
+            conn,
+            RowSource::Composed {
+                rows,
+                names,
+                parent: request.parent,
+            },
+            request.address,
+            request.namespace,
+            request.relations,
+            request.dedupe_by,
+            request.q,
+            request.authority,
+            request.is_migrated,
+            request.sort,
+            request.order,
+            request.cursor,
+            request.page_size,
+        )
+        .await
+    }
+
+    fn entry_name(entry: &Self::Entry) -> &str {
+        &entry.logical_name_id
+    }
 }
 
 /// The walk's page, or `None` when it must give way to the full read.
@@ -247,7 +327,8 @@ async fn walk_page(
     composer: &AddressComposer<'_>,
     by_chain: &BTreeMap<String, BTreeSet<String>>,
     children: &[(FamilyPublication, Vec<RegistryChildRow>)],
-) -> Result<Option<PageEntries>> {
+    exact_total: bool,
+) -> Result<Option<AddressNamesCurrentCappedPage>> {
     // Every chain is checked as the full read checks it, so the same chain answers stale.
     let mut publications = BTreeMap::new();
     for chain_id in by_chain.keys() {
@@ -265,244 +346,71 @@ async fn walk_page(
             }
         }
     }
-    let inputs = WalkInputs {
+    let source = OwnershipWalk {
+        request,
         composer,
         publications,
-        by_chain,
         children: walk_children,
     };
-    let mut kinds: HashMap<&str, Candidate> = HashMap::new();
-    for (chain_id, ids) in by_chain {
-        for id in ids {
-            if kinds
-                .insert(id, Candidate::Name(chain_id.clone()))
-                .is_some()
-            {
-                return Ok(None);
-            }
-        }
-    }
-    let Some(order) = walk_order(conn, request, &inputs).await? else {
+    let Some(mut kinds) = name_kinds(by_chain) else {
+        return Ok(None);
+    };
+    let registration = request.dedupe_by == AddressNamesCurrentDedupe::Resource;
+    let created_at = request.sort == AddressNamesCurrentSort::CreatedAt;
+    let mut every = if exact_total || created_at {
+        Some(read_every_candidate(conn, &source, by_chain, registration, created_at).await?)
+    } else {
+        None
+    };
+    let order_request = OrderRequest {
+        sort: request.sort,
+        order: request.order,
+        cursor: request.cursor,
+    };
+    let child_keys: Vec<(&str, &str)> = source
+        .children
+        .iter()
+        .map(|(id, child)| (*id, child.row.display_name.as_str()))
+        .collect();
+    let created = every.as_mut().and_then(|every| every.created.take());
+    let Some(order) = walk_order(
+        conn,
+        order_request,
+        &source.publications,
+        by_chain,
+        &child_keys,
+        created,
+    )
+    .await?
+    else {
         return Ok(None);
     };
     // A surface-less child the index also lists composes nothing as a name. A name with a
     // published surface is never such a child; if one were, the order would list it twice.
-    for id in inputs.children.keys() {
-        kinds.insert(id, Candidate::Child);
+    for id in source.children.keys() {
+        kinds.insert(id, Kind::Prebuilt);
     }
-    let rank: HashMap<&str, usize> = order
-        .ids
-        .iter()
-        .enumerate()
-        .map(|(index, id)| (id.as_str(), index))
-        .collect();
-    if rank.len() != order.ids.len() {
-        return Ok(None);
-    }
-    let registration = request.dedupe_by == AddressNamesCurrentDedupe::Resource;
-    // Registration closure depends on the partitions, so preserve its complete old sequence.
-    let old_batches = registration || seams::legacy_walk_batches();
-    let mut steps = batch::Steps::first(
-        usize::try_from(request.page_size)?,
-        request.cursor.is_some(),
-        old_batches,
-    );
-    let mut position = order.start;
-    let mut gathered = Gathered::default();
-    loop {
-        let end = position.saturating_add(steps.size()).min(order.ids.len());
-        let mut step = Step::default();
-        let mut names: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-        for id in &order.ids[position..end] {
-            match kinds.get(id.as_str()) {
-                Some(Candidate::Name(chain_id)) => {
-                    names.entry(chain_id).or_default().push(id.clone())
-                }
-                Some(Candidate::Child) => {
-                    gathered.admit_child(&mut step, request.address, &inputs.children[id.as_str()]);
-                }
-                None => return Ok(None),
-            }
-        }
-        for (chain_id, ids) in names {
-            let publication = &inputs.publications[chain_id];
-            for chunk in ids.chunks(seams::compose_chunk()) {
-                for name in composer.compose(conn, publication, chunk).await? {
-                    if !order.agrees(request.sort, &name)
-                        || !gathered.admit_name(&mut step, name)?
-                    {
-                        return Ok(None);
-                    }
-                }
-            }
-        }
-        if registration
-            && !close_groups(
-                conn,
-                &inputs,
-                &order,
-                request.sort,
-                &mut gathered,
-                &mut step,
-            )
-            .await?
-        {
-            return Ok(None);
-        }
-        if request.sort.is_timestamp() && !timestamps_agree(conn, request.sort, &step.names).await?
-        {
-            return Ok(None);
-        }
-        keep_filtered(conn, request, &mut step).await?;
-        gathered.rows.append(&mut step.rows);
-        gathered.names.append(&mut step.names);
-        position = end;
-        let rows = Value::Array(std::mem::take(&mut gathered.rows));
-        let names = Value::Array(std::mem::take(&mut gathered.names));
-        let page = load_address_names_page_entries_from(
-            conn,
-            RowSource::Composed {
-                rows: &rows,
-                names: &names,
-                parent: request.parent,
-            },
-            request.address,
-            request.namespace,
-            request.relations,
-            request.dedupe_by,
-            request.q,
-            request.authority,
-            request.is_migrated,
-            request.sort,
-            request.order,
-            request.cursor,
-            request.page_size,
-        )
-        .await;
-        if let (Value::Array(rows), Value::Array(names)) = (rows, names) {
-            gathered.rows = rows;
-            gathered.names = names;
-        }
-        let (entries, next_cursor) = page?;
-        // The page's groups come in walk order unless a sort key disagrees.
-        let mut last = None;
-        for entry in &entries {
-            let Some(&at) = rank.get(entry.logical_name_id.as_str()) else {
-                return Ok(None);
-            };
-            if last.is_some_and(|last| at <= last) {
-                return Ok(None);
-            }
-            last = Some(at);
-        }
-        let passed = last.is_some_and(|last| last < position);
-        if position >= order.ids.len() || (next_cursor.is_some() && passed) {
-            return Ok(Some((entries, next_cursor)));
-        }
-        let found = entries.len() + usize::from(next_cursor.is_some());
-        steps.grow(position - order.start, found);
-    }
-}
-
-/// Composes the candidates bound to each resource the step reached first and keeps those whose
-/// own resource is one the walk reached, so every gathered `dedupe=registration` group holds
-/// all its members. Registry children on those resources join too.
-async fn close_groups(
-    conn: &mut PgConnection,
-    inputs: &WalkInputs<'_>,
-    order: &WalkOrder,
-    sort: AddressNamesCurrentSort,
-    gathered: &mut Gathered,
-    step: &mut Step,
-) -> Result<bool> {
-    if step.opened.is_empty() {
-        return Ok(true);
-    }
-    for (chain_id, candidates) in inputs.by_chain {
-        let bound: Vec<String> = sqlx::query_scalar(
-            "/* storage:families.records.address_name_walk_closure */
-             SELECT DISTINCT logical_name_id FROM bigname_phase.project_binding_candidate
-             WHERE chain_id = $1 AND resource_id = ANY($2::uuid[])",
-        )
-        .bind(chain_id)
-        .bind(&step.opened)
-        .fetch_all(&mut *conn)
-        .await
-        .context("failed to load the names bound to the walked resources")?;
-        let mut ids: Vec<String> = bound
-            .into_iter()
-            .filter(|id| candidates.contains(id) && !gathered.ids.contains(id))
-            .collect();
-        ids.sort_unstable();
-        for chunk in ids.chunks(seams::compose_chunk()) {
-            let publication = &inputs.publications[chain_id];
-            for name in inputs.composer.compose(conn, publication, chunk).await? {
-                let Some(resource) = name.resource_id.as_deref() else {
-                    return Ok(false);
-                };
-                if !gathered.resources.contains(&resource.parse::<Uuid>()?) {
-                    continue;
-                }
-                if !order.agrees(sort, &name) {
-                    return Ok(false);
-                }
-                gathered.ids.insert(name.logical_name_id);
-                step.rows.extend(name.rows);
-                step.names.push(name.name);
-            }
-        }
-    }
-    for (id, child) in &inputs.children {
-        if !gathered.ids.contains(*id) && step.opened.contains(&child.row.resource_id) {
-            gathered.ids.insert((*id).to_owned());
-            step.rows.extend(registry_child_rows(
-                inputs.composer.address,
-                child.publication,
-                child.row,
-            ));
-        }
-    }
-    Ok(true)
-}
-
-/// Drops the step's rows of names the page's filters keep no row of: they add nothing to any
-/// group, so the gathered rows stay about as large as the rows the page can serve.
-async fn keep_filtered(
-    conn: &mut PgConnection,
-    request: &AddressNamesPageRequest<'_>,
-    step: &mut Step,
-) -> Result<()> {
-    if step.rows.is_empty() {
-        return Ok(());
-    }
-    let rows = Value::Array(std::mem::take(&mut step.rows));
-    let names = Value::Array(std::mem::take(&mut step.names));
-    let kept = load_address_names_filtered_ids_from(
+    let walk_request = WalkRequest {
+        order: order_request,
+        page_size: request.page_size,
+        registration,
+    };
+    let Some((entries, next_cursor)) = walk(
         conn,
-        RowSource::Composed {
-            rows: &rows,
-            names: &names,
-            parent: request.parent,
-        },
-        request.address,
-        request.namespace,
-        request.relations,
-        request.dedupe_by,
-        request.q,
-        request.authority,
-        request.is_migrated,
+        &source,
+        &source,
+        &walk_request,
+        by_chain,
+        &kinds,
+        &order,
     )
-    .await;
-    let (Value::Array(rows), Value::Array(names)) = (rows, names) else {
-        unreachable!("the step's rows are arrays")
+    .await?
+    else {
+        return Ok(None);
     };
-    let kept: HashSet<String> = kept?.into_iter().collect();
-    let kept_row = |row: &Value| {
-        row["logical_name_id"]
-            .as_str()
-            .is_some_and(|id| kept.contains(id))
-    };
-    step.rows = rows.into_iter().filter(|row| kept_row(row)).collect();
-    step.names = names.into_iter().filter(|row| kept_row(row)).collect();
-    Ok(())
+    Ok(Some(AddressNamesCurrentCappedPage {
+        entries,
+        next_cursor,
+        total_count: every.filter(|_| exact_total).map(|every| every.groups),
+    }))
 }

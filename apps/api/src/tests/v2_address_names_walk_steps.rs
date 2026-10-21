@@ -433,3 +433,223 @@ async fn v2_address_names_walk_trusts_stored_keys_beyond_the_page() -> Result<()
     }
     database.cleanup().await
 }
+
+/// Row 12: 3,300 candidates of which only the last three compose a row. Name grouping's steps
+/// grow to 1,024 names and repeat that size. Registration grouping keeps the old doubling, also
+/// capped at 1,024.
+#[tokio::test]
+async fn v2_address_names_walk_repeats_the_largest_step_on_a_long_run_without_rows() -> Result<()> {
+    use bigname_storage::families::records::seams::with_compose_chunk;
+
+    let database = TestDatabase::new_migrated().await?;
+    seed_bulk_names(
+        &database,
+        3_304,
+        |index| bulk_owner_below(index, 3_301),
+        &[],
+    )
+    .await?;
+    list_bulk_names_without_a_relation(&database, 4..3_301).await?;
+    for (query, steps) in [
+        ("", vec![8, 24, 64, 128, 256, 512, 1024, 1024, 260]),
+        (
+            "&dedupe=registration",
+            vec![32, 64, 128, 256, 512, 1024, 1024, 260],
+        ),
+    ] {
+        let uri = format!("/v1/addresses/{BULK_ADDRESS}/names?page_size=5{query}");
+        let exact = walk_all_pages(&database, &uri).await?;
+        let pages =
+            with_compose_chunk(4096, capped_pages(&database, &uri, 1, Some(0), false)).await?;
+        assert_eq!(pages[0].paths, ["walk"], "{uri}");
+        assert_eq!(page_body(&pages[0].payload), page_body(&exact[0]), "{uri}");
+        assert_eq!(
+            pages[0].payload["data"].as_array().unwrap().len(),
+            3,
+            "{uri}"
+        );
+        assert_eq!(pages[0].batches, steps, "{uri}");
+    }
+    database.cleanup().await
+}
+
+async fn with_walk_filters<F: std::future::Future>(future: F) -> (F::Output, Vec<usize>) {
+    use bigname_storage::families::records::seams::with_walk_filter_names;
+    let names = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let output = with_walk_filter_names(names.clone(), future).await;
+    let names = names.lock().unwrap().clone();
+    (output, names)
+}
+
+/// Row 13: one registration bound to 700 candidate names, of which `q` keeps one. When the walk
+/// first reaches the registration it composes the other names a chunk at a time and filters
+/// each chunk, so no filter statement reads more than one chunk of names.
+#[tokio::test]
+async fn v2_address_names_walk_closure_filters_each_chunk() -> Result<()> {
+    use bigname_storage::families::records::seams::with_compose_chunk;
+
+    let database = TestDatabase::new_migrated().await?;
+    let aliases: Vec<(usize, usize)> = (1..700).map(|index| (0, index)).collect();
+    seed_bulk_names(&database, 700, |_| BULK_ADDRESS, &aliases).await?;
+    let uri =
+        format!("/v1/addresses/{BULK_ADDRESS}/names?dedupe=registration&q=bulk00350&page_size=5");
+    let exact = walk_all_pages(&database, &uri).await?;
+    assert_eq!(exact[0]["data"].as_array().unwrap().len(), 1);
+    let ((walked, paths), filters) = with_walk_filters(with_compose_chunk(
+        100,
+        with_paths(with_exact_total_cap(0, walk_all_pages(&database, &uri))),
+    ))
+    .await;
+    assert!(
+        !paths.is_empty() && paths.iter().all(|path| *path == "walk"),
+        "{paths:?}"
+    );
+    assert_eq!(
+        exact.iter().map(page_body).collect::<Vec<_>>(),
+        walked?.iter().map(page_body).collect::<Vec<_>>()
+    );
+    assert!(filters.len() > 7, "{filters:?}");
+    assert!(
+        !filters.is_empty() && filters.iter().all(|names| *names <= 100),
+        "{filters:?}"
+    );
+    database.cleanup().await
+}
+
+/// `include=total_count` above the cap: every candidate is composed and filtered a chunk at a
+/// time and the kept groups are counted, which is the summary statement's count, and the page
+/// walks.
+#[tokio::test]
+async fn v2_address_names_total_count_above_the_cap_counts_every_candidate() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bulk_names(
+        &database,
+        300,
+        |index| {
+            if index % 7 == 3 {
+                BULK_OTHER_ADDRESS
+            } else {
+                BULK_ADDRESS
+            }
+        },
+        &[(10, 200), (20, 21), (30, 31)],
+    )
+    .await?;
+    list_bulk_names_without_a_relation(&database, 300..310).await?;
+    for query in [
+        "",
+        "dedupe=registration",
+        "relation=owner&dedupe=registration&parent=eth",
+        "q=bulk00&match=contains&dedupe=registration",
+        "q=zzz",
+        "sort=created_at&order=desc",
+        "sort=expires_at&dedupe=registration",
+    ] {
+        let uri =
+            format!("/v1/addresses/{BULK_ADDRESS}/names?page_size=7&include=total_count&{query}");
+        let (exact, paths) = with_paths(walk_pages(&database, &uri, 2)).await;
+        let exact = exact?;
+        assert!(
+            !paths.is_empty() && paths.iter().all(|path| *path == "exact"),
+            "{uri}: {paths:?}"
+        );
+        let ((counted, paths), filters) = with_walk_filters(with_paths(with_exact_total_cap(
+            100,
+            walk_pages(&database, &uri, 2),
+        )))
+        .await;
+        let counted = counted?;
+        assert!(
+            !paths.is_empty() && paths.iter().all(|path| *path == "walk"),
+            "{uri}: {paths:?}"
+        );
+        assert_eq!(exact, counted, "{uri}");
+        assert!(exact[0]["page"]["total_count"].is_u64(), "{uri}");
+        assert!(
+            !filters.is_empty() && filters.iter().all(|names| *names <= 256),
+            "{uri}: {filters:?}"
+        );
+    }
+    database.cleanup().await
+}
+
+/// `sort=created_at` above the cap: the walk first composes every candidate a chunk at a time
+/// for the kept names' served first observations, then walks in that order. Its pages are the
+/// full read's, ties among equal times included, and no statement reads more than a chunk.
+#[tokio::test]
+async fn v2_address_names_created_at_above_the_cap_walks_after_reading_every_candidate()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bulk_names(&database, 300, |_| BULK_ADDRESS, &[(10, 200), (20, 21)]).await?;
+    for query in [
+        "sort=created_at",
+        "sort=created_at&order=desc",
+        "sort=created_at&dedupe=registration",
+        "sort=created_at&order=desc&dedupe=registration&q=bulk00&match=contains",
+    ] {
+        let uri = format!("/v1/addresses/{BULK_ADDRESS}/names?page_size=7&{query}");
+        let exact = walk_all_pages(&database, &uri).await?;
+        let pages = capped_pages(&database, &uri, 1000, Some(100), false).await?;
+        assert_eq!(
+            exact.iter().map(page_body).collect::<Vec<_>>(),
+            pages
+                .iter()
+                .map(|page| page_body(&page.payload))
+                .collect::<Vec<_>>(),
+            "{uri}"
+        );
+        for page in &pages {
+            assert_eq!(page.paths, ["walk"], "{uri}");
+            assert!(page.payload["page"]["total_count"].is_null(), "{uri}");
+            assert!(page.batches.iter().all(|batch| *batch <= 256), "{uri}");
+        }
+        // Equal first observations come in name-id order, as the full read serves them.
+        let times: Vec<&Value> = exact
+            .iter()
+            .flat_map(|page| page["data"].as_array().unwrap())
+            .map(|row| &row["created_at"])
+            .collect();
+        assert!(times.windows(2).any(|pair| pair[0] == pair[1]), "{uri}");
+    }
+    database.cleanup().await
+}
+
+/// A served first observation that disagrees with the one the walk ordered a name by sends the
+/// page to the full read once the walk composes that name.
+#[tokio::test]
+async fn v2_address_names_created_at_walk_falls_back_when_a_key_disagrees() -> Result<()> {
+    use bigname_storage::families::records::seams::with_walk_created_at_cleared;
+
+    let database = TestDatabase::new_migrated().await?;
+    seed_bulk_names(&database, 120, |_| BULK_ADDRESS, &[]).await?;
+    for query in ["sort=created_at", "sort=created_at&dedupe=registration"] {
+        let uri = format!("/v1/addresses/{BULK_ADDRESS}/names?page_size=10&{query}");
+        let exact = bulk_payload(&database, &uri).await?;
+        let (walked, paths) = with_paths(with_walk_created_at_cleared(
+            bulk_logical_name_id(50)?,
+            with_exact_total_cap(0, bulk_payload(&database, &uri)),
+        ))
+        .await;
+        assert_eq!(paths, ["fallback"], "{uri}");
+        assert_eq!(page_body(&walked?), page_body(&exact), "{uri}");
+    }
+    database.cleanup().await?;
+
+    let database = TestDatabase::new_migrated().await?;
+    seed_bulk_resolves_to_names(&database, 120, &[], bulk_resolving).await?;
+    for query in [
+        "sort=created_at",
+        "sort=created_at&dedupe=registration&coin_type=evm",
+    ] {
+        let uri = resolves_to_uri(&format!("page_size=10&{query}"));
+        let exact = bulk_payload(&database, &uri).await?;
+        let (walked, paths) = with_paths(with_walk_created_at_cleared(
+            bulk_logical_name_id(50)?,
+            with_exact_total_cap(0, bulk_payload(&database, &uri)),
+        ))
+        .await;
+        assert_eq!(paths, ["fallback"], "{uri}");
+        assert_eq!(page_body(&walked?), page_body(&exact), "{uri}");
+    }
+    database.cleanup().await
+}
