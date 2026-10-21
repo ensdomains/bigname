@@ -11,8 +11,18 @@
 //! match, the ENSIP-19 default-address fallback, dedupe, the authority filter, sorts, cursors and
 //! the EVM aggregation are the served SQL.
 //!
+//! An address with more than `seams::exact_total_cap` candidate names (the names that may
+//! serve records through a candidate resource) is not read in full. The page walks the
+//! candidates in its own order as the ownership relations' page does (`address_names::walk`):
+//! each step composes its names a chunk at a time, assembles the inventories of the candidate
+//! resources those names serve records through and filters the step's rows before the page
+//! statement runs over what is gathered. With `dedupe=registration` a step that reaches a
+//! group first also composes the other names that can fall in it, because the group's entry is
+//! its exact-record member when it has one. Any disagreement with the walk order gives way to
+//! the full read.
+//!
 //! A page is read in one snapshot (`read_snapshot`).
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -24,13 +34,15 @@ use super::{
     candidates::candidate_resources_from,
     inventory::{FamilyAttribution, load_family_record_inventories_on},
     resolves_to::{RecordRow, may_fall_back, record_rows},
+    seams,
 };
 use crate::{
     AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentSort,
     AddressNamesCurrentSortedCursor, AddressRecordsCurrentEvmPage, AddressRecordsCurrentPage,
     ENSIP19_DEFAULT_ADDRESS_RECORD_KEY, NameCurrentRow,
     address_names::{
-        RowSource, load_address_records_evm_page_from, load_address_records_page_from,
+        AddressRecordsQuery, Composed, EvmCoinsPage, OrderRequest, SingleCoinPage, WalkPage,
+        WalkRequest, WalkSource, name_kinds, read_every_candidate, walk, walk_order,
     },
     families::name::{FamilyPublication, servable_publication},
 };
@@ -55,30 +67,35 @@ pub async fn load_family_resolves_to_page(
     if may_fall_back(coin_type) {
         coin_types.push(ENSIP19_DEFAULT_ADDRESS_RECORD_KEY["addr:".len()..].to_owned());
     }
-    let mut snapshot = db.into().snapshot().await?;
-    let (rows, names) =
-        compose_address_record_rows(&mut snapshot, address, &coin_types, namespaces).await?;
-    let page = load_address_records_page_from(
-        &mut snapshot,
-        RowSource::Composed {
-            rows: &rows,
-            names: &names,
-            parent,
-        },
+    let query = AddressRecordsQuery {
         address,
-        coin_type,
+        coin_type: Some(coin_type),
         namespaces,
         dedupe_by,
         q,
         authority,
+        parent,
         sort,
         order,
         cursor,
         page_size,
+    };
+    let mut snapshot = db.into().snapshot().await?;
+    let (entries, next_cursor) = read_page(
+        &mut snapshot,
+        &query,
+        &coin_types,
+        &SingleCoinPage {
+            query: &query,
+            coin_type,
+        },
     )
     .await?;
     snapshot.close().await?;
-    Ok(page)
+    Ok(AddressRecordsCurrentPage {
+        entries,
+        next_cursor,
+    })
 }
 
 /// `load_address_records_current_evm_page` over the families.
@@ -110,100 +127,266 @@ pub async fn load_family_resolves_to_evm_page(
     .fetch_all(&mut *snapshot)
     .await
     .with_context(|| format!("failed to load the indexed coin types of {address}"))?;
-    let (rows, names) =
-        compose_address_record_rows(&mut snapshot, address, &coin_types, namespaces).await?;
-    let page = load_address_records_evm_page_from(
-        &mut snapshot,
-        RowSource::Composed {
-            rows: &rows,
-            names: &names,
-            parent,
-        },
+    let query = AddressRecordsQuery {
         address,
+        coin_type: None,
         namespaces,
         dedupe_by,
         q,
         authority,
+        parent,
         sort,
         order,
         cursor,
         page_size,
-    )
-    .await?;
+    };
+    let (entries, next_cursor) =
+        read_page(&mut snapshot, &query, &coin_types, &EvmCoinsPage(&query)).await?;
     snapshot.close().await?;
-    Ok(page)
+    Ok(AddressRecordsCurrentEvmPage {
+        entries,
+        next_cursor,
+    })
 }
 
-/// The composed `address_records_current` rows of `address` for `coin_types`, and the composed
-/// name rows they read, as JSON record sets.
-async fn compose_address_record_rows(
+/// The page of `query`: read in full when the address has at most the cap of candidate names,
+/// else walked.
+async fn read_page<P: WalkPage>(
     conn: &mut PgConnection,
-    address: &str,
+    query: &AddressRecordsQuery<'_>,
     coin_types: &[String],
-    namespaces: Option<&[String]>,
-) -> Result<(Value, Value)> {
-    let address = address.to_ascii_lowercase();
+    page: &P,
+) -> Result<(Vec<P::Entry>, Option<AddressNamesCurrentSortedCursor>)> {
+    let address = query.address.to_ascii_lowercase();
     let candidates = if coin_types.is_empty() {
         BTreeMap::new()
     } else {
         candidate_resources_from(conn, &address, coin_types).await?
     };
-    if candidates.is_empty() {
-        // The route's namespace publication fence also covers an empty candidate set.
-        return Ok((json!([]), json!([])));
-    }
-    let mut by_chain: BTreeMap<String, Vec<Uuid>> = BTreeMap::new();
+    let mut resources: BTreeMap<String, Vec<Uuid>> = BTreeMap::new();
     for (chain_id, resource_id) in candidates.into_keys() {
-        by_chain.entry(chain_id).or_default().push(resource_id);
+        resources.entry(chain_id).or_default().push(resource_id);
     }
+    // Resolve the requested name scope before a different chain's rebuild can veto it: a chain
+    // with no name in scope is not read.
+    let mut by_chain: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (chain_id, chain_resources) in &resources {
+        let ids = names_reaching(conn, chain_id, chain_resources, query.namespaces).await?;
+        if !ids.is_empty() {
+            by_chain.insert(chain_id.clone(), ids.into_iter().collect());
+        }
+    }
+    if by_chain.values().map(BTreeSet::len).sum::<usize>() > seams::exact_total_cap() {
+        if let Some(found) = walk_page(conn, query, &address, &resources, &by_chain, page).await? {
+            seams::note_address_name_path("walk");
+            return Ok(found);
+        }
+        seams::note_address_name_path("fallback");
+    } else {
+        seams::note_address_name_path("exact");
+    }
+    // The route's namespace publication fence also covers an empty candidate set.
+    let (rows, names) = compose_address_record_rows(conn, &address, &resources, &by_chain).await?;
+    page.page(conn, &rows, &names).await
+}
+
+/// The walked page, or `None` when it must give way to the full read.
+async fn walk_page<P: WalkPage>(
+    conn: &mut PgConnection,
+    query: &AddressRecordsQuery<'_>,
+    address: &str,
+    resources: &BTreeMap<String, Vec<Uuid>>,
+    by_chain: &BTreeMap<String, BTreeSet<String>>,
+    page: &P,
+) -> Result<Option<(Vec<P::Entry>, Option<AddressNamesCurrentSortedCursor>)>> {
+    // Every chain is checked as the full read checks it, so the same chain answers stale.
+    let mut publications = BTreeMap::new();
+    for chain_id in by_chain.keys() {
+        publications.insert(
+            chain_id.clone(),
+            servable_publication(conn, chain_id).await?,
+        );
+    }
+    let Some(kinds) = name_kinds(by_chain) else {
+        return Ok(None);
+    };
+    let source = RecordsWalk {
+        query,
+        address,
+        publications,
+        resources: resources
+            .iter()
+            .map(|(chain_id, resources)| (chain_id.as_str(), resources.iter().copied().collect()))
+            .collect(),
+    };
+    let registration = query.dedupe_by == AddressNamesCurrentDedupe::Resource;
+    let created = if query.sort == AddressNamesCurrentSort::CreatedAt {
+        read_every_candidate(conn, &source, by_chain, registration, true)
+            .await?
+            .created
+    } else {
+        None
+    };
+    let order_request = OrderRequest {
+        sort: query.sort,
+        order: query.order,
+        cursor: query.cursor,
+    };
+    let Some(order) = walk_order(
+        conn,
+        order_request,
+        &source.publications,
+        by_chain,
+        &[],
+        created,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let request = WalkRequest {
+        order: order_request,
+        page_size: query.page_size,
+        registration,
+    };
+    walk(conn, &source, page, &request, by_chain, &kinds, &order).await
+}
+
+/// The resolves-to candidates: names whose records may resolve to the address.
+struct RecordsWalk<'a> {
+    query: &'a AddressRecordsQuery<'a>,
+    /// Lowercase.
+    address: &'a str,
+    publications: BTreeMap<String, FamilyPublication>,
+    resources: BTreeMap<&'a str, HashSet<Uuid>>,
+}
+
+impl WalkSource for RecordsWalk<'_> {
+    async fn compose(
+        &self,
+        conn: &mut PgConnection,
+        chain_id: &str,
+        ids: &[String],
+    ) -> Result<Vec<Composed>> {
+        let composed = compose_base_chunk(conn, ids).await?;
+        let candidates = &self.resources[chain_id];
+        let serving: Vec<Uuid> = composed
+            .values()
+            .filter_map(serves_records_through)
+            .filter(|resource| candidates.contains(resource))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let records = load_record_rows(conn, chain_id, &serving, self.address).await?;
+        let publication = &self.publications[chain_id];
+        let mut out = Vec::new();
+        for row in composed.values() {
+            let Some(found) = serves_records_through(row).and_then(|r| records.get(&r)) else {
+                continue;
+            };
+            out.push(Composed {
+                logical_name_id: row.logical_name_id.clone(),
+                display: row.canonical_display_name.clone(),
+                // The page statement's group key, COALESCE(resource_id, record_resource_id).
+                group: row
+                    .resource_id
+                    .or(found.first().map(|record| record.record_resource_id)),
+                rows: address_record_rows(self.address, found, row, publication),
+                name: Some(name_row(row)),
+            });
+        }
+        Ok(out)
+    }
+
+    async fn group_members(
+        &self,
+        conn: &mut PgConnection,
+        chain_id: &str,
+        groups: &[Uuid],
+    ) -> Result<Vec<String>> {
+        names_reaching(conn, chain_id, groups, self.query.namespaces).await
+    }
+
+    async fn kept(
+        &self,
+        conn: &mut PgConnection,
+        rows: &Value,
+        names: &Value,
+    ) -> Result<Vec<String>> {
+        self.query.kept(conn, rows, names).await
+    }
+}
+
+/// The record rows of `resources` on `chain_id` that resolve to `address`, by resource; a
+/// resource with none has no entry.
+async fn load_record_rows(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    resources: &[Uuid],
+    address: &str,
+) -> Result<BTreeMap<Uuid, Vec<RecordRow>>> {
+    let inventories = load_family_record_inventories_on(
+        conn,
+        chain_id,
+        resources,
+        FamilyAttribution::Given(BTreeSet::new()),
+    )
+    .await?;
+    let mut records = BTreeMap::new();
+    for (resource_id, inventory) in inventories {
+        let found = record_rows(chain_id, &inventory, address);
+        if !found.is_empty() {
+            records.insert(resource_id, found);
+        }
+    }
+    Ok(records)
+}
+
+/// The composed `address_records_current` rows of `address` for every candidate name, and the
+/// composed name rows they read, as JSON record sets.
+async fn compose_address_record_rows(
+    conn: &mut PgConnection,
+    address: &str,
+    resources: &BTreeMap<String, Vec<Uuid>>,
+    by_chain: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<(Value, Value)> {
     let (mut rows, mut names) = (Vec::new(), Vec::new());
-    for (chain_id, resources) in by_chain {
-        // Resolve the requested name scope before a different chain's rebuild can veto it.
-        let mut ids = names_reaching(conn, &chain_id, &resources, namespaces).await?;
+    for (chain_id, ids) in by_chain {
         // Chunks in id order emit the rows in the order one composition of every id did.
-        ids.sort_unstable();
-        if ids.is_empty() {
-            continue;
-        }
-        let publication = servable_publication(conn, &chain_id).await?;
-        let mut records: BTreeMap<Uuid, Vec<RecordRow>> = BTreeMap::new();
-        let inventories = load_family_record_inventories_on(
-            conn,
-            &chain_id,
-            &resources,
-            FamilyAttribution::Given(BTreeSet::new()),
-        )
-        .await?;
-        for (resource_id, inventory) in inventories {
-            let found = record_rows(&chain_id, &inventory, &address);
-            if !found.is_empty() {
-                records.insert(resource_id, found);
-            }
-        }
+        let ids: Vec<String> = ids.iter().cloned().collect();
+        let publication = servable_publication(conn, chain_id).await?;
+        let records = load_record_rows(conn, chain_id, &resources[chain_id], address).await?;
         if records.is_empty() {
             continue;
         }
-        for chunk in ids.chunks(super::seams::compose_chunk()) {
+        for chunk in ids.chunks(seams::compose_chunk()) {
             let composed = compose_base_chunk(conn, chunk).await?;
             for row in composed.values() {
-                let Some(record_resource) = serves_records_through(row) else {
+                let Some(found) = serves_records_through(row).and_then(|r| records.get(&r)) else {
                     continue;
                 };
-                let Some(found) = records.get(&record_resource) else {
-                    continue;
-                };
-                let mut coin_types = BTreeSet::new();
-                for record in found {
-                    // DISTINCT ON (address, coin_type, logical_name_id).
-                    if coin_types.insert(record.coin_type.clone()) {
-                        rows.push(address_record_row(&address, record, row, &publication));
-                    }
-                }
+                rows.extend(address_record_rows(address, found, row, &publication));
                 names.push(name_row(row));
             }
         }
     }
     Ok((Value::Array(rows), Value::Array(names)))
+}
+
+/// A composed name's rows for the records its record resource holds, one per coin type.
+fn address_record_rows(
+    address: &str,
+    found: &[RecordRow],
+    row: &NameCurrentRow,
+    publication: &FamilyPublication,
+) -> Vec<Value> {
+    let mut coin_types = BTreeSet::new();
+    found
+        .iter()
+        // DISTINCT ON (address, coin_type, logical_name_id).
+        .filter(|record| coin_types.insert(record.coin_type.clone()))
+        .map(|record| address_record_row(address, record, row, publication))
+        .collect()
 }
 
 /// The resource a composed name serves records through: its serving resource, else the bound

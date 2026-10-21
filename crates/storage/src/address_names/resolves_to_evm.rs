@@ -92,7 +92,7 @@ pub async fn load_address_records_current_evm_page(
 
 /// The `coin_type=evm` page over `source`, on `conn`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn load_address_records_evm_page_from(
+pub(super) async fn load_address_records_evm_page_from(
     conn: &mut PgConnection,
     source: RowSource<'_>,
     address: &str,

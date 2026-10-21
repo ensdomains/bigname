@@ -709,7 +709,10 @@ Family indexes serve these concrete readers:
   key: the `name_surfaces` and `project_name_summary` primary keys, one probe per candidate,
   then a sort of that address's candidates only. Its closure read
   (`storage:families.records.address_name_walk_closure`) finds the names bound to the walked
-  resources through `project_binding_candidate_resource_idx`.
+  resources through `project_binding_candidate_resource_idx`. The `relation=resolves_to`
+  walk orders the names `storage:families.records.names_reaching_resources` returns for the
+  address's candidate resources the same way, and its closure reruns that statement for the
+  resources it reached.
 - Permission pages use `project_grant_subject_idx`, `project_grant_scope_idx`,
   `project_account_approval_subject_idx`, `project_registry_binding_observation_resource_idx`
   and `project_registry_binding_observation_owner_idx`. Their registry lookups also read

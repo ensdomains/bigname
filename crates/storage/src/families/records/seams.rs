@@ -16,6 +16,8 @@ mod scoped {
         static COMPOSED_NAME_BATCHES: Arc<Mutex<Vec<usize>>>;
         static EXACT_TOTAL_CAP: usize;
         static ADDRESS_NAME_PATHS: Arc<Mutex<Vec<&'static str>>>;
+        static WALK_FILTER_NAMES: Arc<Mutex<Vec<usize>>>;
+        static WALK_CREATED_AT_CLEARED: String;
         static LEGACY_WALK_BATCHES: ();
     }
 
@@ -63,8 +65,8 @@ mod scoped {
         LEGACY_WALK_BATCHES.try_with(|_| ()).is_ok()
     }
 
-    /// Runs `future` appending to `paths` how each capped address-names page was read:
-    /// `exact`, `walk`, or `fallback` when a walk gave way to the exact read.
+    /// Runs `future` appending to `paths` how each capped address-names or resolves-to page
+    /// was read: `exact`, `walk`, or `fallback` when a walk gave way to the exact read.
     pub async fn with_address_name_paths<F: Future>(
         paths: Arc<Mutex<Vec<&'static str>>>,
         future: F,
@@ -78,6 +80,38 @@ mod scoped {
                 paths.push(path);
             }
         });
+    }
+
+    /// Runs `future` appending to `names` how many names' rows each filter statement of an
+    /// address-names or resolves-to walk reads: its steps, its registration closure and its
+    /// read of every candidate.
+    pub async fn with_walk_filter_names<F: Future>(
+        names: Arc<Mutex<Vec<usize>>>,
+        future: F,
+    ) -> F::Output {
+        WALK_FILTER_NAMES.scope(names, future).await
+    }
+
+    pub(crate) fn note_walk_filter(names: usize) {
+        let _ = WALK_FILTER_NAMES.try_with(|filters| {
+            if let Ok(mut filters) = filters.lock() {
+                filters.push(names);
+            }
+        });
+    }
+
+    /// Runs `future` with a `sort=created_at` walk recording the name `logical_name_id` as first
+    /// observed at no time when it reads every candidate, as if its key disagreed with
+    /// composition: the walk must give way to the full read once it composes that name.
+    pub async fn with_walk_created_at_cleared<F: Future>(
+        logical_name_id: String,
+        future: F,
+    ) -> F::Output {
+        WALK_CREATED_AT_CLEARED.scope(logical_name_id, future).await
+    }
+
+    pub(crate) fn walk_created_at_cleared() -> Option<String> {
+        WALK_CREATED_AT_CLEARED.try_with(Clone::clone).ok()
     }
 
     /// Runs `future` with the address reads composing names `size` at a time instead of
@@ -150,19 +184,21 @@ mod scoped {
 /// composed rows rather than every name the address holds.
 const COMPOSE_CHUNK: usize = 256;
 
-/// The most candidate names an address-names page composes in full for an exact total
-/// without `include=total_count`; above it the page walks and its total is null.
+/// The most candidate names an address-names or resolves-to page composes in full; above it
+/// the page walks, and its total is null unless `include=total_count` asks for it.
 const EXACT_TOTAL_CAP: usize = 1_000;
 
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use scoped::{
-    compose_chunk, exact_total_cap, legacy_walk_batches, note_address_name_path,
+    compose_chunk, exact_total_cap, legacy_walk_batches, note_address_name_path, note_walk_filter,
+    walk_created_at_cleared,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use scoped::{
     lookup_work_timer, note_lookup_work, with_address_name_paths, with_compose_chunk,
     with_composed_name_batches, with_exact_total_cap, with_inventory_read_counter,
     with_legacy_walk_batches, with_lookup_work, with_role_read_counter,
+    with_walk_created_at_cleared, with_walk_filter_names,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub(super) use scoped::{note_composed_batch, note_inventory_read, note_role_read};
@@ -174,6 +210,14 @@ pub(crate) fn exact_total_cap() -> usize {
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(crate) fn note_address_name_path(_path: &'static str) {}
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) fn note_walk_filter(_names: usize) {}
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) fn walk_created_at_cleared() -> Option<String> {
+    None
+}
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(crate) fn legacy_walk_batches() -> bool {

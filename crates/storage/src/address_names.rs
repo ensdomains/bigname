@@ -28,13 +28,12 @@ pub use read::{
 pub use resolves_to::{
     AddressRecordCurrentEntry, AddressRecordsCurrentPage, ENSIP19_DEFAULT_ADDRESS_RECORD_KEY,
 };
-pub(crate) use resolves_to_evm::load_address_records_evm_page_from;
 pub use resolves_to_evm::{
     AddressRecordCoinMatch, AddressRecordEvmEntry, AddressRecordsCurrentEvmPage,
     EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT, load_address_records_current_evm_page,
 };
 pub use resolves_to_page::load_address_records_current_page;
-pub(crate) use resolves_to_page::load_address_records_page_from;
+pub(crate) use resolves_to_page::{AddressRecordsQuery, EvmCoinsPage, SingleCoinPage};
 pub(crate) use source::RowSource;
 pub use types::{
     AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation,
@@ -44,6 +43,10 @@ pub use types::{
     AddressNamesCurrentSortedPage, AddressNamesCurrentSummary, NameQuery, NameQueryMatch,
 };
 pub use walk::{AddressNamesPageRequest, load_family_address_names_capped_page};
+pub(crate) use walk::{
+    Composed, OrderRequest, WalkPage, WalkRequest, WalkSource, name_kinds, read_every_candidate,
+    walk, walk_order,
+};
 
 /// The publication half of the read filter: the row's target block is on readable lineage.
 macro_rules! publication_read_filter {

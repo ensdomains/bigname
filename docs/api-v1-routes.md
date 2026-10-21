@@ -3537,11 +3537,13 @@ introduces it rebuilds Project from full history before serving the option; see
   collection is small. Above the cap a page composes candidates in sort order,
   in growing batches, and stops once later candidates can no longer change it,
   so an ordinary page composes about as many names as it returns. A filter that
-  matches few names can still compose every candidate, and `sort=created_at`
-  always reads every candidate, because a name's first observation can be
-  dated by a registrar event bound to it only later. `include=total_count`
-  also reads every candidate; on an address with tens of thousands of names
-  these reads can reach the request deadline (`408 request_timeout`).
+  matches few names can still compose every candidate. `sort=created_at`
+  always composes every candidate first, a batch at a time, because a name's
+  first observation can be dated by a registrar event bound to it only later.
+  `include=total_count` does the same to count every group. The page itself
+  is then composed in sort order as above. On an address with tens of
+  thousands of names these reads can reach the request deadline
+  (`408 request_timeout`).
   The flag changes no row, order or cursor and does not bind cursors, so a
   client can request it on the first page only.
   `owner` also lists names with no token for their registry owner, such as
@@ -3735,6 +3737,13 @@ introduces it rebuilds Project from full history before serving the option; see
   `match`, `sort`, `order`, `dedupe`,
   and `include=role_summary` apply as for the authority relations;
   `include=total_count` returns `400 invalid_input`.
+  An address with more than 1,000 candidate names, the names that may serve
+  records through a resolver record holding the address, is paged as the
+  ownership relations page one above their cap: candidates are composed in
+  sort order, in growing batches, until later candidates can no longer change
+  the page. `sort=created_at` first composes every candidate a batch at a
+  time, so on an address with tens of thousands of such names it can reach the
+  request deadline (`408 request_timeout`).
 - Response shape: `data` is an array of record-shaped rows with `name`,
   `display_name`, `namespace`, `namehash`, `owner`, `manager`,
   `status`, `registered_at`, `created_at`, and `expires_at`.

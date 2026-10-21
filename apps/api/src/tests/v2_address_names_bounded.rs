@@ -62,6 +62,149 @@ async fn seed_bulk_names(
     owner: fn(usize) -> &'static str,
     aliases: &[(usize, usize)],
 ) -> Result<()> {
+    seed_bulk_names_with_records(database, count, owner, aliases, |_| BulkRecords::default()).await
+}
+
+/// What a bulk registration's resolver holds: `addr` writes in order on
+/// [`V2_RESOLVES_TO_RESOLVER`], which its registry pointer selects, and whether a later record
+/// version clears them, which the inverse address index still lists.
+#[derive(Default)]
+struct BulkRecords {
+    writes: Vec<(String, String)>,
+    cleared: bool,
+}
+
+/// A resolver event of a bulk registration's node on [`V2_RESOLVES_TO_RESOLVER`].
+fn bulk_resolver_event(
+    manifest: i64,
+    node: &str,
+    block: i64,
+    hash: &str,
+    kind: &str,
+    after: Value,
+) -> NormalizedEvent {
+    let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100;
+    let mut event = history_event(
+        &format!("bulk-resolver-{ordinal}"),
+        None,
+        None,
+        Some("ethereum-mainnet"),
+        Some(block),
+        Some(hash),
+        Some("0xrecords"),
+        Some(ordinal),
+        CanonicalityState::Canonical,
+    );
+    event.event_kind = kind.into();
+    event.source_family = "ens_v1_resolver_l1".into();
+    event.manifest_version = 1;
+    event.source_manifest_id = Some(manifest);
+    event.raw_fact_ref = json!({"kind":"raw_log", "emitting_address":V2_RESOLVES_TO_RESOLVER,
+        "transaction_index":0});
+    event.before_state = json!({});
+    let mut after = after;
+    after["node"] = json!(node);
+    after["resolver"] = json!(V2_RESOLVES_TO_RESOLVER);
+    event.after_state = after;
+    event
+}
+
+/// The names per block `BIGNAME_BULK_BLOCK_NAMES` asks for in the manual measurement. Without it
+/// every bulk name is created in one of five blocks and registered in one of four.
+fn bulk_block_names() -> Option<usize> {
+    std::env::var("BIGNAME_BULK_BLOCK_NAMES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|names| *names > 0)
+}
+
+/// The blocks bulk name `index` is created and registered in. With a block size, names are
+/// created in blocks 3000 on and registered in blocks 3500 on, one block per group of that
+/// many names, at times that rise with the block.
+fn bulk_blocks(index: usize) -> ((i64, String, String), (i64, String, String)) {
+    let Some(names) = bulk_block_names() else {
+        return (bulk_time(index % 5), bulk_time(5 + index % 4));
+    };
+    let group = index / names;
+    let at = |month: u32| format!("2023-{month:02}-01T{:02}:{:02}:00Z", group / 60, group % 60);
+    (
+        (
+            3000 + group as i64,
+            format!("0xbulk-created-{group}"),
+            at(1),
+        ),
+        (
+            3500 + group as i64,
+            format!("0xbulk-registered-{group}"),
+            at(6),
+        ),
+    )
+}
+
+/// The Ethereum blocks the bulk names of [`bulk_blocks`] use, below the head at 4000.
+fn bulk_lineage(count: usize) -> Result<Vec<(i64, String, String)>> {
+    let Some(names) = bulk_block_names() else {
+        return Ok((0..10).map(bulk_time).collect());
+    };
+    let groups = count.div_ceil(names);
+    anyhow::ensure!(
+        groups <= 500,
+        "{count} names need more than 500 blocks of {names}"
+    );
+    Ok((0..groups)
+        .flat_map(|group| {
+            let (created, registered) = bulk_blocks(group * names);
+            [created, registered]
+        })
+        .collect())
+}
+
+/// [`rebuild_fixture_families`] for the blocks of `BIGNAME_BULK_BLOCK_NAMES`, more than one run
+/// applies: later runs advance from the marker the rebuild reached, as the Project phase does.
+async fn rebuild_spread_bulk_families(pool: &PgPool) -> Result<()> {
+    use bigname_project::families::{FamilyMode, FamilyOptions, apply, input_token};
+
+    let target = bigname_project::Marker {
+        number: 4000,
+        hash: "0xbulk-head".to_owned(),
+    };
+    let options = FamilyOptions::new(bigname_content_hash::PROJECTION_CONTENT_HASH);
+    for run in 0..16 {
+        let mode = if run == 0 {
+            FamilyMode::Rebuild
+        } else {
+            FamilyMode::Normal
+        };
+        let token = input_token(pool, "ethereum-mainnet").await?;
+        let outcome = apply(pool, "ethereum-mainnet", &target, mode, &token, &options).await?;
+        if outcome.marker.as_ref().map(|marker| marker.number) == Some(target.number) {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            outcome.budget_exhausted,
+            "the bulk rebuild stopped short of 4000: {outcome:?}"
+        );
+    }
+    anyhow::bail!("the bulk rebuild did not reach 4000 in 16 runs")
+}
+
+/// Prints how long the bulk seed has run at `stage`, in the manual measurement only.
+fn bulk_seed_stage(started: std::time::Instant, stage: &str) {
+    if std::env::var("BIGNAME_BULK_NAMES").is_ok() {
+        println!("seed stage {stage}: {:?}", started.elapsed());
+    }
+}
+
+/// [`seed_bulk_names`] with each registration's resolver records `records(index)`, an alias
+/// reading its registration's.
+async fn seed_bulk_names_with_records(
+    database: &TestDatabase,
+    count: usize,
+    owner: fn(usize) -> &'static str,
+    aliases: &[(usize, usize)],
+    records: fn(usize) -> BulkRecords,
+) -> Result<()> {
+    let started = std::time::Instant::now();
     database
         .seed_snapshot_selector_chain_positions(&json!({"base":{
             "chain_id":"base-mainnet", "block_number":1, "block_hash":"0xcount-base-empty",
@@ -69,8 +212,8 @@ async fn seed_bulk_names(
         }}))
         .await?;
     rebuild_fixture_families(&database.pool, "base-mainnet", 1, "0xcount-base-empty").await?;
-    for index in 0..10 {
-        let (block, hash, at) = bulk_time(index);
+    bulk_seed_stage(started, "base chain rebuilt");
+    for (block, hash, at) in bulk_lineage(count)? {
         sqlx::query(
             "INSERT INTO chain_lineage
                 (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
@@ -84,12 +227,13 @@ async fn seed_bulk_names(
     }
     let (mut tokens, mut resources, mut surfaces, mut bindings, mut events) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut manifest = None;
     for index in 0..count {
         let name = format!("{}.eth", bulk_label(index));
         let normalized = bigname_domain::normalization::normalize_name(&name)?;
         let (logical, namehash) = phase_logical_identity("ens", &normalized.normalized_name)?;
-        let (created_block, created_hash, created_at) = bulk_time(index % 5);
-        let (registered_block, registered_hash, _) = bulk_time(5 + index % 4);
+        let ((created_block, created_hash, created_at), (registered_block, registered_hash, _)) =
+            bulk_blocks(index);
         let registration = aliases
             .iter()
             .find(|(_, second)| *second == index)
@@ -189,7 +333,56 @@ async fn seed_bulk_names(
                 after,
             ));
         }
+        let held = records(index);
+        if registration != index || held.writes.is_empty() {
+            continue;
+        }
+        if manifest.is_none() {
+            manifest = Some(
+                declare_family_fixture_resolver(
+                    &database.pool,
+                    "ens",
+                    "ethereum-mainnet",
+                    "ens_v1_resolver_l1",
+                    V2_RESOLVES_TO_RESOLVER,
+                )
+                .await?,
+            );
+        }
+        let manifest = manifest.context("the bulk resolver is declared")?;
+        events.push(address_fixture_event(
+            &format!("{event_key}-ResolverChanged"),
+            Some(&logical_event),
+            Some(resource),
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            registered_block,
+            &registered_hash,
+            NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100,
+            json!({"source_event":"NewResolver", "node":node, "resolver":V2_RESOLVES_TO_RESOLVER}),
+        ));
+        for (key, value) in &held.writes {
+            events.push(bulk_resolver_event(
+                manifest,
+                &node,
+                registered_block,
+                &registered_hash,
+                "RecordChanged",
+                family_fixture_record_write(key, Some(json!(value))),
+            ));
+        }
+        if held.cleared {
+            events.push(bulk_resolver_event(
+                manifest,
+                &node,
+                registered_block,
+                &registered_hash,
+                "RecordVersionChanged",
+                json!({"source_event":"VersionChanged", "record_version":index + 1}),
+            ));
+        }
     }
+    bulk_seed_stage(started, "rows built");
     for chunk in tokens.chunks(1000) {
         upsert_test_token_lineages(&database.pool, chunk).await?;
     }
@@ -218,20 +411,21 @@ async fn seed_bulk_names(
             "timestamp":"2024-05-31T18:26:47Z"
         }}))
         .await?;
-    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 4000, "0xbulk-head").await
+    if manifest.is_some() {
+        declare_resolves_to_default_address(database).await?;
+    }
+    bulk_seed_stage(started, "rows and events inserted");
+    if bulk_block_names().is_some() {
+        rebuild_spread_bulk_families(&database.pool).await?;
+    } else {
+        rebuild_fixture_families(&database.pool, "ethereum-mainnet", 4000, "0xbulk-head").await?;
+    }
+    bulk_seed_stage(started, "ethereum rebuilt");
+    Ok(())
 }
 
 async fn bulk_payload(database: &TestDatabase, uri: &str) -> Result<Value> {
     v2_address_names_payload_for_database(database, uri).await
-}
-
-/// How a capped page above the cap reads: `sort=created_at` has no stored key to walk by.
-fn capped_path(uri: &str) -> &'static str {
-    if uri.contains("sort=created_at") {
-        "full"
-    } else {
-        "walk"
-    }
 }
 
 /// The response helper compares role summaries with a second complete per-resource request.
@@ -347,12 +541,16 @@ async fn v2_address_names_compose_a_large_address_in_bounded_chunks() -> Result<
     assert_eq!(payload["page"]["has_more"], json!(true), "{payload}");
     assert!(batches.iter().sum::<usize>() <= 32, "{batches:?}");
 
-    // include=total_count asks for the exact read whatever the cap.
+    // include=total_count above the cap counts every candidate a chunk at a time, then walks.
     let exact = format!("{names}&include=total_count");
-    let (payload, paths) =
-        with_exact_total_cap(100, with_paths(bulk_payload(&database, &exact))).await;
-    assert_eq!(paths, ["exact"]);
+    let ((payload, paths), batches) = with_batches(with_exact_total_cap(
+        100,
+        with_paths(bulk_payload(&database, &exact)),
+    ))
+    .await;
+    assert_eq!(paths, ["walk"]);
     assert_eq!(payload?["page"]["total_count"], json!(600));
+    assert!(batches.iter().all(|batch| *batch <= 256), "{batches:?}");
     database.cleanup().await
 }
 
@@ -380,10 +578,7 @@ async fn v2_address_names_walk_and_chunks_serve_identical_pages() -> Result<()> 
                 )
                 .await;
                 let walked = walked?;
-                assert!(
-                    paths.iter().all(|path| *path == capped_path(&uri)),
-                    "{uri}: {paths:?}"
-                );
+                assert!(paths.iter().all(|path| *path == "walk"), "{uri}: {paths:?}");
                 assert_eq!(
                     exact.iter().map(page_body).collect::<Vec<_>>(),
                     walked.iter().map(page_body).collect::<Vec<_>>(),
@@ -534,10 +729,7 @@ async fn v2_address_names_rich_fixture_is_identical_across_paths() -> Result<()>
             let (walked, paths) =
                 with_paths(with_exact_total_cap(0, walk_all_pages(&database, &uri))).await;
             let walked = walked?;
-            assert!(
-                paths.iter().all(|path| *path == capped_path(&uri)),
-                "{uri}: {paths:?}"
-            );
+            assert!(paths.iter().all(|path| *path == "walk"), "{uri}: {paths:?}");
             assert_eq!(
                 exact.iter().map(page_body).collect::<Vec<_>>(),
                 walked.iter().map(page_body).collect::<Vec<_>>(),
@@ -793,10 +985,7 @@ async fn v2_address_names_walk_batch_policy_serves_identical_pages() -> Result<(
             let uri = format!("/v1/addresses/{BULK_ADDRESS}/names?page_size={page_size}&{query}");
             let pages = assert_step_sizes_change_no_page(&database, &uri).await?;
             assert_eq!(pages.len(), 65_usize.div_ceil(page_size), "{uri}");
-            assert!(
-                pages.iter().all(|page| page.paths == [capped_path(&uri)]),
-                "{uri}"
-            );
+            assert!(pages.iter().all(|page| page.paths == ["walk"]), "{uri}");
         }
     }
     for query in [
@@ -806,10 +995,7 @@ async fn v2_address_names_walk_batch_policy_serves_identical_pages() -> Result<(
     ] {
         let uri = format!("/v1/addresses/{BULK_ADDRESS}/names?page_size=3&{query}");
         let pages = assert_step_sizes_change_no_page(&database, &uri).await?;
-        assert!(
-            pages.iter().all(|page| page.paths == [capped_path(&uri)]),
-            "{uri}"
-        );
+        assert!(pages.iter().all(|page| page.paths == ["walk"]), "{uri}");
     }
     database.cleanup().await
 }
@@ -828,8 +1014,7 @@ async fn v2_address_names_fixtures_identical_across_batch_policies() -> Result<(
             assert!(
                 pages
                     .iter()
-                    .all(|page| page.paths
-                        == vec![capped_path(&uri); address_name_test_requests(&uri)]),
+                    .all(|page| page.paths == vec!["walk"; address_name_test_requests(&uri)]),
                 "{uri}"
             );
         }

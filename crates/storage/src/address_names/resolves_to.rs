@@ -132,6 +132,40 @@ pub(super) async fn load_sorted_entries(
     }))
 }
 
+/// The names among `source`'s rows with a row the page's filters keep, for one coin type or,
+/// with `coin_type` `None`, the EVM coin types. A name with none adds nothing to any group, so a
+/// walk can drop its rows (`families::records::resolves_to_serving`).
+pub(super) async fn load_address_records_filtered_ids_from(
+    conn: &mut PgConnection,
+    source: RowSource<'_>,
+    address: &str,
+    coin_type: Option<&str>,
+    namespaces: Option<&[String]>,
+    q: Option<NameQuery<'_>>,
+    authority: Option<&[&str]>,
+) -> Result<Vec<String>> {
+    let filter = AddressRecordsFilter {
+        address,
+        coins: coin_type.map_or(
+            AddressRecordsCoinSelector::Evm,
+            AddressRecordsCoinSelector::Single,
+        ),
+        namespaces,
+        dedupe_by: AddressNamesCurrentDedupe::Surface,
+        q,
+        authority,
+        source,
+    };
+    let mut builder = QueryBuilder::<Postgres>::new("");
+    push_entries_cte(&mut builder, &filter);
+    builder.push(" SELECT DISTINCT logical_name_id FROM filtered");
+    builder
+        .build_query_scalar()
+        .fetch_all(conn)
+        .await
+        .context("failed to filter the walked address-record rows")
+}
+
 /// The page statement: the filtered and grouped entries, the cursor predicate, order, and limit.
 pub(super) fn push_page_statement<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
