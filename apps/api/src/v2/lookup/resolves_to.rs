@@ -4,8 +4,8 @@
 //! These inputs page `address_records_current` (name order) instead of the authority relations,
 //! so they carry their own cursor binding. Every row still passes the reverse-lookup admission
 //! rules: the name row, its inventory, its primary claim, and the reverse-index row itself must
-//! be published at or before the served head, and the served generation is revalidated by the
-//! caller after every input has rendered.
+//! be published at or before the served head. With a served head every read here is on the
+//! request's read snapshot.
 
 use std::collections::BTreeMap;
 
@@ -16,7 +16,6 @@ use bigname_storage::{
 };
 use tracing::error;
 
-use crate::AppState;
 use crate::v2::{
     CursorPayload, Relation, RelationSet, V2Error, V2Result,
     address_names::{AddressNameResolution, address_name_resolution},
@@ -51,7 +50,7 @@ pub(super) fn is_resolves_to_input(input: &ParsedAddressLookup) -> bool {
 }
 
 pub(super) async fn render_resolves_to_lookup_results(
-    state: &AppState,
+    db: &mut bigname_storage::ReadDb<'_>,
     profile: LookupProfile,
     inputs: &[ParsedAddressLookup],
     served_head: Option<&ServedHead>,
@@ -62,7 +61,7 @@ pub(super) async fn render_resolves_to_lookup_results(
     for input in inputs.iter().filter(|input| is_resolves_to_input(input)) {
         let coin_type = input.coin_type.to_string();
         let page = bigname_storage::families::records::load_family_resolves_to_page(
-            &state.pool,
+            db.reborrow(),
             &input.address,
             &coin_type,
             Some(public_namespaces),
@@ -103,7 +102,7 @@ pub(super) async fn render_resolves_to_lookup_results(
             .map(|entry| entry.logical_name_id.clone())
             .collect::<Vec<_>>();
         let name_records =
-            bigname_storage::load_phase_identity_records_by_ids(&state.pool, &logical_name_ids)
+            bigname_storage::load_phase_identity_records_by_ids(db.reborrow(), &logical_name_ids)
                 .await
                 .map_err(crate::v2::snapshots::name_rows_error(
                     crate::v2::snapshots::SnapshotReadResource::Name,
@@ -121,7 +120,7 @@ pub(super) async fn render_resolves_to_lookup_results(
                 .map(|record| (record.row.logical_name_id.clone(), record))
                 .collect::<BTreeMap<_, _>>();
         let primary_names = load_reverse_identity_primary_snapshots(
-            &state.pool,
+            db.reborrow(),
             &input.address,
             &coin_type,
             public_namespaces,

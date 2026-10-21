@@ -4,17 +4,19 @@ use axum::{
     Json,
     extract::{State, rejection::JsonRejection},
 };
+use bigname_storage::ReadDb;
 use tracing::error;
 
 use super::support::{load_reverse_identity_records_live, load_reverse_identity_records_page_live};
 use crate::AppState;
 
-use super::{Authority, Envelope, NoQueryParams, Page, Status, V2Error, V2Result, encode};
+use super::{Envelope, NoQueryParams, Page, Status, V2Error, V2Result, encode};
 
 mod admission;
 mod build;
 mod cursor;
 mod dto;
+mod enrich;
 mod forward;
 pub(crate) mod head;
 #[cfg(test)]
@@ -111,11 +113,27 @@ pub(crate) async fn get_lookup(
         Some(scope) => load_served_head(&state.pool, scope).await?,
         None => None,
     };
+    // With a served head, every row and enrichment below is read on one snapshot that serves the
+    // captured publication, so a block published during the read cannot reach the batch.
+    let mut pinned = match served_head.as_ref() {
+        Some(served_head) => Some(served_head.pin(&state.pool).await?),
+        None => None,
+    };
+    let mut db = match pinned.as_mut() {
+        Some(reads) => ReadDb::from(&mut **reads),
+        None => ReadDb::from(&state.pool),
+    };
+    #[cfg(test)]
+    head::served_head_revalidation_test_hooks::run_at(
+        &mut db,
+        head::served_head_revalidation_test_hooks::Stage::MidRead,
+    )
+    .await?;
 
     let mut results = vec![None; body.inputs.len()];
     let selected_snapshot = served_head.as_ref().map(head::ServedHead::selected);
     render_name_lookup_results(
-        &state,
+        &mut db,
         profile,
         &name_inputs,
         selected_snapshot,
@@ -123,7 +141,7 @@ pub(crate) async fn get_lookup(
     )
     .await?;
     render_reverse_lookup_results(
-        &state,
+        &mut db,
         profile,
         &address_inputs,
         served_head.as_ref(),
@@ -134,23 +152,24 @@ pub(crate) async fn get_lookup(
         &mut results,
     )
     .await?;
-    apply_migrated_at(&state, &mut results).await?;
+    enrich::apply_migrated_at(db.reborrow(), &mut results).await?;
     if profile == LookupProfile::Detail
         && let Some(snapshot) = selected_snapshot
     {
-        tokens::apply(&state.pool, &mut results, snapshot).await?;
+        tokens::apply(db.reborrow(), &mut results, snapshot).await?;
     }
-    apply_record_abis(&state, &mut results).await?;
-    #[cfg(test)]
-    head::served_head_revalidation_test_hooks::run(&state.pool).await?;
-    // The expiries are a later read than the rows: when the served data moved in between, the
-    // revalidation's stale answer takes precedence over whatever this read then found.
-    let wrapper_expiries = apply_wrapper_expiries(&state, &mut results).await;
+    enrich::apply_record_abis(db.reborrow(), &mut results).await?;
+    enrich::apply_wrapper_expiries(db, &mut results).await?;
+    if let Some(reads) = pinned {
+        reads
+            .commit()
+            .await
+            .map_err(|_| V2Error::internal_error("failed to load lookup data"))?;
+    }
     revalidate_lookup_public_namespaces(&state, public_namespaces.as_ref()).await?;
     if let Some(served_head) = served_head.as_ref() {
         revalidate_served_head(&state.pool, served_head).await?;
     }
-    wrapper_expiries?;
     let data = results
         .into_iter()
         .map(|result| result.expect("every parsed lookup input must render a result"))
@@ -163,89 +182,8 @@ pub(crate) async fn get_lookup(
     }))
 }
 
-/// Fills `migrated_at` on every rendered record whose current authority is the ENSv2 arm, in one
-/// batch across name results and reverse rows.
-async fn apply_migrated_at(state: &AppState, results: &mut [Option<LookupResult>]) -> V2Result<()> {
-    let mut records = results
-        .iter_mut()
-        .flatten()
-        .flat_map(|result| {
-            result
-                .record
-                .iter_mut()
-                .chain(result.records.iter_mut().flatten())
-        })
-        .filter(|record| record.authority == Some(Authority::EnsV2))
-        .map(|record| {
-            // The served name can spell a label as its bracketed hash.
-            let logical_name_id =
-                crate::v2::support::route_logical_name_id(&record.namespace, &record.name);
-            (logical_name_id, record)
-        })
-        .collect::<Vec<_>>();
-    if records.is_empty() {
-        return Ok(());
-    }
-    let logical_name_ids = records
-        .iter()
-        .map(|(logical_name_id, _)| logical_name_id.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let migrated_at =
-        crate::v2::name_record::load_migrated_at(&state.pool, &logical_name_ids).await?;
-    for (logical_name_id, record) in &mut records {
-        record.migrated_at = migrated_at.get(logical_name_id).cloned();
-    }
-    Ok(())
-}
-
-/// Fills the ABI key list on every rendered `records` group, in one batched read across name
-/// results and reverse rows (`record_groups.rs`).
-async fn apply_record_abis(state: &AppState, results: &mut [Option<LookupResult>]) -> V2Result<()> {
-    let targets = results
-        .iter_mut()
-        .flatten()
-        .flat_map(|result| {
-            result
-                .record
-                .iter_mut()
-                .chain(result.records.iter_mut().flatten())
-        })
-        .filter_map(|record| {
-            let source = record.abi_source.as_ref();
-            record.records.as_mut().map(|groups| (groups, source))
-        })
-        .collect::<Vec<_>>();
-    if targets.is_empty() {
-        return Ok(());
-    }
-    crate::v2::record_groups::fill_abi_content_types(&state.pool, targets).await
-}
-
-/// Reads the wrapper expiry of every rendered `ens_v1` once per chain across name results and
-/// reverse rows.
-async fn apply_wrapper_expiries(
-    state: &AppState,
-    results: &mut [Option<LookupResult>],
-) -> V2Result<()> {
-    let mut objects = Vec::new();
-    for result in results.iter_mut().flatten() {
-        for record in result
-            .record
-            .iter_mut()
-            .chain(result.records.iter_mut().flatten())
-        {
-            if let Some(ens_v1) = record.ens_v1.as_mut() {
-                objects.push(ens_v1);
-            }
-        }
-    }
-    crate::v2::name_record::fill_wrapper_expiries(&state.pool, objects).await
-}
-
 async fn render_reverse_lookup_results(
-    state: &AppState,
+    db: &mut ReadDb<'_>,
     profile: LookupProfile,
     inputs: &[ParsedAddressLookup],
     served_head: Option<&head::ServedHead>,
@@ -253,7 +191,7 @@ async fn render_reverse_lookup_results(
     results: &mut [Option<LookupResult>],
 ) -> V2Result<()> {
     render_storage_exact_reverse_lookup_results(
-        state,
+        db,
         profile,
         inputs,
         served_head,
@@ -262,7 +200,7 @@ async fn render_reverse_lookup_results(
     )
     .await?;
     resolves_to::render_resolves_to_lookup_results(
-        state,
+        db,
         profile,
         inputs,
         served_head,
@@ -275,7 +213,7 @@ async fn render_reverse_lookup_results(
         .filter(|input| requires_relation_post_filter(input.relation.as_ref()))
     {
         let page =
-            load_exact_relation_reverse_page(state, profile, input, served_head, public_namespaces)
+            load_exact_relation_reverse_page(db, profile, input, served_head, public_namespaces)
                 .await?;
         render_reverse_input_result(profile, input, page, results)?;
     }
@@ -283,7 +221,7 @@ async fn render_reverse_lookup_results(
 }
 
 async fn render_storage_exact_reverse_lookup_results(
-    state: &AppState,
+    db: &mut ReadDb<'_>,
     profile: LookupProfile,
     inputs: &[ParsedAddressLookup],
     served_head: Option<&head::ServedHead>,
@@ -300,7 +238,7 @@ async fn render_storage_exact_reverse_lookup_results(
         .collect::<Vec<_>>();
     let storage_inputs = deduped_reverse_storage_inputs(storage_exact_inputs.iter().copied());
     let groups = load_reverse_identity_records_live(
-        &state.pool,
+        db.reborrow(),
         &storage_inputs,
         public_namespaces,
         selected_snapshot,
@@ -364,7 +302,7 @@ async fn render_storage_exact_reverse_lookup_results(
 }
 
 async fn load_exact_relation_reverse_page(
-    state: &AppState,
+    db: &mut ReadDb<'_>,
     profile: LookupProfile,
     input: &ParsedAddressLookup,
     served_head: Option<&head::ServedHead>,
@@ -390,7 +328,7 @@ async fn load_exact_relation_reverse_page(
             cursor: cursor.clone(),
         };
         let mut groups = load_reverse_identity_records_page_live(
-            &state.pool,
+            db.reborrow(),
             std::slice::from_ref(&storage_input),
             public_namespaces,
             selected_snapshot,
@@ -452,7 +390,6 @@ async fn load_exact_relation_reverse_page(
         if cursor.is_none() {
             break;
         }
-        super::support::prepare_reverse_identity_additional_scan(&state.pool, served_head).await?;
     }
 
     let binding = LookupReverseCursorBinding {

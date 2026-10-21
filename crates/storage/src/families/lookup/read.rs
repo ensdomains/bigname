@@ -11,7 +11,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
-use sqlx::{PgConnection, PgPool, Row};
+use sqlx::{PgConnection, Row};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
@@ -57,15 +57,15 @@ pub async fn ensure_publications(
 }
 
 pub async fn load_lookup_records(
-    pool: &PgPool,
+    db: impl Into<crate::ReadDb<'_>>,
     ids: &[String],
     include_inventory: bool,
     chains: Option<&[String]>,
 ) -> Result<Vec<IdentityNameRecordRow>> {
-    let mut snapshot = crate::families::read_snapshot(pool).await?;
+    let mut snapshot = db.into().snapshot().await?;
     let publications = ensure_publications(&mut snapshot, chains).await?;
     let rows = load_at(&mut snapshot, ids, include_inventory, &publications).await?;
-    snapshot.commit().await?;
+    snapshot.close().await?;
     Ok(rows)
 }
 

@@ -354,14 +354,22 @@ async fn v2_ens_v1_wrapper_expiry_classifies_the_maximum_and_zero() -> Result<()
     Ok(())
 }
 
-/// Lookup reads the wrapper expiries after its rows. When Project undoes the wrapping in between,
-/// the wrapper's stored row is gone by then; the lookup answers stale, as for any served data
-/// that moved under it, not an internal error.
+/// Lookup reads its rows and the wrapper expiries on one snapshot. When Project undoes the
+/// wrapping after that snapshot began, both reads still see the wrapped name: the batch is the
+/// answer a request a moment earlier got.
 #[tokio::test]
-async fn v2_lookup_answers_stale_when_the_wrapper_is_undone_before_its_expiry_is_read() -> Result<()>
-{
+async fn v2_lookup_serves_the_captured_wrapper_when_it_is_undone_before_its_expiry_is_read()
+-> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_alice_wrapped_reserved_on_an_admitted_chain(&database).await?;
+    let request = json!({"profile": "feed", "inputs": [{"name": "alice.eth"}]});
+    let baseline = v2_lookup_json(&database, request.clone()).await?;
+    assert!(
+        baseline["data"][0]["record"]["ens_v1"]
+            .get("wrapper_expires_at")
+            .is_some(),
+        "{baseline:#}"
+    );
     let (_guard, control) =
         crate::v2::lookup_served_head_revalidation_test_hooks::install(&database.lookup_pool)
             .await?;
@@ -374,9 +382,7 @@ async fn v2_lookup_answers_stale_when_the_wrapper_is_undone_before_its_expiry_is
                     .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::to_vec(&json!({"profile": "feed",
-                            "inputs": [{"name": "alice.eth"}]}))
-                        .expect("body must serialize"),
+                        serde_json::to_vec(&request).expect("body must serialize"),
                     ))
                     .expect("request must build"),
             )
@@ -399,8 +405,8 @@ async fn v2_lookup_answers_stale_when_the_wrapper_is_undone_before_its_expiry_is
         .context("lookup request failed")?;
     let status = response.status();
     let payload: Value = read_json(response).await?;
-    assert_eq!(status, StatusCode::CONFLICT, "{payload:#}");
-    assert_eq!(payload["error"]["code"], json!("stale"), "{payload:#}");
+    assert_eq!(status, StatusCode::OK, "{payload:#}");
+    assert_eq!(payload, baseline);
     database.cleanup().await
 }
 

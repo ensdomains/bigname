@@ -1,9 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use bigname_storage::SelectedSnapshot;
+use bigname_storage::{ReadDb, SelectedSnapshot};
 use tracing::error;
 
-use crate::AppState;
 use crate::v2::{
     Status, V2Error, V2Result, load_subregistry_refs, registries::snapshot_block_for_chain,
 };
@@ -17,7 +16,7 @@ use super::{
 };
 
 pub(super) async fn render_name_lookup_results(
-    state: &AppState,
+    db: &mut ReadDb<'_>,
     profile: LookupProfile,
     inputs: &[ParsedNameLookup],
     selected_snapshot: Option<&SelectedSnapshot>,
@@ -34,7 +33,8 @@ pub(super) async fn render_name_lookup_results(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let records = load_name_records(state, profile, &logical_name_ids, selected_snapshot).await?;
+    let records =
+        load_name_records(db.reborrow(), profile, &logical_name_ids, selected_snapshot).await?;
     let mut names_by_block = BTreeMap::<i64, Vec<String>>::new();
     if let Some(selected) = selected_snapshot {
         for (logical_name_id, record) in &records {
@@ -53,7 +53,7 @@ pub(super) async fn render_name_lookup_results(
     }
     let mut subregistries = BTreeMap::new();
     for (block, names) in names_by_block {
-        subregistries.extend(load_subregistry_refs(&state.pool, &names, Some(block)).await?);
+        subregistries.extend(load_subregistry_refs(db.reborrow(), &names, Some(block)).await?);
     }
 
     for input in inputs {
@@ -89,7 +89,7 @@ pub(super) async fn render_name_lookup_results(
 }
 
 async fn load_name_records(
-    state: &AppState,
+    db: ReadDb<'_>,
     profile: LookupProfile,
     logical_name_ids: &[String],
     selected_snapshot: Option<&SelectedSnapshot>,
@@ -102,7 +102,7 @@ async fn load_name_records(
             .map(|position| position.chain_id.clone())
             .collect();
         bigname_storage::families::lookup::load_lookup_records(
-            &state.pool,
+            db,
             logical_name_ids,
             matches!(profile, LookupProfile::Detail),
             Some(&chains),
@@ -111,15 +111,11 @@ async fn load_name_records(
     } else {
         match profile {
             LookupProfile::Feed => {
-                bigname_storage::load_phase_identity_name_feed_records_by_ids(
-                    &state.pool,
-                    logical_name_ids,
-                )
-                .await
+                bigname_storage::load_phase_identity_name_feed_records_by_ids(db, logical_name_ids)
+                    .await
             }
             LookupProfile::Detail => {
-                bigname_storage::load_phase_identity_records_by_ids(&state.pool, logical_name_ids)
-                    .await
+                bigname_storage::load_phase_identity_records_by_ids(db, logical_name_ids).await
             }
         }
     }

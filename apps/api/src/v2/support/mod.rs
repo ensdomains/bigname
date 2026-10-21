@@ -55,9 +55,23 @@ pub(crate) use records::*;
 pub(crate) use resolution_lookup::*;
 pub(crate) use resolution_verified::*;
 #[cfg(test)]
-pub(crate) use reverse_identity::relation_page_test_hooks as identity_facade_relation_page_test_hooks;
-#[cfg(test)]
 pub(crate) use reverse_identity::test_hooks as identity_facade_count_test_hooks;
 pub(crate) use reverse_identity::*;
 pub(crate) use snapshot_disclosure::*;
 pub(crate) use snapshots::*;
+
+/// The test database a hook is keyed by, read on `db` so a hook inside a request's read
+/// snapshot takes no second connection.
+#[cfg(test)]
+pub(crate) async fn test_database_on(db: &mut bigname_storage::ReadDb<'_>) -> Result<String> {
+    match db {
+        bigname_storage::ReadDb::Pool(pool) => {
+            bigname_test_support::current_test_database(pool).await
+        }
+        bigname_storage::ReadDb::Snapshot(conn) => {
+            Ok(sqlx::query_scalar("SELECT current_database()")
+                .fetch_one(&mut **conn)
+                .await?)
+        }
+    }
+}

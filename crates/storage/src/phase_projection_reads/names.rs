@@ -6,21 +6,21 @@ use sqlx::PgPool;
 use crate::{IdentityNameRecordRow, NameCurrentRow};
 
 pub async fn load_phase_identity_records_by_ids(
-    pool: &PgPool,
+    db: impl Into<crate::ReadDb<'_>>,
     logical_name_ids: &[String],
 ) -> Result<Vec<IdentityNameRecordRow>> {
-    load_phase_identity_records(pool, logical_name_ids, true).await
+    load_phase_identity_records(db.into(), logical_name_ids, true).await
 }
 
 pub async fn load_phase_identity_name_feed_records_by_ids(
-    pool: &PgPool,
+    db: impl Into<crate::ReadDb<'_>>,
     logical_name_ids: &[String],
 ) -> Result<Vec<IdentityNameRecordRow>> {
-    load_phase_identity_records(pool, logical_name_ids, false).await
+    load_phase_identity_records(db.into(), logical_name_ids, false).await
 }
 
 async fn load_phase_identity_records(
-    pool: &PgPool,
+    db: crate::ReadDb<'_>,
     logical_name_ids: &[String],
     include_inventory: bool,
 ) -> Result<Vec<IdentityNameRecordRow>> {
@@ -29,7 +29,7 @@ async fn load_phase_identity_records(
         return Ok(Vec::new());
     }
 
-    super::family_identity::load(pool, &requested, include_inventory).await
+    super::family_identity::load(db, &requested, include_inventory).await
 }
 
 pub async fn load_phase_name_current_rows_by_ids(

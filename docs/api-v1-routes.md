@@ -328,8 +328,8 @@ collection route carry neither header.
 | 200 | object LookupResponse | none | none | The requested answer, including the empty or in-band outcomes documented below. |
 | 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
 | 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
-| 409 | object ErrorEnvelope | `conflict` | none | The explicit snapshot selector cannot form a canonical snapshot or, for lookup, its selected positions cannot be combined. |
-| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 409 | object ErrorEnvelope | `conflict` | none | The explicit snapshot selector cannot form a canonical snapshot, the selected positions cannot be combined, or the active public namespace manifests changed during the read. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, an Interpret redo began during the read, or the publication moved before the read snapshot began ("served publication changed before the lookup read began"). |
 | 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
 | 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
 
@@ -530,14 +530,20 @@ collection route carry neither header.
   incomplete even while Project still reports its prior completed head. Because
   projection publication is incremental, an unchanged
   row target may precede the selected head; it may not be ahead, and a
-  same-height target must match the selected hash. Lookup revalidates both
-  `chain_heads` and that generation after the read. Before that check, public
-  reverse lookup also reloads the active manifest declarations and Interpret
-  redo state captured during namespace derivation. An active manifest
-  declaration change returns `409 conflict`. A redo that begins mid-request, an
-  invalid target, phase lag, readiness change, or other mid-request
-  head/projection change returns the existing retryable `409 stale`, never a
-  partial page. For a bare public reverse request, the request scope contains
+  same-height target must match the selected hash. A batch with a
+  [served head](glossary.md#served-head) is read on one database snapshot
+  that first confirms it still serves the selected position and that
+  generation. After the read, public reverse lookup
+  reloads the active manifest declarations captured during namespace
+  derivation, and every such batch reloads the Interpret redo state of the
+  selected chains. An active manifest declaration change returns
+  `409 conflict`. A redo that begins mid-request, an invalid target, phase lag
+  at capture, or a publication that moved before the snapshot began returns the
+  retryable `409 stale`, never a partial page. A publication that moved, or a redo that began, before
+  the snapshot carries the message "served publication changed before the
+  lookup read began". A head or publication change
+  after the snapshot began is not a refusal: the batch reports the captured
+  position. For a bare public reverse request, the request scope contains
   the chains of every public namespace such a request covers (see
   [Parameters](api-v1.md#parameters)) even when the readable namespace set
   excludes one of them. Readable chains appear in `meta.as_of`; an excluded
