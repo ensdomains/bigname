@@ -106,14 +106,7 @@ async fn assert_refused(
 }
 
 async fn lookup_batch(database: &TestDatabase) -> Result<Value> {
-    let (status, body) = lookup(
-        database,
-        json!({"profile": "feed", "inputs": [
-            {"name": NAME},
-            {"address": OWNER, "relation": "any"},
-        ]}),
-    )
-    .await?;
+    let (status, body) = lookup(database, lookup_batch_body()).await?;
     assert_eq!(status, StatusCode::OK, "{body:#}");
     Ok(body)
 }
@@ -419,5 +412,107 @@ async fn a_redo_mid_read_on_the_withheld_chain_is_not_a_refusal() -> Result<()> 
     .await?;
     assert_eq!(status, StatusCode::OK, "{search:#}");
     assert_eq!(search, baseline);
+    database.cleanup().await
+}
+
+fn lookup_batch_body() -> Value {
+    json!({"profile": "feed", "inputs": [
+        {"name": NAME},
+        {"address": OWNER, "relation": "any"},
+    ]})
+}
+
+/// The lookup batch with Base withheld, before anything moves.
+async fn withheld_lookup_baseline(database: &TestDatabase) -> Result<Value> {
+    let batch = lookup_batch(database).await?;
+    assert_eq!(keys(&batch, "as_of"), ["1"], "{batch:#}");
+    assert_eq!(keys(&batch, "as_of_completeness"), ["8453"], "{batch:#}");
+    Ok(batch)
+}
+
+async fn withheld_lookup_mid_read<Fut>(
+    database: &TestDatabase,
+    inject: impl FnOnce() -> Fut,
+) -> Result<(StatusCode, Value)>
+where
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    lookup_with_mid_read(
+        database,
+        public_search_state(database),
+        crate::v2::lookup_served_head_revalidation_test_hooks::Stage::MidRead,
+        lookup_batch_body(),
+        inject,
+    )
+    .await
+}
+
+/// A block Ethereum publishes during the batch never refuses it. The batch reports the
+/// publication its snapshot read and still discloses Base, and the next request the new block.
+#[tokio::test]
+async fn a_block_mid_read_keeps_the_withheld_lookup_namespace_disclosed() -> Result<()> {
+    let database = mainnet().await?;
+    follow_base(&database).await?;
+    let baseline = withheld_lookup_baseline(&database).await?;
+    let block = baseline["meta"]["as_of"]["1"]["block_number"]
+        .as_i64()
+        .context("served block number")?
+        + 1;
+    let hash = format!("0xfollowed-ethereum-{block}");
+    let (status, batch) = withheld_lookup_mid_read(&database, || async {
+        database
+            .seed_snapshot_selector_chain_positions(&json!({"ethereum": {
+                "chain_id": "ethereum-mainnet", "block_number": block, "block_hash": hash,
+                "timestamp": "2023-11-14T22:15:00Z"
+            }}))
+            .await?;
+        rebuild_fixture_families(&database.pool, "ethereum-mainnet", block, &hash).await
+    })
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{batch:#}");
+    assert_eq!(batch, baseline);
+    let later = lookup_batch(&database).await?;
+    assert_eq!(
+        later["meta"]["as_of"]["1"]["block_number"],
+        json!(block),
+        "{later:#}"
+    );
+    database.cleanup().await
+}
+
+/// An Interpret redo that begins on the served chain during the batch is a retryable stale.
+#[tokio::test]
+async fn a_redo_mid_read_on_the_served_chain_refuses_the_lookup() -> Result<()> {
+    let database = mainnet().await?;
+    follow_base(&database).await?;
+    withheld_lookup_baseline(&database).await?;
+    let (status, batch) = withheld_lookup_mid_read(&database, || {
+        database.simulate_interpret_redo_begin("ethereum-mainnet", "redo")
+    })
+    .await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{batch:#}");
+    assert_search_error(batch, "stale", INTERPRET_REDO_STALE);
+    database.cleanup().await
+}
+
+/// A redo on the withheld chain is not a refusal: the batch selected none of its positions. Base
+/// is published and then unservable, so it has the indexed range a redo needs.
+#[tokio::test]
+async fn a_redo_mid_read_on_the_withheld_chain_does_not_refuse_the_lookup() -> Result<()> {
+    let database = mainnet().await?;
+    publish_base(&database).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.project_family_marker SET state = 'bootstrap_pending'
+         WHERE chain_id = 'base-mainnet'",
+    )
+    .execute(&database.pool)
+    .await?;
+    let baseline = withheld_lookup_baseline(&database).await?;
+    let (status, batch) = withheld_lookup_mid_read(&database, || {
+        database.simulate_interpret_redo_begin(BASE, "redo")
+    })
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{batch:#}");
+    assert_eq!(batch, baseline);
     database.cleanup().await
 }

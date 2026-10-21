@@ -2,24 +2,23 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 use bigname_storage::{
-    IdentityPrimaryNameSnapshot, ReverseIdentityGroup, ReverseIdentityStorageInput,
+    IdentityPrimaryNameSnapshot, ReadDb, ReverseIdentityGroup, ReverseIdentityStorageInput,
 };
-use sqlx::PgPool;
 
 #[cfg(test)]
 mod hooks;
 #[cfg(test)]
-pub(crate) use hooks::{relation_page_test_hooks, test_hooks};
+pub(crate) use hooks::test_hooks;
 
 pub(crate) async fn load_reverse_identity_records_live(
-    pool: &PgPool,
+    db: impl Into<ReadDb<'_>>,
     inputs: &[ReverseIdentityStorageInput],
     public_namespaces: &[String],
     selected: Option<&bigname_storage::SelectedSnapshot>,
     include_inventory: bool,
 ) -> Result<Vec<ReverseIdentityGroup>> {
     load_reverse_identity_records_live_with_count_mode(
-        pool,
+        db.into(),
         inputs,
         public_namespaces,
         selected,
@@ -30,16 +29,14 @@ pub(crate) async fn load_reverse_identity_records_live(
 }
 
 pub(crate) async fn load_reverse_identity_records_page_live(
-    pool: &PgPool,
+    db: impl Into<ReadDb<'_>>,
     inputs: &[ReverseIdentityStorageInput],
     public_namespaces: &[String],
     selected: Option<&bigname_storage::SelectedSnapshot>,
     include_inventory: bool,
 ) -> Result<Vec<ReverseIdentityGroup>> {
-    #[cfg(test)]
-    relation_page_test_hooks::record_page_load(pool).await?;
     load_reverse_identity_records_live_with_count_mode(
-        pool,
+        db.into(),
         inputs,
         public_namespaces,
         selected,
@@ -53,7 +50,7 @@ pub(crate) async fn load_reverse_identity_records_page_live(
 /// Shares the single primary-name read of the reverse page loader so `relation=resolves_to`
 /// computes `is_primary` from the same claim and snapshot rules as the authority relations.
 pub(crate) async fn load_reverse_identity_primary_snapshots(
-    pool: &PgPool,
+    db: impl Into<ReadDb<'_>>,
     address: &str,
     coin_type: &str,
     public_namespaces: &[String],
@@ -68,27 +65,13 @@ pub(crate) async fn load_reverse_identity_primary_snapshots(
             .collect::<Vec<_>>()
     });
     return bigname_storage::families::records::load_family_reverse_primary_snapshots(
-        pool,
+        db,
         address,
         coin_type,
         public_namespaces,
         chains.as_deref(),
     )
     .await;
-}
-
-pub(crate) async fn prepare_reverse_identity_additional_scan(
-    pool: &PgPool,
-    served_head: Option<&crate::v2::lookup::head::ServedHead>,
-) -> crate::v2::V2Result<()> {
-    #[cfg(test)]
-    relation_page_test_hooks::pause_before_additional_scan(pool)
-        .await
-        .map_err(|_| crate::v2::V2Error::internal_error("failed to run reverse-page test hook"))?;
-    if let Some(served_head) = served_head {
-        crate::v2::lookup::head::revalidate_served_head(pool, served_head).await?;
-    }
-    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -98,7 +81,7 @@ enum ReverseCountMode {
 }
 
 async fn load_reverse_identity_records_live_with_count_mode(
-    pool: &PgPool,
+    #[allow(unused_mut)] mut db: ReadDb<'_>,
     inputs: &[ReverseIdentityStorageInput],
     public_namespaces: &[String],
     selected: Option<&bigname_storage::SelectedSnapshot>,
@@ -119,10 +102,10 @@ async fn load_reverse_identity_records_live_with_count_mode(
     });
     #[cfg(test)]
     if matches!(count_mode, ReverseCountMode::Include) {
-        test_hooks::record(pool).await?;
+        test_hooks::record(&mut db).await?;
     }
     return bigname_storage::families::records::load_family_reverse_identity_groups(
-        pool,
+        db,
         inputs,
         public_namespaces,
         chains.as_deref(),

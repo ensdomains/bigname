@@ -168,10 +168,10 @@ fn event_ids(value: Option<&Value>) -> Option<Vec<i64>> {
 /// Resolve ABI content types using each inventory's captured classification and one batched
 /// read of the referenced events, whatever the row count.
 pub async fn load_record_inventory_abi_content_types(
-    pool: &PgPool,
+    db: impl Into<crate::ReadDb<'_>>,
     inputs: &[AbiContentTypesInput<'_>],
 ) -> Result<Vec<AbiContentTypes>> {
-    load_abi_content_types(pool, inputs).await
+    load_abi_content_types(db.into(), inputs).await
 }
 
 /// Alias for [`load_record_inventory_abi_content_types`] for family inventory callers.
@@ -179,11 +179,11 @@ pub async fn load_family_record_inventory_abi_content_types(
     pool: &PgPool,
     inputs: &[AbiContentTypesInput<'_>],
 ) -> Result<Vec<AbiContentTypes>> {
-    load_abi_content_types(pool, inputs).await
+    load_abi_content_types(pool.into(), inputs).await
 }
 
 async fn load_abi_content_types(
-    pool: &PgPool,
+    db: crate::ReadDb<'_>,
     inputs: &[AbiContentTypesInput<'_>],
 ) -> Result<Vec<AbiContentTypes>> {
     let plans = inputs.iter().map(plan).collect::<Vec<_>>();
@@ -256,7 +256,7 @@ async fn load_abi_content_types(
         .iter()
         .flat_map(|(_, scope, ids, _)| ids.iter().map(move |id| (*id, scope.clone())))
         .collect::<BTreeSet<_>>();
-    let evidence = load_evidence(pool, &requested).await?;
+    let evidence = load_evidence(db, &requested).await?;
     for (index, scope, ids, link_ids) in pending {
         answers[index] = Some(content_types_from_evidence(
             &ids, &link_ids, &scope, &evidence,
@@ -356,12 +356,13 @@ const ABI_EVIDENCE_QUERY: &str = r#"
 "#;
 
 async fn load_evidence(
-    pool: &PgPool,
+    db: crate::ReadDb<'_>,
     requested: &BTreeSet<(i64, EventScope)>,
 ) -> Result<BTreeMap<(i64, EventScope), Evidence>> {
     if requested.is_empty() {
         return Ok(BTreeMap::new());
     }
+    let mut conn = db.acquire().await?;
     let mut ids = Vec::with_capacity(requested.len());
     let mut chain_ids = Vec::with_capacity(requested.len());
     let mut max_blocks = Vec::with_capacity(requested.len());
@@ -374,7 +375,7 @@ async fn load_evidence(
         .bind(ids)
         .bind(chain_ids)
         .bind(max_blocks)
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await
         .context("failed to load selected ABI writes")?;
     // Every requested id is retained non-ABI evidence unless the read reports otherwise.

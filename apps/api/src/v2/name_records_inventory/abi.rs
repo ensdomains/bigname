@@ -60,7 +60,7 @@ pub(crate) async fn fill_records_route_abi_content_types(
             {
                 // Admission uses the classification captured with this inventory.
                 #[cfg(test)]
-                abi_content_types_test_hooks::record(pool, 1).await;
+                abi_content_types_test_hooks::record(&mut pool.into(), 1).await;
                 bigname_storage::load_family_record_inventory_abi_content_types(pool, &[input])
                     .await
                     .map_err(|load_error| {
@@ -83,15 +83,17 @@ pub(crate) async fn fill_records_route_abi_content_types(
 
 /// One read for every container in the request, answered in input order.
 pub(crate) async fn load_abi_content_types(
-    pool: &PgPool,
+    db: impl Into<bigname_storage::ReadDb<'_>>,
     inputs: &[AbiContentTypesInput<'_>],
 ) -> V2Result<Vec<AbiContentTypes>> {
     if inputs.is_empty() {
         return Ok(Vec::new());
     }
+    #[allow(unused_mut)]
+    let mut db = db.into();
     #[cfg(test)]
-    abi_content_types_test_hooks::record(pool, inputs.len()).await;
-    bigname_storage::load_record_inventory_abi_content_types(pool, inputs)
+    abi_content_types_test_hooks::record(&mut db, inputs.len()).await;
+    bigname_storage::load_record_inventory_abi_content_types(db, inputs)
         .await
         .map_err(|load_error| {
             error!(
@@ -153,8 +155,8 @@ pub(crate) mod abi_content_types_test_hooks {
         Ok((guard, calls))
     }
 
-    pub(super) async fn record(pool: &PgPool, inputs: usize) {
-        let Ok(database) = current_test_database(pool).await else {
+    pub(super) async fn record(db: &mut bigname_storage::ReadDb<'_>, inputs: usize) {
+        let Ok(database) = crate::v2::support::test_database_on(db).await else {
             return;
         };
         if let Some(calls) = HOOKS.get_cloned(&database) {

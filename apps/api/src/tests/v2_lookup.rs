@@ -1003,8 +1003,10 @@ async fn v2_lookup_paginates_normalizable_phase_primary_claim() -> Result<()> {
     database.cleanup().await
 }
 
+/// A reorg during the read does not refuse the batch. It is served at the captured block, the
+/// answer a request a moment earlier got.
 #[tokio::test]
-async fn v2_lookup_rejects_head_reorg_before_project_republication() -> Result<()> {
+async fn v2_lookup_serves_the_captured_publication_when_the_head_reorgs_mid_read() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_identity_name(
         &database,
@@ -1047,6 +1049,10 @@ async fn v2_lookup_rejects_head_reorg_before_project_republication() -> Result<(
     )
     .execute(&database.lookup_pool)
     .await?;
+    let request = json!({"inputs": [{"id": "reorg", "name": "reorg.eth"}]});
+    // The served publication trails the canonical block 39 within the lag tolerance.
+    let baseline = v2_lookup_json(&database, request.clone()).await?;
+    assert_eq!(baseline["data"][0]["status"], json!("ok"), "{baseline:#}");
     let (_guard, control) =
         crate::v2::lookup_served_head_revalidation_test_hooks::install(&database.lookup_pool)
             .await?;
@@ -1059,10 +1065,7 @@ async fn v2_lookup_rejects_head_reorg_before_project_republication() -> Result<(
                     .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::to_vec(&json!({
-                            "inputs": [{"id": "reorg", "name": "reorg.eth"}]
-                        }))
-                        .expect("body must serialize"),
+                        serde_json::to_vec(&request).expect("body must serialize"),
                     ))
                     .expect("request must build"),
             )
@@ -1071,7 +1074,7 @@ async fn v2_lookup_rejects_head_reorg_before_project_republication() -> Result<(
 
     control.wait_until_reached().await;
     // A reorg replaces the served block 39 and extends the new fork to 40. The head moves on
-    // before Project republishes, so the served publication is no longer on the readable path.
+    // before Project republishes, so the captured publication leaves the readable path.
     sqlx::query(
         "INSERT INTO bigname_phase.chain_lineage (
              chain_id, block_hash, block_number, block_timestamp, canonicality_state
@@ -1114,11 +1117,123 @@ async fn v2_lookup_rejects_head_reorg_before_project_republication() -> Result<(
         .await
         .context("lookup reorg request task panicked")?
         .context("lookup reorg request failed")?;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
-    assert_eq!(payload["error"]["code"], json!("stale"));
+    assert_eq!(payload, baseline);
 
     database.cleanup().await
+}
+
+/// A reorg during the read that orphans the served block itself does not refuse the batch. It is
+/// attributed to the captured block, now orphaned, the answer a request a moment earlier got.
+#[tokio::test]
+async fn v2_lookup_serves_the_captured_block_when_a_reorg_orphans_it_mid_read() -> Result<()> {
+    const SERVED: &str = "0xlookup-served-43";
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_lookup_reverse_fixture(&database, "0x0000000000000000000000000000000000000abc").await?;
+    // Project publishes block 43 while it is only canonical (not yet safe), so a reorg can still
+    // replace it. The fixture's own blocks are finalized and can never be orphaned.
+    insert_lookup_lineage(&database, SERVED, 43).await?;
+    move_lookup_head(&database, SERVED, 43).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET current_block_number = 43, current_block_hash = $1,
+             target_block_number = 43, target_block_hash = $1
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name IN ('interpret', 'project')",
+    )
+    .bind(SERVED)
+    .execute(&database.lookup_pool)
+    .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 43, SERVED).await?;
+    let request = json!({"inputs": [{"name": "alice.eth"}]});
+    let baseline = v2_lookup_json(&database, request.clone()).await?;
+    assert_eq!(baseline["data"][0]["status"], json!("ok"), "{baseline:#}");
+    assert_eq!(baseline["meta"]["as_of"]["1"]["block_hash"], json!(SERVED), "{baseline:#}");
+    let (_guard, control) =
+        crate::v2::lookup_served_head_revalidation_test_hooks::install(&database.lookup_pool)
+            .await?;
+    let state = database.app_state();
+    let raced_request = request.clone();
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/lookup")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&raced_request).expect("body must serialize"),
+                    ))
+                    .expect("request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    // A reorg orphans the served block 43 and the new fork reaches 44.
+    insert_lookup_lineage(&database, "0xlookup-reorged-44", 44).await?;
+    move_lookup_head(&database, "0xlookup-reorged-44", 44).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.chain_lineage
+         SET canonicality_state = 'orphaned'
+         WHERE chain_id = 'ethereum-mainnet' AND block_hash = $1",
+    )
+    .bind(SERVED)
+    .execute(&database.lookup_pool)
+    .await?;
+    insert_lookup_lineage(&database, "0xlookup-reorged-43", 43).await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("lookup orphan request task panicked")?
+        .context("lookup orphan request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload, baseline);
+    assert_eq!(payload["meta"]["as_of"]["1"]["block_hash"], json!(SERVED));
+    // The reorg is visible to the next request: the head selection finds no readable Project
+    // publication on the new fork, so it answers stale until Project republishes.
+    let response = v2_lookup_response_for_database(&database, "/v1/lookup", request).await?;
+    let later_status = response.status();
+    let later: Value = read_json(response).await?;
+    assert_eq!(later_status, StatusCode::CONFLICT, "{later:#}");
+    assert_search_error(
+        later,
+        "stale",
+        "served data is not available at the current snapshot",
+    );
+
+    database.cleanup().await
+}
+
+async fn insert_lookup_lineage(database: &TestDatabase, hash: &str, number: i64) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO bigname_phase.chain_lineage (
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state
+         ) VALUES (
+             'ethereum-mainnet', $1, $2, $3::timestamptz, 'canonical'
+         )",
+    )
+    .bind(hash)
+    .bind(number)
+    .bind(format!("2026-04-17T00:00:{:02}Z", number % 60))
+    .execute(&database.lookup_pool)
+    .await?;
+    Ok(())
+}
+
+async fn move_lookup_head(database: &TestDatabase, hash: &str, number: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE chain_heads
+         SET latest_block_hash = $1, latest_block_number = $2, updated_at = now()
+         WHERE chain_id = 'ethereum-mainnet'",
+    )
+    .bind(hash)
+    .bind(number)
+    .execute(&database.lookup_pool)
+    .await?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -1491,13 +1606,18 @@ async fn v2_lookup_reverse_keeps_primary_order_and_flag_coherent_across_projecti
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
     seed_v2_lookup_reverse_fixture(&database, address).await?;
+    let baseline = v2_lookup_json(
+        &database,
+        json!({"profile":"detail", "inputs":[{"address":address,"page_size":1}]}),
+    )
+    .await?;
     let (task, reached, resume) = paused_reverse_lookup(&database, address).await?;
     publish_primary_claim(&database.pool, "ens", address, b"bob.eth").await?;
     let response = finish_paused_reverse_lookup(task, reached, resume).await?;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let refused: Value = read_json(response).await?;
-    assert_eq!(refused["error"]["code"], "stale");
-    assert!(refused.get("data").is_none());
+    // The rewrite landed after the batch's snapshot began: the batch is the captured one.
+    assert_eq!(response.status(), StatusCode::OK);
+    let raced: Value = read_json(response).await?;
+    assert_eq!(raced, baseline);
     let fresh = v2_lookup_json(
         &database,
         json!({"profile":"detail", "inputs":[{"address":address,"page_size":1}]}),
@@ -1523,6 +1643,11 @@ async fn v2_lookup_reverse_uses_candidate_name_for_order_flag_and_cursor_across_
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
     seed_v2_lookup_reverse_fixture(&database, address).await?;
+    let baseline = v2_lookup_json(
+        &database,
+        json!({"profile":"detail", "inputs":[{"address":address,"page_size":1}]}),
+    )
+    .await?;
     let (task, reached, resume) = paused_reverse_lookup(&database, address).await?;
     let replacement_resource = Uuid::from_u128(0x5a0391);
     sqlx::query("UPDATE surface_bindings SET active_to = '2026-04-17T00:00:44Z' WHERE surface_binding_id = $1")
@@ -1544,10 +1669,10 @@ async fn v2_lookup_reverse_uses_candidate_name_for_order_flag_and_cursor_across_
     )
     .await?;
     let response = finish_paused_reverse_lookup(task, reached, resume).await?;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let refused: Value = read_json(response).await?;
-    assert_eq!(refused["error"]["code"], "stale");
-    assert!(refused.get("data").is_none());
+    // The rewrite landed after the batch's snapshot began: the batch is the captured one.
+    assert_eq!(response.status(), StatusCode::OK);
+    let raced: Value = read_json(response).await?;
+    assert_eq!(raced, baseline);
     let fresh = v2_lookup_json(
         &database,
         json!({"profile":"detail", "inputs":[{"address":address,"page_size":1}]}),
@@ -2134,8 +2259,11 @@ async fn v2_lookup_allows_interpret_live_progress_during_public_reverse_read() -
     database.cleanup().await
 }
 
+/// A namespace that becomes ready during the read does not refuse the batch: it keeps the
+/// captured disclosure, and its cursor binds the captured namespace list.
 #[tokio::test]
-async fn v2_lookup_rejects_public_namespace_becoming_ready_during_reverse_read() -> Result<()> {
+async fn v2_lookup_keeps_the_captured_disclosure_when_a_namespace_becomes_ready_mid_read()
+-> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
     seed_v2_lookup_reverse_fixture(&database, address).await?;
@@ -2162,6 +2290,21 @@ async fn v2_lookup_rejects_public_namespace_becoming_ready_during_reverse_read()
         )
         .await?;
     // Base has a selected head but no family publication yet, so basenames is not ready.
+    let state = AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    let (status, baseline) = lookup_with_state(
+        state,
+        json!({"inputs": [{"address": address, "page_size": 1}]}),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{baseline:#}");
+    assert_eq!(
+        baseline["meta"]["as_of_completeness"]["8453"]["unsupported_reason"],
+        json!("temporarily_unavailable"),
+        "{baseline:#}"
+    );
     let (_guard, control) =
         crate::v2::lookup_served_head_revalidation_test_hooks::install(&database.lookup_pool)
             .await?;
@@ -2177,7 +2320,7 @@ async fn v2_lookup_rejects_public_namespace_becoming_ready_during_reverse_read()
                     .uri("/v1/lookup")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
+                        serde_json::to_vec(&json!({"inputs": [{"address": address, "page_size": 1}]}))
                             .expect("body must serialize"),
                     ))
                     .expect("lookup request must build"),
@@ -2194,10 +2337,29 @@ async fn v2_lookup_rejects_public_namespace_becoming_ready_during_reverse_read()
         .await
         .context("lookup readiness-change request task panicked")?
         .context("lookup readiness-change request failed")?;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(response.status(), StatusCode::OK);
+    let raced: Value = read_json(response).await?;
+    assert_eq!(raced, baseline);
+    // The cursor minted under the captured disclosure binds `["ens"]`; with Base ready the
+    // namespace list is `["basenames", "ens"]`, so the next page fails closed.
+    let cursor = raced["data"][0]["page"]["next_cursor"]
+        .as_str()
+        .context("the first page has more")?;
+    let state = AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    let (status, next) = lookup_with_state(
+        state,
+        json!({"inputs": [{"address": address, "page_size": 1, "cursor": cursor}]}),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{next:#}");
+    assert_eq!(next["error"]["code"], json!("invalid_input"), "{next:#}");
     assert_eq!(
-        read_json::<Value>(response).await?["error"]["code"],
-        json!("stale")
+        next["error"]["message"],
+        json!("cursor must match this lookup input"),
+        "{next:#}"
     );
 
     database.cleanup().await
@@ -2703,60 +2865,6 @@ async fn v2_lookup_reverse_relation_filter_resumes_across_scan_boundaries() -> R
 
     database.cleanup().await?;
     Ok(())
-}
-
-#[tokio::test]
-#[ignore = "no family producer yields an owned relation that is not `owner`, so the exact-relation scan never skips a row"]
-async fn v2_lookup_reverse_relation_page_revalidates_generation_before_second_scan() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    let address = "0x0000000000000000000000000000000000000abc";
-    seed_v2_lookup_relation_scan_fixture(&database, address, 125, &[101]).await?;
-    let (_guard, control) = crate::v2::support::identity_facade_relation_page_test_hooks::install(
-        &database.lookup_pool,
-    )
-    .await?;
-    let state = database.app_state();
-    let request_task = tokio::spawn(async move {
-        app_router(state)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/lookup")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "profile": "detail",
-                            "inputs": [{
-                                "address": address,
-                                "relation": "owner",
-                                "page_size": 1
-                            }]
-                        })
-                        .to_string(),
-                    ))
-                    .expect("lookup request must build"),
-            )
-            .await
-    });
-
-    control.wait_until_reached().await;
-    advance_v2_lookup_ethereum_head(&database, 10_001, "0xlookup-scan-advanced").await?;
-    control.resume().await;
-
-    let response = request_task
-        .await
-        .context("reverse relation lookup request task panicked")?
-        .context("reverse relation lookup request failed")?;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let payload: Value = read_json(response).await?;
-    assert_eq!(payload["error"]["code"], json!("stale"));
-    assert_eq!(
-        control.page_loader_call_count(),
-        1,
-        "a changed Project publication must be rejected before another broad page load"
-    );
-
-    database.cleanup().await
 }
 
 #[tokio::test]

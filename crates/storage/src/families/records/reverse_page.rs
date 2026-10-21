@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use serde_json::json;
-use sqlx::{PgConnection, PgPool};
+use sqlx::PgConnection;
 
 use super::primary::load_family_primary_name_snapshots_on;
 use crate::{
@@ -14,16 +14,16 @@ use crate::{
 
 /// Readable primary claims for the requested address and coin type, keyed by namespace.
 pub async fn load_family_reverse_primary_snapshots(
-    pool: &PgPool,
+    db: impl Into<crate::ReadDb<'_>>,
     address: &str,
     coin_type: &str,
     namespaces: &[String],
     chains: Option<&[String]>,
 ) -> Result<BTreeMap<String, IdentityPrimaryNameSnapshot>> {
-    let mut snapshot = crate::families::read_snapshot(pool).await?;
+    let mut snapshot = db.into().snapshot().await?;
     ensure_publications(&mut snapshot, chains).await?;
     let out = primary_on(&mut snapshot, address, coin_type, namespaces, chains).await?;
-    snapshot.commit().await?;
+    snapshot.close().await?;
     Ok(out)
 }
 
@@ -73,7 +73,7 @@ async fn primary_on(
 /// The API reverse page/count contract. The count is independent of the cursor; page-only
 /// callers stop after the first page and sentinel. Inventories are read only for returned rows.
 pub async fn load_family_reverse_identity_groups(
-    pool: &PgPool,
+    db: impl Into<crate::ReadDb<'_>>,
     inputs: &[ReverseIdentityStorageInput],
     namespaces: &[String],
     chains: Option<&[String]>,
@@ -83,7 +83,7 @@ pub async fn load_family_reverse_identity_groups(
     if inputs.is_empty() {
         return Ok(Vec::new());
     }
-    let mut snapshot = crate::families::read_snapshot(pool).await?;
+    let mut snapshot = db.into().snapshot().await?;
     // Check before the walk: a reset can empty every candidate table.
     ensure_publications(&mut snapshot, chains).await?;
     let mut out = Vec::with_capacity(inputs.len());
@@ -132,7 +132,7 @@ pub async fn load_family_reverse_identity_groups(
             out.push(group);
         }
     }
-    snapshot.commit().await?;
+    snapshot.close().await?;
     Ok(out)
 }
 

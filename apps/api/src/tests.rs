@@ -549,6 +549,7 @@ include!("tests/v2_registries_manifest_history.rs");
 include!("tests/v2_interpret_redo_loaders.rs");
 include!("tests/v2_primary_name.rs");
 include!("tests/v2_lookup.rs");
+include!("tests/v2_lookup_snapshot.rs");
 include!("tests/v2_record_inventory_abi.rs");
 include!("tests/v2_node_record_events.rs");
 include!("tests/v2_history_event_data.rs");
