@@ -206,21 +206,46 @@ fn bulk_connect_options() -> Result<sqlx::postgres::PgConnectOptions> {
         .parse()?)
 }
 
-/// Sets the server's `log_min_duration_statement` to `BIGNAME_BULK_LOG_SLOW_MS`, or resets it,
-/// for the seed and the requests that follow.
-async fn log_slow_bulk_statements() -> Result<()> {
-    let admin = PgPool::connect_with(bulk_connect_options()?).await?;
-    let slow = match std::env::var("BIGNAME_BULK_LOG_SLOW_MS") {
-        Ok(ms) => format!("SET log_min_duration_statement = {}", ms.parse::<u64>()?),
-        Err(_) => "RESET log_min_duration_statement".to_owned(),
+/// Sets the server's `log_min_duration_statement` to `BIGNAME_BULK_LOG_SLOW_MS` for the seed and
+/// the requests that follow, and returns its prior value. The pool's own connections log too,
+/// so a session setting would not reach them. Without the variable the server is left alone.
+async fn log_slow_bulk_statements() -> Result<Option<i64>> {
+    let Ok(ms) = std::env::var("BIGNAME_BULK_LOG_SLOW_MS") else {
+        return Ok(None);
     };
-    sqlx::raw_sql(&format!("ALTER SYSTEM {slow}"))
-        .execute(&admin)
-        .await?;
-    sqlx::query("SELECT pg_reload_conf()")
-        .execute(&admin)
-        .await?;
+    let ms: i64 = ms.parse()?;
+    let admin = PgPool::connect_with(bulk_connect_options()?).await?;
+    let prior: String = sqlx::query_scalar(
+        "SELECT setting FROM pg_settings WHERE name = 'log_min_duration_statement'",
+    )
+    .fetch_one(&admin)
+    .await?;
+    let prior: i64 = prior.parse()?;
+    set_bulk_slow_log(&admin, ms).await?;
     admin.close().await;
+    Ok(Some(prior))
+}
+
+/// Restores the `log_min_duration_statement` [`log_slow_bulk_statements`] replaced, if any.
+async fn restore_bulk_slow_log(prior: Option<i64>) -> Result<()> {
+    let Some(prior) = prior else {
+        return Ok(());
+    };
+    let admin = PgPool::connect_with(bulk_connect_options()?).await?;
+    set_bulk_slow_log(&admin, prior).await?;
+    admin.close().await;
+    Ok(())
+}
+
+async fn set_bulk_slow_log(admin: &PgPool, ms: i64) -> Result<()> {
+    sqlx::raw_sql(&format!(
+        "ALTER SYSTEM SET log_min_duration_statement = {ms}"
+    ))
+    .execute(admin)
+    .await?;
+    sqlx::query("SELECT pg_reload_conf()")
+        .execute(admin)
+        .await?;
     Ok(())
 }
 
@@ -280,7 +305,15 @@ async fn v2_address_names_large_address_memory() -> Result<()> {
         .unwrap_or(20_000);
     let resolves_to = std::env::var("BIGNAME_BULK_RESOLVES_TO").is_ok_and(|value| value == "1");
     let kept = std::env::var("BIGNAME_BULK_DATABASE").ok();
-    log_slow_bulk_statements().await?;
+    let prior = log_slow_bulk_statements().await?;
+    let measured = measure_bulk_address(count, resolves_to, kept).await;
+    restore_bulk_slow_log(prior).await?;
+    measured
+}
+
+/// The measurement of [`v2_address_names_large_address_memory`], on the kept database `kept` or
+/// a fresh one.
+async fn measure_bulk_address(count: usize, resolves_to: bool, kept: Option<String>) -> Result<()> {
     let (pool, database) = match &kept {
         Some(name) => (kept_bulk_database(name, count, resolves_to).await?, None),
         None => {

@@ -229,7 +229,11 @@ async fn v2_resolves_to_walk_steps_past_names_that_no_longer_resolve() -> Result
 
 /// Row 6: a registration with two names far apart in walk order. In descending order the walk
 /// reaches the higher name first and composes the lower one with it, whose entry the group is:
-/// the page is not final until the walk passes it.
+/// the page is not final until the walk passes it. Every member of a group reads one record
+/// inventory, so a group's record ranks cannot split across inventories: a name has a serving
+/// resource only when it has no binding (the ownerless and root-TLD rules of
+/// `families/name/selection.rs` and `families/name/batch.rs`), so a bound group's members read
+/// the bound resource and an unbound name's group is the resource it reads.
 #[tokio::test]
 async fn v2_resolves_to_walk_closes_a_registration_split_across_steps() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
