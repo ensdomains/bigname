@@ -1192,13 +1192,16 @@ async fn v2_lookup_serves_the_captured_block_when_a_reorg_orphans_it_mid_read() 
     let payload: Value = read_json(response).await?;
     assert_eq!(payload, baseline);
     assert_eq!(payload["meta"]["as_of"]["1"]["block_hash"], json!(SERVED));
-    // The reorg is visible to the next request, which no longer serves the orphaned block.
+    // The reorg is visible to the next request: the head selection finds no readable Project
+    // publication on the new fork, so it answers stale until Project republishes.
     let response = v2_lookup_response_for_database(&database, "/v1/lookup", request).await?;
     let later_status = response.status();
     let later: Value = read_json(response).await?;
-    assert!(
-        later_status != StatusCode::OK || later["meta"]["as_of"]["1"]["block_hash"] != json!(SERVED),
-        "{later_status}: {later:#}"
+    assert_eq!(later_status, StatusCode::CONFLICT, "{later:#}");
+    assert_search_error(
+        later,
+        "stale",
+        "served data is not available at the current snapshot",
     );
 
     database.cleanup().await
