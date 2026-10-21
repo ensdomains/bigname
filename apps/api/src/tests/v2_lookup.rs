@@ -1124,6 +1124,115 @@ async fn v2_lookup_serves_the_captured_publication_when_the_head_reorgs_mid_read
     database.cleanup().await
 }
 
+/// A reorg during the read that orphans the served block itself does not refuse the batch. It is
+/// attributed to the captured block, now orphaned, the answer a request a moment earlier got.
+#[tokio::test]
+async fn v2_lookup_serves_the_captured_block_when_a_reorg_orphans_it_mid_read() -> Result<()> {
+    const SERVED: &str = "0xlookup-served-43";
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_lookup_reverse_fixture(&database, "0x0000000000000000000000000000000000000abc").await?;
+    // Project publishes block 43 while it is only canonical (not yet safe), so a reorg can still
+    // replace it. The fixture's own blocks are finalized and can never be orphaned.
+    insert_lookup_lineage(&database, SERVED, 43).await?;
+    move_lookup_head(&database, SERVED, 43).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET current_block_number = 43, current_block_hash = $1,
+             target_block_number = 43, target_block_hash = $1
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name IN ('interpret', 'project')",
+    )
+    .bind(SERVED)
+    .execute(&database.lookup_pool)
+    .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 43, SERVED).await?;
+    let request = json!({"inputs": [{"name": "alice.eth"}]});
+    let baseline = v2_lookup_json(&database, request.clone()).await?;
+    assert_eq!(baseline["data"][0]["status"], json!("ok"), "{baseline:#}");
+    assert_eq!(baseline["meta"]["as_of"]["1"]["block_hash"], json!(SERVED), "{baseline:#}");
+    let (_guard, control) =
+        crate::v2::lookup_served_head_revalidation_test_hooks::install(&database.lookup_pool)
+            .await?;
+    let state = database.app_state();
+    let raced_request = request.clone();
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/lookup")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&raced_request).expect("body must serialize"),
+                    ))
+                    .expect("request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    // A reorg orphans the served block 43 and the new fork reaches 44.
+    insert_lookup_lineage(&database, "0xlookup-reorged-44", 44).await?;
+    move_lookup_head(&database, "0xlookup-reorged-44", 44).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.chain_lineage
+         SET canonicality_state = 'orphaned'
+         WHERE chain_id = 'ethereum-mainnet' AND block_hash = $1",
+    )
+    .bind(SERVED)
+    .execute(&database.lookup_pool)
+    .await?;
+    insert_lookup_lineage(&database, "0xlookup-reorged-43", 43).await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("lookup orphan request task panicked")?
+        .context("lookup orphan request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload, baseline);
+    assert_eq!(payload["meta"]["as_of"]["1"]["block_hash"], json!(SERVED));
+    // The reorg is visible to the next request, which no longer serves the orphaned block.
+    let response = v2_lookup_response_for_database(&database, "/v1/lookup", request).await?;
+    let later_status = response.status();
+    let later: Value = read_json(response).await?;
+    assert!(
+        later_status != StatusCode::OK || later["meta"]["as_of"]["1"]["block_hash"] != json!(SERVED),
+        "{later_status}: {later:#}"
+    );
+
+    database.cleanup().await
+}
+
+async fn insert_lookup_lineage(database: &TestDatabase, hash: &str, number: i64) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO bigname_phase.chain_lineage (
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state
+         ) VALUES (
+             'ethereum-mainnet', $1, $2, $3::timestamptz, 'canonical'
+         )",
+    )
+    .bind(hash)
+    .bind(number)
+    .bind(format!("2026-04-17T00:00:{:02}Z", number % 60))
+    .execute(&database.lookup_pool)
+    .await?;
+    Ok(())
+}
+
+async fn move_lookup_head(database: &TestDatabase, hash: &str, number: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE chain_heads
+         SET latest_block_hash = $1, latest_block_number = $2, updated_at = now()
+         WHERE chain_id = 'ethereum-mainnet'",
+    )
+    .bind(hash)
+    .bind(number)
+    .execute(&database.lookup_pool)
+    .await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn v2_lookup_rejects_project_publication_between_selection_and_first_read() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -2244,6 +2353,11 @@ async fn v2_lookup_keeps_the_captured_disclosure_when_a_namespace_becomes_ready_
     .await?;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{next:#}");
     assert_eq!(next["error"]["code"], json!("invalid_input"), "{next:#}");
+    assert_eq!(
+        next["error"]["message"],
+        json!("cursor must match this lookup input"),
+        "{next:#}"
+    );
 
     database.cleanup().await
 }

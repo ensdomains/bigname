@@ -217,6 +217,31 @@ async fn v2_lookup_public_reverse_returns_stale_when_interpret_redo_begins_mid_r
     database.cleanup().await
 }
 
+/// Row pre-redo. An Interpret redo that begins between the capture and the snapshot is caught
+/// by the snapshot's own publication check, so it answers the before-the-read message.
+#[tokio::test]
+async fn v2_lookup_retries_an_interpret_redo_begun_before_the_snapshot_begins() -> Result<()> {
+    for body in [
+        json!({"inputs": [{"name": "alice.eth"}]}),
+        json!({"inputs": [{"address": LOOKUP_ADDRESS}]}),
+    ] {
+        let database = TestDatabase::new_migrated().await?;
+        seed_v2_lookup_reverse_fixture(&database, LOOKUP_ADDRESS).await?;
+        let (status, payload) = lookup_with_mid_read(
+            &database,
+            database.app_state(),
+            LookupStage::BeforeSnapshot,
+            body.clone(),
+            || database.simulate_interpret_redo_begin("ethereum-mainnet", "recompute_flags"),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}: {payload:#}");
+        assert_search_error(payload, "stale", LOOKUP_PUBLICATION_MOVED);
+        database.cleanup().await?;
+    }
+    Ok(())
+}
+
 /// Row cur. The reverse cursor binds the input and the namespace list, not a publication, so a
 /// block between pages continues the walk at the new head.
 #[tokio::test]
