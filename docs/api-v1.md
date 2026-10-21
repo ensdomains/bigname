@@ -1293,12 +1293,17 @@ redo can be incomplete even while Project still reports its prior completed
 head.
 Bare search and public reverse lookup filter current rows and counts to exactly
 the eligible namespaces, and public reverse lookup builds its snapshot scope
-from the same authority chains. After reading a bare search page, the API reloads the active
-manifest declarations, selected authority chain heads, and completed projection
-publication generations captured during derivation, and confirms that no
-selected authority chain began an Interpret redo. Any change returns the
-existing retryable `409 conflict` instead of serving a response assembled
-across deployment states.
+from the same authority chains. A bare search page is read on one database
+snapshot, which first confirms that it still serves the projection publications
+captured during derivation. A block published after that is not a refusal: the
+page reports the captured publications in `meta.as_of`. A publication that moved
+between derivation and the snapshot returns the retryable `409 conflict`, and so
+does an Interpret redo that began on a served chain in that window. After
+reading the page, the API reloads the active manifest declarations and the
+Interpret redo state of the served authority chains, both captured during
+derivation. A manifest change returns `409 conflict` with the message "active
+public namespace manifests changed while the request was being read". A redo
+that began during the read returns the retryable `409 stale`.
 Public reverse lookup reloads its captured active manifest declarations before
 the route's existing head and projection-publication check, including the same
 Interpret redo check: a manifest change returns `409 conflict`, while a redo,
@@ -1306,11 +1311,18 @@ head, or publication change returns the existing retryable `409 stale`. A redo
 that begins after derivation therefore never exposes a partial page through
 either route.
 Explicit-namespace search captures its request-scope metadata before reading
-the page and reloads it afterward. A head, completed publication generation, or
-readiness change returns the same retryable `409 conflict` instead of
-attributing the page to a position selected after the rows were read.
-Publication becoming ready between admission reads is such a readiness change,
-not evidence of an Interpret redo.
+the page. When the capture found a ready publication, the page's snapshot
+confirms it the same way. A head or publication change after that is not a
+refusal, and the page reports the captured position. A publication that moved,
+or an Interpret redo that began, before the snapshot returns the retryable
+`409 conflict`. A capture without a ready publication is checked the other way:
+the snapshot must still find no servable publication, or the request returns the
+same `409 conflict`. A redo in that window keeps the publication unservable, so
+it returns `409 stale` from the reload after the page. After the page, the API
+reloads only the Interpret redo state, and a redo that began during the read
+returns `409 stale`. Publication becoming ready between
+admission reads returns `409 conflict`. It is a readiness change, not evidence
+of an Interpret redo.
 Their namespace-omitted cursors bind that derived namespace list and fail closed if it
 changes. Search with an explicit recognized `namespace` bypasses public
 namespace derivation. It still requires the selected namespace's

@@ -384,10 +384,7 @@ async fn v2_search_rejects_manifest_change_between_derivation_and_row_read() -> 
         .context("search coherence request task panicked")?
         .context("search coherence request failed")?;
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        read_json::<Value>(response).await?["error"]["code"],
-        json!("conflict")
-    );
+    assert_search_error(read_json(response).await?, "conflict", MANIFEST_CONFLICT);
 
     database.cleanup().await
 }
@@ -438,12 +435,7 @@ async fn v2_search_manifest_change_that_breaks_derivation_returns_conflict() -> 
         .context("search derivation-breaking request task panicked")?
         .context("search derivation-breaking request failed")?;
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    let payload: Value = read_json(response).await?;
-    assert_eq!(payload["error"]["code"], json!("conflict"));
-    assert!(
-        payload.get("data").is_none(),
-        "no partial page may be served"
-    );
+    assert_search_error(read_json(response).await?, "conflict", MANIFEST_CONFLICT);
 
     database.cleanup().await
 }
@@ -933,13 +925,18 @@ async fn v2_search_paginates_without_overlap_or_gap() -> Result<()> {
     database.cleanup().await
 }
 
+/// The residual window: a publication that moves between its capture and the page's snapshot
+/// is refused for retry.
 #[tokio::test]
-async fn v2_search_rejects_project_republication_during_public_read() -> Result<()> {
+async fn v2_search_retries_a_republication_before_the_snapshot_begins() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
     seed_v2_search_public_authority(&database).await?;
-    let (_guard, control) =
-        crate::v2::search_public_namespace_read_test_hooks::install(&database.lookup_pool).await?;
+    let (_guard, control) = crate::v2::search_public_namespace_read_test_hooks::install_at(
+        &database.lookup_pool,
+        crate::v2::search_public_namespace_read_test_hooks::ReadHookPoint::BeforeRead,
+    )
+    .await?;
     let state = AppState::new_with_rpc_urls(
         database.lookup_pool.clone(),
         bigname_lookup::ChainRpcUrls::default(),
@@ -969,60 +966,51 @@ async fn v2_search_rejects_project_republication_during_public_read() -> Result<
         .context("search generation-change request task panicked")?
         .context("search generation-change request failed")?;
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        read_json::<Value>(response).await?["error"]["code"],
-        json!("conflict")
+    assert_search_error(
+        read_json(response).await?,
+        "conflict",
+        BEFORE_SNAPSHOT_CONFLICT,
     );
 
     database.cleanup().await
 }
 
+/// A head that moves after the page's snapshot never refuses the page: it reports the
+/// publication its snapshot read.
 #[tokio::test]
-async fn v2_search_explicit_namespace_rejects_a_position_change_after_the_page_read() -> Result<()>
-{
+async fn v2_search_explicit_serves_the_captured_publication_after_a_head_moves_mid_read()
+-> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
-    let (_guard, control) =
-        crate::v2::search_public_namespace_read_test_hooks::install(&database.lookup_pool).await?;
-    let state = database.app_state();
-    let request_task = tokio::spawn(async move {
-        app_router(state)
-            .oneshot(
-                Request::builder()
-                    .uri("/v1/search?q=alpha&namespace=ens")
-                    .body(Body::empty())
-                    .expect("explicit search request must build"),
-            )
-            .await
-    });
-
-    tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        control.wait_until_reached(),
+    let uri = "/v1/search?q=alpha&namespace=ens";
+    let baseline = v2_search_payload_for_database(&database, uri).await?;
+    let (status, payload) = search_with_mid_read(
+        &database,
+        database.app_state(),
+        uri,
+        crate::v2::search_public_namespace_read_test_hooks::ReadHookPoint::AfterPage,
+        || async {
+            database
+                .seed_snapshot_selector_chain_positions(&json!({
+                    "ethereum": {
+                        "chain_id": "ethereum-mainnet",
+                        "block_number": 999,
+                        "block_hash": "0xsearch-explicit-later",
+                        "timestamp": "2026-08-26T00:16:39Z"
+                    }
+                }))
+                .await
+        },
     )
-    .await
-    .context("search read hook was not reached")?;
-    database
-        .seed_snapshot_selector_chain_positions(&json!({
-            "ethereum": {
-                "chain_id": "ethereum-mainnet",
-                "block_number": 999,
-                "block_hash": "0xsearch-explicit-later",
-                "timestamp": "2026-08-26T00:16:39Z"
-            }
-        }))
-        .await?;
-    control.resume().await;
-
-    let response = request_task
-        .await
-        .context("explicit search position-change request task panicked")?
-        .context("explicit search position-change request failed")?;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{payload:#}");
+    assert_eq!(payload, baseline);
     assert_eq!(
-        read_json::<Value>(response).await?["error"]["code"],
-        json!("conflict")
+        v2_search_names(payload["data"].as_array().context("search data")?),
+        vec!["alpha.eth"]
     );
+    let (_, later) = search_with_state(database.app_state(), uri.to_owned()).await?;
+    assert_ne!(later, baseline, "the head must have moved for later requests");
 
     database.cleanup().await
 }
@@ -1168,55 +1156,239 @@ async fn v2_search_explicit_namespace_reports_publication_readiness_change_as_co
     database.cleanup().await
 }
 
+/// A same-height Project republication after the page's snapshot never refuses it.
 #[tokio::test]
-async fn v2_search_explicit_namespace_rejects_project_republication_after_the_page_read()
+async fn v2_search_explicit_serves_the_captured_publication_after_a_republication_mid_read()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
-    let (_guard, control) =
-        crate::v2::search_public_namespace_read_test_hooks::install(&database.lookup_pool).await?;
-    let state = database.app_state();
-    let request_task = tokio::spawn(async move {
-        app_router(state)
-            .oneshot(
-                Request::builder()
-                    .uri("/v1/search?q=alpha&namespace=ens")
-                    .body(Body::empty())
-                    .expect("explicit search request must build"),
+    let uri = "/v1/search?q=alpha&namespace=ens";
+    let baseline = v2_search_payload_for_database(&database, uri).await?;
+    let (status, payload) = search_with_mid_read(
+        &database,
+        database.app_state(),
+        uri,
+        crate::v2::search_public_namespace_read_test_hooks::ReadHookPoint::AfterPage,
+        || {
+            rebuild_fixture_families(
+                &database.pool,
+                "ethereum-mainnet",
+                210,
+                "0xsearch-public-ethereum",
             )
-            .await
-    });
-
-    tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        control.wait_until_reached(),
+        },
     )
-    .await
-    .context("search read hook was not reached")?;
-    rebuild_fixture_families(
-        &database.pool,
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{payload:#}");
+    assert_eq!(payload, baseline);
+
+    database.cleanup().await
+}
+
+/// The residual window: a republication between capture and the page's snapshot is
+/// refused for retry.
+#[tokio::test]
+async fn v2_search_explicit_retries_a_republication_before_the_snapshot_begins() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    let (status, payload) = search_with_mid_read(
+        &database,
+        database.app_state(),
+        "/v1/search?q=alpha&namespace=ens",
+        crate::v2::search_public_namespace_read_test_hooks::ReadHookPoint::BeforeRead,
+        || {
+            rebuild_fixture_families(
+                &database.pool,
+                "ethereum-mainnet",
+                210,
+                "0xsearch-public-ethereum",
+            )
+        },
+    )
+    .await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{payload:#}");
+    assert_search_error(payload, "conflict", BEFORE_SNAPSHOT_CONFLICT);
+
+    database.cleanup().await
+}
+
+/// A block on Ethereum and a Base republication after the page's snapshot never refuse
+/// the page: it reports the publications its snapshot read, and the next request the new block.
+#[tokio::test]
+async fn v2_search_bare_serves_the_captured_publication_after_a_block_lands_mid_read()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    seed_v2_search_public_authority(&database).await?;
+    let uri = "/v1/search?q=alpha";
+    let (status, baseline) =
+        search_with_state(public_search_state(&database), uri.to_owned()).await?;
+    assert_eq!(status, StatusCode::OK, "{baseline:#}");
+    let (status, payload) = search_with_mid_read(
+        &database,
+        public_search_state(&database),
+        uri,
+        crate::v2::search_public_namespace_read_test_hooks::ReadHookPoint::AfterPage,
+        || async {
+            publish_search_ethereum_block(&database, 212).await?;
+            rebuild_fixture_families(&database.pool, "base-mainnet", 211, "0xsearch-public-base")
+                .await
+        },
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{payload:#}");
+    assert_eq!(payload, baseline);
+    assert_eq!(
+        v2_search_names(payload["data"].as_array().context("search data")?),
+        vec!["alpha.base.eth", "alpha.eth"]
+    );
+    assert_eq!(payload["meta"]["as_of"]["1"]["block_number"], json!(210));
+    let (_, later) = search_with_state(public_search_state(&database), uri.to_owned()).await?;
+    assert_eq!(later["meta"]["as_of"]["1"]["block_number"], json!(212), "{later:#}");
+
+    database.cleanup().await
+}
+
+/// An explicit namespace captured while its publication is unavailable is refused for retry
+/// when the publication becomes ready before the page's snapshot: the page would read finished
+/// rows under a disclosure that calls them unavailable.
+#[tokio::test]
+async fn v2_search_explicit_retries_when_an_unavailable_publication_becomes_ready_before_the_snapshot()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    begin_search_family_rebuild(
+        &database,
         "ethereum-mainnet",
         210,
         "0xsearch-public-ethereum",
     )
     .await?;
-    control.resume().await;
+    let (status, payload) = search_with_mid_read(
+        &database,
+        database.app_state(),
+        "/v1/search?q=alpha&namespace=ens",
+        crate::v2::search_public_namespace_read_test_hooks::ReadHookPoint::BeforeRead,
+        || {
+            rebuild_fixture_families(
+                &database.pool,
+                "ethereum-mainnet",
+                210,
+                "0xsearch-public-ethereum",
+            )
+        },
+    )
+    .await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{payload:#}");
+    assert_search_error(payload, "conflict", BEFORE_SNAPSHOT_CONFLICT);
 
-    let response = request_task
-        .await
-        .context("explicit search republication request task panicked")?
-        .context("explicit search republication request failed")?;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        read_json::<Value>(response).await?["error"]["code"],
-        json!("conflict")
-    );
+    database.cleanup().await
+}
+
+/// A redo that begins before the page's snapshot withholds the captured publication on that
+/// snapshot, so the request is refused as a moved publication before any post-read reload. The
+/// query matches nothing: a matching row the redo withholds answers stale from the page read.
+#[tokio::test]
+async fn v2_search_bare_refuses_a_redo_before_the_snapshot_as_a_moved_publication() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    seed_v2_search_public_authority(&database).await?;
+    let (status, payload) = search_with_mid_read(
+        &database,
+        public_search_state(&database),
+        "/v1/search?q=zzz",
+        crate::v2::search_public_namespace_read_test_hooks::ReadHookPoint::BeforeRead,
+        || database.simulate_interpret_redo_begin("ethereum-mainnet", "redo"),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{payload:#}");
+    assert_search_error(payload, "conflict", BEFORE_SNAPSHOT_CONFLICT);
 
     database.cleanup().await
 }
 
 #[tokio::test]
-async fn v2_search_bare_namespace_returns_conflict_when_interpret_redo_begins_during_read()
+async fn v2_search_explicit_refuses_a_redo_before_the_snapshot_as_a_moved_publication()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    let (status, payload) = search_with_mid_read(
+        &database,
+        database.app_state(),
+        "/v1/search?q=zzz&namespace=ens",
+        crate::v2::search_public_namespace_read_test_hooks::ReadHookPoint::BeforeRead,
+        || database.simulate_interpret_redo_begin("ethereum-mainnet", "redo"),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{payload:#}");
+    assert_search_error(payload, "conflict", BEFORE_SNAPSHOT_CONFLICT);
+
+    database.cleanup().await
+}
+
+/// The explicit cursor binds no publication: it continues across a block published
+/// between pages, and the next page reports the new block.
+#[tokio::test]
+async fn v2_search_explicit_cursor_continues_after_a_block_lands_between_pages() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    let first =
+        v2_search_payload_for_database(&database, "/v1/search?q=al&namespace=ens&page_size=1")
+            .await?;
+    assert_eq!(
+        v2_search_names(first["data"].as_array().context("first page")?),
+        vec!["alpha.eth"]
+    );
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .context("the first page must continue")?;
+    publish_search_ethereum_block(&database, 212).await?;
+    let next = v2_search_payload_for_database(
+        &database,
+        &format!("/v1/search?q=al&namespace=ens&page_size=1&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(
+        v2_search_names(next["data"].as_array().context("next page")?),
+        vec!["alpine.eth"]
+    );
+    assert_eq!(next["meta"]["as_of"]["1"]["block_number"], json!(212), "{next:#}");
+
+    database.cleanup().await
+}
+
+/// The bare cursor binds the namespace set, which a block does not change: it
+/// continues across a block published between pages.
+#[tokio::test]
+async fn v2_search_bare_cursor_continues_after_a_block_lands_between_pages() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    let first = v2_search_payload_for_database(&database, "/v1/search?q=al&page_size=1").await?;
+    assert_eq!(
+        v2_search_names(first["data"].as_array().context("first page")?),
+        vec!["alpha.base.eth"]
+    );
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .context("the first page must continue")?;
+    publish_search_ethereum_block(&database, 212).await?;
+    let next = v2_search_payload_for_database(
+        &database,
+        &format!("/v1/search?q=al&page_size=1&cursor={cursor}"),
+    )
+    .await?;
+    assert_eq!(
+        v2_search_names(next["data"].as_array().context("next page")?),
+        vec!["alpha.eth"]
+    );
+    assert_search_meta_chains(&next, &["1", "8453"], &[]);
+    assert_eq!(next["meta"]["as_of"]["1"]["block_number"], json!(212), "{next:#}");
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_search_bare_namespace_returns_stale_when_interpret_redo_begins_during_read()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
@@ -1271,12 +1443,7 @@ async fn v2_search_bare_namespace_returns_conflict_when_interpret_redo_begins_du
         .context("bare search Interpret-redo request task panicked")?
         .context("bare search Interpret-redo request failed")?;
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    let payload: Value = read_json(response).await?;
-    assert_eq!(payload["error"]["code"], json!("conflict"));
-    assert!(
-        payload.get("data").is_none(),
-        "no partial page may be served"
-    );
+    assert_search_error(read_json(response).await?, "stale", INTERPRET_REDO_STALE);
 
     database.cleanup().await
 }
@@ -1337,12 +1504,7 @@ async fn v2_search_explicit_namespace_returns_stale_when_interpret_redo_begins_d
         .context("search Interpret-redo request task panicked")?
         .context("search Interpret-redo request failed")?;
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    let payload: Value = read_json(response).await?;
-    assert_eq!(payload["error"]["code"], json!("stale"));
-    assert!(
-        payload.get("data").is_none(),
-        "no partial page may be served"
-    );
+    assert_search_error(read_json(response).await?, "stale", INTERPRET_REDO_STALE);
 
     database.cleanup().await
 }
@@ -2013,4 +2175,69 @@ async fn begin_search_family_rebuild(
         Some(block)
     );
     Ok(())
+}
+
+const BEFORE_SNAPSHOT_CONFLICT: &str = "search publication changed before the page was read";
+const MANIFEST_CONFLICT: &str =
+    "active public namespace manifests changed while the request was being read";
+const INTERPRET_REDO_STALE: &str =
+    "served data is temporarily unavailable while Interpret redo is in progress";
+
+fn assert_search_error(payload: Value, code: &str, message: &str) {
+    assert_eq!(payload["error"]["code"], json!(code), "{payload:#}");
+    assert_eq!(payload["error"]["message"], json!(message), "{payload:#}");
+    assert!(payload.get("data").is_none(), "no partial page may be served: {payload:#}");
+}
+
+fn public_search_state(database: &TestDatabase) -> AppState {
+    AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    )
+}
+
+async fn search_with_state(state: AppState, uri: String) -> Result<(StatusCode, Value)> {
+    let response = app_router(state)
+        .oneshot(Request::builder().uri(uri).body(Body::empty())?)
+        .await?;
+    let status = response.status();
+    Ok((status, read_json(response).await?))
+}
+
+/// Answers `uri` with the read paused at `point` while `inject` runs.
+async fn search_with_mid_read<Fut>(
+    database: &TestDatabase,
+    state: AppState,
+    uri: &str,
+    point: crate::v2::search_public_namespace_read_test_hooks::ReadHookPoint,
+    inject: impl FnOnce() -> Fut,
+) -> Result<(StatusCode, Value)>
+where
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let (_guard, control) =
+        crate::v2::search_public_namespace_read_test_hooks::install_at(&database.lookup_pool, point)
+            .await?;
+    let request = tokio::spawn(search_with_state(state, uri.to_owned()));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        control.wait_until_reached(),
+    )
+    .await
+    .context("search read hook was not reached")?;
+    inject().await?;
+    control.resume().await;
+    request.await.context("search request task panicked")?
+}
+
+/// Ethereum publishes `block` on the search fixture: a new head and a family rebuild at it.
+async fn publish_search_ethereum_block(database: &TestDatabase, block: i64) -> Result<()> {
+    let hash = format!("0xsearch-ethereum-{block}");
+    database
+        .seed_snapshot_selector_chain_positions(&json!({"ethereum": {
+            "chain_id": "ethereum-mainnet", "block_number": block, "block_hash": hash,
+            "timestamp": "2026-08-10T00:05:00Z"
+        }}))
+        .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", block, &hash).await
 }
