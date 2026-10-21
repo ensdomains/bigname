@@ -1315,10 +1315,12 @@ the page. When the capture found a ready publication, the page's snapshot
 confirms it the same way. A head or publication change after that is not a
 refusal, and the page reports the captured position. A publication that moved,
 or an Interpret redo that began, before the snapshot returns the retryable
-`409 conflict`. A capture without a ready publication gives the snapshot nothing
-to confirm, so such a redo returns `409 stale` from the reload after the page.
-After the page, the API reloads only the Interpret redo state, and a redo that
-began during the read returns `409 stale`. Publication becoming ready between
+`409 conflict`. A capture without a ready publication is checked the other way:
+the snapshot must still find no servable publication, or the request returns the
+same `409 conflict`. A redo in that window keeps the publication unservable, so
+it returns `409 stale` from the reload after the page. After the page, the API
+reloads only the Interpret redo state, and a redo that began during the read
+returns `409 stale`. Publication becoming ready between
 admission reads returns `409 conflict`. It is a readiness change, not evidence
 of an Interpret redo.
 Their namespace-omitted cursors bind that derived namespace list and fail closed if it

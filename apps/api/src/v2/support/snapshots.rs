@@ -213,6 +213,16 @@ async fn load_request_scope_snapshot(
     load_request_scope_snapshot_on(&mut connection, scope).await
 }
 
+/// Whether `scope` has a servable publication at its head on `connection`.
+pub(crate) async fn request_scope_is_ready_on(
+    connection: &mut sqlx::PgConnection,
+    scope: &SnapshotSelectionScope,
+) -> ApiResult<bool> {
+    Ok(load_request_scope_snapshot_on(connection, scope)
+        .await?
+        .is_some())
+}
+
 async fn load_request_scope_snapshot_on(
     connection: &mut sqlx::PgConnection,
     scope: &SnapshotSelectionScope,

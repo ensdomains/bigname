@@ -1249,6 +1249,42 @@ async fn v2_search_bare_serves_the_captured_publication_after_a_block_lands_mid_
     database.cleanup().await
 }
 
+/// An explicit namespace captured while its publication is unavailable is refused for retry
+/// when the publication becomes ready before the page's snapshot: the page would read finished
+/// rows under a disclosure that calls them unavailable.
+#[tokio::test]
+async fn v2_search_explicit_retries_when_an_unavailable_publication_becomes_ready_before_the_snapshot()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    begin_search_family_rebuild(
+        &database,
+        "ethereum-mainnet",
+        210,
+        "0xsearch-public-ethereum",
+    )
+    .await?;
+    let (status, payload) = search_with_mid_read(
+        &database,
+        database.app_state(),
+        "/v1/search?q=alpha&namespace=ens",
+        crate::v2::search_public_namespace_read_test_hooks::ReadHookPoint::BeforeRead,
+        || {
+            rebuild_fixture_families(
+                &database.pool,
+                "ethereum-mainnet",
+                210,
+                "0xsearch-public-ethereum",
+            )
+        },
+    )
+    .await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{payload:#}");
+    assert_search_error(payload, "conflict", BEFORE_SNAPSHOT_CONFLICT);
+
+    database.cleanup().await
+}
+
 /// A redo that begins before the page's snapshot withholds the captured publication on that
 /// snapshot, so the request is refused as a moved publication before any post-read reload. The
 /// query matches nothing: a matching row the redo withholds answers stale from the page read.

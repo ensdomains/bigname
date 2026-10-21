@@ -9,6 +9,7 @@ const TEMPORARILY_UNAVAILABLE: &str = "temporarily_unavailable";
 #[derive(Debug)]
 pub(crate) struct ExplicitNamespaceRequestScope {
     meta: Meta,
+    scope: SnapshotSelectionScope,
     selected: Option<SelectedSnapshot>,
     project_generations: Option<BTreeMap<String, String>>,
     interpret_redo_state: InterpretRedoCapture,
@@ -57,11 +58,15 @@ impl ExplicitNamespaceRequestScope {
         self.selected.is_some()
     }
 
-    /// Preserve unavailable-scope disclosure. A ready capture must still be the same
-    /// publication on the request's snapshot, including an empty search page.
+    /// A ready capture must still be the same publication on the request's snapshot, including
+    /// an empty search page. An unavailable capture keeps its disclosure only while the
+    /// snapshot has no servable publication either: rows it would read are no longer withheld.
     pub(crate) async fn served_on(&self, conn: &mut sqlx::PgConnection) -> V2Result<bool> {
         let Some(selected) = self.selected.as_ref() else {
-            return Ok(true);
+            return request_scope_is_ready_on(conn, &self.scope)
+                .await
+                .map(|ready| !ready)
+                .map_err(api_error_to_v2);
         };
         let current = load_selected_project_generations_on(conn, selected, true)
             .await
@@ -202,9 +207,10 @@ pub(crate) async fn explicit_namespace_request_scope(
         };
     Ok(ExplicitNamespaceRequestScope {
         meta: request_scope_meta(&[RequestScopeSnapshot {
-            scope,
+            scope: scope.clone(),
             selected: selected.clone(),
         }])?,
+        scope,
         selected,
         project_generations,
         interpret_redo_state,

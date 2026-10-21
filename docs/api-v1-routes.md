@@ -4459,7 +4459,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
 | 404 | object ErrorEnvelope | `not_found` | none | The requested namespace is not a supported public namespace. |
 | 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
-| 409 | object ErrorEnvelope | `conflict` | none | The deployment has no servable public namespace for a search without namespace, the active manifests change during the read ("active public namespace manifests changed while the request was being read"), a ready captured publication moved, or an Interpret redo started on a served chain, before the page's snapshot began, or publication readiness changed between admission reads. |
+| 409 | object ErrorEnvelope | `conflict` | none | The deployment has no servable public namespace for a search without namespace, the active manifests change during the read ("active public namespace manifests changed while the request was being read"), the captured publication changed before the page's snapshot began (a ready publication moved, an Interpret redo started on a served chain, or an unavailable explicit publication became ready), or publication readiness changed between admission reads. |
 | 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, an Interpret redo began during the read, or the route's publication revalidation requires retry. |
 | 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
 | 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
@@ -4507,8 +4507,9 @@ introduces it rebuilds Project from full history before serving the option; see
   positions in `meta.as_of`. A publication that moved between capture and the
   snapshot returns the retryable `409 conflict`, and so does an Interpret redo
   that began on a served chain in that window. An explicit namespace captured
-  without a ready publication has nothing for the snapshot to confirm, so a
-  redo in that window returns `409 stale` instead. After reading its page, bare
+  without a ready publication returns the same `409 conflict` when the snapshot
+  finds the publication ready, and a redo in that window returns `409 stale`
+  instead. After reading its page, bare
   search reloads the active manifest declarations and the Interpret redo state
   of its served chains. A manifest change returns `409 conflict` with the
   message "active public namespace manifests changed while the request was
