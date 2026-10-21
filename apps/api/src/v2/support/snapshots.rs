@@ -280,43 +280,6 @@ pub(crate) async fn revalidate_public_namespace_set(
         .await
 }
 
-pub(crate) async fn revalidate_lookup_public_namespace_set(
-    state: &AppState,
-    expected: &PublicNamespaceSet,
-) -> ApiResult<()> {
-    if state.public_namespaces_override().is_some() {
-        let current = derive_public_namespace_set(state).await?;
-        return require_same_public_namespace_names(expected, &current);
-    }
-
-    let manifest_tokens = load_public_namespace_manifest_tokens(&state.pool).await?;
-    if expected.manifest_tokens.as_ref() != manifest_tokens.as_slice() {
-        return Err(public_namespace_manifest_conflict());
-    }
-    let current =
-        derive_public_namespace_set_from_manifests(state, manifest_tokens.clone()).await?;
-    let reloaded_manifest_tokens = load_public_namespace_manifest_tokens(&state.pool).await?;
-    if manifest_tokens != reloaded_manifest_tokens {
-        return Err(public_namespace_manifest_conflict());
-    }
-    require_same_public_namespace_names(expected, &current)
-}
-
-fn require_same_public_namespace_names(
-    expected: &PublicNamespaceSet,
-    current: &PublicNamespaceSet,
-) -> ApiResult<()> {
-    if expected.names == current.names {
-        return Ok(());
-    }
-
-    Err(ApiError {
-        status: StatusCode::CONFLICT,
-        code: "stale",
-        message: "public namespace readiness changed while the request was being read".to_owned(),
-    })
-}
-
 fn public_namespace_manifest_conflict() -> ApiError {
     ApiError {
         status: StatusCode::CONFLICT,

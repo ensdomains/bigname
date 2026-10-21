@@ -3,8 +3,7 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::Notify;
 
 #[tokio::test]
-async fn registry_token_ids_keep_name_snapshots_and_reject_changed_lookup_publication() -> Result<()>
-{
+async fn registry_token_ids_keep_name_snapshots_when_a_block_publishes_mid_read() -> Result<()> {
     for route in [
         format!("/v1/names/{NAME}"),
         "lookup".into(),
@@ -39,9 +38,10 @@ async fn registry_token_ids_keep_name_snapshots_and_reject_changed_lookup_public
             request.await?
         };
         if route == "lookup" {
-            assert_eq!(status, StatusCode::CONFLICT, "{body}");
-            assert_eq!(body["error"]["code"], "stale", "{body}");
-        } else if status == StatusCode::OK {
+            // The block published after the batch's snapshot began: the old row, the old token.
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+        if status == StatusCode::OK {
             let rows = routes::token_rows(&route, &body);
             assert!(!rows.is_empty(), "{body}");
             for row in rows {

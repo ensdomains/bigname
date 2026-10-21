@@ -6067,7 +6067,7 @@
             }
           },
           "409": {
-            "description": "`conflict`: The explicit snapshot selector cannot form a canonical snapshot or, for lookup, its selected positions cannot be combined.\n\n`stale`: The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry.",
+            "description": "`conflict`: The explicit snapshot selector cannot form a canonical snapshot, the selected positions cannot be combined, or the active public namespace manifests changed during the read.\n\n`stale`: The publication or selected position cannot be served coherently, an Interpret redo began during the read, or the publication moved before the read snapshot began (\"served publication changed before the lookup read began\").",
             "content": {
               "application/json": {
                 "schema": {

@@ -1,5 +1,5 @@
-// Collections read the captured family publication on one snapshot; lookup heads revalidate it
-// after reading. Expiry filters use its block timestamp on both first pages and continuations.
+// Collections and lookup batches read the captured family publication on one snapshot. Expiry
+// filters use its block timestamp on both first pages and continuations.
 
 /// Advance the generation during a paused read, modeling the marker change of a family commit.
 /// An intentional direct write: the fixtures publish through the family publisher, but a
@@ -103,7 +103,35 @@ async fn v2_collection_retries_a_block_committed_before_the_snapshot_begins() ->
 }
 
 #[tokio::test]
-async fn v2_lookup_head_refuses_a_family_block_committed_during_the_read() -> Result<()> {
+async fn v2_lookup_head_keeps_the_captured_publication_after_a_family_block_commits() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_marker_collection_fixture(&database).await?;
+    let served = crate::v2::lookup::head::load_served_head(&database.pool, &ens_head_scope())
+        .await
+        .expect("the served head loads")
+        .context("the chain has a head")?;
+    let Ok(mut reads) = served.pin(&database.pool).await else {
+        panic!("the snapshot serves the capture");
+    };
+    let marker_sequence = "SELECT sequence::TEXT FROM bigname_phase.project_family_marker";
+    let read_before: String = sqlx::query_scalar(marker_sequence)
+        .fetch_one(&mut *reads)
+        .await?;
+    commit_family_block(&database.pool).await?;
+    let read_after: String = sqlx::query_scalar(marker_sequence)
+        .fetch_one(&mut *reads)
+        .await?;
+    assert_eq!(read_after, read_before, "a later read sees the captured block");
+    reads.commit().await?;
+    crate::v2::lookup::head::revalidate_served_head(&database.pool, &served)
+        .await
+        .expect("a block after the snapshot began does not refuse the batch");
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_lookup_head_retries_a_family_block_committed_before_the_snapshot_begins() -> Result<()>
+{
     let database = TestDatabase::new_migrated().await?;
     seed_marker_collection_fixture(&database).await?;
     let served = crate::v2::lookup::head::load_served_head(&database.pool, &ens_head_scope())
@@ -111,13 +139,11 @@ async fn v2_lookup_head_refuses_a_family_block_committed_during_the_read() -> Re
         .expect("the served head loads")
         .context("the chain has a head")?;
     commit_family_block(&database.pool).await?;
-    let error = crate::v2::lookup::head::revalidate_served_head(&database.pool, &served)
-        .await
-        .expect_err("the served generation moved");
-    assert_eq!(
-        error.envelope().error.message,
-        "served data changed while the lookup was being read"
-    );
+    let Err(error) = served.pin(&database.pool).await else {
+        panic!("the snapshot no longer serves the capture");
+    };
+    assert_eq!(error.code(), crate::v2::ErrorCode::Stale);
+    assert_eq!(error.envelope().error.message, LOOKUP_PUBLICATION_MOVED);
     database.cleanup().await
 }
 

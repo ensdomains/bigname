@@ -117,9 +117,20 @@ async fn populated_lookup_publication_rebuild_resume_and_pruned_redo() -> Result
             .await?;
     assert!(next > sequence);
     control.resume().await;
+    // The rebuild landed after the batch's snapshot began. The batch is the captured one, the
+    // same payload at the same position, though the marker sequence moved underneath.
     let raced = request.await??;
-    assert_eq!(raced.status(), StatusCode::CONFLICT);
-    assert_eq!(read_json::<Value>(raced).await?["error"]["code"], "stale");
+    assert_eq!(raced.status(), StatusCode::OK);
+    let raced: Value = read_json(raced).await?;
+    assert_eq!(
+        raced["data"][0]["record"]["records"]["texts"]["atomic-a"],
+        "0"
+    );
+    assert_eq!(
+        raced["data"][0]["record"]["records"]["texts"]["atomic-b"],
+        "0"
+    );
+    assert_eq!(raced["data"][0]["record"], before);
     drop(guard);
     assert_eq!(assert_name_prepared_parity(&database, CHILD).await?, before);
 

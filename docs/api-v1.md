@@ -1304,12 +1304,18 @@ Interpret redo state of the served authority chains, both captured during
 derivation. A manifest change returns `409 conflict` with the message "active
 public namespace manifests changed while the request was being read". A redo
 that began during the read returns the retryable `409 stale`.
-Public reverse lookup reloads its captured active manifest declarations before
-the route's existing head and projection-publication check, including the same
-Interpret redo check: a manifest change returns `409 conflict`, while a redo,
-head, or publication change returns the existing retryable `409 stale`. A redo
-that begins after derivation therefore never exposes a partial page through
-either route.
+A lookup batch with a [served head](glossary.md#served-head), public reverse
+lookup included, is read on one database snapshot, which first confirms that it
+still serves the projection publications captured for the batch. A publication
+that moved, or an Interpret redo that began, before the snapshot returns the
+retryable `409 stale` with the message "served publication changed before the
+lookup read began". A block, same-height rebuild, undo or reorg after that is
+not a refusal: the batch reports the captured position in `meta.as_of`. After
+the read, the API reloads the active manifest declarations captured for address
+inputs and the Interpret redo state of the selected chains. A manifest change
+returns `409 conflict`. A redo that began or ran during the read returns
+`409 stale`. A redo that begins after derivation therefore never exposes a
+partial page through either route.
 Explicit-namespace search captures its request-scope metadata before reading
 the page. When the capture found a ready publication, the page's snapshot
 confirms it the same way. A head or publication change after that is not a
@@ -1324,10 +1330,12 @@ returns `409 stale`. Publication becoming ready between
 admission reads returns `409 conflict`. It is a readiness change, not evidence
 of an Interpret redo.
 Their namespace-omitted cursors bind that derived namespace list and fail closed if it
-changes. Search with an explicit recognized `namespace` bypasses public
-namespace derivation. It still requires the selected namespace's
-`redo_in_progress` value to be false and returns `409 stale` while an Interpret
-redo is active. Name-only lookup likewise keeps its existing name snapshot
+changes. A namespace that becomes ready during a bare search or public reverse
+lookup read does not refuse it: the response keeps the captured disclosure, and
+a cursor it returns fails closed on the next page. Search with an explicit
+recognized `namespace` bypasses public namespace derivation. It still requires
+the selected namespace's `redo_in_progress` value to be false and returns
+`409 stale` while an Interpret redo is active. Name-only lookup likewise keeps its existing name snapshot
 selection and does not derive the public set; only address inputs invoke public
 reverse derivation.
 The chains accounted for by `meta.as_of` and `meta.as_of_completeness` are

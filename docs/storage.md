@@ -500,9 +500,9 @@ older value. Resource UUIDs remain stable permission handles, independent of tok
 Name detail loads its selected composed row and token evidence in one short read-only
 REPEATABLE READ snapshot, then closes it before verified RPC work. Resolver bound-name pages
 reuse their collection snapshot; detail lookup enriches all forward and reverse records once
-before its existing served-head generation revalidation. Feed and DTOs without `token_id` make
-no token read. There is no historical token endpoint: exact name/resolver selectors below the
-current publication still return `stale`. The reader changes no normalized or projected rows.
+on the request's read snapshot. Feed and DTOs without `token_id` make no token read. There is
+no historical token endpoint: exact name/resolver selectors below the current publication still
+return `stale`. The reader changes no normalized or projected rows.
 The [concurrent prebuild runbook](../ops/registry-token-index/README.md) gives the large-database
 installation, adoption and recovery procedure for schema-migration
 `20261005090000_normalized_events_registry_token_index.sql`. This index is rebuilt with the

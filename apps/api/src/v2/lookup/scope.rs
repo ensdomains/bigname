@@ -8,7 +8,7 @@ use crate::{
     v2::support::{
         PublicNamespaceSet, apply_request_scope_completeness,
         apply_suppressed_request_scope_completeness, derive_public_namespace_set,
-        revalidate_lookup_public_namespace_set,
+        revalidate_collection_manifests,
     },
 };
 
@@ -102,12 +102,15 @@ pub(super) async fn lookup_public_namespaces(state: &AppState) -> V2Result<Publi
     Ok(namespaces)
 }
 
+/// After the batch's snapshot committed: `409 conflict` when the active manifest declarations
+/// captured for address inputs changed. Readiness is not rechecked: the batch serves the
+/// captured disclosure, and a cursor minted under it binds the captured namespace list.
 pub(super) async fn revalidate_lookup_public_namespaces(
     state: &AppState,
     namespaces: Option<&PublicNamespaceSet>,
 ) -> V2Result<()> {
     if let Some(namespaces) = namespaces {
-        revalidate_lookup_public_namespace_set(state, namespaces)
+        revalidate_collection_manifests(state, namespaces, None)
             .await
             .map_err(api_error_to_v2)?;
     }

@@ -16,7 +16,6 @@ use bigname_storage::{
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use sqlx::PgPool;
 use sqlx::types::Uuid;
 use sqlx::types::time::OffsetDateTime;
 use tracing::error;
@@ -314,14 +313,14 @@ impl AbiSource {
 /// object without one (a verified read of a name with no inventory row) reports
 /// `inventory_not_available`.
 pub(crate) async fn fill_abi_content_types(
-    pool: &PgPool,
+    db: impl Into<bigname_storage::ReadDb<'_>>,
     targets: Vec<(&mut RecordGroups, Option<&AbiSource>)>,
 ) -> V2Result<()> {
     let inputs = targets
         .iter()
         .filter_map(|(_, source)| source.map(AbiSource::input))
         .collect::<Vec<_>>();
-    let mut answers = load_abi_content_types(pool, &inputs).await?.into_iter();
+    let mut answers = load_abi_content_types(db, &inputs).await?.into_iter();
     for (groups, source) in targets {
         let answer = match source {
             Some(_) => answers.next().expect("one ABI answer per inventory source"),
