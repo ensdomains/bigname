@@ -164,7 +164,7 @@ pub(crate) async fn get_search(
                 "the deployment does not serve a public namespace",
             ));
         }
-        Some(namespaces)
+        Some(namespaces.capture_interpret_redo_state(&state.pool).await?)
     } else {
         None
     };
@@ -190,9 +190,11 @@ pub(crate) async fn get_search(
 
     let filter = search_filter(&params, public_namespaces);
     #[cfg(test)]
-    if public_namespace_set.is_some() {
-        public_namespace_read_test_hooks::run(&state.pool).await?;
-    }
+    public_namespace_read_test_hooks::run_at(
+        &state.pool,
+        public_namespace_read_test_hooks::ReadHookPoint::BeforeRead,
+    )
+    .await?;
     // Identity text, finished public fields and live creation context share one snapshot.
     let mut reads = bigname_storage::begin_read_snapshot(&state.pool)
         .await
@@ -219,40 +221,34 @@ pub(crate) async fn get_search(
                 .is_none_or(|scope| scope.has_publication()),
     )
     .await?;
-    // Closed before the revalidation below, which reads through the pool.
+    // Closed before the revalidation below, which reads through the pool. A block published
+    // from here on is not a refusal: the page is attributed to the publication it was read at.
     reads
         .commit()
         .await
         .map_err(|_| V2Error::internal_error("failed to load search results"))?;
+    // The captured publication moved, or a redo withheld it, before the snapshot's first read.
+    if scope_changed {
+        return Err(V2Error::conflict(
+            "search publication changed before the page was read",
+        ));
+    }
     #[cfg(test)]
-    if public_namespace_set.is_none() {
-        public_namespace_read_test_hooks::run(&state.pool).await?;
-    }
-    if let Some(public_namespace_set) = public_namespace_set.as_ref() {
-        revalidate_public_namespace_set(&state, public_namespace_set)
-            .await
-            .map_err(api_error_to_v2)?;
-    }
+    public_namespace_read_test_hooks::run(&state.pool).await?;
     let meta = match public_namespace_set.as_ref() {
-        Some(public_namespace_set) => request_scope_meta(public_namespace_set.request_scope())?,
+        Some(public_namespace_set) => {
+            revalidate_public_namespace_set(&state, public_namespace_set).await?;
+            request_scope_meta(public_namespace_set.request_scope())?
+        }
         None => {
             revalidate_explicit_namespace_request_scope(
                 &state,
-                params
-                    .namespace
-                    .as_deref()
-                    .expect("explicit search scope must include a namespace"),
                 explicit_namespace_meta
                     .expect("explicit search scope metadata must be captured before the page read"),
             )
             .await?
         }
     };
-    if scope_changed {
-        return Err(V2Error::conflict(
-            "search namespace position changed while the request was being read",
-        ));
-    }
 
     let next_cursor = storage_page
         .next_cursor
@@ -494,6 +490,9 @@ pub(crate) mod public_namespace_read_test_hooks {
 
     #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
     pub(crate) enum ReadHookPoint {
+        /// After capture, before the page's snapshot begins.
+        BeforeRead,
+        /// After the page's snapshot committed, before the post-read checks.
         AfterPage,
         AfterExplicitSelection,
         BeforeUnfencedGenerations,

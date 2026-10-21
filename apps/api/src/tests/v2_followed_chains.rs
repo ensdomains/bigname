@@ -301,3 +301,123 @@ async fn a_deployment_following_no_chain_refuses() -> Result<()> {
     .await?;
     database.cleanup().await
 }
+
+const SEARCH: &str = "/v1/search?q=premigrated";
+
+/// The bare search answer with Base withheld, before anything moves.
+async fn withheld_search_baseline(database: &TestDatabase) -> Result<Value> {
+    let (status, search) = get(database, SEARCH).await?;
+    assert_eq!(status, StatusCode::OK, "{search:#}");
+    assert_eq!(row_names(&search), [NAME], "{search:#}");
+    assert_eq!(keys(&search, "as_of"), ["1"], "{search:#}");
+    assert_eq!(keys(&search, "as_of_completeness"), ["8453"], "{search:#}");
+    Ok(search)
+}
+
+async fn withheld_search_mid_read<Fut>(
+    database: &TestDatabase,
+    inject: impl FnOnce() -> Fut,
+) -> Result<(StatusCode, Value)>
+where
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    search_with_mid_read(
+        database,
+        public_search_state(database),
+        SEARCH,
+        crate::v2::search_public_namespace_read_test_hooks::ReadHookPoint::AfterPage,
+        inject,
+    )
+    .await
+}
+
+/// A block Ethereum publishes during the read never refuses the page. The page reports the
+/// publication its snapshot read and still discloses Base, and the next request the new block.
+#[tokio::test]
+async fn a_block_mid_read_keeps_the_withheld_namespace_disclosed() -> Result<()> {
+    let database = mainnet().await?;
+    follow_base(&database).await?;
+    let baseline = withheld_search_baseline(&database).await?;
+    let block = baseline["meta"]["as_of"]["1"]["block_number"]
+        .as_i64()
+        .context("served block number")?
+        + 1;
+    let hash = format!("0xfollowed-ethereum-{block}");
+    let (status, search) = withheld_search_mid_read(&database, || async {
+        database
+            .seed_snapshot_selector_chain_positions(&json!({"ethereum": {
+                "chain_id": "ethereum-mainnet", "block_number": block, "block_hash": hash,
+                "timestamp": "2023-11-14T22:15:00Z"
+            }}))
+            .await?;
+        rebuild_fixture_families(&database.pool, "ethereum-mainnet", block, &hash).await
+    })
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{search:#}");
+    assert_eq!(search, baseline);
+    let (_, later) = get(&database, SEARCH).await?;
+    assert_eq!(
+        later["meta"]["as_of"]["1"]["block_number"],
+        json!(block),
+        "{later:#}"
+    );
+    database.cleanup().await
+}
+
+/// A manifest declaration change during the read still refuses the page.
+#[tokio::test]
+async fn a_manifest_change_mid_read_refuses_the_withheld_scope() -> Result<()> {
+    let database = mainnet().await?;
+    follow_base(&database).await?;
+    withheld_search_baseline(&database).await?;
+    let (status, search) = withheld_search_mid_read(&database, || async {
+        sqlx::query(
+            "UPDATE bigname_phase.manifest_versions SET rollout_status = 'deprecated'
+             WHERE namespace = 'ens' AND rollout_status = 'active'",
+        )
+        .execute(&database.pool)
+        .await?;
+        Ok(())
+    })
+    .await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{search:#}");
+    assert_search_error(search, "conflict", MANIFEST_CONFLICT);
+    database.cleanup().await
+}
+
+/// An Interpret redo that begins on the served chain during the read is a retryable stale.
+#[tokio::test]
+async fn a_redo_mid_read_on_the_served_chain_refuses_the_withheld_scope() -> Result<()> {
+    let database = mainnet().await?;
+    follow_base(&database).await?;
+    withheld_search_baseline(&database).await?;
+    let (status, search) = withheld_search_mid_read(&database, || {
+        database.simulate_interpret_redo_begin("ethereum-mainnet", "redo")
+    })
+    .await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{search:#}");
+    assert_search_error(search, "stale", INTERPRET_REDO_STALE);
+    database.cleanup().await
+}
+
+/// A redo on the withheld chain is not a refusal: the page read none of its rows. Base is
+/// published and then unservable, so it has the indexed range a redo needs.
+#[tokio::test]
+async fn a_redo_mid_read_on_the_withheld_chain_is_not_a_refusal() -> Result<()> {
+    let database = mainnet().await?;
+    publish_base(&database).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.project_family_marker SET state = 'bootstrap_pending'
+         WHERE chain_id = 'base-mainnet'",
+    )
+    .execute(&database.pool)
+    .await?;
+    let baseline = withheld_search_baseline(&database).await?;
+    let (status, search) = withheld_search_mid_read(&database, || {
+        database.simulate_interpret_redo_begin(BASE, "redo")
+    })
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{search:#}");
+    assert_eq!(search, baseline);
+    database.cleanup().await
+}

@@ -5757,7 +5757,7 @@
             }
           },
           "409": {
-            "description": "`conflict`: The deployment has no servable public namespace for a search without namespace, or the selected namespace set, manifest, publication readiness or served position changes during the read.\n\n`stale`: The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry.",
+            "description": "`conflict`: The deployment has no servable public namespace for a search without namespace, the active manifests change during the read (\"active public namespace manifests changed while the request was being read\"), the captured publication changed before the page's snapshot began (a ready publication moved, an Interpret redo started on a served chain, or an unavailable explicit publication became ready), or publication readiness changed between admission reads.\n\n`stale`: The publication or selected position cannot be served coherently, an Interpret redo began during the read, or the route's publication revalidation requires retry.",
             "content": {
               "application/json": {
                 "schema": {

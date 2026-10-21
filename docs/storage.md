@@ -334,8 +334,9 @@ identity document is an integrity error; it is never silently omitted or rebuilt
 An explicit scope without a selected publication keeps the original lexical candidate walk:
 matching source publications are checked before unsupported rows are omitted. Thus a stale
 matching publication still returns stale, while a truly empty lexical page retains the existing
-unavailable metadata. Post-request scope revalidation remains in place. Search does not adopt
-the different admission policy of the other collection routes.
+unavailable metadata. Post-request revalidation covers the active manifest declarations and the
+Interpret redo state only. Search does not adopt the different admission policy of the other
+collection routes.
 
 ### Binding intervals and authority arms
 

@@ -4468,8 +4468,8 @@ introduces it rebuilds Project from full history before serving the option; see
 | 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
 | 404 | object ErrorEnvelope | `not_found` | none | The requested namespace is not a supported public namespace. |
 | 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
-| 409 | object ErrorEnvelope | `conflict` | none | The deployment has no servable public namespace for a search without namespace, or the selected namespace set, manifest, publication readiness or served position changes during the read. |
-| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 409 | object ErrorEnvelope | `conflict` | none | The deployment has no servable public namespace for a search without namespace, the active manifests change during the read ("active public namespace manifests changed while the request was being read"), the captured publication changed before the page's snapshot began (a ready publication moved, an Interpret redo started on a served chain, or an unavailable explicit publication became ready), or publication readiness changed between admission reads. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, an Interpret redo began during the read, or the route's publication revalidation requires retry. |
 | 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
 | 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
 
@@ -4510,18 +4510,25 @@ introduces it rebuilds Project from full history before serving the option; see
   `meta.as_of_token`, and its cursor carries no snapshot validity claim (see
   [current-state list cursors](api-v1.md#current-state-list-cursors)). True
   as-of search enumeration is deferred to the
-  revision-bound storage follow-up. Bare search reloads the active manifest
-  declarations, selected authority chain heads, project generations, and
-  Interpret redo state after reading its page; a redo that begins mid-request
-  or another captured-state change returns the existing retryable `409 conflict`,
-  never a partial page. Explicit-namespace search likewise captures its
-  request-scope metadata before reading the page and reloads it afterward; a
-  head, completed publication generation, or readiness change returns `409
-  conflict` rather than attributing the page to a later position. An explicit
-  namespace returns retryable `409 stale` whenever an Interpret redo is among
-  the failed admission terms, including when the redo begins during the read.
-  A Project publication that becomes ready between admission reads with no
-  redo involved is instead a readiness change and returns `409 conflict`.
+  revision-bound storage follow-up. The page is read on one database snapshot,
+  which first confirms that it still serves the captured publications. A block
+  published after that is not a refusal: the page reports the captured
+  positions in `meta.as_of`. A publication that moved between capture and the
+  snapshot returns the retryable `409 conflict`, and so does an Interpret redo
+  that began on a served chain in that window. An explicit namespace captured
+  without a ready publication returns the same `409 conflict` when the snapshot
+  finds the publication ready, and a redo in that window returns `409 stale`
+  instead. After reading its page, bare
+  search reloads the active manifest declarations and the Interpret redo state
+  of its served chains. A manifest change returns `409 conflict` with the
+  message "active public namespace manifests changed while the request was
+  being read". A redo that begins during the read returns the retryable `409
+  stale`, never a partial page. Explicit-namespace search reloads only the
+  Interpret redo state after the page, with the same `409 stale`. An explicit
+  namespace also returns `409 stale` whenever an Interpret redo is among the
+  failed admission terms. A Project publication that becomes ready between
+  admission reads with no redo involved is instead a readiness change and
+  returns `409 conflict`.
 - Status semantics: no matches returns `200` with empty `data`. A stored name
   longer than 2000 bytes is never a result, because search walks an index
   that holds only shorter names. `q` is

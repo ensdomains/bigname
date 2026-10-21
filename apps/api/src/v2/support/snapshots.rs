@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 use bigname_manifests::{ActiveManifestVersion, load_namespace_manifest_snapshot};
 
+use crate::v2::{V2Error, V2Result};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PublicNamespaceReadToken {
     selected: SelectedSnapshot,
@@ -60,6 +62,7 @@ pub(crate) struct PublicNamespaceSet {
     request_scope: Arc<[RequestScopeSnapshot]>,
     manifest_tokens: Arc<[PublicNamespaceManifestToken]>,
     names: Arc<[String]>,
+    interpret_redo_state: Option<InterpretRedoCapture>,
 }
 
 impl PublicNamespaceSet {
@@ -77,7 +80,23 @@ impl PublicNamespaceSet {
             request_scope: Arc::from(request_scope),
             manifest_tokens: Arc::from(manifest_tokens),
             names: Arc::from(names),
+            interpret_redo_state: None,
         }
+    }
+
+    /// Capture the Interpret redo state of the chains whose rows the set serves. A withheld
+    /// namespace serves no rows, so its chains are not captured.
+    pub(crate) async fn capture_interpret_redo_state(mut self, pool: &PgPool) -> V2Result<Self> {
+        let chain_ids = self
+            .deployments
+            .iter()
+            .filter_map(|deployment| deployment.read_token.as_ref())
+            .flat_map(|token| token.selected.chain_positions.as_map().values())
+            .map(|position| position.chain_id.clone())
+            .collect::<BTreeSet<_>>();
+        self.interpret_redo_state =
+            Some(InterpretRedoCapture::load(pool, chain_ids.into_iter().collect()).await?);
+        Ok(self)
     }
 
     pub(crate) fn deployments(&self) -> &[PublicNamespaceDeployment] {
@@ -100,19 +119,6 @@ impl PublicNamespaceSet {
         self.deployments
             .iter()
             .any(|deployment| deployment.namespace == namespace)
-    }
-
-    fn shares_read_view(&self, other: &Self) -> bool {
-        self.manifest_tokens == other.manifest_tokens
-            && self.deployments.len() == other.deployments.len()
-            && self
-                .deployments
-                .iter()
-                .zip(other.deployments.iter())
-                .all(|(expected, current)| {
-                    expected.namespace == current.namespace
-                        && expected.read_token == current.read_token
-                })
     }
 }
 
@@ -207,6 +213,16 @@ async fn load_request_scope_snapshot(
     load_request_scope_snapshot_on(&mut connection, scope).await
 }
 
+/// Whether `scope` has a servable publication at its head on `connection`.
+pub(crate) async fn request_scope_is_ready_on(
+    connection: &mut sqlx::PgConnection,
+    scope: &SnapshotSelectionScope,
+) -> ApiResult<bool> {
+    Ok(load_request_scope_snapshot_on(connection, scope)
+        .await?
+        .is_some())
+}
+
 async fn load_request_scope_snapshot_on(
     connection: &mut sqlx::PgConnection,
     scope: &SnapshotSelectionScope,
@@ -242,34 +258,26 @@ async fn load_request_scope_snapshot_on(
     )
 }
 
+/// Bare search's post-read check. The page was read on a snapshot that still served every
+/// captured publication (`served_on`), so a block published after it is not a refusal. A
+/// manifest change is `409 conflict`, and a redo on a served chain during the read is
+/// `409 stale`.
 pub(crate) async fn revalidate_public_namespace_set(
     state: &AppState,
     expected: &PublicNamespaceSet,
-) -> ApiResult<()> {
-    let current = if state.public_namespaces_override().is_some() {
-        derive_public_namespace_set(state).await?
-    } else {
-        let manifest_tokens = load_public_namespace_manifest_tokens(&state.pool).await?;
-        if expected.manifest_tokens.as_ref() != manifest_tokens.as_slice() {
-            return Err(public_namespace_manifest_conflict());
-        }
-        let current =
-            derive_public_namespace_set_from_manifests(state, manifest_tokens.clone()).await?;
-        let reloaded_manifest_tokens = load_public_namespace_manifest_tokens(&state.pool).await?;
-        if manifest_tokens != reloaded_manifest_tokens {
-            return Err(public_namespace_manifest_conflict());
-        }
-        current
-    };
-    if expected.shares_read_view(&current) {
-        return Ok(());
-    }
-
-    Err(ApiError {
-        status: StatusCode::CONFLICT,
-        code: "conflict",
-        message: "public namespace authority changed while the request was being read".to_owned(),
-    })
+) -> V2Result<()> {
+    revalidate_collection_manifests(state, expected, None)
+        .await
+        .map_err(|error| match error.code {
+            "conflict" => V2Error::conflict(error.message),
+            _ => crate::v2::api_error_to_v2(error),
+        })?;
+    expected
+        .interpret_redo_state
+        .as_ref()
+        .ok_or_else(|| V2Error::internal_error("search Interpret redo state was not captured"))?
+        .revalidate(&state.pool)
+        .await
 }
 
 pub(crate) async fn revalidate_lookup_public_namespace_set(
