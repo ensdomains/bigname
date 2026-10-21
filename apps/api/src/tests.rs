@@ -519,6 +519,7 @@ include!("tests/v2_address_resolves_to.rs");
 include!("tests/v2_address_resolves_to_evm.rs");
 include!("tests/v2_address_resolves_to_evm_plan.rs");
 include!("tests/v2_address_resolves_to_bounded.rs");
+include!("tests/v2_address_resolves_to_candidates.rs");
 #[path = "tests/v2_address_name_queries.rs"]
 mod v2_address_name_queries;
 #[path = "tests/v2_authority_ens_v0.rs"]
