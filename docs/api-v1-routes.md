@@ -4459,7 +4459,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
 | 404 | object ErrorEnvelope | `not_found` | none | The requested namespace is not a supported public namespace. |
 | 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
-| 409 | object ErrorEnvelope | `conflict` | none | The deployment has no servable public namespace for a search without namespace, the active manifests change during the read, the captured publication moved before the page's snapshot began, or publication readiness changed between admission reads. |
+| 409 | object ErrorEnvelope | `conflict` | none | The deployment has no servable public namespace for a search without namespace, the active manifests change during the read, the captured publication moved, or an Interpret redo started, before the page's snapshot began, or publication readiness changed between admission reads. |
 | 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, an Interpret redo began during the read, or the route's publication revalidation requires retry. |
 | 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
 | 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
@@ -4505,7 +4505,8 @@ introduces it rebuilds Project from full history before serving the option; see
   which first confirms that it still serves the captured publications. A block
   published after that is not a refusal: the page reports the captured
   positions in `meta.as_of`. A publication that moved between capture and the
-  snapshot returns the retryable `409 conflict`. After reading its page, bare
+  snapshot returns the retryable `409 conflict`, and so does an Interpret redo
+  that began in that window. After reading its page, bare
   search reloads the active manifest declarations and the Interpret redo state
   of its served chains. A manifest change returns `409 conflict`. A redo that
   begins mid-request returns the retryable `409 stale`, never a partial page.

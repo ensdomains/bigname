@@ -1297,7 +1297,8 @@ from the same authority chains. A bare search page is read on one database
 snapshot, which first confirms that it still serves the projection publications
 captured during derivation. A block published after that is not a refusal: the
 page reports the captured publications in `meta.as_of`. A publication that moved
-between derivation and the snapshot returns the retryable `409 conflict`. After
+between derivation and the snapshot returns the retryable `409 conflict`, and so
+does an Interpret redo that began in that window. After
 reading the page, the API reloads the active manifest declarations and the
 Interpret redo state of the served authority chains, both captured during
 derivation. A manifest change returns `409 conflict`. A redo that began during
@@ -1311,8 +1312,8 @@ either route.
 Explicit-namespace search captures its request-scope metadata before reading
 the page, and the page's snapshot confirms the captured publication the same
 way. A head or publication change after that is not a refusal, and the page
-reports the captured position. A publication that moved before the snapshot
-returns the retryable `409 conflict`. After the page, the API reloads only the
+reports the captured position. A publication that moved, or an Interpret redo
+that began, before the snapshot returns the retryable `409 conflict`. After the page, the API reloads only the
 Interpret redo state, and a redo that began during the read returns `409 stale`.
 Publication becoming ready between admission reads returns `409 conflict`. It is
 a readiness change, not evidence of an Interpret redo.

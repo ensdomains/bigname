@@ -1257,6 +1257,47 @@ async fn v2_search_bare_serves_the_captured_publication_after_a_block_lands_mid_
     database.cleanup().await
 }
 
+/// A redo that begins before the page's snapshot withholds the captured publication on that
+/// snapshot, so the request is refused as a moved publication before any post-read reload. The
+/// query matches nothing: a matching row the redo withholds answers stale from the page read.
+#[tokio::test]
+async fn v2_search_bare_refuses_a_redo_before_the_snapshot_as_a_moved_publication() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    seed_v2_search_public_authority(&database).await?;
+    let (status, payload) = search_with_mid_read(
+        &database,
+        public_search_state(&database),
+        "/v1/search?q=zzz",
+        crate::v2::search_public_namespace_read_test_hooks::ReadHookPoint::BeforeRead,
+        || database.simulate_interpret_redo_begin("ethereum-mainnet", "redo"),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{payload:#}");
+    assert_search_error(payload, "conflict", BEFORE_SNAPSHOT_CONFLICT);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_search_explicit_refuses_a_redo_before_the_snapshot_as_a_moved_publication()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    let (status, payload) = search_with_mid_read(
+        &database,
+        database.app_state(),
+        "/v1/search?q=zzz&namespace=ens",
+        crate::v2::search_public_namespace_read_test_hooks::ReadHookPoint::BeforeRead,
+        || database.simulate_interpret_redo_begin("ethereum-mainnet", "redo"),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{payload:#}");
+    assert_search_error(payload, "conflict", BEFORE_SNAPSHOT_CONFLICT);
+
+    database.cleanup().await
+}
+
 /// The explicit cursor binds no publication: it continues across a block published
 /// between pages, and the next page reports the new block.
 #[tokio::test]

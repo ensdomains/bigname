@@ -227,6 +227,12 @@ pub(crate) async fn get_search(
         .commit()
         .await
         .map_err(|_| V2Error::internal_error("failed to load search results"))?;
+    // The captured publication moved, or a redo withheld it, before the snapshot's first read.
+    if scope_changed {
+        return Err(V2Error::conflict(
+            "search publication changed before the page was read",
+        ));
+    }
     #[cfg(test)]
     public_namespace_read_test_hooks::run(&state.pool).await?;
     let meta = match public_namespace_set.as_ref() {
@@ -243,12 +249,6 @@ pub(crate) async fn get_search(
             .await?
         }
     };
-    // The captured publication moved between its capture and the snapshot's first read.
-    if scope_changed {
-        return Err(V2Error::conflict(
-            "search publication changed before the page was read",
-        ));
-    }
 
     let next_cursor = storage_page
         .next_cursor
