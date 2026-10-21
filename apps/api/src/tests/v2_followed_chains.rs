@@ -381,12 +381,7 @@ async fn a_manifest_change_mid_read_refuses_the_withheld_scope() -> Result<()> {
     })
     .await?;
     assert_eq!(status, StatusCode::CONFLICT, "{search:#}");
-    // The API sanitizes the manifest conflict's internal message to the shared snapshot one.
-    assert_search_error(
-        search,
-        "conflict",
-        "requested snapshot cannot be resolved for resource",
-    );
+    assert_search_error(search, "conflict", MANIFEST_CONFLICT);
     database.cleanup().await
 }
 

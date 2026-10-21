@@ -384,10 +384,7 @@ async fn v2_search_rejects_manifest_change_between_derivation_and_row_read() -> 
         .context("search coherence request task panicked")?
         .context("search coherence request failed")?;
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        read_json::<Value>(response).await?["error"]["code"],
-        json!("conflict")
-    );
+    assert_search_error(read_json(response).await?, "conflict", MANIFEST_CONFLICT);
 
     database.cleanup().await
 }
@@ -438,12 +435,7 @@ async fn v2_search_manifest_change_that_breaks_derivation_returns_conflict() -> 
         .context("search derivation-breaking request task panicked")?
         .context("search derivation-breaking request failed")?;
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    let payload: Value = read_json(response).await?;
-    assert_eq!(payload["error"]["code"], json!("conflict"));
-    assert!(
-        payload.get("data").is_none(),
-        "no partial page may be served"
-    );
+    assert_search_error(read_json(response).await?, "conflict", MANIFEST_CONFLICT);
 
     database.cleanup().await
 }
@@ -2150,6 +2142,8 @@ async fn begin_search_family_rebuild(
 }
 
 const BEFORE_SNAPSHOT_CONFLICT: &str = "search publication changed before the page was read";
+const MANIFEST_CONFLICT: &str =
+    "active public namespace manifests changed while the request was being read";
 const INTERPRET_REDO_STALE: &str =
     "served data is temporarily unavailable while Interpret redo is in progress";
 

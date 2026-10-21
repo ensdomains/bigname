@@ -258,7 +258,10 @@ pub(crate) async fn revalidate_public_namespace_set(
 ) -> V2Result<()> {
     revalidate_collection_manifests(state, expected, None)
         .await
-        .map_err(crate::v2::api_error_to_v2)?;
+        .map_err(|error| match error.code {
+            "conflict" => V2Error::conflict(error.message),
+            _ => crate::v2::api_error_to_v2(error),
+        })?;
     expected
         .interpret_redo_state
         .as_ref()
