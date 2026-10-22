@@ -114,6 +114,12 @@ mod scoped {
         WALK_CREATED_AT_CLEARED.try_with(Clone::clone).ok()
     }
 
+    /// The statement the inverse address read finds its candidate resources with, binding the
+    /// address and its coin types. Tests compare its rows and plan with earlier statements'.
+    pub fn candidate_statement() -> &'static str {
+        super::super::candidates::CANDIDATES
+    }
+
     /// Runs `future` with the address reads composing names `size` at a time instead of
     /// [`super::COMPOSE_CHUNK`].
     pub async fn with_compose_chunk<F: Future>(size: usize, future: F) -> F::Output {
@@ -189,16 +195,16 @@ const COMPOSE_CHUNK: usize = 256;
 const EXACT_TOTAL_CAP: usize = 1_000;
 
 #[cfg(any(test, feature = "test-support"))]
+pub use scoped::{
+    candidate_statement, lookup_work_timer, note_lookup_work, with_address_name_paths,
+    with_compose_chunk, with_composed_name_batches, with_exact_total_cap,
+    with_inventory_read_counter, with_legacy_walk_batches, with_lookup_work,
+    with_role_read_counter, with_walk_created_at_cleared, with_walk_filter_names,
+};
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use scoped::{
     compose_chunk, exact_total_cap, legacy_walk_batches, note_address_name_path, note_walk_filter,
     walk_created_at_cleared,
-};
-#[cfg(any(test, feature = "test-support"))]
-pub use scoped::{
-    lookup_work_timer, note_lookup_work, with_address_name_paths, with_compose_chunk,
-    with_composed_name_batches, with_exact_total_cap, with_inventory_read_counter,
-    with_legacy_walk_batches, with_lookup_work, with_role_read_counter,
-    with_walk_created_at_cleared, with_walk_filter_names,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub(super) use scoped::{note_composed_batch, note_inventory_read, note_role_read};

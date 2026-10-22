@@ -26,49 +26,68 @@ pub(crate) struct Candidate {
     pub(crate) indexed_coin_types: BTreeSet<String>,
 }
 
+/// The candidate statement: one piece per way a pointer can admit an index row, each joined on
+/// equalities, so no pointer is tested against a key it shares only a chain with. A node-keyed
+/// row reaches the pointers at its node, and a row written under a name those at that name's
+/// namehash, in either case at the row's resolver or at a mirror resolver of its chain. The
+/// `admitted` set pairs each row with those resolvers once. A record-id row reaches every
+/// pointer at its resolver. A pointer that more than one piece or row reaches is one candidate
+/// per coin type. The earlier statement also matched a pointer's resource against a named
+/// resource that neither key arm ever set, so that unreachable arm is dropped.
+pub(super) const CANDIDATES: &str = "WITH node_keys AS (
+         SELECT chain_id, resolver_address, node,
+                CASE WHEN logical_name_id <> ''
+                     THEN lower(split_part(logical_name_id, ':', 2)) END AS named_namehash,
+                coin_type
+         FROM bigname_phase.project_address_record_node_index
+         WHERE address = $1 AND coin_type = ANY($2::text[])
+     ),
+     mirrors AS (
+         SELECT chain_id, resolver_address
+         FROM bigname_phase.project_resolver_classification
+         WHERE classification ->> 'role' = 'ensv1_mirror_resolver'
+     ),
+     admitted AS (
+         SELECT chain_id, resolver_address, node, named_namehash, coin_type FROM node_keys
+         UNION ALL
+         SELECT key.chain_id, mirror.resolver_address, key.node, key.named_namehash,
+                key.coin_type
+         FROM node_keys key
+         JOIN mirrors mirror ON mirror.chain_id = key.chain_id
+     ),
+     matched AS (
+         SELECT pointer.chain_id, pointer.resource_id, admitted.coin_type
+         FROM admitted
+         JOIN bigname_phase.project_resource_pointer pointer
+           ON pointer.chain_id = admitted.chain_id
+          AND pointer.namehash = admitted.node
+          AND pointer.resolver_address = admitted.resolver_address
+         UNION ALL
+         SELECT pointer.chain_id, pointer.resource_id, admitted.coin_type
+         FROM admitted
+         JOIN bigname_phase.project_resource_pointer pointer
+           ON pointer.chain_id = admitted.chain_id
+          AND pointer.namehash = admitted.named_namehash
+          AND pointer.resolver_address = admitted.resolver_address
+         UNION ALL
+         SELECT pointer.chain_id, pointer.resource_id, record.coin_type
+         FROM bigname_phase.project_address_record_id_index record
+         JOIN bigname_phase.project_resource_pointer pointer
+           ON pointer.chain_id = record.chain_id
+          AND pointer.resolver_address = record.resolver_address
+         WHERE record.address = $1 AND record.coin_type = ANY($2::text[])
+     )
+     SELECT chain_id, resource_id, coin_type, true AS indexed
+     FROM matched
+     GROUP BY chain_id, resource_id, coin_type";
+
 /// The candidate resources of `address` for `coin_types` from `source`.
 pub(crate) async fn candidate_resources_from(
     conn: &mut PgConnection,
     address: &str,
     coin_types: &[String],
 ) -> Result<BTreeMap<(String, Uuid), Candidate>> {
-    // A node-index row written under a name also reaches the pointers at that name's namehash
-    // (the named arm admits by logical name, `namespace:namehash`, with no node test).
-    let sql = "WITH keys AS (
-             SELECT chain_id, resolver_address, node, NULL::text AS record_id,
-                    NULL::uuid AS named_resource,
-                    CASE WHEN logical_name_id <> ''
-                         THEN lower(split_part(logical_name_id, ':', 2)) END AS named_namehash,
-                    coin_type, true AS indexed
-             FROM bigname_phase.project_address_record_node_index
-             WHERE address = $1 AND coin_type = ANY($2::text[])
-             UNION ALL
-             SELECT chain_id, resolver_address, NULL, record_id, NULL, NULL, coin_type, true
-             FROM bigname_phase.project_address_record_id_index
-             WHERE address = $1 AND coin_type = ANY($2::text[])
-         ),
-         mirrors AS (
-             SELECT chain_id, resolver_address
-             FROM bigname_phase.project_resolver_classification
-             WHERE classification ->> 'role' = 'ensv1_mirror_resolver'
-         )
-         SELECT pointer.chain_id, pointer.resource_id, keys.coin_type, bool_or(keys.indexed)
-                    AS indexed
-         FROM keys
-         JOIN bigname_phase.project_resource_pointer pointer
-           ON pointer.chain_id = keys.chain_id
-          AND (
-              ((pointer.namehash = keys.node OR pointer.resource_id = keys.named_resource
-                OR pointer.namehash = keys.named_namehash)
-               AND (pointer.resolver_address = keys.resolver_address
-                    OR pointer.resolver_address IN (
-                        SELECT mirror.resolver_address FROM mirrors mirror
-                        WHERE mirror.chain_id = keys.chain_id)))
-              OR (keys.record_id IS NOT NULL
-                  AND pointer.resolver_address = keys.resolver_address)
-          )
-         GROUP BY pointer.chain_id, pointer.resource_id, keys.coin_type";
-    let rows = sqlx::query(sql)
+    let rows = sqlx::query(CANDIDATES)
         .bind(address)
         .bind(coin_types)
         .fetch_all(&mut *conn)
