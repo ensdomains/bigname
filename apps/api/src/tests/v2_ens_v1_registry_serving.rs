@@ -682,8 +682,9 @@ async fn assert_bound_and_listed(database: &TestDatabase) -> Result<()> {
 
 /// P1: the registry points the node at `NEXT` through its registry-only resource, and `NEXT`'s
 /// records follow in a later block. Every name mode serves `NEXT` and its records, as the
-/// same logs on the lease do, and `relation=resolves_to` lists the name under `NEXT`'s address. The name's summary stays a bound name, not a serving one, and
-/// the `parent=eth` listing shows it. History and the resolver route read the same either way.
+/// same logs on the lease do, and `relation=resolves_to` lists the name under `NEXT`'s address.
+/// The name's summary stays a bound name, not a serving one, and the `parent=eth` listing shows
+/// it. History and the resolver route read the same either way.
 #[tokio::test]
 async fn p1_a_registry_pointer_on_the_registry_only_resource_moves_every_mode() -> Result<()> {
     let after = || -> Result<Vec<Logs>> {

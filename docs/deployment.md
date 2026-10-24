@@ -4925,7 +4925,8 @@ These rows arrive through re-derivation. Every chain needs one full-range Projec
 Interpret redo, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary)
 under matching runner and API binaries. The change rides the next release that redoes
 Project and shares that release's Project redo. Do not mark old rows ready under the new
-hash.
+hash. The redo writes one `RegistryNode` row in `project_lookup_dependency` for each ENSv1
+resource with a pointer, so on mainnet that table grows by about the ENSv1 resource count.
 
 It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
 and the compiled watch plan are unchanged, so stamp no Ingest redo.

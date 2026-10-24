@@ -670,11 +670,12 @@ async fn v2_resolves_to_candidates_registry_piece_contributes() -> Result<()> {
 }
 
 /// Row 16: the registry pieces read the node's registry pointer through its primary key, with
-/// the chain, the namespace and the node all bound, the namespace from the row's name or from the
-/// requested set, and never walk the resolver index, which for a shared resolver holds every node it serves.
-/// It holds for a request in one namespace and for one spanning every servable namespace, as a
-/// request naming none does, with rows written under no name among the keys. Sequential scans
-/// and hash and merge joins are off, so the plan shows the index path the statement can bind.
+/// the chain, the namespace and the node all bound, the namespace from the row's name or from
+/// the requested set, and never walk the resolver index, which for a shared resolver holds every
+/// node it serves. It holds for a request in one namespace and for one spanning every servable
+/// namespace, as a request naming none does, with rows written under no name among the keys.
+/// Sequential scans and hash and merge joins are off, so the plan shows the index path the
+/// statement can bind.
 #[tokio::test]
 async fn v2_resolves_to_candidates_registry_piece_binds_the_primary_key() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

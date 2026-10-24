@@ -193,11 +193,11 @@ pub fn resolver_block<'a>(
     // An admitted ENSv1 pointer that the node's registry pointer disagrees with is read through
     // the registry pointer, clears included. The test is the pointer's family alone, the one the
     // record inventory applies (`records/serving.rs`), so `resolver` and the inventory read a
-    // pointer through the registry under one rule. It admits exactly the `ens_v1` arm's pointers: `family_arm` maps
-    // every `ens_v1_*` family to that arm and no other family to it (control/rows.rs:141), the
-    // `ens_v2` arm (selection.rs:253) admits only the ENSv2 key's resource (compose.rs:276),
-    // whose pointers are `ens_v2_*`, and `ens_v0` is the `ens_v1` arm while only the 2017
-    // registry holds the node's record.
+    // pointer through the registry under one rule. It admits exactly the `ens_v1` arm's
+    // pointers: `family_arm` maps every `ens_v1_*` family to that arm and no other family to it
+    // (control/rows.rs:141), the `ens_v2` arm (selection.rs:253) admits only the ENSv2 key's
+    // resource (compose.rs:276), whose pointers are `ens_v2_*`, and `ens_v0` is the `ens_v1` arm
+    // while only the 2017 registry holds the node's record.
     let registry_read = |pointer: &'a PointerRow| match node_pointer {
         Some(node)
             if V1_POINTER_FAMILIES.contains(&pointer.source_family.as_str())
