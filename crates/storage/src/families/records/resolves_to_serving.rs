@@ -54,6 +54,7 @@ pub async fn load_family_resolves_to_page(
     address: &str,
     coin_type: &str,
     namespaces: Option<&[String]>,
+    servable_namespaces: &[String],
     dedupe_by: AddressNamesCurrentDedupe,
     q: Option<crate::NameQuery<'_>>,
     authority: Option<&[&str]>,
@@ -71,6 +72,7 @@ pub async fn load_family_resolves_to_page(
         address,
         coin_type: Some(coin_type),
         namespaces,
+        servable_namespaces,
         dedupe_by,
         q,
         authority,
@@ -104,6 +106,7 @@ pub async fn load_family_resolves_to_evm_page(
     db: impl Into<crate::ReadDb<'_>>,
     address: &str,
     namespaces: Option<&[String]>,
+    servable_namespaces: &[String],
     dedupe_by: AddressNamesCurrentDedupe,
     q: Option<crate::NameQuery<'_>>,
     authority: Option<&[&str]>,
@@ -131,6 +134,7 @@ pub async fn load_family_resolves_to_evm_page(
         address,
         coin_type: None,
         namespaces,
+        servable_namespaces,
         dedupe_by,
         q,
         authority,
@@ -161,7 +165,13 @@ async fn read_page<P: WalkPage>(
     let candidates = if coin_types.is_empty() {
         BTreeMap::new()
     } else {
-        candidate_resources_from(conn, &address, coin_types).await?
+        candidate_resources_from(
+            conn,
+            &address,
+            coin_types,
+            query.namespaces.unwrap_or(query.servable_namespaces),
+        )
+        .await?
     };
     let mut resources: BTreeMap<String, Vec<Uuid>> = BTreeMap::new();
     for (chain_id, resource_id) in candidates.into_keys() {

@@ -402,7 +402,8 @@ async fn produced_registry_only_name_serves_ens_v0_until_the_current_registry_re
 
 /// P15 of the ENSv1 registry-pointer rows (`v2_ens_v1_registry_serving.rs`): the 2017 registry's
 /// resolver serves the `ens_v0` name until the current registry's first record for the node,
-/// whose resolver is unset, and the current registry's own resolver serves after. The fallback
+/// whose resolver is unset, and the current registry's own resolver serves after. The record
+/// inventory, read on the records route, follows the same pointer at each step. The fallback
 /// registry answers the old registry's resolver only while it has no record of its own
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f).
 #[tokio::test]
@@ -477,6 +478,13 @@ async fn an_old_registry_resolver_serves_until_the_current_registry_records_the_
             );
             assert_eq!(read["resolver"], expected, "block {block}: {read:#}");
         }
+        // The record inventory follows the same pointer across the handoff.
+        let keyed =
+            v2_get_json(&database, &format!("/v1/names/{NAME}/records?keys=addr:60")).await?;
+        assert_eq!(
+            keyed["data"]["resolver"], expected,
+            "block {block}: {keyed:#}"
+        );
     }
     database.cleanup().await
 }

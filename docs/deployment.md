@@ -4916,6 +4916,8 @@ What changes for names:
   stayed selected, serves the new resolver and that resolver's
   records on name detail, lookup and the name records route. Before, it kept serving the
   lease's earlier resolver and records while `ens_v1.resolver` named the new one.
+- `relation=resolves_to` on `GET /v1/addresses/{address}/names` lists such a name under the
+  addresses the new resolver holds for it, and no longer under the earlier resolver's.
 - A registry pointer cleared that way clears the served resolver and records.
 - A name whose resource pointer and registry pointer agree serves the same rows as before.
 

@@ -10,9 +10,9 @@
 //! pointer event carried is read back from `normalized_events` by its identity, a metadata
 //! lookup by key. The F5 named pointer (`project_named_resource_pointer`) also retains each
 //! name's latest admitted pointer on a resource, so another name's later write on the same
-//! resource does not displace it. An `ens_v1` name's admitted ENSv1 pointer is read through the
-//! node's F4 row when the two name different resolvers, as its record inventory is
-//! (`records/serving.rs`), so the served resolver is the one the registry holds.
+//! resource does not displace it. A name's admitted ENSv1 pointer is read through the node's F4
+//! row when the two name different resolvers, as its record inventory is (`records/serving.rs`),
+//! so the served resolver is the one the registry holds.
 use serde_json::Value;
 
 use crate::families::{
@@ -159,8 +159,7 @@ pub struct ResolverScope<'a> {
     /// The resource the name's admitted pointers sit on: the selected lifecycle key's resource
     /// for an ENSv2 name, the selected resource otherwise.
     pub resource: Option<&'a str>,
-    /// The selected arm, for a pointer without a resource, and for the `ens_v1` read of the
-    /// node's registry pointer.
+    /// The selected arm, for a pointer without a resource.
     pub arm: Option<&'a str>,
     /// Whether the name's authority admits events at all (an unsupported selection admits no
     /// pointer).
@@ -191,12 +190,17 @@ pub fn resolver_block<'a>(
                 }
             }
     };
-    // An admitted ENSv1 pointer of an `ens_v1` name that the node's registry pointer disagrees
-    // with is read through the registry pointer, clears included.
+    // An admitted ENSv1 pointer that the node's registry pointer disagrees with is read through
+    // the registry pointer, clears included. The test is the pointer's family alone, the one the
+    // record inventory applies (`records/serving.rs`), so `resolver` and the inventory read a
+    // pointer through the registry under one rule. It admits exactly the `ens_v1` arm's pointers: `family_arm` maps
+    // every `ens_v1_*` family to that arm and no other family to it (control/rows.rs:141), the
+    // `ens_v2` arm (selection.rs:253) admits only the ENSv2 key's resource (compose.rs:276),
+    // whose pointers are `ens_v2_*`, and `ens_v0` is the `ens_v1` arm while only the 2017
+    // registry holds the node's record.
     let registry_read = |pointer: &'a PointerRow| match node_pointer {
         Some(node)
-            if scope.arm == Some("ens_v1")
-                && V1_POINTER_FAMILIES.contains(&pointer.source_family.as_str())
+            if V1_POINTER_FAMILIES.contains(&pointer.source_family.as_str())
                 && !same_resolver(
                     pointer.resolver_address.as_deref(),
                     node.resolver_address.as_deref(),

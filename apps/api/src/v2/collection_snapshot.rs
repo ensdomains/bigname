@@ -131,6 +131,12 @@ impl CollectionSnapshot {
         })
     }
 
+    /// The namespaces the request spans: the requested one, or every servable namespace when
+    /// the request names none.
+    pub(crate) fn namespace_names(&self) -> &[String] {
+        self.namespaces.names()
+    }
+
     pub(crate) fn evaluated_at(&self) -> OffsetDateTime {
         self.evaluated_at
     }

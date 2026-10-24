@@ -637,6 +637,25 @@ async fn stored_node(database: &TestDatabase, node: B256) -> Result<Value> {
     .await?)
 }
 
+/// The names `relation=resolves_to` lists for `address` on coin 60, in the `ens` namespace or,
+/// with `scope` empty, in every namespace.
+async fn resolving_names_in(
+    database: &TestDatabase,
+    address: &str,
+    scope: &str,
+) -> Result<Vec<Value>> {
+    let found = rows(
+        database,
+        &format!("/v1/addresses/{address}/names?{scope}relation=resolves_to&coin_type=60"),
+    )
+    .await?;
+    Ok(found.iter().map(|row| row["name"].clone()).collect())
+}
+
+async fn resolving_names(database: &TestDatabase, address: &str) -> Result<Vec<Value>> {
+    resolving_names_in(database, address, "namespace=ens&").await
+}
+
 /// The name's summary row is a bound name, not a serving one, and the `parent=eth` listing
 /// shows it through its binding.
 async fn assert_bound_and_listed(database: &TestDatabase) -> Result<()> {
@@ -663,7 +682,7 @@ async fn assert_bound_and_listed(database: &TestDatabase) -> Result<()> {
 
 /// P1: the registry points the node at `NEXT` through its registry-only resource, and `NEXT`'s
 /// records follow in a later block. Every name mode serves `NEXT` and its records, as the
-/// same logs on the lease do. The name's summary stays a bound name, not a serving one, and
+/// same logs on the lease do, and `relation=resolves_to` lists the name under `NEXT`'s address. The name's summary stays a bound name, not a serving one, and
 /// the `parent=eth` listing shows it. History and the resolver route read the same either way.
 #[tokio::test]
 async fn p1_a_registry_pointer_on_the_registry_only_resource_moves_every_mode() -> Result<()> {
@@ -695,8 +714,29 @@ async fn p1_a_registry_pointer_on_the_registry_only_resource_moves_every_mode() 
         digest(&history["data"]),
         history["data"]
     );
+    let next_holder = resolving_names(&database, NEXT_HOLDER).await?;
+    let owner = resolving_names(&database, OWNER).await?;
+    // A record written before Interpret surfaced the name keeps no name in the inverse index.
+    // Such a row reaches the name through the node's registry pointer in each namespace the
+    // request spans, a request with no namespace spanning every servable one.
+    sqlx::query(
+        "UPDATE bigname_phase.project_address_record_node_index SET logical_name_id = ''
+         WHERE chain_id = $1 AND address = $2",
+    )
+    .bind(CHAIN)
+    .bind(NEXT_HOLDER)
+    .execute(&database.pool)
+    .await?;
+    let unnamed = resolving_names_in(&database, NEXT_HOLDER, "").await?;
+    let unnamed_ens = resolving_names(&database, NEXT_HOLDER).await?;
     database.cleanup().await?;
     assert_serves_next(&wrong);
+    // The name resolves to the coin-60 address only `NEXT` holds, and no longer to the one only
+    // `FIRST` holds.
+    assert_eq!(next_holder, [json!(NAME)]);
+    assert!(owner.is_empty(), "{owner:?}");
+    assert_eq!(unnamed, [json!(NAME)]);
+    assert_eq!(unnamed_ens, [json!(NAME)]);
 
     let reference = published(after()?, &[]).await?;
     let right = served(&reference).await?;
@@ -822,11 +862,13 @@ async fn p7_a_wrapped_name_serves_its_registry_pointer() -> Result<()> {
 }
 
 /// P8: a registry child below the `.eth` name with its own pointer, on its registry-only
-/// resource, the child's own authority. Its registry fact is `NEXT`. The Sepolia profile is cut
+/// resource, the child's own authority. Its registry fact is `NEXT`. The rule cannot change this
+/// row: a registry-only resource's pointer and the node's registry pointer come from the same
+/// registry `NewResolver`, so the two never name different resolvers. The Sepolia profile is cut
 /// over, and the ENSv2 path gives a name below the reservation no resolver, so every mode
 /// withholds it on either build. The composed row prints a digest the two builds can compare.
 #[tokio::test]
-async fn p8_a_child_with_its_own_registry_pointer_serves_it() -> Result<()> {
+async fn p8_a_child_with_its_own_registry_pointer_is_withheld_alike() -> Result<()> {
     let database = published(
         vec![logs(vec![
             child(),

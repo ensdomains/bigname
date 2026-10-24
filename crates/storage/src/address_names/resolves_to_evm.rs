@@ -75,6 +75,7 @@ pub async fn load_address_records_current_evm_page(
     db: impl Into<crate::ReadDb<'_>>,
     address: &str,
     namespaces: Option<&[String]>,
+    servable_namespaces: &[String],
     dedupe_by: AddressNamesCurrentDedupe,
     q: Option<NameQuery<'_>>,
     authority: Option<&[&str]>,
@@ -85,7 +86,18 @@ pub async fn load_address_records_current_evm_page(
     page_size: u64,
 ) -> Result<AddressRecordsCurrentEvmPage> {
     crate::families::records::load_family_resolves_to_evm_page(
-        db, address, namespaces, dedupe_by, q, authority, parent, sort, order, cursor, page_size,
+        db,
+        address,
+        namespaces,
+        servable_namespaces,
+        dedupe_by,
+        q,
+        authority,
+        parent,
+        sort,
+        order,
+        cursor,
+        page_size,
     )
     .await
 }

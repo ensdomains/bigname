@@ -1528,15 +1528,21 @@ resource the event carries. `project_resource_pointer` keeps a resource's
 pointer only from the events that carry that resource, so the two can disagree
 when the registry's resolver changes on another resource of the same node.
 
-When a name's selected authority arm is `ens_v1` and its pointer on the selected
-resource is an ENSv1 pointer, the served `resolver` and the record inventory are
-read through the node's registry pointer whenever the two name different
-resolvers. A cleared registry pointer clears both. `ens_v1.resolver` and
+When a name's pointer on its selected resource is an ENSv1 pointer, the served
+`resolver` and the record inventory are read through the node's registry pointer
+whenever the two name different resolvers. Only a name whose selected authority
+arm is `ens_v1` (`authority` `ens_v1` or `ens_v0`) selects a resource with an
+ENSv1 pointer. A cleared registry pointer clears both. `ens_v1.resolver` and
 `resolver` then agree whenever both are present. The inventory records the node
 as one of its inputs, so a later registry pointer write recomposes it. The
-resource pointer still decides history attribution, and an ENSv2 pointer at the
-ENSv1 mirror keeps its registry walk. Basenames keeps no registry pointer per
-node, so a Basenames name serves its resource pointer.
+inverse address read (`relation=resolves_to`) also finds such a name through the
+node's registry pointer: an address the registry pointer's resolver holds for the
+node reaches the node's ENSv1 resource pointers. A record written under no name,
+such as one written before Interpret surfaced the name, reaches them in each
+namespace the request spans, which is every servable namespace when the request
+names none. The resource pointer still decides history attribution, and an ENSv2
+pointer at the ENSv1 mirror keeps its registry walk. Basenames keeps no registry
+pointer per node, so a Basenames name serves its resource pointer.
 
 The composed record inventory records the selectors observed under a resource's
 latest retained linked resolver event whose name has a readable canonical
