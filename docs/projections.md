@@ -1518,6 +1518,26 @@ boundary, winner per key and assembled row. A declared ENSv1 mirror resolver
 takes the same ENSv1 registry walk. The read adds no family and no stored row.
 
 
+### An ENSv1 name serves the resolver its registry record holds
+
+An ENSv1 client reads a name's resolver from the ENSv1 registry at read time
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137-L141 @ ens_v1@91c966f).
+Project keeps that value per node in `project_registry_pointer`, from every
+admitted ENSv1 registry, registrar and NameWrapper `ResolverChanged`, whatever
+resource the event carries. `project_resource_pointer` keeps a resource's
+pointer only from the events that carry that resource, so the two can disagree
+when the registry's resolver changes on another resource of the same node.
+
+When a name's selected authority arm is `ens_v1` and its pointer on the selected
+resource is an ENSv1 pointer, the served `resolver` and the record inventory are
+read through the node's registry pointer whenever the two name different
+resolvers. A cleared registry pointer clears both. `ens_v1.resolver` and
+`resolver` then agree whenever both are present. The inventory records the node
+as one of its inputs, so a later registry pointer write recomposes it. The
+resource pointer still decides history attribution, and an ENSv2 pointer at the
+ENSv1 mirror keeps its registry walk. Basenames keeps no registry pointer per
+node, so a Basenames name serves its resource pointer.
+
 The composed record inventory records the selectors observed under a resource's
 latest retained linked resolver event whose name has a readable canonical
 surface at the selected publication, with fallback to an earlier linked event when a
@@ -1568,7 +1588,8 @@ because resolver storage persists and ENSv1 reads it at read time; a write on a
 resolver the name never selected, or made only after the name left that resolver
 for good, stays unattributed. Value selection does not widen with it: records,
 versions, resets, and `unsupported_reason`s are still selected only through the
-latest non-zero pointer. When the selected pointer is a clear, the registration
+latest non-zero pointer, an ENSv1 pointer read through the node's registry
+pointer as above. When the selected pointer is a clear, the registration
 has no pointer to serve records through; historical attribution remains available
 independently: the boundary anchors on the clearing `ResolverChanged`, `support_status`
 is `unsupported` with `resolver_pointer_cleared`, there are no selectors, no

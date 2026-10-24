@@ -13,7 +13,7 @@ use super::{
         PartitionKey, RecordCandidate, admitted_partitions, load_partitions, load_record_id_values,
         select_values,
     },
-    serving::{ServingPointer, family_pointer_eligibility, serving_pointers},
+    serving::{ServingPointer, family_pointer_eligibility, registry_node, serving_pointers},
 };
 use anyhow::Result;
 use sqlx::PgConnection;
@@ -78,6 +78,16 @@ pub(super) async fn select(
         });
     }
     let pointers = load_family_resource_pointers_on(conn, chain_id, &resource_ids).await?;
+    // An ENSv1 pointer is read through its node's registry pointer, which a later block can
+    // change or clear whatever the resource's own pointer does.
+    for pointer in pointers.values() {
+        if let Some((namespace, node)) = registry_node(pointer) {
+            out.get_mut(&pointer.resource_id)
+                .expect("requested resource")
+                .dependencies
+                .insert(Dependency::RegistryNode { namespace, node });
+        }
+    }
     let servings = serving_pointers(conn, pointers.values()).await?;
     if servings.is_empty() {
         return Ok(Prepared {

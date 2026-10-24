@@ -4898,3 +4898,38 @@ inputs of neither.
   `install.sql` rebuilds them.
 - It adds no table, manifest or setting. The manifest-authority
   fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## An ENSv1 name serves its registry's resolver
+
+The build that reads an ENSv1 name's resolver and records through the node's ENSv1 registry
+pointer when the pointer on the name's own resource names another resolver
+([projections](projections.md#an-ensv1-name-serves-the-resolver-its-registry-record-holds))
+changes the composition Project stores (`crates/storage/src/families/name/serving.rs`,
+`records/serving.rs` and `records/inventory_selection.rs`). It rotates the
+[projection content hash](glossary.md#projection-content-hash) for every chain. The
+[interpreter content hash](glossary.md#interpreter-content-hash) does not rotate.
+
+What changes for names:
+
+- An ENSv1 name whose registry `NewResolver` reached only the node's
+  [registry-only resource](glossary.md#registry-only-resource), while its registrar lease
+  stayed selected, serves the new resolver and that resolver's
+  records on name detail, lookup and the name records route. Before, it kept serving the
+  lease's earlier resolver and records while `ens_v1.resolver` named the new one.
+- A registry pointer cleared that way clears the served resolver and records.
+- A name whose resource pointer and registry pointer agree serves the same rows as before.
+
+These rows arrive through re-derivation. Every chain needs one full-range Project redo and no
+Interpret redo, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary)
+under matching runner and API binaries. The change rides the next release that redoes
+Project and shares that release's Project redo. Do not mark old rows ready under the new
+hash.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
+and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+Before the release is recorded, confirm that the Project redo adopted the new projection
+content hash, then check on Sepolia that `GET /v1/names/phantombug01.eth` serves `resolver`
+`0x8948458626811dd0c23eb25cc74291247077cc51`, equal to its `ens_v1.resolver` (registry
+`NewResolver` at block 11982720), and that `GET /v1/names/phantombug01.eth/records?keys=addr:61`
+finds the record.
