@@ -1287,3 +1287,82 @@ async fn p16_a_registry_pointer_at_a_linked_record_resolver_moves_resolves_to() 
     }
     Ok(())
 }
+
+/// Names the resolver records of `block` under the lease's name, as a resolver write at another
+/// node is when Interpret names it under a name it is not the node of.
+async fn named_under_the_lease(pool: &PgPool, block: i64) -> Result<()> {
+    let named: Vec<String> = sqlx::query_scalar(
+        "UPDATE bigname_phase.normalized_events SET logical_name_id = $3
+         WHERE chain_id = $1 AND block_number = $2 AND event_kind = 'RecordChanged'
+           AND source_family = 'ens_v1_resolver_l1'
+         RETURNING event_identity",
+    )
+    .bind(CHAIN)
+    .bind(block)
+    .bind(format!("ens:{:#x}", lease_node()))
+    .fetch_all(pool)
+    .await?;
+    anyhow::ensure!(!named.is_empty(), "block {block} has no resolver record");
+    Ok(())
+}
+
+/// P17: the registry points the lease at `NEXT` through its registry-only resource, and `NEXT`
+/// holds `NEXT_HOLDER` in a record written at another node under the lease's name. The records
+/// route serves `NEXT` and that record, and the address-names route and lookup list the name
+/// under `NEXT_HOLDER` and no longer under `FIRST`'s holder, read in full and walked, as the
+/// same logs on the lease do.
+#[tokio::test]
+async fn p17_a_registry_pointer_moves_a_record_named_at_another_node() -> Result<()> {
+    let after = || -> Result<Vec<Logs>> {
+        Ok(vec![
+            pointer(lease_node(), NEXT)?,
+            records(NEXT, child_node(), NEXT_HOLDER, None, &[])?,
+        ])
+    };
+    for misattributed in [&[1][..], &[]] {
+        let case = format!("misattributed {misattributed:?}");
+        let database = TestDatabase::new_migrated().await?;
+        let base = interpret(&database, after()?).await?;
+        named_under_the_lease(&database.pool, base + 2).await?;
+        for offset in misattributed {
+            misattribute(&database.pool, base + offset).await?;
+        }
+        project(&database.pool, HEAD, FamilyMode::Rebuild).await?;
+        let keyed = ok(
+            &database,
+            &format!("/v1/names/{NAME}/records?namespace=ens&keys=addr:60"),
+        )
+        .await?;
+        assert_eq!(
+            keyed["data"]["resolver"],
+            resolver(NEXT),
+            "{case}: {keyed:#}"
+        );
+        assert_eq!(
+            keyed["data"]["records"]["addr:60"],
+            json!({"status": "ok", "value": NEXT_HOLDER}),
+            "{case}: {keyed:#}"
+        );
+        for bounded in [false, true] {
+            let (found, paths) = resolving_everywhere(&database, NEXT_HOLDER, bounded).await?;
+            assert_eq!(
+                found,
+                vec![vec![json!(NAME)]; 3],
+                "{case}, bounded {bounded}"
+            );
+            assert_eq!(
+                paths.contains(&"exact"),
+                !bounded,
+                "{case}, bounded {bounded}: {paths:?}"
+            );
+            let (found, _) = resolving_everywhere(&database, OWNER, bounded).await?;
+            assert_eq!(
+                found,
+                vec![Vec::<Value>::new(); 3],
+                "{case}, bounded {bounded}"
+            );
+        }
+        database.cleanup().await?;
+    }
+    Ok(())
+}
