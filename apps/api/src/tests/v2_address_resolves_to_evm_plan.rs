@@ -83,6 +83,7 @@ async fn v2_resolves_to_evm_pages_preserve_all_matching_coin_types() -> Result<(
                 &database.pool,
                 V2_ADDRESS,
                 None,
+                &[],
                 dedupe,
                 None,
                 None,
@@ -100,7 +101,7 @@ async fn v2_resolves_to_evm_pages_preserve_all_matching_coin_types() -> Result<(
         }
         let cursor = cursor.expect("fixture must span several pages");
         let continuation = bigname_storage::load_address_records_current_evm_page(
-            &database.pool, V2_ADDRESS, None, dedupe, None, None, None, sort, order,
+            &database.pool, V2_ADDRESS, None, &[], dedupe, None, None, None, sort, order,
             Some(&cursor), page_size,
         ).await?;
         assert!(!continuation.entries.is_empty(), "{label}");
@@ -151,6 +152,7 @@ async fn v2_resolves_to_evm_storage_bounds_the_group_aggregation() -> Result<()>
             &database.pool,
             V2_EVM_WIDE_ADDRESS,
             None,
+            &[],
             dedupe,
             None,
             None,
@@ -183,6 +185,7 @@ async fn v2_resolves_to_evm_storage_bounds_the_group_aggregation() -> Result<()>
             &database.pool,
             V2_EVM_BOUNDED_ADDRESS,
             None,
+            &[],
             dedupe,
             None,
             None,

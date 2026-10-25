@@ -115,7 +115,8 @@ mod scoped {
     }
 
     /// The statement the inverse address read finds its candidate resources with, binding the
-    /// address and its coin types. Tests compare its rows and plan with earlier statements'.
+    /// address, its coin types and the namespaces the request spans. Tests compare its rows and
+    /// plan with earlier statements'.
     pub fn candidate_statement() -> &'static str {
         super::super::candidates::CANDIDATES
     }

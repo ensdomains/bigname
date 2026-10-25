@@ -10,10 +10,15 @@
 //! pointer event carried is read back from `normalized_events` by its identity, a metadata
 //! lookup by key. The F5 named pointer (`project_named_resource_pointer`) also retains each
 //! name's latest admitted pointer on a resource, so another name's later write on the same
-//! resource does not displace it.
+//! resource does not displace it. A name's admitted ENSv1 pointer is read through the node's F4
+//! row when the two name different resolvers, as its record inventory is (`records/serving.rs`),
+//! so the served resolver is the one the registry holds.
 use serde_json::Value;
 
-use crate::families::position::Position as FamilyPosition;
+use crate::families::{
+    position::Position as FamilyPosition,
+    records::serving::{V1_POINTER_FAMILIES, same_resolver},
+};
 
 pub(super) const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 const REGISTRY_FAMILIES: [&str; 2] = ["ens_v1_registry_l1", "basenames_base_registry"];
@@ -43,7 +48,8 @@ impl PointerRow {
 /// `declared_summary.ens_v1_resolver`: the node's `project_registry_pointer` row as the registry
 /// getter returns it, `{chain_id, address}`, or null for a zero pointer, a pointer event without a
 /// resolver, or a node with no pointer event. It is not admitted against the row's name or arm.
-/// It is the node's registry fact, which the served `resolver` may withhold or replace.
+/// It is the node's registry fact. The served `resolver` may withhold it. An `ens_v1` name
+/// served through an ENSv1 pointer serves this resolver whenever it serves one.
 pub(super) fn ens_v1_resolver(pointer: Option<&PointerRow>, chain_id: &str) -> Value {
     pointer
         .filter(|pointer| pointer.resolves())
@@ -167,11 +173,11 @@ pub struct ResolverScope<'a> {
 }
 
 /// The resolver block and the pointer's source family.
-pub fn resolver_block(
+pub fn resolver_block<'a>(
     scope: &ResolverScope<'_>,
-    resource_pointer: Option<&PointerRow>,
-    node_pointer: Option<&PointerRow>,
-    serving: Option<&Serving>,
+    resource_pointer: Option<&'a PointerRow>,
+    node_pointer: Option<&'a PointerRow>,
+    serving: Option<&'a Serving>,
 ) -> (Value, Option<String>) {
     let admitted = |pointer: &&PointerRow| {
         scope.admits
@@ -184,10 +190,35 @@ pub fn resolver_block(
                 }
             }
     };
+    // An admitted ENSv1 pointer that the node's registry pointer disagrees with is read through
+    // the registry pointer, clears included. The test is the pointer's family alone, the one the
+    // record inventory applies (`records/serving.rs`), so `resolver` and the inventory read a
+    // pointer through the registry under one rule. It admits exactly the `ens_v1` arm's
+    // pointers: `family_arm` maps every `ens_v1_*` family to that arm and no other family to it
+    // (control/rows.rs:141), the `ens_v2` arm (selection.rs:253) admits only the ENSv2 key's
+    // resource (compose.rs:276), whose pointers are `ens_v2_*`, and `ens_v0` is the `ens_v1` arm
+    // while only the 2017 registry holds the node's record.
+    let registry_read = |pointer: &'a PointerRow| match node_pointer {
+        Some(node)
+            if V1_POINTER_FAMILIES.contains(&pointer.source_family.as_str())
+                && !same_resolver(
+                    pointer.resolver_address.as_deref(),
+                    node.resolver_address.as_deref(),
+                ) =>
+        {
+            node
+        }
+        _ => pointer,
+    };
     let mut candidates: Vec<(&PointerRow, bool)> = resource_pointer
-        .into_iter()
-        .chain(node_pointer.filter(|pointer| pointer.resource_id.is_none()))
         .filter(admitted)
+        .map(registry_read)
+        .into_iter()
+        .chain(
+            node_pointer
+                .filter(|pointer| pointer.resource_id.is_none())
+                .filter(admitted),
+        )
         .map(|pointer| (pointer, false))
         .collect();
     if let Some(serving) = serving {

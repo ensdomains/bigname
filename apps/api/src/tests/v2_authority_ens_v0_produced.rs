@@ -36,6 +36,7 @@ const CLEARED: i64 = 134;
 sol! {
     event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
     event Transfer(bytes32 indexed node, address owner);
+    event NewResolver(bytes32 indexed node, address resolver);
     event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires);
 }
 
@@ -129,6 +130,14 @@ fn logs(block: i64) -> Vec<RawLogInput> {
 }
 
 fn interpret(block: i64, session: Option<AdapterSession>) -> Result<(BatchOutput, AdapterSession)> {
+    interpret_logs(block, session, logs(block))
+}
+
+fn interpret_logs(
+    block: i64,
+    session: Option<AdapterSession>,
+    raw_logs: Vec<RawLogInput>,
+) -> Result<(BatchOutput, AdapterSession)> {
     let input = BatchInput {
         chain_id: CHAIN.into(),
         manifests: manifests(),
@@ -151,7 +160,7 @@ fn interpret(block: i64, session: Option<AdapterSession>) -> Result<(BatchOutput
             block_timestamp: timestamp(1_700_000_000 + block),
             canonicality_state: "canonical".into(),
         }],
-        raw_logs: logs(block),
+        raw_logs,
     };
     let (output, session) =
         prepare_schema_v2_batch_incremental(input, session, StateCacheCapacity::Unlimited)?
@@ -388,6 +397,95 @@ async fn produced_registry_only_name_serves_ens_v0_until_the_current_registry_re
         }
     }
     fresh.cleanup().await?;
+    database.cleanup().await
+}
+
+/// P15 of the ENSv1 registry-pointer rows (`v2_ens_v1_registry_serving.rs`): the 2017 registry's
+/// resolver serves the `ens_v0` name until the current registry's first record for the node,
+/// whose resolver is unset, and the current registry's own resolver serves after. The record
+/// inventory, read on the records route, follows the same pointer at each step. The fallback
+/// registry answers the old registry's resolver only while it has no record of its own
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f).
+#[tokio::test]
+async fn an_old_registry_resolver_serves_until_the_current_registry_records_the_name() -> Result<()>
+{
+    const OLD_RESOLVER: &str = "0x00000000000000000000000000000000000000e7";
+    const NEW_RESOLVER: &str = "0x00000000000000000000000000000000000000e8";
+    let resolver_log = |resolver: &str, block: i64, index: i64, emitter: &str| {
+        raw(
+            NewResolver {
+                node: namehash(NAME),
+                resolver: resolver.parse().unwrap(),
+            }
+            .encode_log_data(),
+            block,
+            index,
+            emitter,
+        )
+    };
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({"base": {
+            "chain_id": "base-mainnet",
+            "block_number": 1,
+            "block_hash": "0xcount-base-empty",
+            "timestamp": "2024-01-01T00:00:00Z",
+        }}))
+        .await?;
+    republish_fixture_chain(&database, "base-mainnet").await?;
+    let mut session = None;
+    for block in OLD_RECORD..=MOVED {
+        seed_v2_history_blocks(&database, block..=block).await?;
+        let raw_logs = match block {
+            OLD_RECORD => {
+                let mut raw_logs = logs(block);
+                raw_logs.push(resolver_log(OLD_RESOLVER, block, 2, OLD_REGISTRY));
+                raw_logs
+            }
+            MOVED => vec![resolver_log(NEW_RESOLVER, block, 0, REGISTRY)],
+            _ => logs(block),
+        };
+        let (output, next) = interpret_logs(block, session, raw_logs)?;
+        session = Some(next);
+        persist(&database.pool, &output).await?;
+        project(&database.pool, block, None).await?;
+        database
+            .seed_snapshot_selector_chain_positions(&json!({CHAIN: {
+                "chain_id": CHAIN,
+                "block_number": block,
+                "block_hash": format!("0xhistory{block}"),
+                "timestamp": bigname_storage::UnixSeconds::from(timestamp(1_700_000_000 + block)).internal_string(),
+            }}))
+            .await?;
+        if block == OLD_RECORD {
+            continue;
+        }
+        let (authority, expected) = match block {
+            SURFACED => ("ens_v0", Some(OLD_RESOLVER)),
+            HANDOFF => ("ens_v1", None),
+            _ => ("ens_v1", Some(NEW_RESOLVER)),
+        };
+        let expected = expected.map_or(
+            Value::Null,
+            |address| json!({"chain_id": 1, "address": address}),
+        );
+        let reads = product_reads(&database).await?;
+        for read in &reads[..2] {
+            assert_eq!(read["authority"], authority, "block {block}: {read:#}");
+            assert_eq!(
+                read["ens_v1"]["resolver"], expected,
+                "block {block}: {read:#}"
+            );
+            assert_eq!(read["resolver"], expected, "block {block}: {read:#}");
+        }
+        // The record inventory follows the same pointer across the handoff.
+        let keyed =
+            v2_get_json(&database, &format!("/v1/names/{NAME}/records?keys=addr:60")).await?;
+        assert_eq!(
+            keyed["data"]["resolver"], expected,
+            "block {block}: {keyed:#}"
+        );
+    }
     database.cleanup().await
 }
 

@@ -65,6 +65,7 @@ pub(super) async fn render_resolves_to_lookup_results(
             &input.address,
             &coin_type,
             Some(public_namespaces),
+            public_namespaces,
             AddressNamesCurrentDedupe::Surface,
             None,
             None,

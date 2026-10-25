@@ -21,7 +21,9 @@ use super::{
 /// Load a bounded page of current names whose `addr:<coin_type>` record resolves to `address`.
 ///
 /// `coin_type` is the decimal ENSIP-9/SLIP-44 coin type. `namespaces` restricts rows to those
-/// public namespaces; `None` reads every namespace. `parent`, a normalized name, keeps only names
+/// public namespaces; `None` reads every namespace. `servable_namespaces` are the namespaces a
+/// request that names none spans, where a record written under no name looks for its node's
+/// registry pointer. `parent`, a normalized name, keeps only names
 /// exactly one label below it. Sort, order, dedupe, and the keyset cursor
 /// use the `address_names_current` vocabulary. The rows are composed
 /// from the owned key families instead (`families::records::load_family_resolves_to_page`).
@@ -31,6 +33,7 @@ pub async fn load_address_records_current_page(
     address: &str,
     coin_type: &str,
     namespaces: Option<&[String]>,
+    servable_namespaces: &[String],
     dedupe_by: AddressNamesCurrentDedupe,
     q: Option<NameQuery<'_>>,
     authority: Option<&[&str]>,
@@ -41,7 +44,18 @@ pub async fn load_address_records_current_page(
     page_size: u64,
 ) -> Result<AddressRecordsCurrentPage> {
     crate::families::records::load_family_resolves_to_page(
-        db, address, coin_type, namespaces, dedupe_by, q, authority, parent, sort, order, cursor,
+        db,
+        address,
+        coin_type,
+        namespaces,
+        servable_namespaces,
+        dedupe_by,
+        q,
+        authority,
+        parent,
+        sort,
+        order,
+        cursor,
         page_size,
     )
     .await
@@ -85,6 +99,8 @@ pub(crate) struct AddressRecordsQuery<'a> {
     pub(crate) address: &'a str,
     pub(crate) coin_type: Option<&'a str>,
     pub(crate) namespaces: Option<&'a [String]>,
+    /// The namespaces a request that names none spans.
+    pub(crate) servable_namespaces: &'a [String],
     pub(crate) dedupe_by: AddressNamesCurrentDedupe,
     pub(crate) q: Option<NameQuery<'a>>,
     pub(crate) authority: Option<&'a [&'a str]>,

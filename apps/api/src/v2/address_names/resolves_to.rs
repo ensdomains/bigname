@@ -134,6 +134,9 @@ pub(super) async fn get_address_resolves_to(
         params.namespace.as_deref(),
     )
     .await?;
+    // A request that names no namespace spans every servable one, so a record written under no
+    // name can still reach a name through its node's registry pointer in each of them.
+    let servable_namespaces = snapshot.namespace_names().to_vec();
     let storage_cursor = params
         .cursor
         .as_deref()
@@ -156,6 +159,7 @@ pub(super) async fn get_address_resolves_to(
                 normalized_address,
                 coin_type,
                 namespaces.as_deref(),
+                &servable_namespaces,
                 dedupe_to_storage(params.dedupe),
                 storage_q,
                 authorities.as_deref(),
@@ -178,6 +182,7 @@ pub(super) async fn get_address_resolves_to(
                 snapshot.conn().await?,
                 normalized_address,
                 namespaces.as_deref(),
+                &servable_namespaces,
                 dedupe_to_storage(params.dedupe),
                 storage_q,
                 authorities.as_deref(),

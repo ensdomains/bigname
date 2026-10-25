@@ -2,6 +2,25 @@
 // candidates the statement it replaced found, for every input: that statement joined every index
 // row of the address to every pointer of its chain and tested each pair with an OR filter. The
 // fixtures are the resolves-to, mirror, record-id and bulk tests'.
+//
+// Each way the forward read admits a value (`rows.rs`, `admitted_partitions`, and the link
+// selection in `links.rs`) has a candidate piece per pointer source. The resource pointer is the
+// resource's own pointer. The registry pointer is the node's ENSv1 registry pointer, which the
+// forward read serves an ENSv1 pointer through when the two name different resolvers
+// (`serving.rs`, `serving_pointers`). The bounded walk and lookup read the same candidates.
+//
+// | Admission (index row)  | Resource pointer piece    | Registry pointer piece             |
+// | ---------------------- | ------------------------- | ---------------------------------- |
+// | native: the row's node | node, row's resolver      | node, primary key (rows 15, 16)    |
+// | named: the row's name  | namehash, row's resolver  | namehash, primary key (16, 18)     |
+// | linked record (by id)  | all at row's resolver     | row's resolver, resolver index (17)|
+// | mirror                 | node, mirror resolver     | none                               |
+// | guarded, Basenames     | the node pieces           | none                               |
+//
+// The named registry piece reads only rows whose name's namehash is not their node. The node
+// pieces cover the rest. Mirror admission is the `ens_v2` arm at a mirror resolver, not a V1
+// pointer family, so the registry pieces don't apply to it. Guarded admission is for ENSv2
+// families alone, and Basenames keeps no registry pointer per node.
 
 /// The candidate statement before TYR-244 split it into equality pieces.
 const PREVIOUS_CANDIDATES: &str = "WITH keys AS (
@@ -51,11 +70,14 @@ async fn candidate_rows(
     address: &str,
     coin_types: &[String],
 ) -> Result<Vec<CandidateRow>> {
-    let mut rows: Vec<CandidateRow> = sqlx::query_as(statement)
-        .bind(address)
-        .bind(coin_types)
-        .fetch_all(pool)
-        .await?;
+    let query = sqlx::query_as(statement).bind(address).bind(coin_types);
+    // The current statement also binds the requested namespaces, for rows written under no name.
+    let query = if statement.contains("$3") {
+        query.bind(["ens", "basenames"].map(str::to_owned).to_vec())
+    } else {
+        query
+    };
+    let mut rows: Vec<CandidateRow> = query.fetch_all(pool).await?;
     rows.sort();
     Ok(rows)
 }
@@ -506,14 +528,8 @@ async fn v2_resolves_to_candidates_plan_joins_on_equalities() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_bulk_resolves_to_names(&database, 40, &[], bulk_resolving).await?;
     let coin_types = vec!["60".to_owned(), V2_ENSIP19_DEFAULT_COIN.to_owned()];
-    let plan: Value = sqlx::query_scalar(&format!(
-        "EXPLAIN (FORMAT JSON, VERBOSE) {}",
-        current_candidates()
-    ))
-    .bind(BULK_ADDRESS)
-    .bind(&coin_types)
-    .fetch_one(&database.pool)
-    .await?;
+    let plan: Value =
+        explain_candidates(&mut *database.pool.acquire().await?, &coin_types, &["ens"]).await?;
     let nodes = plan_nodes(&plan);
     assert!(
         nodes.iter().any(|node| node.get("Join Type").is_some()),
@@ -534,4 +550,382 @@ async fn v2_resolves_to_candidates_plan_joins_on_equalities() -> Result<()> {
         assert_ne!(node["Parent Relationship"], json!("SubPlan"), "{plan:#}");
     }
     database.cleanup().await
+}
+
+/// The current statement's plan for [`BULK_ADDRESS`], binding `namespaces` as the namespaces
+/// the request spans when the statement takes them.
+async fn explain_candidates(
+    conn: &mut sqlx::PgConnection,
+    coin_types: &[String],
+    namespaces: &[&str],
+) -> Result<Value> {
+    explain_candidates_of(conn, BULK_ADDRESS, coin_types, namespaces).await
+}
+
+/// [`explain_candidates`] for `address`.
+async fn explain_candidates_of(
+    conn: &mut sqlx::PgConnection,
+    address: &str,
+    coin_types: &[String],
+    namespaces: &[&str],
+) -> Result<Value> {
+    let statement = format!("EXPLAIN (FORMAT JSON, VERBOSE) {}", current_candidates());
+    let query = sqlx::query_scalar(&statement)
+        .bind(address)
+        .bind(coin_types);
+    let query = if statement.contains("$3") {
+        query.bind(
+            namespaces
+                .iter()
+                .map(|namespace| (*namespace).to_owned())
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        query
+    };
+    Ok(query.fetch_one(conn).await?)
+}
+
+async fn insert_candidate_registry_pointer(
+    database: &TestDatabase,
+    chain: &str,
+    node: &str,
+    resolver: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO bigname_phase.project_registry_pointer
+            (chain_id, namespace, node, block_number, event_identity, resolver_address,
+             source_family)
+         VALUES ($1, 'ens', $2, 2, $3, $4, 'ens_v1_registry_l1')",
+    )
+    .bind(chain)
+    .bind(node)
+    .bind(format!("candidate-registry-pointer-{node}"))
+    .bind(resolver)
+    .execute(&database.pool)
+    .await?;
+    Ok(())
+}
+
+async fn insert_candidate_family_pointer(
+    database: &TestDatabase,
+    chain: &str,
+    resource: u128,
+    resolver: &str,
+    namehash: &str,
+    source_family: &str,
+) -> Result<()> {
+    insert_candidate_pointer(database, chain, resource, resolver, Some(namehash)).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.project_resource_pointer
+         SET namespace = 'ens', source_family = $3
+         WHERE chain_id = $1 AND resource_id = $2",
+    )
+    .bind(chain)
+    .bind(Uuid::from_u128(resource))
+    .bind(source_family)
+    .execute(&database.pool)
+    .await?;
+    Ok(())
+}
+
+/// Row 15: a node-keyed row reaches the ENSv1 pointers at its node through the node's registry
+/// pointer at its resolver, though their own pointer names another resolver, as the forward read
+/// serves them through it. A row written under a name takes the name's namespace, a row written
+/// under none each requested namespace. An ENSv2 pointer at the node, an ENSv1 pointer at another
+/// node and a node whose registry pointer names another resolver are not reached.
+#[tokio::test]
+async fn v2_resolves_to_candidates_registry_piece_contributes() -> Result<()> {
+    let (chain, node, other) = (CANDIDATE_CHAIN, CANDIDATE_NODE, CANDIDATE_NAMED);
+    for named in [false, true] {
+        let logical = |node: &str| {
+            if named {
+                format!("ens:{node}")
+            } else {
+                String::new()
+            }
+        };
+        let database = TestDatabase::new_migrated().await?;
+        insert_candidate_node_key(
+            &database,
+            chain,
+            "60",
+            CANDIDATE_RESOLVER,
+            node,
+            &logical(node),
+        )
+        .await?;
+        insert_candidate_node_key(
+            &database,
+            chain,
+            "60",
+            CANDIDATE_RESOLVER,
+            other,
+            &logical(other),
+        )
+        .await?;
+        insert_candidate_registry_pointer(&database, chain, node, CANDIDATE_RESOLVER).await?;
+        insert_candidate_registry_pointer(&database, chain, other, CANDIDATE_OTHER_RESOLVER)
+            .await?;
+        let stale = CANDIDATE_OTHER_RESOLVER;
+        insert_candidate_family_pointer(&database, chain, 0xd1, stale, node, "ens_v1_registrar_l1")
+            .await?;
+        insert_candidate_family_pointer(&database, chain, 0xd2, stale, node, "ens_v2_registry_l1")
+            .await?;
+        insert_candidate_family_pointer(
+            &database,
+            chain,
+            0xd3,
+            stale,
+            other,
+            "ens_v1_registrar_l1",
+        )
+        .await?;
+        let rows = candidate_rows(
+            &database.pool,
+            current_candidates(),
+            CANDIDATE_ADDRESS,
+            &["60".to_owned()],
+        )
+        .await?;
+        let found: Vec<(String, u128, String)> = rows
+            .into_iter()
+            .map(|(chain, resource, coin, _)| (chain, resource.as_u128(), coin))
+            .collect();
+        assert_eq!(found, [candidate(chain, 0xd1, "60")], "named {named}");
+        database.cleanup().await?;
+    }
+    Ok(())
+}
+
+/// Row 16: the node and named registry pieces read the registry pointer through its primary key,
+/// with the chain, the namespace and the node all bound, the namespace from the row's name or
+/// from the requested set, and never walk the resolver index, which for a shared resolver holds
+/// every node it serves. It holds for a request in one namespace and for one spanning every
+/// servable namespace, as a request naming none does, with rows written under no name among the
+/// keys. Sequential scans and hash and merge joins are off, so the plan shows the index path the
+/// statement can bind.
+#[tokio::test]
+async fn v2_resolves_to_candidates_registry_piece_binds_the_primary_key() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bulk_resolves_to_names(&database, 40, &[], bulk_resolving).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.project_address_record_node_index SET logical_name_id = ''
+         WHERE address = $1 AND node IN (
+             SELECT node FROM bigname_phase.project_address_record_node_index
+             WHERE address = $1 ORDER BY node LIMIT 5)",
+    )
+    .bind(BULK_ADDRESS)
+    .execute(&database.pool)
+    .await?;
+    let coin_types = vec!["60".to_owned(), V2_ENSIP19_DEFAULT_COIN.to_owned()];
+    for namespaces in [&["ens"][..], &["basenames", "ens"][..]] {
+        let mut transaction = database.pool.begin().await?;
+        for setting in ["enable_seqscan", "enable_hashjoin", "enable_mergejoin"] {
+            sqlx::query(&format!("SET LOCAL {setting} = off"))
+                .execute(&mut *transaction)
+                .await?;
+        }
+        let plan = explain_candidates(&mut transaction, &coin_types, namespaces).await?;
+        transaction.rollback().await?;
+        // The node and named pieces' registry reads, `registry` to `registry_2` in statement
+        // order. Row 17 covers the record-id piece's `registry_3`.
+        let registry: Vec<&Value> = plan_nodes(&plan)
+            .into_iter()
+            .filter(|node| {
+                node["Index Name"]
+                    .as_str()
+                    .is_some_and(|index| index.starts_with("project_registry_pointer"))
+                    && ["registry", "registry_1", "registry_2"]
+                        .contains(&node["Alias"].as_str().unwrap_or(""))
+            })
+            .collect();
+        // One read per piece: rows written under a name and under none at their node, and rows
+        // written under a name at another node.
+        assert_eq!(registry.len(), 3, "{namespaces:?}: {plan:#}");
+        for node in registry {
+            assert_eq!(
+                node["Index Name"], "project_registry_pointer_pkey",
+                "{namespaces:?}: {plan:#}"
+            );
+            let alias = node["Alias"].as_str().unwrap_or_default();
+            let condition = node["Index Cond"].as_str().unwrap_or_default();
+            for column in ["chain_id", "namespace", "node"] {
+                let part = format!("({alias}.{column} = ");
+                assert!(
+                    condition.contains(&part),
+                    "{namespaces:?} {part}: {condition}\n{plan:#}"
+                );
+            }
+        }
+    }
+    database.cleanup().await
+}
+
+/// Row 17: a record-id row, a linked record, reaches the ENSv1 pointers at every node whose
+/// registry pointer names its resolver, though their own pointer names another resolver. An
+/// ENSv2 pointer at such a node and an ENSv1 pointer at a node whose registry pointer names
+/// another resolver are not reached. On a chain with many other names, and with sequential
+/// scans and hash and merge joins off, the piece reads the registry pointers at the resolver
+/// through the resolver index and the resource pointers by node, and no table of the statement
+/// is read by a sequential scan.
+#[tokio::test]
+async fn v2_resolves_to_candidates_record_id_registry_piece() -> Result<()> {
+    let (chain, node, other) = (CANDIDATE_CHAIN, CANDIDATE_NODE, CANDIDATE_NAMED);
+    let stale = CANDIDATE_OTHER_RESOLVER;
+    let database = TestDatabase::new_migrated().await?;
+    insert_candidate_record_key(&database, chain, "60", CANDIDATE_RESOLVER).await?;
+    insert_candidate_registry_pointer(&database, chain, node, CANDIDATE_RESOLVER).await?;
+    insert_candidate_registry_pointer(&database, chain, other, stale).await?;
+    insert_candidate_family_pointer(&database, chain, 0xe1, stale, node, "ens_v1_registrar_l1")
+        .await?;
+    insert_candidate_family_pointer(&database, chain, 0xe2, stale, node, "ens_v2_registry_l1")
+        .await?;
+    insert_candidate_family_pointer(&database, chain, 0xe3, stale, other, "ens_v1_registrar_l1")
+        .await?;
+    let rows = candidate_rows(
+        &database.pool,
+        current_candidates(),
+        CANDIDATE_ADDRESS,
+        &["60".to_owned()],
+    )
+    .await?;
+    let found: Vec<(String, u128, String)> = rows
+        .into_iter()
+        .map(|(chain, resource, coin, _)| (chain, resource.as_u128(), coin))
+        .collect();
+    assert_eq!(found, [candidate(chain, 0xe1, "60")]);
+    // Other names on the chain, each with an ENSv1 pointer and a registry pointer at another
+    // resolver, so the planner sizes a chain-wide read of either table by its statistics.
+    sqlx::query(
+        "INSERT INTO bigname_phase.project_resource_pointer
+            (chain_id, resource_id, block_number, event_identity, resolver_address, namehash,
+             namespace, source_family)
+         SELECT $1, md5('filler-' || i)::uuid, 1, 'filler-pointer-' || i, $2,
+                '0x' || lpad(to_hex(i), 64, '0'), 'ens', 'ens_v1_registrar_l1'
+         FROM generate_series(1, 2000) i",
+    )
+    .bind(chain)
+    .bind(CANDIDATE_MIRROR)
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO bigname_phase.project_registry_pointer
+            (chain_id, namespace, node, block_number, event_identity, resolver_address,
+             source_family)
+         SELECT $1, 'ens', '0x' || lpad(to_hex(i), 64, '0'), 2, 'filler-registry-' || i, $2,
+                'ens_v1_registry_l1'
+         FROM generate_series(1, 2000) i",
+    )
+    .bind(chain)
+    .bind(CANDIDATE_MIRROR)
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        "ANALYZE bigname_phase.project_resource_pointer, bigname_phase.project_registry_pointer,
+             bigname_phase.project_address_record_id_index",
+    )
+    .execute(&database.pool)
+    .await?;
+    let mut transaction = database.pool.begin().await?;
+    for setting in ["enable_seqscan", "enable_hashjoin", "enable_mergejoin"] {
+        sqlx::query(&format!("SET LOCAL {setting} = off"))
+            .execute(&mut *transaction)
+            .await?;
+    }
+    let plan = explain_candidates_of(
+        &mut transaction,
+        CANDIDATE_ADDRESS,
+        &["60".to_owned()],
+        &["ens"],
+    )
+    .await?;
+    transaction.rollback().await?;
+    let nodes = plan_nodes(&plan);
+    assert!(
+        nodes.iter().all(|node| node["Node Type"] != "Seq Scan"),
+        "{plan:#}"
+    );
+    // The record-id piece's reads, `registry_3` and `pointer_5` in statement order.
+    // A bitmap heap scan reads through the bitmap index scan below it.
+    let read = |alias: &str| {
+        let node = nodes
+            .iter()
+            .find(|node| node["Alias"] == alias)
+            .copied()
+            .unwrap_or_else(|| panic!("no {alias} read: {plan:#}"));
+        if node["Node Type"] == "Bitmap Heap Scan" {
+            &node["Plans"][0]
+        } else {
+            node
+        }
+    };
+    for (alias, index, columns) in [
+        (
+            "registry_3",
+            "project_registry_pointer_resolver_idx",
+            &["chain_id", "resolver_address"][..],
+        ),
+        (
+            "pointer_5",
+            "project_resource_pointer_hydration_node_idx",
+            &["chain_id", "namespace", "namehash"][..],
+        ),
+    ] {
+        let node = read(alias);
+        assert_eq!(node["Index Name"], index, "{alias}: {plan:#}");
+        let condition = node["Index Cond"].as_str().unwrap_or_default();
+        for column in columns {
+            let part = format!("({alias}.{column} = ");
+            assert!(condition.contains(&part), "{alias} {part}: {condition}\n{plan:#}");
+        }
+    }
+    database.cleanup().await
+}
+
+/// Row 18: a row written under a name at another node, which the forward read's named arm admits
+/// by the logical name alone, reaches the ENSv1 pointers of the name's namehash through that
+/// namehash's registry pointer at the row's resolver, though their own pointer names another
+/// resolver. An ENSv2 pointer there, and the name's pointers when its registry pointer names
+/// another resolver, are not reached.
+#[tokio::test]
+async fn v2_resolves_to_candidates_named_registry_piece_contributes() -> Result<()> {
+    let (chain, node, named) = (CANDIDATE_CHAIN, CANDIDATE_NODE, CANDIDATE_NAMED);
+    let stale = CANDIDATE_OTHER_RESOLVER;
+    for registry_resolver in [CANDIDATE_RESOLVER, stale] {
+        let database = TestDatabase::new_migrated().await?;
+        insert_candidate_node_key(
+            &database,
+            chain,
+            "60",
+            CANDIDATE_RESOLVER,
+            node,
+            &format!("ens:{named}"),
+        )
+        .await?;
+        insert_candidate_registry_pointer(&database, chain, named, registry_resolver).await?;
+        insert_candidate_family_pointer(&database, chain, 0xf1, stale, named, "ens_v1_registrar_l1")
+            .await?;
+        insert_candidate_family_pointer(&database, chain, 0xf2, stale, named, "ens_v2_registry_l1")
+            .await?;
+        let rows = candidate_rows(
+            &database.pool,
+            current_candidates(),
+            CANDIDATE_ADDRESS,
+            &["60".to_owned()],
+        )
+        .await?;
+        let found: Vec<(String, u128, String)> = rows
+            .into_iter()
+            .map(|(chain, resource, coin, _)| (chain, resource.as_u128(), coin))
+            .collect();
+        let expected = if registry_resolver == CANDIDATE_RESOLVER {
+            vec![candidate(chain, 0xf1, "60")]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(found, expected, "registry at {registry_resolver}");
+        database.cleanup().await?;
+    }
+    Ok(())
 }
