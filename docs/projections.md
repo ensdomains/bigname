@@ -1537,8 +1537,9 @@ ENSv1 pointer. A cleared registry pointer clears both. `ens_v1.resolver` and
 as one of its inputs, so a later registry pointer write recomposes it. The
 inverse address read (`relation=resolves_to`) also finds such a name through the
 node's registry pointer: an address the registry pointer's resolver holds for the
-node reaches the node's ENSv1 resource pointers. A record written under no name,
-such as one written before Interpret surfaced the name, reaches them in each
+node, in a node record or in a linked record, reaches the node's ENSv1 resource
+pointers. A record written under no name, such as one written before Interpret
+surfaced the name, and a linked record, which has no name, reach them in each
 namespace the request spans, which is every servable namespace when the request
 names none. The resource pointer still decides history attribution, and an ENSv2
 pointer at the ENSv1 mirror keeps its registry walk. Basenames keeps no registry

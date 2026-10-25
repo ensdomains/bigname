@@ -29,6 +29,12 @@ sol! {
     event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender);
     event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value);
     event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry);
+    event Upgraded(address indexed implementation);
+    event ResolverCreated();
+    event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap);
+    event ProxyDeployed(address indexed sender, address indexed proxyAddress, uint256 salt, address implementation);
+    event Linked(uint256 indexed recordId, bytes32 indexed node, bytes name);
+    event AddressUpdated(uint256 indexed recordId, uint256 coinType, bytes addressBytes);
 }
 mod erc721 {
     alloy_sol_types::sol! { event Transfer(address indexed from, address indexed to, uint256 indexed tokenId); }
@@ -47,6 +53,13 @@ const ZERO: &str = "0x0000000000000000000000000000000000000000";
 /// The coin-60 address only `NEXT` holds for the node.
 const NEXT_HOLDER: &str = "0x00000000000000000000000000000000000000b2";
 const KEYS: &str = "addr:60,addr:61,text:name,text:avatar";
+/// A PermissionedResolver proxy, which keeps records by record id and links them to nodes, the
+/// Sepolia profile's implementation behind it and the factory that deploys it.
+const LINKED: &str = "0x0000000000000000000000000000000000025910";
+const LINKED_IMPLEMENTATION: &str = "0x115eb53f0c60696633855f90b138178fb40b2b2c";
+const LINKED_FACTORY: &str = "0xda70306c98e97ece36f997a21368e53298572991";
+/// The coin-60 address only the record linked to the node at `LINKED` holds.
+const LINKED_HOLDER: &str = "0x00000000000000000000000000000000000000b3";
 const DAY: u64 = 86_400;
 
 fn namehash(name: &str) -> B256 {
@@ -1098,4 +1111,179 @@ async fn p14_a_rebuild_serves_what_the_incremental_runs_published() -> Result<()
     assert_eq!(served(&database).await?, incremental);
     assert_eq!(stored(&database).await?, rows);
     database.cleanup().await
+}
+
+/// The owner's PermissionedResolver proxy at `LINKED`, deployed through the factory, with the
+/// owner's root setter and link grants, as the proxy initializes them before use.
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/PermissionedResolver.sol:L119-L132 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L10-L58 @ ens_v2_sepolia_20261001@07e55a05)
+fn linked_deployed() -> Result<Logs> {
+    let implementation: Address = LINKED_IMPLEMENTATION.parse()?;
+    let owner: Address = OWNER.parse()?;
+    Ok(vec![
+        (LINKED, Upgraded { implementation }.encode_log_data()),
+        (LINKED, ResolverCreated {}.encode_log_data()),
+        (
+            LINKED,
+            EACRolesChanged {
+                resource: U256::ZERO,
+                account: owner,
+                oldRoleBitmap: U256::ZERO,
+                newRoleBitmap: [0, 4, 28, 128, 132, 156]
+                    .into_iter()
+                    .fold(U256::ZERO, |roles, bit| roles | (U256::from(1) << bit)),
+            }
+            .encode_log_data(),
+        ),
+        (
+            LINKED_FACTORY,
+            ProxyDeployed {
+                sender: owner,
+                proxyAddress: LINKED.parse()?,
+                salt: U256::from(25_910_u64),
+                implementation,
+            }
+            .encode_log_data(),
+        ),
+    ])
+}
+
+/// Record 1 at `LINKED`, holding `LINKED_HOLDER` on coin 60, linked to the lease's node or,
+/// with `default`, to the empty name, which makes it the record of every node with no link of
+/// its own.
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/PermissionedResolver.sol:L352-L370 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L380-L386 @ ens_v2@a971bd64)
+fn linked_records(default: bool) -> Result<Logs> {
+    let (node, dns) = if default {
+        (B256::ZERO, vec![0])
+    } else {
+        let mut dns = vec![u8::try_from(label().len())?];
+        dns.extend_from_slice(label().as_bytes());
+        dns.extend_from_slice(b"\x03eth\0");
+        (lease_node(), dns)
+    };
+    let holder: Address = LINKED_HOLDER.parse()?;
+    Ok(vec![
+        (
+            LINKED,
+            Linked {
+                recordId: U256::from(1_u64),
+                node,
+                name: dns.into(),
+            }
+            .encode_log_data(),
+        ),
+        (
+            LINKED,
+            AddressUpdated {
+                recordId: U256::from(1_u64),
+                coinType: U256::from(60_u64),
+                addressBytes: holder.to_vec().into(),
+            }
+            .encode_log_data(),
+        ),
+    ])
+}
+
+/// The names `POST /v1/lookup` lists for `address` with `relation=resolves_to` on coin 60.
+async fn looked_up_resolving(database: &TestDatabase, address: &str) -> Result<Vec<Value>> {
+    let (status, body) = lookup(
+        database,
+        json!({"profile": "detail", "inputs": [{"address": address, "relation": "resolves_to"}]}),
+    )
+    .await?;
+    anyhow::ensure!(status == StatusCode::OK, "{body:#}");
+    Ok(body["data"][0]["records"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|record| record["name"].clone())
+        .collect())
+}
+
+/// Every read of the names resolving to `address`: the address-names route in `ens` and in
+/// every namespace, and lookup, each read in full and, with `bounded`, walked as an address
+/// with more candidate names than the exact cap is. Returns each read's names and the paths
+/// the bounded reads took.
+async fn resolving_everywhere(
+    database: &TestDatabase,
+    address: &str,
+    bounded: bool,
+) -> Result<(Vec<Vec<Value>>, Vec<&'static str>)> {
+    use bigname_storage::families::records::seams;
+    let reads = async {
+        Ok::<_, anyhow::Error>(vec![
+            resolving_names_in(database, address, "namespace=ens&").await?,
+            resolving_names_in(database, address, "").await?,
+            looked_up_resolving(database, address).await?,
+        ])
+    };
+    let paths = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let found = if bounded {
+        seams::with_address_name_paths(paths.clone(), seams::with_exact_total_cap(0, reads)).await
+    } else {
+        seams::with_address_name_paths(paths.clone(), reads).await
+    }?;
+    let paths = paths.lock().expect("paths").clone();
+    Ok((found, paths))
+}
+
+/// P16: the registry points the node at `LINKED`, a resolver that keeps its records by record
+/// id, through its registry-only resource, and a record linked there, to the node or as the
+/// resolver's default, holds `LINKED_HOLDER`. The records route serves `LINKED` and the linked
+/// record, and the address-names route and lookup list the name under `LINKED_HOLDER` and no
+/// longer under `FIRST`'s holder, read in full and walked, as the same logs on the lease do.
+#[tokio::test]
+async fn p16_a_registry_pointer_at_a_linked_record_resolver_moves_resolves_to() -> Result<()> {
+    for default in [false, true] {
+        let after = || -> Result<Vec<Logs>> {
+            Ok(vec![
+                linked_deployed()?,
+                pointer(lease_node(), LINKED)?,
+                linked_records(default)?,
+            ])
+        };
+        for misattributed in [&[2][..], &[]] {
+            let case = format!("default {default}, misattributed {misattributed:?}");
+            let database = published(after()?, misattributed).await?;
+            let keyed = ok(
+                &database,
+                &format!("/v1/names/{NAME}/records?namespace=ens&keys=addr:60"),
+            )
+            .await?;
+            assert_eq!(
+                keyed["data"]["resolver"],
+                resolver(LINKED),
+                "{case}: {keyed:#}"
+            );
+            assert_eq!(
+                keyed["data"]["records"]["addr:60"],
+                json!({"status": "ok", "value": LINKED_HOLDER}),
+                "{case}: {keyed:#}"
+            );
+            for bounded in [false, true] {
+                let (found, paths) =
+                    resolving_everywhere(&database, LINKED_HOLDER, bounded).await?;
+                assert_eq!(
+                    found,
+                    vec![vec![json!(NAME)]; 3],
+                    "{case}, bounded {bounded}"
+                );
+                assert_eq!(
+                    paths.contains(&"exact"),
+                    !bounded,
+                    "{case}, bounded {bounded}: {paths:?}"
+                );
+                let (found, _) = resolving_everywhere(&database, OWNER, bounded).await?;
+                assert_eq!(
+                    found,
+                    vec![Vec::<Value>::new(); 3],
+                    "{case}, bounded {bounded}"
+                );
+            }
+            database.cleanup().await?;
+        }
+    }
+    Ok(())
 }

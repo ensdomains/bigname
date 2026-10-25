@@ -16,7 +16,9 @@
 //!
 //! A node-keyed row also reaches the ENSv1 pointers at its node when the node's ENSv1 registry
 //! pointer (`project_registry_pointer`) names the row's resolver, because the forward read serves
-//! an ENSv1 pointer through that registry pointer when the two disagree (`serving.rs`).
+//! an ENSv1 pointer through that registry pointer when the two disagree (`serving.rs`). A
+//! record-id row likewise reaches the ENSv1 pointers at every node whose registry pointer names
+//! its resolver.
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
@@ -49,6 +51,13 @@ pub(crate) struct Candidate {
 /// all unnamed. They then reach the node's ENSv1 resource pointers on
 /// `(chain_id, namespace, namehash)`. A pointer at the registry pointer's own resolver is left to
 /// the node piece, which already reaches it.
+///
+/// A record-id row, a linked record such as a PermissionedResolver holds, carries no node, so
+/// its registry piece reads the registry pointers at the row's resolver through
+/// `project_registry_pointer_resolver_idx`, in each namespace the request spans, then the ENSv1
+/// resource pointers at each pointer's node. That walks the registry pointers at the resolver,
+/// the same class of walk the record-id piece below makes over the resource pointers at it. A
+/// pointer at the registry pointer's own resolver is left to that piece.
 pub(super) const CANDIDATES: &str = "WITH node_keys AS (
          SELECT chain_id, resolver_address, node,
                 CASE WHEN logical_name_id <> ''
@@ -116,6 +125,21 @@ pub(super) const CANDIDATES: &str = "WITH node_keys AS (
               ('ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1')
           AND pointer.resolver_address IS DISTINCT FROM registry.resolver_address
          WHERE key.address = $1 AND key.coin_type = ANY($2::text[]) AND key.logical_name_id = ''
+         UNION ALL
+         SELECT pointer.chain_id, pointer.resource_id, record.coin_type
+         FROM bigname_phase.project_address_record_id_index record
+         JOIN bigname_phase.project_registry_pointer registry
+           ON registry.chain_id = record.chain_id
+          AND registry.resolver_address = record.resolver_address
+          AND registry.namespace = ANY($3::text[])
+         JOIN bigname_phase.project_resource_pointer pointer
+           ON pointer.chain_id = registry.chain_id
+          AND pointer.namespace = registry.namespace
+          AND pointer.namehash = registry.node
+          AND pointer.source_family IN
+              ('ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1')
+          AND pointer.resolver_address IS DISTINCT FROM registry.resolver_address
+         WHERE record.address = $1 AND record.coin_type = ANY($2::text[])
          UNION ALL
          SELECT pointer.chain_id, pointer.resource_id, record.coin_type
          FROM bigname_phase.project_address_record_id_index record
