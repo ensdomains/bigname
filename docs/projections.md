@@ -2573,17 +2573,34 @@ work block above the switch point, or the target), the rebuild runs the pass:
   Nothing writes the families until the pass ends, so the list stays the one
   its beginning found.
 - Chunks then compose, at the marker's block and with the manifest set the
-  marker recorded, the listed names by number, every address index key, and the
-  history catalogue over consecutive block windows. Each chunk is one
-  transaction fenced on the marker, the input revision and the record's stream
-  and cursor, and counts as one block against the run's budget, so a run stops
-  between chunks and the next continues from the record's cursor. After the
-  pass's 1st, 2nd, 4th, 8th and later powers of two of chunks, counted on the
-  record across runs, the pass refreshes the planner statistics of the tables it
-  composes.
+  marker recorded, the listed names by number, then every address index key.
+  Each names chunk marks its work list rows composed and keeps each composed
+  name's current address relations on its row.
+- The last stream builds the history catalogue once, from set-based
+  statements, in steps: the keys the work list and the events reach, one scan
+  of the events per block span, resolver edge discovery, the sources, the edge
+  bounds, then the name and resource address memberships, each step split
+  into key partitions (`hashtext(key)` under a power-of-two mask). Each
+  partition deletes its own rows and writes them again. A step reads an
+  earlier step's rows only once all of that step's partitions committed, and
+  it never reads a composed row. The build starts only when every work list
+  row is composed. The spans and partitions are run options, with the
+  `work_mem` of the build's transactions. The record's cursor names the last
+  partition committed with the split and the Postgres server version, and a
+  run with another split or another server version refuses to continue the
+  build. The work table `project_compose_history_work` holds the keys and
+  their per-span partial aggregates.
+- Each chunk and each partition is one transaction fenced on the marker, the
+  input revision and the record's stream and cursor, and counts as one block
+  against the run's budget, so a run stops between chunks and the next
+  continues from the record's cursor. After the pass's 1st, 2nd, 4th, 8th and
+  later powers of two of chunks, counted on the record across runs, the pass
+  refreshes the planner statistics of the tables it composes. The build also
+  refreshes each table it writes after a step's last partition.
 - A fenced transition ends the pass, which also counts as one block of the
   budget. The record returns to `rebuilding` with `composed_block` set to the
-  marker's block, the work list is dropped, and one marker journal row under
+  marker's block, the work list and the build's work table are dropped, and
+  one marker journal row under
   that block, marked `families_journalled: false`, ends the undo journal there.
 
 The runner continues a run that spent its budget on chunks or the pass's end

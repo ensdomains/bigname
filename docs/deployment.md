@@ -4936,3 +4936,44 @@ content hash, then check on Sepolia that `GET /v1/names/phantombug01.eth` serves
 `0x8948458626811dd0c23eb25cc74291247077cc51`, equal to its `ens_v1.resolver` (registry
 `NewResolver` at block 11982720), and that `GET /v1/names/phantombug01.eth/records?keys=addr:61`
 finds the record.
+
+## The composition pass builds the history catalogue once
+
+The build whose [composition pass](glossary.md#composition-pass) builds the address history
+catalogue once at its block, from set-based statements in partitions, and whose names stream no
+longer refreshes the catalogue per chunk, changes `crates/project/src` and adds a
+schema-migration. It is an input of the
+[projection content hash](glossary.md#projection-content-hash) only. The served catalogue rows
+are the same, row for row.
+
+- The projection content hash rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not. Every chain needs
+  one full-range Project redo and no Interpret redo, under matching runner and API binaries.
+  The change rides the next re-derivation release and shares that release's Project redo. A
+  pass in flight under the previous binary does not resume: the rebuild starts again.
+- The schema-migration `20261027120000_project_compose_history_builder.sql` adds the work
+  list's `composed` and `relations` columns with the partial index over the names still to
+  compose, and the build's work table `project_compose_history_work`. It must run before the
+  new runner binary. Without it every family reset and every pass of the new binary fails.
+- Three runner settings split the build. `--project-families-compose-block-spans`
+  (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_BLOCK_SPANS`, default 64) is the number of
+  block spans the event scan runs in. `--project-families-compose-key-partitions`
+  (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_KEY_PARTITIONS`, default 16, a power of two)
+  is the number of key partitions of every other step. `--project-families-compose-work-mem`
+  (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_WORK_MEM`, unset by default) sets `work_mem`
+  inside each build transaction only. None of them changes a served row. Changing the spans or
+  partitions while a build is under way stops the run with an error naming both splits, so
+  change them only between passes or put the old values back. A build continued on another
+  Postgres server version is refused the same way, since key partitions hash by `hashtext`.
+- Each build partition is one transaction and logs "committed a partition of the catalogue
+  build" with its step, partition, rows and time. A partition that runs past the heartbeat
+  threshold fires `BignamePhaseRunnerHeartbeatStale`. Raise the spans or the partitions for
+  the next pass if the log shows long partitions.
+- During the build the [family marker](glossary.md#family-marker) stays on one block while
+  the [repair record](glossary.md#repair-record)'s `compose_stream` is 3 and its
+  `compose_cursor` names the last partition committed
+  ([pipeline monitoring](runbooks/pipeline-monitoring.md)).
+- Rolling the runner back mid-pass is safe. The previous binary resets the chain under its
+  own projection content hash. Its reset leaves the build's work table, which it never reads,
+  and the new binary clears it at its next reset or pass end. The manifest-authority
+  fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.
