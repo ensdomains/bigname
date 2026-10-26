@@ -27,7 +27,7 @@ use adaptive::AdaptiveInterpretArgs;
 mod families;
 use families::ProjectFamiliesArgs;
 #[path = "cli_live.rs"]
-mod live;
+pub mod live;
 #[path = "cli_redo.rs"]
 mod redo_resolution;
 use redo_resolution::resolve_redo;

@@ -277,53 +277,53 @@ async fn failed_refresh_degrades_but_retains_the_last_successful_head_as_evidenc
     Ok(())
 }
 
-/// The runner's largest Live publication lag, 3 blocks of 12 seconds, stays ready on a late
-/// probe: the network head is a block old (12 s) and was read just before the next refresh
-/// (`DEFAULT_PROVIDER_REFRESH_SECS`), so the published block is 3 × 12 + 12 + 5 = 53 s older than
-/// it. One block more is 65 s, past `DEFAULT_MAX_LAG_SECS`.
+/// The runner's largest Live publication lag stays ready on a late probe, on 12-second blocks:
+/// the network head is a block old and was read just before the next refresh
+/// (`DEFAULT_PROVIDER_REFRESH_SECS`), so the published block is cap × 12 + 12 + 5 seconds older
+/// than it, 53 s at the cap of 3. One block more is past `DEFAULT_MAX_LAG_SECS`. The cap is the
+/// runner's own constant, so raising it past the API's threshold fails here.
 #[tokio::test]
 async fn the_largest_live_publication_lag_stays_ready_on_a_late_probe() -> Result<()> {
+    const BLOCK_SECS: u64 = 12;
+    let cap = u64::from(phase_runner::cli::live::MAX_LIVE_PUBLICATION_LAG_BLOCKS);
+    let late = |lag: u64| lag * BLOCK_SECS + BLOCK_SECS + DEFAULT_PROVIDER_REFRESH_SECS;
+    assert!(i64::try_from(late(cap))? <= DEFAULT_MAX_LAG_SECS);
+    assert!(i64::try_from(late(cap + 1))? > DEFAULT_MAX_LAG_SECS);
     let urls = ChainRpcUrls::from_entries(&["ethereum-mainnet=http://rpc.test".to_owned()])?;
     let freshness = StatusFreshness::new(StatusFreshnessConfig::default());
-    let late = |lag: u64| Duration::from_secs(lag * 12 + 12 + DEFAULT_PROVIDER_REFRESH_SECS);
     let observed_at = OffsetDateTime::now_utc();
-    freshness
-        .seed_success("ethereum-mainnet", 103, observed_at)
-        .await;
-    let three = freshness
-        .compare(
-            &urls,
-            "ethereum-mainnet",
-            Some(100),
-            Some(observed_at - late(3)),
-        )
-        .await;
-    assert_eq!(
-        three.block,
-        Some(103),
-        "the network head is reported beside the canonical block"
-    );
-    assert_eq!(three.ingestion_lag_blocks, Some(3));
-    assert_eq!(three.ingestion_lag_seconds, Some(53));
-    assert_eq!(
-        freshness.readiness(Some(100), Some(100), Some(0), Some(0), &three),
-        StatusReadiness::Ready
-    );
-    freshness
-        .seed_success("ethereum-mainnet", 104, observed_at)
-        .await;
-    let four = freshness
-        .compare(
-            &urls,
-            "ethereum-mainnet",
-            Some(100),
-            Some(observed_at - late(4)),
-        )
-        .await;
-    assert_eq!(four.ingestion_lag_seconds, Some(65));
-    assert_eq!(
-        freshness.readiness(Some(100), Some(100), Some(0), Some(0), &four),
-        StatusReadiness::Stale
-    );
+    for (lag, readiness) in [
+        (cap, StatusReadiness::Ready),
+        (cap + 1, StatusReadiness::Stale),
+    ] {
+        let network_head = 100 + i64::try_from(lag)?;
+        freshness
+            .seed_success("ethereum-mainnet", network_head, observed_at)
+            .await;
+        let comparison = freshness
+            .compare(
+                &urls,
+                "ethereum-mainnet",
+                Some(100),
+                Some(observed_at - Duration::from_secs(late(lag))),
+            )
+            .await;
+        assert_eq!(
+            comparison.block,
+            Some(network_head),
+            "the network head is reported beside the canonical block"
+        );
+        assert_eq!(comparison.ingestion_lag_blocks, Some(i64::try_from(lag)?));
+        assert_eq!(
+            comparison.ingestion_lag_seconds,
+            Some(i64::try_from(late(lag))?)
+        );
+        assert_eq!(
+            freshness.readiness(Some(100), Some(100), Some(0), Some(0), &comparison),
+            readiness,
+            "lag {lag}"
+        );
+    }
+    assert_eq!(late(3), 53, "the cap of 3 reads 53 seconds");
     Ok(())
 }

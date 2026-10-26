@@ -585,9 +585,187 @@ async fn a_safe_block_inside_the_window_is_published_at_the_readable_head() -> R
     lagged.finish().await
 }
 
-// Metrics under the lag. The chain-head gauge is the published, lagged head. Live records the
-// block it loaded as both its target and its position, so its head lag reads 0, as do Interpret
-// and Project, which stand on the published head. The publication gap reads the configured lag,
+// A reorg and an extension in one poll: the node forks at the readable head and runs four blocks
+// past it. The two replaced blocks were only observed, so nothing is stamped, and the new branch's
+// blocks up to the lag below its top become readable straight from observed.
+#[tokio::test]
+async fn a_reorg_that_also_extends_promotes_the_new_branch_without_a_stamp() -> Result<()> {
+    let mut lagged = start("live_lag_reorg_extend", 3, 6, LAG).await?;
+    lagged.settled(at(1, 6)).await?;
+    let pool = lagged.scratch.pool().clone();
+    let before = redo_generations(&pool, &lagged.chain).await?;
+    lagged.fixture.reorg(2, 4, 8).await;
+    let settled = lagged.settled(at(2, 8)).await?;
+    assert_eq!(settled.head, at(2, 6));
+    assert_eq!(settled.interpret, at(2, 6));
+    assert_eq!(settled.project_marker, Some(at(2, 6)));
+    assert_eq!(
+        lineage(&pool, &lagged.chain, 4).await?,
+        vec![
+            row(1, 4, "canonical"),
+            row(1, 5, "orphaned"),
+            row(2, 5, "canonical"),
+            row(1, 6, "orphaned"),
+            row(2, 6, "canonical"),
+            row(2, 7, "observed"),
+            row(2, 8, "observed"),
+        ]
+    );
+    assert_eq!(
+        redo_generations(&pool, &lagged.chain).await?,
+        before,
+        "no phase was stamped"
+    );
+    lagged.finish().await
+}
+
+// A fork that shortens the chain: the node drops to 5 on a branch forked at the readable head.
+// The old block 6 sits above the orphan ceiling and stays observed, unread, until the new branch
+// passes it.
+#[tokio::test]
+async fn a_shortening_fork_leaves_the_block_above_its_top_observed_until_passed() -> Result<()> {
+    let mut lagged = start("live_lag_shortening", 3, 6, LAG).await?;
+    lagged.settled(at(1, 6)).await?;
+    let pool = lagged.scratch.pool().clone();
+    let before = redo_generations(&pool, &lagged.chain).await?;
+    lagged.fixture.reorg(2, 4, 5).await;
+    let settled = lagged.settled(at(2, 5)).await?;
+    assert_eq!(settled.head, at(1, 4), "the readable head stays");
+    assert_eq!(
+        lineage(&pool, &lagged.chain, 5).await?,
+        vec![
+            row(1, 5, "orphaned"),
+            row(2, 5, "observed"),
+            row(1, 6, "observed"),
+        ]
+    );
+    lagged.fixture.reorg(2, 5, 8).await;
+    let settled = lagged.settled(at(2, 8)).await?;
+    assert_eq!(settled.head, at(2, 6));
+    assert_eq!(settled.interpret, at(2, 6));
+    assert_eq!(
+        lineage(&pool, &lagged.chain, 6).await?,
+        vec![
+            row(1, 6, "orphaned"),
+            row(2, 6, "canonical"),
+            row(2, 7, "observed"),
+            row(2, 8, "observed"),
+        ]
+    );
+    assert_eq!(
+        redo_generations(&pool, &lagged.chain).await?,
+        before,
+        "no phase was stamped"
+    );
+    lagged.finish().await
+}
+
+fn readable(heads: Option<bigname_ingest::HeadMarkers>) -> Result<HeadMarkers> {
+    let heads = heads.context("live batch did not request publication")?;
+    let marker = |marker: bigname_ingest::Marker| BlockMarker::new(marker.number, marker.hash);
+    Ok(HeadMarkers {
+        latest: marker(heads.latest)?,
+        safe: heads.safe.map(marker).transpose()?,
+        finalized: heads.finalized.map(marker).transpose()?,
+    })
+}
+
+// Catch-up under the lag: each bounded window publishes the lag below its top, and the next
+// window resumes from that readable head, so the readable lineage stays contiguous.
+#[tokio::test]
+async fn catch_up_windows_each_publish_the_lag_below_their_top() -> Result<()> {
+    let scratch = ScratchDatabase::create("live_lag_catch_up").await?;
+    let chain = "live-lag-catch-up";
+    seed_branch(scratch.pool(), chain, 1, 0, None).await?;
+    publish(scratch.pool(), chain, 1, 0, 0, 0).await?;
+    seed_empty_watch_manifest(scratch.pool(), chain).await?;
+    let fixture = RpcFixture::spawn(1, 600).await?;
+    let engine = Engine::new(scratch.pool().clone());
+    let request = || live_request(chain, &fixture.endpoint, 0, block_hash(1, 0));
+    let head = || async {
+        sqlx::query_as::<_, (i64, String)>(
+            "SELECT latest_block_number, latest_block_hash FROM chain_heads WHERE chain_id = $1",
+        )
+        .bind(chain)
+        .fetch_one(scratch.pool())
+        .await
+    };
+    let mut windows = Vec::new();
+    loop {
+        let batch = engine.run_live_batch(request()).await?;
+        publish_lagged_heads(scratch.pool(), chain, &readable(batch.heads)?, LAG).await?;
+        windows.push((batch.current.number, head().await?));
+        if batch.caught_up {
+            break;
+        }
+    }
+    assert_eq!(
+        windows,
+        vec![(256, at(1, 254)), (510, at(1, 508)), (600, at(1, 598))],
+        "each window resumes from the readable head the previous one published"
+    );
+    let states: Vec<(String, i64, i64, i64)> = sqlx::query_as(
+        "SELECT canonicality_state::text, count(*), min(block_number), max(block_number)
+         FROM chain_lineage WHERE chain_id = $1
+         GROUP BY canonicality_state ORDER BY canonicality_state::text",
+    )
+    .bind(chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    let readable_rows = states
+        .iter()
+        .filter(|(state, ..)| ["canonical", "safe", "finalized"].contains(&state.as_str()))
+        .map(|(_, count, ..)| *count)
+        .sum::<i64>();
+    assert_eq!(
+        readable_rows, 599,
+        "blocks 0 through 598, with no gap: {states:?}"
+    );
+    assert!(
+        states.contains(&("observed".to_owned(), 2, 599, 600)),
+        "{states:?}"
+    );
+    assert!(!states.iter().any(|(state, ..)| state == "orphaned"));
+    fixture.server.abort();
+    scratch.cleanup().await
+}
+
+// The lag changed across a restart: raised from 2 to 3, the head holds rather than stepping back;
+// lowered to 0, every loaded block becomes readable, as on a runner without the setting.
+#[tokio::test]
+async fn a_lag_changed_across_a_restart_never_moves_the_head_backward() -> Result<()> {
+    let mut lagged = start("live_lag_changed", 3, 6, LAG).await?;
+    lagged.settled(at(1, 6)).await?;
+    for (lag, through, head) in [(3, 7, 4), (3, 8, 5), (0, 9, 9)] {
+        lagged.stop.cancel();
+        let previous = std::mem::replace(&mut lagged.task, tokio::spawn(async { Ok(()) }));
+        previous.await??;
+        lagged.fixture.reorg(1, through - 1, through).await;
+        let (stop, task) = spawn(&lagged.scratch, &lagged.fixture, &lagged.chain, lag, None)?;
+        lagged.stop = stop;
+        lagged.task = task;
+        let settled = lagged.settled(at(1, through)).await?;
+        assert_eq!(
+            settled.head,
+            at(1, head),
+            "lag {lag} with block {through} loaded"
+        );
+        assert_eq!(settled.interpret, at(1, head));
+    }
+    let observed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM chain_lineage
+         WHERE chain_id = $1 AND canonicality_state = 'observed'",
+    )
+    .bind(&lagged.chain)
+    .fetch_one(lagged.scratch.pool())
+    .await?;
+    assert_eq!(observed, 0, "at lag 0 nothing stays observed");
+    lagged.finish().await
+}
+
+// Metrics under the lag. The chain-head gauge is the published, lagged head. Live's target is the
+// node's head and its position the newest block it loaded, which match once it has caught up, so
+// its head lag reads 0, as do Interpret and Project, which stand on the published head. The publication gap reads the configured lag,
 // and so does the served lag, which measures from the node's head.
 #[tokio::test]
 async fn metrics_report_the_publication_gap_and_the_configured_lag() -> Result<()> {

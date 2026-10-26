@@ -4,8 +4,10 @@ use clap::Args;
 /// The largest publication lag `run` accepts. `/v1/status` reads stale once the published block
 /// is older than the network head by more than the API's `DEFAULT_MAX_LAG_SECS`, 60 seconds.
 /// With 12-second blocks each lagged block adds 12 seconds on top of the head's own age of up
-/// to one block: 3 blocks stay under 60 seconds, 4 do not on a late probe.
-pub(super) const MAX_LIVE_PUBLICATION_LAG_BLOCKS: u32 = 3;
+/// to one block: 3 blocks stay under 60 seconds, 4 do not on a late probe. The API's
+/// `the_largest_live_publication_lag_stays_ready_on_a_late_probe` reads this constant and fails if
+/// it outgrows `DEFAULT_MAX_LAG_SECS`.
+pub const MAX_LIVE_PUBLICATION_LAG_BLOCKS: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Args)]
 pub(super) struct LiveArgs {
