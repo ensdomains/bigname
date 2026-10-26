@@ -205,8 +205,9 @@ async fn a_project_redo_rerun_after_an_interpret_revision_change_rebuilds() -> R
 // generation. Ranges right after the reset ask for 1, 2, 4, ... blocks, never more than the budget
 // has left and never more events than the cap. At the default cap and above it, a budget of 10
 // commits [1], [2, 3], [4 to 7] and [8 to 10]. A cap of 2 cuts them to [1], [2, 3], [4, 5],
-// [6, 7], [8, 9] and [10], a cap of 1 to single blocks. The families at the head are the default
-// run's.
+// [6, 7], [8, 9] and [10], a cap of 1 to single blocks. The families at the head, two composed
+// names among them, are the default run's. The crate's range and composition tests carry the
+// equality on full histories.
 #[tokio::test]
 async fn the_range_event_cap_at_or_above_the_default_ranges_as_the_default() -> Result<()> {
     let expected = ranged_rebuild("families_cap_default", budget_and_cap(10, None)).await?;
@@ -349,7 +350,7 @@ fn budget_and_cap(budget: u64, cap: Option<u64>) -> FamilySettings {
 }
 
 /// A rebuild through the runner: the marker and the generations since the rebuild's reset after
-/// each batch, and the families at the head.
+/// each batch, and the families at the head, at least one table of them non-empty.
 struct RangedRebuild {
     batches: Vec<(Option<i64>, i64)>,
     families: Vec<(String, String)>,
@@ -368,6 +369,21 @@ impl RangedRebuild {
 /// one, with the chain's safe block at the head so blocks 1 to 25 rebuild in ranges.
 async fn ranged_rebuild(prefix: &str, settings: FamilySettings) -> Result<RangedRebuild> {
     let scratch = ready(prefix).await?;
+    // Two names surfaced at block 1, which the composition pass composes, so the families
+    // compared below hold rows.
+    for name in [0xa_u64, 0xb] {
+        sqlx::query(
+            "INSERT INTO name_surfaces (logical_name_id, namespace, namehash, labelhashes,
+                 normalizer_version, visibility_state, chain_id, block_hash, block_number,
+                 canonicality_state)
+             VALUES ('ens:' || $1, 'ens', $1, ARRAY[$1], 'fixture', 'active', $2,
+                 $2 || '-block-1', 1, 'canonical')",
+        )
+        .bind(format!("0x{name:064x}"))
+        .bind(CHAIN)
+        .execute(scratch.pool())
+        .await?;
+    }
     let head = head_marker(&scratch, HEAD).await?;
     sqlx::query("UPDATE chain_lineage SET canonicality_state = 'safe' WHERE chain_id = $1")
         .bind(CHAIN)
@@ -403,6 +419,12 @@ async fn ranged_rebuild(prefix: &str, settings: FamilySettings) -> Result<Ranged
     }
     ensure!(marker(&scratch).await? == Some(HEAD));
     let families = families(&scratch).await?;
+    ensure!(
+        families
+            .iter()
+            .any(|(table, rows)| table != "project_family_marker" && rows != "[]"),
+        "the rebuild left every family table empty, so the comparison covers nothing"
+    );
     scratch.cleanup().await?;
     Ok(RangedRebuild { batches, families })
 }

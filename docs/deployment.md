@@ -398,7 +398,7 @@ The implemented phases use:
 - `BIGNAME_PHASE_RUNNER_REDO_METRICS_BIND_ADDR`
 - `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS`
 - `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_BLOCKS` — most owned key family blocks one Project batch applies or undoes, 256 by default
-- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_RANGE_EVENTS` — most interpreted events one rebuild range, or one catalogue window of the composition pass, applies, 4,096 by default
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_RANGE_EVENTS` — most interpreted events one [rebuild range](glossary.md#rebuild-range), or one catalogue window of the [composition pass](glossary.md#composition-pass), applies, 4,096 by default
 
 An unset optional ceiling configures no limit; Docker inspection may show its bare
 variable name without `=`. An explicitly empty `KEY=` value is invalid.
