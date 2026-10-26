@@ -862,12 +862,17 @@ const ADDRESS_INDEXES: [&str; 3] = [
 /// How the prepared work list over `from..=to` reads the edges and addresses, under a custom and
 /// a generic plan: the failures, each named with its plan mode. Prints both plans. The probes may
 /// number at most one per address boundary in the range, plus one, however many destinations the
-/// chain has. A probe of the
-/// destination index is any scan of it under the `destination` list, or one with the destination
-/// in its index condition, which only the address side has. Each probe returns at most one row.
-/// Without statistics the planner may serve the unchanged edge boundary sources from the
-/// destination index with a filter, so their filter removals and boundary indexes are checked
-/// only on `analyzed` tables.
+/// chain has. A probe of the destination index is any scan of it under the `destination` list, or
+/// one with the destination in its index condition, which only the address side has. Each probe
+/// returns at most one row.
+///
+/// The guard is the run on `analyzed` tables. Statistics are present in every served deployment,
+/// autovacuum keeps them current, and a restored copy is analyzed before it serves. The run
+/// before `ANALYZE` is a sanity check, not a guard. Without statistics the planner may read every
+/// resolver edge through another index with a filter, for the edge boundary sources and for an
+/// address's ordered step alike. So that run checks the probe bound, the per-probe row bound and
+/// the absence of a sequential scan, and only the analyzed run checks filter removals and which
+/// boundary indexes are read.
 async fn access_path_failures(
     pool: &sqlx::PgPool,
     label: &str,
