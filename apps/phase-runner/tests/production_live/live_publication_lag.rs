@@ -96,7 +96,8 @@ struct Settled {
     head: (i64, String),
     safe: Option<(i64, String)>,
     interpret: (i64, String),
-    project_marker: (i64, String),
+    /// None until Project has published once; the seeded spine has no family marker.
+    project_marker: Option<(i64, String)>,
 }
 
 /// Wait until Live has loaded through `newest` and Interpret and Project stand completed, out of
@@ -132,6 +133,9 @@ async fn settled(
     }
 }
 
+/// A derived phase: name, status, whether it holds a redo, and its position.
+type PhaseRow = (String, String, bool, Option<i64>, Option<String>);
+
 async fn settled_now(
     pool: &PgPool,
     chain: &str,
@@ -154,7 +158,7 @@ async fn settled_now(
     .bind(chain)
     .fetch_one(pool)
     .await?;
-    let phases: Vec<(String, String, bool, Option<i64>, Option<String>)> = sqlx::query_as(
+    let phases: Vec<PhaseRow> = sqlx::query_as(
         "SELECT phase_name, phase_status, redo_in_progress, current_block_number, current_block_hash
          FROM chain_phase_state
          WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')
@@ -172,15 +176,12 @@ async fn settled_now(
     if !at_head {
         return Ok(None);
     }
-    let marker: Option<(i64, String)> = sqlx::query_as(
+    let project_marker: Option<(i64, String)> = sqlx::query_as(
         "SELECT current_block_number, current_block_hash FROM project_family_marker WHERE chain_id = $1",
     )
     .bind(chain)
     .fetch_optional(pool)
     .await?;
-    let Some(project_marker) = marker else {
-        return Ok(None);
-    };
     Ok(Some(Settled {
         head: (head.0, head.1),
         safe: head.2.zip(head.3),
@@ -247,7 +248,7 @@ async fn lagged_live_publishes_two_blocks_below_the_loaded_head_and_serves_at_to
     let settled = lagged.settled(at(1, 6)).await?;
     assert_eq!(settled.head, at(1, 4), "{settled:?}");
     assert_eq!(settled.interpret, at(1, 4));
-    assert_eq!(settled.project_marker, at(1, 4));
+    assert_eq!(settled.project_marker, Some(at(1, 4)));
     let pool = lagged.scratch.pool();
     assert_eq!(
         lineage(pool, &lagged.chain, 4).await?,
@@ -258,7 +259,10 @@ async fn lagged_live_publishes_two_blocks_below_the_loaded_head_and_serves_at_to
         ]
     );
     // The API's own fence query: the publication is one the head is not ahead of.
-    let (number, hash) = &settled.project_marker;
+    let (number, hash) = settled
+        .project_marker
+        .as_ref()
+        .context("a family publication")?;
     for tolerance in [0, 1] {
         let served = bigname_storage::load_served_project_generation(
             pool,
@@ -306,7 +310,7 @@ async fn depth_one_reorg_inside_the_lag_orphans_without_a_stamp_and_follows_the_
         at(2, 6),
         "Interpret follows the new branch"
     );
-    assert_eq!(settled.project_marker, at(2, 6));
+    assert_eq!(settled.project_marker, Some(at(2, 6)));
     assert_eq!(redo_generations(&pool, &lagged.chain).await?, before);
     lagged.finish().await
 }
