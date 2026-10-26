@@ -19,7 +19,7 @@ use crate::{
 };
 
 /// Bounds and retry policy for Project's family publication loop.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FamilySettings {
     /// Blocks applied or undone before returning progress to the runner.
     pub max_blocks_per_run: u64,
@@ -33,6 +33,12 @@ pub struct FamilySettings {
     pub require_hydration_url: bool,
     /// Most names an ENSv2 root admission change may compose again in one publication.
     pub max_admission_sweep_names: u64,
+    /// Block spans of a rebuild's history catalogue build.
+    pub compose_block_spans: u16,
+    /// Key partitions of a rebuild's history catalogue build, a power of two.
+    pub compose_key_partitions: u16,
+    /// `work_mem` of each history catalogue build transaction, the server's setting when unset.
+    pub compose_work_mem: Option<String>,
 }
 
 impl Default for FamilySettings {
@@ -43,6 +49,9 @@ impl Default for FamilySettings {
             rebuild_ranges: RebuildRanges::BelowSafe,
             require_hydration_url: true,
             max_admission_sweep_names: bigname_project::families::MAX_ADMISSION_SWEEP_NAMES,
+            compose_block_spans: bigname_project::families::COMPOSE_BUILDER_BLOCK_SPANS,
+            compose_key_partitions: bigname_project::families::COMPOSE_BUILDER_KEY_PARTITIONS,
+            compose_work_mem: None,
         }
     }
 }

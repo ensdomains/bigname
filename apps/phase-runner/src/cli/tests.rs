@@ -231,6 +231,77 @@ fn redo_takes_the_family_run_budget_and_keeps_every_family_failure_fatal() {
 }
 
 #[test]
+fn the_catalogue_build_flags_reach_the_family_settings() {
+    let redo = |flags: &[&str]| {
+        let mut args = vec![
+            "phase-runner",
+            "redo",
+            "--database-url",
+            "postgres://phase-runner.invalid/fresh",
+            "--all-chains",
+            "--phase",
+            "recompute-flags",
+            "--from-block",
+            "1",
+            "--to-block",
+            "30",
+        ];
+        args.extend_from_slice(flags);
+        Cli::try_parse_from(args)
+    };
+    let families = |flags: &[&str]| {
+        let command = redo(flags)
+            .expect("build flags must parse")
+            .resolve()
+            .expect("build flags must resolve");
+        let ResolvedCommand::Redo {
+            project_families, ..
+        } = command
+        else {
+            panic!("expected redo command");
+        };
+        project_families
+    };
+    let defaults = families(&[]);
+    assert_eq!(
+        (
+            defaults.compose_block_spans,
+            defaults.compose_key_partitions,
+            defaults.compose_work_mem
+        ),
+        (
+            bigname_project::families::COMPOSE_BUILDER_BLOCK_SPANS,
+            bigname_project::families::COMPOSE_BUILDER_KEY_PARTITIONS,
+            None
+        )
+    );
+    let set = families(&[
+        "--project-families-compose-block-spans",
+        "3",
+        "--project-families-compose-key-partitions",
+        "32",
+        "--project-families-compose-work-mem",
+        "256MB",
+    ]);
+    assert_eq!(
+        (
+            set.compose_block_spans,
+            set.compose_key_partitions,
+            set.compose_work_mem.as_deref()
+        ),
+        (3, 32, Some("256MB"))
+    );
+    for flags in [
+        ["--project-families-compose-block-spans", "0"],
+        ["--project-families-compose-key-partitions", "0"],
+        ["--project-families-compose-key-partitions", "3"],
+        ["--project-families-compose-key-partitions", "32768"],
+    ] {
+        assert!(redo(&flags).is_err(), "{flags:?} must be refused");
+    }
+}
+
+#[test]
 fn run_takes_the_family_run_budget_and_retries_family_failures() {
     configure_redo_source_endpoint();
     let command = Cli::try_parse_from([
