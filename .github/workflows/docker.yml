@@ -83,7 +83,7 @@ jobs:
             echo "tags<<EOF"
             echo "$image:$TAG"
             echo "$image:${HEAD_SHA::7}"
-            [[ "$TAG" == *-* ]] || echo "$image:latest"
+            [[ "$TAG" == *-* ]] || ! git merge-base --is-ancestor "$HEAD_SHA" origin/main || echo "$image:latest"
             echo "EOF"
             echo "labels<<EOF"
             echo "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY"

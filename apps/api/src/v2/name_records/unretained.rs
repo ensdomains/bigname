@@ -3,7 +3,8 @@
 //! bigname retained no value for it. Only those keys are read, through the same lookup and RPC
 //! timeouts `source=auto` uses for explicit keys. Every other key keeps its indexed answer, and a
 //! key the verified read does not answer `ok` or `not_found` keeps `value_not_retained`. A failed
-//! read leaves the indexed response as it was.
+//! read leaves the indexed response as it was. A response with a filled key reports
+//! `meta.source=verified` and carries no cache headers (`v2::cache_headers`).
 use bigname_storage::{NameCurrentRow, SelectedSnapshot};
 use tracing::warn;
 
@@ -13,13 +14,14 @@ use crate::v2::support::{AliasPath, ResolutionRecordKey};
 
 const VALUE_NOT_RETAINED: &str = "value_not_retained";
 
-/// Whether the request named no `source`, which is the default read.
+/// Whether the request named no `source`, or only a blank one, which is the default read. The
+/// request bounds classify the same requests as verified execution
+/// (`bounds::classification::is_verified_execution_request`), so the fill runs under the
+/// verified in-flight ceiling and client rate limit.
 pub(super) fn default_source(raw_query: Option<&str>) -> bool {
-    !raw_query.unwrap_or_default().split('&').any(|pair| {
-        pair.split('=')
-            .next()
-            .is_some_and(|key| key.trim() == "source")
-    })
+    form_urlencoded::parse(raw_query.unwrap_or_default().as_bytes())
+        .filter(|(key, _)| key == "source")
+        .all(|(_, value)| value.trim().is_empty())
 }
 
 type Reads<'a> = (

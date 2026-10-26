@@ -528,9 +528,11 @@ async fn r5_a_registry_pointer_on_the_lease_serves_as_composed() -> Result<()> {
     Ok(())
 }
 
-/// Row 6, Sepolia pinned: a registry child below the reserved `.eth` name with its own pointer.
-/// The Sepolia proxy reaches UniversalResolverV2, and the ENSv2 path gives a name below the
-/// reservation no resolver, so every read withholds it, as before this change.
+/// Row 6, Sepolia pinned: a registry child below the reserved `.eth` name with its own pointer,
+/// which no label-bearing event names, so bigname knows it only by its label hash. bigname's
+/// composed row withholds it with `ens_v2_path_no_resolver`. This pins bigname's served answer,
+/// which the registry read leaves alone because it skips a withheld row. It makes no claim about
+/// what the chain resolves for the child.
 #[tokio::test]
 async fn r6_sepolia_keeps_withholding_a_child_below_the_reservation() -> Result<()> {
     let database = published(

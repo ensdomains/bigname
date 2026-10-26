@@ -182,7 +182,11 @@ pub(crate) async fn get_name_record(
     let mut reads = bigname_storage::begin_read_snapshot(&state.pool)
         .await
         .map_err(|_| V2Error::internal_error("failed to open name read snapshot"))?;
-    let ServedName { row, alias } = load_served_name_for_selected_snapshot(
+    let ServedName {
+        row,
+        alias,
+        registry,
+    } = load_served_name_for_selected_snapshot(
         &mut reads,
         &namespace,
         &normalized.normalized_name,
@@ -224,7 +228,7 @@ pub(crate) async fn get_name_record(
         .map_err(|_| V2Error::internal_error("failed to close name read snapshot"))?;
 
     let record_inventory = if row_has_current_registration(&row) {
-        load_name_record_inventory(&state.pool, &row, &selected_snapshot)
+        load_name_record_inventory(&state.pool, &row, &registry, &selected_snapshot)
             .await
             .map_err(|error| {
                 api_error_to_v2_for_resource(

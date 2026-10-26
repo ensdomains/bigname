@@ -197,16 +197,16 @@ pub(crate) async fn get_name_records(
 
     let include_resolution_auxiliary =
         namespace == BASENAMES_NAMESPACE && params.source == RequestSource::Verified;
-    let (mut selected_snapshot, ServedName { mut row, mut alias }, mut record_inventory) =
-        load_name_records_snapshot_state(
-            &state,
-            &namespace,
-            &normalized.normalized_name,
-            params.at.as_ref(),
-            params.finality,
-            include_resolution_auxiliary,
-        )
-        .await?;
+    let (mut selected_snapshot, served, mut record_inventory) = load_name_records_snapshot_state(
+        &state,
+        &namespace,
+        &normalized.normalized_name,
+        params.at.as_ref(),
+        params.finality,
+        include_resolution_auxiliary,
+    )
+    .await?;
+    let (mut row, mut alias) = (served.row, served.alias);
 
     // Without `keys`, every source answers the inventory-derived default set. Inventory is loaded
     // only for a row the name may serve, so reservation and audit-only rows derive no keys. The
@@ -464,7 +464,7 @@ async fn load_name_records_snapshot_state(
     let row = &served.row;
 
     let record_inventory = if super::name_record::row_has_current_registration(row) {
-        load_records_route_inventory(&state.pool, row, &selected_snapshot)
+        load_records_route_inventory(&state.pool, row, &served.registry, &selected_snapshot)
             .await
             .map_err(|error| {
                 api_error_to_v2_for_resource(

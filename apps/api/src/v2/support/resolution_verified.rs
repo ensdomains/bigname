@@ -53,13 +53,22 @@ pub(crate) async fn load_indexed_record_inventory_current_for_snapshot(
 ///
 /// The inventory is the family inventory of the resource the name
 /// serves records through, at the family publication
-/// (`bigname_storage::families::records::load_family_record_inventory_for_snapshot`).
+/// (`bigname_storage::families::records::load_family_record_inventory_for_snapshot`), unless the
+/// request's registry read `registry` serves another resolver or a registry clear
+/// (`serve_ens_v1_registry_resolver`).
 pub(crate) async fn load_records_route_inventory(
     pool: &PgPool,
     row: &NameCurrentRow,
+    registry: &RegistryRead,
     selected_snapshot: &SelectedSnapshot,
 ) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
-    let composed =
-        load_indexed_record_inventory_current_for_snapshot(pool, row, selected_snapshot).await?;
-    ens_v1_registry_record_inventory(pool, row, selected_snapshot, composed).await
+    match registry {
+        RegistryRead::Composed => {
+            load_indexed_record_inventory_current_for_snapshot(pool, row, selected_snapshot).await
+        }
+        RegistryRead::Cleared => Ok(None),
+        RegistryRead::Resolver(resolver) => {
+            ens_v1_registry_record_inventory(pool, row, resolver, selected_snapshot).await
+        }
+    }
 }
