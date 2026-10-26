@@ -965,7 +965,8 @@ async fn a_touched_name_selects_itself_only() -> Result<()> {
 
 // An owner-only change of a parent entry recomposes the parent and no descendant: the
 // entry's owner is not one of the fields a descendant reads through its ancestors. A
-// resolver-pointer change of the same parent still recomposes its whole subtree.
+// registry pointer change of the same parent still recomposes the names under it without a
+// pointer of their own, which here is every one.
 #[tokio::test]
 async fn an_owner_only_parent_change_selects_the_parent_only() -> Result<()> {
     let mut world = World::new().await?;

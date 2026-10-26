@@ -2256,8 +2256,11 @@ says which names it expands.
   pointer: names of three or more labels with no resolver of their own. ENSv1
   resolution uses the nearest node that has a resolver
   (upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f),
-  and composition reads an ancestor's registry pointer only for a name below a
-  `.eth` second-level name. A pointer with no resolver, an empty one or the zero
+  and the name summary and lookup name composition read an ancestor's registry
+  pointer only for a name below a `.eth` second-level name. The record
+  inventory reads ancestors' pointers at any depth, and it recomposes a
+  resource through its own dependency on each node it read, not through this
+  list. A pointer with no resolver, an empty one or the zero
   address counts as no resolver. When the same name also expands for any other
   reason in the publication, every name under it expands.
 - A resource pointer is deleted or moves to another name. This expands the name

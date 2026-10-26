@@ -1,8 +1,8 @@
 //! Which names an ENSv1 registry pointer change expands.
 //!
-//! Composition reads an ancestor's registry pointer only in the ENSv1 mirror walk, for a name
-//! below a `.eth` second-level name, and the walk stops at the nearest pointer that is not
-//! cleared. So a pointer change expands the names of three or more labels under the changed
+//! The name summary and lookup name composition read an ancestor's registry pointer only in the
+//! ENSv1 mirror walk, for a name below a `.eth` second-level name, and the walk stops at the
+//! nearest pointer that is not cleared. So a pointer change expands the names of three or more labels under the changed
 //! node that have no resolver of their own. A name whose path any other change also names keeps
 //! its whole subtree.
 //!
@@ -363,4 +363,71 @@ async fn another_change_of_the_same_path_keeps_the_whole_subtree() -> Result<()>
     }
     ensure!(failures.is_empty(), "{}", failures.join("\n"));
     Ok(())
+}
+
+// Row D at three labels. A pointer-only change at `a.foo.eth`, with no change at `eth`, selects
+// `a.foo.eth` and the names under it without a resolver of their own: `x.a.foo.eth`, and not
+// `y.a.foo.eth`.
+#[tokio::test]
+async fn a_third_level_pointer_change_skips_a_child_with_its_own_resolver() -> Result<()> {
+    let mut world = tree(&POINTERS, None).await?;
+    world.surface(Surface::of("y.a.foo.eth")).await?;
+    world.registry_pointer_at("y.a.foo.eth", SET).await?;
+    pointer_changed(&world, "a.foo.eth", Some(A_RESOLVER), AFTER).await?;
+    world
+        .assert_selects(CALL, &["a.foo.eth", "x.a.foo.eth"])
+        .await?;
+    world.cleanup().await
+}
+
+// A narrow name whose surface has a null first label hash has no entry key to look its names
+// up by, so it stays a full prefix and its whole subtree is selected: `x.null.foo.eth` has a
+// resolver of its own and is selected.
+#[tokio::test]
+async fn a_pointer_change_on_a_null_first_label_keeps_the_whole_subtree() -> Result<()> {
+    let mut world = World::new().await?;
+    let label = |text: &str| Some(labelhash(text));
+    world.surfaces(&["eth", "foo.eth", "b.foo.eth"]).await?;
+    for (name, labels) in [
+        ("null.foo.eth", vec![None, label("foo"), label("eth")]),
+        (
+            "x.null.foo.eth",
+            vec![label("x"), None, label("foo"), label("eth")],
+        ),
+    ] {
+        world.surface(Surface::of(name).labels(labels)).await?;
+    }
+    world.registry_pointer_at("x.null.foo.eth", SET).await?;
+    pointer_changed(&world, "null.foo.eth", Some(BEFORE), AFTER).await?;
+    world
+        .assert_selects(CALL, &["null.foo.eth", "x.null.foo.eth"])
+        .await?;
+    world.cleanup().await
+}
+
+// A reclassified resolver makes the names whose pointers name it full prefixes, and only
+// those. `a.foo.eth`'s resolver is reclassified in the block that changes `eth`'s pointer. The
+// names under `a.foo.eth` are selected whatever their pointers, and `eth` stays narrow.
+#[tokio::test]
+async fn a_reclassified_resolver_widens_only_the_names_that_point_at_it() -> Result<()> {
+    let mut world = tree(&POINTERS, None).await?;
+    world.surface(Surface::of("y.a.foo.eth")).await?;
+    world.registry_pointer_at("y.a.foo.eth", SET).await?;
+    pointer_changed(&world, "eth", Some(BEFORE), AFTER).await?;
+    world.reclassify(A_RESOLVER).await?;
+    world
+        .assert_selects(
+            CALL,
+            &[
+                "eth",
+                "a.foo.eth",
+                "b.foo.eth",
+                "c.foo.eth",
+                "x.a.foo.eth",
+                "y.a.foo.eth",
+                "z.bar.eth",
+            ],
+        )
+        .await?;
+    world.cleanup().await
 }

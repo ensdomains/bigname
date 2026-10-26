@@ -82,16 +82,19 @@ pub(super) fn statement(normal_work: &str) -> String {
     let under_prefix = "cardinality(prefix.labelhashes)<=cardinality(child.labelhashes)
               AND (cardinality(prefix.labelhashes)=0 OR
                 child.labelhashes[cardinality(child.labelhashes)-cardinality(prefix.labelhashes)+1:]=prefix.labelhashes)";
-    // Composition reads an ancestor's registry pointer only in the ENSv1 mirror walk
-    // (storage `records/mirror.rs`, `nearest`). It runs that walk only for a name below a
-    // `.eth` second-level name (storage `families/name/batch.rs:527-529`,
-    // `NamePlace::BelowEthSecondLevel`), so a name of fewer than three labels never reads one.
+    // The name summary and lookup name work this statement feeds read an ancestor's registry
+    // pointer only in the ENSv1 mirror walk (storage `records/mirror.rs`, `nearest`). Their
+    // composition runs it only for a name below a `.eth` second-level name (storage
+    // `families/name/batch.rs:527-529`, `NamePlace::BelowEthSecondLevel`), so there a name of
+    // fewer than three labels never reads one. The record inventory walks at any depth, but it
+    // recomposes through its own `registry_node` dependency on each node it read
+    // (`lookup/inventory_work.sql`), not through this statement.
     let walks_ancestor_pointers = "cardinality(child.labelhashes)>=3";
     // The walk returns the nearest pointer that is not cleared (null, empty or the zero
     // address), as ENSv1 resolution does
     // (upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f).
     // A name with its own resolver never reads its ancestors'. The scalar subquery is one
-    // primary-key probe per name. The planner never turns it into a join over the table.
+    // primary-key probe per name, in both plan modes (`scaling_tests.rs`, row L).
     let has_no_own_resolver = "COALESCE((SELECT own.resolver_address FROM project_registry_pointer own
                   WHERE own.chain_id=$1 AND own.namespace=child.namespace AND own.node=child.namehash), '')
                 IN ('', '0x0000000000000000000000000000000000000000')";
