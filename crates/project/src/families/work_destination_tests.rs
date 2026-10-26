@@ -1074,3 +1074,441 @@ async fn many_destinations_do_not_make_a_range_probe_each_one() -> Result<()> {
     database.cleanup().await?;
     Ok(())
 }
+
+/// The limit every grid cell asks for, a rebuild's batch.
+const GRID_LIMIT: i64 = 257;
+
+/// Addresses or edges in a grid fixture, well beyond the limit.
+const MANY: i64 = 20_000;
+
+/// Resolver edges that point at a grid fixture's one hot destination.
+const HOT_GRID: i64 = 200;
+
+/// In a sparse grid fixture one block in this many qualifies.
+const SPARSE: i64 = 50;
+
+fn instance_sql(n: &str) -> String {
+    format!("('00000000-0000-0000-0000-' || lpad(to_hex({n}), 12, '0'))::uuid")
+}
+
+/// Readable lineage at each block in `13..=last` that `every` divides. Blocks 0 to 12 are
+/// readable in every test database.
+fn readable_blocks(fixture: &mut Fixture, last: i64, every: i64) {
+    fixture.sql += &format!(
+        "INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp,
+             canonicality_state)
+         SELECT '{CHAIN}', '0x' || lpad(to_hex(n), 64, '0'), n,
+                to_timestamp(1800000000 + n * 12), 'canonical'
+         FROM generate_series(13, {last}) n
+         WHERE n % {every} = 0;\n"
+    );
+}
+
+/// `MANY` instances, the address of each starting at its own readable block `n`. A blockless
+/// resolver edge points at every instance whose number `every` divides, each a destination of
+/// its own.
+fn many_destinations(fixture: &mut Fixture, every: i64) {
+    let instance = instance_sql("n");
+    fixture.instance(CHAIN, 0);
+    fixture.sql += &format!(
+        "INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+         SELECT {instance}, '{CHAIN}', 'contract' FROM generate_series(1, {MANY}) n;
+         INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id,
+             to_contract_instance_id, discovery_source, admission_basis, canonicality_state)
+         SELECT '{CHAIN}', 'resolver', '{}', {instance}, 'NewResolver', 'fixture', 'canonical'
+         FROM generate_series(1, {MANY}) n
+         WHERE n % {every} = 0;
+         INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address,
+             active_from_block_number)
+         SELECT {instance}, '{CHAIN}', '0x' || lpad(to_hex(n), 40, '0'), n
+         FROM generate_series(1, {MANY}) n;\n",
+        id(0)
+    );
+    readable_blocks(fixture, MANY + 1, 1);
+}
+
+/// Instance 1 is the destination of `HOT_GRID` blockless resolver edges. At each readable block
+/// `k` in `1..=MANY` that `every` divides it has a deactivated address that starts and stops at
+/// `k`. At every other block an instance no edge names has an address that starts there.
+fn one_destination(fixture: &mut Fixture, every: i64) {
+    let filler = instance_sql("65536 + k");
+    fixture.instance(CHAIN, 0).instance(CHAIN, 1);
+    fixture.sql += &format!(
+        "INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id,
+             to_contract_instance_id, discovery_source, admission_basis, canonicality_state)
+         SELECT '{CHAIN}', 'resolver', '{}', '{}', 'NewResolver', 'fixture', 'canonical'
+         FROM generate_series(1, {HOT_GRID}) n;
+         INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address,
+             active_from_block_number, active_to_block_number, deactivated_at)
+         SELECT '{}', '{CHAIN}', '0x' || lpad(to_hex(k), 40, '0'), k, k, now()
+         FROM generate_series(1, {MANY}) k
+         WHERE k % {every} = 0;
+         INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+         SELECT {filler}, '{CHAIN}', 'contract' FROM generate_series(1, {MANY}) k
+         WHERE k % {every} <> 0;
+         INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address,
+             active_from_block_number)
+         SELECT {filler}, '{CHAIN}', '0x' || lpad(to_hex(65536 + k), 40, '0'), k
+         FROM generate_series(1, {MANY}) k
+         WHERE k % {every} <> 0;\n",
+        id(0),
+        id(1),
+        id(1)
+    );
+    readable_blocks(fixture, MANY + 1, 1);
+}
+
+/// `MANY` resolver edges to instance 1, which has no address, the edge `n` starting at block
+/// `n` and stopping at `n + 1`. Only the blocks that `every` divides are readable, besides 0 to
+/// 12. `FILLER` instances no edge names have addresses that start after the range, so the
+/// address table is not empty.
+fn many_edges(fixture: &mut Fixture, every: i64) {
+    let filler = instance_sql("65536 + n");
+    fixture.instance(CHAIN, 0).instance(CHAIN, 1);
+    fixture.sql += &format!(
+        "INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+         SELECT {filler}, '{CHAIN}', 'contract' FROM generate_series(1, {FILLER}) n;
+         INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address,
+             active_from_block_number)
+         SELECT {filler}, '{CHAIN}', '0x' || lpad(to_hex(65536 + n), 40, '0'), {MANY} + 100 + n
+         FROM generate_series(1, {FILLER}) n;\n"
+    );
+    fixture.sql += &format!(
+        "INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id,
+             to_contract_instance_id, discovery_source, admission_basis,
+             active_from_block_number, active_from_block_hash, active_to_block_number,
+             active_to_block_hash, canonicality_state)
+         SELECT '{CHAIN}', 'resolver', '{}', '{}', 'NewResolver', 'fixture', n,
+                '0x' || lpad(to_hex(n), 64, '0'), n + 1, '0x' || lpad(to_hex(n + 1), 64, '0'),
+                'canonical'
+         FROM generate_series(1, {MANY}) n;\n",
+        id(0),
+        id(1)
+    );
+    readable_blocks(fixture, MANY + 1, every);
+}
+
+/// The rows `rows` lists in `from..=to` that a walk of that boundary must examine: those in block
+/// order up to and including the block that fills the limit, or all of them when fewer blocks
+/// qualify. `rows` lists each row's block, ascending, and whether the row qualifies. A block
+/// qualifies when it is readable and one of its rows qualifies. The cut is counted here rather
+/// than in SQL, so the bound does not hang on a plan over tables without statistics.
+async fn examined(pool: &sqlx::PgPool, rows: &str, (from, to): (i64, i64)) -> Result<i64> {
+    let readable: std::collections::HashSet<i64> = sqlx::query_scalar(
+        "SELECT block_number FROM chain_lineage
+         WHERE chain_id = $1 AND canonicality_state IN ('canonical', 'safe', 'finalized')",
+    )
+    .bind(CHAIN)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect();
+    let rows: Vec<(i64, bool)> = sqlx::query_as(rows)
+        .bind(CHAIN)
+        .bind(from)
+        .bind(to)
+        .fetch_all(pool)
+        .await?;
+    let (mut kept, mut last) = (0, None);
+    for (n, &(block, qualifies)) in rows.iter().enumerate() {
+        if qualifies && readable.contains(&block) && last != Some(block) {
+            kept += 1;
+            last = Some(block);
+            if kept == GRID_LIMIT {
+                let at_cut = rows[n..].iter().take_while(|row| row.0 == block).count();
+                return Ok(i64::try_from(n + at_cut)?);
+            }
+        }
+    }
+    Ok(i64::try_from(rows.len())?)
+}
+
+/// What one run of the work list read: the executions of the per-address destination step, the
+/// steps and rows of the edge boundary walks, the most rows one destination step read, and every
+/// scan with whether it ran inside a destination step.
+#[derive(Default)]
+struct Reads<'a> {
+    lookups: i64,
+    edge_steps: i64,
+    edge_rows: i64,
+    widest_step: f64,
+    scans: Vec<(bool, &'a serde_json::Value)>,
+}
+
+/// Whether `node` or a node under it reads resolver edges by destination.
+fn reads_destination(node: &serde_json::Value) -> bool {
+    let conditions = format!(
+        "{} {} {}",
+        node["Index Cond"], node["Recheck Cond"], node["Filter"]
+    );
+    (node["Relation Name"] == "discovery_edges" && conditions.contains("to_contract_instance_id"))
+        || node["Plans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(reads_destination)
+}
+
+/// Adds `node`'s reads to `reads`. A subplan that reads resolver edges by destination is a
+/// destination step, and its loops are its executions, whatever scan serves it.
+fn tally<'a>(node: &'a serde_json::Value, in_step: bool, reads: &mut Reads<'a>) {
+    let loops = node["Actual Loops"].as_i64().unwrap_or(0);
+    let step = !in_step && node["Parent Relationship"] == "SubPlan" && reads_destination(node);
+    if step {
+        reads.lookups += loops;
+    }
+    let in_step = in_step || step;
+    if node["Node Type"]
+        .as_str()
+        .is_some_and(|kind| kind.contains("Scan"))
+        && loops > 0
+    {
+        let rows = node["Actual Rows"].as_f64().unwrap_or_default()
+            + node["Rows Removed by Filter"].as_f64().unwrap_or_default();
+        if node["Relation Name"] == "discovery_edges" {
+            if in_step {
+                reads.widest_step = reads.widest_step.max(rows);
+            } else {
+                reads.edge_steps += loops;
+                reads.edge_rows += (rows * loops as f64).round() as i64;
+            }
+        }
+        reads.scans.push((in_step, node));
+    }
+    for child in node["Plans"].as_array().into_iter().flatten() {
+        tally(child, in_step, reads);
+    }
+}
+
+/// The failures of the prepared work list over `from..=to` with `GRID_LIMIT`, under a custom and
+/// a generic plan. In every run the destination steps number at most the addresses a walk must
+/// examine, plus four, and the edge boundary walks take at most as many steps as the edges a walk
+/// must examine, plus four. On `analyzed` tables those walks also read at most that many edges,
+/// every scan reads through its boundary or destination index, a destination step reads one row,
+/// and an edge boundary scan filters out nothing. Without statistics the planner may serve a step
+/// from another index with a filter, so rows are bounded only once the tables are analyzed.
+async fn grid_failures(
+    pool: &sqlx::PgPool,
+    label: &str,
+    analyzed: bool,
+    (from, to): (i64, i64),
+) -> Result<Vec<String>> {
+    let mut lookup_bound = 4;
+    let mut edge_bound = 4;
+    for column in ["active_from_block_number", "active_to_block_number"] {
+        let addresses = format!(
+            "SELECT address.{column},
+                    address.contract_instance_id IN (
+                        SELECT edge.to_contract_instance_id FROM discovery_edges edge
+                        WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver')
+             FROM contract_instance_addresses address
+             WHERE address.chain_id = $1 AND address.{column} BETWEEN $2 AND $3
+             ORDER BY 1"
+        );
+        let edges = format!(
+            "SELECT edge.{column}, true FROM discovery_edges edge
+             WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
+               AND edge.{column} BETWEEN $2 AND $3
+             ORDER BY 1"
+        );
+        lookup_bound += examined(pool, &addresses, (from, to)).await?;
+        edge_bound += examined(pool, &edges, (from, to)).await?;
+    }
+    let history = manifests::History::read(pool, CHAIN, to).await?;
+    input::work_blocks(pool, CHAIN, from, to, &history, GRID_LIMIT).await?;
+    let prepared: String = sqlx::query_scalar(
+        "SELECT name FROM pg_prepared_statements
+         WHERE statement LIKE '/* project:families.input.work_blocks */%'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let mut failures = Vec::new();
+    for mode in ["force_custom_plan", "force_generic_plan"] {
+        sqlx::raw_sql(&format!("SET plan_cache_mode = {mode}"))
+            .execute(pool)
+            .await?;
+        let execute = format!("EXECUTE {prepared} ('{CHAIN}', {to}, {from}, '{{}}', {GRID_LIMIT})");
+        let plan: serde_json::Value =
+            sqlx::query_scalar(&format!("EXPLAIN (ANALYZE, FORMAT JSON) {execute}"))
+                .fetch_one(pool)
+                .await?;
+        let mut reads = Reads::default();
+        tally(&plan[0]["Plan"], false, &mut reads);
+        println!(
+            "{label}, {mode}: {} destination lookups (bound {lookup_bound}), {} edge boundary \
+             steps and {} rows (bound {edge_bound}), {} ms",
+            reads.lookups, reads.edge_steps, reads.edge_rows, plan[0]["Execution Time"]
+        );
+        let before = failures.len();
+        if reads.lookups > lookup_bound {
+            failures.push(format!(
+                "{label}, {mode}: {} destination lookups, bound {lookup_bound}",
+                reads.lookups
+            ));
+        }
+        if reads.edge_steps > edge_bound {
+            failures.push(format!(
+                "{label}, {mode}: {} edge boundary steps, bound {edge_bound}",
+                reads.edge_steps
+            ));
+        }
+        if analyzed {
+            if reads.edge_rows > edge_bound {
+                failures.push(format!(
+                    "{label}, {mode}: {} edge boundary rows read, bound {edge_bound}",
+                    reads.edge_rows
+                ));
+            }
+            if reads.widest_step > 1.0 {
+                failures.push(format!(
+                    "{label}, {mode}: a destination step reads {} rows",
+                    reads.widest_step
+                ));
+            }
+            for &(in_step, node) in &reads.scans {
+                let allowed = match (node["Relation Name"].as_str(), in_step) {
+                    (Some("discovery_edges"), true) => &EDGE_INDEXES[2..],
+                    (Some("discovery_edges"), false) => &EDGE_INDEXES[..2],
+                    (Some("contract_instance_addresses"), _) => &ADDRESS_INDEXES[..2],
+                    _ => continue,
+                };
+                if !reads_through(node, allowed) {
+                    failures.push(format!(
+                        "{label}, {mode}: {} of {} by {}",
+                        node["Node Type"], node["Relation Name"], node["Index Name"]
+                    ));
+                }
+                if node["Relation Name"] == "discovery_edges"
+                    && !in_step
+                    && node["Rows Removed by Filter"].as_f64().unwrap_or_default() > 0.0
+                {
+                    failures.push(format!(
+                        "{label}, {mode}: an edge boundary scan filters out {} rows",
+                        node["Rows Removed by Filter"]
+                    ));
+                }
+            }
+        }
+        if failures.len() > before {
+            let text: Vec<String> =
+                sqlx::query_scalar(&format!("EXPLAIN (ANALYZE, FORMAT TEXT) {execute}"))
+                    .fetch_all(pool)
+                    .await?;
+            println!("{label}, {mode}:\n{}\n", text.join("\n"));
+        }
+    }
+    sqlx::raw_sql("SET plan_cache_mode = auto")
+        .execute(pool)
+        .await?;
+    Ok(failures)
+}
+
+/// The work list over `from..=to` is its own full list cut at each limit around that list's
+/// length, and both frozen statements return the same. The frozen statements probe a hot
+/// destination with a sequential scan for each address, so they run with sequential scans
+/// discouraged. The work list runs with the default settings.
+async fn agrees(pool: &sqlx::PgPool, (from, to): (i64, i64)) -> Result<()> {
+    let history = manifests::History::read(pool, CHAIN, to).await?;
+    let starts = history.declaration_starts(from, to);
+    let full = input::work_blocks(pool, CHAIN, from, to, &history, i64::MAX).await?;
+    let length = i64::try_from(full.len())?;
+    let mut limits = vec![1, 2, length - 1, length, length + 1, GRID_LIMIT, i64::MAX];
+    limits.retain(|limit| *limit >= 1);
+    limits.sort_unstable();
+    limits.dedup();
+    for limit in limits {
+        let want = &full[..full.len().min(usize::try_from(limit)?)];
+        let new = input::work_blocks(pool, CHAIN, from, to, &history, limit).await?;
+        sqlx::raw_sql("SET enable_seqscan = off")
+            .execute(pool)
+            .await?;
+        let probed = frozen(pool, WORK_BLOCKS_PROBED, CHAIN, (from, to), &starts, limit).await?;
+        let before = frozen(pool, WORK_BLOCKS_BEFORE, CHAIN, (from, to), &starts, limit).await?;
+        sqlx::raw_sql("RESET enable_seqscan").execute(pool).await?;
+        assert_eq!(new, want, "work list, {from}..={to}, limit {limit}");
+        assert_eq!(
+            probed, new,
+            "probed statement, {from}..={to}, limit {limit}"
+        );
+        assert_eq!(
+            before, new,
+            "statement before, {from}..={to}, limit {limit}"
+        );
+    }
+    Ok(())
+}
+
+/// Writes the fixture `build` makes, then checks each range before `ANALYZE` and after it and
+/// runs the three-way comparison over each range.
+async fn grid(build: impl FnOnce(&mut Fixture), ranges: &[(i64, i64)]) -> Result<()> {
+    let (database, pool) = database().await?;
+    let mut fixture = Fixture::default();
+    build(&mut fixture);
+    fixture.write(&pool).await?;
+    let mut failures = Vec::new();
+    for &range in ranges {
+        let label = format!("{}..={}, before ANALYZE", range.0, range.1);
+        failures.extend(grid_failures(&pool, &label, false, range).await?);
+    }
+    fixture.analyze().write(&pool).await?;
+    for &range in ranges {
+        let label = format!("{}..={}, after ANALYZE", range.0, range.1);
+        failures.extend(grid_failures(&pool, &label, true, range).await?);
+        agrees(&pool, range).await?;
+    }
+    assert!(
+        failures.is_empty(),
+        "the work list's reads:\n{}",
+        failures.join("\n")
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A rebuild's whole remaining range over a grid fixture, and the same range resumed a quarter
+/// of the way in.
+const GRID_RANGES: [(i64, i64); 2] = [(1, MANY + 1), (MANY / 4, MANY + 1)];
+
+// The grid. Each row is one fixture: how many addresses or edges start or stop in the range,
+// how many of them qualify, and how many resolver edge destinations there are. A walk of a
+// boundary examines its rows in block order up to the block that fills the limit, and no further.
+
+#[tokio::test]
+async fn one_address_and_a_hot_destination_stay_within_the_walk_bound() -> Result<()> {
+    grid(hot, &[(1, 12)]).await
+}
+
+#[tokio::test]
+async fn one_address_and_many_destinations_stay_within_the_walk_bound() -> Result<()> {
+    grid(spread, &[(5, 12)]).await
+}
+
+#[tokio::test]
+async fn many_addresses_of_many_destinations_stay_within_the_walk_bound() -> Result<()> {
+    grid(|fixture| many_destinations(fixture, 1), &GRID_RANGES).await
+}
+
+#[tokio::test]
+async fn many_addresses_of_a_hot_destination_stay_within_the_walk_bound() -> Result<()> {
+    grid(|fixture| one_destination(fixture, 1), &GRID_RANGES).await
+}
+
+#[tokio::test]
+async fn sparse_addresses_of_many_destinations_stay_within_the_walk_bound() -> Result<()> {
+    grid(|fixture| many_destinations(fixture, SPARSE), &GRID_RANGES).await
+}
+
+#[tokio::test]
+async fn sparse_addresses_of_a_hot_destination_stay_within_the_walk_bound() -> Result<()> {
+    grid(|fixture| one_destination(fixture, SPARSE), &GRID_RANGES).await
+}
+
+#[tokio::test]
+async fn many_readable_edge_boundaries_stay_within_the_walk_bound() -> Result<()> {
+    grid(|fixture| many_edges(fixture, 1), &GRID_RANGES).await
+}
+
+#[tokio::test]
+async fn sparse_readable_edge_boundaries_stay_within_the_walk_bound() -> Result<()> {
+    grid(|fixture| many_edges(fixture, SPARSE), &GRID_RANGES).await
+}

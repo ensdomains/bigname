@@ -4937,10 +4937,10 @@ content hash, then check on Sepolia that `GET /v1/names/phantombug01.eth` serves
 `NewResolver` at block 11982720), and that `GET /v1/names/phantombug01.eth/records?keys=addr:61`
 finds the record.
 
-## Resolver destination probes as ordered index steps
+## Resolver boundary walks in the rebuild work list
 
-The build that checks each contract address in a rebuild work list with an ordered step of the
-resolver destination index changes one Project statement, `project:families.input.work_blocks`
+The build that walks the resolver boundaries of a rebuild work list block by block changes one
+Project statement, `project:families.input.work_blocks`
 ([table ownership](storage.md#table-ownership)).
 
 - Before, the two sources of contract addresses that start or stop in the requested range
@@ -4950,8 +4950,12 @@ resolver destination index changes one Project statement, `project:families.inpu
   question with a sequential scan of every resolver edge of the chain. Each address now asks
   for the lowest resolver edge destination at or above its own contract, one step of
   `project_families_discovery_edges_resolver_destination_idx`, and is kept when that is its own
-  contract. Any other plan for that step reads every resolver edge first. The blocks it returns
-  are the same.
+  contract.
+- Before, each of the four resolver boundary sources listed the distinct boundaries of the
+  whole requested range and then took the lowest. PostgreSQL could read and sort every boundary
+  in the range before the limit. Each source now walks its boundary index upward one block at a
+  time and stops once it holds as many blocks as the limit asks for. The blocks it returns are
+  the same.
 - Stored rows do not change. API responses do not change.
 - The statement is in `crates/project/src`, an input of the
   [projection content hash](glossary.md#projection-content-hash) only. That hash rotates for
