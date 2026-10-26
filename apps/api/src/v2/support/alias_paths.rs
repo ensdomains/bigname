@@ -65,8 +65,27 @@ pub(crate) struct ServedName {
 /// path is walked: when it reaches a token whose canonical name is another, that name's row is
 /// served under the requested path, if it is still the token's own row. A path that reaches
 /// nothing serves what it served before, the row or `404 not_found`. Every read runs on
-/// `conn`'s one snapshot.
+/// `conn`'s one snapshot. An ENSv1 name serves the resolver its registry record holds
+/// (`serve_ens_v1_registry_resolver`).
 pub(crate) async fn load_served_name_for_selected_snapshot(
+    conn: &mut PgConnection,
+    namespace: &str,
+    name: &str,
+    selected_snapshot: &SelectedSnapshot,
+) -> ApiResult<ServedName> {
+    let mut served = load_composed_served_name(&mut *conn, namespace, name, selected_snapshot).await?;
+    serve_ens_v1_registry_resolver(&mut *conn, &mut served.row)
+        .await
+        .map_err(|error| {
+            error!(service = "api", error = %error, "failed to read the ENSv1 registry resolver");
+            ApiError::internal_error(format!(
+                "failed to read the ENSv1 registry resolver of {namespace}/{name}"
+            ))
+        })?;
+    Ok(served)
+}
+
+async fn load_composed_served_name(
     conn: &mut PgConnection,
     namespace: &str,
     name: &str,

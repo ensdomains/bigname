@@ -59,5 +59,7 @@ pub(crate) async fn load_records_route_inventory(
     row: &NameCurrentRow,
     selected_snapshot: &SelectedSnapshot,
 ) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
-    load_indexed_record_inventory_current_for_snapshot(pool, row, selected_snapshot).await
+    let composed =
+        load_indexed_record_inventory_current_for_snapshot(pool, row, selected_snapshot).await?;
+    ens_v1_registry_record_inventory(pool, row, selected_snapshot, composed).await
 }

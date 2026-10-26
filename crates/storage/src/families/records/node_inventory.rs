@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::families::records::{
     assemble::{self, Assembly, AssemblyReads},
+    is_cleared,
     facts::{ResolverClassification, load_classifications_at},
     inventory_selection::{Plan, Selected, select_plans},
     inventory_types::FamilyRecordInventory,
@@ -94,6 +95,76 @@ impl FamilyRecordInventory {
         }))
     }
 
+    /// The resolver the ENSv1 registry holds for `row`'s node, read at request time, when it is
+    /// not `served`, the resolver the row's composed resource pointer serves. `None` keeps the
+    /// composed answer. `Some(None)` is a registry clear. ENSv1 clients read the resolver from the
+    /// registry (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137-L141 @ ens_v1@91c966f),
+    /// and `project_registry_pointer` keeps the node's latest ENSv1 `ResolverChanged` whichever
+    /// resource the event carries, so a resource pointer can lag it. Only a row whose selected
+    /// arm is `ens_v1` or `ens_v0` and whose served pointer is an ENSv1 one is read this way, and
+    /// never a row the cut-over walk withholds or cannot prove.
+    pub async fn ens_v1_registry_resolver(
+        conn: &mut PgConnection,
+        row: &crate::NameCurrentRow,
+        served: Option<&str>,
+    ) -> Result<Option<Option<String>>> {
+        let arm = row
+            .provenance
+            .pointer("/authority_selection/authority_arm")
+            .and_then(serde_json::Value::as_str);
+        let family = row
+            .provenance
+            .get("resolver_pointer_source_family")
+            .and_then(serde_json::Value::as_str);
+        if !matches!(arm, Some("ens_v1" | "ens_v0"))
+            || !family.is_some_and(|family| V1_POINTER_FAMILIES.contains(&family))
+            || row.unresolvable_reason().is_some()
+            || row.resolution_unsupported_reason().is_some()
+        {
+            return Ok(None);
+        }
+        let Some(chain_id) = crate::ChainPositions::from_value(&row.chain_positions)
+            .ok()
+            .and_then(|positions| {
+                positions
+                    .as_map()
+                    .values()
+                    .map(|position| position.chain_id.clone())
+                    .next()
+            })
+        else {
+            return Ok(None);
+        };
+        let registry: Option<Option<String>> = sqlx::query_scalar(
+            "/* storage:families.records.ens_v1_registry_resolver */
+             SELECT NULLIF(pointer.resolver_address, '')
+             FROM bigname_phase.project_registry_pointer pointer
+             WHERE pointer.chain_id = $1 AND pointer.namespace = $2 AND pointer.node = $3",
+        )
+        .bind(&chain_id)
+        .bind(&row.namespace)
+        .bind(row.namehash.to_ascii_lowercase())
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some(registry) = registry else {
+            return Ok(None);
+        };
+        let same = match (is_cleared(served), is_cleared(registry.as_deref())) {
+            (false, false) => served
+                .unwrap_or_default()
+                .eq_ignore_ascii_case(registry.as_deref().unwrap_or_default()),
+            (served, registry) => served && registry,
+        };
+        if same {
+            return Ok(None);
+        }
+        Ok(Some(
+            registry
+                .filter(|address| !is_cleared(Some(address)))
+                .map(|address| address.to_ascii_lowercase()),
+        ))
+    }
+
     /// The family inventory `resolver_address` holds for `node`, read on `conn`, which the
     /// caller holds in one snapshot, at the current family publication.
     pub async fn load_resolver_node_on(
@@ -114,6 +185,14 @@ impl FamilyRecordInventory {
         node_inventory_at(conn, &publication, &key, None).await
     }
 }
+
+/// The ENSv1 pointer families, whose `ResolverChanged` Project also keeps as the node's
+/// `project_registry_pointer` row (crates/project/src/families/resolver.rs).
+const V1_POINTER_FAMILIES: [&str; 3] = [
+    "ens_v1_registry_l1",
+    "ens_v1_registrar_l1",
+    "ens_v1_wrapper_l1",
+];
 
 /// The pointer family whose partitions hold a resolver family's writes (`admitted_partitions`).
 fn pointer_family(classification: &ResolverClassification) -> &'static str {

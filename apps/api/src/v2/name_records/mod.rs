@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, RawQuery, State},
 };
 use bigname_domain::resolver_read::ResolverReadFeature;
 use bigname_storage::{
@@ -30,6 +30,7 @@ use super::{
 
 mod build;
 mod keys;
+mod unretained;
 pub(crate) use build::{
     EXACT_NAME_AUTHORITY_NOT_VERIFIABLE, VERIFIED_NOT_SUPPORTED_REASON,
     build_authority_unsupported_name_records, build_auto_name_records, build_indexed_name_records,
@@ -178,8 +179,10 @@ pub(crate) enum VerifiedRecordLookup {
 pub(crate) async fn get_name_records(
     Path(input_name): Path<String>,
     params: NameRecordsQuery,
+    RawQuery(raw_query): RawQuery,
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<NameRecords>>> {
+    let default_source = unretained::default_source(raw_query.as_deref());
     let params = params.into_inner();
     let normalized = normalize_inferred_route_name(&input_name)
         .map_err(|error| V2Error::invalid_input(error.message))?;
@@ -235,16 +238,17 @@ pub(crate) async fn get_name_records(
         (source, data)
     } else {
         match params.source {
-            RequestSource::Indexed => (
-                Source::Indexed,
-                build_indexed_name_records(
+            RequestSource::Indexed => {
+                let mut data = build_indexed_name_records(
                     &row,
                     record_inventory.as_ref(),
                     selection,
                     include_inventory,
                     false,
-                )?,
-            ),
+                )?;
+                let reads = (&state, &row, &mut selected_snapshot, alias.as_ref(), requested_records);
+                (unretained::fill(default_source, reads, &mut data).await, data)
+            }
             RequestSource::Verified => {
                 let admit_null_resolver_discovery = verified_discovery(&row, alias.as_ref());
                 #[cfg(test)]
