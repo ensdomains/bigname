@@ -1104,10 +1104,10 @@ fn readable_blocks(fixture: &mut Fixture, last: i64, every: i64) {
     );
 }
 
-/// `MANY` instances, the address of each starting at its own readable block `n`. A blockless
-/// resolver edge points at every instance whose number `every` divides, each a destination of
-/// its own.
-fn many_destinations(fixture: &mut Fixture, every: i64) {
+/// `MANY` instances, the address of each starting at its own block `n`. A blockless resolver
+/// edge points at every instance whose number `every` divides, each a destination of its own.
+/// The blocks that `readable` divides are readable, besides 0 to 12.
+fn many_destinations(fixture: &mut Fixture, every: i64, readable: i64) {
     let instance = instance_sql("n");
     fixture.instance(CHAIN, 0);
     fixture.sql += &format!(
@@ -1124,7 +1124,39 @@ fn many_destinations(fixture: &mut Fixture, every: i64) {
          FROM generate_series(1, {MANY}) n;\n",
         id(0)
     );
-    readable_blocks(fixture, MANY + 1, 1);
+    readable_blocks(fixture, MANY + 1, readable);
+}
+
+/// Instances 10 to 19, which no edge names, and then instance 1, the destination of a
+/// blockless resolver edge, each have an address that starts at block 7. The qualifying address
+/// is the last of the block's eleven. `FILLER` resolver edges to instance 2, which has no
+/// address, start after the range, and `FILLER` instances no edge names have addresses that
+/// start after it, so neither table is small enough to read whole.
+fn crowded_block(fixture: &mut Fixture) {
+    let filler = instance_sql("4096 + n");
+    fixture.instance(CHAIN, 0).instance(CHAIN, 2);
+    fixture.sql += &format!(
+        "INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id,
+             to_contract_instance_id, discovery_source, admission_basis,
+             active_from_block_number, active_from_block_hash, canonicality_state)
+         SELECT '{CHAIN}', 'resolver', '{}', '{}', 'NewResolver', 'fixture', 100 + n,
+                '0x' || lpad(to_hex(100 + n), 64, '0'), 'canonical'
+         FROM generate_series(1, {FILLER}) n;
+         INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+         SELECT {filler}, '{CHAIN}', 'contract' FROM generate_series(1, {FILLER}) n;
+         INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address,
+             active_from_block_number)
+         SELECT {filler}, '{CHAIN}', '0x' || lpad(to_hex(4096 + n), 40, '0'), 100 + n
+         FROM generate_series(1, {FILLER}) n;\n",
+        id(0),
+        id(2)
+    );
+    for n in 10..20 {
+        fixture.address(CHAIN, n, Some(7), None, false);
+    }
+    fixture
+        .edge(CHAIN, "resolver", 1, None, None)
+        .address(CHAIN, 1, Some(7), None, false);
 }
 
 /// Instance 1 is the destination of `HOT_GRID` blockless resolver edges. At each readable block
@@ -1249,11 +1281,23 @@ fn reads_destination(node: &serde_json::Value) -> bool {
             .any(reads_destination)
 }
 
-/// Adds `node`'s reads to `reads`. A subplan that reads resolver edges by destination is a
-/// destination step, and its loops are its executions, whatever scan serves it.
+/// Whether a subplan under `node` reads resolver edges by destination.
+fn destination_subplan_below(node: &serde_json::Value) -> bool {
+    node["Plans"].as_array().into_iter().flatten().any(|child| {
+        (child["Parent Relationship"] == "SubPlan" && reads_destination(child))
+            || destination_subplan_below(child)
+    })
+}
+
+/// Adds `node`'s reads to `reads`. The innermost subplan that reads resolver edges by
+/// destination is a destination step, one per address examined, and its loops are its
+/// executions, whatever scan serves it.
 fn tally<'a>(node: &'a serde_json::Value, in_step: bool, reads: &mut Reads<'a>) {
     let loops = node["Actual Loops"].as_i64().unwrap_or(0);
-    let step = !in_step && node["Parent Relationship"] == "SubPlan" && reads_destination(node);
+    let step = !in_step
+        && node["Parent Relationship"] == "SubPlan"
+        && reads_destination(node)
+        && !destination_subplan_below(node);
     if step {
         reads.lookups += loops;
     }
@@ -1478,14 +1522,29 @@ async fn one_address_and_a_hot_destination_stay_within_the_walk_bound() -> Resul
     grid(hot, &[(1, 12)]).await
 }
 
+// The range also holds the 50,001 resolver edges that start at block 2.
 #[tokio::test]
 async fn one_address_and_many_destinations_stay_within_the_walk_bound() -> Result<()> {
-    grid(spread, &[(5, 12)]).await
+    grid(spread, &[(1, 12)]).await
+}
+
+#[tokio::test]
+async fn several_addresses_at_one_block_stay_within_the_walk_bound() -> Result<()> {
+    grid(crowded_block, &[(1, 12)]).await
 }
 
 #[tokio::test]
 async fn many_addresses_of_many_destinations_stay_within_the_walk_bound() -> Result<()> {
-    grid(|fixture| many_destinations(fixture, 1), &GRID_RANGES).await
+    grid(|fixture| many_destinations(fixture, 1, 1), &GRID_RANGES).await
+}
+
+#[tokio::test]
+async fn many_addresses_at_sparse_readable_blocks_stay_within_the_walk_bound() -> Result<()> {
+    grid(
+        |fixture| many_destinations(fixture, 1, SPARSE),
+        &GRID_RANGES,
+    )
+    .await
 }
 
 #[tokio::test]
@@ -1495,7 +1554,11 @@ async fn many_addresses_of_a_hot_destination_stay_within_the_walk_bound() -> Res
 
 #[tokio::test]
 async fn sparse_addresses_of_many_destinations_stay_within_the_walk_bound() -> Result<()> {
-    grid(|fixture| many_destinations(fixture, SPARSE), &GRID_RANGES).await
+    grid(
+        |fixture| many_destinations(fixture, SPARSE, 1),
+        &GRID_RANGES,
+    )
+    .await
 }
 
 #[tokio::test]

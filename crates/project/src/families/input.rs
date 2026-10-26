@@ -293,8 +293,9 @@ pub(crate) async fn work_blocks(
          -- The resolver boundary walks. An activation below the retained lineage has no block
          -- to apply, so a walk keeps only readable blocks and the first readable work block
          -- classifies under it. A deactivated edge still makes its destination's address count.
-         -- A step has no upper bound, so even without statistics the planner expects many rows
-         -- above the last block and serves the step from the ordered index. The walk stops past $2.
+         -- A step has no upper bound, so the planner expects rows above the last block and, with
+         -- statistics, serves the step from the ordered index. Without statistics it may still
+         -- serve a step from another index with a filter. The walk stops past $2.
          WITH RECURSIVE
          edge_from (block_number, kept, found) AS (
              SELECT $3 - 1, false, 0::bigint
