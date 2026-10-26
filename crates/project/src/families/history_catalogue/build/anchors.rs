@@ -74,7 +74,8 @@ pub(super) async fn resources(
                NULL::uuid AS resource_id, {mask} AS mask
         FROM {RELATIONS}
         JOIN anchored ON anchored.resource = relation.resource_id
-        WHERE work.chain_id = $1 AND work.relations IS NOT NULL",
+        WHERE work.chain_id = $1 AND work.relations IS NOT NULL
+          AND (hashtext(relation.resource_id::text) & $4::int) = $3::int",
         mask = relation_mask_sql("relation.relation"),
     );
     write(
