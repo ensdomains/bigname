@@ -283,9 +283,11 @@ async fn a_mainnet_range_rebuild_resumed_after_budget_stops_equals_block_by_bloc
             !outcome.reset || runs == 0,
             "run {runs} restarted the rebuild"
         );
+        // A run spends its budget on ranges, on the composition pass or, once the pass has
+        // ended, on the target block alone.
         ensure!(
-            runs == 0 || outcome.ranges > 0 || outcome.compose_chunks > 0,
-            "run {runs} applied no range and no chunk of the composition pass"
+            runs == 0 || outcome.ranges > 0 || outcome.compose_chunks > 0 || outcome.blocks > 0,
+            "run {runs} applied no block and no chunk of the composition pass"
         );
         runs += 1;
         mode = FamilyMode::Normal;
