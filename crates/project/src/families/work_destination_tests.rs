@@ -862,9 +862,10 @@ const ADDRESS_INDEXES: [&str; 3] = [
 /// How the prepared work list over `from..=to` reads the edges and addresses, under a custom and
 /// a generic plan: the failures, each named with its plan mode. Prints both plans. The probes may
 /// number at most one per address boundary in the range, plus one, however many destinations the
-/// chain has. A probe of the destination index is any scan of it under the `destination` list, or
-/// one with the destination in its index condition, which only the address side has. Each probe
-/// returns at most one row.
+/// chain has. On `analyzed` tables a probe of the destination index is any scan of it. Before
+/// `ANALYZE` it is a scan under the `destination` list, or one with the destination in its index
+/// condition, which only the address side has, because the planner may then serve an edge
+/// boundary source from the destination index with a filter. Each probe returns at most one row.
 ///
 /// The guard is the run on `analyzed` tables. Statistics are present in every served deployment,
 /// autovacuum keeps them current, and a restored copy is analyzed before it serves. The run
@@ -946,7 +947,9 @@ async fn access_path_failures(
                 .or(node["Recheck Cond"].as_str())
                 .unwrap_or_default();
             if indexes.contains(&DESTINATION_INDEX)
-                && (cte == "destination" || condition.contains("to_contract_instance_id"))
+                && (cte == "destination"
+                    || analyzed
+                    || condition.contains("to_contract_instance_id"))
             {
                 probes += loops;
                 if node["Actual Rows"].as_f64().unwrap_or_default() > 1.0 {
