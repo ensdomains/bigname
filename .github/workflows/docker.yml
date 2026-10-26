@@ -28,7 +28,7 @@ jobs:
 
       # workflow_run never fires for tags, so the tagged commit's own CI result
       # is read here rather than rebuilding CI's gates in this job.
-      - name: Require a released commit on main with green CI
+      - name: Require a released commit on main or a release branch with green CI
         id: commit
         shell: bash
         env:
@@ -40,8 +40,12 @@ jobs:
             exit 1
           fi
           sha="$(git rev-parse HEAD)"
-          if ! git merge-base --is-ancestor "$sha" origin/main; then
-            echo "::error::tag $TAG points at $sha, which is not on main"
+          released=false
+          for branch in origin/main $(git for-each-ref --format='%(refname:short)' refs/remotes/origin/release/); do
+            if git merge-base --is-ancestor "$sha" "$branch"; then released=true; fi
+          done
+          if [[ "$released" != true ]]; then
+            echo "::error::tag $TAG points at $sha, which is not on main or a release/* branch"
             exit 1
           fi
           # A tag pushed right after a merge can race main's own CI run.
