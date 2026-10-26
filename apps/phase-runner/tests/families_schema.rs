@@ -353,6 +353,12 @@ async fn optional_raw_evidence_upgrade_matches_the_baseline_on_a_populated_schem
         ))
         .execute(upgraded.pool())
         .await?;
+        // Dropping the witness column dropped the released-witness index with it.
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/20261027130000_name_surfaces_lost_witness_indexes.sql"
+        ))
+        .execute(upgraded.pool())
+        .await?;
         assert_eq!(
             name_surfaces_structure(upgraded.pool()).await?,
             name_surfaces_structure(installed.pool()).await?,

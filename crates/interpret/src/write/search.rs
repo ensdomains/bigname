@@ -7,34 +7,37 @@ pub(super) fn failure(error: anyhow::Error) -> InterpretError {
     InterpretError::data_integrity(format!("identity search derivation failed: {error:#}"))
 }
 
+/// A superset of the exact repair targets: range anchors, raw evidence without a readable
+/// witness, and range preimage observations. Each arm reads its own index. An event names a
+/// surface of its own chain through a foreign key, so the last arm needs no surface probe.
+pub(super) fn redo_names() -> String {
+    format!(
+        "/* interpret:identity_search.redo_names */
+         SELECT anchored.logical_name_id
+         FROM name_surfaces anchored
+         WHERE anchored.chain_id = $1
+           AND anchored.block_number BETWEEN $2 AND $3
+         UNION
+         {lost}
+         UNION
+         SELECT event.logical_name_id
+         FROM normalized_events event
+         WHERE event.chain_id = $1
+           AND event.block_number BETWEEN $2 AND $3
+           AND event.logical_name_id IS NOT NULL
+           AND event.event_kind = '{PREIMAGE_OBSERVATION_EVENT_KIND}'
+         ORDER BY logical_name_id",
+        lost = super::witness::lost_witnesses(),
+    )
+}
+
 pub(super) async fn prepare_redo(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     range: (i64, i64),
     output: &BatchOutput,
 ) -> Result<Vec<String>> {
-    // This includes the exact repair target's superset: range anchors, range observations,
-    // released witnesses, and raw evidence whose witness has lost readable lineage.
-    let statement = format!(
-        "/* interpret:identity_search.redo_names */ SELECT logical_name_id FROM name_surfaces surface
-         WHERE surface.chain_id=$1 AND (
-             surface.block_number BETWEEN $2 AND $3
-             OR (surface.raw_name IS NOT NULL AND (
-                 surface.preimage_event_identity IS NULL OR NOT EXISTS (
-                     SELECT 1 FROM normalized_events witness JOIN chain_lineage lineage
-                       ON lineage.chain_id=witness.chain_id AND lineage.block_hash=witness.block_hash
-                      AND lineage.block_number=witness.block_number
-                     WHERE witness.chain_id=surface.chain_id
-                       AND witness.event_identity=surface.preimage_event_identity
-                       AND witness.canonicality_state IN ('canonical','safe','finalized')
-                       AND lineage.canonicality_state IN ('canonical','safe','finalized'))))
-             OR EXISTS (SELECT 1 FROM normalized_events event
-                WHERE event.chain_id=$1 AND event.block_number BETWEEN $2 AND $3
-                  AND event.logical_name_id=surface.logical_name_id
-                  AND event.event_kind='{PREIMAGE_OBSERVATION_EVENT_KIND}'))
-         ORDER BY logical_name_id",
-    );
-    let mut names: Vec<String> = sqlx::query_scalar(&statement)
+    let mut names: Vec<String> = sqlx::query_scalar(&redo_names())
         .bind(chain_id)
         .bind(range.0)
         .bind(range.1)

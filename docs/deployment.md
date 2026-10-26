@@ -4936,3 +4936,66 @@ content hash, then check on Sepolia that `GET /v1/names/phantombug01.eth` serves
 `0x8948458626811dd0c23eb25cc74291247077cc51`, equal to its `ens_v1.resolver` (registry
 `NewResolver` at block 11982720), and that `GET /v1/names/phantombug01.eth/records?keys=addr:61`
 finds the record.
+
+## Redo finds lost preimage witnesses without reading every surface
+
+An Interpret redo finds the surfaces whose raw labels lost their
+[preimage witness](glossary.md#preimage-witness) twice: once to refresh their search
+documents (`interpret:identity_search.redo_names`) and once to repair the witness
+(`interpret:reanchor.repair_preimage_witnesses`). Both statements read every surface of the
+chain, so a one-block redo after a reorg at the head cost as much as a full scan of
+`name_surfaces`. They now read three small sets: surfaces without a witness, surfaces whose
+witness sits on an orphaned block, and byte-oriented shadows whose witness names no readable
+event ([storage](storage.md#table-ownership)). The repair also looks up each target's earlier
+observations and updates the targets by name, so no plan of it joins every surface.
+
+- No stored row changes. The statements select the same surfaces and write the same rows.
+- It changes `crates/interpret/src/write/search.rs`, `reanchor.rs` and the new `witness.rs`,
+  so it rotates the [interpreter content hash](glossary.md#interpreter-content-hash) for every
+  chain although no stored row changes. The
+  [projection content hash](glossary.md#projection-content-hash) covers the interpreter hash,
+  so it rotates too. An existing deployment finishes the full-range Interpret redo and then
+  the stamped Project redo it installs before the matching API serves, as the
+  [handoff](#phase-runner-configuration) describes. The change rides the next release that
+  redoes Interpret and shares that release's redo pair.
+- `20261027130000_name_surfaces_lost_witness_indexes.sql` adds
+  `name_surfaces_released_witness_idx` and `name_surfaces_byte_shadow_idx`, both on
+  `name_surfaces (chain_id, logical_name_id)`. Each is a plain `CREATE INDEX` with a SHARE
+  lock on `name_surfaces` until the schema-migration commits, which blocks Interpret's writes
+  to it. Apply it with the phase runner, redo processes and API stopped, with the
+  `lock_timeout`, `statement_timeout` and retry procedure of [Server Compose](#server-compose)
+  and `--target-version 20261027130000`. On a large initialized database, prebuild both
+  concurrently first, outside a transaction, so the schema-migration finds them and skips the
+  builds:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_released_witness_idx
+    ON bigname_phase.name_surfaces (chain_id, logical_name_id)
+    WHERE raw_name IS NOT NULL AND preimage_event_identity IS NULL;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_byte_shadow_idx
+    ON bigname_phase.name_surfaces (chain_id, logical_name_id)
+    WHERE raw_name = '' AND visibility_state = 'shadow';
+```
+
+  Either way, confirm both indexes are `indisvalid` and `indisready` in `pg_index` and that
+  `pg_get_indexdef` shows those columns and predicates. `IF NOT EXISTS` matches the name only.
+  An interrupted concurrent build leaves an invalid index that must be dropped with
+  `DROP INDEX CONCURRENTLY` before the build is run again.
+- The three sets equal the old scan only while two counts stay zero, which the e2e reorg
+  scenario asserts. On an existing database, both queries below must return 0 before the
+  release redo. They read every surface and every event of the chain, so run them away from
+  the serving path:
+
+```sql
+SELECT count(*) FROM bigname_phase.name_surfaces surface
+WHERE surface.preimage_event_identity IS NOT NULL
+  AND NOT (surface.raw_name = '' AND surface.visibility_state = 'shadow')
+  AND NOT EXISTS (
+      SELECT 1 FROM bigname_phase.normalized_events event
+      WHERE event.event_identity = surface.preimage_event_identity);
+SELECT count(*) FROM bigname_phase.normalized_events
+WHERE canonicality_state NOT IN ('canonical', 'safe', 'finalized');
+```
+
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
