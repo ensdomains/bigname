@@ -296,9 +296,11 @@ async fn composed_for(fixture: &Fixture, id: &str) -> Result<i64> {
     .await
 }
 
-// Rebuilt in ranges through the target with one name to a chunk and catalogue windows of at most
-// 25 events, the history equals its block-by-block rebuild in every family table, the 12 composed
-// tables among them. The comparison covers what it is meant to: lookup rows with no composed core
+// Rebuilt in ranges through the target with one name to a chunk, under event caps of 4,096 (the
+// default), 1, 2 and 25, the history equals its block-by-block rebuild in every family table, the
+// 12 composed tables among them. The cap bounds the ranges and the composition pass's catalogue
+// windows alike, and the catalogue sources, edges and anchors of each cap are byte for byte the
+// default cap's. The comparison covers what it is meant to: lookup rows with no composed core
 // and empty name sources of ids with no surface, one inventory served by names in different
 // chunks, resource anchors, catalogue sources by node and by record id, and both record indexes.
 // Each id with no surface keeps the rows block by block leaves it: a registry child a NewOwner
@@ -310,33 +312,53 @@ async fn composed_for(fixture: &Fixture, id: &str) -> Result<i64> {
 async fn a_rebuild_in_ranges_composes_once_what_block_by_block_composes() -> Result<()> {
     let fixture = seeded("families_compose_equal").await?;
     let expected = block_by_block(&fixture).await?;
-    let mut ranged = options(RebuildRanges::Through(TARGET))
-        .with_compose_chunk_keys(1)
-        .with_range_caps(64, u64::MAX);
-    ranged.max_range_events = 25;
-    let outcome = fixture
-        .apply_with(TARGET, FamilyMode::Rebuild, &ranged)
-        .await?;
-    require_equal(&fixture, &expected, "in ranges").await?;
-    let (state, stream, cursor, composed) = pass_state(&fixture).await?;
-    ensure!(
-        (state.as_str(), &stream, &cursor) == ("complete", &Value::Null, &Value::Null),
-        "the record completes with no pass in progress: {state} {stream} {cursor}"
-    );
-    ensure!(
-        composed.as_i64().is_some_and(|block| block < TARGET),
-        "the pass composed below the target: {composed}"
-    );
-    ensure!(
-        outcome.compose_chunks > 100,
-        "one name a chunk: {} chunks",
-        outcome.compose_chunks
-    );
-    let journalled = fixture.journalled_blocks().await?;
-    ensure!(
-        journalled == vec![composed.as_i64().unwrap_or_default(), TARGET],
-        "the pass's marker row and the target: {journalled:?}"
-    );
+    let mut by_default = None;
+    for events in [families::MAX_RANGE_EVENTS, 1, 2, 25] {
+        let ranged = options(RebuildRanges::Through(TARGET))
+            .with_compose_chunk_keys(1)
+            .with_range_caps(64, events);
+        let outcome = fixture
+            .apply_with(TARGET, FamilyMode::Rebuild, &ranged)
+            .await?;
+        require_equal(&fixture, &expected, &format!("in ranges, cap {events}")).await?;
+        let mut catalogue = Vec::new();
+        for table in [
+            "project_history_source",
+            "project_history_source_edge",
+            "project_address_history_anchor",
+        ] {
+            let rows = fixture.rows(table).await?;
+            ensure!(!rows.is_empty(), "cap {events}: {table} is empty");
+            catalogue.push((table, rows));
+        }
+        match &by_default {
+            None => by_default = Some(catalogue),
+            Some(by_default) => ensure!(
+                by_default == &catalogue,
+                "cap {events}: the catalogue differs from the default cap's"
+            ),
+        }
+        let (state, stream, cursor, composed) = pass_state(&fixture).await?;
+        ensure!(
+            (state.as_str(), &stream, &cursor) == ("complete", &Value::Null, &Value::Null),
+            "cap {events}: the record completes with no pass in progress: {state} {stream} \
+             {cursor}"
+        );
+        ensure!(
+            composed.as_i64().is_some_and(|block| block < TARGET),
+            "cap {events}: the pass composed below the target: {composed}"
+        );
+        ensure!(
+            outcome.compose_chunks > 100,
+            "cap {events}: one name a chunk: {} chunks",
+            outcome.compose_chunks
+        );
+        let journalled = fixture.journalled_blocks().await?;
+        ensure!(
+            journalled == vec![composed.as_i64().unwrap_or_default(), TARGET],
+            "cap {events}: the pass's marker row and the target: {journalled:?}"
+        );
+    }
 
     // The comparison covers each shape.
     for (what, query) in [
@@ -881,9 +903,16 @@ async fn with_no_range_the_pass_is_empty() -> Result<()> {
 
 // The switch point rises between two runs: the second run applies blocks above the first run's
 // switch point in a range, after the pass. That range composes and journals as one generation, so
-// it undoes as one step, and the rebuild equals the block-by-block one.
+// it undoes as one step, and the rebuild equals the block-by-block one. Under an event cap of 2
+// the second run applies 17 to 24 as four such ranges of two blocks, each its own generation.
 #[tokio::test]
 async fn a_range_after_the_pass_composes_and_journals() -> Result<()> {
+    range_after_the_pass(families::MAX_RANGE_EVENTS, &[24]).await?;
+    range_after_the_pass(2, &[18, 20, 22, 24]).await
+}
+
+/// The second run's ranges under an event cap of `events` end at `ends`.
+async fn range_after_the_pass(events: u64, ends: &[i64]) -> Result<()> {
     let fixture = Fixture::new("families_compose_risen", 30).await?;
     for block in 10..=24 {
         fixture
@@ -908,17 +937,24 @@ async fn a_range_after_the_pass_composes_and_journals() -> Result<()> {
         stopped == Some(16),
         "two single blocks after the pass: {stopped:?}"
     );
-    let high = options(RebuildRanges::Through(24));
+    let high =
+        options(RebuildRanges::Through(24)).with_range_caps(families::MAX_RANGE_BLOCKS, events);
     let second = run_to(&fixture, 25, false, &high).await?;
     ensure!(
-        second.ranges > 0 && second.compose_chunks == 0,
-        "the risen switch point ranges 17 to 24 after the pass: {second:?}"
+        second.ranges == u64::try_from(ends.len())? && second.compose_chunks == 0,
+        "cap {events}: the risen switch point ranges 17 to 24 after the pass: {second:?}"
     );
-    require_equal(&fixture, &expected, "a range after the pass").await?;
+    require_equal(
+        &fixture,
+        &expected,
+        &format!("a range after the pass, cap {events}"),
+    )
+    .await?;
     let journalled = fixture.journalled_blocks().await?;
     ensure!(
-        journalled.first() == Some(&14) && journalled.contains(&24),
-        "the pass at 14, single blocks, the range ending at 24 and the target: {journalled:?}"
+        journalled.first() == Some(&14) && ends.iter().all(|end| journalled.contains(end)),
+        "cap {events}: the pass at 14, single blocks, the ranges ending at {ends:?} and the \
+         target: {journalled:?}"
     );
     let range_rows = count(
         &fixture,
@@ -934,13 +970,18 @@ async fn a_range_after_the_pass_composes_and_journals() -> Result<()> {
     );
     let undone = families::undo_to(&fixture.pool, CHAIN, 16).await?;
     ensure!(
-        undone == 2,
-        "25, then the range ending at 24 as one step: {undone}"
+        undone == 1 + u64::try_from(ends.len())?,
+        "cap {events}: 25, then each range ending at {ends:?} as one step: {undone}"
     );
     fixture
         .apply_with(25, FamilyMode::Normal, &options(RebuildRanges::Off))
         .await?;
-    require_equal(&fixture, &expected, "replayed after the undo").await?;
+    require_equal(
+        &fixture,
+        &expected,
+        &format!("replayed after the undo, cap {events}"),
+    )
+    .await?;
     fixture.cleanup().await
 }
 

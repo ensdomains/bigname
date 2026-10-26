@@ -2532,7 +2532,9 @@ later run that resumes the rebuild starts by asking for its whole remaining
 budget. A request is capped at 1,024 work blocks and at what the run's budget
 has left, since each block counts against the budget: under the default budget
 of 256 blocks a run the budget is the binding cap, and 1,024 binds only when a
-run's budget is larger. A range also ends at 4,096 events, counted per block
+run's budget is larger. A range also ends at 4,096 events by default
+(`--project-families-max-range-events`, or
+`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_RANGE_EVENTS`), counted per block
 before duplicates are dropped: it ends before the block that would take it past
 the cap and always holds its first block, so a first block over the cap is a
 range of its own. A range opens with its first block as a single block does,
@@ -2574,7 +2576,9 @@ work block above the switch point, or the target), the rebuild runs the pass:
   its beginning found.
 - Chunks then compose, at the marker's block and with the manifest set the
   marker recorded, the listed names by number, every address index key, and the
-  history catalogue over consecutive block windows. Each chunk is one
+  history catalogue over consecutive block windows. A window holds at most the
+  range event cap above, 4,096 events by default, unless its first block alone
+  holds more. Each chunk is one
   transaction fenced on the marker, the input revision and the record's stream
   and cursor, and counts as one block against the run's budget, so a run stops
   between chunks and the next continues from the record's cursor. After the
