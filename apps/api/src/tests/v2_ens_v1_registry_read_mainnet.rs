@@ -5,9 +5,9 @@ use super::v2_mainnet_admission::{
     DAY, MIRROR_RESOLVER, NAME, OWNER, PUBLIC_RESOLVER, REGISTERED, RESERVED, lease, publish,
     reservation, text,
 };
-use super::v2_sepolia_redeploy::get;
+use super::v2_sepolia_redeploy::{get, token};
 use super::*;
-use alloy_primitives::{B256, keccak256};
+use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use axum::http::StatusCode;
 
@@ -15,9 +15,19 @@ sol! {
     event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
     event NewResolver(bytes32 indexed node, address resolver);
     event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value);
+    event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender);
+    event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value);
+    event TokenResource(uint256 indexed tokenId, uint256 indexed resource);
+    event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender);
+    event ParentUpdated(address indexed parent, string label, address indexed sender);
 }
 
 const ENS_REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
+/// The admitted RootRegistry and the ETHRegistry of the checked-in mainnet profile.
+const ROOT: &str = "0x2553c09be6447beffdb86fa622ad41fb8f77a91e";
+const ETH_REGISTRY: &str = "0xf60aba43e1f7f3dab1186ff03b561401c9df85e2";
+/// The holder of `eth` in the RootRegistry.
+const ROOT_HOLDER: &str = "0x0000000000000000000000000000000000000053";
 const MAINNET: u64 = 1;
 
 fn namehash(name: &str) -> B256 {
@@ -28,6 +38,63 @@ fn namehash(name: &str) -> B256 {
 
 fn child_node() -> B256 {
     keccak256([namehash(NAME).as_slice(), keccak256(b"sub").as_slice()].concat())
+}
+
+/// The RootRegistry's `eth` entry with the ETHRegistry as its subregistry, as the mainnet
+/// deployment registers it, so the ENSv2 path walk of a name below `.eth` reaches the ETHRegistry.
+fn root_eth() -> Result<super::v2_mainnet_admission::Logs> {
+    let holder: Address = ROOT_HOLDER.parse()?;
+    Ok(vec![
+        (
+            ROOT,
+            LabelRegistered {
+                tokenId: token("eth"),
+                labelHash: keccak256(b"eth"),
+                label: "eth".into(),
+                owner: holder,
+                expiry: u64::MAX,
+                sender: holder,
+            }
+            .encode_log_data(),
+        ),
+        (
+            ROOT,
+            TransferSingle {
+                operator: holder,
+                from: Address::ZERO,
+                to: holder,
+                id: token("eth"),
+                value: U256::from(1),
+            }
+            .encode_log_data(),
+        ),
+        (
+            ROOT,
+            TokenResource {
+                tokenId: token("eth"),
+                resource: token("eth"),
+            }
+            .encode_log_data(),
+        ),
+        (
+            ETH_REGISTRY,
+            ParentUpdated {
+                parent: ROOT.parse()?,
+                label: "eth".into(),
+                sender: holder,
+            }
+            .encode_log_data(),
+        ),
+        (
+            ROOT,
+            SubregistryUpdated {
+                tokenId: token("eth"),
+                subregistry: ETH_REGISTRY.parse()?,
+                sender: holder,
+            }
+            .encode_log_data(),
+        ),
+    ])
 }
 
 /// The lease owner's `setSubnodeOwner(node, keccak("sub"), owner)`, then its own registry
@@ -136,18 +203,19 @@ async fn pin_a_reservation_without_a_resolver_serves_the_lease_resolver() -> Res
     Ok(())
 }
 
-/// Pin (sub.brantly.eth shape), a known gap: a registry child of a reserved `.eth` name with its
-/// own registry resolver and records. An unwrapped parent's child has no label-bearing event, so
-/// bigname knows it by its label hash only. The composed row withholds it with
-/// `ens_v2_path_no_resolver`, and the registry read leaves a withheld row alone, so name detail
-/// and both records reads serve no resolver. The ENSv1 mirror's resolver-anchored read finds the
-/// child's avatar through the ENSv1 registry. This hotfix does not change that split.
+/// Pin (sub.brantly.eth shape): a registry child of a reserved `.eth` name with its own registry
+/// resolver and records. An unwrapped parent's child has no label-bearing event, so bigname knows
+/// it by its label hash only. The ENSv2 path walk reaches the reservation's ENSv1 mirror at the
+/// parent, the mirror's ENSv1 walk finds the child's own registry resolver, and the name serves
+/// that resolver and its avatar on name detail and both records reads, as the mirror's
+/// resolver-anchored read does. The registry read leaves it as composed.
 #[tokio::test]
-async fn a_child_of_a_reserved_mainnet_name_stays_withheld() -> Result<()> {
+async fn a_child_of_a_reserved_mainnet_name_is_served() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     publish(
         &database,
         vec![
+            (REGISTERED - 120, root_eth()?),
             (REGISTERED, lease()?),
             (REGISTERED + 60, text()?),
             (RESERVED, reservation()?),
@@ -158,7 +226,7 @@ async fn a_child_of_a_reserved_mainnet_name_stays_withheld() -> Result<()> {
     .await?;
     let name = format!("[{:x}].{NAME}", keccak256(b"sub"));
     let view = served(&database, &name).await?;
-    let mirror = get(
+    let (status, mirror) = get(
         &database,
         &format!(
             "/v1/resolvers/{MAINNET}/{MIRROR_RESOLVER}/records?name={}&keys=text:avatar",
@@ -167,24 +235,19 @@ async fn a_child_of_a_reserved_mainnet_name_stays_withheld() -> Result<()> {
     )
     .await?;
     database.cleanup().await?;
-    assert_eq!(view["ens_v1_resolver"], public_resolver(), "{view:#}");
-    assert_eq!(
-        view["unresolvable_reason"], "ens_v2_path_no_resolver",
-        "{view:#}"
-    );
-    for field in ["resolver", "keyed_resolver", "default_resolver"] {
-        assert!(view[field].is_null(), "{field}: {view:#}");
+    for field in [
+        "resolver",
+        "ens_v1_resolver",
+        "keyed_resolver",
+        "default_resolver",
+    ] {
+        assert_eq!(view[field], public_resolver(), "{field}: {view:#}");
     }
-    assert_eq!(
-        view["keyed"]["text:avatar"],
-        json!({"status": "not_found"}),
-        "{view:#}"
-    );
-    let (status, mirror) = mirror;
+    let avatar = json!({"status": "ok", "value": "child.png"});
+    assert_eq!(view["keyed"]["text:avatar"], avatar, "{view:#}");
     assert_eq!(status, StatusCode::OK, "{mirror:#}");
     assert_eq!(
-        mirror["data"]["records"]["text:avatar"],
-        json!({"status": "ok", "value": "child.png"}),
+        mirror["data"]["records"]["text:avatar"], avatar,
         "{mirror:#}"
     );
     Ok(())
