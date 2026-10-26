@@ -4939,7 +4939,8 @@ finds the record.
 
 ## Resolver destinations listed once per rebuild work list
 
-The build that lists the chain's resolver edge destinations once for each rebuild work list
+The build that lists the destinations of the chain's
+[resolver edges](glossary.md#discovery-graph--discovery-edge) once for each rebuild work list
 changes one Project statement, `project:families.input.work_blocks`
 ([table ownership](storage.md#table-ownership)).
 

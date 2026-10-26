@@ -390,10 +390,12 @@ const COMBINED: Sources<'static> = Sources {
 const COMBINED_BLOCKS: [i64; 9] = [2, 3, 4, 6, 7, 8, 9, 10, 11];
 
 /// Instance 1 is the destination of `HOT` resolver edges, and instance 2 of five more, all
-/// outside `1..=12`. Instance 1's address starts at 7 and instance 2's stops at 9. Instance 3,
-/// which no edge names, has an address that starts at 5, and instance 4, reached only by a
-/// subregistry edge, one that starts at 6. `FILLER` more instances no edge names have addresses
-/// outside the range, so the address table is not small enough to read whole.
+/// outside `1..=12`. Instance 1's address starts at 7 and instance 2's stops at 9. Instances 3
+/// and 5, which no edge names, have addresses that start at 5 and 3, and instance 4, reached
+/// only by a subregistry edge, one that starts at 6. That is five addresses in the range against
+/// two destinations, so a probe per address shows more than one probe per destination plus one.
+/// `FILLER` more instances no edge names have addresses outside the range, so the address table
+/// is not small enough to read whole.
 fn hot(fixture: &mut Fixture) {
     fixture.instance(CHAIN, 0).instance(CHAIN, 1);
     fixture.sql += &format!(
@@ -423,7 +425,8 @@ fn hot(fixture: &mut Fixture) {
         .address(CHAIN, 1, Some(7), None, false)
         .address(CHAIN, 2, Some(0), Some(9), false)
         .address(CHAIN, 3, Some(5), None, false)
-        .address(CHAIN, 4, Some(6), None, false);
+        .address(CHAIN, 4, Some(6), None, false)
+        .address(CHAIN, 5, Some(3), None, false);
 }
 
 async fn frozen(
@@ -860,10 +863,11 @@ const ADDRESS_INDEXES: [&str; 3] = [
 
 /// How the prepared work list over `1..=12` reads the edges and addresses, under a custom and a
 /// generic plan: the failures, each named with its plan mode. Prints both plans. A probe of the
-/// destination index is a scan of it with the destination in its index condition, which only the
-/// address side has. Without statistics the planner may serve the unchanged edge boundary sources
-/// from the destination index with a filter, so their filter removals and boundary indexes are
-/// checked only on `analyzed` tables.
+/// destination index is any scan of it under the `destination` list, or one with the destination
+/// in its index condition, which only the address side has. Each probe returns at most one row.
+/// Without statistics the planner may serve the unchanged edge boundary sources from the
+/// destination index with a filter, so their filter removals and boundary indexes are checked
+/// only on `analyzed` tables.
 async fn access_path_failures(
     pool: &sqlx::PgPool,
     label: &str,
@@ -902,7 +906,7 @@ async fn access_path_failures(
         let mut scans = Vec::new();
         executed_scans(&plan[0]["Plan"], "", &mut scans);
         let (mut read, mut probes) = (std::collections::BTreeSet::new(), 0);
-        for (_, node) in scans {
+        for (cte, node) in scans {
             let indexes = indexes_read(node);
             read.extend(indexes.iter().copied());
             let relation = node["Relation Name"].as_str();
@@ -924,7 +928,8 @@ async fn access_path_failures(
                 .as_str()
                 .or(node["Recheck Cond"].as_str())
                 .unwrap_or_default();
-            if indexes.contains(&DESTINATION_INDEX) && condition.contains("to_contract_instance_id")
+            if indexes.contains(&DESTINATION_INDEX)
+                && (cte == "destination" || condition.contains("to_contract_instance_id"))
             {
                 probes += loops;
                 if node["Actual Rows"].as_f64().unwrap_or_default() > 1.0 {
