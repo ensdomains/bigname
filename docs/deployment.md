@@ -4955,9 +4955,10 @@ are the same, row for row.
   list's `composed` and `relations` columns with the partial index over the names still to
   compose, and the build's work table `project_compose_history_work`. It must run before the
   new runner binary. Without it every family reset and every pass of the new binary fails.
-- Three runner settings split the build. `--project-families-compose-block-spans`
-  (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_BLOCK_SPANS`, default 64) is the number of
-  block spans the event scan runs in. `--project-families-compose-key-partitions`
+- Two runner settings split the build and a third sets its memory.
+  `--project-families-compose-block-spans`
+  (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_BLOCK_SPANS`, default 64, from 1 to 16384) is
+  the number of block spans the event scan runs in. `--project-families-compose-key-partitions`
   (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_KEY_PARTITIONS`, default 16, a power of two)
   is the number of key partitions of every other step. `--project-families-compose-work-mem`
   (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_WORK_MEM`, unset by default) sets `work_mem`

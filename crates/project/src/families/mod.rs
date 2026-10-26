@@ -117,6 +117,11 @@ pub const COMPOSE_BUILDER_KEY_PARTITIONS: u16 = 16;
 /// The most key partitions of the catalogue build: partition numbers fit a `smallint`.
 pub const MAX_COMPOSE_BUILDER_KEY_PARTITIONS: u16 = 1 << 14;
 
+/// The most block spans of the catalogue build. A span's partials go to the work table under its
+/// number in the `smallint` column `part`, which holds numbers below `i16::MAX`, so the bound
+/// keeps every span its own part. It is far above any split a pass needs.
+pub const MAX_COMPOSE_BUILDER_BLOCK_SPANS: u16 = 1 << 14;
+
 /// Which work blocks a rebuild applies several to a transaction. A range folds its blocks one
 /// by one exactly as single blocks would, then journals, writes and advances the marker once, to
 /// its last block; undo takes the whole range back in one step.
@@ -312,11 +317,11 @@ impl FamilyOptions {
         self
     }
 
-    /// Split the catalogue build into `spans` block spans, at least one, and `keys` key
-    /// partitions, rounded up to a power of two and at most
-    /// [`MAX_COMPOSE_BUILDER_KEY_PARTITIONS`].
+    /// Split the catalogue build into `spans` block spans, from one to
+    /// [`MAX_COMPOSE_BUILDER_BLOCK_SPANS`], and `keys` key partitions, rounded up to a power of
+    /// two and at most [`MAX_COMPOSE_BUILDER_KEY_PARTITIONS`].
     pub fn with_compose_builder_partitions(mut self, spans: u16, keys: u16) -> Self {
-        self.compose_builder_block_spans = spans.max(1);
+        self.compose_builder_block_spans = spans.clamp(1, MAX_COMPOSE_BUILDER_BLOCK_SPANS);
         self.compose_builder_key_partitions = keys
             .clamp(1, MAX_COMPOSE_BUILDER_KEY_PARTITIONS)
             .next_power_of_two();

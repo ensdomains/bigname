@@ -16,7 +16,7 @@ pub(super) struct ProjectFamiliesArgs {
         long,
         env = "BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_BLOCK_SPANS",
         default_value_t = bigname_project::families::COMPOSE_BUILDER_BLOCK_SPANS,
-        value_parser = clap::value_parser!(u16).range(1..),
+        value_parser = block_spans,
         help = "block spans a rebuild's history catalogue build scans the events in, each one \
                 transaction"
     )]
@@ -37,6 +37,16 @@ pub(super) struct ProjectFamiliesArgs {
                 such as 256MB, the server's setting when unset"
     )]
     project_families_compose_work_mem: Option<String>,
+}
+
+fn block_spans(value: &str) -> Result<u16, String> {
+    let spans: u16 = value.parse().map_err(|error| format!("{value}: {error}"))?;
+    let most = bigname_project::families::MAX_COMPOSE_BUILDER_BLOCK_SPANS;
+    if (1..=most).contains(&spans) {
+        Ok(spans)
+    } else {
+        Err(format!("{value} is not from 1 to {most}"))
+    }
 }
 
 fn key_partitions(value: &str) -> Result<u16, String> {

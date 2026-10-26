@@ -23,7 +23,7 @@ use bigname_storage::history_catalogue_contract::{event_key_bloom_sql, event_kin
 use sqlx::{Postgres, Transaction};
 
 use super::{super::sources, Layout, WORK, database};
-use crate::Result;
+use crate::{ProjectError, Result, families::MAX_COMPOSE_BUILDER_BLOCK_SPANS};
 
 const CLEAR: &str = "/* project:history.build.clear_keys */
     DELETE FROM project_compose_history_work WHERE chain_id = $1 AND part = $2";
@@ -134,7 +134,7 @@ pub(super) async fn span(
     layout: Layout,
     mask: i32,
 ) -> Result<(&'static str, u64)> {
-    let part = i16::try_from(span).unwrap_or(i16::MAX);
+    let part = span_part(span)?;
     clear(transaction, chain, part).await?;
     let (from, to) = bounds(pass, span, layout.spans);
     let rows = sqlx::query(&span_sql())
@@ -150,6 +150,20 @@ pub(super) async fn span(
         ))?
         .rows_affected();
     Ok((WORK, rows))
+}
+
+/// The work table part of span `span`. A span at or past
+/// [`MAX_COMPOSE_BUILDER_BLOCK_SPANS`] is refused: a part shared with another span would let
+/// each clear the other's partials.
+pub(super) fn span_part(span: u16) -> Result<i16> {
+    i16::try_from(span)
+        .ok()
+        .filter(|_| span < MAX_COMPOSE_BUILDER_BLOCK_SPANS)
+        .ok_or_else(|| {
+            ProjectError::data_integrity(format!(
+                "catalogue build span {span} is past the most spans, {MAX_COMPOSE_BUILDER_BLOCK_SPANS}"
+            ))
+        })
 }
 
 /// The blocks `[from, to)` of span `span` of `spans` over `[0, pass]`.

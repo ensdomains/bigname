@@ -1,7 +1,8 @@
 //! The catalogue build's cursor, partition order and persisted relations, without a database.
 use uuid::Uuid;
 
-use super::{Cursor, Layout, PersistedRelation, Step, analyzed, is_done, next, spans};
+use super::{Cursor, Layout, PersistedRelation, STEPS, Step, analyzed, is_done, next, spans};
+use crate::families::{FamilyOptions, MAX_COMPOSE_BUILDER_BLOCK_SPANS};
 
 const LAYOUT: Layout = Layout {
     spans: 3,
@@ -161,4 +162,60 @@ fn a_persisted_relation_reads_back_as_written() {
                            "resource_id": "00000000-0000-0000-0000-000000000387"})
     );
     assert_eq!(PersistedRelation::from_json(&json), Some(relation));
+}
+
+// Every block span writes its partials under its own work table part: two spans that shared one
+// would each clear the other's partials, and the sources would lose those spans' events. A span
+// number the `smallint` part cannot hold apart is refused, not saturated.
+#[test]
+fn every_block_span_has_its_own_part_and_one_past_the_bound_is_refused() {
+    let most = MAX_COMPOSE_BUILDER_BLOCK_SPANS;
+    for (span, part) in [(0, 0), (1, 1), (most - 1, 16_383)] {
+        assert_eq!(spans::span_part(span).ok(), Some(part), "span {span}");
+    }
+    for (first, second) in [(32_767, 32_768), (32_767, 39_999), (most, most + 1)] {
+        if let (Ok(one), Ok(other)) = (spans::span_part(first), spans::span_part(second)) {
+            assert_ne!(one, other, "spans {first} and {second} share a part");
+        }
+    }
+    for span in [most, 32_767, 32_768, 40_000, u16::MAX] {
+        assert!(
+            spans::span_part(span).is_err(),
+            "span {span} must be refused, it is {:?}",
+            spans::span_part(span)
+        );
+    }
+}
+
+// The build's options keep the span count within the bound, as they keep the key partitions.
+#[test]
+fn the_build_options_bound_the_block_spans() {
+    let most = MAX_COMPOSE_BUILDER_BLOCK_SPANS;
+    for (asked, kept) in [
+        (0, 1),
+        (3, 3),
+        (most, most),
+        (most + 1, most),
+        (40_000, most),
+        (u16::MAX, most),
+    ] {
+        let options = FamilyOptions::new("keccak256:00").with_compose_builder_partitions(asked, 16);
+        assert_eq!(
+            options.compose_builder_block_spans, kept,
+            "{asked} spans asked"
+        );
+    }
+}
+
+// The steps the build walks are the steps a cursor parses, each under its own name, so a step
+// added to the enum cannot print or parse as another.
+#[test]
+fn every_step_is_walked_once_and_named_apart() {
+    let mut walked = vec![Step::Keys];
+    while let Some(&last) = walked.last().filter(|step| **step != Step::Done) {
+        walked.push(last.after());
+    }
+    assert_eq!(walked, STEPS);
+    let names: std::collections::BTreeSet<&str> = STEPS.iter().map(|step| step.name()).collect();
+    assert_eq!(names.len(), STEPS.len());
 }

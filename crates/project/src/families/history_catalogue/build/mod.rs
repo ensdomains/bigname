@@ -82,23 +82,30 @@ pub(crate) enum Step {
     Done,
 }
 
-const STEPS: [(Step, &str); 8] = [
-    (Step::Keys, "keys"),
-    (Step::Spans, "spans"),
-    (Step::Edges, "edges"),
-    (Step::Sources, "sources"),
-    (Step::EdgeBounds, "edge_bounds"),
-    (Step::NameAnchors, "name_anchors"),
-    (Step::ResourceAnchors, "resource_anchors"),
-    (Step::Done, "done"),
+/// Every step, in the order the build runs them. A cursor's step name parses back through it.
+const STEPS: [Step; 8] = [
+    Step::Keys,
+    Step::Spans,
+    Step::Edges,
+    Step::Sources,
+    Step::EdgeBounds,
+    Step::NameAnchors,
+    Step::ResourceAnchors,
+    Step::Done,
 ];
 
 impl Step {
     pub(crate) fn name(self) -> &'static str {
-        STEPS
-            .iter()
-            .find(|(step, _)| *step == self)
-            .map_or("done", |(_, name)| name)
+        match self {
+            Self::Keys => "keys",
+            Self::Spans => "spans",
+            Self::Edges => "edges",
+            Self::Sources => "sources",
+            Self::EdgeBounds => "edge_bounds",
+            Self::NameAnchors => "name_anchors",
+            Self::ResourceAnchors => "resource_anchors",
+            Self::Done => "done",
+        }
     }
 
     fn parts(self, layout: Layout) -> u16 {
@@ -110,10 +117,15 @@ impl Step {
     }
 
     fn after(self) -> Self {
-        let index = STEPS.iter().position(|(step, _)| *step == self);
-        index
-            .and_then(|index| STEPS.get(index + 1))
-            .map_or(Self::Done, |(step, _)| *step)
+        match self {
+            Self::Keys => Self::Spans,
+            Self::Spans => Self::Edges,
+            Self::Edges => Self::Sources,
+            Self::Sources => Self::EdgeBounds,
+            Self::EdgeBounds => Self::NameAnchors,
+            Self::NameAnchors => Self::ResourceAnchors,
+            Self::ResourceAnchors | Self::Done => Self::Done,
+        }
     }
 }
 
@@ -152,9 +164,8 @@ impl Cursor {
                 .ok_or_else(invalid)
         };
         let step = STEPS
-            .iter()
-            .find(|(_, name)| Some(*name) == value["step"].as_str())
-            .map(|(step, _)| *step)
+            .into_iter()
+            .find(|step| Some(step.name()) == value["step"].as_str())
             .ok_or_else(invalid)?;
         Ok(Self {
             step,

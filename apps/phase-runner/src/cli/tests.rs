@@ -293,12 +293,16 @@ fn the_catalogue_build_flags_reach_the_family_settings() {
     );
     for flags in [
         ["--project-families-compose-block-spans", "0"],
+        ["--project-families-compose-block-spans", "16385"],
+        ["--project-families-compose-block-spans", "40000"],
         ["--project-families-compose-key-partitions", "0"],
         ["--project-families-compose-key-partitions", "3"],
         ["--project-families-compose-key-partitions", "32768"],
     ] {
         assert!(redo(&flags).is_err(), "{flags:?} must be refused");
     }
+    let most = families(&["--project-families-compose-block-spans", "16384"]);
+    assert_eq!(most.compose_block_spans, 16384);
 }
 
 #[test]
