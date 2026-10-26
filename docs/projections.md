@@ -2248,9 +2248,18 @@ says which names it expands.
   logs a registry emits when it sets an entry's resolver or subregistry
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/interfaces/IRegistryEvents.sol:L56-L70 @ ens_v2_sepolia_20261001@07e55a05)
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L148-L161 @ ens_v2_sepolia_20261001@07e55a05).
-- A registry pointer or resource pointer row is new, or its resolver address
-  changes. For a resource pointer, a change of its last nonzero resolver address
-  counts too. This expands the name the pointer names and the names under it.
+- A resource pointer row is new, or its resolver address changes. A change of
+  its last nonzero resolver address counts too. This expands the name the
+  pointer names and the names under it.
+- An ENSv1 registry pointer row is new, or its resolver address changes. This
+  expands the name the pointer names and the names under it that read the
+  pointer: names of three or more labels with no resolver of their own. ENSv1
+  resolution uses the nearest node that has a resolver
+  (upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f),
+  and composition reads an ancestor's registry pointer only for a name below a
+  `.eth` second-level name. A pointer with no resolver, an empty one or the zero
+  address counts as no resolver. When the same name also expands for any other
+  reason in the publication, every name under it expands.
 - A resource pointer is deleted or moves to another name. This expands the name
   it named before and the names under it. After a move it also expands the name
   it names now and the names under that.
