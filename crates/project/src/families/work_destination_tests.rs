@@ -1009,8 +1009,7 @@ async fn a_hot_destination_does_not_make_the_address_sources_scan_every_edge() -
     Ok(())
 }
 
-/// Distinct resolver destinations: one resolver contract each, as ENSv2 gives every
-/// `PermissionedResolver` proxy its own instance.
+/// Distinct resolver destinations, one contract instance each.
 const SPREAD: i64 = 50_000;
 
 /// `SPREAD` resolver edges at block 2, each to an instance of its own whose address starts above
@@ -1055,7 +1054,7 @@ async fn many_destinations_return_the_one_boundary_in_the_range() -> Result<()> 
     Ok(())
 }
 
-// When every resolver contract is a destination of its own, a range with one address boundary
+// When every resolver edge has a destination of its own, a range with one address boundary
 // probes the destination index at most once for that address, plus one, not once per
 // destination: before ANALYZE and after it, under a custom and a generic plan.
 #[tokio::test]
