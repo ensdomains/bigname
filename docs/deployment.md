@@ -4937,20 +4937,21 @@ content hash, then check on Sepolia that `GET /v1/names/phantombug01.eth` serves
 `NewResolver` at block 11982720), and that `GET /v1/names/phantombug01.eth/records?keys=addr:61`
 finds the record.
 
-## Resolver destinations listed once per rebuild work list
+## Resolver destination probes as ordered index steps
 
-The build that lists the destinations of the chain's
-[resolver edges](glossary.md#discovery-graph--discovery-edge) once for each rebuild work list
-changes one Project statement, `project:families.input.work_blocks`
+The build that checks each contract address in a rebuild work list with an ordered step of the
+resolver destination index changes one Project statement, `project:families.input.work_blocks`
 ([table ownership](storage.md#table-ownership)).
 
 - Before, the two sources of contract addresses that start or stop in the requested range
-  asked, address by address, whether any resolver edge pointed at the address. When a few
-  resolver contracts hold most resolver edges, as on mainnet, PostgreSQL could answer each
-  question with a sequential scan of every resolver edge of the chain. It now walks
-  `project_families_discovery_edges_resolver_destination_idx` once per call, one probe for
-  each distinct destination and one more, and both address sources join that list. The
-  blocks it returns are the same.
+  asked, address by address, whether any
+  [resolver edge](glossary.md#discovery-graph--discovery-edge) pointed at the address. When a
+  few resolver contracts hold most resolver edges, as on mainnet, PostgreSQL could answer each
+  question with a sequential scan of every resolver edge of the chain. Each address now asks
+  for the lowest resolver edge destination at or above its own contract, one step of
+  `project_families_discovery_edges_resolver_destination_idx`, and is kept when that is its own
+  contract. Any other plan for that step reads every resolver edge first. The blocks it returns
+  are the same.
 - Stored rows do not change. API responses do not change.
 - The statement is in `crates/project/src`, an input of the
   [projection content hash](glossary.md#projection-content-hash) only. That hash rotates for

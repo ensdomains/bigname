@@ -573,10 +573,10 @@ async fn work_blocks_returns_the_resolver_boundaries_it_returned_before() -> Res
     Ok(())
 }
 
-// The work list reads the resolver edges that start or stop inside its range through their
-// boundary indexes, lists the resolver edges' destinations through that index, and reads the
-// destinations' addresses through a boundary index or the address instance index, whichever the
-// planner joins from. It reads no edge outside the range, under a custom and a generic plan.
+// The work list reads the resolver edges and addresses that start or stop inside its
+// range through the four boundary indexes, and asks whether an address belongs to a resolver
+// edge's destination through that index. It reads no edge or address outside the range, under
+// a custom and a generic plan.
 #[tokio::test]
 async fn work_blocks_reads_resolver_boundaries_by_index() -> Result<()> {
     const EDGE_INDEXES: [&str; 3] = [
@@ -584,10 +584,9 @@ async fn work_blocks_reads_resolver_boundaries_by_index() -> Result<()> {
         "project_families_discovery_edges_resolver_to_block_idx",
         "project_families_discovery_edges_resolver_destination_idx",
     ];
-    const ADDRESS_INDEXES: [&str; 3] = [
+    const ADDRESS_INDEXES: [&str; 2] = [
         "project_families_contract_instance_addresses_from_block_idx",
         "project_families_contract_instance_addresses_to_block_idx",
-        "contract_instance_addresses_instance_idx",
     ];
     let (database, pool) = database().await?;
     resolver_boundaries(&pool).await?;
@@ -635,7 +634,7 @@ async fn work_blocks_reads_resolver_boundaries_by_index() -> Result<()> {
                 ));
             }
         }
-        for index in &EDGE_INDEXES[..2] {
+        for index in EDGE_INDEXES[..2].iter().chain(&ADDRESS_INDEXES) {
             if !read.contains(index) {
                 failures.push(format!("{mode}: {index} is not read"));
             }

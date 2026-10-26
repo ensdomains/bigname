@@ -11,8 +11,8 @@ use super::{
     work_tests::WORK_BLOCKS_BEFORE,
 };
 
-/// The work list as it stood before it listed the resolver destinations once: each address
-/// source asked, address by address, whether any resolver edge pointed at the address's
+/// The work list as it stood before its address sources took an ordered step of the destination
+/// index: each asked, address by address, whether any resolver edge pointed at the address's
 /// instance. A frozen copy, never edited to follow `input::work_blocks`.
 const WORK_BLOCKS_PROBED: &str = "
      SELECT DISTINCT work.block_number FROM (
@@ -392,10 +392,8 @@ const COMBINED_BLOCKS: [i64; 9] = [2, 3, 4, 6, 7, 8, 9, 10, 11];
 /// Instance 1 is the destination of `HOT` resolver edges, and instance 2 of five more, all
 /// outside `1..=12`. Instance 1's address starts at 7 and instance 2's stops at 9. Instances 3
 /// and 5, which no edge names, have addresses that start at 5 and 3, and instance 4, reached
-/// only by a subregistry edge, one that starts at 6. That is five addresses in the range against
-/// two destinations, so a probe per address shows more than one probe per destination plus one.
-/// `FILLER` more instances no edge names have addresses outside the range, so the address table
-/// is not small enough to read whole.
+/// only by a subregistry edge, one that starts at 6. `FILLER` more instances no edge names have
+/// addresses outside the range, so the address table is not small enough to read whole.
 fn hot(fixture: &mut Fixture) {
     fixture.instance(CHAIN, 0).instance(CHAIN, 1);
     fixture.sql += &format!(
@@ -861,8 +859,10 @@ const ADDRESS_INDEXES: [&str; 3] = [
     "contract_instance_addresses_instance_idx",
 ];
 
-/// How the prepared work list over `1..=12` reads the edges and addresses, under a custom and a
-/// generic plan: the failures, each named with its plan mode. Prints both plans. A probe of the
+/// How the prepared work list over `from..=to` reads the edges and addresses, under a custom and
+/// a generic plan: the failures, each named with its plan mode. Prints both plans. The probes may
+/// number at most one per address boundary in the range, plus one, however many destinations the
+/// chain has. A probe of the
 /// destination index is any scan of it under the `destination` list, or one with the destination
 /// in its index condition, which only the address side has. Each probe returns at most one row.
 /// Without statistics the planner may serve the unchanged edge boundary sources from the
@@ -872,9 +872,10 @@ async fn access_path_failures(
     pool: &sqlx::PgPool,
     label: &str,
     analyzed: bool,
+    (from, to): (i64, i64),
 ) -> Result<Vec<String>> {
-    let history = manifests::History::read(pool, CHAIN, 12).await?;
-    input::work_blocks(pool, CHAIN, 1, 12, &history, 257).await?;
+    let history = manifests::History::read(pool, CHAIN, to).await?;
+    input::work_blocks(pool, CHAIN, from, to, &history, 257).await?;
     let prepared: String = sqlx::query_scalar(
         "SELECT name FROM pg_prepared_statements
          WHERE statement LIKE '/* project:families.input.work_blocks */%'",
@@ -888,12 +889,23 @@ async fn access_path_failures(
     .bind(CHAIN)
     .fetch_one(pool)
     .await?;
+    let boundaries: i64 = sqlx::query_scalar(
+        "SELECT count(*) FILTER (WHERE active_from_block_number BETWEEN $2 AND $3)
+              + count(*) FILTER (WHERE active_to_block_number BETWEEN $2 AND $3)
+         FROM contract_instance_addresses WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .bind(from)
+    .bind(to)
+    .fetch_one(pool)
+    .await?;
+    let max_probes = boundaries + 1;
     let mut failures = Vec::new();
     for mode in ["force_custom_plan", "force_generic_plan"] {
         sqlx::raw_sql(&format!("SET plan_cache_mode = {mode}"))
             .execute(pool)
             .await?;
-        let execute = format!("EXECUTE {prepared} ('{CHAIN}', 12, 1, '{{}}', 257)");
+        let execute = format!("EXECUTE {prepared} ('{CHAIN}', {to}, {from}, '{{}}', 257)");
         let text: Vec<String> =
             sqlx::query_scalar(&format!("EXPLAIN (ANALYZE, FORMAT TEXT) {execute}"))
                 .fetch_all(pool)
@@ -949,10 +961,10 @@ async fn access_path_failures(
                 ));
             }
         }
-        if probes > destinations + 1 {
+        if probes > max_probes {
             failures.push(format!(
-                "{label}, {mode}: {probes} probes of the destination index for {destinations} \
-                 destinations"
+                "{label}, {mode}: {probes} probes of the destination index for {boundaries} \
+                 address boundaries and {destinations} destinations"
             ));
         }
         for index in &EDGE_INDEXES[..2] {
@@ -968,17 +980,85 @@ async fn access_path_failures(
 }
 
 // When most resolver edges point at one destination, the planner must still read no edge
-// outside the range and probe the destination index once for each destination, plus one,
-// whatever the statistics say: before ANALYZE and after it, under a custom and a generic plan.
+// outside the range and probe the destination index at most once for each address boundary in
+// the range, plus one, whatever the statistics say: before ANALYZE and after it, under a custom
+// and a generic plan.
 #[tokio::test]
 async fn a_hot_destination_does_not_make_the_address_sources_scan_every_edge() -> Result<()> {
     let (database, pool) = database().await?;
     let mut fixture = Fixture::default();
     hot(&mut fixture);
     fixture.write(&pool).await?;
-    let mut failures = access_path_failures(&pool, "before ANALYZE", false).await?;
+    let mut failures = access_path_failures(&pool, "before ANALYZE", false, (1, 12)).await?;
     fixture.analyze().write(&pool).await?;
-    failures.extend(access_path_failures(&pool, "after ANALYZE", true).await?);
+    failures.extend(access_path_failures(&pool, "after ANALYZE", true, (1, 12)).await?);
+    assert!(
+        failures.is_empty(),
+        "the work list's access paths:\n{}",
+        failures.join("\n")
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// Distinct resolver destinations: one resolver contract each, as ENSv2 gives every
+/// `PermissionedResolver` proxy its own instance.
+const SPREAD: i64 = 50_000;
+
+/// `SPREAD` resolver edges at block 2, each to an instance of its own whose address starts above
+/// 100. One more destination has an address that starts at 9. So `5..=12` holds one address
+/// boundary.
+fn spread(fixture: &mut Fixture) {
+    fixture.instance(CHAIN, 0);
+    fixture.sql += &format!(
+        "INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+         SELECT ('00000000-0000-0000-0000-' || lpad(to_hex(n), 12, '0'))::uuid, '{CHAIN}',
+                'contract'
+         FROM generate_series(1, {SPREAD}) n;
+         INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id,
+             to_contract_instance_id, discovery_source, admission_basis,
+             active_from_block_number, active_from_block_hash, canonicality_state)
+         SELECT '{CHAIN}', 'resolver', '{}',
+                ('00000000-0000-0000-0000-' || lpad(to_hex(n), 12, '0'))::uuid, 'NewResolver',
+                'fixture', 2, '{}', 'canonical'
+         FROM generate_series(1, {SPREAD}) n;
+         INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address,
+             active_from_block_number)
+         SELECT ('00000000-0000-0000-0000-' || lpad(to_hex(n), 12, '0'))::uuid, '{CHAIN}',
+                '0x' || lpad(to_hex(n), 40, '0'), 100 + n
+         FROM generate_series(1, {SPREAD}) n;\n",
+        id(0),
+        hash(2)
+    );
+    let last = u32::try_from(SPREAD + 1).expect("the fixture fits in u32");
+    fixture
+        .edge(CHAIN, "resolver", last, Some(2), None)
+        .address(CHAIN, last, Some(9), None, false);
+}
+
+#[tokio::test]
+async fn many_destinations_return_the_one_boundary_in_the_range() -> Result<()> {
+    let (database, pool) = database().await?;
+    let mut fixture = Fixture::default();
+    spread(&mut fixture);
+    fixture.analyze().write(&pool).await?;
+    returns(&pool, CHAIN, (5, 12), &[9]).await?;
+    database.cleanup().await?;
+    Ok(())
+}
+
+// When every resolver contract is a destination of its own, a range with one address boundary
+// probes the destination index at most once for that address, plus one, not once per
+// destination: before ANALYZE and after it, under a custom and a generic plan.
+#[tokio::test]
+async fn many_destinations_do_not_make_a_range_probe_each_one() -> Result<()> {
+    let (database, pool) = database().await?;
+    let mut fixture = Fixture::default();
+    spread(&mut fixture);
+    fixture.write(&pool).await?;
+    let mut failures = access_path_failures(&pool, "before ANALYZE", false, (5, 12)).await?;
+    fixture.analyze().write(&pool).await?;
+    failures.extend(access_path_failures(&pool, "after ANALYZE", true, (5, 12)).await?);
     assert!(
         failures.is_empty(),
         "the work list's access paths:\n{}",
