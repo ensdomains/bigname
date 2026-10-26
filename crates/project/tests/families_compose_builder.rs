@@ -1403,6 +1403,35 @@ async fn the_build_refuses_an_uncomposed_name() -> Result<()> {
     fixture.cleanup().await
 }
 
+// A split written to the options' fields past the bounds, which the setter and the runner's
+// flags never give: the build refuses it at its first partition, before any partial is written,
+// and the record stays at the build's start.
+#[tokio::test]
+async fn the_build_refuses_a_split_past_its_bounds_at_its_start() -> Result<()> {
+    let fixture = mixed("families_builder_bounds").await?;
+    let mut options = ranged((3, 2), 5);
+    options.compose_builder_block_spans = 40_000;
+    let error = fixture
+        .apply_with(TARGET, FamilyMode::Rebuild, &options)
+        .await
+        .expect_err("the split is refused");
+    ensure!(
+        error
+            .to_string()
+            .contains("cannot split as (spans, partitions) = (40000, 2)"),
+        "{error}"
+    );
+    let partials: i64 = sqlx::query_scalar("SELECT count(*) FROM project_compose_history_work")
+        .fetch_one(&fixture.pool)
+        .await?;
+    let (stream, cursor) = pass_cursor(&fixture).await?;
+    ensure!(
+        partials == 0 && stream == json!(3) && cursor.is_null(),
+        "{partials} partials written, stream {stream}, cursor {cursor}"
+    );
+    fixture.cleanup().await
+}
+
 // C8. The names stream's chunks mark exactly their own work rows composed, and persist the
 // current relations of each composed name: none below reach 2 or for a name without one, and for
 // the others the relations the built anchors carry, mask and current resource.

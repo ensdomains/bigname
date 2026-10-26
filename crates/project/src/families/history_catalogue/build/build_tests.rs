@@ -219,3 +219,30 @@ fn every_step_is_walked_once_and_named_apart() {
     let names: std::collections::BTreeSet<&str> = STEPS.iter().map(|step| step.name()).collect();
     assert_eq!(names.len(), STEPS.len());
 }
+
+// A build's first partition is refused for a split past the bounds, however the layout was set.
+#[test]
+fn a_build_split_past_its_bounds_is_refused_at_its_start() {
+    let most = MAX_COMPOSE_BUILDER_BLOCK_SPANS;
+    for (spans, partitions) in [
+        (0, 2),
+        (most + 1, 2),
+        (40_000, 2),
+        (3, 0),
+        (3, 3),
+        (3, 32_768),
+    ] {
+        let layout = Layout { spans, partitions };
+        assert!(
+            next(None, layout, 170_004).is_err(),
+            "({spans}, {partitions}) must be refused"
+        );
+    }
+    for (spans, partitions) in [(1, 1), (most, 1 << 14)] {
+        let layout = Layout { spans, partitions };
+        assert!(
+            next(None, layout, 170_004).is_ok(),
+            "({spans}, {partitions})"
+        );
+    }
+}

@@ -29,7 +29,10 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::{ProjectError, Result};
+use crate::{
+    ProjectError, Result,
+    families::{MAX_COMPOSE_BUILDER_BLOCK_SPANS, MAX_COMPOSE_BUILDER_KEY_PARTITIONS},
+};
 
 /// The pass-scoped work table of the build, cleared with the name work list.
 pub(crate) const WORK: &str = "project_compose_history_work";
@@ -195,13 +198,27 @@ pub(crate) fn is_done(cursor: Option<&str>) -> Result<bool> {
 
 /// The partition after the one `cursor` names, the first with no cursor. A build the cursor
 /// says was split otherwise, or on another server version, is refused: its committed partitions
-/// were hashed so.
+/// were hashed so. A first partition is refused for a split past the bounds, before any partial
+/// is written.
 pub(crate) fn next(
     cursor: Option<&str>,
     layout: Layout,
     server_version_num: i32,
 ) -> Result<Cursor> {
     let Some(text) = cursor else {
+        let spans = 1..=MAX_COMPOSE_BUILDER_BLOCK_SPANS;
+        let partitions = 1..=MAX_COMPOSE_BUILDER_KEY_PARTITIONS;
+        if !spans.contains(&layout.spans)
+            || !partitions.contains(&layout.partitions)
+            || !layout.partitions.is_power_of_two()
+        {
+            return Err(ProjectError::data_integrity(format!(
+                "the catalogue build cannot split as (spans, partitions) = ({}, {}): spans run \
+                 from 1 to {MAX_COMPOSE_BUILDER_BLOCK_SPANS} and partitions are a power of two \
+                 from 1 to {MAX_COMPOSE_BUILDER_KEY_PARTITIONS}",
+                layout.spans, layout.partitions
+            )));
+        }
         return Ok(Cursor {
             step: Step::Keys,
             part: 0,
