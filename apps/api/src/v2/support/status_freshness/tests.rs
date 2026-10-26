@@ -276,3 +276,54 @@ async fn failed_refresh_degrades_but_retains_the_last_successful_head_as_evidenc
     );
     Ok(())
 }
+
+/// The runner's largest Live publication lag, 3 blocks of 12 seconds, stays ready on a late
+/// probe: the network head is a block old (12 s) and was read just before the next refresh
+/// (`DEFAULT_PROVIDER_REFRESH_SECS`), so the published block is 3 × 12 + 12 + 5 = 53 s older than
+/// it. One block more is 65 s, past `DEFAULT_MAX_LAG_SECS`.
+#[tokio::test]
+async fn the_largest_live_publication_lag_stays_ready_on_a_late_probe() -> Result<()> {
+    let urls = ChainRpcUrls::from_entries(&["ethereum-mainnet=http://rpc.test".to_owned()])?;
+    let freshness = StatusFreshness::new(StatusFreshnessConfig::default());
+    let late = |lag: u64| Duration::from_secs(lag * 12 + 12 + DEFAULT_PROVIDER_REFRESH_SECS);
+    let observed_at = OffsetDateTime::now_utc();
+    freshness
+        .seed_success("ethereum-mainnet", 103, observed_at)
+        .await;
+    let three = freshness
+        .compare(
+            &urls,
+            "ethereum-mainnet",
+            Some(100),
+            Some(observed_at - late(3)),
+        )
+        .await;
+    assert_eq!(
+        three.block,
+        Some(103),
+        "the network head is reported beside the canonical block"
+    );
+    assert_eq!(three.ingestion_lag_blocks, Some(3));
+    assert_eq!(three.ingestion_lag_seconds, Some(53));
+    assert_eq!(
+        freshness.readiness(Some(100), Some(100), Some(0), Some(0), &three),
+        StatusReadiness::Ready
+    );
+    freshness
+        .seed_success("ethereum-mainnet", 104, observed_at)
+        .await;
+    let four = freshness
+        .compare(
+            &urls,
+            "ethereum-mainnet",
+            Some(100),
+            Some(observed_at - late(4)),
+        )
+        .await;
+    assert_eq!(four.ingestion_lag_seconds, Some(65));
+    assert_eq!(
+        freshness.readiness(Some(100), Some(100), Some(0), Some(0), &four),
+        StatusReadiness::Stale
+    );
+    Ok(())
+}

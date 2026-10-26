@@ -212,8 +212,11 @@ ops dashboards tracked in Linear TYR-34.
   publication gauge is not expected to return to zero.
 - `phase_runner_served_lag_blocks{chain}` is the newest observed
   execution-client head minus that publication block. It is the only one of
-  the two expected to return to zero. A non-zero value means the newest
+  the two expected to return to zero, or to the Live publication lag when one is set. A non-zero value means the newest
   publication is that many blocks behind the newest block the runner has seen.
+  It includes the configured
+  [Live publication lag](../deployment.md#live-publication-lag), so at steady
+  state it reads that lag rather than zero.
   Because the API stops serving a chain once its publication trails the stored
   head by more than `BIGNAME_API_PUBLICATION_LAG_TOLERANCE_BLOCKS` (one block by
   default), a value above that tolerance usually means readers are getting

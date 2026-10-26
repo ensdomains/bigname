@@ -1,6 +1,9 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU32, Ordering},
+    },
 };
 
 use anyhow::{Context, Result};
@@ -20,9 +23,20 @@ pub struct RunnerMetricsFeed {
     project_writes: super::project_writes::PendingProjectWrites,
     rpc_chains: super::rpc_chain::RpcChainStates,
     ingest_rpc: bigname_ingest::RpcCounters,
+    live_publication_lag_blocks: Arc<AtomicU32>,
 }
 
 impl RunnerMetricsFeed {
+    /// The Live publication lag the runner was started with, exported beside the gap it opens.
+    pub fn set_live_publication_lag_blocks(&self, blocks: u32) {
+        self.live_publication_lag_blocks
+            .store(blocks, Ordering::Relaxed);
+    }
+
+    pub(super) fn live_publication_lag_blocks(&self) -> u32 {
+        self.live_publication_lag_blocks.load(Ordering::Relaxed)
+    }
+
     /// Configured chains always export both gauges, as -1 when nothing is available.
     pub fn seed_chain(&self, chain: &str) {
         self.configured_chains
@@ -103,12 +117,17 @@ pub(super) struct ServedLagRow {
     pub(super) chain_id: String,
     pub(super) observed_head_block_number: Option<i64>,
     pub(super) publication_block_number: Option<i64>,
+    /// The newest block Live loaded minus the published chain head.
+    pub(super) publication_gap_blocks: Option<i64>,
 }
 
 #[derive(Clone)]
 pub(super) struct ServedLagGauges {
     lag_blocks: IntGaugeVec,
     publication_block: IntGaugeVec,
+    publication_gap: IntGaugeVec,
+    publication_lag: IntGaugeVec,
+    configured_lag: Arc<Mutex<i64>>,
     incoherent: Arc<Mutex<BTreeMap<String, (i64, i64)>>>,
     configured: Arc<Mutex<BTreeSet<String>>>,
     exported: Arc<Mutex<BTreeSet<String>>>,
@@ -128,6 +147,19 @@ impl ServedLagGauges {
                 "Block of the newest readable family publication, or -1 when there is none.",
                 &["chain"],
             )?,
+            publication_gap: registry.int_gauge_vec(
+                "phase_runner_publication_gap_blocks",
+                "Newest block Live has loaded minus the published chain head, or -1 when either \
+                 is unavailable. At steady state it equals the configured Live publication lag.",
+                &["chain"],
+            )?,
+            publication_lag: registry.int_gauge_vec(
+                "phase_runner_publication_lag_blocks",
+                "Configured Live publication lag: how many blocks below the newest loaded block \
+                 Live publishes the chain head.",
+                &["chain"],
+            )?,
+            configured_lag: Arc::default(),
             incoherent: Arc::default(),
             configured: Arc::default(),
             exported: Arc::default(),
@@ -136,8 +168,9 @@ impl ServedLagGauges {
 
     /// Seeds -1 for configured chains before the first refresh and keeps their series
     /// for the life of the process.
-    pub(super) fn configure(&self, chains: &[String]) {
+    pub(super) fn configure(&self, chains: &[String], live_publication_lag_blocks: u32) {
         *lock(&self.configured) = chains.iter().cloned().collect();
+        *lock(&self.configured_lag) = i64::from(live_publication_lag_blocks);
         self.apply(&[]);
     }
 
@@ -156,9 +189,15 @@ impl ServedLagGauges {
             if configured.contains(chain) {
                 self.lag_blocks.with_label_values(&[chain]).set(-1);
                 self.publication_block.with_label_values(&[chain]).set(-1);
+                self.publication_gap.with_label_values(&[chain]).set(-1);
+                self.publication_lag
+                    .with_label_values(&[chain])
+                    .set(*lock(&self.configured_lag));
             } else {
                 let _ = self.lag_blocks.remove_label_values(&[chain]);
                 let _ = self.publication_block.remove_label_values(&[chain]);
+                let _ = self.publication_gap.remove_label_values(&[chain]);
+                let _ = self.publication_lag.remove_label_values(&[chain]);
             }
         }
         *exported = returned
@@ -190,6 +229,12 @@ impl ServedLagGauges {
             self.publication_block
                 .with_label_values(chain)
                 .set(row.publication_block_number.unwrap_or(-1));
+            self.publication_gap
+                .with_label_values(chain)
+                .set(row.publication_gap_blocks.map_or(-1, |gap| gap.max(0)));
+            self.publication_lag
+                .with_label_values(chain)
+                .set(*lock(&self.configured_lag));
         }
     }
 
@@ -248,7 +293,8 @@ pub(super) async fn load(pool: &PgPool) -> Result<Vec<ServedLagRow>> {
 const FAMILY_MARKER_SERVED_LAG: &str = "SELECT project.chain_id,
         GREATEST(live.target_block_number, head.latest_block_number)
             AS observed_head_block_number,
-        lineage.block_number AS publication_block_number
+        lineage.block_number AS publication_block_number,
+        live.current_block_number - head.latest_block_number AS publication_gap_blocks
  FROM chain_phase_state project
  LEFT JOIN chain_phase_state live
    ON live.chain_id = project.chain_id
