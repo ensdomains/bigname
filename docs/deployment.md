@@ -4997,5 +4997,9 @@ SELECT count(*) FROM bigname_phase.normalized_events
 WHERE canonicality_state NOT IN ('canonical', 'safe', 'finalized');
 ```
 
+  If either count is not 0, stop and do not start the redo. The three sets would miss those
+  surfaces, so their raw labels would keep a witness that names no readable event. Such a
+  database needs the statements bounded by an anti-join on `preimage_event_identity` instead,
+  which this release does not ship.
 - It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
   watch plan are unchanged, so stamp no Ingest redo.

@@ -10,6 +10,8 @@ use bigname_test_support::StatementCounter;
 
 use super::*;
 
+mod hot_name;
+
 const PLAN_MODES: [&str; 2] = ["force_custom_plan", "force_generic_plan"];
 const RANGE: (i64, i64) = (3, 3);
 const BLOCKS: i64 = 5_100;
@@ -263,9 +265,11 @@ async fn one_of_each(pool: &PgPool) -> TestResult {
 }
 
 /// The surfaces each set serves, and the rows each statement may read for them: every member,
-/// every byte shadow probed, every event on an orphaned block and every orphaned block.
+/// every byte shadow probed, every event on an orphaned block and every orphaned block, and
+/// every event of a member's name.
 struct Sizes {
     members: BTreeSet<String>,
+    member_events: i64,
     released: i64,
     byte_shadows: i64,
     orphaned_blocks: i64,
@@ -297,8 +301,15 @@ async fn sizes(pool: &PgPool, members: &BTreeSet<String>) -> TestResult<Sizes> {
     ))
     .fetch_one(pool)
     .await?;
+    let member_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events WHERE logical_name_id = ANY ($1)",
+    )
+    .bind(members.iter().cloned().collect::<Vec<_>>())
+    .fetch_one(pool)
+    .await?;
     Ok(Sizes {
         members: members.clone(),
+        member_events,
         released,
         byte_shadows,
         orphaned_blocks,
@@ -347,15 +358,18 @@ async fn check(pool: &PgPool, label: &str, sizes: &Sizes, statistics: bool) -> T
             ),
             ("repair targets", &measured.targets, "chain_lineage", blocks),
         ];
-        // The rest of the repair probes each target's row and its observations. Before ANALYZE
-        // the planner may walk the readable lineage for each target's earliest observation, a
-        // fast-start plan for its LIMIT 1 that main's statement shares, so only the targets,
-        // the part this change bounds, are held to their sizes there.
+        // The rest of the repair probes each target's row and the events of its name, each
+        // with its one block, at most twice: for the earliest readable observation, and for
+        // label-hash-path evidence only when no observation survives.
+        // Before ANALYZE the planner may walk the readable lineage for each target's earliest
+        // observation, a fast-start plan for its LIMIT 1 that main's statement shares, so only
+        // the targets, the part this change bounds, are held to their sizes there.
         if let Some(repair) = &measured.repair {
+            let history = 2 * sizes.member_events;
             reads.extend([
                 ("repair", repair, "name_surfaces", surfaces + targets),
-                ("repair", repair, "normalized_events", events + 4 * targets),
-                ("repair", repair, "chain_lineage", blocks + 4 * targets),
+                ("repair", repair, "normalized_events", events + history),
+                ("repair", repair, "chain_lineage", blocks + history),
             ]);
         }
         for (statement, measured, relation, bound) in reads {

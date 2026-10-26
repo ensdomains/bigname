@@ -218,7 +218,8 @@ pub(super) fn repair_targets() -> String {
 /// Every read past the targets is a probe for one target: the surface rows through an index
 /// condition on the target names, and the label-hash-path evidence through a lateral probe.
 /// Joined or tested as an `EXISTS` instead, a generic plan hashes every surface or every event
-/// of the chain.
+/// of the chain. The evidence probe runs only for a target without a surviving observation,
+/// the only rows that read it, so it never walks the history of a name that keeps a witness.
 pub(super) fn repair_statement() -> String {
     format!(
         "/* interpret:reanchor.repair_preimage_witnesses */
@@ -254,7 +255,8 @@ pub(super) fn repair_statement() -> String {
                   ON lineage.chain_id = observation.chain_id
                  AND lineage.block_hash = observation.block_hash
                  AND lineage.block_number = observation.block_number
-                WHERE observation.chain_id = $1
+                WHERE earliest.event_identity IS NULL
+                  AND observation.chain_id = $1
                   AND observation.logical_name_id = target.logical_name_id
                   AND observation.after_state
                       @> jsonb_build_object('{NAME_IDENTITY_OBSERVED_KEY}', true)
