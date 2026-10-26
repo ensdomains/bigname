@@ -23,7 +23,7 @@ pub(super) async fn fill(
         FROM jsonb_populate_recordset(NULL::project_address_history_anchor,$3) anchor
         {bounds}",
         fresh = FRESH,
-        bounds = bounds(kind)
+        bounds = bounds(kind, "anchor.anchor_id")
     );
     for chunk in rows.chunks(256) {
         let rows: Vec<Value> = sqlx::query_scalar(&sql)
@@ -55,7 +55,7 @@ pub(super) async fn refresh(
             WHERE anchor.chain_id=$1 AND anchor.anchor_kind=$2 AND anchor.anchor_id=ANY($3)
               AND ROW(anchor.first_bucket,anchor.last_bucket,anchor.event_mask,anchor.key_bloom)
                 IS DISTINCT FROM ROW(bounds.first_bucket,bounds.last_bucket,bounds.event_mask,bounds.key_bloom)",
-            fresh=FRESH,bounds=bounds(kind));
+            fresh=FRESH,bounds=bounds(kind, "anchor.anchor_id"));
         for chunk in keys.chunks(256) {
             let pairs: Vec<(Value, Value)> = sqlx::query_as(&sql)
                 .bind(chain)
@@ -80,22 +80,30 @@ const FRESH: &str = "to_jsonb(anchor)||jsonb_build_object(
     'bucket_range',CASE WHEN bounds.first_bucket IS NULL THEN 'empty'::int8range
       ELSE int8range(bounds.first_bucket,bounds.last_bucket+1,'[)') END,
     'event_mask',bounds.event_mask,'key_bloom',bounds.key_bloom)";
-fn bounds(kind: i16) -> String {
+/// The envelope of an anchor whose id is the SQL expression `anchor`: its source, and for a
+/// resource the resource's edges too.
+pub(super) fn bounds(kind: i16, anchor: &str) -> String {
     format!(
         "CROSS JOIN LATERAL (
       SELECT min(source.first_bucket) AS first_bucket,max(source.last_bucket) AS last_bucket,
         COALESCE(bit_or(source.event_mask),0) AS event_mask,
         COALESCE(bit_or(source.key_bloom),B'0'::bit(256)) AS key_bloom FROM (
           SELECT first_bucket,last_bucket,event_mask,key_bloom FROM project_history_source
-          WHERE chain_id=$1 AND source_kind=$2 AND source_key=anchor.anchor_id
+          WHERE chain_id=$1 AND source_kind=$2 AND source_key={anchor}
           {edges}
         ) source
     ) bounds",
         edges = if kind == 1 {
-            "UNION ALL SELECT first_bucket,last_bucket,event_mask,key_bloom
-        FROM project_history_source_edge WHERE chain_id=$1 AND resource_id=anchor.anchor_id::uuid"
+            format!(
+                "UNION ALL SELECT first_bucket,last_bucket,event_mask,key_bloom
+        FROM project_history_source_edge WHERE chain_id=$1 AND resource_id={anchor}::uuid"
+            )
         } else {
-            ""
+            String::new()
         }
     )
 }
+
+#[cfg(test)]
+#[path = "envelopes_text_tests.rs"]
+mod envelopes_text_tests;
