@@ -89,12 +89,10 @@ pub(crate) async fn ens_v1_registry_record_inventory(
         Some(None) => None,
         Some(Some(resolver)) => {
             let chain_id = row_chain_id(row).ok_or_else(|| {
-                internal(anyhow::anyhow!("composed name row carries no chain position"))
+                internal(anyhow::anyhow!(
+                    "composed name row carries no chain position"
+                ))
             })?;
-            let resource_id = composed
-                .as_ref()
-                .map(|inventory| inventory.resource_id)
-                .or_else(|| row.record_serving_resource_id());
             FamilyRecordInventory::load_resolver_node_for_snapshot(
                 &mut snapshot,
                 &chain_id,
@@ -106,12 +104,6 @@ pub(crate) async fn ens_v1_registry_record_inventory(
                 &selected_snapshot.chain_positions,
             )
             .await?
-            .map(|mut inventory| {
-                if let Some(resource_id) = resource_id {
-                    inventory.resource_id = resource_id;
-                }
-                inventory
-            })
         }
     };
     snapshot

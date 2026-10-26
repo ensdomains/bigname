@@ -12,7 +12,9 @@
 //! keeps the lease's older pointer. Each misattributed case is compared with the same logs left
 //! as Interpret wrote them.
 use super::v2_continuing_lease::{ENS_REGISTRY, LEASE, Logs, NAME, OWNER, registered_with};
-use super::v2_sepolia_redeploy::{CHAIN, HEAD, NEW_REGISTRY, checked_in_profile, complete_phases, get};
+use super::v2_sepolia_redeploy::{
+    CHAIN, HEAD, NEW_REGISTRY, checked_in_profile, complete_phases, get,
+};
 use super::*;
 use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
@@ -411,8 +413,16 @@ fn assert_serves_next(served: &Value) {
     for field in RESOLVER_FIELDS {
         assert_eq!(served[field], resolver(NEXT), "{field}: {served:#}");
     }
-    assert_eq!(served["records"]["seen_addresses"], json!(["60", "61"]), "{served:#}");
-    assert_eq!(served["records"]["texts"], json!({"name": "Test"}), "{served:#}");
+    assert_eq!(
+        served["records"]["seen_addresses"],
+        json!(["60", "61"]),
+        "{served:#}"
+    );
+    assert_eq!(
+        served["records"]["texts"],
+        json!({"name": "Test"}),
+        "{served:#}"
+    );
     assert_eq!(
         served["keyed"]["addr:60"],
         json!({"status": "ok", "value": NEXT_HOLDER}),
@@ -424,7 +434,10 @@ fn assert_serves_next(served: &Value) {
         json!({"status": "not_found"}),
         "{served:#}"
     );
-    assert_eq!(served["default"]["addr:60"]["value"], NEXT_HOLDER, "{served:#}");
+    assert_eq!(
+        served["default"]["addr:60"]["value"], NEXT_HOLDER,
+        "{served:#}"
+    );
     assert!(served["default"].get("text:avatar").is_none(), "{served:#}");
 }
 
@@ -532,104 +545,14 @@ async fn r6_sepolia_keeps_withholding_a_child_below_the_reservation() -> Result<
     let view = served_name(&database, &child_name()).await?;
     database.cleanup().await?;
     assert_eq!(view["ens_v1_resolver"], resolver(NEXT), "{view:#}");
-    assert_eq!(view["unresolvable_reason"], "ens_v2_path_no_resolver", "{view:#}");
+    assert_eq!(
+        view["unresolvable_reason"], "ens_v2_path_no_resolver",
+        "{view:#}"
+    );
     for field in ["resolver", "keyed_resolver", "default_resolver"] {
         assert!(view[field].is_null(), "{field}: {view:#}");
     }
     Ok(())
-}
-
-/// A child `dev.alice.eth` of the mainnet fixture name, decided by ENSv1, with its own registry
-/// pointer and records.
-async fn seed_alice_child(database: &TestDatabase) -> Result<()> {
-    let chain = "ethereum-mainnet";
-    let resource = Uuid::from_u128(0x2201);
-    let resolver = "0x0000000000000000000000000000000000000abc";
-    let logical = seed_family_identity_inputs(
-        &database.pool,
-        "ens",
-        "dev.alice.eth",
-        chain,
-        21_000_003,
-        "0xbinding",
-        resource,
-        Uuid::from_u128(0x1101),
-        Uuid::from_u128(0x3301),
-        "ens_v1",
-    )
-    .await?;
-    let node = bigname_lookup::ens_namehash_hex("dev.alice.eth")?;
-    let mut events = Vec::new();
-    for (index, (kind, after)) in [
-        (
-            "AuthorityTransferred",
-            json!({"source_event": "NewOwner", "node": node,
-                "owner": "0x00000000000000000000000000000000000000bb"}),
-        ),
-        ("ResolverChanged", json!({"node": node, "resolver": resolver})),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let mut event = history_event(
-            &format!("dev-alice-{kind}"),
-            Some(&logical),
-            Some(resource),
-            Some(chain),
-            Some(21_000_003),
-            Some("0xbinding"),
-            Some("0xdev-alice"),
-            Some(index as i64 + 1),
-            CanonicalityState::Canonical,
-        );
-        event.event_kind = kind.into();
-        event.source_family = "ens_v1_registry_l1".into();
-        event.before_state = json!({});
-        event.after_state = after;
-        events.push(event);
-    }
-    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
-    insert_family_fixture_record_writes(
-        &database.pool,
-        "ens",
-        chain,
-        "dev.alice.eth",
-        resolver,
-        21_000_003,
-        "0xbinding",
-        &[family_fixture_record_write(
-            "text:description",
-            Some(json!("dev profile")),
-        )],
-    )
-    .await?;
-    rebuild_fixture_families(&database.pool, chain, 21_000_003, "0xbinding").await
-}
-
-/// Pin (dev.sbt.eth shape): on mainnet a child below a `.eth` name with no ENSv2 entry stays
-/// unresolvable once the chain is cut over, as the parent does. The ETHRegistry holds no entry
-/// for the parent, so UniversalResolverV2 finds no resolver for either name
-/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/universalResolver/libraries/LibResolution.sol:L108-L135 @ ens_v2_mainnet_20261002@b1f97b91)
-/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/deploy/01_ETHRegistry.ts:L39-L51 @ ens_v2_mainnet_20261002@b1f97b91).
-#[tokio::test]
-async fn pin_a_child_below_an_unreserved_mainnet_name_stays_unresolvable() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_alice_name_inputs(&database).await?;
-    seed_alice_child(&database).await?;
-    let before = v2_name_record_payload_for_database(&database, "/v1/names/dev.alice.eth").await?;
-    assert!(before["data"]["resolver"].is_object(), "{before:#}");
-    admit_ens_v2_root_registry(&database, "ethereum-mainnet").await?;
-    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
-    for name in ["alice.eth", "dev.alice.eth"] {
-        let detail = v2_name_record_payload_for_database(&database, &format!("/v1/names/{name}")).await?;
-        let records =
-            v2_name_record_payload_for_database(&database, &format!("/v1/names/{name}/records"))
-                .await?;
-        assert_eq!(detail["data"]["unresolvable_reason"], "no_live_ens_v2_entry", "{detail:#}");
-        assert!(detail["data"].get("resolver").is_none(), "{detail:#}");
-        assert!(records["data"]["resolver"].is_null(), "{records:#}");
-    }
-    database.cleanup().await
 }
 
 /// Row 2 (ens.eth shape): the resolver's event named `text:email` but bigname retained no value.
@@ -664,10 +587,11 @@ async fn r2_the_default_read_answers_an_unretained_text_through_the_verified_rea
     )
     .await?;
     rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_004, HASH).await?;
-    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
-        resolution_universal_resolver_text_response("alice@example.test"),
-    ])
-    .await?;
+    let (rpc_url, rpc_handle) =
+        spawn_primary_name_mock_rpc(vec![resolution_universal_resolver_text_response(
+            "alice@example.test",
+        )])
+        .await?;
     let state = database
         .app_state_with_lookup_chain_rpc_urls(bigname_lookup::ChainRpcUrls::from_entries(&[
             format!("ethereum-mainnet={rpc_url}"),

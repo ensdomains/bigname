@@ -73,7 +73,8 @@ pub(crate) async fn load_served_name_for_selected_snapshot(
     name: &str,
     selected_snapshot: &SelectedSnapshot,
 ) -> ApiResult<ServedName> {
-    let mut served = load_composed_served_name(&mut *conn, namespace, name, selected_snapshot).await?;
+    let mut served =
+        load_composed_served_name(&mut *conn, namespace, name, selected_snapshot).await?;
     serve_ens_v1_registry_resolver(&mut *conn, &mut served.row)
         .await
         .map_err(|error| {

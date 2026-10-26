@@ -1419,7 +1419,13 @@ its value map:
   back to verified lookup. Without `keys` (omitted, empty, or only
   whitespace), `source=auto` is an indexed read of the default key set: it
   makes no verified fallback, reports `meta.source=indexed`, and returns the
-  same answers as `source=indexed`. A verified read has two closed refusal
+  same answers as `source=indexed`. A request that names no `source` reads
+  indexed and then answers each key whose indexed answer is
+  `value_not_retained` through verified lookup, and only those keys. A key the
+  lookup answers `ok` or `not_found` takes that answer, and the response then
+  reports `meta.source=verified`. A lookup that fails or is refused leaves the
+  indexed answers as they are. An explicit `source=indexed` never reads the
+  chain. A verified read has two closed refusal
   reasons of its own, reported per key on this route and as `data.unsupported_reason` on the verified
   exact-name detail route: `verified_records_not_supported` when the projected
   row carries no topology the engine admits (a bound name without a record

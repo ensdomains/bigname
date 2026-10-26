@@ -239,15 +239,15 @@ pub(crate) async fn get_name_records(
     } else {
         match params.source {
             RequestSource::Indexed => {
-                let mut data = build_indexed_name_records(
+                let data = build_indexed_name_records(
                     &row,
                     record_inventory.as_ref(),
                     selection,
                     include_inventory,
                     false,
                 )?;
-                let reads = (&state, &row, &mut selected_snapshot, alias.as_ref(), requested_records);
-                (unretained::fill(default_source, reads, &mut data).await, data)
+                let reads = (&state, &row, alias.as_ref(), requested_records);
+                unretained::fill(default_source, reads, &mut selected_snapshot, data).await
             }
             RequestSource::Verified => {
                 let admit_null_resolver_discovery = verified_discovery(&row, alias.as_ref());

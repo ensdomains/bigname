@@ -1,9 +1,9 @@
 //! The default records read, with no `source` parameter, answers a key whose indexed answer is
 //! `value_not_retained` through the verified read: the resolver's event named the key, but
-//! bigname retained no value for it. Only those keys are read, through the same lookup and RPC timeouts `source=auto` uses for
-//! explicit keys. Every other key keeps its indexed answer, and a key the verified read does not
-//! answer `ok` or `not_found` keeps `value_not_retained`. A failed read leaves the indexed
-//! response as it was.
+//! bigname retained no value for it. Only those keys are read, through the same lookup and RPC
+//! timeouts `source=auto` uses for explicit keys. Every other key keeps its indexed answer, and a
+//! key the verified read does not answer `ok` or `not_found` keeps `value_not_retained`. A failed
+//! read leaves the indexed response as it was.
 use bigname_storage::{NameCurrentRow, SelectedSnapshot};
 use tracing::warn;
 
@@ -25,15 +25,30 @@ pub(super) fn default_source(raw_query: Option<&str>) -> bool {
 type Reads<'a> = (
     &'a AppState,
     &'a NameCurrentRow,
-    &'a mut SelectedSnapshot,
     Option<&'a AliasPath>,
     &'a [ResolutionRecordKey],
 );
 
 /// Fills `data`'s `value_not_retained` answers from the verified read on the default read, and
-/// returns the response's source: `verified` once any answer came from it, as `source=auto` does.
-pub(super) async fn fill(default_source: bool, reads: Reads<'_>, data: &mut NameRecords) -> Source {
-    let (state, row, selected_snapshot, alias, requested) = reads;
+/// returns the response's source with it: `verified` once any answer came from the verified
+/// read, as `source=auto` does.
+pub(super) async fn fill(
+    default_source: bool,
+    reads: Reads<'_>,
+    selected_snapshot: &mut SelectedSnapshot,
+    mut data: NameRecords,
+) -> (Source, NameRecords) {
+    let source = fill_unretained(default_source, reads, selected_snapshot, &mut data).await;
+    (source, data)
+}
+
+async fn fill_unretained(
+    default_source: bool,
+    reads: Reads<'_>,
+    selected_snapshot: &mut SelectedSnapshot,
+    data: &mut NameRecords,
+) -> Source {
+    let (state, row, alias, requested) = reads;
     if !default_source {
         return Source::Indexed;
     }
@@ -50,20 +65,20 @@ pub(super) async fn fill(default_source: bool, reads: Reads<'_>, data: &mut Name
     if keys.is_empty() {
         return Source::Indexed;
     }
-    let lookup = match load_verified_record_lookup(state, row, &keys, selected_snapshot, alias).await
-    {
-        Ok(Some(VerifiedRecordLookup::Found { response })) => response,
-        Ok(_) => return Source::Indexed,
-        Err(error) => {
-            warn!(
-                service = "api",
-                name = %row.logical_name_id,
-                error = ?error,
-                "verified read for value_not_retained records failed; serving indexed answers"
-            );
-            return Source::Indexed;
-        }
-    };
+    let lookup =
+        match load_verified_record_lookup(state, row, &keys, selected_snapshot, alias).await {
+            Ok(Some(VerifiedRecordLookup::Found { response })) => response,
+            Ok(_) => return Source::Indexed,
+            Err(error) => {
+                warn!(
+                    service = "api",
+                    name = %row.logical_name_id,
+                    error = ?error,
+                    "verified read for value_not_retained records failed; serving indexed answers"
+                );
+                return Source::Indexed;
+            }
+        };
     let Ok(answers) = super::build::verified_answers_from_results(&lookup.records, &keys) else {
         return Source::Indexed;
     };

@@ -17,10 +17,10 @@ use uuid::Uuid;
 
 use crate::families::records::{
     assemble::{self, Assembly, AssemblyReads},
-    is_cleared,
     facts::{ResolverClassification, load_classifications_at},
     inventory_selection::{Plan, Selected, select_plans},
     inventory_types::FamilyRecordInventory,
+    is_cleared,
     mirror::{evaluate_family_mirror_at, is_mirror_pointer},
     serving::ServingPointer,
 };
