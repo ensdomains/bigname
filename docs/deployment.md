@@ -4936,3 +4936,27 @@ content hash, then check on Sepolia that `GET /v1/names/phantombug01.eth` serves
 `0x8948458626811dd0c23eb25cc74291247077cc51`, equal to its `ens_v1.resolver` (registry
 `NewResolver` at block 11982720), and that `GET /v1/names/phantombug01.eth/records?keys=addr:61`
 finds the record.
+
+## Resolver destinations listed once per rebuild work list
+
+The build that lists the chain's resolver edge destinations once for each rebuild work list
+changes one Project statement, `project:families.input.work_blocks`
+([table ownership](storage.md#table-ownership)).
+
+- Before, the two sources of contract addresses that start or stop in the requested range
+  asked, address by address, whether any resolver edge pointed at the address. When a few
+  resolver contracts hold most resolver edges, as on mainnet, PostgreSQL could answer each
+  question with a sequential scan of every resolver edge of the chain. It now walks
+  `project_families_discovery_edges_resolver_destination_idx` once per call, one probe for
+  each distinct destination and one more, and both address sources join that list. The
+  blocks it returns are the same.
+- Stored rows do not change. API responses do not change.
+- The statement is in `crates/project/src`, an input of the
+  [projection content hash](glossary.md#projection-content-hash) only. That hash rotates for
+  every chain. The [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, at a planned
+  [re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+  binaries. The change rides the next re-derivation release and shares that release's Project
+  redo.
+- It adds no schema-migration, table, index, manifest or setting. The manifest-authority
+  fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.

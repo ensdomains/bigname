@@ -270,14 +270,17 @@ impl BlockEvent {
 /// order, but duplicate rows per block, rejected rows and other plans can make them read much or
 /// all of the remaining interval. The four resolver edge sources are the edges that start in
 /// the range, the edges that stop in it, and the addresses of a resolver edge's destination
-/// that start or stop in it. Each reads only the rows with that boundary in the range, through
-/// the boundary's own index, and deduplicates them before applying readability and the
-/// per-source limit. An address costs one more probe, of the resolver destination index. With
-/// an ordered nested-loop plan the lineage probes stop once enough readable boundaries are
-/// produced or the candidates are exhausted (unreadable candidates need probes too), but that
-/// plan is not guaranteed and other plans may read more lineage rows. The declaration source
-/// reads the captured start list. Readability is checked inside each source, before its limit,
-/// so no source spends its limit on blocks that are then dropped.
+/// that start or stop in it. The edge sources read only the edges with that boundary in the
+/// range, through the boundary's own index. The destinations are listed once per call, one probe
+/// of the resolver destination index for each and one more to find the end, and the address
+/// sources join that list to the addresses with that boundary in the range. A probe per address
+/// would let the planner scan every resolver edge for each address when a few destinations hold
+/// most edges. Each source deduplicates its rows before applying readability and the per-source
+/// limit. With an ordered nested-loop plan the lineage probes stop once enough readable
+/// boundaries are produced or the candidates are exhausted (unreadable candidates need probes
+/// too), but that plan is not guaranteed and other plans may read more lineage rows. The
+/// declaration source reads the captured start list. Readability is checked inside each source,
+/// before its limit, so no source spends its limit on blocks that are then dropped.
 pub(crate) async fn work_blocks(
     pool: &sqlx::PgPool,
     chain_id: &str,
@@ -288,6 +291,22 @@ pub(crate) async fn work_blocks(
 ) -> Result<Vec<i64>> {
     sqlx::query_scalar(
         "/* project:families.input.work_blocks */
+         -- The destinations of the chain's resolver edges, deactivated edges included: the
+         -- lowest, then the lowest above the last, one step of the destination index each.
+         WITH RECURSIVE destination (contract_instance_id) AS (
+             (SELECT edge.to_contract_instance_id FROM discovery_edges edge
+              WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
+              ORDER BY edge.to_contract_instance_id
+              LIMIT 1)
+             UNION ALL
+             SELECT (SELECT edge.to_contract_instance_id FROM discovery_edges edge
+                     WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
+                       AND edge.to_contract_instance_id > previous.contract_instance_id
+                     ORDER BY edge.to_contract_instance_id
+                     LIMIT 1)
+             FROM destination previous
+             WHERE previous.contract_instance_id IS NOT NULL
+         )
          SELECT DISTINCT work.block_number FROM (
              (SELECT DISTINCT event.block_number
               FROM normalized_events event
@@ -343,16 +362,10 @@ pub(crate) async fn work_blocks(
              (SELECT boundary.block_number
               FROM (SELECT DISTINCT address.active_from_block_number AS block_number
                     FROM contract_instance_addresses address
+                    JOIN destination
+                      ON destination.contract_instance_id = address.contract_instance_id
                     WHERE address.chain_id = $1
-                      AND address.active_from_block_number BETWEEN $3 AND $2
-                      -- The address of a resolver edge's destination. OFFSET 0 keeps this
-                      -- one index probe for each address that starts in the range.
-                      AND EXISTS (
-                          SELECT 1 FROM discovery_edges edge
-                          WHERE edge.chain_id = address.chain_id
-                            AND edge.to_contract_instance_id = address.contract_instance_id
-                            AND edge.edge_kind = 'resolver'
-                          OFFSET 0)) boundary
+                      AND address.active_from_block_number BETWEEN $3 AND $2) boundary
               WHERE EXISTS (
                   SELECT 1 FROM chain_lineage lineage
                   WHERE lineage.chain_id = $1 AND lineage.block_number = boundary.block_number
@@ -363,14 +376,10 @@ pub(crate) async fn work_blocks(
              (SELECT boundary.block_number
               FROM (SELECT DISTINCT address.active_to_block_number AS block_number
                     FROM contract_instance_addresses address
+                    JOIN destination
+                      ON destination.contract_instance_id = address.contract_instance_id
                     WHERE address.chain_id = $1
-                      AND address.active_to_block_number BETWEEN $3 AND $2
-                      AND EXISTS (
-                          SELECT 1 FROM discovery_edges edge
-                          WHERE edge.chain_id = address.chain_id
-                            AND edge.to_contract_instance_id = address.contract_instance_id
-                            AND edge.edge_kind = 'resolver'
-                          OFFSET 0)) boundary
+                      AND address.active_to_block_number BETWEEN $3 AND $2) boundary
               WHERE EXISTS (
                   SELECT 1 FROM chain_lineage lineage
                   WHERE lineage.chain_id = $1 AND lineage.block_number = boundary.block_number
