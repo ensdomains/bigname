@@ -3,25 +3,31 @@
 //! bigname retained no value for it. Only those keys are read, through the same lookup and RPC
 //! timeouts `source=auto` uses for explicit keys. Every other key keeps its indexed answer, and a
 //! key the verified read does not answer `ok` or `not_found` keeps `value_not_retained`. A failed
-//! read leaves the indexed response as it was. A response with a filled key reports
-//! `meta.source=verified` and carries no cache headers (`v2::cache_headers`).
+//! read leaves the indexed response as it was. A read with a key to fill takes the client's
+//! verified rate-limit token and a verified in-flight slot first, and keeps its indexed answers
+//! when either is refused. A read with nothing to fill takes neither. A response with a filled
+//! key reports `meta.source=verified` and carries no cache headers (`v2::cache_headers`).
 use bigname_storage::{NameCurrentRow, SelectedSnapshot};
 use tracing::warn;
 
 use super::{NameRecords, Source, Status, VerifiedRecordLookup, load_verified_record_lookup};
 use crate::AppState;
+use crate::bounds::FillAdmission;
 use crate::v2::support::{AliasPath, ResolutionRecordKey};
 
 const VALUE_NOT_RETAINED: &str = "value_not_retained";
 
-/// Whether the request named no `source`, or only a blank one, which is the default read. The
-/// request bounds classify the same requests as verified execution
-/// (`bounds::classification::is_verified_execution_request`), so the fill runs under the
-/// verified in-flight ceiling and client rate limit.
-pub(super) fn default_source(raw_query: Option<&str>) -> bool {
+/// The verified-execution admission of a default read, one that names no `source` or only blank
+/// ones, and `None` for any other read, which never fills. The bounds layer supplies it to every
+/// request (`bounds::FillAdmission`). The fill takes it only when it has a key to fill.
+pub(super) fn admission(
+    raw_query: Option<&str>,
+    admission: Option<axum::Extension<FillAdmission>>,
+) -> Option<FillAdmission> {
     form_urlencoded::parse(raw_query.unwrap_or_default().as_bytes())
         .filter(|(key, _)| key == "source")
         .all(|(_, value)| value.trim().is_empty())
+        .then_some(admission?.0)
 }
 
 type Reads<'a> = (
@@ -35,25 +41,25 @@ type Reads<'a> = (
 /// returns the response's source with it: `verified` once any answer came from the verified
 /// read, as `source=auto` does.
 pub(super) async fn fill(
-    default_source: bool,
+    admission: Option<FillAdmission>,
     reads: Reads<'_>,
     selected_snapshot: &mut SelectedSnapshot,
     mut data: NameRecords,
 ) -> (Source, NameRecords) {
-    let source = fill_unretained(default_source, reads, selected_snapshot, &mut data).await;
+    let source = fill_unretained(admission, reads, selected_snapshot, &mut data).await;
     (source, data)
 }
 
 async fn fill_unretained(
-    default_source: bool,
+    admission: Option<FillAdmission>,
     reads: Reads<'_>,
     selected_snapshot: &mut SelectedSnapshot,
     data: &mut NameRecords,
 ) -> Source {
     let (state, row, alias, requested) = reads;
-    if !default_source {
+    let Some(admission) = admission else {
         return Source::Indexed;
-    }
+    };
     let keys: Vec<ResolutionRecordKey> = requested
         .iter()
         .filter(|record| {
@@ -67,6 +73,11 @@ async fn fill_unretained(
     if keys.is_empty() {
         return Source::Indexed;
     }
+    // The client's rate-limit token and a verified slot, held across the lookup. A refused
+    // admission keeps the indexed answers.
+    let Some(_permit) = admission.admit() else {
+        return Source::Indexed;
+    };
     let lookup =
         match load_verified_record_lookup(state, row, &keys, selected_snapshot, alias).await {
             Ok(Some(VerifiedRecordLookup::Found { response })) => response,

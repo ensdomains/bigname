@@ -37,6 +37,8 @@ const NEXT: &str = "0x8948458626811dd0c23eb25cc74291247077cc51";
 /// The ENSv1 mirror resolver the Sepolia profile declares, premigration's ENSv2 resolver.
 const MIRROR: &str = "0x322b7581ca210a69c6d0e0d7c88a7688d2789cb0";
 const ZERO: &str = "0x0000000000000000000000000000000000000000";
+/// An address no Sepolia resolver manifest declares.
+const UNDECLARED: &str = "0x00000000000000000000000000000000000000c3";
 /// The coin-60 address only `NEXT` holds for the node.
 const NEXT_HOLDER: &str = "0x00000000000000000000000000000000000000b2";
 const KEYS: &str = "addr:60,addr:61,text:name,text:avatar";
@@ -525,6 +527,26 @@ async fn r5_a_registry_pointer_on_the_lease_serves_as_composed() -> Result<()> {
     let view = served(&database).await?;
     database.cleanup().await?;
     assert_serves_next(&view);
+    Ok(())
+}
+
+/// Row 8: the registry points the node at an address no Sepolia resolver manifest declares,
+/// through the registry-only resource. Project classifies it `unsupported` with
+/// `resolver_not_declared`. Name detail and both records reads serve that address and its
+/// inventory, as the same logs on the lease do, which is how any name pointing at an undeclared
+/// resolver is served.
+#[tokio::test]
+async fn r8_a_registry_pointer_to_an_undeclared_resolver_serves_it() -> Result<()> {
+    let (wrong, right) = both(|| Ok(vec![pointer(lease_node(), UNDECLARED)?]), &[1]).await?;
+    for field in RESOLVER_FIELDS {
+        assert_eq!(wrong[field], resolver(UNDECLARED), "{field}: {wrong:#}");
+    }
+    assert_ne!(
+        wrong["keyed"]["text:avatar"],
+        json!({"status": "ok", "value": "first.png"}),
+        "{wrong:#}"
+    );
+    assert_eq!(wrong, right);
     Ok(())
 }
 

@@ -180,9 +180,10 @@ pub(crate) async fn get_name_records(
     Path(input_name): Path<String>,
     params: NameRecordsQuery,
     RawQuery(raw_query): RawQuery,
+    admission: Option<axum::Extension<crate::bounds::FillAdmission>>,
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<NameRecords>>> {
-    let default_source = unretained::default_source(raw_query.as_deref());
+    let fill_admission = unretained::admission(raw_query.as_deref(), admission);
     let params = params.into_inner();
     let normalized = normalize_inferred_route_name(&input_name)
         .map_err(|error| V2Error::invalid_input(error.message))?;
@@ -247,7 +248,7 @@ pub(crate) async fn get_name_records(
                     false,
                 )?;
                 let reads = (&state, &row, alias.as_ref(), requested_records);
-                unretained::fill(default_source, reads, &mut selected_snapshot, data).await
+                unretained::fill(fill_admission, reads, &mut selected_snapshot, data).await
             }
             RequestSource::Verified => {
                 let admit_null_resolver_discovery = verified_discovery(&row, alias.as_ref());

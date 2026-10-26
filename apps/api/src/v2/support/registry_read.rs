@@ -11,9 +11,10 @@
 //! (`load_records_route_inventory`). Only a row that serves a resolver, whose selected arm is
 //! `ens_v1` or `ens_v0` and whose served pointer is an ENSv1 one is read this way. A row the
 //! cut-over walk withholds or cannot prove, or whose coverage keeps its resolver out of the
-//! response, is served as composed. A registry pointer to a resolver bigname has no
-//! classification for is also served as composed, resolver and records, because no record
-//! inventory can be assembled for it.
+//! response, is served as composed. A registry pointer to an address no resolver manifest
+//! declares serves that address and its `unsupported` inventory (`resolver_not_declared`), as
+//! any name pointing at an undeclared resolver is served. Only an address with no classification
+//! row at all keeps the composed answer, because no inventory can be assembled for it.
 use bigname_storage::{
     ChainPositions, NameCurrentRow, RecordInventoryCurrentRow, SelectedSnapshot,
     SnapshotSelectionError, families::records::FamilyRecordInventory,
@@ -41,7 +42,8 @@ pub(crate) enum RegistryRead {
     Composed,
     /// The registry's pointer is cleared: no resolver and no records.
     Cleared,
-    /// The registry names this lower-cased, classified resolver: it and its records for the node.
+    /// The registry names this lower-cased resolver, which has a classification, supported or
+    /// not: it and its inventory for the node.
     Resolver(String),
 }
 
