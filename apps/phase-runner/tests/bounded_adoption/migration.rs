@@ -15,6 +15,9 @@ const FACTORY: &str = "0x77510ba162dfea3d8989e3f0928a691b345730d2";
 const USER_IMPLEMENTATION: &str = "0x75ff9adbcfce2469b097ac68f6ae650eae1351bb";
 const WRAPPER_IMPLEMENTATION: &str = "0xcf3edb3f5501de63b57254d910b6782ee370039b";
 const LOCKED_CONTROLLER: &str = "0xc46bf3b6c7ebcffd4ecfc3b012a1726a2463694d";
+const UNLOCKED_CONTROLLER: &str = "0xab821ca676cf2e0790fa273526a165cfa86aeb64";
+/// The registry family's declared `registry`, the checked-in ETHRegistry.
+const ETH_REGISTRY: &str = "0xf60aba43e1f7f3dab1186ff03b561401c9df85e2";
 /// A redeployed contract the checked-in manifest does not declare.
 const REDEPLOYED: &str = "0x0000000000000000000000000000000000300001";
 const PROXY: &str = "0x0000000000000000000000000000000000300002";
@@ -26,6 +29,10 @@ sol! {
         address indexed sender, address indexed proxyAddress, uint256 salt, address implementation
     );
     event Initialized(uint64 version);
+    event LabelRegistered(
+        uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner,
+        uint64 expiry, address indexed sender
+    );
 }
 
 /// The `[[contracts]]` entry of `role` and the text before and after it, as checked in.
@@ -86,6 +93,18 @@ fn proxy_deployed_by(
         proxyAddress: proxy.parse()?,
         salt: U256::from_be_bytes(alice().0),
         implementation: implementation.parse()?,
+    }
+    .encode_log_data())
+}
+
+fn label_registered(sender: &str) -> Result<alloy_primitives::LogData> {
+    Ok(LabelRegistered {
+        tokenId: U256::from(1),
+        labelHash: alice(),
+        label: "alice".to_owned(),
+        owner: SENDER.parse()?,
+        expiry: 0,
+        sender: sender.parse()?,
     }
     .encode_log_data())
 }
@@ -847,38 +866,51 @@ async fn a_moved_address_with_a_log_below_its_old_start_keeps_the_full_range() -
     fixture.cleanup().await
 }
 
-/// A fixture whose locked migration controller moves from `LOCKED_CONTROLLER` at `old` to
-/// `REDEPLOYED` at `new`, with factory logs at `logs` naming `(sender, proxy)`, synced after the
-/// initial pair.
+/// A fixture whose `role` moves from `from` at `old` to `REDEPLOYED` at `new`, with `logs` of
+/// `(block, emitter, log)`, synced after the initial pair.
+async fn role_moved(
+    prefix: &str,
+    role: &str,
+    (from, old, new): (&str, i64, i64),
+    logs: &[(i64, &str, alloy_primitives::LogData)],
+) -> Result<(Fixture, String)> {
+    let fixture = Fixture::with(prefix, 59, |profile| {
+        migration_baseline(profile, &[(role, Some((from, old)))])
+    })
+    .await?;
+    for (block, emitter, log) in logs {
+        fixture.log(*block, 0, emitter, log).await?;
+    }
+    fixture.initial_pair().await?;
+    fixture.declare_migration(role, Some((REDEPLOYED, new)))?;
+    let token = fixture.sync_migration().await?;
+    Ok((fixture, token))
+}
+
+/// The locked migration controller moved from `LOCKED_CONTROLLER` at `old` to `REDEPLOYED` at
+/// `new`, with factory logs at `logs` naming `(sender, proxy)`.
 async fn controller_moved(
     prefix: &str,
     (old, new): (i64, i64),
     logs: &[(i64, &str, &str)],
 ) -> Result<(Fixture, String)> {
-    let fixture = Fixture::with(prefix, 59, |profile| {
-        migration_baseline(
-            profile,
-            &[(
-                "locked_migration_controller",
-                Some((LOCKED_CONTROLLER, old)),
-            )],
-        )
-    })
-    .await?;
-    for (block, sender, proxy) in logs {
-        fixture
-            .log(
+    let logs = logs
+        .iter()
+        .map(|(block, sender, proxy)| {
+            Ok((
                 *block,
-                0,
                 FACTORY,
-                &proxy_deployed_by(sender, proxy, UNDECLARED)?,
-            )
-            .await?;
-    }
-    fixture.initial_pair().await?;
-    fixture.declare_migration("locked_migration_controller", Some((REDEPLOYED, new)))?;
-    let token = fixture.sync_migration().await?;
-    Ok((fixture, token))
+                proxy_deployed_by(sender, proxy, UNDECLARED)?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    role_moved(
+        prefix,
+        "locked_migration_controller",
+        (LOCKED_CONTROLLER, old, new),
+        &logs,
+    )
+    .await
 }
 
 // The factory-sender guard. The controller lookup reads a factory `ProxyDeployed` naming the
@@ -901,8 +933,8 @@ async fn a_factory_log_below_the_new_controllers_start_keeps_the_full_range() ->
             &token,
             &format!(
                 "declares locked_migration_controller {REDEPLOYED} from block {new}, but the \
-                 factory log at block {} names that address as `sender`, so the declared start \
-                 is not its deployment block",
+                 ProxyDeployed log of {FACTORY} at block {} names that address as `sender`, so \
+                 the declared start is not its deployment block",
                 START + 15
             ),
         )
@@ -931,7 +963,7 @@ async fn a_factory_log_below_the_old_controllers_start_keeps_the_full_range() ->
             &token,
             &format!(
                 "declares locked_migration_controller {LOCKED_CONTROLLER} from block {old}, but \
-                 the factory log at block {} names that address as `sender`",
+                 the ProxyDeployed log of {FACTORY} at block {} names that address as `sender`",
                 old - 1
             ),
         )
@@ -983,11 +1015,115 @@ async fn a_factory_log_naming_only_the_other_side_of_a_move_stays_bounded() -> R
     fixture.assert_equals_full_pair().await
 }
 
-// The factory-sender statement probes the factory's own logs through `raw_logs_emitter_idx`, with
-// the topics as filters, under the generic plan a prepared statement settles on. Over 20,000 logs
+// The registry-sender guard. The migration adapter compares the `sender` of a same-transaction
+// registration, built from the registry's `LabelRegistered`, with both controllers by address
+// alone (`crates/adapters/src/schema_v2/migration.rs`). A registration naming the new unlocked
+// controller below its declared start, and below the bound, keeps the full range and names the
+// registry log's block. The full range then runs, and the tables equal the full pair's.
+#[tokio::test]
+async fn a_registration_below_the_unlocked_controllers_start_keeps_the_full_range() -> Result<()> {
+    let (old, new) = (START + 20, START + 30);
+    let (fixture, token) = role_moved(
+        "migration_registration_unlocked",
+        "unlocked_migration_controller",
+        (UNLOCKED_CONTROLLER, old, new),
+        &[(START + 15, ETH_REGISTRY, label_registered(REDEPLOYED)?)],
+    )
+    .await?;
+    fixture
+        .assert_short_range_refused(
+            &token,
+            &format!(
+                "declares unlocked_migration_controller {REDEPLOYED} from block {new}, but the \
+                 LabelRegistered log of {ETH_REGISTRY} at block {} names that address as \
+                 `sender`, so the declared start is not its deployment block",
+                START + 15
+            ),
+        )
+        .await?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(START, START)?;
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// The registry-sender guard for the locked controller, on the old side of a move: a registration
+// one block below the old controller's declared start.
+#[tokio::test]
+async fn a_registration_below_the_locked_controllers_start_keeps_the_full_range() -> Result<()> {
+    let (old, new) = (START + 20, START + 30);
+    let (fixture, token) = role_moved(
+        "migration_registration_locked",
+        "locked_migration_controller",
+        (LOCKED_CONTROLLER, old, new),
+        &[(old - 1, ETH_REGISTRY, label_registered(LOCKED_CONTROLLER)?)],
+    )
+    .await?;
+    fixture
+        .assert_short_range_refused(
+            &token,
+            &format!(
+                "declares locked_migration_controller {LOCKED_CONTROLLER} from block {old}, but \
+                 the LabelRegistered log of {ETH_REGISTRY} at block {} names that address as \
+                 `sender`",
+                old - 1
+            ),
+        )
+        .await?;
+    fixture.cleanup().await
+}
+
+// The registry guard's lower edge. A registration naming each side of the move exactly at its
+// declared start stays inside the bound, so the redo is bounded from the old start.
+#[tokio::test]
+async fn registrations_naming_a_controller_at_its_start_stay_bounded() -> Result<()> {
+    let (old, new) = (START + 20, START + 30);
+    let (fixture, token) = role_moved(
+        "migration_registration_at_start",
+        "locked_migration_controller",
+        (LOCKED_CONTROLLER, old, new),
+        &[
+            (old, ETH_REGISTRY, label_registered(LOCKED_CONTROLLER)?),
+            (new, ETH_REGISTRY, label_registered(REDEPLOYED)?),
+        ],
+    )
+    .await?;
+    fixture.assert_bounded_refusal(&token, old).await?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(old, old)?;
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// A registry change beside a controller move refuses the bound by the registry family's
+// whole-redo rule, before any probe reads the registry it replaces.
+#[tokio::test]
+async fn a_registry_change_beside_a_controller_move_refuses_as_a_whole() -> Result<()> {
+    let (fixture, _) =
+        controller_moved("migration_registry_moved", (START + 20, START + 30), &[]).await?;
+    fixture
+        .plant_manifest(
+            "ens_v2_registry_l1",
+            json!([{"role": "registry", "address": PROXY, "proxy_kind": "none",
+                "start_block": START + 5}]),
+        )
+        .await?;
+    let token = fixture.plant_marker("registry_moved").await?;
+    fixture
+        .assert_short_range_refused(&token, "of family ens_v2_registry_l1 changed")
+        .await?;
+    fixture.cleanup().await
+}
+
+// The sender statement probes one emitter's own logs through `raw_logs_emitter_idx`, with the
+// topics as filters, under the generic plan a prepared statement settles on. Over 20,000 logs
 // from 200 emitters it walks no table whole.
 #[tokio::test]
-async fn the_factory_sender_statement_reads_the_emitter_index() -> Result<()> {
+async fn the_sender_statement_reads_the_emitter_index() -> Result<()> {
     let fixture = Fixture::new("migration_sender_plan", 1_999).await?;
     sqlx::query(
         "INSERT INTO raw_logs (chain_id, block_hash, block_number, transaction_hash,
@@ -1012,15 +1148,15 @@ async fn the_factory_sender_statement_reads_the_emitter_index() -> Result<()> {
         .execute(&mut *transaction)
         .await?;
     sqlx::raw_sql(&format!(
-        "PREPARE factory_sender AS {}",
-        phase_runner::factory_sender_statement()
+        "PREPARE sender_log AS {}",
+        phase_runner::sender_statement()
     ))
     .execute(&mut *transaction)
     .await?;
     let head = fixture.head;
     let (topic0, sender) = (format!("0x{:0>64}", 5), format!("0x{:0>64}", 7));
     let plan = sqlx::query_scalar::<_, String>(&format!(
-        "EXPLAIN (COSTS OFF) EXECUTE factory_sender('{CHAIN}',
+        "EXPLAIN (COSTS OFF) EXECUTE sender_log('{CHAIN}',
              '0x0000000000000000000000000000000000001001', {head}, '{topic0}', 2, '{sender}')"
     ))
     .fetch_all(&mut *transaction)

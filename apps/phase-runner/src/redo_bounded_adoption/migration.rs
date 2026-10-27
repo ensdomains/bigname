@@ -6,10 +6,10 @@
 //! `crates/adapters/src/schema_v2/migration/registry_origin.rs` (`supported_origin`) and the
 //! Project reader of `crates/storage/src/families/control/permissions/registry_support.rs`
 //! (`load`). A redo from the lowest start on either side of such a change therefore recomposes
-//! every row the change can alter. The controller lookup reads a controller as a factory log's
-//! indexed `sender`, which no first-effect arm can find, so it rests on the declared start being
-//! the deployment block. `start_refusal` refuses the bound where a log shows otherwise: a log the
-//! address emitted, or a factory log naming it as `sender`.
+//! every row the change can alter. The controller lookups read a controller as the indexed
+//! `sender` of a factory or registry log, which no first-effect arm can find, so they rest on the
+//! declared start being the deployment block. `start_refusal` refuses the bound where a log shows
+//! otherwise: a log the address emitted, or a factory or registry log naming it as `sender`.
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
@@ -33,31 +33,44 @@ const COMPILED_WATCH: &str = "_bigname_compiled_watch";
 /// `proxy_sender`). Such a role emits none of the family's events, so only the factory's logs can
 /// show that it acted before its declared start.
 const FACTORY_SENDER_ROLES: [&str; 1] = ["locked_migration_controller"];
-const FACTORY_ROLE: &str = "verifiable_factory";
 const FACTORY_EVENT: &str = "ProxyDeployed";
+
+/// The roles a registry `LabelRegistered` names as its indexed `sender`. The migration adapter
+/// compares the `sender` of a same-transaction `RegistrationGranted`, built from that log, with
+/// both controllers by address alone (`crates/adapters/src/schema_v2/migration.rs`,
+/// `correlate_authority_transitions`), and its launch gate is the Graveyard's start, below a
+/// redeployed controller's. The emitters are the registry family's own, read from its current
+/// manifest.
+const REGISTRY_SENDER_ROLES: [&str; 2] = [
+    "unlocked_migration_controller",
+    "locked_migration_controller",
+];
+const REGISTRY_FAMILY: &str = "ens_v2_registry_l1";
+const REGISTRY_EVENT: &str = "LabelRegistered";
 const SENDER: &str = "sender";
 
-/// The first canonical factory log at or below `$3` whose topic at array position `$5` is `$6`.
-/// It walks `raw_logs_emitter_idx` over the factory's own logs, with the topics as filters, as
-/// the first-effect scan's watched-address arm does.
-const FACTORY_SENDER_LOG: &str = "SELECT log.block_number FROM raw_logs log
+/// The first canonical log of emitter `$2` at or below `$3` whose topic at array position `$5`
+/// is `$6`. It walks `raw_logs_emitter_idx` over that emitter's own logs, with the topics as
+/// filters, as the first-effect scan's watched-address arm does.
+const SENDER_LOG: &str = "SELECT log.block_number FROM raw_logs log
     JOIN chain_lineage lineage ON lineage.chain_id = log.chain_id
      AND lineage.block_hash = log.block_hash AND lineage.block_number = log.block_number
     WHERE log.chain_id = $1 AND lower(log.emitting_address) = $2 AND log.block_number <= $3
       AND lower(log.topics[1]) = $4 AND lower(log.topics[$5]) = $6 AND {READABLE}
     ORDER BY log.block_number LIMIT 1";
 
-/// The factory-sender statement as `start_refusal` sends it, so a test can pin its plan.
+/// The sender statement as `start_refusal` sends it, so a test can pin its plan.
 #[doc(hidden)]
-pub fn factory_sender_statement() -> String {
-    FACTORY_SENDER_LOG.replace("{READABLE}", READABLE)
+pub fn sender_statement() -> String {
+    SENDER_LOG.replace("{READABLE}", READABLE)
 }
 
-/// Where a changed address shows up as a factory log's `sender`: the declared factory, the
-/// event's topic0, and the PostgreSQL array position of the `sender` topic in `raw_logs.topics`.
+/// Where a changed address shows up as a log's `sender`: the declared emitters of the event, its
+/// name and topic0, and the PostgreSQL array position of the `sender` topic in `raw_logs.topics`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SenderProbe {
-    pub(crate) factory: String,
+    pub(crate) emitters: Vec<String>,
+    pub(crate) event: String,
     pub(crate) topic0: String,
     pub(crate) position: i32,
 }
@@ -148,7 +161,7 @@ pub(crate) fn migration_change_qualifies(
         };
         let sender = if FACTORY_SENDER_ROLES.contains(role) {
             if probe.is_none() {
-                probe = Some(sender_probe(new, &after)?);
+                probe = Some(sender_probe(new.payload, FACTORY_EVENT)?);
             }
             probe.clone().flatten()
         } else {
@@ -179,30 +192,40 @@ pub(crate) fn migration_change_qualifies(
     Ok(changed)
 }
 
-/// How to find the factory logs naming a sender role, read from the declared factory and the
-/// family's `ProxyDeployed` fragment. `None` when the manifest declares no factory or no such
-/// event, so no factory log is interpreted for it. A fragment that does not index `sender` leaves
-/// nothing to probe, so the change keeps the full range.
-fn sender_probe(
-    side: &Side<'_>,
-    roles: &BTreeMap<&str, Vec<&Value>>,
-) -> Result<Option<SenderProbe>, String> {
-    let Some(factory) = roles
-        .get(FACTORY_ROLE)
-        .and_then(|entries| entries.first())
-        .and_then(|entry| address(entry))
-    else {
-        return Ok(None);
-    };
-    let Some(event) = side.payload["abi"]["events"]
+/// How to find the logs naming a sender role: the payload's `[[abi.events]]` entry `name`, the
+/// declared contracts of its emitter roles and the position of its indexed `sender`. `None` when
+/// the payload declares no such event or no emitter, so no such log is interpreted. A fragment
+/// that does not index `sender` leaves nothing to probe, so the change keeps the full range.
+fn sender_probe(payload: &Value, name: &str) -> Result<Option<SenderProbe>, String> {
+    let Some(event) = payload["abi"]["events"]
         .as_array()
         .into_iter()
         .flatten()
-        .find(|event| event["name"] == FACTORY_EVENT)
+        .find(|event| event["name"] == name)
     else {
         return Ok(None);
     };
-    let unreadable = || format!("its {FACTORY_EVENT} fragment does not index `{SENDER}`");
+    let roles: Vec<&str> = event["emitter_roles"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let emitters: Vec<String> = payload[CONTRACTS]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|entry| {
+            entry["role"]
+                .as_str()
+                .is_some_and(|role| roles.contains(&role))
+        })
+        .filter_map(address)
+        .collect();
+    if emitters.is_empty() {
+        return Ok(None);
+    }
+    let unreadable = || format!("its {name} fragment does not index `{SENDER}`");
     let event: ManifestAbiEvent =
         serde_json::from_value(event.clone()).map_err(|_| unreadable())?;
     let parsed = event.parsed_event().map_err(|_| unreadable())?;
@@ -223,7 +246,8 @@ fn sender_probe(
         .position(|name| *name == SENDER)
         .ok_or_else(unreadable)?;
     Ok(Some(SenderProbe {
-        factory,
+        emitters,
+        event: name.to_owned(),
         topic0,
         position: i32::try_from(at + 2).map_err(|_| unreadable())?,
     }))
@@ -265,18 +289,64 @@ fn other_watches(side: &Side<'_>, addresses: &BTreeSet<&str>) -> BTreeSet<String
 }
 
 /// Why the bound of a qualifying change is refused, when a declaration it adds or moves names an
-/// address with a retained log below the declared start: one it emitted, or, for a role the
-/// factory names as `sender`, a factory log naming it. The start is then not the contract's
-/// deployment block, and a factory log naming it below that start could lie below the bound.
-/// Each address walks its own logs, as the first-effect scan's emitted-log arm does, and each
-/// sender probe walks the factory's.
+/// address with a retained log below the declared start: one it emitted, or, for a role a factory
+/// or registry log names as `sender`, such a log naming it. The start is then not the contract's
+/// deployment block, and a log naming it below that start could lie below the bound. Each
+/// address walks its own logs, as the first-effect scan's emitted-log arm does, and each sender
+/// probe walks each of its emitters'. The registry probe reads the registry family's manifests in
+/// `current`, the set the redo adopts. A registry change refuses the bound before this, by the
+/// whole-redo rule.
+///
+/// The registry probe also covers `crates/adapters/src/schema_v2/migration/unwrapped_reconcile.rs`,
+/// which reads both controllers and the Graveyard with no block (:73-75). It cannot act on a
+/// transaction without a `LabelRegistered`: it returns early without a v1 registrar `Transfer`
+/// (:80-93), and everything it proves comes from the probe's authority transitions (:95-128,
+/// :183-195). `correlate_authority_transitions` (`migration.rs`:318-420) pushes one only inside
+/// its loop over the same-transaction `RegistrationGranted` rows built from `LabelRegistered`
+/// (:331-349), and compares the addresses only there: the Graveyard with the `Transfer`'s `to`
+/// (:373-375), the controllers with the registration's `sender` (:379, :385, :395, and the
+/// proof at `unwrapped_reconcile.rs`:195). So these sites no longer rest on the test that each
+/// declared start is the deployment receipt's block.
+///
+/// On main, TYR-385's block-aware controller comparisons (`Controllers::at(catalog, block)`) are
+/// the structural fix, and the bounded pair equals the full pair by construction there. This
+/// guard is defence for this release line, and it forward-merges harmlessly.
 pub(crate) async fn start_refusal(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     changed: &[(i64, Changed)],
+    current: &[super::EventRow],
     through: i64,
 ) -> RunnerResult<Option<String>> {
+    let mut registries = Vec::new();
+    if changed
+        .iter()
+        .any(|(_, declaration)| REGISTRY_SENDER_ROLES.contains(&declaration.role.as_str()))
+    {
+        for row in current
+            .iter()
+            .filter(|row| row.2 == chain_id && row.4 == REGISTRY_FAMILY)
+        {
+            let Some(side) = super::side(Some(row)) else {
+                continue;
+            };
+            if side.rollout_status != Some("active") {
+                continue;
+            }
+            match sender_probe(side.payload, REGISTRY_EVENT) {
+                Ok(probe) => registries.extend(probe),
+                Err(reason) => {
+                    return Ok(Some(format!(
+                        "manifest {} of family {REGISTRY_FAMILY} cannot show where a changed \
+                         migration controller registered names: {reason}",
+                        row.0
+                    )));
+                }
+            }
+        }
+    }
     let statement = EMITTED_LOG.replace("{READABLE}", READABLE);
+    let sender_log = sender_statement();
     for (manifest_id, declaration) in changed {
         let below = (declaration.start - 1).min(through);
         if below < 0 {
@@ -302,32 +372,35 @@ pub(crate) async fn start_refusal(
                 declaration.role, declaration.address, declaration.start
             )));
         }
-        let Some(probe) = &declaration.sender else {
-            continue;
-        };
+        let controller = REGISTRY_SENDER_ROLES.contains(&declaration.role.as_str());
+        let registry: &[SenderProbe] = if controller { &registries } else { &[] };
         let topic = format!("0x{:0>64}", declaration.address.trim_start_matches("0x"));
-        let named: Option<i64> = sqlx::query_scalar(&factory_sender_statement())
-            .bind(chain_id)
-            .bind(&probe.factory)
-            .bind(below)
-            .bind(&probe.topic0)
-            .bind(probe.position)
-            .bind(topic)
-            .fetch_optional(&mut **transaction)
-            .await
-            .map_err(|error| {
-                RunnerError::database(
-                    "failed to read the factory logs naming a changed migration address",
-                    error,
-                )
-            })?;
-        if let Some(block) = named {
-            return Ok(Some(format!(
-                "manifest {manifest_id} of family {MIGRATION_FAMILY} declares {} {} from block \
-                 {}, but the factory log at block {block} names that address as `{SENDER}`, so \
-                 the declared start is not its deployment block",
-                declaration.role, declaration.address, declaration.start
-            )));
+        for probe in declaration.sender.iter().chain(registry) {
+            for emitter in &probe.emitters {
+                let named: Option<i64> = sqlx::query_scalar(&sender_log)
+                    .bind(chain_id)
+                    .bind(emitter)
+                    .bind(below)
+                    .bind(&probe.topic0)
+                    .bind(probe.position)
+                    .bind(&topic)
+                    .fetch_optional(&mut **transaction)
+                    .await
+                    .map_err(|error| {
+                        RunnerError::database(
+                            "failed to read the logs naming a changed migration address",
+                            error,
+                        )
+                    })?;
+                if let Some(block) = named {
+                    return Ok(Some(format!(
+                        "manifest {manifest_id} of family {MIGRATION_FAMILY} declares {} {} from \
+                         block {}, but the {} log of {emitter} at block {block} names that \
+                         address as `{SENDER}`, so the declared start is not its deployment block",
+                        declaration.role, declaration.address, declaration.start, probe.event
+                    )));
+                }
+            }
         }
     }
     Ok(None)

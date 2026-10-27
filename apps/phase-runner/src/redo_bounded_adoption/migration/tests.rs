@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{Changed, SenderProbe, migration_change_qualifies};
+use super::{Changed, SenderProbe, migration_change_qualifies, sender_probe};
 use crate::redo_first_effect::{ManifestDiff, Side};
 
 const CONTROLLER: &str = "0x00000000000000000000000000000000000c0001";
@@ -72,7 +72,8 @@ fn changed(role: &str, address: &str, start: i64) -> Changed {
 fn controller(address: &str, start: i64, position: i32) -> Changed {
     Changed {
         sender: Some(SenderProbe {
-            factory: FACTORY.to_owned(),
+            emitters: vec![FACTORY.to_owned()],
+            event: "ProxyDeployed".to_owned(),
             topic0: PROXY_DEPLOYED.to_owned(),
             position,
         }),
@@ -335,4 +336,24 @@ fn a_controller_without_a_declared_factory_has_no_probe() {
         verdict(&payload(&[]), &new),
         Ok(vec![changed("locked_migration_controller", CONTROLLER, 20)])
     );
+}
+
+// The registry family's `LabelRegistered` names its `sender` third among the indexed inputs, so
+// the probe reads `topics[4]` of every declared emitter of the event.
+#[test]
+fn the_registry_probe_reads_the_sender_at_topic_four() {
+    let fragment = "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, \
+                    string label, address owner, uint64 expiry, address indexed sender)";
+    let registry = json!({
+        "contracts": [contract("registry", MOVED, 5), contract("helper", CONTROLLER, 5)],
+        "abi": {"events": [{"name": "LabelRegistered", "fragment": fragment,
+            "emitter_roles": ["registry"]}]},
+    });
+    let probe = sender_probe(&registry, "LabelRegistered")
+        .expect("the fragment indexes `sender`")
+        .expect("the registry is declared");
+    assert_eq!(probe.position, 4);
+    assert_eq!(probe.emitters, [MOVED]);
+    assert_eq!(probe.event, "LabelRegistered");
+    assert_eq!(sender_probe(&registry, "LabelReserved"), Ok(None));
 }

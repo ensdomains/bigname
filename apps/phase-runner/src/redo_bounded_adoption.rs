@@ -153,7 +153,7 @@ pub(crate) async fn plan(
         manifests.entry(row.0).or_default().1 = Some(row);
     }
     let mut diff = ManifestDiff::default();
-    let mut migration_changes = Vec::new();
+    let mut migrated = Vec::new();
     for (manifest_id, (before, after)) in manifests {
         let (old, new) = (side(before), side(after));
         if old.as_ref().map(|side| (side.rollout_status, side.payload))
@@ -192,7 +192,7 @@ pub(crate) async fn plan(
             .any(|row| row.4 == MIGRATION_FAMILY)
         {
             match migration_change_qualifies(old.as_ref(), new.as_ref()) {
-                Ok(changed) => migration_changes.extend(
+                Ok(changed) => migrated.extend(
                     changed
                         .into_iter()
                         .map(|declaration| (manifest_id, declaration)),
@@ -221,7 +221,7 @@ pub(crate) async fn plan(
         diff.add(old.as_ref(), new.as_ref());
     }
     if let Some(reason) =
-        migration::start_refusal(transaction, chain_id, &migration_changes, through).await?
+        migration::start_refusal(transaction, chain_id, &migrated, &current, through).await?
     {
         return Ok(Plan::Full(reason));
     }

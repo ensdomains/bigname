@@ -1046,8 +1046,8 @@ The redo keeps the full range, and the refusal says why after "because", when:
 - the change edits the `ens_v2_migration_l1` manifest other than by adding an
   address or moving one, as the next paragraph describes
 - an address such a migration change adds or moves emitted a retained log
-  below its declared `start_block`, or a retained factory `ProxyDeployed` log
-  below that start names it as `sender`
+  below its declared `start_block`, or a retained factory `ProxyDeployed` or
+  registry `LabelRegistered` log below that start names it as `sender`
 - the change edits `universal_resolver_implementations` or
   `correlation_addresses`, which Interpret reads at every block
 - the marker records no change of the published set, as when manifest sync
@@ -1070,14 +1070,17 @@ declaration, or editing one in place, keeps the full range. That includes a
 
 The bound assumes each changed `start_block` is the contract's deployment block.
 Interpret reads the locked migration controller as the `sender` of a factory
-`ProxyDeployed` log, and the first-effect scan cannot search that field. A
-changed address that emitted a retained log below its declared start shows the
-assumption is wrong, so the redo keeps the full range. For the locked
-controller, on each side of a move, the redo also reads the declared
-`verifiable_factory`'s retained `ProxyDeployed` logs below that start whose
-`sender` topic is the controller's address. The topic's position comes from the
-event's indexed inputs in the manifest's `[[abi.events]]`. A hit keeps the full
-range, and the refusal names the factory log's block.
+`ProxyDeployed` log, and both migration controllers as the `sender` of a
+registry `LabelRegistered` log, by address alone. The first-effect scan cannot
+search that field. A changed address that emitted a retained log below its
+declared start shows the assumption is wrong, so the redo keeps the full range.
+For a changed controller, on each side of a move, the redo also reads the
+retained logs below that start whose `sender` topic is the controller's
+address: the declared `verifiable_factory`'s `ProxyDeployed` logs for the locked
+controller, and the `LabelRegistered` logs of the registry family's current
+`registry` declarations for both. Each topic's position comes from the event's
+indexed inputs in its manifest's `[[abi.events]]`. A hit keeps the full range,
+and the refusal names the log's block.
 
 The stamped Project redo undoes to the bound and replays from it while the bound
 lies inside the [family undo journal](glossary.md#family-undo-journal). Once
