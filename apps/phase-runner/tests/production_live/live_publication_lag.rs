@@ -232,6 +232,21 @@ impl Lagged {
         settled(self.scratch.pool(), &self.chain, newest, &mut self.task).await
     }
 
+    /// Stop the runner, extend the node's branch 1 through `extend_to` when given, and start the
+    /// runner again with `lag`.
+    async fn restart(&mut self, lag: u32, extend_to: Option<i64>) -> Result<()> {
+        self.stop.cancel();
+        let previous = std::mem::replace(&mut self.task, tokio::spawn(async { Ok(()) }));
+        previous.await??;
+        if let Some(through) = extend_to {
+            self.fixture.reorg(1, through - 1, through).await;
+        }
+        let (stop, task) = spawn(&self.scratch, &self.fixture, &self.chain, lag, None)?;
+        self.stop = stop;
+        self.task = task;
+        Ok(())
+    }
+
     async fn finish(self) -> Result<()> {
         self.stop.cancel();
         self.task.await??;
@@ -730,20 +745,54 @@ async fn catch_up_windows_each_publish_the_lag_below_their_top() -> Result<()> {
     scratch.cleanup().await
 }
 
-// The lag changed across a restart: raised from 2 to 3, the head holds rather than stepping back;
-// lowered to 0, every loaded block becomes readable, as on a runner without the setting.
+// The lag changed across a restart. Raised from 2 to 3 with no new block, the lag would put the
+// head below the block already readable, which holds instead. Raised with new blocks, the head
+// stalls until the lag catches up. Lowered to 0, every loaded block becomes readable, as on a
+// runner without the setting.
 #[tokio::test]
 async fn a_lag_changed_across_a_restart_never_moves_the_head_backward() -> Result<()> {
     let mut lagged = start("live_lag_changed", 3, 6, LAG).await?;
     lagged.settled(at(1, 6)).await?;
+    let pool = lagged.scratch.pool().clone();
+    let before = redo_generations(&pool, &lagged.chain).await?;
+    // The node still stands at 6, so 6 - 3 = 3 is below the readable head 4.
+    lagged.restart(3, None).await?;
+    // Live keeps polling a node with nothing new. Twenty more requests take the restarted runner
+    // past its first batch and the publication that follows it.
+    let polled = lagged.fixture.requests().await + 20;
+    tokio::time::timeout(HEAD_ADVANCE_DEADLINE, async {
+        while lagged.fixture.requests().await < polled && !lagged.task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("the restarted runner stopped polling the node"))?;
+    let published: (i64, String) = sqlx::query_as(
+        "SELECT latest_block_number, latest_block_hash FROM chain_heads WHERE chain_id = $1",
+    )
+    .bind(&lagged.chain)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(published, at(1, 4), "lag 3 with no new block");
+    let settled = lagged.settled(at(1, 6)).await?;
+    assert_eq!(settled.head, at(1, 4));
+    assert_eq!(settled.interpret, at(1, 4));
+    assert_eq!(
+        lineage(&pool, &lagged.chain, 4).await?,
+        vec![
+            row(1, 4, "canonical"),
+            row(1, 5, "observed"),
+            row(1, 6, "observed")
+        ]
+    );
+    assert_eq!(count_in_state(&pool, &lagged.chain, "orphaned").await?, 0);
+    assert_eq!(
+        redo_generations(&pool, &lagged.chain).await?,
+        before,
+        "no phase was stamped"
+    );
     for (lag, through, head) in [(3, 7, 4), (3, 8, 5), (0, 9, 9)] {
-        lagged.stop.cancel();
-        let previous = std::mem::replace(&mut lagged.task, tokio::spawn(async { Ok(()) }));
-        previous.await??;
-        lagged.fixture.reorg(1, through - 1, through).await;
-        let (stop, task) = spawn(&lagged.scratch, &lagged.fixture, &lagged.chain, lag, None)?;
-        lagged.stop = stop;
-        lagged.task = task;
+        lagged.restart(lag, Some(through)).await?;
         let settled = lagged.settled(at(1, through)).await?;
         assert_eq!(
             settled.head,
@@ -752,21 +801,30 @@ async fn a_lag_changed_across_a_restart_never_moves_the_head_backward() -> Resul
         );
         assert_eq!(settled.interpret, at(1, head));
     }
-    let observed: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM chain_lineage
-         WHERE chain_id = $1 AND canonicality_state = 'observed'",
-    )
-    .bind(&lagged.chain)
-    .fetch_one(lagged.scratch.pool())
-    .await?;
-    assert_eq!(observed, 0, "at lag 0 nothing stays observed");
+    assert_eq!(
+        count_in_state(&pool, &lagged.chain, "observed").await?,
+        0,
+        "at lag 0 nothing stays observed"
+    );
     lagged.finish().await
+}
+
+async fn count_in_state(pool: &PgPool, chain: &str, state: &str) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*) FROM chain_lineage
+         WHERE chain_id = $1 AND canonicality_state::text = $2",
+    )
+    .bind(chain)
+    .bind(state)
+    .fetch_one(pool)
+    .await?)
 }
 
 // Metrics under the lag. The chain-head gauge is the published, lagged head. Live's target is the
 // node's head and its position the newest block it loaded, which match once it has caught up, so
-// its head lag reads 0, as do Interpret and Project, which stand on the published head. The publication gap reads the configured lag,
-// and so does the served lag, which measures from the node's head.
+// its head lag reads 0, as do Interpret and Project, which stand on the published head. The
+// publication gap reads the configured lag, and so does the served lag, which measures from the
+// node's head.
 #[tokio::test]
 async fn metrics_report_the_publication_gap_and_the_configured_lag() -> Result<()> {
     for (label, lag, head) in [("live_lag_metrics", LAG, 4), ("live_lag_metrics_off", 0, 6)] {
