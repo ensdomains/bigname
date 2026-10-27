@@ -840,7 +840,9 @@ collection route carry neither header.
   as `page.total_count`), and `record_count`, the known record-selector count
   of the current registration's record inventory with the same meaning as on
   address-name rows; `record_count` is omitted when the row has no current
-  record inventory. Neither count is added to any `read_status=unsupported`
+  record inventory. A name served through its ENSv1 registry pointer counts
+  the inventory its `records` come from, so a registry clear omits
+  `record_count`. Neither count is added to any `read_status=unsupported`
   name-level record, including a verified unsupported record that retains its
   registration fields. There is no `event_count`: bigname keeps no
   precomputed per-name event total, and counting history rows on the request
@@ -1246,6 +1248,9 @@ its value map:
   whenever its stored resolver names another one. A registry clear serves no
   resolver and no records. A pointer to a resolver bigname has no
   classification for keeps the stored resolver and its records.
+  `source=verified` and the verified keys of `source=auto` read the chain as
+  for any other name. Whether that read runs Universal Resolver discovery
+  still follows the stored resolver.
 - Records this route withholds, for a released name, a lapsed reservation or
   a name whose resolution is withheld, can still be read by resolver:
   [`GET /v1/resolvers/{chain_id}/{address}/records`](#get-v1resolverschain_idaddressrecords)

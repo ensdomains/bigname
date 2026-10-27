@@ -642,3 +642,342 @@ async fn r2_the_default_read_answers_an_unretained_text_through_the_verified_rea
     assert_eq!(payload["meta"]["source"], "indexed", "{payload:#}");
     database.cleanup().await
 }
+
+/// An address no Sepolia resolver manifest declares.
+const NOT_DECLARED: &str = "0x00000000000000000000000000000000000000c3";
+
+/// The lease's pointer cleared on the lease, then the registry pointing the node at `resolver`
+/// through the registry-only resource with `then`'s logs in the same block. The composed row
+/// serves no resolver, and the registry names `resolver`.
+fn cleared_then(resolver: &str, then: Result<Logs>) -> Result<Vec<Logs>> {
+    Ok(vec![
+        pointer(lease_node(), ZERO)?,
+        logs(vec![pointer(lease_node(), resolver), then])?,
+    ])
+}
+
+/// `NEXT`'s records with a fourth selector, so its record count differs from `FIRST`'s.
+fn more_next_records(node: B256) -> Result<Logs> {
+    records(
+        NEXT,
+        node,
+        NEXT_HOLDER,
+        Some(OWNER),
+        &[("name", "Test"), ("url", "https://next.test")],
+    )
+}
+
+/// `name` DNS-encoded, as the Universal Resolver's `ResolverNotFound` carries it.
+fn dns_encoded(name: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    for label in name.split('.') {
+        out.push(label.len() as u8);
+        out.extend_from_slice(label.as_bytes());
+    }
+    out.push(0);
+    out
+}
+
+/// `uri` against the Sepolia lookup pointed at a mock RPC that answers `response` once. Returns
+/// the status, the body, and whether the chain was read.
+async fn with_chain(
+    database: &TestDatabase,
+    uri: &str,
+    response: Value,
+) -> Result<(StatusCode, Value, bool)> {
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![response]).await?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(bigname_lookup::ChainRpcUrls::from_entries(&[
+            format!("{CHAIN}={rpc_url}"),
+        ])?)
+        .await?;
+    let response = app_router(state)
+        .oneshot(Request::builder().uri(uri).body(Body::empty())?)
+        .await?;
+    let status = response.status();
+    let body: Value = read_json(response).await?;
+    // The mock task ends once it has answered its one request.
+    let read_chain = tokio::time::timeout(std::time::Duration::from_secs(5), rpc_handle)
+        .await
+        .is_ok();
+    Ok((status, body, read_chain))
+}
+
+/// Row A1: the lease's pointer cleared, then the registry pointing at `NEXT` through the
+/// registry-only resource. The composed row serves no resolver, so the verified lookup, which
+/// reloads it, runs Universal Resolver discovery. A `source=verified` read answers `200` from
+/// the chain and serves `NEXT`, with no `409 stale`.
+#[tokio::test]
+async fn ra1_a_verified_read_of_a_cleared_lease_serving_a_registry_resolver_is_not_stale()
+-> Result<()> {
+    let database = published(cleared_then(NEXT, next_records(lease_node()))?, &[2]).await?;
+    let (status, body, read_chain) = with_chain(
+        &database,
+        &format!("/v1/names/{NAME}/records?namespace=ens&source=verified&keys=text:name"),
+        resolution_universal_resolver_text_response("Test"),
+    )
+    .await?;
+    database.cleanup().await?;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert_eq!(body["data"]["resolver"], resolver(NEXT), "{body:#}");
+    assert_eq!(
+        body["data"]["records"]["text:name"],
+        json!({"status": "ok", "value": "Test"}),
+        "{body:#}"
+    );
+    assert_eq!(body["meta"]["source"], "verified", "{body:#}");
+    assert!(read_chain);
+    Ok(())
+}
+
+/// Row A2: as A1, with the registry pointing at an address no resolver manifest declares.
+#[tokio::test]
+async fn ra2_a_verified_read_of_a_cleared_lease_serving_an_undeclared_resolver_is_not_stale()
+-> Result<()> {
+    let database = published(cleared_then(NOT_DECLARED, Ok(Vec::new()))?, &[2]).await?;
+    let (status, body, read_chain) = with_chain(
+        &database,
+        &format!("/v1/names/{NAME}/records?namespace=ens&source=verified&keys=text:name"),
+        resolution_universal_resolver_text_response("Test"),
+    )
+    .await?;
+    database.cleanup().await?;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert_eq!(body["data"]["resolver"], resolver(NOT_DECLARED), "{body:#}");
+    assert_eq!(body["meta"]["source"], "verified", "{body:#}");
+    assert!(read_chain);
+    Ok(())
+}
+
+/// Row A3: the registry's pointer cleared through the registry-only resource while the composed
+/// row keeps `FIRST`. The verified lookup reloads the composed row and runs its projected route.
+/// A `source=verified` read answers `200` with no resolver and the chain's answer, here the
+/// Universal Resolver's `ResolverNotFound`, with no `409 stale`.
+#[tokio::test]
+async fn ra3_a_verified_read_of_a_registry_clear_is_not_stale() -> Result<()> {
+    let database = published(vec![pointer(lease_node(), ZERO)?], &[1]).await?;
+    let (status, body, read_chain) = with_chain(
+        &database,
+        &format!("/v1/names/{NAME}/records?namespace=ens&source=verified&keys=text:name"),
+        resolution_resolver_not_found_error(&dns_encoded(NAME)),
+    )
+    .await?;
+    database.cleanup().await?;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert!(body["data"]["resolver"].is_null(), "{body:#}");
+    assert_ne!(
+        body["data"]["records"]["text:name"]["status"], "ok",
+        "{body:#}"
+    );
+    assert_eq!(body["meta"]["source"], "verified", "{body:#}");
+    assert!(read_chain);
+    Ok(())
+}
+
+/// Row A4: as A3, read with `source=auto`. The registry clear serves no resolver, so the indexed
+/// answer is `not_found` and the read never reaches the chain, with no `409 stale`.
+#[tokio::test]
+async fn ra4_an_auto_read_of_a_registry_clear_answers_from_the_index() -> Result<()> {
+    let database = published(vec![pointer(lease_node(), ZERO)?], &[1]).await?;
+    let (status, body, read_chain) = with_chain(
+        &database,
+        &format!("/v1/names/{NAME}/records?namespace=ens&source=auto&keys=text:name"),
+        resolution_resolver_not_found_error(&dns_encoded(NAME)),
+    )
+    .await?;
+    database.cleanup().await?;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert!(body["data"]["resolver"].is_null(), "{body:#}");
+    assert_eq!(
+        body["data"]["records"]["text:name"]["status"], "not_found",
+        "{body:#}"
+    );
+    assert_eq!(body["meta"]["source"], "indexed", "{body:#}");
+    assert!(!read_chain);
+    Ok(())
+}
+
+/// Row A5, pin: the composed row keeps `FIRST` and the registry names `NEXT`. Both select the
+/// projected route, so a `source=verified` read answers `200` and serves `NEXT`.
+#[tokio::test]
+async fn ra5_a_verified_read_of_a_stale_pointer_serves_the_registry_resolver() -> Result<()> {
+    let database = published(
+        vec![pointer(lease_node(), NEXT)?, next_records(lease_node())?],
+        &[1],
+    )
+    .await?;
+    let (status, body, read_chain) = with_chain(
+        &database,
+        &format!("/v1/names/{NAME}/records?namespace=ens&source=verified&keys=text:name"),
+        resolution_universal_resolver_text_response("Test"),
+    )
+    .await?;
+    database.cleanup().await?;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert_eq!(body["data"]["resolver"], resolver(NEXT), "{body:#}");
+    assert_eq!(
+        body["data"]["records"]["text:name"],
+        json!({"status": "ok", "value": "Test"}),
+        "{body:#}"
+    );
+    assert!(read_chain);
+    Ok(())
+}
+
+/// The legacy `TextChanged` without its value, as the older PublicResolver generations emit it,
+/// so bigname retains the key but not its value.
+fn unretained_email(resolver: &'static str, node: B256) -> Result<Logs> {
+    sol! {
+        event TextChanged(bytes32 indexed node, string indexed indexedKey, string key);
+    }
+    Ok(vec![(
+        resolver,
+        TextChanged {
+            node,
+            indexedKey: keccak256(b"email"),
+            key: "email".into(),
+        }
+        .encode_log_data(),
+    )])
+}
+
+/// Row A6: as A1, read with `source=auto` and a key whose value `NEXT` did not retain, so the
+/// read takes the verified fallback for it. It answers `200` from the chain, with no `409 stale`.
+#[tokio::test]
+async fn ra6_an_auto_fallback_of_a_cleared_lease_serving_a_registry_resolver_is_not_stale()
+-> Result<()> {
+    let database = published(
+        cleared_then(
+            NEXT,
+            logs(vec![
+                next_records(lease_node()),
+                unretained_email(NEXT, lease_node()),
+            ]),
+        )?,
+        &[2],
+    )
+    .await?;
+    let (status, body, read_chain) = with_chain(
+        &database,
+        &format!("/v1/names/{NAME}/records?namespace=ens&source=auto&keys=text:name,text:email"),
+        resolution_universal_resolver_text_response("next@example.test"),
+    )
+    .await?;
+    database.cleanup().await?;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert_eq!(body["data"]["resolver"], resolver(NEXT), "{body:#}");
+    assert_eq!(
+        body["data"]["records"]["text:name"],
+        json!({"status": "ok", "value": "Test"}),
+        "{body:#}"
+    );
+    assert_eq!(
+        body["data"]["records"]["text:email"],
+        json!({"status": "ok", "value": "next@example.test"}),
+        "{body:#}"
+    );
+    assert_eq!(body["meta"]["source"], "verified", "{body:#}");
+    assert!(read_chain);
+    Ok(())
+}
+
+/// Name detail with `include=counts`: its resolver and `record_count`.
+async fn counted(database: &TestDatabase) -> Result<Value> {
+    let detail = ok(
+        database,
+        &format!("/v1/names/{NAME}?namespace=ens&include=counts"),
+    )
+    .await?;
+    Ok(json!({
+        "resolver": detail["data"]["resolver"],
+        "record_count": detail["data"]["record_count"],
+    }))
+}
+
+/// `counted` on the misattributed fixture and on the same logs as Interpret wrote them.
+async fn both_counted(
+    after: impl Fn() -> Result<Vec<Logs>>,
+    misattributed: &[i64],
+) -> Result<(Value, Value)> {
+    let database = published(after()?, misattributed).await?;
+    let wrong = counted(&database).await?;
+    database.cleanup().await?;
+    let reference = published(after()?, &[]).await?;
+    let right = counted(&reference).await?;
+    reference.cleanup().await?;
+    Ok((wrong, right))
+}
+
+/// Row B1: the registry points at `NEXT`, which holds four selectors, while the composed row
+/// keeps `FIRST`, which holds three. `record_count` counts `NEXT`'s inventory, the one `records`
+/// comes from, as the same logs on the lease do.
+#[tokio::test]
+async fn rb1_record_count_follows_the_registry_resolver() -> Result<()> {
+    let (wrong, right) = both_counted(
+        || {
+            Ok(vec![
+                pointer(lease_node(), NEXT)?,
+                more_next_records(lease_node())?,
+            ])
+        },
+        &[1],
+    )
+    .await?;
+    assert_eq!(wrong["resolver"], resolver(NEXT), "{wrong:#}");
+    assert_eq!(wrong["record_count"], 4, "{wrong:#}");
+    assert_eq!(wrong, right);
+    Ok(())
+}
+
+/// Row B2: a registry clear serves no resolver and no records, so `record_count` is omitted, as
+/// for a clear on the lease, never `FIRST`'s count.
+#[tokio::test]
+async fn rb2_a_registry_clear_omits_record_count() -> Result<()> {
+    let (wrong, right) = both_counted(|| Ok(vec![pointer(lease_node(), ZERO)?]), &[1]).await?;
+    assert!(wrong["resolver"].is_null(), "{wrong:#}");
+    assert!(wrong["record_count"].is_null(), "{wrong:#}");
+    assert_eq!(wrong, right);
+    Ok(())
+}
+
+/// Row B3: a registry pointer to an undeclared address counts that address's inventory, as the
+/// same pointer on the lease does.
+#[tokio::test]
+async fn rb3_record_count_follows_an_undeclared_registry_resolver() -> Result<()> {
+    let (wrong, right) =
+        both_counted(|| Ok(vec![pointer(lease_node(), NOT_DECLARED)?]), &[1]).await?;
+    assert_eq!(wrong["resolver"], resolver(NOT_DECLARED), "{wrong:#}");
+    assert_eq!(wrong, right);
+    Ok(())
+}
+
+/// Row B4: the lease's pointer cleared, then the registry pointing at `NEXT`. `record_count`
+/// counts `NEXT`'s inventory, as the same logs on the lease do.
+#[tokio::test]
+async fn rb4_record_count_of_a_cleared_lease_follows_the_registry_resolver() -> Result<()> {
+    let (wrong, right) =
+        both_counted(|| cleared_then(NEXT, more_next_records(lease_node())), &[2]).await?;
+    assert_eq!(wrong["resolver"], resolver(NEXT), "{wrong:#}");
+    assert_eq!(wrong["record_count"], 4, "{wrong:#}");
+    assert_eq!(wrong, right);
+    Ok(())
+}
+
+/// Row B5, pin: the registry pointer on the lease. The registry read leaves the row as
+/// composed, and `record_count` counts `NEXT`'s inventory.
+#[tokio::test]
+async fn rb5_record_count_of_a_composed_pointer_is_unchanged() -> Result<()> {
+    let database = published(
+        vec![
+            pointer(lease_node(), NEXT)?,
+            more_next_records(lease_node())?,
+        ],
+        &[],
+    )
+    .await?;
+    let view = counted(&database).await?;
+    database.cleanup().await?;
+    assert_eq!(view["resolver"], resolver(NEXT), "{view:#}");
+    assert_eq!(view["record_count"], 4, "{view:#}");
+    Ok(())
+}

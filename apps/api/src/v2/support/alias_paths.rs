@@ -61,6 +61,10 @@ pub(crate) struct ServedName {
     pub(crate) alias: Option<AliasPath>,
     /// What the row serves through its ENSv1 registry pointer, decided on the same snapshot.
     pub(crate) registry: RegistryRead,
+    /// Whether a verified read runs Universal Resolver discovery
+    /// (`name_records::verified_discovery`). The lookup engine reloads the composed row, not
+    /// `row` as the registry read left it, so this is decided on the composed row.
+    pub(crate) lookup_discovery: bool,
 }
 
 /// The requested name's row when it holds a current registration. Otherwise the requested
@@ -75,9 +79,10 @@ pub(crate) async fn load_served_name_for_selected_snapshot(
     name: &str,
     selected_snapshot: &SelectedSnapshot,
 ) -> ApiResult<ServedName> {
-    let mut served =
+    let (mut row, alias) =
         load_composed_served_name(&mut *conn, namespace, name, selected_snapshot).await?;
-    served.registry = serve_ens_v1_registry_resolver(&mut *conn, &mut served.row)
+    let lookup_discovery = crate::v2::name_records::verified_discovery(&row, alias.as_ref());
+    let registry = serve_ens_v1_registry_resolver(&mut *conn, &mut row)
         .await
         .map_err(|error| {
             error!(service = "api", error = %error, "failed to read the ENSv1 registry resolver");
@@ -85,7 +90,12 @@ pub(crate) async fn load_served_name_for_selected_snapshot(
                 "failed to read the ENSv1 registry resolver of {namespace}/{name}"
             ))
         })?;
-    Ok(served)
+    Ok(ServedName {
+        row,
+        alias,
+        registry,
+        lookup_discovery,
+    })
 }
 
 async fn load_composed_served_name(
@@ -93,7 +103,7 @@ async fn load_composed_served_name(
     namespace: &str,
     name: &str,
     selected_snapshot: &SelectedSnapshot,
-) -> ApiResult<ServedName> {
+) -> ApiResult<(NameCurrentRow, Option<AliasPath>)> {
     let stored =
         load_name_current_for_selected_snapshot(&mut *conn, namespace, name, selected_snapshot)
             .await;
@@ -102,11 +112,7 @@ async fn load_composed_served_name(
         Err(error) => error.status == StatusCode::NOT_FOUND,
     };
     if !walks {
-        return stored.map(|row| ServedName {
-            row,
-            alias: None,
-            registry: RegistryRead::Composed,
-        });
+        return stored.map(|row| (row, None));
     }
     let walk = bigname_storage::families::alias_path::resolve_alias_path(
         &mut *conn,
@@ -120,11 +126,7 @@ async fn load_composed_served_name(
     #[cfg(test)]
     let _ = ALIAS_WALK_STATEMENTS.try_with(|count| count.set(count.get() + walk.statements));
     let Some(target) = walk.target else {
-        return stored.map(|row| ServedName {
-            row,
-            alias: None,
-            registry: RegistryRead::Composed,
-        });
+        return stored.map(|row| (row, None));
     };
     let row = match load_name_current_for_snapshot(
         &mut *conn,
@@ -146,11 +148,7 @@ async fn load_composed_served_name(
         }
     };
     let canonical_name = row.normalized_name.clone();
-    Ok(ServedName {
-        row,
-        alias: Some(AliasPath::new(name, canonical_name)),
-        registry: RegistryRead::Composed,
-    })
+    Ok((row, Some(AliasPath::new(name, canonical_name))))
 }
 
 /// Whether `row` is the reached token's own row. A token's row is bound to its resource. A

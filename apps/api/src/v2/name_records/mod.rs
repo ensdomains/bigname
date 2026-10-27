@@ -206,7 +206,8 @@ pub(crate) async fn get_name_records(
         include_resolution_auxiliary,
     )
     .await?;
-    let (mut row, mut alias) = (served.row, served.alias);
+    let (mut row, mut alias, lookup_discovery) =
+        (served.row, served.alias, served.lookup_discovery);
 
     // Without `keys`, every source answers the inventory-derived default set. Inventory is loaded
     // only for a row the name may serve, so reservation and audit-only rows derive no keys. The
@@ -250,7 +251,7 @@ pub(crate) async fn get_name_records(
                 unretained::fill(default_source, reads, &mut selected_snapshot, data).await
             }
             RequestSource::Verified => {
-                let admit_null_resolver_discovery = verified_discovery(&row, alias.as_ref());
+                let admit_null_resolver_discovery = lookup_discovery;
                 #[cfg(test)]
                 auto_fallback_test_hooks::run(&state.pool).await?;
                 let verified_lookup = load_verified_record_lookup(
@@ -294,7 +295,7 @@ pub(crate) async fn get_name_records(
                         )?,
                     )
                 } else {
-                    let admit_null_resolver_discovery = verified_discovery(&row, alias.as_ref());
+                    let admit_null_resolver_discovery = lookup_discovery;
                     let mut fallback_records = indexed_records_requiring_verified_fallback(
                         &row,
                         record_inventory.as_ref(),

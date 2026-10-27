@@ -186,6 +186,7 @@ pub(crate) async fn get_name_record(
         row,
         alias,
         registry,
+        ..
     } = load_served_name_for_selected_snapshot(
         &mut reads,
         &namespace,
@@ -283,6 +284,7 @@ pub(crate) async fn get_name_record(
     counts::apply(
         &state,
         &row,
+        (&registry, record_inventory.as_ref()),
         &selected_snapshot,
         count_snapshot.as_mut(),
         &mut record,
