@@ -6,39 +6,19 @@ use uuid::Uuid;
 
 use crate::{families::name::FamilyPublication, identity::ens_v2_registry_root_resource_id};
 
-// One row per reviewed deployment: its chain, its deployment epoch, its VerifiableFactory and the
-// exact registry implementations whose code model the reader supports. A manifest role alone
-// cannot establish a code model. A row is inert until a manifest of that epoch declares it.
-// (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/VerifiableFactory.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
-// (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/WrapperRegistryImpl.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
-// (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UserRegistryImpl.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
-// (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/VerifiableFactory.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
-// (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/WrapperRegistryImpl.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
-// (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UserRegistryImpl.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
-struct Deployment {
-    chain: &'static str,
-    epoch: &'static str,
-    factory: &'static str,
-    wrapper: &'static str,
-    user: &'static str,
-}
-
-const DEPLOYMENTS: [Deployment; 2] = [
-    Deployment {
-        chain: "ethereum-sepolia",
-        epoch: "ens_v2_sepolia_20261001",
-        factory: "0xda70306c98e97ece36f997a21368e53298572991",
-        wrapper: "0xbe768b63e5fbbfbb0ae97e9064e0002df8001880",
-        user: "0x9bd8a88719068d09ecee662f36c0e3856708366a",
-    },
-    Deployment {
-        chain: "ethereum-mainnet",
-        epoch: "ens_v2_mainnet_20261002",
-        factory: "0x77510ba162dfea3d8989e3f0928a691b345730d2",
-        wrapper: "0xcf3edb3f5501de63b57254d910b6782ee370039b",
-        user: "0x75ff9adbcfce2469b097ac68f6ae650eae1351bb",
-    },
+// The reviewed deployment epochs. A manifest of any other epoch is not read, so its
+// declarations prove no code. The epoch carries no address: the supported registry
+// implementations are the active migration manifest's declarations under the two
+// implementation roles (docs/manifests.md § Registry implementation declarations).
+const REVIEWED_EPOCHS: [(&str, &str); 2] = [
+    ("ethereum-sepolia", "ens_v2_sepolia_20261001"),
+    ("ethereum-mainnet", "ens_v2_mainnet_20261002"),
 ];
+
+// The migration family's two implementation roles. Storage does not depend on the manifest
+// crate, so the names are repeated here and a test holds them equal to its constants.
+const WRAPPER_ROLE: &str = "wrapper_registry_implementation";
+const USER_ROLE: &str = "user_registry_implementation";
 
 /// The ENS namespace every reviewed ENSv2 root, registry and resolver manifest declares under.
 const NAMESPACE: &str = "ens";
@@ -80,14 +60,14 @@ impl Declaration {
             && payload["chain"] == chain
             && payload["namespace"] == namespace
             && payload["source_family"] == family
-            && self.deployment(chain).is_some()
+            && self.reviewed_epoch(chain)
     }
 
-    fn deployment(&self, chain: &str) -> Option<&'static Deployment> {
+    fn reviewed_epoch(&self, chain: &str) -> bool {
         let epoch = &self.after_state["manifest_payload"]["deployment_epoch"];
-        DEPLOYMENTS
+        REVIEWED_EPOCHS
             .iter()
-            .find(|deployment| deployment.chain == chain && *epoch == deployment.epoch)
+            .any(|(reviewed_chain, reviewed)| *reviewed_chain == chain && epoch == reviewed)
     }
 
     fn declares(&self, role: &str, address: &str, block: i64) -> bool {
@@ -276,16 +256,35 @@ WHERE lower(raw_fact_ref ->> 'emitting_address') = $2 AND chain_id = $1
 ORDER BY block_number, log_index, normalized_event_id
 LIMIT 2";
 
-// Literal predicates match the sparse indexes even for a generic plan. Any canonical
-// physical departure disqualifies, irrespective of migration consumer visibility.
+// Any canonical physical departure from the origin's implementation disqualifies, irrespective
+// of migration consumer visibility. The three arms are the ranges of
+// `normalized_events_registry_departure_idx` either side of the implementation, plus a missing
+// one, so same-code upgrades are never visited. The block bounds are a containment test, not
+// an index range, so under default estimates no index keyed by block outranks the
+// implementation key.
 const DEPARTURES: &str = "/* storage:families.control.permissions.registry_support_departure */
 SELECT EXISTS (
     SELECT 1 FROM bigname_phase.normalized_events event
     WHERE event.chain_id = $1 AND lower(event.after_state ->> 'proxy_address') = $2
       AND event.source_family = 'ens_v2_registry_l1' AND event.event_kind = 'Upgraded'
       AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND event.block_number BETWEEN $3 AND $4
-      AND lower(event.after_state ->> 'implementation') IS DISTINCT FROM ";
+      AND lower(event.after_state ->> 'implementation') < $5
+      AND int8range($3, $4, '[]') @> event.block_number
+) OR EXISTS (
+    SELECT 1 FROM bigname_phase.normalized_events event
+    WHERE event.chain_id = $1 AND lower(event.after_state ->> 'proxy_address') = $2
+      AND event.source_family = 'ens_v2_registry_l1' AND event.event_kind = 'Upgraded'
+      AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND lower(event.after_state ->> 'implementation') > $5
+      AND int8range($3, $4, '[]') @> event.block_number
+) OR EXISTS (
+    SELECT 1 FROM bigname_phase.normalized_events event
+    WHERE event.chain_id = $1 AND lower(event.after_state ->> 'proxy_address') = $2
+      AND event.source_family = 'ens_v2_registry_l1' AND event.event_kind = 'Upgraded'
+      AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND lower(event.after_state ->> 'implementation') IS NULL
+      AND int8range($3, $4, '[]') @> event.block_number
+)";
 
 pub(crate) async fn load(
     conn: &mut PgConnection,
@@ -312,33 +311,22 @@ pub(crate) async fn load(
     let Some(source) = declarations.source(origin.source_manifest_id) else {
         return Ok(None);
     };
-    let Some(deployment) = source.deployment(&publication.chain_id) else {
+    let (Some(implementation), Some(factory)) = (&origin.implementation, &origin.emitter) else {
         return Ok(None);
     };
-    let (model, implementation, role) = match origin.implementation.as_deref() {
-        Some(code) if code == deployment.wrapper => (
-            Model::Wrapper,
-            deployment.wrapper,
-            "wrapper_registry_implementation",
-        ),
-        Some(code) if code == deployment.user => {
-            (Model::User, deployment.user, "user_registry_implementation")
-        }
+    let declares = |role| source.declares(role, implementation, origin.block_number);
+    // An address declared under both roles names no single code model.
+    let model = match (declares(WRAPPER_ROLE), declares(USER_ROLE)) {
+        (true, false) => Model::Wrapper,
+        (false, true) => Model::User,
         _ => return Ok(None),
     };
-    if origin.emitter.as_deref() != Some(deployment.factory)
-        || !source.active(
-            &publication.chain_id,
-            "ens_v2_migration_l1",
-            &origin.namespace,
-            origin.manifest_version,
-        )
-        || !source.declares(
-            "verifiable_factory",
-            deployment.factory,
-            origin.block_number,
-        )
-        || !source.declares(role, implementation, origin.block_number)
+    if !source.active(
+        &publication.chain_id,
+        "ens_v2_migration_l1",
+        &origin.namespace,
+        origin.manifest_version,
+    ) || !source.declares("verifiable_factory", factory, origin.block_number)
     {
         return Ok(None);
     }
@@ -377,11 +365,12 @@ pub(crate) async fn load(
     if parent_instance.is_some_and(|expected| expected != instance) {
         return Ok(None);
     }
-    let departed: bool = sqlx::query_scalar(&format!("{DEPARTURES}'{implementation}')"))
+    let departed: bool = sqlx::query_scalar(DEPARTURES)
         .bind(&publication.chain_id)
         .bind(registry)
         .bind(origin.block_number)
         .bind(publication.block_number)
+        .bind(implementation)
         .fetch_one(conn)
         .await
         .context("failed to check the registry's implementation history")?;

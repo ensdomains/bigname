@@ -303,6 +303,16 @@ async fn an_ens_v2_manifest_change_is_refused_whole() -> Result<()> {
             json!([{"role": "migration_controller", "address": SECOND_RESOLVER,
                 "proxy_kind": "none", "start_block": START + 5}]),
         ),
+        // A further registry implementation pair, two declarations under one repeatable role.
+        (
+            "ens_v2_migration_l1",
+            json!([
+                {"role": "wrapper_registry_implementation", "address": SECOND_RESOLVER,
+                    "proxy_kind": "none", "start_block": START + 5},
+                {"role": "wrapper_registry_implementation", "address": RESOLVER,
+                    "proxy_kind": "none", "start_block": START + 6},
+            ]),
+        ),
     ] {
         let planted = fixture.plant_manifest(family, contracts).await?;
         let token = fixture.plant_marker(family).await?;

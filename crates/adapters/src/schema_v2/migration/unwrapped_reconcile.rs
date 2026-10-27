@@ -71,8 +71,8 @@ pub(in crate::schema_v2) fn unwrapped_reconciliations(
         return Ok(Vec::new());
     };
     let graveyard = declared_address(catalog, "graveyard")?;
-    let unlocked = declared_address(catalog, "unlocked_migration_controller")?;
-    let locked = declared_address(catalog, "locked_migration_controller")?;
+    Controllers::ensure_declared(catalog)?;
+    let controllers = Controllers::at(catalog, block.block_number);
     let Some(wrapper) = catalog.correlation_address(MIGRATION_FAMILY, "ens_v1_name_wrapper") else {
         return Ok(Vec::new());
     };
@@ -104,8 +104,7 @@ pub(in crate::schema_v2) fn unwrapped_reconciliations(
             source,
             transaction,
             &graveyard,
-            &unlocked,
-            &locked,
+            &controllers,
             catalog,
             base,
             wrapper,
@@ -128,6 +127,9 @@ pub(in crate::schema_v2) fn unwrapped_reconciliations(
         if boundary.after_state["migration_path"] != "unwrapped" {
             continue;
         }
+        let Some(unlocked) = controllers.unlocked() else {
+            continue;
+        };
         let matching = probe
             .migration_authority_transitions
             .iter()
@@ -199,7 +201,7 @@ pub(in crate::schema_v2) fn unwrapped_reconciliations(
             &predecessor_state,
             output,
             base,
-            &unlocked,
+            unlocked,
             &graveyard,
         ) {
             proofs.push(proof);

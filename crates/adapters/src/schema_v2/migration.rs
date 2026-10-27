@@ -100,8 +100,7 @@ pub(super) fn correlate(
     let migration_source = migration_source
         .context("ENSv2 migration observations have no active migration manifest")?;
     let graveyard = declared_address(catalog, "graveyard")?;
-    let unlocked = declared_address(catalog, "unlocked_migration_controller")?;
-    let locked = declared_address(catalog, "locked_migration_controller")?;
+    Controllers::ensure_declared(catalog)?;
     let name_wrapper = catalog
         .correlation_address(MIGRATION_FAMILY, "ens_v1_name_wrapper")
         .context("migration manifest has no ENSv1 NameWrapper correlation address")?;
@@ -121,18 +120,18 @@ pub(super) fn correlate(
     let mut boundaries = Vec::new();
     let mut registries = Vec::new();
     for transaction_observations in by_transaction.values() {
+        let controllers = Controllers::at(catalog, transaction_observations[0].raw.block_number);
         correlate_renewals(transaction_observations, output)?;
         correlate_controllers(name_wrapper, transaction_observations, output)?;
         correlate_historical_renewals(transaction_observations, output)?;
         correlate_cleanups(transaction_observations, &graveyard, output)?;
         let registry_groups =
-            correlate_registry_creation(catalog, transaction_observations, &locked, output)?;
+            correlate_registry_creation(catalog, transaction_observations, &controllers, output)?;
         correlate_authority_transitions(
             migration_source,
             transaction_observations,
             &graveyard,
-            &unlocked,
-            &locked,
+            &controllers,
             catalog,
             base_registrar,
             name_wrapper,
@@ -319,8 +318,7 @@ fn correlate_authority_transitions(
     migration_source: &super::manifest::ManifestSource,
     observations: &[&MigrationObservation],
     graveyard: &str,
-    unlocked: &str,
-    locked: &str,
+    controllers: &Controllers,
     catalog: &Catalog,
     base_registrar: &str,
     name_wrapper: &str,
@@ -376,13 +374,13 @@ fn correlate_authority_transitions(
             })
             .collect::<Vec<_>>();
         let (migration_path, registry_group) =
-            if sender.eq_ignore_ascii_case(unlocked) && !transfers.is_empty() {
+            if controllers.is_unlocked(sender) && !transfers.is_empty() {
                 let controller_held_v1_token = transfers.iter().any(|observation| {
                     observation
                         .decoded
                         .get("from")
                         .and_then(Value::as_str)
-                        .is_some_and(|from| from.eq_ignore_ascii_case(unlocked))
+                        .is_some_and(|from| controllers.is_unlocked(from))
                 });
                 (
                     if controller_held_v1_token {
@@ -392,7 +390,7 @@ fn correlate_authority_transitions(
                     },
                     None,
                 )
-            } else if sender.eq_ignore_ascii_case(locked) {
+            } else if controllers.is_locked(sender) {
                 let group = registry_groups.iter().find(|group| {
                     group.logical_name_id == logical_name_id
                         && group.completion_log_index < registration_log
@@ -471,7 +469,7 @@ fn correlate_authority_transitions(
             )?;
         }
         let registrar_cleanup_sender = match migration_path {
-            "unwrapped" => Some(unlocked),
+            "unwrapped" => controllers.unlocked(),
             "unlocked_wrapped" => Some(name_wrapper),
             _ => None,
         };

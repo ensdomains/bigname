@@ -13,7 +13,7 @@ bigname anchors every ENSv1, ENSv2, Basenames, admitted upstream app-metadata, r
 | `ens_v1_lll` | `ensdomains/ens` | `7e377df8` | Historical evidence for the 2017 LLL registry only |
 | `ens_v2` | `ensdomains/contracts-v2` | `a971bd64` | Post-audit ENSv2 contracts and pinned Sepolia deployment evidence |
 | `ens_v2_sepolia_20261001` | `ensdomains/contracts-v2` | `07e55a05` | Official 2026-10-01 Sepolia redeploy artifacts, receipts, compiler inputs and matching source; current Sepolia manifest authority |
-| `ens_v2_mainnet_20261002` | `ensdomains/namechain` | `b1f97b91` | Official 2026-10-02 mainnet ENSv2 deployment artifacts, receipts, compiler inputs and matching source, the mainnet ENSv2 deployment authority |
+| `ens_v2_mainnet_20261002` | `ensdomains/namechain` | `4f47cbcc` | Official 2026-10-02 mainnet ENSv2 deployment artifacts, receipts, compiler inputs and matching source, the mainnet ENSv2 deployment authority |
 | `ens_v2_sepolia_20260916` | `ensdomains/contracts-v2` | `366de741` | Superseded 2026-09-15 Sepolia deployment; ENSv2 Solidity source evidence only where the cited lines are unchanged in the 2026-10-01 redeploy, and evidence of the dropped deployment's own history |
 | `ens_v2_sepolia_20260903` | `ensdomains/contracts-v2` | `5da83f6a` | Record-ID PermissionedResolver and direct PublicResolverV2 source evidence; not deployment-address authority |
 | `ens_v1_publicresolver_5141a2a` | `ensdomains/ens-contracts` | `5141a2ac` | Inherited PublicResolverV2 node-record source evidence only |

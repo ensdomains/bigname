@@ -408,6 +408,57 @@ pub(super) fn declared_address(catalog: &Catalog, role: &str) -> anyhow::Result<
         .to_ascii_lowercase())
 }
 
+/// The ENSv1→ENSv2 migration controllers at one block. Each is the address whose declared range
+/// holds the block, so a controller is never matched before its start or after its range closed.
+pub(super) struct Controllers {
+    unlocked: Option<String>,
+    locked: Option<String>,
+}
+
+impl Controllers {
+    const UNLOCKED: &str = "unlocked_migration_controller";
+    const LOCKED: &str = "locked_migration_controller";
+
+    /// Fails when the manifest declares either controller role at no block at all. A role may
+    /// hold several addresses, each in its own range.
+    pub(super) fn ensure_declared(catalog: &Catalog) -> anyhow::Result<()> {
+        for role in [Self::UNLOCKED, Self::LOCKED] {
+            anyhow::ensure!(
+                catalog.declares_role(MIGRATION_FAMILY, role),
+                "migration manifest has no {role} declaration"
+            );
+        }
+        Ok(())
+    }
+
+    pub(super) fn at(catalog: &Catalog, block: i64) -> Self {
+        let at = |role| {
+            catalog
+                .declared_address_at(MIGRATION_FAMILY, role, block)
+                .map(str::to_ascii_lowercase)
+        };
+        Self {
+            unlocked: at(Self::UNLOCKED),
+            locked: at(Self::LOCKED),
+        }
+    }
+
+    pub(super) fn unlocked(&self) -> Option<&str> {
+        self.unlocked.as_deref()
+    }
+
+    pub(super) fn is_unlocked(&self, address: &str) -> bool {
+        self.unlocked()
+            .is_some_and(|unlocked| address.eq_ignore_ascii_case(unlocked))
+    }
+
+    pub(super) fn is_locked(&self, address: &str) -> bool {
+        self.locked
+            .as_deref()
+            .is_some_and(|locked| address.eq_ignore_ascii_case(locked))
+    }
+}
+
 pub(super) fn observation_evidence(observation: &MigrationObservation) -> Value {
     json!({
         "kind":"raw_log",

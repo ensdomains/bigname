@@ -2,6 +2,8 @@
 mod admissions;
 #[path = "catalog_announcements.rs"]
 mod announcements;
+#[path = "catalog_roles.rs"]
+mod roles;
 use admissions::Admissions;
 pub(super) use announcements::ANNOUNCEMENT_ADMISSION_BASIS;
 use std::collections::{BTreeMap, BTreeSet};
@@ -373,37 +375,6 @@ impl Catalog {
             .filter(|admission| admission.contract_instance_id == contract_instance_id)
             .filter_map(|admission| admission.source_manifest_id)
             .find_map(|manifest_id| self.source(manifest_id))
-    }
-
-    pub(super) fn declared_address_for_role(
-        &self,
-        source_family: &str,
-        role: &str,
-    ) -> Option<&str> {
-        self.admissions.for_role(role).find_map(|admission| {
-            (admission.role.as_deref() == Some(role)
-                && admission
-                    .source_manifest_id
-                    .and_then(|manifest_id| self.source(manifest_id))
-                    .is_some_and(|source| source.source_family == source_family))
-            .then_some(admission.address.as_str())
-        })
-    }
-
-    pub(super) fn declared_start_block_for_role(
-        &self,
-        source_family: &str,
-        role: &str,
-    ) -> Option<i64> {
-        self.admissions.for_role(role).find_map(|admission| {
-            (admission.role.as_deref() == Some(role)
-                && admission
-                    .source_manifest_id
-                    .and_then(|manifest_id| self.source(manifest_id))
-                    .is_some_and(|source| source.source_family == source_family))
-            .then_some(admission.active_from_block)
-            .flatten()
-        })
     }
 
     pub(super) fn migration_registry_correlations(

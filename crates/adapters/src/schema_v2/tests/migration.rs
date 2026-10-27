@@ -9,7 +9,9 @@ use super::*;
 
 mod announced_resolver;
 mod child;
+mod controller_ranges;
 mod expiry;
+mod implementation_announcement;
 mod intermediary;
 
 const MIGRATION_MANIFEST_ID: i64 = 100;
