@@ -1,0 +1,824 @@
+//! The `ens_v2_migration_l1` rows. An address added under a role, or a singleton role moved to
+//! another address, is redone from the lowest start on either side of the change. Every other
+//! change of the family keeps the full range and says why. The fixture's migration manifest is the
+//! checked-in mainnet one, with the factory declared from the window's first block, so a factory
+//! `ProxyDeployed` in the window is interpreted. A factory origin naming a declared registry
+//! implementation is retained as a `ContractDiscovered` row, from that implementation's start
+//! only (`crates/adapters/src/schema_v2/migration/registry_origin.rs`), which is how these rows
+//! observe what an added or moved implementation changes.
+use alloy_primitives::U256;
+
+use super::*;
+
+const MIGRATION_FILE: &str = "ethereum/ens/ens_v2_migration_l1/v1.toml";
+const FACTORY: &str = "0x77510ba162dfea3d8989e3f0928a691b345730d2";
+const USER_IMPLEMENTATION: &str = "0x75ff9adbcfce2469b097ac68f6ae650eae1351bb";
+const WRAPPER_IMPLEMENTATION: &str = "0xcf3edb3f5501de63b57254d910b6782ee370039b";
+const LOCKED_CONTROLLER: &str = "0xc46bf3b6c7ebcffd4ecfc3b012a1726a2463694d";
+/// A redeployed contract the checked-in manifest does not declare.
+const REDEPLOYED: &str = "0x0000000000000000000000000000000000300001";
+const PROXY: &str = "0x0000000000000000000000000000000000300002";
+
+sol! {
+    event ProxyDeployed(
+        address indexed sender, address indexed proxyAddress, uint256 salt, address implementation
+    );
+    event Initialized(uint64 version);
+}
+
+/// The `[[contracts]]` entry of `role` and the text before and after it, as checked in.
+fn split<'a>(manifest: &'a str, role: &str) -> Option<(&'a str, &'a str, &'a str)> {
+    let at = manifest.find(&format!("[[contracts]]\nrole = \"{role}\"\n"))?;
+    let rest = &manifest[at..];
+    let start = rest.find("start_block = ")?;
+    let end = start + rest[start..].find('\n')? + 1;
+    Some((&manifest[..at], &rest[..end], &rest[end..]))
+}
+
+fn declaration(role: &str, address: &str, start: i64) -> String {
+    format!(
+        "[[contracts]]\nrole = \"{role}\"\naddress = \"{address}\"\nproxy_kind = \"none\"\n\
+         start_block = {start}\n"
+    )
+}
+
+/// The migration manifest with `role` declared at `address` from `start`, in place of its
+/// checked-in entry or added after the rest, or with its entry removed when `declared` is `None`.
+fn declare(manifest: &str, role: &str, declared: Option<(&str, i64)>) -> String {
+    let declared = declared.map(|(address, start)| declaration(role, address, start));
+    match (split(manifest, role), declared) {
+        (Some((before, _, after)), declared) => {
+            format!("{before}{}{after}", declared.unwrap_or_default())
+        }
+        (None, Some(declared)) => format!("{manifest}\n{declared}"),
+        (None, None) => manifest.to_owned(),
+    }
+}
+
+/// The checked-in migration manifest with the factory declared from `START`, then `changes`.
+fn migration_baseline(profile: &Path, changes: &[(&str, Option<(&str, i64)>)]) -> Result<()> {
+    let path = profile.join(MIGRATION_FILE);
+    let mut manifest = declare(
+        &std::fs::read_to_string(&path)?,
+        "verifiable_factory",
+        Some((FACTORY, START)),
+    );
+    for (role, declared) in changes {
+        manifest = declare(&manifest, role, *declared);
+    }
+    std::fs::write(path, manifest)?;
+    Ok(())
+}
+
+fn proxy_deployed(implementation: &str) -> Result<alloy_primitives::LogData> {
+    Ok(ProxyDeployed {
+        sender: SENDER.parse()?,
+        proxyAddress: PROXY.parse()?,
+        salt: U256::from_be_bytes(alice().0),
+        implementation: implementation.parse()?,
+    }
+    .encode_log_data())
+}
+
+fn initialized() -> alloy_primitives::LogData {
+    Initialized { version: 1 }.encode_log_data()
+}
+
+/// The blocks of the retained factory origins.
+async fn origins(pool: &sqlx::PgPool) -> Result<Vec<i64>> {
+    Ok(sqlx::query_scalar(
+        "SELECT block_number FROM normalized_events
+         WHERE chain_id = $1 AND source_family = 'ens_v2_migration_l1'
+           AND event_kind = 'ContractDiscovered'
+         ORDER BY block_number",
+    )
+    .bind(CHAIN)
+    .fetch_all(pool)
+    .await?)
+}
+
+impl Fixture {
+    /// `sync`, completing the Ingest redo a widened watch plan stamps by the runner's own effects
+    /// on the phase rows. The harness's test source fails the intake shape an Ethereum Mainnet
+    /// Ingest redo checks (`src/verify_source.rs`, `validate_intake_shape`), and Ingest loads
+    /// nothing here, so what the redo leaves is the Interpret stamp it writes as it begins
+    /// (`src/redo_stamp.rs`, `stamp_ingest_redo_dependents`) and its restored row
+    /// (`src/redo_state.rs`, the completion statement).
+    async fn sync_migration(&self) -> Result<String> {
+        sync_schema_v2_repository(self.pool(), &load_repository(&self.profile)?).await?;
+        let required: Option<(i64, i64)> = sqlx::query_as(
+            "SELECT redo_from_block_number, redo_to_block_number FROM chain_phase_state
+             WHERE chain_id = $1 AND phase_name = 'ingest' AND redo_in_progress",
+        )
+        .bind(CHAIN)
+        .fetch_optional(self.pool())
+        .await?;
+        if let Some((from, to)) = required {
+            let stamped = sqlx::query(CREATE_STAMP)
+                .bind(CHAIN)
+                .bind(PhaseName::Interpret.as_str())
+                .bind(from)
+                .bind(to)
+                .bind(format!(
+                    "{REQUIRED_REDO_PREFIX}ingest redo may change the raw-fact extent"
+                ))
+                .execute(self.pool())
+                .await?;
+            ensure!(
+                stamped.rows_affected() == 1,
+                "the Interpret row takes the Ingest redo's stamp from {from}"
+            );
+            sqlx::query(
+                "UPDATE chain_phase_state
+                 SET phase_status = redo_previous_phase_status, redo_in_progress = false,
+                     redo_mode = NULL, last_error = redo_previous_last_error,
+                     started_at = redo_previous_started_at, finished_at = now(),
+                     redo_previous_phase_status = NULL, redo_previous_last_error = NULL,
+                     redo_previous_started_at = NULL, redo_previous_finished_at = NULL,
+                     redo_from_block_number = NULL, redo_to_block_number = NULL,
+                     redo_requested_from_block_number = NULL,
+                     redo_requested_to_block_number = NULL, updated_at = now()
+                 WHERE chain_id = $1 AND phase_name = 'ingest' AND redo_in_progress",
+            )
+            .bind(CHAIN)
+            .execute(self.pool())
+            .await?;
+        }
+        self.token().await
+    }
+
+    fn declare_migration(&self, role: &str, declared: Option<(&str, i64)>) -> Result<()> {
+        self.edit(MIGRATION_FILE, |manifest| declare(manifest, role, declared))
+    }
+
+    /// Blocks `head + 1..=to` canonical as `seed_chain` makes them, and every phase completed
+    /// through `to` with those blocks not derived yet, as a chain that followed the head leaves
+    /// them before its next full pair.
+    async fn advance(&mut self, to: i64) -> Result<()> {
+        sqlx::query(
+            "WITH lineage AS (
+                 INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+                     block_timestamp, canonicality_state)
+                 SELECT $1, $1 || '-block-' || height, $1 || '-block-' || (height - 1), height,
+                        to_timestamp(height), 'canonical'::canonicality_state
+                 FROM generate_series($2::bigint, $3::bigint) height
+                 RETURNING block_number, block_hash
+             )
+             INSERT INTO raw_transactions (chain_id, block_hash, block_number, transaction_hash,
+                 transaction_index, from_address, to_address)
+             SELECT $1, block_hash, block_number, $1 || '-transaction-' || block_number, 0, $4, $5
+             FROM lineage",
+        )
+        .bind(CHAIN)
+        .bind(self.head + 1)
+        .bind(to)
+        .bind(SENDER)
+        .bind(REGISTRY)
+        .execute(self.pool())
+        .await?;
+        sqlx::query(
+            "UPDATE ingest_cursors SET next_block_number = $2 + 1, target_block_number = $2,
+                 last_processed_block_number = $2, last_processed_block_hash = $3
+             WHERE chain_id = $1",
+        )
+        .bind(CHAIN)
+        .bind(to)
+        .bind(block_hash(to))
+        .execute(self.pool())
+        .await?;
+        sqlx::query(
+            "UPDATE chain_phase_state
+             SET current_block_number = $2, current_block_hash = $3,
+                 target_block_number = $2, target_block_hash = $3,
+                 live_handoff_block_number = CASE WHEN phase_name = 'ingest' THEN $2 END,
+                 live_handoff_block_hash = CASE WHEN phase_name = 'ingest' THEN $3 END
+             WHERE chain_id = $1 AND phase_name IN ('ingest', 'interpret', 'project')",
+        )
+        .bind(CHAIN)
+        .bind(to)
+        .bind(block_hash(to))
+        .execute(self.pool())
+        .await?;
+        publish_heads(
+            self.pool(),
+            CHAIN,
+            &HeadMarkers {
+                latest: BlockMarker::new(to, block_hash(to))?,
+                safe: None,
+                finalized: None,
+            },
+        )
+        .await?;
+        self.head = to;
+        Ok(())
+    }
+
+    /// Publish the head as the safe and finalized block too, so each Project publication prunes
+    /// its undo journal to the configured depth below it, as on a chain with finality heads.
+    async fn finalize_head(&self) -> Result<()> {
+        let head = BlockMarker::new(self.head, block_hash(self.head))?;
+        publish_heads(
+            self.pool(),
+            CHAIN,
+            &HeadMarkers {
+                latest: head.clone(),
+                safe: Some(head.clone()),
+                finalized: Some(head),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+/// A fixture whose baseline does not declare the UserRegistry implementation, with factory
+/// origins naming it at `START + 10` and at `start + 5`.
+async fn without_user_implementation(prefix: &str, span: i64, start: i64) -> Result<Fixture> {
+    let fixture = Fixture::with(prefix, span, |profile| {
+        migration_baseline(profile, &[("user_registry_implementation", None)])
+    })
+    .await?;
+    fixture
+        .log(
+            START + 10,
+            0,
+            FACTORY,
+            &proxy_deployed(USER_IMPLEMENTATION)?,
+        )
+        .await?;
+    fixture
+        .log(start + 5, 0, FACTORY, &proxy_deployed(USER_IMPLEMENTATION)?)
+        .await?;
+    Ok(fixture)
+}
+
+// Row 1. The UserRegistry implementation added at S below the head, its own log at S. The
+// printed full range runs from S, the audit row records S..=H, Project undoes to below S and
+// replays, the origin above S is retained and the one below is not, and the tables equal the
+// full pair's.
+#[tokio::test]
+async fn an_added_implementation_below_the_head_redoes_from_its_start() -> Result<()> {
+    let start = START + 20;
+    let fixture = without_user_implementation("migration_added", 59, start).await?;
+    fixture
+        .log(start, 1, USER_IMPLEMENTATION, &initialized())
+        .await?;
+    fixture.initial_pair().await?;
+    ensure!(
+        origins(fixture.pool()).await?.is_empty(),
+        "nothing retained"
+    );
+    fixture.declare_migration(
+        "user_registry_implementation",
+        Some((USER_IMPLEMENTATION, start)),
+    )?;
+    let token = fixture.sync_migration().await?;
+    fixture.assert_bounded_refusal(&token, start).await?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(start, start)?;
+    ensure!(fixture.audits().await? == vec![(start, fixture.head)]);
+    ensure!(origins(fixture.pool()).await? == vec![start + 5]);
+    let repair = repair_record(fixture.pool()).await?;
+    ensure!(
+        repair.0 == "complete" && repair.1.is_some_and(|base| (START..start).contains(&base)),
+        "the family repair is not an undo stopping in {START}..{start}: {repair:?}"
+    );
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// Row 2. The UserRegistry implementation moved from A at S1 to B at S2 above it, with a factory
+// origin naming A at S1 + 1. The redo runs from S1, not S2, so the origin A no longer declares
+// goes, as on the full pair under the moved manifest.
+#[tokio::test]
+async fn a_moved_implementation_redoes_from_its_old_start() -> Result<()> {
+    let (old, new) = (START + 10, START + 30);
+    let fixture = Fixture::with("migration_moved", 59, |profile| {
+        migration_baseline(
+            profile,
+            &[(
+                "user_registry_implementation",
+                Some((USER_IMPLEMENTATION, old)),
+            )],
+        )
+    })
+    .await?;
+    fixture
+        .log(old + 1, 0, FACTORY, &proxy_deployed(USER_IMPLEMENTATION)?)
+        .await?;
+    fixture.initial_pair().await?;
+    ensure!(origins(fixture.pool()).await? == vec![old + 1]);
+    fixture.declare_migration("user_registry_implementation", Some((REDEPLOYED, new)))?;
+    let token = fixture.sync_migration().await?;
+    fixture.assert_bounded_refusal(&token, old).await?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(old, old)?;
+    ensure!(fixture.audits().await? == vec![(old, fixture.head)]);
+    ensure!(origins(fixture.pool()).await?.is_empty(), "A's origin goes");
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// Row 2b. The locked migration controller moved from A at S1 to B at S2 with no log naming
+// either: the bound is still S1. It does not depend on what the old address did.
+#[tokio::test]
+async fn a_moved_controller_with_no_logs_redoes_from_its_old_start() -> Result<()> {
+    let (old, new) = (START + 10, START + 30);
+    let fixture = Fixture::with("migration_moved_quiet", 59, |profile| {
+        migration_baseline(
+            profile,
+            &[(
+                "locked_migration_controller",
+                Some((LOCKED_CONTROLLER, old)),
+            )],
+        )
+    })
+    .await?;
+    fixture.initial_pair().await?;
+    fixture.declare_migration("locked_migration_controller", Some((REDEPLOYED, new)))?;
+    let token = fixture.sync_migration().await?;
+    fixture.assert_bounded_refusal(&token, old).await?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(old, old)?;
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// Row 3. A declaration removed from the migration manifest keeps the full range and says why.
+#[tokio::test]
+async fn a_removed_migration_declaration_keeps_the_full_range() -> Result<()> {
+    let fixture = Fixture::with("migration_removed", 59, |profile| {
+        migration_baseline(
+            profile,
+            &[(
+                "migration_helper",
+                Some(("0x0b92006fa187b4c98d0a7dfc9d3b918b6d243485", START + 10)),
+            )],
+        )
+    })
+    .await?;
+    fixture.initial_pair().await?;
+    fixture.declare_migration("migration_helper", None)?;
+    let token = fixture.sync_migration().await?;
+    fixture
+        .assert_short_range_refused(&token, "of family ens_v2_migration_l1 changed")
+        .await?;
+    fixture
+        .assert_short_range_refused(&token, "it removes the migration_helper declaration")
+        .await?;
+    fixture.cleanup().await
+}
+
+// Row 4. A qualifying addition after the families were published under another interpreter
+// content hash, as in a release that also edits an event block: the hash reason wins.
+#[tokio::test]
+async fn an_interpreter_rotation_keeps_a_migration_addition_full() -> Result<()> {
+    let start = START + 20;
+    let fixture = without_user_implementation("migration_rotation", 59, start).await?;
+    fixture.initial_pair().await?;
+    fixture.declare_migration(
+        "user_registry_implementation",
+        Some((USER_IMPLEMENTATION, start)),
+    )?;
+    let token = fixture.sync_migration().await?;
+    sqlx::query(
+        "UPDATE project_family_marker SET interpret_input_content_hash = 'keccak256:prior'
+         WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .execute(fixture.pool())
+    .await?;
+    fixture
+        .assert_short_range_refused(
+            &token,
+            "the owned key families were last published under interpreter content hash \
+             keccak256:prior",
+        )
+        .await?;
+    fixture.cleanup().await
+}
+
+// Row 5. A changed migration `correlation_addresses` keeps the full range with the every-block
+// reason, which comes before the family's own predicate.
+#[tokio::test]
+async fn a_migration_correlation_change_names_the_every_block_field() -> Result<()> {
+    let fixture = Fixture::with("migration_correlation", 59, |profile| {
+        migration_baseline(profile, &[])
+    })
+    .await?;
+    fixture.initial_pair().await?;
+    fixture.edit(MIGRATION_FILE, |manifest| {
+        manifest.replacen(
+            "[correlation_addresses]\n",
+            &format!("[correlation_addresses]\nfixture_correlation = \"{REDEPLOYED}\"\n"),
+            1,
+        )
+    })?;
+    let token = fixture.sync_migration().await?;
+    fixture
+        .assert_short_range_refused(
+            &token,
+            "changed `correlation_addresses`, which Interpret reads at every block",
+        )
+        .await?;
+    fixture.cleanup().await
+}
+
+// Row 6. The implementation admitted at S above the head costs one block. The head then passes S
+// and an ordinary full pair publishes the set. A move to S2 is then bounded from S, the old start
+// now below the head, and the origin at S + 5 that the move undeclares goes.
+#[tokio::test]
+async fn an_admission_ahead_then_moved_redoes_from_its_old_start() -> Result<()> {
+    let mut fixture = Fixture::with("migration_ahead_then_moved", 59, |profile| {
+        migration_baseline(profile, &[("user_registry_implementation", None)])
+    })
+    .await?;
+    let start = fixture.head + 20;
+    fixture.initial_pair().await?;
+    fixture.declare_migration(
+        "user_registry_implementation",
+        Some((USER_IMPLEMENTATION, start)),
+    )?;
+    let token = fixture.sync_migration().await?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(fixture.head, fixture.head)?;
+    fixture.advance(start + 40).await?;
+    fixture
+        .log(start + 5, 0, FACTORY, &proxy_deployed(USER_IMPLEMENTATION)?)
+        .await?;
+    fixture.initial_pair().await?;
+    ensure!(origins(fixture.pool()).await? == vec![start + 5]);
+    fixture.declare_migration(
+        "user_registry_implementation",
+        Some((REDEPLOYED, start + 20)),
+    )?;
+    let token = fixture.sync_migration().await?;
+    fixture.assert_bounded_refusal(&token, start).await?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(start, start)?;
+    ensure!(
+        origins(fixture.pool()).await?.is_empty(),
+        "the old origin goes"
+    );
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// Row 7. A second addition after the first bounded pair published diffs against the set that
+// pair published, so it bounds to its own start S2, not to the first one's S1.
+#[tokio::test]
+async fn a_second_addition_after_a_completed_pair_bounds_to_its_own_start() -> Result<()> {
+    let (first, second) = (START + 20, START + 40);
+    let fixture = Fixture::with("migration_second_addition", 59, |profile| {
+        migration_baseline(
+            profile,
+            &[
+                ("user_registry_implementation", None),
+                ("wrapper_registry_implementation", None),
+            ],
+        )
+    })
+    .await?;
+    fixture
+        .log(first + 5, 0, FACTORY, &proxy_deployed(USER_IMPLEMENTATION)?)
+        .await?;
+    fixture
+        .log(
+            second + 5,
+            0,
+            FACTORY,
+            &proxy_deployed(WRAPPER_IMPLEMENTATION)?,
+        )
+        .await?;
+    fixture.initial_pair().await?;
+    fixture.declare_migration(
+        "user_registry_implementation",
+        Some((USER_IMPLEMENTATION, first)),
+    )?;
+    let token = fixture.sync_migration().await?;
+    fixture.discharge(&token, None).await?;
+    fixture.declare_migration(
+        "wrapper_registry_implementation",
+        Some((WRAPPER_IMPLEMENTATION, second)),
+    )?;
+    let token = fixture.sync_migration().await?;
+    fixture.assert_bounded_refusal(&token, second).await?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(second, second)?;
+    ensure!(
+        fixture.audits().await? == vec![(first, fixture.head), (second, fixture.head)],
+        "{:?}",
+        fixture.audits().await?
+    );
+    ensure!(origins(fixture.pool()).await? == vec![first + 5, second + 5]);
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// Row 7b. A second addition after the first one's Interpret half completed and before Project
+// published it. The open Project redo lowers the next Interpret start to S1, below the second
+// addition's S2.
+#[tokio::test]
+async fn a_second_addition_between_the_halves_redoes_from_the_first() -> Result<()> {
+    let (first, second) = (START + 20, START + 40);
+    let fixture = Fixture::with("migration_between_halves", 59, |profile| {
+        migration_baseline(
+            profile,
+            &[
+                ("user_registry_implementation", None),
+                ("wrapper_registry_implementation", None),
+            ],
+        )
+    })
+    .await?;
+    fixture
+        .log(first + 5, 0, FACTORY, &proxy_deployed(USER_IMPLEMENTATION)?)
+        .await?;
+    fixture.initial_pair().await?;
+    fixture.declare_migration(
+        "user_registry_implementation",
+        Some((USER_IMPLEMENTATION, first)),
+    )?;
+    let token = fixture.sync_migration().await?;
+    fixture
+        .discharge(&token, Some(PhaseName::Project))
+        .await
+        .err()
+        .context("the Project half stops")?;
+    fixture.declare_migration(
+        "wrapper_registry_implementation",
+        Some((WRAPPER_IMPLEMENTATION, second)),
+    )?;
+    let token = fixture.sync_migration().await?;
+    let run = fixture.discharge(&token, None).await?;
+    fixture.assert_hashes().await?;
+    // The tables first, so a redo that starts too late shows the rows it kept.
+    let ranges = run.assert_ranges(first, first);
+    fixture.assert_equals_full_pair().await?;
+    ranges
+}
+
+// Row 10. A qualifying migration addition at S1 and a resolver declared at S2 above it in one
+// sync bound together from S1.
+#[tokio::test]
+async fn a_migration_and_a_resolver_change_in_one_sync_bound_from_the_lower_start() -> Result<()> {
+    let (migration, resolver) = (START + 15, START + 25);
+    let fixture = without_user_implementation("migration_mixed", 59, migration).await?;
+    fixture
+        .log(resolver + 1, 0, RESOLVER, &addr_changed()?)
+        .await?;
+    fixture.initial_pair().await?;
+    fixture.declare_migration(
+        "user_registry_implementation",
+        Some((USER_IMPLEMENTATION, migration)),
+    )?;
+    fixture.add_resolver("public_resolver_fixture", RESOLVER, resolver)?;
+    let token = fixture.sync_migration().await?;
+    fixture.assert_bounded_refusal(&token, migration).await?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(migration, migration)?;
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// Row 11, the integration leg. A start edit of an unchanged address keeps the full range and says
+// why. A new or retired migration manifest is row 13's leg in
+// `an_ens_v2_manifest_change_is_refused_whole`, whose planted manifest is a new one.
+#[tokio::test]
+async fn a_migration_start_edit_keeps_the_full_range() -> Result<()> {
+    let fixture = Fixture::with("migration_start_edit", 59, |profile| {
+        migration_baseline(
+            profile,
+            &[(
+                "locked_migration_controller",
+                Some((LOCKED_CONTROLLER, START + 10)),
+            )],
+        )
+    })
+    .await?;
+    fixture.initial_pair().await?;
+    fixture.declare_migration(
+        "locked_migration_controller",
+        Some((LOCKED_CONTROLLER, START + 20)),
+    )?;
+    let token = fixture.sync_migration().await?;
+    fixture
+        .assert_short_range_refused(
+            &token,
+            &format!(
+                "it edits the locked_migration_controller declaration of {LOCKED_CONTROLLER} in \
+                 place"
+            ),
+        )
+        .await?;
+    fixture.cleanup().await
+}
+
+// Row 17. The families were written under another projection content hash: the Interpret half
+// is bounded and the Project stamp is the full range.
+#[tokio::test]
+async fn a_projection_rotation_keeps_the_migration_project_half_full() -> Result<()> {
+    let start = START + 20;
+    let fixture = without_user_implementation("migration_projection_rotation", 59, start).await?;
+    fixture.initial_pair().await?;
+    fixture.declare_migration(
+        "user_registry_implementation",
+        Some((USER_IMPLEMENTATION, start)),
+    )?;
+    let token = fixture.sync_migration().await?;
+    sqlx::query(
+        "UPDATE project_family_marker SET input_content_hash = 'keccak256:prior-projection'
+         WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .execute(fixture.pool())
+    .await?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(start, START)?;
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// Row 18. Project stands below the first effect when the sync lands: its stamp is one block at
+// its own head.
+#[tokio::test]
+async fn a_project_head_below_a_migration_first_effect_gets_a_one_block_stamp() -> Result<()> {
+    let (start, project) = (START + 20, START + 10);
+    let fixture = without_user_implementation("migration_project_behind", 59, start).await?;
+    fixture.initial_pair().await?;
+    fixture.declare_migration(
+        "user_registry_implementation",
+        Some((USER_IMPLEMENTATION, start)),
+    )?;
+    let token = fixture.sync_migration().await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET current_block_number = $2, current_block_hash = $3,
+             target_block_number = $2, target_block_hash = $3
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(CHAIN)
+    .bind(project)
+    .bind(block_hash(project))
+    .execute(fixture.pool())
+    .await?;
+    let run = fixture.discharge(&token, None).await?;
+    ensure!(
+        run.ranges(PhaseName::Interpret)
+            .first()
+            .map(|range| range.from)
+            == Some(start),
+        "{:?}",
+        run.ranges(PhaseName::Interpret)
+    );
+    ensure!(
+        run.ranges(PhaseName::Project).first() == Some(&BlockRange::new(project, project)?),
+        "{:?}",
+        run.ranges(PhaseName::Project)
+    );
+    fixture.cleanup().await
+}
+
+// Row 19. The bound lies deeper than the kept undo journal. With finality heads published, each
+// publication prunes the journal to 256 blocks below the family marker, so over 300 blocks it no
+// longer reaches S. Interpret still runs from S. Project is asked from S, finds no journal to undo
+// to, clears its families and rebuilds them, and the tables equal the full pair's.
+#[tokio::test]
+async fn a_bound_below_the_kept_journal_rebuilds_project_and_equals_the_full_pair() -> Result<()> {
+    let start = START + 20;
+    let fixture = without_user_implementation("migration_below_journal", 299, start).await?;
+    fixture.finalize_head().await?;
+    fixture.initial_pair().await?;
+    let journal: Option<i64> =
+        sqlx::query_scalar("SELECT min(block_number) FROM project_family_undo WHERE chain_id = $1")
+            .bind(CHAIN)
+            .fetch_one(fixture.pool())
+            .await?;
+    ensure!(
+        journal.is_none_or(|lowest| lowest > start),
+        "the journal still reaches {start}: its lowest block is {journal:?}"
+    );
+    fixture.declare_migration(
+        "user_registry_implementation",
+        Some((USER_IMPLEMENTATION, start)),
+    )?;
+    let token = fixture.sync_migration().await?;
+    let run = fixture.discharge(&token, None).await?;
+    ensure!(fixture.audits().await? == vec![(start, fixture.head)]);
+    let repair = repair_record(fixture.pool()).await?;
+    ensure!(
+        repair == ("complete".to_owned(), None),
+        "the family repair is not a completed rebuild: {repair:?}"
+    );
+    ensure!(origins(fixture.pool()).await? == vec![start + 5]);
+    fixture.assert_hashes().await?;
+    let ranges = run.assert_ranges(start, start);
+    fixture.assert_equals_full_pair().await?;
+    ranges
+}
+
+// Row 22. A migration address admitted above the head: no first effect, so each phase replays the
+// head block alone.
+#[tokio::test]
+async fn a_migration_admission_above_the_head_replays_one_block() -> Result<()> {
+    let fixture = Fixture::with("migration_above_head", 59, |profile| {
+        migration_baseline(profile, &[("user_registry_implementation", None)])
+    })
+    .await?;
+    fixture.initial_pair().await?;
+    fixture.declare_migration(
+        "user_registry_implementation",
+        Some((USER_IMPLEMENTATION, fixture.head + 100)),
+    )?;
+    let token = fixture.sync_migration().await?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(fixture.head, fixture.head)?;
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// The start guard. An added address that emitted a log below its declared start was not deployed
+// there, so a factory log naming it as `sender` could lie below the bound: the redo keeps the full
+// range and names the log. The full range then runs, and the tables equal the full pair's.
+#[tokio::test]
+async fn an_added_address_with_a_log_below_its_start_keeps_the_full_range() -> Result<()> {
+    let start = START + 20;
+    let fixture = without_user_implementation("migration_guard_added", 59, start).await?;
+    fixture
+        .log(start - 5, 1, USER_IMPLEMENTATION, &initialized())
+        .await?;
+    fixture.initial_pair().await?;
+    fixture.declare_migration(
+        "user_registry_implementation",
+        Some((USER_IMPLEMENTATION, start)),
+    )?;
+    let token = fixture.sync_migration().await?;
+    fixture
+        .assert_short_range_refused(
+            &token,
+            &format!(
+                "declares user_registry_implementation {USER_IMPLEMENTATION} from block {start}, \
+                 but that address emitted a log at block {}, so the declared start is not its \
+                 deployment block",
+                start - 5
+            ),
+        )
+        .await?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(START, START)?;
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// The start guard on the old side of a move: the address the move retires logged below its own
+// declared start.
+#[tokio::test]
+async fn a_moved_address_with_a_log_below_its_old_start_keeps_the_full_range() -> Result<()> {
+    let (old, new) = (START + 20, START + 30);
+    let fixture = Fixture::with("migration_guard_moved", 59, |profile| {
+        migration_baseline(
+            profile,
+            &[(
+                "locked_migration_controller",
+                Some((LOCKED_CONTROLLER, old)),
+            )],
+        )
+    })
+    .await?;
+    fixture
+        .log(old - 1, 0, LOCKED_CONTROLLER, &initialized())
+        .await?;
+    fixture.initial_pair().await?;
+    fixture.declare_migration("locked_migration_controller", Some((REDEPLOYED, new)))?;
+    let token = fixture.sync_migration().await?;
+    fixture
+        .assert_short_range_refused(
+            &token,
+            &format!(
+                "declares locked_migration_controller {LOCKED_CONTROLLER} from block {old}, but \
+                 that address emitted a log at block {}",
+                old - 1
+            ),
+        )
+        .await?;
+    fixture.cleanup().await
+}

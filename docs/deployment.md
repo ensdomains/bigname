@@ -1041,14 +1041,45 @@ The redo keeps the full range, and the refusal says why after "because", when:
 
 - the owned key families were last published under another interpreter content
   hash, or, for the Project redo only, another projection content hash
-- the change edits a manifest of the ENSv2 root, registry or migration family,
-  whose declarations stored rows of every name read
+- the change edits a manifest of the ENSv2 root or registry family, whose
+  declarations stored rows of every name read
+- the change edits the `ens_v2_migration_l1` manifest other than by adding an
+  address or moving one, as the next paragraph describes
+- an address such a migration change adds or moves emitted a retained log
+  below its declared `start_block`
 - the change edits `universal_resolver_implementations` or
   `correlation_addresses`, which Interpret reads at every block
 - the marker records no change of the published set, as when manifest sync
   repaired an address floor
 - the family marker records no published set, as on a fresh corpus or after a
   cold restore.
+
+An `ens_v2_migration_l1` change is bounded when the manifest stays active and
+only its `[[contracts]]` entries differ. Each role whose entries differ either
+gains an entry it did not declare before, or moves its one entry to another
+address. Each added or moved entry has `proxy_kind = "none"`, and its role emits
+none of the family's `[[abi.events]]`. Every other field must be equal. So must
+the compiled watch plan, apart from the watches of the added and moved
+addresses. Every reader of the family's declarations reads one at or above its
+`start_block`, or where the declared contract already existed, so the redo runs
+from the lowest start on either side. For an addition that is the new start.
+For a move it is the lower of the two starts, normally the old one. Removing a
+declaration, or editing one in place, keeps the full range. That includes a
+`start_block` edit of an unchanged address.
+
+The bound assumes each changed `start_block` is the contract's deployment block.
+Interpret reads a migration controller as the `sender` of a factory
+`ProxyDeployed` log, and the first-effect scan cannot search that field. A
+changed address that emitted a retained log below its declared start shows the
+assumption is wrong, so the redo keeps the full range.
+
+The stamped Project redo undoes to the bound and replays from it while the bound
+lies inside the [family undo journal](glossary.md#family-undo-journal). Once
+the chain publishes finalized and safe blocks, each publication prunes the
+journal to 256 blocks below the block it publishes, or to the finalized or safe
+block when that is lower. A deeper bound makes the Project redo clear its
+families and rebuild them, which costs as much as a full-range Project redo.
+The Interpret redo stays bounded either way.
 
 Retiring a family that matches events from every emitter, such as
 `ens_v1_resolver_l1`, finds its first matched log near the family's start, so
@@ -4739,7 +4770,7 @@ admission changes (see
   (`phase-runner redo --chain <chain> --phase project`).
 - A manifest sync still moves the manifest-authority fingerprint, so the runner
   asks for the attested redo before it follows again. A change to the ENSv2
-  root, registry or migration family keeps that redo the full range
+  root or registry family keeps that redo the full range
   ([manifest-authority marker](#manifest-authority-marker)), so a followed
   chain meets a changed admission only inside a redo that composes every name
   anyway.
@@ -4821,6 +4852,28 @@ observes `eth`, and a busy contract emits many logs in one batch.
   matching runner and API binaries. The change rides the next re-derivation release and
   shares that release's one Interpret and Project redo pair with its other hash-rotating
   changes. Do not mark old rows ready under the new hash.
+
+## Address-only ENSv2 migration manifest changes redo from their first effect
+
+The build that bounds the redo of an `ens_v2_migration_l1` change that only adds
+an address or moves a role to another address
+([manifest-authority marker](#manifest-authority-marker)) changes
+`apps/phase-runner` only, which is an input of neither content hash.
+
+- The [interpreter content hash](glossary.md#interpreter-content-hash) and the
+  [projection content hash](glossary.md#projection-content-hash) do not rotate.
+  The build needs no redo of its own and ships as an image swap.
+- It adds no schema-migration, table, manifest or setting. The
+  manifest-authority fingerprint and the compiled watch plan are unchanged, so
+  stamp no Ingest redo.
+- A later migration manifest change of that shape still records a marker and
+  stamps any Ingest redo its widened watches need. Run the full range the fence
+  error prints, as for any marker. The attested Interpret redo then runs from
+  the lowest declared start on either side of the change, and the Project redo
+  it stamps runs from there too.
+- When that start lies below Project's family undo journal, the Project redo
+  rebuilds its families, so it takes as long as a full-range Project redo. The
+  Interpret redo stays bounded.
 
 ## A family rebuild in ranges composes once, in a composition pass
 
