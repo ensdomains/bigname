@@ -4958,8 +4958,8 @@ read by the range that holds each transaction's block. The build moves the
   API binaries. The change rides the next full re-derivation release and shares its
   Interpret and Project redo pair.
 - The mainnet migration manifest declares new addresses for the locked migration
-  controller, the migration helper and both registry implementations, and retires the
-  earlier ones. Manifest synchronization records a
+  controller, the migration helper and both registry implementations. The earlier ones leave
+  the manifest and are treated as never declared. Manifest synchronization records a
   [manifest-authority marker](glossary.md#manifest-authority-marker) on mainnet and stamps
   a required Ingest redo from block `26277137`, the earliest new declaration's start
   ([watch-plan widening](manifests.md#mandatory-historical-fetch-after-watch-plan-widening)).

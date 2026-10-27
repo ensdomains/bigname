@@ -161,18 +161,26 @@ fn a_controller_outside_its_range_correlates_nothing() -> anyhow::Result<()> {
 
 /// The controller check: each controller role needs exactly one live declaration, one with no
 /// end block, beside any number of retired ranges. A role with only retired ranges, or with two
-/// live addresses, is refused, so a migration through an undeclared controller cannot read as an
-/// ordinary registration.
+/// live addresses, is refused, so a role never loses its live controller. Two controllers whose
+/// ranges hold one of the batch's blocks are refused too. A sender not declared at a block is
+/// not a controller there, and its registration reads as ordinary. Every case is collected
+/// before the assertion, so one red run shows each refused case.
 #[test]
 fn a_controller_role_needs_exactly_one_live_declaration() -> anyhow::Result<()> {
+    const ONE_LIVE: &str = "exactly one live locked_migration_controller declaration";
+    // One live declaration passes the role check, but a retired range that still holds the
+    // migration block names a second controller there, and the batch fails.
+    const TWO_AT_BLOCK: &str = "declares 2 locked_migration_controller addresses at block";
     let block = block()?;
-    for (case, ranges) in [
-        ("retired only", vec![("fixture", 0, Some(block))]),
+    let mut failures = Vec::new();
+    for (case, ranges, expected) in [
+        ("retired only", vec![("fixture", 0, Some(block))], ONE_LIVE),
         (
             "two retired",
             vec![("fixture", 0, Some(block)), (RETIRED, 0, Some(block - 1))],
+            ONE_LIVE,
         ),
-        ("two live", vec![("fixture", 0, None), (RETIRED, 0, None)]),
+        ("two live", vec![("fixture", 0, None), (RETIRED, 0, None)], ONE_LIVE),
         (
             "two live beside a retired one",
             vec![
@@ -180,23 +188,20 @@ fn a_controller_role_needs_exactly_one_live_declaration() -> anyhow::Result<()> 
                 ("fixture", 0, None),
                 (RETIRED, 0, None),
             ],
+            ONE_LIVE,
+        ),
+        (
+            "two controllers at one block",
+            vec![("fixture", 0, None), (RETIRED, 0, Some(block))],
+            TWO_AT_BLOCK,
         ),
     ] {
-        let refused = locked_migration(&ranges).expect_err(case).to_string();
-        assert!(
-            refused.contains("exactly one live locked_migration_controller declaration"),
-            "{case}: {refused}"
-        );
+        match locked_migration(&ranges) {
+            Ok(_) => failures.push(format!("{case}: accepted, expected a refusal")),
+            Err(error) if error.to_string().contains(expected) => {}
+            Err(error) => failures.push(format!("{case}: wrong refusal: {error}")),
+        }
     }
-    // One live declaration passes the role check, but a retired range that still holds the
-    // migration block names a second controller there, and the batch fails.
-    let refused = locked_migration(&[("fixture", 0, None), (RETIRED, 0, Some(block))])
-        .expect_err("two controllers at one block")
-        .to_string();
-    assert!(
-        refused.contains("declares 2 locked_migration_controller addresses at block"),
-        "{refused}"
-    );
     // One live declaration beside retired ones passes, and the live one correlates, whatever
     // order the rows load in.
     for (case, ranges) in [
@@ -217,8 +222,13 @@ fn a_controller_role_needs_exactly_one_live_declaration() -> anyhow::Result<()> 
             ],
         ),
     ] {
-        assert!(locked_boundary(&locked_migration(&ranges)?), "{case}");
+        match locked_migration(&ranges) {
+            Ok(output) if locked_boundary(&output) => {}
+            Ok(_) => failures.push(format!("{case}: no locked boundary")),
+            Err(error) => failures.push(format!("{case}: refused: {error}")),
+        }
     }
+    anyhow::ensure!(failures.is_empty(), "{}", failures.join("\n"));
     Ok(())
 }
 

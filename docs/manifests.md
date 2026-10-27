@@ -1301,8 +1301,10 @@ declarations. No code constant lists them. Two contract roles name them:
   correlates against the controller address whose declared range holds its block.
 - Each controller role needs exactly one live declaration, one with no end block, beside any
   retired ranges. Interpret refuses a batch whose migration manifest has none or two, or
-  whose declared ranges name two controllers at one block, so a migration through an
-  undeclared controller never reads as an ordinary registration.
+  whose declared ranges name two controllers at one of the batch's blocks. A role never
+  loses its live controller. A sender the manifest does not declare at that block, such as a
+  controller replaced before the live one's start, is not a controller, and its registration
+  reads as ordinary.
 - Declaring a further implementation pair adds two `[[contracts]]` entries. On the mainnet
   profile it also moves two tests: the pinned-artifact test's role map, which looks for each
   declared contract in `deployments/mainnet/`, and the rule that no replaced contract is
