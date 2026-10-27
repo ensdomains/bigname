@@ -298,19 +298,25 @@ fn other_watches(side: &Side<'_>, addresses: &BTreeSet<&str>) -> BTreeSet<String
 /// whole-redo rule.
 ///
 /// The registry probe also covers `crates/adapters/src/schema_v2/migration/unwrapped_reconcile.rs`,
-/// which reads both controllers and the Graveyard with no block (:73-75). It cannot act on a
-/// transaction without a `LabelRegistered`: it returns early without a v1 registrar `Transfer`
-/// (:80-93), and everything it proves comes from the probe's authority transitions (:95-128,
-/// :183-195). `correlate_authority_transitions` (`migration.rs`:318-420) pushes one only inside
-/// its loop over the same-transaction `RegistrationGranted` rows built from `LabelRegistered`
-/// (:331-349), and compares the addresses only there: the Graveyard with the `Transfer`'s `to`
-/// (:373-375), the controllers with the registration's `sender` (:379, :385, :395, and the
-/// proof at `unwrapped_reconcile.rs`:195). So these sites no longer rest on the test that each
-/// declared start is the deployment receipt's block.
+/// which reads both controllers and the Graveyard with no block. The line references here are
+/// v0.14.x's. It reads them at :73-75. It cannot act on a transaction without a
+/// `LabelRegistered`: it returns early without a v1 registrar `Transfer` (:80-93), and everything
+/// it proves comes from the probe's authority transitions (:95-128, :183-195).
+/// `correlate_authority_transitions` (`migration.rs`:318-420) builds the same-transaction
+/// `RegistrationGranted` rows from `LabelRegistered` (:331-350), pushes a transition only inside
+/// its loop over them (:353), and compares the addresses only there: the Graveyard with the
+/// `Transfer`'s `to` (:373-375), the controllers with the registration's `sender` (:379, :385,
+/// :395). The unlocked controller reaches `prove` at `unwrapped_reconcile.rs`:202, as its
+/// `controller` (:221). So for registrations by the declared registry these sites no longer rest
+/// on the test that each declared start is the deployment receipt's block. A registry admitted
+/// through a `registry_announcement` edge also yields a `RegistrationGranted`
+/// (`catalog.rs`:466-470, `protocol/v2_registry.rs`:94, :390), and the correlation does not filter
+/// by emitter, but the probe reads only the declared registry.
 ///
-/// On main, TYR-385's block-aware controller comparisons (`Controllers::at(catalog, block)`) are
-/// the structural fix, and the bounded pair equals the full pair by construction there. This
-/// guard is defence for this release line, and it forward-merges harmlessly.
+/// TYR-385 is to bring block-aware controller comparisons (`Controllers::at(catalog, block)`) to
+/// main as the structural fix, so that the bounded pair equals the full pair by construction
+/// there. This guard is defence for this release line. It forward-merges harmlessly, because it
+/// can only refuse a bound, never pass a wrong one.
 pub(crate) async fn start_refusal(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,

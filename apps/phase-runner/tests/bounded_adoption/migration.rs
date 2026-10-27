@@ -98,8 +98,12 @@ fn proxy_deployed_by(
 }
 
 fn label_registered(sender: &str) -> Result<alloy_primitives::LogData> {
+    label_registered_as(U256::from(1), sender)
+}
+
+fn label_registered_as(token: U256, sender: &str) -> Result<alloy_primitives::LogData> {
     Ok(LabelRegistered {
-        tokenId: U256::from(1),
+        tokenId: token,
         labelHash: alice(),
         label: "alice".to_owned(),
         owner: SENDER.parse()?,
@@ -1093,6 +1097,33 @@ async fn registrations_naming_a_controller_at_its_start_stay_bounded() -> Result
     fixture.assert_bounded_refusal(&token, old).await?;
     fixture
         .discharge(&token, None)
+        .await?
+        .assert_ranges(old, old)?;
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// The unlocked controller's lower edge, and the position filter. A registration naming each side
+// of the move exactly at its start stays inside the bound, and one below the bound whose
+// `tokenId`, the first indexed topic, holds the new controller's address names no sender.
+#[tokio::test]
+async fn registrations_naming_the_unlocked_controller_at_its_start_stay_bounded() -> Result<()> {
+    let (old, new) = (START + 20, START + 30);
+    let token = U256::from_be_slice(REDEPLOYED.parse::<Address>()?.as_slice());
+    let (fixture, redo) = role_moved(
+        "migration_registration_unlocked_at_start",
+        "unlocked_migration_controller",
+        (UNLOCKED_CONTROLLER, old, new),
+        &[
+            (START + 5, ETH_REGISTRY, label_registered_as(token, SENDER)?),
+            (old, ETH_REGISTRY, label_registered(UNLOCKED_CONTROLLER)?),
+            (new, ETH_REGISTRY, label_registered(REDEPLOYED)?),
+        ],
+    )
+    .await?;
+    fixture.assert_bounded_refusal(&redo, old).await?;
+    fixture
+        .discharge(&redo, None)
         .await?
         .assert_ranges(old, old)?;
     fixture.assert_hashes().await?;
