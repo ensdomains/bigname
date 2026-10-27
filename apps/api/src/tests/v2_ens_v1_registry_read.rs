@@ -824,8 +824,12 @@ async fn ra5_a_verified_read_of_a_stale_pointer_serves_the_registry_resolver() -
     Ok(())
 }
 
-/// The legacy `TextChanged` without its value, as the older PublicResolver generations emit it,
-/// so bigname retains the key but not its value.
+/// A `TextChanged` with no value, so bigname retains the key `email` but not its value. The
+/// layout is the archived mainnet PublicResolver's
+/// (upstream: .refs/ens_v1/deployments/archive/PublicResolver_mainnet_9412610.sol/PublicResolver_mainnet_9412610.json:L269-L293 @ ens_v1@91c966f).
+/// The log is synthetic: `NEXT`'s own generation emits the value
+/// (upstream: .refs/ens_v1_sepolia_8209157/contracts/resolvers/profiles/ITextResolver.sol:L5-L10 @ ens_v1_sepolia_8209157@8209157),
+/// and the fixture emits the older layout from its address only to make a not-retained key.
 fn unretained_email(resolver: &'static str, node: B256) -> Result<Logs> {
     sol! {
         event TextChanged(bytes32 indexed node, string indexed indexedKey, string key);
@@ -841,7 +845,7 @@ fn unretained_email(resolver: &'static str, node: B256) -> Result<Logs> {
     )])
 }
 
-/// Row A6: as A1, read with `source=auto` and a key whose value `NEXT` did not retain, so the
+/// Row A6: as A1, read with `source=auto` and a key whose value bigname did not retain, so the
 /// read takes the verified fallback for it. It answers `200` from the chain, with no `409 stale`.
 #[tokio::test]
 async fn ra6_an_auto_fallback_of_a_cleared_lease_serving_a_registry_resolver_is_not_stale()
