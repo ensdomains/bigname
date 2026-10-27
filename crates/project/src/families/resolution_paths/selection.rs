@@ -201,10 +201,15 @@ pub(super) fn statement(normal_work: &str) -> String {
         SELECT journal.key->>1 AS resolver FROM journal
         JOIN project_resolver_classification current ON current.chain_id=$1
           AND journal.family='project_resolver_classification' AND current.resolver_address=journal.key->>1
-        WHERE current.classification IS DISTINCT FROM journal.before_image->'classification'
-           OR current.support_status IS DISTINCT FROM journal.before_image->>'support_status'
-           OR current.unsupported_reason IS DISTINCT FROM journal.before_image->>'unsupported_reason'
-           OR to_jsonb(current.manifest_id) IS DISTINCT FROM journal.before_image->'manifest_id'
+        -- PROD HOT PATCH 2026-10-27 (sel11): a resolver has changed for a resolution path only when
+        -- its supportedness changed, or its classification (role, source family, read features,
+        -- mirror) changed while it is or was supported. The composers read nothing else from the
+        -- row (storage families/records/facts.rs). A re-filing under another manifest, a reason
+        -- text, or an unsupported-to-unsupported rewrite moves no path (TYR-398, block 26286063).
+        WHERE (COALESCE(current.support_status,'')='supported')
+              IS DISTINCT FROM (COALESCE(journal.before_image->>'support_status','')='supported')
+           OR ((current.support_status='supported' OR journal.before_image->>'support_status'='supported')
+               AND current.classification IS DISTINCT FROM journal.before_image->'classification')
     ), global_change AS MATERIALIZED (
         -- Any ENSv1 mirror resolver an ENSv2 resolver manifest of the chain declares. The walk
         -- reads the publication's own declaration, one of these (resolution_path.rs).

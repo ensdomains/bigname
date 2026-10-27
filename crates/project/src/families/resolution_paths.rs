@@ -29,7 +29,7 @@ pub(super) async fn prepare(
     // starts at `root_registry`, the admission the block composes with, never the current
     // manifests.
     let statement = selection::statement(super::derived::SUMMARY_WORK_LIST);
-    sqlx::query(&statement)
+    let selected = sqlx::query(&statement)
         .bind(chain)
         .bind(block.number)
         .bind(block.timestamp_seconds)
@@ -37,7 +37,18 @@ pub(super) async fn prepare(
         .bind(root_registry)
         .execute(&mut **transaction)
         .await
-        .map_err(|e| ProjectError::database("failed to select affected resolution paths", e))?;
+        .map_err(|e| ProjectError::database("failed to select affected resolution paths", e))?
+        .rows_affected();
+    // PROD HOT PATCH 2026-10-27 (sel11): the selected set's size is the first number an operator
+    // needs when a publication stalls (TYR-398); it was discarded before.
+    tracing::info!(
+        target: "bigname_project::families",
+        chain_id = chain,
+        block = block.number,
+        after,
+        selected,
+        "resolution path names selected"
+    );
     Ok(())
 }
 

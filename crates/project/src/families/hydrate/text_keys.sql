@@ -18,8 +18,12 @@ WITH values_changed AS (
         WHERE (stored.chain_id, stored.resolver_address) = (change.chain_id, change.resolver_address)
         OFFSET 0
     ) stored ON true
-    WHERE (change.classification, change.support_status, change.unsupported_reason, change.manifest_id)
-        IS DISTINCT FROM (stored.classification, stored.support_status, stored.unsupported_reason, stored.manifest_id)
+    -- PROD HOT PATCH 2026-10-27 (sel11): only supportedness, or the classification while
+    -- supported, is a change a hydrated record reads (see resolution_paths/selection.rs).
+    WHERE (COALESCE(change.support_status, '')='supported')
+        IS DISTINCT FROM (COALESCE(stored.support_status, '')='supported')
+       OR ((change.support_status='supported' OR stored.support_status='supported')
+           AND change.classification IS DISTINCT FROM stored.classification)
 ), affected AS (
     SELECT chain_id, resolver_address, arm, arm_identity, record_key FROM values_changed
     UNION
