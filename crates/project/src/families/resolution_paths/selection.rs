@@ -217,7 +217,7 @@ pub(super) fn statement(normal_work: &str) -> String {
     ), tree_scope_event AS MATERIALIZED (
         -- PROD HOT PATCH 2026-10-27 (sel10): a rewrite of every `.eth` name needs an event of the
         -- window on the admitted root registry, on a declared ENSv1 mirror resolver, or on the
-        -- `eth` node of the mirrored ENSv1 registry. A journal diff alone (a family re-stamping a
+        -- `eth` node's own ENSv1 resolver. A journal diff alone (a family re-stamping a
         -- root-scope row it touched) moves no resolution path, and twice selected every `.eth`
         -- name (TYR-398, block 26286063).
         SELECT 1 FROM normalized_events event
@@ -225,7 +225,8 @@ pub(super) fn statement(normal_work: &str) -> String {
           AND event.canonicality_state IN ('canonical','safe','finalized')
           AND (lower(event.raw_fact_ref->>'emitting_address')=lower($5::text)
             OR lower(event.after_state->>'proxy_address')=lower($5::text)
-            OR lower(event.after_state->>'node')='0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae'
+            OR (event.event_kind='ResolverChanged' AND event.source_family='ens_v1_registry_l1'
+              AND lower(event.after_state->>'node')='0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae')
             OR EXISTS (SELECT 1 FROM manifest_contract_instances declared
                 JOIN manifest_versions manifest ON manifest.manifest_id=declared.manifest_id
                  AND manifest.chain_id=declared.chain_id AND manifest.source_family='ens_v2_resolver_l1'
