@@ -40,8 +40,13 @@ fn child_node() -> B256 {
     keccak256([namehash(NAME).as_slice(), keccak256(b"sub").as_slice()].concat())
 }
 
-/// The RootRegistry's `eth` entry with the ETHRegistry as its subregistry, as the mainnet
-/// deployment registers it, so the ENSv2 path walk of a name below `.eth` reaches the ETHRegistry.
+/// The RootRegistry's `eth` entry with the ETHRegistry as its subregistry, so the ENSv2 path walk
+/// of a name below `.eth` reaches the ETHRegistry. The mainnet deployment registers `eth` in the
+/// RootRegistry with the ETHRegistry as its registry and then sets the ETHRegistry's parent to
+/// the RootRegistry under `eth`. The holder here stands in for the deployer.
+/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/deploy/01_ETHRegistry.ts:L39-L53 @ ens_v2_mainnet_20261002@b1f97b91)
+/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/deploy/01_ETHRegistry.ts:L71-L81 @ ens_v2_mainnet_20261002@b1f97b91)
+/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registry/PermissionedRegistry.sol:L498-L513 @ ens_v2_mainnet_20261002@b1f97b91)
 fn root_eth() -> Result<super::v2_mainnet_admission::Logs> {
     let holder: Address = ROOT_HOLDER.parse()?;
     Ok(vec![
