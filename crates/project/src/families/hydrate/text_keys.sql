@@ -22,8 +22,8 @@ WITH values_changed AS (
     -- supported, is a change a hydrated record reads (see resolution_paths/selection.rs).
     WHERE (COALESCE(change.support_status, '')='supported')
         IS DISTINCT FROM (COALESCE(stored.support_status, '')='supported')
-       OR ((change.support_status='supported' OR stored.support_status='supported')
-           AND change.classification IS DISTINCT FROM stored.classification)
+       OR COALESCE((change.support_status='supported' OR stored.support_status='supported')
+           AND change.classification IS DISTINCT FROM stored.classification, false)
 ), affected AS (
     SELECT chain_id, resolver_address, arm, arm_identity, record_key FROM values_changed
     UNION

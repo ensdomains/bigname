@@ -208,8 +208,8 @@ pub(super) fn statement(normal_work: &str) -> String {
         -- text, or an unsupported-to-unsupported rewrite moves no path (TYR-398, block 26286063).
         WHERE (COALESCE(current.support_status,'')='supported')
               IS DISTINCT FROM (COALESCE(journal.before_image->>'support_status','')='supported')
-           OR ((current.support_status='supported' OR journal.before_image->>'support_status'='supported')
-               AND current.classification IS DISTINCT FROM journal.before_image->'classification')
+           OR COALESCE((current.support_status='supported' OR journal.before_image->>'support_status'='supported')
+               AND current.classification IS DISTINCT FROM journal.before_image->'classification', false)
     ), global_change AS MATERIALIZED (
         -- Any ENSv1 mirror resolver an ENSv2 resolver manifest of the chain declares. The walk
         -- reads the publication's own declaration, one of these (resolution_path.rs).

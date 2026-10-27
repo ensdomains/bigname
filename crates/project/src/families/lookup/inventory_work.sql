@@ -18,9 +18,9 @@ WITH changed AS MATERIALIZED (
           -- supported, is a change an inventory reads (see resolution_paths/selection.rs).
           OR (COALESCE(old.before_image ->> 'support_status', '')='supported')
               IS DISTINCT FROM (COALESCE(current.support_status, '')='supported')
-          OR ((old.before_image ->> 'support_status'='supported' OR current.support_status='supported')
+          OR COALESCE((old.before_image ->> 'support_status'='supported' OR current.support_status='supported')
               AND COALESCE(old.before_image -> 'classification', 'null'::jsonb)
-                  IS DISTINCT FROM COALESCE(current.classification, 'null'::jsonb)))
+                  IS DISTINCT FROM COALESCE(current.classification, 'null'::jsonb), false))
     UNION SELECT 'registry_node', key ->> 1, key ->> 2, '' FROM changed
       WHERE family='project_registry_pointer'
     UNION SELECT 'partition', old.key ->> 1, old.key ->> 2, old.key ->> 3 FROM changed old
