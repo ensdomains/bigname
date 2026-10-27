@@ -424,7 +424,7 @@ Served data runs N blocks behind head, about 24 seconds at N=2. Each live poll
 loads those N blocks again from the node. The writes are no-ops, so the cost is N
 block reads per poll. The setting applies to every chain the runner follows.
 Finite Ingest and a rewind publish without it. A redo publishes no heads.
-Server Compose forwards the variable to the phase-runner service, 0 when unset.
+Server Compose forwards the variable to the phase-runner service, 0 when unset or empty.
 
 The API's `BIGNAME_API_PUBLICATION_LAG_TOLERANCE_BLOCKS` keeps its default. The
 stored head itself lags, so the publication stands at the head as before. The
