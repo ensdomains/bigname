@@ -843,8 +843,14 @@ async fn ra5_a_verified_read_of_a_stale_pointer_serves_the_registry_resolver() -
     Ok(())
 }
 
-/// The legacy `TextChanged` without its value, as the older PublicResolver generations emit it,
-/// so bigname retains the key but not its value.
+/// A `TextChanged` with no value, so bigname retains the key `email` but not its value. The
+/// layout is the archived mainnet PublicResolver's
+/// (upstream: .refs/ens_v1/deployments/archive/PublicResolver_mainnet_9412610.sol/PublicResolver_mainnet_9412610.json:L269-L293 @ ens_v1@91c966f).
+/// The log is synthetic: `NEXT`'s own generation emits the value
+/// (upstream: .refs/ens_v1_sepolia_8209157/contracts/resolvers/profiles/ITextResolver.sol:L5-L10 @ ens_v1_sepolia_8209157@8209157),
+/// and the fixture emits the older layout from its address only to make a not-retained key. The
+/// Sepolia resolver manifest admits that layout from every emitter, so the emitter does not
+/// change how it decodes.
 fn unretained_email(resolver: &'static str, node: B256) -> Result<Logs> {
     sol! {
         event TextChanged(bytes32 indexed node, string indexed indexedKey, string key);
@@ -860,7 +866,7 @@ fn unretained_email(resolver: &'static str, node: B256) -> Result<Logs> {
     )])
 }
 
-/// Row A6: as A1, read with `source=auto` and a key whose value `NEXT` did not retain, so the
+/// Row A6: as A1, read with `source=auto` and a key whose value bigname did not retain, so the
 /// read takes the verified fallback for it. It answers `200` from the chain, with no `409 stale`.
 #[tokio::test]
 async fn ra6_an_auto_fallback_of_a_cleared_lease_serving_a_registry_resolver_is_not_stale()
@@ -898,6 +904,47 @@ async fn ra6_an_auto_fallback_of_a_cleared_lease_serving_a_registry_resolver_is_
     assert_eq!(body["meta"]["source"], "verified", "{body:#}");
     assert!(read_chain);
     Ok(())
+}
+
+/// Row A7: as A2, read with `source=auto`. The undeclared resolver's inventory answers every key
+/// `unsupported`, so the read takes the verified fallback for `text:name`. It answers `200` from
+/// the chain, with no `409 stale`.
+#[tokio::test]
+async fn ra7_an_auto_fallback_of_a_cleared_lease_serving_an_undeclared_resolver_is_not_stale()
+-> Result<()> {
+    let database = published(cleared_then(UNDECLARED, Ok(Vec::new()))?, &[2]).await?;
+    let (status, body, read_chain) = with_chain(
+        &database,
+        &format!("/v1/names/{NAME}/records?namespace=ens&source=auto&keys=text:name"),
+        resolution_universal_resolver_text_response("Test"),
+    )
+    .await?;
+    database.cleanup().await?;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert_eq!(body["data"]["resolver"], resolver(UNDECLARED), "{body:#}");
+    assert_eq!(
+        body["data"]["records"]["text:name"],
+        json!({"status": "ok", "value": "Test"}),
+        "{body:#}"
+    );
+    assert_eq!(body["meta"]["source"], "verified", "{body:#}");
+    assert!(read_chain);
+    Ok(())
+}
+
+/// A contenthash for `node` on `resolver`.
+fn contenthash(resolver: &'static str, node: B256) -> Result<Logs> {
+    sol! {
+        event ContenthashChanged(bytes32 indexed node, bytes hash);
+    }
+    Ok(vec![(
+        resolver,
+        ContenthashChanged {
+            node,
+            hash: vec![0xe3, 0x01, 0x01, 0x70].into(),
+        }
+        .encode_log_data(),
+    )])
 }
 
 /// Name detail with `include=counts`: its resolver and `record_count`.
@@ -998,5 +1045,57 @@ async fn rb5_record_count_of_a_composed_pointer_is_unchanged() -> Result<()> {
     database.cleanup().await?;
     assert_eq!(view["resolver"], resolver(NEXT), "{view:#}");
     assert_eq!(view["record_count"], 4, "{view:#}");
+    Ok(())
+}
+
+/// Row B6: as B1, with `NEXT` also holding a text whose value bigname did not retain and a
+/// contenthash. `record_count` counts the same selectors as the same logs on the lease.
+#[tokio::test]
+async fn rb6_record_count_parity_covers_an_unretained_text_and_a_contenthash() -> Result<()> {
+    let (wrong, right) = both_counted(
+        || {
+            Ok(vec![
+                pointer(lease_node(), NEXT)?,
+                logs(vec![
+                    more_next_records(lease_node()),
+                    unretained_email(NEXT, lease_node()),
+                    contenthash(NEXT, lease_node()),
+                ])?,
+            ])
+        },
+        &[1],
+    )
+    .await?;
+    assert_eq!(wrong["resolver"], resolver(NEXT), "{wrong:#}");
+    assert_eq!(wrong["record_count"], 6, "{wrong:#}");
+    assert_eq!(wrong, right);
+    Ok(())
+}
+
+/// Row B7: as B3, with the undeclared address holding records for the node. `record_count`
+/// counts its inventory as the same pointer on the lease does.
+#[tokio::test]
+async fn rb7_record_count_parity_covers_an_undeclared_resolver_holding_records() -> Result<()> {
+    let (wrong, right) = both_counted(
+        || {
+            Ok(vec![
+                pointer(lease_node(), UNDECLARED)?,
+                logs(vec![
+                    records(
+                        UNDECLARED,
+                        lease_node(),
+                        NEXT_HOLDER,
+                        None,
+                        &[("url", "https://undeclared.test")],
+                    ),
+                    contenthash(UNDECLARED, lease_node()),
+                ])?,
+            ])
+        },
+        &[1],
+    )
+    .await?;
+    assert_eq!(wrong["resolver"], resolver(UNDECLARED), "{wrong:#}");
+    assert_eq!(wrong, right);
     Ok(())
 }
