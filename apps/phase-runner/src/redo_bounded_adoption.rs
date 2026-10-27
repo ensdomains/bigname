@@ -21,7 +21,7 @@ use crate::{
     transitions::PhaseStateRow,
 };
 
-mod migration;
+pub(crate) mod migration;
 
 /// Families whose stored rows read the declarations at the publication block, below any first
 /// effect (`crates/storage/src/families/control/permissions/registry_support.rs`,

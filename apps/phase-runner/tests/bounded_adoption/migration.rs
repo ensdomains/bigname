@@ -18,6 +18,8 @@ const LOCKED_CONTROLLER: &str = "0xc46bf3b6c7ebcffd4ecfc3b012a1726a2463694d";
 /// A redeployed contract the checked-in manifest does not declare.
 const REDEPLOYED: &str = "0x0000000000000000000000000000000000300001";
 const PROXY: &str = "0x0000000000000000000000000000000000300002";
+/// An implementation no manifest declares, so a factory log naming it leaves no origin.
+const UNDECLARED: &str = "0x0000000000000000000000000000000000300003";
 
 sol! {
     event ProxyDeployed(
@@ -71,9 +73,17 @@ fn migration_baseline(profile: &Path, changes: &[(&str, Option<(&str, i64)>)]) -
 }
 
 fn proxy_deployed(implementation: &str) -> Result<alloy_primitives::LogData> {
+    proxy_deployed_by(SENDER, PROXY, implementation)
+}
+
+fn proxy_deployed_by(
+    sender: &str,
+    proxy: &str,
+    implementation: &str,
+) -> Result<alloy_primitives::LogData> {
     Ok(ProxyDeployed {
-        sender: SENDER.parse()?,
-        proxyAddress: PROXY.parse()?,
+        sender: sender.parse()?,
+        proxyAddress: proxy.parse()?,
         salt: U256::from_be_bytes(alice().0),
         implementation: implementation.parse()?,
     }
@@ -103,7 +113,9 @@ impl Fixture {
     /// Ingest redo checks (`src/verify_source.rs`, `validate_intake_shape`), and Ingest loads
     /// nothing here, so what the redo leaves is the Interpret stamp it writes as it begins
     /// (`src/redo_stamp.rs`, `stamp_ingest_redo_dependents`) and its restored row
-    /// (`src/redo_state.rs`, the completion statement).
+    /// (`src/redo_state.rs`, the completion statement). The real begin stamps Verify too. These
+    /// rows leave it out because Verify takes no part in the attested pair and `assert_hashes`
+    /// reads only the Interpret and Project rows, so no row here can observe it.
     async fn sync_migration(&self) -> Result<String> {
         sync_schema_v2_repository(self.pool(), &load_repository(&self.profile)?).await?;
         let required: Option<(i64, i64)> = sqlx::query_as(
@@ -725,6 +737,18 @@ async fn a_bound_below_the_kept_journal_rebuilds_project_and_equals_the_full_pai
         repair == ("complete".to_owned(), None),
         "the family repair is not a completed rebuild: {repair:?}"
     );
+    // An undo with an unreadable block below its start also leaves no trusted base, but it
+    // clears the reset sequence that only a rebuild's begin writes
+    // (`crates/project/src/families/repair.rs`).
+    let reset: Option<i64> =
+        sqlx::query_scalar("SELECT reset_sequence FROM project_repair_record WHERE chain_id = $1")
+            .bind(CHAIN)
+            .fetch_one(fixture.pool())
+            .await?;
+    ensure!(
+        reset.is_some(),
+        "the family repair was an undo, not a rebuild"
+    );
     ensure!(origins(fixture.pool()).await? == vec![start + 5]);
     fixture.assert_hashes().await?;
     let ranges = run.assert_ranges(start, start);
@@ -820,5 +844,202 @@ async fn a_moved_address_with_a_log_below_its_old_start_keeps_the_full_range() -
             ),
         )
         .await?;
+    fixture.cleanup().await
+}
+
+/// A fixture whose locked migration controller moves from `LOCKED_CONTROLLER` at `old` to
+/// `REDEPLOYED` at `new`, with factory logs at `logs` naming `(sender, proxy)`, synced after the
+/// initial pair.
+async fn controller_moved(
+    prefix: &str,
+    (old, new): (i64, i64),
+    logs: &[(i64, &str, &str)],
+) -> Result<(Fixture, String)> {
+    let fixture = Fixture::with(prefix, 59, |profile| {
+        migration_baseline(
+            profile,
+            &[(
+                "locked_migration_controller",
+                Some((LOCKED_CONTROLLER, old)),
+            )],
+        )
+    })
+    .await?;
+    for (block, sender, proxy) in logs {
+        fixture
+            .log(
+                *block,
+                0,
+                FACTORY,
+                &proxy_deployed_by(sender, proxy, UNDECLARED)?,
+            )
+            .await?;
+    }
+    fixture.initial_pair().await?;
+    fixture.declare_migration("locked_migration_controller", Some((REDEPLOYED, new)))?;
+    let token = fixture.sync_migration().await?;
+    Ok((fixture, token))
+}
+
+// The factory-sender guard. The controller lookup reads a factory `ProxyDeployed` naming the
+// declared controller as its indexed `sender`, whatever the block
+// (`crates/adapters/src/schema_v2/migration/registry.rs`). A factory log naming the new controller
+// below its declared start, and below the bound, shows the start is not its deployment block: the
+// redo keeps the full range and names the factory log's block. The full range then runs, and the
+// tables equal the full pair's.
+#[tokio::test]
+async fn a_factory_log_below_the_new_controllers_start_keeps_the_full_range() -> Result<()> {
+    let (old, new) = (START + 20, START + 30);
+    let (fixture, token) = controller_moved(
+        "migration_sender_new",
+        (old, new),
+        &[(START + 15, REDEPLOYED, PROXY)],
+    )
+    .await?;
+    fixture
+        .assert_short_range_refused(
+            &token,
+            &format!(
+                "declares locked_migration_controller {REDEPLOYED} from block {new}, but the \
+                 factory log at block {} names that address as `sender`, so the declared start \
+                 is not its deployment block",
+                START + 15
+            ),
+        )
+        .await?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(START, START)?;
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// The factory-sender guard on the old side of a move: a factory log one block below the old
+// controller's declared start.
+#[tokio::test]
+async fn a_factory_log_below_the_old_controllers_start_keeps_the_full_range() -> Result<()> {
+    let (old, new) = (START + 20, START + 30);
+    let (fixture, token) = controller_moved(
+        "migration_sender_old",
+        (old, new),
+        &[(old - 1, LOCKED_CONTROLLER, PROXY)],
+    )
+    .await?;
+    fixture
+        .assert_short_range_refused(
+            &token,
+            &format!(
+                "declares locked_migration_controller {LOCKED_CONTROLLER} from block {old}, but \
+                 the factory log at block {} names that address as `sender`",
+                old - 1
+            ),
+        )
+        .await?;
+    fixture.cleanup().await
+}
+
+// The guard's lower edge. A factory log naming each side of the move exactly at its declared
+// start stays inside the bound, so the redo is bounded from the old start.
+#[tokio::test]
+async fn factory_logs_naming_a_controller_at_its_start_stay_bounded() -> Result<()> {
+    let (old, new) = (START + 20, START + 30);
+    let (fixture, token) = controller_moved(
+        "migration_sender_at_start",
+        (old, new),
+        &[(old, LOCKED_CONTROLLER, PROXY), (new, REDEPLOYED, PROXY)],
+    )
+    .await?;
+    fixture.assert_bounded_refusal(&token, old).await?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(old, old)?;
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// Each side is probed for its own address in the `sender` topic only. Below the new controller's
+// start, a factory log naming the old controller at or above the old start, and one naming the new
+// controller as `proxyAddress`, the next indexed topic, leave the redo bounded.
+#[tokio::test]
+async fn a_factory_log_naming_only_the_other_side_of_a_move_stays_bounded() -> Result<()> {
+    let (old, new) = (START + 10, START + 30);
+    let (fixture, token) = controller_moved(
+        "migration_sender_other_side",
+        (old, new),
+        &[
+            (START + 20, LOCKED_CONTROLLER, PROXY),
+            (START + 5, SENDER, REDEPLOYED),
+        ],
+    )
+    .await?;
+    fixture.assert_bounded_refusal(&token, old).await?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(old, old)?;
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// The factory-sender statement probes the factory's own logs through `raw_logs_emitter_idx`, with
+// the topics as filters, under the generic plan a prepared statement settles on. Over 20,000 logs
+// from 200 emitters it walks no table whole.
+#[tokio::test]
+async fn the_factory_sender_statement_reads_the_emitter_index() -> Result<()> {
+    let fixture = Fixture::new("migration_sender_plan", 1_999).await?;
+    sqlx::query(
+        "INSERT INTO raw_logs (chain_id, block_hash, block_number, transaction_hash,
+             transaction_index, log_index, emitting_address, topics, data)
+         SELECT $1, $1 || '-block-' || height, height, $1 || '-transaction-' || height, 0,
+                slot, '0x' || lpad(to_hex(4096 + (height * 10 + slot) % 200), 40, '0'),
+                ARRAY['0x' || lpad(to_hex((height + slot) % 20), 64, '0'),
+                      '0x' || lpad(to_hex(height % 50), 64, '0')], ''::bytea
+         FROM generate_series($2::bigint, $3::bigint) height
+         CROSS JOIN generate_series(1, 10) slot",
+    )
+    .bind(CHAIN)
+    .bind(START)
+    .bind(fixture.head)
+    .execute(fixture.pool())
+    .await?;
+    sqlx::raw_sql("ANALYZE raw_logs, chain_lineage")
+        .execute(fixture.pool())
+        .await?;
+    let mut transaction = fixture.pool().begin().await?;
+    sqlx::query("SET LOCAL plan_cache_mode = force_generic_plan")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::raw_sql(&format!(
+        "PREPARE factory_sender AS {}",
+        phase_runner::factory_sender_statement()
+    ))
+    .execute(&mut *transaction)
+    .await?;
+    let head = fixture.head;
+    let (topic0, sender) = (format!("0x{:0>64}", 5), format!("0x{:0>64}", 7));
+    let plan = sqlx::query_scalar::<_, String>(&format!(
+        "EXPLAIN (COSTS OFF) EXECUTE factory_sender('{CHAIN}',
+             '0x0000000000000000000000000000000000001001', {head}, '{topic0}', 2, '{sender}')"
+    ))
+    .fetch_all(&mut *transaction)
+    .await?
+    .join("\n");
+    transaction.rollback().await?;
+    println!("factory sender:\n{plan}\n");
+    ensure!(
+        plan.contains("raw_logs_emitter_idx"),
+        "the statement does not probe raw_logs_emitter_idx:\n{plan}"
+    );
+    ensure!(
+        plan.lines()
+            .any(|line| line.contains("Index Cond") && line.contains("emitting_address")),
+        "the emitter is not an index condition:\n{plan}"
+    );
+    ensure!(
+        !plan.contains("Seq Scan on raw_logs"),
+        "the statement scans raw_logs whole:\n{plan}"
+    );
     fixture.cleanup().await
 }

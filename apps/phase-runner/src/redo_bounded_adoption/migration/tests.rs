@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{Changed, migration_change_qualifies};
+use super::{Changed, SenderProbe, migration_change_qualifies};
 use crate::redo_first_effect::{ManifestDiff, Side};
 
 const CONTROLLER: &str = "0x00000000000000000000000000000000000c0001";
@@ -8,6 +8,9 @@ const MOVED: &str = "0x00000000000000000000000000000000000c0002";
 const FACTORY: &str = "0x00000000000000000000000000000000000f0001";
 const IMPLEMENTATION: &str = "0x00000000000000000000000000000000000e0001";
 const PROXY_DEPLOYED: &str = "0x0a2c575ff341b41da136c9ccae74ec230a927a024d18f0dccf46d123f28f5f54";
+/// The family's `ProxyDeployed` fragment, as the manifest declares it.
+const FRAGMENT: &str = "event ProxyDeployed(address indexed sender, address indexed proxyAddress, \
+                        uint256 salt, address implementation)";
 
 fn contract(role: &str, address: &str, start: i64) -> Value {
     json!({"role": role, "address": address, "proxy_kind": "none", "start_block": start})
@@ -16,6 +19,10 @@ fn contract(role: &str, address: &str, start: i64) -> Value {
 /// A migration payload over `contracts`, with the address watch every declared contract compiles
 /// for the family's one event.
 fn payload(contracts: &[Value]) -> Value {
+    with_fragment(contracts, FRAGMENT)
+}
+
+fn with_fragment(contracts: &[Value], fragment: &str) -> Value {
     let watch: Vec<Value> = contracts
         .iter()
         .map(|contract| {
@@ -30,7 +37,8 @@ fn payload(contracts: &[Value]) -> Value {
         "rollout_status": "active", "normalizer_version": "ensip15@ens-normalize-0.1.1",
         "correlation_addresses": {"ens_v1_name_wrapper": "0x01"}, "capability_flags": {},
         "roots": [], "discovery_rules": [], "contracts": contracts,
-        "abi": {"events": [{"name": "ProxyDeployed", "emitter_roles": ["verifiable_factory"]}]},
+        "abi": {"events": [{"name": "ProxyDeployed", "fragment": fragment,
+            "emitter_roles": ["verifiable_factory"]}]},
         "_bigname_compiled_watch": watch,
     })
 }
@@ -56,6 +64,19 @@ fn changed(role: &str, address: &str, start: i64) -> Changed {
         role: role.to_owned(),
         address: address.to_owned(),
         start,
+        sender: None,
+    }
+}
+
+/// A changed controller, probed at the factory's `ProxyDeployed` topic `position`.
+fn controller(address: &str, start: i64, position: i32) -> Changed {
+    Changed {
+        sender: Some(SenderProbe {
+            factory: FACTORY.to_owned(),
+            topic0: PROXY_DEPLOYED.to_owned(),
+            position,
+        }),
+        ..changed("locked_migration_controller", address, start)
     }
 }
 
@@ -101,8 +122,8 @@ fn a_moved_singleton_qualifies_from_the_lower_start() {
     assert_eq!(
         verdict(&old, &new),
         Ok(vec![
-            changed("locked_migration_controller", CONTROLLER, 20),
-            changed("locked_migration_controller", MOVED, 30),
+            controller(CONTROLLER, 20, 2),
+            controller(MOVED, 30, 2)
         ])
     );
     let mut diff = ManifestDiff::default();
@@ -267,5 +288,51 @@ fn an_addition_and_a_move_in_one_change_qualify_together() {
         declared.iter().map(|entry| entry.start).min(),
         Some(10),
         "{declared:?}"
+    );
+}
+
+// The factory names the controller in the topic after the topic0 and every indexed input before
+// `sender`, read from the fragment's indexed flags.
+#[test]
+fn the_sender_topic_follows_the_fragments_indexed_inputs() {
+    let old = payload(&[factory()]);
+    let contracts = [
+        factory(),
+        contract("locked_migration_controller", CONTROLLER, 20),
+    ];
+    let reordered = "event ProxyDeployed(address indexed proxyAddress, uint256 salt, \
+                     address indexed sender, address implementation)";
+    let mut new = with_fragment(&contracts, reordered);
+    let mut old_reordered = old.clone();
+    old_reordered["abi"] = new["abi"].clone();
+    let mut probed = controller(CONTROLLER, 20, 3);
+    let event: super::ManifestAbiEvent =
+        serde_json::from_value(json!({"name": "ProxyDeployed", "fragment": reordered})).unwrap();
+    probed.sender.as_mut().unwrap().topic0 = event.topic0().unwrap().unwrap();
+    assert_eq!(verdict(&old_reordered, &new), Ok(vec![probed]));
+    assert_eq!(
+        verdict(&old, &payload(&contracts)),
+        Ok(vec![controller(CONTROLLER, 20, 2)])
+    );
+    new["abi"]["events"][0]["fragment"] = json!(
+        "event ProxyDeployed(address sender, address indexed proxyAddress, uint256 salt, \
+         address implementation)"
+    );
+    let mut old_unindexed = old;
+    old_unindexed["abi"] = new["abi"].clone();
+    refused(
+        &old_unindexed,
+        &new,
+        "its ProxyDeployed fragment does not index `sender`",
+    );
+}
+
+// Without a declared factory no factory log is interpreted, so the controller has no probe.
+#[test]
+fn a_controller_without_a_declared_factory_has_no_probe() {
+    let new = payload(&[contract("locked_migration_controller", CONTROLLER, 20)]);
+    assert_eq!(
+        verdict(&payload(&[]), &new),
+        Ok(vec![changed("locked_migration_controller", CONTROLLER, 20)])
     );
 }
