@@ -225,8 +225,10 @@ pub(super) fn statement(normal_work: &str) -> String {
           AND event.canonicality_state IN ('canonical','safe','finalized')
           AND (lower(event.raw_fact_ref->>'emitting_address')=lower($5::text)
             OR lower(event.after_state->>'proxy_address')=lower($5::text)
+            -- (`node` is the parent when `child_node` is present; the subject is the child.)
             OR (event.event_kind='ResolverChanged' AND event.source_family='ens_v1_registry_l1'
-              AND lower(event.after_state->>'node')='0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae')
+              AND lower(COALESCE(event.after_state->>'child_node', event.after_state->>'node'))
+                ='0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae')
             OR EXISTS (SELECT 1 FROM manifest_contract_instances declared
                 JOIN manifest_versions manifest ON manifest.manifest_id=declared.manifest_id
                  AND manifest.chain_id=declared.chain_id AND manifest.source_family='ens_v2_resolver_l1'
