@@ -397,6 +397,7 @@ The implemented phases use:
 - `BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR`
 - `BIGNAME_PHASE_RUNNER_REDO_METRICS_BIND_ADDR`
 - `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS`
+- `BIGNAME_PHASE_RUNNER_LIVE_PUBLICATION_LAG_BLOCKS` — optional, 0 (default) to 3; see [Live publication lag](#live-publication-lag)
 
 An unset optional ceiling configures no limit; Docker inspection may show its bare
 variable name without `=`. An explicitly empty `KEY=` value is invalid.
@@ -407,6 +408,53 @@ the unchanged CLI accepts zero. Direct CLI defaults remain floor zero, path `.`
 and no ceiling; the existing capacity poll interval remains five seconds.
 These settings are read at startup. Shell values override `--env-file`, so inspect
 both interpolation inputs and the effective service/container configuration.
+
+### Live publication lag
+
+`BIGNAME_PHASE_RUNNER_LIVE_PUBLICATION_LAG_BLOCKS` (`--live-publication-lag-blocks`)
+makes live follow publish the readable head that many blocks below the newest block
+it has loaded. The blocks above it stay `observed`, and Interpret, Project,
+hydration and the API read none of them. A reorg that replaces only those blocks
+orphans them with no downstream redo. Without the lag, a one-block reorg at the
+head redoes Interpret and Project for that block, and the API refuses to serve the
+chain until the redo completes. A reorg deeper than the lag still redoes the
+readable blocks it replaces.
+
+Served data runs N blocks behind head, about 24 seconds at N=2. Each live poll
+loads those N blocks again from the node. The writes are no-ops, so the cost is N
+block reads per poll. The setting applies to every chain the runner follows.
+Finite Ingest and a rewind publish without it. A redo publishes no heads.
+Server Compose forwards the variable to the phase-runner service, 0 when unset or empty.
+
+The API's `BIGNAME_API_PUBLICATION_LAG_TOLERANCE_BLOCKS` keeps its default. The
+stored head itself lags, so the publication stands at the head as before. The
+runner refuses a value above 3 at startup. `/v1/status` reads `stale` once the
+published block is more than 60 seconds (`DEFAULT_MAX_LAG_SECS`) older than the
+network head. On a chain with 12-second blocks, each lagged block adds 12 seconds
+to the age the head already has, up to one block plus the five-second network-head
+refresh. That makes 53 seconds at 3 blocks and 65 at 4.
+
+Metrics under the lag:
+
+- `phase_runner_publication_lag_blocks{chain}` is the configured lag.
+- `phase_runner_publication_gap_blocks{chain}` is the newest block Live has loaded
+  minus the published chain head. At steady state it equals the configured lag,
+  and it is 0 without one. It also reads 0 while the node reports a head below
+  the published one: Live then records the published head as its position, even
+  though the observed blocks above it are still stored. Both gauges carry the
+  same `chain` label, so the two join on instance and chain.
+- `phase-runner redo` exports `phase_runner_publication_lag_blocks` as 0 on its
+  own metrics listener, whatever `run` was given.
+- `phase_runner_chain_head_block` is the published, lagged head.
+- `phase_runner_head_lag_blocks{phase="live"}` reads 0 when Live is caught up.
+  Live's target is the node's head and its position the newest block it loaded,
+  which match once it has caught up.
+  Interpret and Project stand on the published head, so theirs read 0 too.
+- `phase_runner_served_lag_blocks` measures from the node's head, so at steady
+  state it reads the lag rather than 0. A rule that alerts on it above 1 fires at
+  a lag of 2.
+- `/v1/status` reports the network head beside the canonical block, so its
+  `ingestion_lag_blocks` reads the lag.
 
 The runner syncs every manifest in the
 [deployment profile](glossary.md#deployment-profile), whichever chains
