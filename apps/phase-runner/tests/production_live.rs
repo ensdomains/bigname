@@ -26,7 +26,7 @@ use phase_runner::{
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, SourceRole, TimingConfig},
     error::{ErrorKind, RunnerError},
-    heads::{BlockMarker, HeadMarkers, publish_heads},
+    heads::{BlockMarker, HeadMarkers, publish_heads, publish_lagged_heads},
     ingest_phase::IngestPhase,
     interpret_phase::InterpretPhase,
     live_phase::LivePhase,
@@ -3664,6 +3664,9 @@ mod hydration;
 #[path = "production_live/project_reorg.rs"]
 mod project_reorg;
 
+#[path = "production_live/live_publication_lag.rs"]
+mod live_publication_lag;
+
 fn live_request(
     chain: &str,
     endpoint: &str,
@@ -4290,6 +4293,8 @@ struct RpcChain {
     reorg_after_number_batch: Option<(u64, i64, i64)>,
     reorg_after_logs: Option<(u64, i64, i64)>,
     requests: usize,
+    /// Report the head as the safe block too, instead of block 0.
+    safe_at_head: bool,
 }
 
 struct RpcFixture {
@@ -4383,6 +4388,7 @@ fn rpc_chain(branch: u64, through: i64) -> RpcChain {
         reorg_after_number_batch: None,
         reorg_after_logs: None,
         requests: 0,
+        safe_at_head: false,
     }
 }
 
@@ -4460,6 +4466,7 @@ fn chain_rpc_response(state: &RpcChain, request: &Value) -> Value {
             let selector = params.first().and_then(Value::as_str).unwrap_or_default();
             let index = match selector {
                 "latest" => state.canonical.len().checked_sub(1),
+                "safe" if state.safe_at_head => state.canonical.len().checked_sub(1),
                 "safe" | "finalized" => Some(0),
                 quantity => usize::from_str_radix(quantity.trim_start_matches("0x"), 16).ok(),
             };

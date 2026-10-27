@@ -48,11 +48,6 @@ justification = "Read-only and disposable-copy connection preflights, per-connec
 review_justification = "Reviewed as non-serving release tooling: the file is below the 1200 LOC ceiling and most of its length is focused refusal-path coverage for the two connection modes rather than additional production responsibilities."
 
 [[files]]
-path = "apps/phase-runner/src/heads.rs"
-loc = 616
-justification = "Head-marker validation, retained provider finality, and publication checks share this module; database persistence is already split into heads/persist.rs. Preserve that boundary for this integration."
-
-[[files]]
 path = "apps/phase-runner/src/verify_phase.rs"
 loc = 605
 justification = "Verify reference selection carries the startup-recorded genesis into the reference provider's RPC chain check beside the plan selection and provider cache it belongs to; the file remains well below the review threshold."
