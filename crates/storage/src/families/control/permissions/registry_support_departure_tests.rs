@@ -1,9 +1,11 @@
 //! Row 14: the departure probe's cardinality axes. The probe reads one proxy's canonical
 //! `Upgraded` rows through `normalized_events_registry_departure_idx`, either side of the
 //! origin's implementation, so it visits no same-code upgrade and stops at the first departure.
-//! Partial set {empty, one proxy, many proxies}, upgrades per proxy {0, 1, many same-code, many
-//! departures, no implementation}, plan mode {custom, generic}, before and after ANALYZE. The
-//! empty partial set is mainnet's state with no registry `Upgraded` row.
+//! Partial set {empty over a populated table, one proxy, many proxies}, upgrades per proxy
+//! {0, 1, many same-code, many departures, no implementation}, plan mode {custom, generic},
+//! before and after ANALYZE. An empty partial set over a populated table is mainnet's state
+//! with no registry `Upgraded` row. A truly empty table is read for its answer only, since a
+//! scan of no rows is right there whatever the plan.
 use anyhow::{Result, ensure};
 use serde_json::Value;
 use sqlx::{PgConnection, raw_sql};
@@ -17,11 +19,13 @@ const CODE: &str = "0x00000000000000000000000000000000000000c1";
 const OTHER: &str = "0x00000000000000000000000000000000000000c2";
 const UPGRADES: i64 = 1_000;
 
-/// The partial set holds the upgrades of `proxies`. Proxies 1 to 20 each carry a thousand
+/// `normalized_events` holds the upgrades of `proxies` under `family`. Under the registry
+/// family they form the partial set. Under another family they fill the table and leave the
+/// partial set empty. Proxies 1 to 20 each carry a thousand
 /// same-code upgrades, so "many" proxies and "many" same-code rows hold together. Proxy 21 has
 /// none, proxy 22 one departure among a thousand same-code upgrades, proxy 23 a thousand
 /// departures, and proxy 24 one upgrade with no implementation.
-async fn install(connection: &mut PgConnection, proxies: &[i64]) -> Result<()> {
+async fn install(connection: &mut PgConnection, proxies: &[i64], family: &str) -> Result<()> {
     let listed = format!(
         "ARRAY[{}]::bigint[]",
         proxies
@@ -39,7 +43,7 @@ async fn install(connection: &mut PgConnection, proxies: &[i64]) -> Result<()> {
          INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
              manifest_version, chain_id, block_number, block_hash, derivation_kind,
              canonicality_state, after_state)
-         SELECT 'upgrade:' || proxy || ':' || n, 'ens', 'Upgraded', 'ens_v2_registry_l1', 1,
+         SELECT 'upgrade:' || proxy || ':' || n, 'ens', 'Upgraded', '{family}', 1,
                 '{CHAIN}', n, 'block-' || n, 'proxy_upgrade', 'canonical',
                 jsonb_build_object('proxy_address', '0x' || lpad(to_hex(proxy), 40, '0'),
                     'implementation', CASE
@@ -51,7 +55,7 @@ async fn install(connection: &mut PgConnection, proxies: &[i64]) -> Result<()> {
          INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
              manifest_version, chain_id, block_number, block_hash, derivation_kind,
              canonicality_state, after_state)
-         SELECT 'upgrade:24', 'ens', 'Upgraded', 'ens_v2_registry_l1', 1, '{CHAIN}', 7,
+         SELECT 'upgrade:24', 'ens', 'Upgraded', '{family}', 1, '{CHAIN}', 7,
              'block-7', 'proxy_upgrade', 'canonical',
              jsonb_build_object('proxy_address', '0x' || lpad(to_hex(24), 40, '0'))
          WHERE 24 = ANY ({listed});
@@ -132,27 +136,67 @@ const MANY: [Cell; 5] = [
     (24, true, 1),
 ];
 
-/// (shape, the proxies with upgrades, the cells read)
-const SHAPES: [(&str, &[i64], &[Cell]); 3] = [
-    ("empty", &[], &[(1, false, 0)]),
-    ("one proxy", &[1], &[(1, false, 0), (21, false, 0)]),
-    (
-        "many proxies",
-        &[
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 23, 24,
-        ],
-        &MANY,
-    ),
+const REGISTRY: &str = "ens_v2_registry_l1";
+
+/// Every proxy that has upgrades in the many-proxies shape.
+const ALL: [i64; 23] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 23, 24,
 ];
 
-async fn check(connection: &mut PgConnection, stats: &str, cells: &[Cell]) -> Result<Vec<String>> {
+/// One shape: its name, the proxies with upgrades, their family, the cells read, and whether
+/// the plan is held to the index.
+struct Shape {
+    name: &'static str,
+    proxies: &'static [i64],
+    family: &'static str,
+    cells: &'static [Cell],
+    plan: bool,
+}
+
+const SHAPES: [Shape; 4] = [
+    Shape {
+        name: "empty table",
+        proxies: &[],
+        family: REGISTRY,
+        cells: &[(1, false, 0)],
+        plan: false,
+    },
+    Shape {
+        name: "empty partial set over a populated table",
+        proxies: &ALL,
+        family: "ens_v2_resolver_l1",
+        cells: &[
+            (1, false, 0),
+            (22, false, 0),
+            (23, false, 0),
+            (24, false, 0),
+        ],
+        plan: true,
+    },
+    Shape {
+        name: "one proxy",
+        proxies: &[1],
+        family: REGISTRY,
+        cells: &[(1, false, 0), (21, false, 0)],
+        plan: true,
+    },
+    Shape {
+        name: "many proxies",
+        proxies: &ALL,
+        family: REGISTRY,
+        cells: &MANY,
+        plan: true,
+    },
+];
+
+async fn check(connection: &mut PgConnection, stats: &str, shape: &Shape) -> Result<Vec<String>> {
     let probes = [Probe {
         index: INDEX,
         conditions: &["chain_id = ", "proxy_address", "implementation"],
     }];
     let mut failures = Vec::new();
     for mode in PLAN_MODES {
-        for &(proxy, departed, bound) in cells {
+        for &(proxy, departed, bound) in shape.cells {
             let label = format!("{stats} {mode} proxy {proxy}");
             let measured = measure(connection, mode, proxy).await?;
             if measured.departed != departed {
@@ -164,6 +208,9 @@ async fn check(connection: &mut PgConnection, stats: &str, cells: &[Cell]) -> Re
                     measured.visited,
                     measured.text.join("\n")
                 ));
+            }
+            if !shape.plan {
+                continue;
             }
             failures.extend(missing_probes(&label, &measured.text, &probes));
             // Every arm reads the index.
@@ -185,20 +232,20 @@ async fn check(connection: &mut PgConnection, stats: &str, cells: &[Cell]) -> Re
 
 #[tokio::test]
 async fn the_departure_probe_visits_no_same_code_upgrade() -> Result<()> {
-    for (index, (shape, proxies, cells)) in SHAPES.into_iter().enumerate() {
+    for (index, shape) in SHAPES.iter().enumerate() {
         with_database(
             &format!("registry_support_departure_plan_{index}"),
             async |connection| {
-                install(connection, proxies).await?;
+                install(connection, shape.proxies, shape.family).await?;
+                let name = shape.name;
                 let mut failures =
-                    check(connection, &format!("{shape}, before ANALYZE"), cells).await?;
+                    check(connection, &format!("{name}, before ANALYZE"), shape).await?;
                 raw_sql("ANALYZE normalized_events")
                     .execute(&mut *connection)
                     .await?;
-                failures
-                    .extend(check(connection, &format!("{shape}, after ANALYZE"), cells).await?);
+                failures.extend(check(connection, &format!("{name}, after ANALYZE"), shape).await?);
                 ensure!(failures.is_empty(), "{}", failures.join("\n\n"));
-                if proxies.len() > 1 {
+                if shape.family == REGISTRY && shape.proxies.len() > 1 {
                     // Without the index the arms read the proxy's upgrades through another
                     // index and visit every same-code upgrade, so the bound above can fail.
                     raw_sql(&format!("DROP INDEX {INDEX}"))
