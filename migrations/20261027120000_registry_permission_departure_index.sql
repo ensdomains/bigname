@@ -2,6 +2,10 @@
 -- The departure index the registry permission reader probes for every declared registry
 -- implementation. The implementation is a key column, so the probe reads either side of the
 -- origin's implementation and never visits a same-code upgrade.
+-- Dead indexes: normalized_events_wrapper_departure_idx,
+-- normalized_events_user_registry_departure_idx, normalized_events_mainnet_wrapper_departure_idx
+-- and normalized_events_mainnet_user_registry_departure_idx have no reader from this release on.
+-- They stay installed so earlier migrations keep their proofs. Drop them in later shrink work.
 -- Populated upgrades require ops/registry-permission-indexes/install.sql first.
 -- Validate the whole set before building anything. A prebuilt index is adopted in place.
 -- Only an empty target table may build its missing index in this transaction.

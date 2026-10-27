@@ -1299,6 +1299,9 @@ declarations. No code constant lists them. Two contract roles name them:
   declarations' admitted ranges hold the origin's block. Ranges are inclusive at both ends.
 - The same rule holds for the locked and unlocked migration controllers. Each transaction
   correlates against the controller address whose declared range holds its block.
+- Each controller role needs exactly one live declaration, one with no end block, beside any
+  retired ranges. Interpret refuses a batch whose migration manifest has none or two, so a
+  migration through an undeclared controller never reads as an ordinary registration.
 - Declaring a further implementation pair is a manifest change of two `[[contracts]]`
   entries. A pair that leaves the manifest has its range closed at the chain head seen
   when the manifest loaded, so origins inside that range stay kept on a rebuild.

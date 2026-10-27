@@ -18,9 +18,21 @@ impl Catalog {
         })
     }
 
-    /// Whether the family declares `role` at all, under any address and range.
-    pub(in crate::schema_v2) fn declares_role(&self, source_family: &str, role: &str) -> bool {
-        self.role_admissions(source_family, role).next().is_some()
+    /// The distinct addresses the family declares under `role` with no end block: the live
+    /// declarations. A retired range has an end block, so it is not counted.
+    pub(in crate::schema_v2) fn live_addresses(
+        &self,
+        source_family: &str,
+        role: &str,
+    ) -> Vec<String> {
+        let mut live: Vec<String> = self
+            .role_admissions(source_family, role)
+            .filter(|admission| admission.active_to_block.is_none())
+            .map(|admission| admission.address.to_ascii_lowercase())
+            .collect();
+        live.sort();
+        live.dedup();
+        live
     }
 
     /// The one address the family declares under `role`, at any block. `None` when the role is

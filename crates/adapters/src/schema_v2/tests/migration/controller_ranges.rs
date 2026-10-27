@@ -4,6 +4,7 @@
 use super::*;
 
 const RETIRED: &str = "0x00000000000000000000000000000000000000c0";
+const EARLIER: &str = "0x00000000000000000000000000000000000000c1";
 
 /// The locked `.eth` migration L-01 (`ProxyDeployed` and `LabelRegistered` sent by the fixture's
 /// locked controller), with the locked controller role declared as `ranges`, in that order.
@@ -141,12 +142,67 @@ fn a_controller_outside_its_range_correlates_nothing() -> anyhow::Result<()> {
             "{case}"
         );
     }
-    // The boundaries of the ranges: from = block and to = block both hold it.
+    // The boundaries of the ranges: from = block and to = block both hold it. A retired range
+    // sits beside a live declaration that starts after it.
     for ranges in [
         vec![("fixture", block, None)],
-        vec![("fixture", 0, Some(block))],
+        vec![("fixture", 0, Some(block)), (RETIRED, block + 1, None)],
     ] {
         assert!(locked_boundary(&locked_migration(&ranges)?));
+    }
+    Ok(())
+}
+
+/// The controller check: each controller role needs exactly one live declaration, one with no
+/// end block, beside any number of retired ranges. A role with only retired ranges, or with two
+/// live addresses, is refused, so a migration through an undeclared controller cannot read as an
+/// ordinary registration.
+#[test]
+fn a_controller_role_needs_exactly_one_live_declaration() -> anyhow::Result<()> {
+    let block = block()?;
+    for (case, ranges) in [
+        ("retired only", vec![("fixture", 0, Some(block))]),
+        (
+            "two retired",
+            vec![("fixture", 0, Some(block)), (RETIRED, 0, Some(block - 1))],
+        ),
+        ("two live", vec![("fixture", 0, None), (RETIRED, 0, None)]),
+        (
+            "two live beside a retired one",
+            vec![
+                (EARLIER, 0, Some(1)),
+                ("fixture", 0, None),
+                (RETIRED, 0, None),
+            ],
+        ),
+    ] {
+        let refused = locked_migration(&ranges).expect_err(case).to_string();
+        assert!(
+            refused.contains("exactly one live locked_migration_controller declaration"),
+            "{case}: {refused}"
+        );
+    }
+    // One live declaration beside retired ones passes, and the live one correlates, whatever
+    // order the rows load in.
+    for (case, ranges) in [
+        (
+            "retired first",
+            vec![
+                (RETIRED, 0, Some(block - 1)),
+                (EARLIER, 0, Some(1)),
+                ("fixture", block, None),
+            ],
+        ),
+        (
+            "live first",
+            vec![
+                ("fixture", block, None),
+                (EARLIER, 0, Some(1)),
+                (RETIRED, 0, Some(block - 1)),
+            ],
+        ),
+    ] {
+        assert!(locked_boundary(&locked_migration(&ranges)?), "{case}");
     }
     Ok(())
 }

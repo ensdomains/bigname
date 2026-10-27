@@ -235,7 +235,8 @@ fn origin_cases() -> Vec<OriginCase> {
             None,
             None,
         ),
-        // Row 13: upgrades.
+        // Row 13: upgrades. An upgrade to any other implementation is a departure, even one
+        // the manifest declares, under the other role or under the same one.
         mainnet(
             "a same-code upgrade",
             current(),

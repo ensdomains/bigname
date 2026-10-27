@@ -419,13 +419,17 @@ impl Controllers {
     const UNLOCKED: &str = "unlocked_migration_controller";
     const LOCKED: &str = "locked_migration_controller";
 
-    /// Fails when the manifest declares either controller role at no block at all. A role may
-    /// hold several addresses, each in its own range.
+    /// Fails unless each controller role has exactly one live declaration, one with no end
+    /// block. Retired ranges may sit beside it. A role with only retired ranges, or with two
+    /// live addresses, would let a migration through an undeclared controller read as an
+    /// ordinary registration.
     pub(super) fn ensure_declared(catalog: &Catalog) -> anyhow::Result<()> {
         for role in [Self::UNLOCKED, Self::LOCKED] {
+            let live = catalog.live_addresses(MIGRATION_FAMILY, role);
             anyhow::ensure!(
-                catalog.declares_role(MIGRATION_FAMILY, role),
-                "migration manifest has no {role} declaration"
+                live.len() == 1,
+                "migration manifest needs exactly one live {role} declaration, found {}",
+                live.len()
             );
         }
         Ok(())
