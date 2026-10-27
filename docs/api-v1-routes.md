@@ -849,7 +849,9 @@ collection route carry neither header.
   path would be an unbounded scan, so the expansion does not offer one. Any
   other `include` value returns `400 invalid_input`.
   Counts require the current publication on the name's chain and are read on
-  one database snapshot of the captured publication. A historical selection at
+  one database snapshot of the captured publication. A name served through its
+  ENSv1 registry pointer takes `record_count` from its records' inventory at
+  that same publication. A historical selection at
   another position returns `409 stale`, as does a publication that lands before
   the counts' first read; a publication during the counts read does not affect
   them. Historical profiles without counts retain their existing behavior.
