@@ -704,7 +704,17 @@ async fn with_chain(
     uri: &str,
     response: Value,
 ) -> Result<(StatusCode, Value, bool)> {
-    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![response]).await?;
+    with_chain_answers(database, uri, vec![response]).await
+}
+
+/// As `with_chain`, with the mock answering `responses` in turn. The chain counts as read once
+/// it answered all of them.
+async fn with_chain_answers(
+    database: &TestDatabase,
+    uri: &str,
+    responses: Vec<Value>,
+) -> Result<(StatusCode, Value, bool)> {
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(responses).await?;
     let state = database
         .app_state_with_lookup_chain_rpc_urls(bigname_lookup::ChainRpcUrls::from_entries(&[
             format!("{CHAIN}={rpc_url}"),
@@ -715,7 +725,7 @@ async fn with_chain(
         .await?;
     let status = response.status();
     let body: Value = read_json(response).await?;
-    // The mock task ends once it has answered its one request.
+    // The mock task ends once it has answered every response.
     let read_chain = tokio::time::timeout(std::time::Duration::from_secs(5), rpc_handle)
         .await
         .is_ok();
@@ -932,6 +942,33 @@ async fn ra7_an_auto_fallback_of_a_cleared_lease_serving_an_undeclared_resolver_
     Ok(())
 }
 
+/// Row A8, pin: as A2, on verified name detail, with the provider unable to serve the selected
+/// block, so the lookup answers `stale`. Name detail answers `200` with `read_status=stale`. It
+/// lists no per-key answer, and the `addr:60` it always requests is `stale` under either
+/// discovery decision, so this row reads the same before and after name detail took the
+/// composed row's decision.
+#[tokio::test]
+async fn ra8_verified_name_detail_of_a_cleared_lease_serving_an_undeclared_resolver_is_stale()
+-> Result<()> {
+    let database = published(cleared_then(UNDECLARED, Ok(Vec::new()))?, &[2]).await?;
+    let unavailable = json!({"__rpc_error": {"code": -32000, "message": "header not found"}});
+    let (status, body, _) = with_chain_answers(
+        &database,
+        &format!("/v1/names/{NAME}?namespace=ens&source=verified"),
+        vec![unavailable; crate::v2::support::PROFILE_FALLBACK_RECORD_KEYS.len()],
+    )
+    .await?;
+    database.cleanup().await?;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert_eq!(body["data"]["resolver"], resolver(UNDECLARED), "{body:#}");
+    assert_eq!(body["data"]["read_status"], "stale", "{body:#}");
+    assert_eq!(
+        body["data"]["failure_reason"], "verified_answer_stale_for_snapshot",
+        "{body:#}"
+    );
+    Ok(())
+}
+
 /// A contenthash for `node` on `resolver`.
 fn contenthash(resolver: &'static str, node: B256) -> Result<Logs> {
     sol! {
@@ -1072,8 +1109,8 @@ async fn rb6_record_count_parity_covers_an_unretained_text_and_a_contenthash() -
     Ok(())
 }
 
-/// Row B7: as B3, with the undeclared address holding records for the node. `record_count`
-/// counts its inventory as the same pointer on the lease does.
+/// Row B7: as B3, with the undeclared address holding four selectors for the node, where `FIRST`
+/// holds three. `record_count` counts its inventory as the same pointer on the lease does.
 #[tokio::test]
 async fn rb7_record_count_parity_covers_an_undeclared_resolver_holding_records() -> Result<()> {
     let (wrong, right) = both_counted(
@@ -1086,7 +1123,7 @@ async fn rb7_record_count_parity_covers_an_undeclared_resolver_holding_records()
                         lease_node(),
                         NEXT_HOLDER,
                         None,
-                        &[("url", "https://undeclared.test")],
+                        &[("name", "Undeclared"), ("url", "https://undeclared.test")],
                     ),
                     contenthash(UNDECLARED, lease_node()),
                 ])?,
@@ -1096,6 +1133,7 @@ async fn rb7_record_count_parity_covers_an_undeclared_resolver_holding_records()
     )
     .await?;
     assert_eq!(wrong["resolver"], resolver(UNDECLARED), "{wrong:#}");
+    assert_eq!(wrong["record_count"], 4, "{wrong:#}");
     assert_eq!(wrong, right);
     Ok(())
 }

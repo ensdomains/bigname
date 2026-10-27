@@ -186,7 +186,7 @@ pub(crate) async fn get_name_record(
         row,
         alias,
         registry,
-        ..
+        lookup_discovery,
     } = load_served_name_for_selected_snapshot(
         &mut reads,
         &namespace,
@@ -248,7 +248,7 @@ pub(crate) async fn get_name_record(
         chain_id,
         &mut selected_snapshot,
         route_source,
-        alias.as_ref(),
+        (alias.as_ref(), lookup_discovery),
     )
     .await?;
     if let Some(alias) = &alias {
