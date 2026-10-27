@@ -214,6 +214,25 @@ pub(super) fn statement(normal_work: &str) -> String {
          AND lower(declared.declared_address)=changed.resolver
         JOIN manifest_versions manifest ON manifest.manifest_id=declared.manifest_id
          AND manifest.chain_id=declared.chain_id AND manifest.source_family='ens_v2_resolver_l1'
+    ), tree_scope_event AS MATERIALIZED (
+        -- PROD HOT PATCH 2026-10-27 (sel10): a rewrite of every `.eth` name needs an event of the
+        -- window on the admitted root registry, on a declared ENSv1 mirror resolver, or on the
+        -- `eth` node of the mirrored ENSv1 registry. A journal diff alone (a family re-stamping a
+        -- root-scope row it touched) moves no resolution path, and twice selected every `.eth`
+        -- name (TYR-398, block 26286063).
+        SELECT 1 FROM normalized_events event
+        WHERE event.chain_id=$1 AND event.block_number>$4 AND event.block_number<=$2
+          AND event.canonicality_state IN ('canonical','safe','finalized')
+          AND (lower(event.raw_fact_ref->>'emitting_address')=lower($5::text)
+            OR lower(event.after_state->>'proxy_address')=lower($5::text)
+            OR lower(event.after_state->>'node')='0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae'
+            OR EXISTS (SELECT 1 FROM manifest_contract_instances declared
+                JOIN manifest_versions manifest ON manifest.manifest_id=declared.manifest_id
+                 AND manifest.chain_id=declared.chain_id AND manifest.source_family='ens_v2_resolver_l1'
+                WHERE declared.chain_id=$1 AND declared.declaration_kind='contract'
+                  AND declared.role='ensv1_mirror_resolver'
+                  AND lower(declared.declared_address) IN (
+                      lower(event.raw_fact_ref->>'emitting_address'), lower(event.after_state->>'proxy_address'))))
     ), source_names AS MATERIALIZED (
         SELECT logical_name_id FROM normal
         WHERE logical_name_id IN (SELECT logical_name_id FROM names_whose_change_can_move_descendants)
@@ -433,6 +452,7 @@ pub(super) fn statement(normal_work: &str) -> String {
         SELECT child.logical_name_id FROM name_surfaces child
         WHERE (EXISTS (SELECT 1 FROM global_change)
             OR EXISTS (SELECT 1 FROM prefixes prefix WHERE cardinality(prefix.labelhashes)=0))
+          AND EXISTS (SELECT 1 FROM tree_scope_event)
           AND {eth_name}
         UNION
         -- A name under a prefix holds the prefix's first label. The index finds the surfaces
@@ -465,6 +485,8 @@ pub(super) fn statement(normal_work: &str) -> String {
             OFFSET 0
         ) probe
         WHERE prefix.labelhashes[1] IS NOT NULL
+          -- PROD HOT PATCH 2026-10-27 (sel10): a prefix of one label is the whole `.eth` tree.
+          AND (cardinality(prefix.labelhashes)>=2 OR EXISTS (SELECT 1 FROM tree_scope_event))
         UNION
         -- A first label hash that is null has no key to look up. Label hash arrays compare
         -- two nulls as equal, so such a prefix keeps the read of every surface.
