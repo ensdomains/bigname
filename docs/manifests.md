@@ -1300,11 +1300,17 @@ declarations. No code constant lists them. Two contract roles name them:
 - The same rule holds for the locked and unlocked migration controllers. Each transaction
   correlates against the controller address whose declared range holds its block.
 - Each controller role needs exactly one live declaration, one with no end block, beside any
-  retired ranges. Interpret refuses a batch whose migration manifest has none or two, so a
-  migration through an undeclared controller never reads as an ordinary registration.
-- Declaring a further implementation pair is a manifest change of two `[[contracts]]`
-  entries. A pair that leaves the manifest has its range closed at the chain head seen
-  when the manifest loaded, so origins inside that range stay kept on a rebuild.
+  retired ranges. Interpret refuses a batch whose migration manifest has none or two, or
+  whose declared ranges name two controllers at one block, so a migration through an
+  undeclared controller never reads as an ordinary registration.
+- Declaring a further implementation pair adds two `[[contracts]]` entries. On the mainnet
+  profile it also moves two tests: the pinned-artifact test's role map, which looks for each
+  declared contract in `deployments/mainnet/`, and the rule that no replaced contract is
+  declared, since an earlier pair's artifacts live only in a replaced folder.
+- A pair that leaves the manifest is treated as never declared. A rebuild retains none of its
+  origins, and Project serves no model for registries created through it. An implementation
+  that produced registries must stay declared. The manifest has no way to end a range at a
+  chosen block.
 - Each origin's model follows the role its implementation is declared under. An address
   declared under both roles is supported under neither.
 

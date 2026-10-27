@@ -120,7 +120,7 @@ pub(super) fn correlate(
     let mut boundaries = Vec::new();
     let mut registries = Vec::new();
     for transaction_observations in by_transaction.values() {
-        let controllers = Controllers::at(catalog, transaction_observations[0].raw.block_number);
+        let controllers = Controllers::at(catalog, transaction_observations[0].raw.block_number)?;
         correlate_renewals(transaction_observations, output)?;
         correlate_controllers(name_wrapper, transaction_observations, output)?;
         correlate_historical_renewals(transaction_observations, output)?;

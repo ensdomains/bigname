@@ -182,6 +182,15 @@ fn a_controller_role_needs_exactly_one_live_declaration() -> anyhow::Result<()> 
             "{case}: {refused}"
         );
     }
+    // One live declaration passes the role check, but a retired range that still holds the
+    // migration block names a second controller there, and the batch fails.
+    let refused = locked_migration(&[("fixture", 0, None), (RETIRED, 0, Some(block))])
+        .expect_err("two controllers at one block")
+        .to_string();
+    assert!(
+        refused.contains("declares 2 locked_migration_controller addresses at block"),
+        "{refused}"
+    );
     // One live declaration beside retired ones passes, and the live one correlates, whatever
     // order the rows load in.
     for (case, ranges) in [

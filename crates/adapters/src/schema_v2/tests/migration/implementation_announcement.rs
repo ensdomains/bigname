@@ -1,6 +1,8 @@
 //! Row 12: a registry implementation's own `RegistryCreated`, emitted when the implementation
 //! contract is constructed, is an ordinary self-announced registry. Declaring the address under
 //! an implementation role keeps no factory origin for it and correlates nothing.
+//! A guard row: the code tables before the manifest declared implementations kept the same
+//! announcement ordinary, and this holds the manifest declarations to it.
 use super::*;
 
 const IMPLEMENTATION: &str = "0x4444444444444444444444444444444444444444";

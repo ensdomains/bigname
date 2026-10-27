@@ -402,10 +402,12 @@ pub(super) fn value_str<'a>(value: &'a Value, key: &str) -> anyhow::Result<&'a s
 }
 
 pub(super) fn declared_address(catalog: &Catalog, role: &str) -> anyhow::Result<String> {
-    Ok(catalog
-        .declared_address_for_role(MIGRATION_FAMILY, role)
-        .with_context(|| format!("migration manifest has no {role} declaration"))?
-        .to_ascii_lowercase())
+    let mut addresses = catalog.declared_addresses(MIGRATION_FAMILY, role);
+    match addresses.len() {
+        0 => anyhow::bail!("migration manifest has no {role} declaration"),
+        1 => Ok(addresses.remove(0)),
+        many => anyhow::bail!("migration manifest declares {many} {role} addresses, not one"),
+    }
 }
 
 /// The ENSv1→ENSv2 migration controllers at one block. Each is the address whose declared range
@@ -435,16 +437,24 @@ impl Controllers {
         Ok(())
     }
 
-    pub(super) fn at(catalog: &Catalog, block: i64) -> Self {
-        let at = |role| {
-            catalog
-                .declared_address_at(MIGRATION_FAMILY, role, block)
-                .map(str::to_ascii_lowercase)
+    /// The controllers whose declared ranges hold `block`. After [`Self::ensure_declared`], a
+    /// role is `None` only when no declared range holds the block, as before the live
+    /// declaration's start. Two addresses holding one block fail the batch.
+    pub(super) fn at(catalog: &Catalog, block: i64) -> anyhow::Result<Self> {
+        let at = |role| -> anyhow::Result<Option<String>> {
+            let mut addresses = catalog.declared_addresses_at(MIGRATION_FAMILY, role, block);
+            match addresses.len() {
+                0 => Ok(None),
+                1 => Ok(Some(addresses.remove(0))),
+                many => anyhow::bail!(
+                    "migration manifest declares {many} {role} addresses at block {block}, not one"
+                ),
+            }
         };
-        Self {
-            unlocked: at(Self::UNLOCKED),
-            locked: at(Self::LOCKED),
-        }
+        Ok(Self {
+            unlocked: at(Self::UNLOCKED)?,
+            locked: at(Self::LOCKED)?,
+        })
     }
 
     pub(super) fn unlocked(&self) -> Option<&str> {

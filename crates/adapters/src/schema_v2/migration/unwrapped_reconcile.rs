@@ -72,7 +72,7 @@ pub(in crate::schema_v2) fn unwrapped_reconciliations(
     };
     let graveyard = declared_address(catalog, "graveyard")?;
     Controllers::ensure_declared(catalog)?;
-    let controllers = Controllers::at(catalog, block.block_number);
+    let controllers = Controllers::at(catalog, block.block_number)?;
     let Some(wrapper) = catalog.correlation_address(MIGRATION_FAMILY, "ens_v1_name_wrapper") else {
         return Ok(Vec::new());
     };

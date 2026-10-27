@@ -18,6 +18,16 @@ impl Catalog {
         })
     }
 
+    /// The distinct addresses the family declares under `role`, in any range. One address
+    /// closed and declared again is one address.
+    pub(in crate::schema_v2) fn declared_addresses(
+        &self,
+        source_family: &str,
+        role: &str,
+    ) -> Vec<String> {
+        distinct(self.role_admissions(source_family, role))
+    }
+
     /// The distinct addresses the family declares under `role` with no end block: the live
     /// declarations. A retired range has an end block, so it is not counted.
     pub(in crate::schema_v2) fn live_addresses(
@@ -25,14 +35,23 @@ impl Catalog {
         source_family: &str,
         role: &str,
     ) -> Vec<String> {
-        let mut live: Vec<String> = self
-            .role_admissions(source_family, role)
-            .filter(|admission| admission.active_to_block.is_none())
-            .map(|admission| admission.address.to_ascii_lowercase())
-            .collect();
-        live.sort();
-        live.dedup();
-        live
+        distinct(
+            self.role_admissions(source_family, role)
+                .filter(|admission| admission.active_to_block.is_none()),
+        )
+    }
+
+    /// The distinct addresses whose declared range under `role` holds `block`.
+    pub(in crate::schema_v2) fn declared_addresses_at(
+        &self,
+        source_family: &str,
+        role: &str,
+        block: i64,
+    ) -> Vec<String> {
+        distinct(
+            self.role_admissions(source_family, role)
+                .filter(|admission| holds(admission, block)),
+        )
     }
 
     /// The one address the family declares under `role`, at any block. `None` when the role is
@@ -57,20 +76,6 @@ impl Catalog {
             .min()
     }
 
-    /// The one address admitted under `role` at `block`. `None` when no declaration of the role
-    /// holds the block, or several addresses do.
-    pub(in crate::schema_v2) fn declared_address_at(
-        &self,
-        source_family: &str,
-        role: &str,
-        block: i64,
-    ) -> Option<&str> {
-        one_address(
-            self.role_admissions(source_family, role)
-                .filter(|admission| holds(admission, block)),
-        )
-    }
-
     /// Whether some declaration of `role` at `address` holds `block`.
     pub(in crate::schema_v2) fn declares_at(
         &self,
@@ -92,6 +97,16 @@ fn one_address<'a>(
     admissions
         .all(|admission| admission.address.eq_ignore_ascii_case(first))
         .then_some(first)
+}
+
+/// The distinct lowercase addresses of `admissions`, sorted.
+fn distinct<'a>(admissions: impl Iterator<Item = &'a AddressAdmissionInput>) -> Vec<String> {
+    let mut addresses: Vec<String> = admissions
+        .map(|admission| admission.address.to_ascii_lowercase())
+        .collect();
+    addresses.sort();
+    addresses.dedup();
+    addresses
 }
 
 /// The inclusive admitted range, as event admission reads it.
