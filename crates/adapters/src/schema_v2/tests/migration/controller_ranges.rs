@@ -224,23 +224,39 @@ fn a_controller_role_needs_exactly_one_live_declaration() -> anyhow::Result<()> 
 
 /// Mainnet's day-one shape: the locked controller's one live declaration starts at block S, and
 /// nothing declares it below S. The controller check runs on every block, so a block below S
-/// must process with no refusal. A block with only an ordinary ENSv1 registrar `Transfer` runs
-/// the per-block unwrapped reconciliation, completes, and keeps its transfer.
+/// must process with no refusal. A block with an ordinary ENSv1 registration and its registrar
+/// `Transfer` runs the per-block unwrapped reconciliation, completes, and keeps the transfer.
 #[test]
 fn blocks_below_the_live_controller_start_process_without_refusal() -> anyhow::Result<()> {
     let fixture = fixture()?;
     let addresses = &fixture["addresses"];
+    let registrar = addresses["base_registrar"].as_str().unwrap();
     let start = block()? + 1_000;
+    let (owner, successor, token) = (
+        Address::from([0x21; 20]),
+        Address::from([0x22; 20]),
+        B256::from([0x33; 32]),
+    );
     for below in [start - 1, block()?, 1] {
         let mut input = batch(
-            vec![registrar_transfer_at(
-                Address::from([0x21; 20]),
-                Address::from([0x22; 20]),
-                B256::from([0x33; 32]),
-                below,
-                0,
-                addresses["base_registrar"].as_str().unwrap(),
-            )],
+            vec![
+                raw_at_transaction(
+                    with_topic0(
+                        BaseNameRegistered {
+                            id: U256::from_be_bytes(*token),
+                            owner,
+                            expires: U256::from(4_000_000_000_u64),
+                        }
+                        .encode_log_data(),
+                        keccak256(b"NameRegistered(uint256,address,uint256)"),
+                    ),
+                    below,
+                    0,
+                    0,
+                    registrar,
+                ),
+                registrar_transfer_at(owner, successor, token, below, 1, registrar),
+            ],
             &fixture,
             false,
         );
