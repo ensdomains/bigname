@@ -56,6 +56,13 @@ fn locked_migration_expiring(
         &fixture,
         false,
     );
+    declare_locked(&mut input, addresses, ranges);
+    interpret_test_batch(input)
+}
+
+/// Replaces the batch's locked controller declarations with `ranges`, in that order. The
+/// address "fixture" is the fixture's locked controller.
+fn declare_locked(input: &mut BatchInput, addresses: &Value, ranges: &[(&str, i64, Option<i64>)]) {
     input
         .admissions
         .retain(|admission| admission.role.as_deref() != Some("locked_migration_controller"));
@@ -74,7 +81,6 @@ fn locked_migration_expiring(
         row.active_to_block = *to;
         input.admissions.push(row);
     }
-    interpret_test_batch(input)
 }
 
 fn locked_boundary(output: &BatchOutput) -> bool {
@@ -212,6 +218,42 @@ fn a_controller_role_needs_exactly_one_live_declaration() -> anyhow::Result<()> 
         ),
     ] {
         assert!(locked_boundary(&locked_migration(&ranges)?), "{case}");
+    }
+    Ok(())
+}
+
+/// Mainnet's day-one shape: the locked controller's one live declaration starts at block S, and
+/// nothing declares it below S. The controller check runs on every block, so a block below S
+/// must process with no refusal. A block with only an ordinary ENSv1 registrar `Transfer` runs
+/// the per-block unwrapped reconciliation, completes, and keeps its transfer.
+#[test]
+fn blocks_below_the_live_controller_start_process_without_refusal() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let addresses = &fixture["addresses"];
+    let start = block()? + 1_000;
+    for below in [start - 1, block()?, 1] {
+        let mut input = batch(
+            vec![registrar_transfer_at(
+                Address::from([0x21; 20]),
+                Address::from([0x22; 20]),
+                B256::from([0x33; 32]),
+                below,
+                0,
+                addresses["base_registrar"].as_str().unwrap(),
+            )],
+            &fixture,
+            false,
+        );
+        declare_locked(&mut input, addresses, &[("fixture", start, None)]);
+        let output = interpret_test_batch(input)?;
+        assert!(has_v1_registrar_transfer(&output), "block {below}");
+        assert!(
+            output
+                .normalized_events
+                .iter()
+                .all(|event| event.event_kind != "MigrationApplied"),
+            "block {below}"
+        );
     }
     Ok(())
 }
