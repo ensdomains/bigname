@@ -211,14 +211,18 @@ ops dashboards tracked in Linear TYR-34.
   `phase_runner_redo_in_progress` reports active repairs separately. The
   publication gauge is not expected to return to zero.
 - `phase_runner_served_lag_blocks{chain}` is the newest observed
-  execution-client head minus that publication block. It is the only one of
-  the two expected to return to zero. A non-zero value means the newest
-  publication is that many blocks behind the newest block the runner has seen.
-  Because the API stops serving a chain once its publication trails the stored
-  head by more than `BIGNAME_API_PUBLICATION_LAG_TOLERANCE_BLOCKS` (one block by
-  default), a value above that tolerance usually means readers are getting
-  stale-data errors, not old answers. The Project latency target
-  (Linear TYR-36) requires this gauge to return to zero every normal block.
+  execution-client head minus that publication block. A non-zero value means
+  the newest publication is that many blocks behind the newest block the runner
+  has seen. It includes the configured
+  [Live publication lag](../deployment.md#live-publication-lag) N, so at steady
+  state it reads N, and 0 when no lag is set. Read it against N, not against
+  the API's `BIGNAME_API_PUBLICATION_LAG_TOLERANCE_BLOCKS`. That tolerance
+  compares the publication with the stored head, and the stored head lags by N
+  too, so the API keeps serving while this gauge reads N. A value above N
+  means Project or the head itself is behind, and readers may get stale-data
+  errors once the publication trails the stored head by more than the
+  tolerance. The Project latency target (Linear TYR-36) requires this gauge to
+  return to N, or to zero without a lag, every normal block.
 
 `-1` on either gauge means unavailable, never healthy or caught up. The lag
 reads `-1` when either side is missing, and also when the observed head is below

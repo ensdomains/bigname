@@ -17,6 +17,7 @@ use crate::{
 pub struct LivePhase {
     engine: Arc<Engine>,
     metrics_feed: Option<RunnerMetricsFeed>,
+    publication_lag_blocks: u32,
 }
 
 impl LivePhase {
@@ -28,7 +29,15 @@ impl LivePhase {
         Self {
             engine,
             metrics_feed: None,
+            publication_lag_blocks: 0,
         }
+    }
+
+    /// Publishes the readable head `blocks` below the newest loaded block (heads/lag.rs).
+    #[must_use]
+    pub fn with_publication_lag_blocks(mut self, blocks: u32) -> Self {
+        self.publication_lag_blocks = blocks;
+        self
     }
 
     /// Reports an RPC chain check failure to `feed` before the phase fails on it.
@@ -49,6 +58,10 @@ impl LivePhase {
 impl Phase for LivePhase {
     fn name(&self) -> PhaseName {
         PhaseName::Live
+    }
+
+    fn publication_lag_blocks(&self) -> u32 {
+        self.publication_lag_blocks
     }
 
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
