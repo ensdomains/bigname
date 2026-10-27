@@ -180,7 +180,11 @@ fn a_controller_role_needs_exactly_one_live_declaration() -> anyhow::Result<()> 
             vec![("fixture", 0, Some(block)), (RETIRED, 0, Some(block - 1))],
             ONE_LIVE,
         ),
-        ("two live", vec![("fixture", 0, None), (RETIRED, 0, None)], ONE_LIVE),
+        (
+            "two live",
+            vec![("fixture", 0, None), (RETIRED, 0, None)],
+            ONE_LIVE,
+        ),
         (
             "two live beside a retired one",
             vec![
