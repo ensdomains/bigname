@@ -224,53 +224,50 @@ fn a_controller_role_needs_exactly_one_live_declaration() -> anyhow::Result<()> 
 
 /// Mainnet's day-one shape: the locked controller's one live declaration starts at block S, and
 /// nothing declares it below S. The controller check runs on every block, so a block below S
-/// must process with no refusal. A block with an ordinary ENSv1 registration and its registrar
-/// `Transfer` runs the per-block unwrapped reconciliation, completes, and keeps the transfer.
+/// must process with no refusal. A migration-free block carrying an ENSv1 registrar `Transfer`
+/// completes with no boundary. An unlocked migration below S, whose registrar `Transfer` to the
+/// Graveyard runs the per-block unwrapped reconciliation, still applies.
 #[test]
 fn blocks_below_the_live_controller_start_process_without_refusal() -> anyhow::Result<()> {
     let fixture = fixture()?;
     let addresses = &fixture["addresses"];
-    let registrar = addresses["base_registrar"].as_str().unwrap();
-    let start = block()? + 1_000;
-    let (owner, successor, token) = (
-        Address::from([0x21; 20]),
-        Address::from([0x22; 20]),
-        B256::from([0x33; 32]),
-    );
+    let unwrapped = &fixture["scenarios"]["U-01"];
+    let migration_block = unwrapped["migration_block"].as_i64().unwrap();
+    let start = block()?.max(migration_block) + 1_000;
+    let boundaries = |output: &BatchOutput| {
+        output
+            .normalized_events
+            .iter()
+            .filter(|event| event.event_kind == "MigrationApplied")
+            .count()
+    };
     for below in [start - 1, block()?, 1] {
         let mut input = batch(
-            vec![
-                raw_at_transaction(
-                    with_topic0(
-                        BaseNameRegistered {
-                            id: U256::from_be_bytes(*token),
-                            owner,
-                            expires: U256::from(4_000_000_000_u64),
-                        }
-                        .encode_log_data(),
-                        keccak256(b"NameRegistered(uint256,address,uint256)"),
-                    ),
-                    below,
-                    0,
-                    0,
-                    registrar,
-                ),
-                registrar_transfer_at(owner, successor, token, below, 1, registrar),
-            ],
+            vec![registrar_transfer_at(
+                Address::from([0x21; 20]),
+                Address::from([0x22; 20]),
+                B256::from([0x33; 32]),
+                below,
+                0,
+                addresses["base_registrar"].as_str().unwrap(),
+            )],
             &fixture,
             false,
         );
         declare_locked(&mut input, addresses, &[("fixture", start, None)]);
-        let output = interpret_test_batch(input)?;
-        assert!(has_v1_registrar_transfer(&output), "block {below}");
-        assert!(
-            output
-                .normalized_events
-                .iter()
-                .all(|event| event.event_kind != "MigrationApplied"),
+        assert_eq!(
+            boundaries(&interpret_test_batch(input)?),
+            0,
             "block {below}"
         );
     }
+    let mut input = batch(
+        unlocked_name_logs(unwrapped, addresses, migration_block, 1, false)?,
+        &fixture,
+        true,
+    );
+    declare_locked(&mut input, addresses, &[("fixture", start, None)]);
+    assert_eq!(boundaries(&interpret_test_batch(input)?), 1);
     Ok(())
 }
 
