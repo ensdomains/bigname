@@ -322,6 +322,17 @@ pub(super) fn statement(normal_work: &str) -> String {
           AND evidence->>'event_kind'='RegistryCreated' AND created.chain_id=$1
           AND created.event_kind='RegistryCreated' AND created.consumer_visibility='activated'
           AND created.canonicality_state IN ('canonical','safe','finalized')
+    ), mounted_names AS MATERIALIZED (
+        -- PROD HOT PATCH 2026-10-27: a changed registry other than the admitted root is reached by
+        -- the walk below only through an entry whose subregistry pointer names it, and the walk
+        -- stops at that entry. So the names whose current pointer names a changed registry are
+        -- the only candidates such a registry needs; the window's own pointer events are already
+        -- changed entries. The corpus-wide candidate set stays for a change of the root registry.
+        SELECT DISTINCT surface.labelhashes FROM changed_registries changed
+        JOIN project_parent_subregistry mount ON mount.chain_id=$1
+          AND lower(mount.subregistry_address)=changed.registry
+        JOIN name_surfaces surface ON surface.logical_name_id=mount.logical_name_id
+          AND surface.chain_id=$1 AND surface.namespace='ens' AND cardinality(surface.labelhashes)>0
     ), logical_prefixes AS MATERIALIZED (
         SELECT DISTINCT surface.labelhashes FROM source_names name JOIN name_surfaces surface
           ON surface.logical_name_id=name.logical_name_id AND surface.chain_id=$1 AND surface.namespace='ens'
@@ -332,10 +343,13 @@ pub(super) fn statement(normal_work: &str) -> String {
           ON surface.logical_name_id=name.logical_name_id AND surface.chain_id=$1 AND surface.namespace='ens'
         WHERE surface.block_number>$4 AND surface.block_number<=$2
     ), candidates AS MATERIALIZED (
-        -- A changed registry can sit below any name, so every surface is a candidate.
+        -- PROD HOT PATCH 2026-10-27: only a change of the root registry itself can sit below any
+        -- name; every other changed registry is covered by `mounted_names`.
         SELECT surface.labelhashes FROM name_surfaces surface
-        WHERE EXISTS (SELECT 1 FROM changed_registries)
+        WHERE EXISTS (SELECT 1 FROM changed_registries WHERE registry=lower($5::text))
           AND surface.chain_id=$1 AND surface.namespace='ens' AND cardinality(surface.labelhashes)>0
+        UNION ALL
+        SELECT labelhashes FROM mounted_names
         UNION ALL
         -- With changed entries alone, a candidate holds a label of a changed entry key. The
         -- index finds the surfaces with the key's hash and the label comparison decides.
@@ -348,7 +362,7 @@ pub(super) fn statement(normal_work: &str) -> String {
                 WHERE changed.entry_key=left(lower(label),58)||'00000000')
             OFFSET 0
         ) probe
-        WHERE NOT EXISTS (SELECT 1 FROM changed_registries)
+        WHERE NOT EXISTS (SELECT 1 FROM changed_registries WHERE registry=lower($5::text))
     ), wanted AS MATERIALIZED (
         SELECT DISTINCT candidate.labelhashes[depth:] AS labelhashes
         FROM candidates candidate CROSS JOIN LATERAL generate_series(1,cardinality(candidate.labelhashes)) depth
