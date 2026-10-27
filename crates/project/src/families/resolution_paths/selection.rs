@@ -86,7 +86,9 @@ pub(super) fn statement(normal_work: &str) -> String {
           AND family IN ('project_ens_v2_entry_owner', 'project_registry_pointer',
             'project_resource_pointer', 'project_resolver_classification',
             'project_registry_node_state', 'project_wrapper_state')
-    ), names_whose_change_can_move_descendants AS MATERIALIZED (
+    ), pointer_moved AS MATERIALIZED (
+        -- FORK HOT PATCH 2026-10-26: a v1 registry pointer change on a name is kept apart, so its
+        -- descendants can be narrowed to the names without a nonzero pointer of their own.
         SELECT pointer.namespace || ':' || lower(pointer.node) AS logical_name_id
         FROM journal JOIN project_registry_pointer pointer
           ON journal.family='project_registry_pointer' AND pointer.chain_id=$1
@@ -94,7 +96,9 @@ pub(super) fn statement(normal_work: &str) -> String {
         WHERE journal.before_image IS NULL
            OR pointer.resolver_address IS DISTINCT FROM journal.before_image->>'resolver_address'
         UNION
-        SELECT pointer.namespace || ':' || lower(pointer.namehash)
+        -- A resource pointer's resolver change or move on a name is the same class of change:
+        -- descendants read an ancestor's resolver only through the mirror walk (first pointer wins).
+        SELECT pointer.namespace || ':' || lower(pointer.namehash) AS logical_name_id
         FROM journal LEFT JOIN project_resource_pointer pointer
           ON journal.family='project_resource_pointer' AND pointer.chain_id=$1
          AND pointer.resource_id=(journal.key->>1)::uuid
@@ -118,9 +122,9 @@ pub(super) fn statement(normal_work: &str) -> String {
            OR pointer.nonzero_resolver_address IS DISTINCT FROM journal.before_image->>'nonzero_resolver_address'
            OR pointer.namespace IS DISTINCT FROM journal.before_image->>'namespace'
            OR pointer.namehash IS DISTINCT FROM journal.before_image->>'namehash')
-        UNION
+    ), other_moved AS MATERIALIZED (
         SELECT COALESCE(state.namespace, journal.before_image->>'namespace', journal.key->>1)
-                 || ':' || lower(COALESCE(state.node, journal.before_image->>'node', journal.key->>2))
+                 || ':' || lower(COALESCE(state.node, journal.before_image->>'node', journal.key->>2)) AS logical_name_id
         FROM journal LEFT JOIN project_registry_node_state state
           ON journal.family='project_registry_node_state' AND state.chain_id=$1
          AND state.namespace=journal.key->>1 AND state.node=journal.key->>2
@@ -188,6 +192,10 @@ pub(super) fn statement(normal_work: &str) -> String {
               (CASE WHEN wrapper.expiry_seconds::text ~ '^[0-9]+$'
                      AND wrapper.expiry_seconds <= 18446744073709551615
                     THEN wrapper.expiry_seconds END))
+    ), names_whose_change_can_move_descendants AS MATERIALIZED (
+        SELECT logical_name_id FROM pointer_moved
+        UNION
+        SELECT logical_name_id FROM other_moved
     ), normal AS MATERIALIZED ({normal_work}),
     changed_resolvers AS MATERIALIZED (
         SELECT journal.key->>1 AS resolver FROM journal
@@ -381,6 +389,31 @@ pub(super) fn statement(normal_work: &str) -> String {
           AND changed.entry_key=left(lower(next.labelhashes[1]),58)||'00000000'
     ), prefixes AS MATERIALIZED (
         SELECT labelhashes FROM logical_prefixes UNION SELECT labelhashes FROM physical_prefixes
+    ), narrow_prefixes AS MATERIALIZED (
+        -- FORK HOT PATCH 2026-10-26: prefixes that exist only because a v1 registry pointer changed
+        -- on the prefix name. The ENSv1 mirror's walk stops at the first resolver it finds
+        -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol findResolver semantics), so such a
+        -- change moves only the descendants that have no nonzero pointer of their own. A prefix that
+        -- any other source also names keeps its whole subtree.
+        SELECT DISTINCT surface.labelhashes FROM normal name
+        JOIN name_surfaces surface
+          ON surface.logical_name_id=name.logical_name_id AND surface.chain_id=$1 AND surface.namespace='ens'
+        WHERE name.logical_name_id IN (SELECT logical_name_id FROM pointer_moved)
+        EXCEPT (
+            SELECT DISTINCT surface.labelhashes FROM normal name JOIN name_surfaces surface
+              ON surface.logical_name_id=name.logical_name_id AND surface.chain_id=$1 AND surface.namespace='ens'
+            WHERE name.logical_name_id IN (SELECT logical_name_id FROM other_moved)
+            UNION
+            SELECT DISTINCT surface.labelhashes FROM source_names name JOIN name_surfaces surface
+              ON surface.logical_name_id=name.logical_name_id AND surface.chain_id=$1 AND surface.namespace='ens'
+            WHERE name.logical_name_id NOT IN (SELECT logical_name_id FROM normal)
+            UNION
+            SELECT DISTINCT surface.labelhashes FROM normal name JOIN name_surfaces surface
+              ON surface.logical_name_id=name.logical_name_id AND surface.chain_id=$1 AND surface.namespace='ens'
+            WHERE surface.block_number>$4 AND surface.block_number<=$2
+            UNION
+            SELECT labelhashes FROM physical_prefixes
+        )
     ), affected AS MATERIALIZED (
         -- A fallback resolver change or a prefix of no labels affects every `.eth` name.
         SELECT child.logical_name_id FROM name_surfaces child
@@ -397,6 +430,24 @@ pub(super) fn statement(normal_work: &str) -> String {
                 @> ARRAY[hashtextextended(left(lower(prefix.labelhashes[1]),58)||'00000000',0)]
               AND {eth_name}
               AND {under_prefix}
+              -- FORK HOT PATCH 2026-10-26: an ancestor's v1 pointer is read only by the ENSv1 mirror
+              -- walk, which runs for names below a `.eth` second-level name (families/name/batch.rs,
+              -- NamePlace::BelowEthSecondLevel) and stops at the first non-cleared pointer. So under a
+              -- pointer-only prefix, a second-level name never moves, and a deeper child with a nonzero
+              -- pointer of its own resolves through that pointer and does not move either.
+              AND NOT (
+                EXISTS (SELECT 1 FROM narrow_prefixes narrow WHERE narrow.labelhashes=prefix.labelhashes)
+                AND (
+                  cardinality(child.labelhashes) <= 2
+                  OR EXISTS (
+                    SELECT 1 FROM project_registry_pointer own
+                    WHERE own.chain_id=$1 AND own.namespace=child.namespace
+                      AND own.node=split_part(child.logical_name_id, ':', 2)
+                      AND own.resolver_address IS NOT NULL
+                      AND own.resolver_address NOT IN ('', '0x0000000000000000000000000000000000000000')
+                  )
+                )
+              )
             OFFSET 0
         ) probe
         WHERE prefix.labelhashes[1] IS NOT NULL

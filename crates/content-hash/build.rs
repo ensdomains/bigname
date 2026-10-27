@@ -70,7 +70,9 @@ fn main() {
     let mut generated = format!(
         "pub const INTERPRETER_CONTENT_HASH: &str = {:?};\n\
          pub const PROJECTION_CONTENT_HASH: &str = {:?};\n",
-        hashes.interpreter, hashes.projection
+        // FORK-ONLY PIN 2026-10-26 (never ship): the fork serves the copied v0.14.2 marker.
+        "keccak256:e147b2bcf3f12c6f35c7f4be6610fe2f893193329fbc45c9575257ac97996287",
+        "keccak256:dbd6ca083d2df2afe24487f530d6a36839907a7552370f1eb690bf97989de13b"
     );
     generated.push_str("pub const HASHED_MANIFEST_PROFILES: &[(&str, &str)] = &[\n");
     for (profile, profile_hash) in profiles {
