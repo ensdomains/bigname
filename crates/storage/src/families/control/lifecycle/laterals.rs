@@ -50,10 +50,15 @@ pub(super) fn registered_at(facts: &NameFacts, grant: &LifecycleEvent) -> Value 
 /// The registration time of a registration on its implied lease (`ImpliedLease`): the lease's
 /// own grant from a controller registration, else the registry handoff block's time, else the
 /// lease's first admitted event's block. A grant the adapter derives at the lease's first renewal
-/// (source event `NameRenewed`) dates only the renewal. The 2020 registrar migration emitted the
-/// BaseRegistrar's own `NameRegistered` in the transaction that wrote the name's first
-/// current-registry record, so the handoff block is the migration's registration block
-/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L155 @ ens_v1@91c966f).
+/// (source event `NameRenewed`) dates only the renewal. The 2020 registrar migration registered
+/// each name through the BaseRegistrar's `_register`, which mints, writes the registry record and
+/// emits `NameRegistered` in one call, and only the `eth` node's owner can write a `.eth`
+/// second-level record. So the name's first current-registry record is in the migration's
+/// transaction, and the handoff block is the migration's registration block (`docs/upstream.md`,
+/// migrated `.eth` names, has the observed transactions).
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L152 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L21 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L81 @ ens_v1@91c966f)
 pub(super) fn implied_registered_at(
     facts: &NameFacts,
     lease: ImpliedLease<'_>,
