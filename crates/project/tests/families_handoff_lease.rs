@@ -205,8 +205,9 @@ struct Registry<'a> {
     address: &'a str,
 }
 
-/// The generic test registry. Its string identifier `eth` is no reviewed deployment's contract
-/// instance, so the registrar grace policy (`lifecycle/policy.rs`) gives it no grace.
+/// The generic test registry. The registrar grace policy (`lifecycle/policy.rs`, `load`) keeps
+/// only registry identifiers that parse as a Uuid. `eth` does not, so `registries` never matches
+/// it and it gets no grace.
 const GENERIC: Registry<'static> = Registry {
     instance: "eth",
     address: V2_REGISTRY,
