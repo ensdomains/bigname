@@ -951,7 +951,7 @@ collection route carry neither header.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L84 @ ens_v1@91c966f). An
   `ens_v0` name keeps every field it would have as `ens_v1`, including a
   registry-only name's `registration_id`. `authority` is omitted for Basenames
-  names, on a supported, unregistered ownerless registry row, and on the
+  names, on a supported ownerless registry row, and on the
   `read_status=unsupported` identity-only object. A zero registry owner does not
   remove `authority` supplied by a retained registrar binding. `migrated_at` is present only when ENSv2 is the currently selected
   `authority` and the name's history retains an activated `MigrationApplied`

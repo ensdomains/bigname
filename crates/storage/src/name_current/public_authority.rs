@@ -30,7 +30,7 @@ pub fn name_current_registry_handoff_block_number(provenance: &Value) -> Option<
         .and_then(Value::as_i64)
 }
 
-/// Whether Project classified the row as the supported, unregistered ownerless registry
+/// Whether Project classified the row as the supported ownerless registry
 /// profile. Such a row keeps its selected arm but serves no public `authority`.
 pub fn name_current_is_ownerless_registry(provenance: &Value) -> bool {
     provenance.pointer("/authority_selection/ownerless_registry") == Some(&Value::Bool(true))

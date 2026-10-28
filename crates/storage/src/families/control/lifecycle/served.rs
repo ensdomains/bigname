@@ -377,7 +377,10 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
             event.released_at.clone()
         }
     });
-    let status = if selection.ownerless_registry {
+    // A cleared ENSv1 registry record does not end the BaseRegistrar lease: an ownerless name
+    // with an implied lease serves it, with no authority and no registry custody.
+    let ownerless_unleased = selection.ownerless_registry && authority.implied_lease.is_none();
+    let status = if ownerless_unleased {
         json!("unregistered")
     } else {
         match selected_kind {
@@ -421,9 +424,17 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     let v2_release = selected_kind == Some("RegistrationReleased") && is_v2;
     let mut unreleased = None;
     if selection.ownerless_registry {
-        for field in ["authority_kind", "authority_key", "registrant", "expiry"] {
-            registration.insert(field.into(), Value::Null);
+        let fields: &[&str] = if ownerless_unleased {
+            &["authority_kind", "authority_key", "registrant", "expiry"]
+        } else {
+            &["authority_kind", "authority_key", "registrant"]
+        };
+        for field in fields {
+            registration.insert((*field).into(), Value::Null);
         }
+    }
+    if ownerless_unleased {
+        // The ownerless-registry profile without a lease serves no registration to lapse.
     } else if selection.released_tombstone {
         registration.insert("authority_kind".into(), Value::Null);
         registration.insert("authority_key".into(), Value::Null);

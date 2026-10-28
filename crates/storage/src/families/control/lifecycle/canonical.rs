@@ -1,7 +1,7 @@
 //! Registration schedules are retained independently of current control and resolution.
 //! Only canonical lifecycle evidence changes a selected schedule; crossing its expiry never
 //! switches a name on a cut-over chain back to a different registration's dates.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
 
@@ -24,9 +24,16 @@ struct Instance<'a> {
 /// Retain one instance per admitted registry/token/resource key. The origin is distinct from the
 /// public registration handle. Unnamed changes belong only while the key still names this name;
 /// another name's association cannot renew or terminate its predecessor's retained instance.
-fn v2_instance<'a>(tagged: &[Tagged<'a>]) -> Option<Instance<'a>> {
+/// An event `never_live` names takes no part.
+fn v2_instance<'a>(
+    tagged: &[Tagged<'a>],
+    never_live: impl Fn(&LifecycleEvent) -> bool,
+) -> Option<Instance<'a>> {
     let mut keys: BTreeMap<&str, Vec<&Tagged<'a>>> = BTreeMap::new();
-    for item in tagged.iter().filter(|item| item.event.is_v2_family()) {
+    for item in tagged
+        .iter()
+        .filter(|item| item.event.is_v2_family() && !never_live(item.event))
+    {
         if let Some(key) = item.key.as_deref() {
             keys.entry(key).or_default().push(item);
         }
@@ -201,8 +208,21 @@ pub(super) fn apply(
     registration: &mut Map<String, Value>,
     trace: &mut Map<String, Value>,
 ) -> anyhow::Result<()> {
-    let canonical =
-        v2_instance(tagged).filter(|_| facts.input.selection.is_v2() || facts.resolution_cutover);
+    // For a name ENSv1 decides, a reservation already expired when written is never live
+    // (`membership::expired_when_written`): it opens no instance, so its lapse supplies no dates
+    // over the ENSv1 lease, which stays the registration until premigration reserves it again.
+    let mut never_live = BTreeSet::new();
+    if !facts.input.selection.is_v2() {
+        for item in tagged {
+            if super::membership::expired_when_written(facts, item.event)? {
+                never_live.insert(item.event.position.event_identity.as_str());
+            }
+        }
+    }
+    let canonical = v2_instance(tagged, |event| {
+        never_live.contains(event.position.event_identity.as_str())
+    })
+    .filter(|_| facts.input.selection.is_v2() || facts.resolution_cutover);
     let mut terminal = false;
     // An authority-kind hint or a binding alone is not an observed allocation. During a
     // historical rebuild a later authority can already have a resource identity while its
@@ -373,8 +393,17 @@ pub(super) fn apply(
         (Grace::None, Boundary::Exclusive)
     } else {
         // A release of an implied lease is terminal even without an expiry to schedule from.
-        terminal = trace.contains_key("implied_lease")
-            && registration.get("status").and_then(Value::as_str) == Some("released");
+        // The implied lease is the registration's identity, also when no binding stands for it.
+        if trace.contains_key("implied_lease") {
+            terminal = registration.get("status").and_then(Value::as_str) == Some("released");
+            let lease = registration
+                .get("resource_id")
+                .cloned()
+                .unwrap_or(Value::Null);
+            if lease.is_string() {
+                registration.entry("identity_resource_id").or_insert(lease);
+            }
+        }
         match facts.input.place {
             NamePlace::EthSecondLevel => (Grace::EnsV1, Boundary::InclusiveGrace),
             NamePlace::BasenamesSecondLevel => (Grace::Basenames, Boundary::InclusiveGrace),
@@ -396,7 +425,10 @@ pub(super) fn apply(
                     == facts.input.selection.resource_id.as_deref()
         });
     anyhow::ensure!(
-        !allocated || expiry.is_some() || no_expiry,
+        !allocated
+            || expiry.is_some()
+            || no_expiry
+            || (terminal && trace.contains_key("implied_lease")),
         "allocated registration is missing its required expiry: {}",
         facts.input.logical_name_id
     );

@@ -390,10 +390,18 @@ A produced fixture where the registration's provisional owner writes the
 record and later hands the token and the record on shows transient removal
 dropping the earlier write's `AuthorityTransferred` while the later write's
 stays.
-`ownerless_registry` is `true` exactly when the row is the supported,
-unregistered ownerless registry profile; the selected arm is kept, but the API
-serves no `authority` for such a row and no public `authority` filter matches
-it.
+`ownerless_registry` is `true` exactly when the row is the supported ownerless
+registry profile. The selected arm is kept, but the API serves no `authority`
+for such a row and no public `authority` filter matches it. Such a row is
+unregistered unless the name is a `.eth` second-level name with an
+[implied lease](glossary.md#implied-lease). A cleared ENSv1 registry record does
+not end that BaseRegistrar lease: until its expiry plus grace nobody else can
+register the name, and its token holder can `reclaim` the record
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L104 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f).
+The row then serves the lease's registration as the implied lease paragraph
+below states, `active`, `expired` or `released` by the ENSv1 schedule. Its
+authority kind, registrant, registry owner and control stay absent.
 
 After the [Universal Resolver cutover](glossary.md#universal-resolver-cutover),
 ENSv1-selected descendants below `.eth` share one publication-scoped ENSv2 path
@@ -614,7 +622,8 @@ which Project builds before it reaches the block's grants.
 A name the January 2020 registrar migration moved has a lease that no grant opened. The
 migration emitted the BaseRegistrar's own `NameRegistered` in the transaction that wrote the
 name's first current-registry record, and no controller event, so the name is selected through
-a registry-only binding that stands for no lease. Its first controller renewal names the lease: the adapter mints the
+a registry-only binding that stands for no lease, or through no binding once its registry owner
+is zero (the ownerless-registry profile above). Its first controller renewal names the lease: the adapter mints the
 lease's resource there and derives a `RegistrationGranted` beside the renewal. That lease is the
 name's [implied lease](glossary.md#implied-lease): the resource of the name's latest own
 `RegistrationGranted`, `RegistrationRenewed`, `RegistrationReleased` or `ExpiryChanged` row of
@@ -628,8 +637,8 @@ the first current-registry record's block, the migration's own registration bloc
 lease's first row when the node has none. A grant a controller registration wrote dates the
 lease itself. The derived grant does not, and its zero-address registrant names no holder. The
 selected binding, its authority kind and the registry owner stay as they were. A name whose
-binding records a lease with registrar rows, a name with no binding (the ownerless-registry
-profile among them), a wrapper-selected name, a name selected under
+binding records a lease with registrar rows, a name with no binding outside the
+ownerless-registry profile, a wrapper-selected name, a name selected under
 ENSv2 and any name other than a `.eth` second-level name have no implied lease. The migration's
 own `NameRegistered` is still not interpreted, so a migrated name never renewed has no lease
 row and serves as before.
@@ -640,7 +649,13 @@ On a cut-over chain an ENSv1 `.eth` name with an ownerless ENSv2 reservation kee
 `registered_at` and identity, unless an ENSv2 registration of the name came after the lease and
 before the current ENSv2 entry. An earlier reservation is not such a registration: premigration
 reserves a name only for its ENSv1 lease, so a reservation that was replaced by a later one
-stood for the same lease.
+stood for the same lease. A reservation already expired when written is never live
+(`docs/architecture.md`, authority selection) and supplies none of an ENSv1-selected name's
+dates. Premigration reserves at the lease's expiry plus 62 days, so a lease more than 62 days
+into its 90-day grace is reserved already expired, and a later run reserves the name again once
+it reads as available. Until then the lease serves its own expiry and the ENSv1 grace, a renewal
+included, and the release Interpret derives for that reservation ends nothing.
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/script/preMigration.ts:L775-L792 @ ens_v2_mainnet_20261002@b1f97b91)
 (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registrar/BatchRegistrar.sol:L48-L72 @ ens_v2_mainnet_20261002@b1f97b91)
 
 The release of the retained lease releases the name like any other lapse. On chain the registry

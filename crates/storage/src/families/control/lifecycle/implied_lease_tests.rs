@@ -261,14 +261,18 @@ fn a_binding_that_records_a_lease_or_is_not_registry_only_has_no_implied_lease()
 }
 
 #[test]
-fn a_name_with_no_binding_has_no_implied_lease_even_on_an_ownerless_record() {
-    // The ownerless-registry profile is unregistered whatever its lease (docs/projections.md).
-    for ownerless in [true, false] {
+fn only_the_ownerless_registry_profile_implies_a_lease_without_a_binding() {
+    // A cleared registry record leaves the BaseRegistrar lease standing (docs/projections.md).
+    for (ownerless, expected) in [(true, Some(LEASE.to_owned())), (false, None)] {
         let mut name = Name::migrated(renewed(12, LEASE));
         name.binding = None;
         name.ownerless = ownerless;
-        assert_eq!(implied(name), None, "ownerless {ownerless}");
+        assert_eq!(implied(name), expected, "ownerless {ownerless}");
     }
+    let mut unleased = Name::migrated(Vec::new());
+    unleased.binding = None;
+    unleased.ownerless = true;
+    assert_eq!(implied(unleased), None);
 }
 
 #[test]

@@ -393,8 +393,10 @@ async fn a_release_without_an_expiry_releases_the_implied_lease() -> Result<()> 
     fixture.cleanup().await
 }
 
-/// Shape B with a reservation: the lease lapsed after premigration reserved it. The continued
-/// lease keeps its release, holder and handoff time.
+/// Shape B with a reservation: the lease was in its grace period when premigration reserved it,
+/// so the reservation's expiry had already passed when it was written, and the lease then lapsed.
+/// A reservation already expired when written is never live, so the lease keeps its own expiry,
+/// release, holder and handoff time.
 #[tokio::test]
 async fn a_reserved_implied_lease_that_lapsed_keeps_its_release() -> Result<()> {
     let fixture = Fixture::new("families_handoff_lease_reserved_released", 7).await?;
@@ -412,15 +414,27 @@ async fn a_reserved_implied_lease_that_lapsed_keeps_its_release() -> Result<()> 
         &served(&fixture, &name).await?,
         json!({"status": "released", "registered_at": block_time(1),
                "identity_resource_id": lease, "lapsed_owner": HOLDER,
-               "expires_at": lapsed + 62 * DAY}),
+               "expires_at": lapsed, "grace_ends_at": lapsed + 90 * DAY}),
     )?;
     fixture.assert_rebuild_equal(5).await?;
     fixture.cleanup().await
 }
 
 /// A registrar binding of `name` on `lease` opened at `block`, granted by a controller at
-/// `block + 1`.
+/// `block + 1` until `LEASE_EXPIRY`.
 async fn registered(fixture: &Fixture, name: &str, n: u32, lease: &str, block: i64) -> Result<()> {
+    registered_until(fixture, name, n, lease, block, LEASE_EXPIRY).await
+}
+
+/// `registered`, with the grant's expiry.
+async fn registered_until(
+    fixture: &Fixture,
+    name: &str,
+    n: u32,
+    lease: &str,
+    block: i64,
+    expiry: i64,
+) -> Result<()> {
     let log = i64::from(n) * 10;
     fixture
         .binding(&uuid(100 + n), name, lease, "ens_v1", block, log, None)
@@ -447,7 +461,7 @@ async fn registered(fixture: &Fixture, name: &str, n: u32, lease: &str, block: i
             Some(name),
             Some(lease),
             json!({"authority_kind": "registrar", "source_event": "NameRegistered",
-                   "status": "registered", "registrant": OWNER, "expiry": LEASE_EXPIRY}),
+                   "status": "registered", "registrant": OWNER, "expiry": expiry}),
             REGISTRAR,
         )
         .await?;
@@ -506,5 +520,101 @@ async fn a_replaced_reservation_does_not_undate_the_lease_it_stood_for() -> Resu
         json!({"registered_at": Value::Null, "identity_resource_id": Value::Null}),
     )?;
     fixture.assert_rebuild_equal(6).await?;
+    fixture.cleanup().await
+}
+
+/// Shape C as kaaboosd.eth's own events order it on Ethereum Mainnet. Premigration reserved the
+/// name while its lease was in grace, so that reservation was already expired when written, and
+/// the interpreter derived its release in the same block. The lease was then renewed through the
+/// ENSv2 renewal bridge, and premigration reserved the name again. A reservation already expired
+/// when written is never live (`docs/architecture.md`, authority selection), so the ENSv1 lease
+/// stays the registration throughout: before the second reservation with its own renewed expiry,
+/// and after it with its grant's time and identity.
+#[tokio::test]
+async fn a_reservation_replaced_after_lapsing_leaves_the_renewed_lease_registered() -> Result<()> {
+    const GRANTED_UNTIL: i64 = 1_785_656_670;
+    const FIRST_RESERVED_UNTIL: i64 = 1_791_013_470;
+    const RENEWED_UNTIL: i64 = 1_817_192_670;
+    const SECOND_RESERVED_UNTIL: i64 = 1_822_549_470;
+    let fixture = Fixture::new("families_handoff_lease_lapsed_reservation", 8).await?;
+    declared_path::root_eth_entry(&fixture).await?;
+    let kaaboosd = surface(&fixture, "kaaboosd.eth").await?;
+    let lease = uuid(0x1001);
+    let entry = uuid(0x2001);
+    registered_until(&fixture, &kaaboosd, 1, &lease, 1, GRANTED_UNTIL).await?;
+    reserved(&fixture, &kaaboosd, &entry, 3, 152, FIRST_RESERVED_UNTIL).await?;
+    fixture
+        .event(
+            Event::new(
+                "kaaboosd-first-reservation-expired",
+                3,
+                0,
+                "RegistrationReleased",
+                "ens_v2_registry_l1",
+            )
+            .name(&kaaboosd)
+            .resource(&entry)
+            .synthesised()
+            .before(json!({"status": "reserved", "expiry": FIRST_RESERVED_UNTIL,
+                           "registrant": Value::Null}))
+            .after(json!({"source_event": "RegistryPathExpired",
+                          "derived_from": "interpreter_state",
+                          "terminal_reason": "registry_name_binding_expired",
+                          "registry": V2_REGISTRY, "token_id": "1",
+                          "registry_contract_instance_id": "eth",
+                          "expiry": FIRST_RESERVED_UNTIL, "status": "released",
+                          "released_at": block_time(3)}))
+            .raw(json!({"kind": "raw_block", "emitting_address": V2_REGISTRY})),
+        )
+        .await?;
+    fixture
+        .write(
+            5,
+            694,
+            "RegistrationRenewed",
+            "ens_v2_migration_l1",
+            Some(&kaaboosd),
+            None,
+            json!({"source_event": "NameRenewed", "token_id": "1",
+                   "namehash": node(&kaaboosd), "expiry": RENEWED_UNTIL}),
+            V2_REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            5,
+            695,
+            "RegistrationRenewed",
+            "ens_v1_registrar_l1",
+            Some(&kaaboosd),
+            Some(&lease),
+            json!({"authority_kind": "registrar", "source_event": "NameRenewed",
+                   "registrant": OWNER, "expiry": RENEWED_UNTIL,
+                   "namehash": node(&kaaboosd)}),
+            REGISTRAR,
+        )
+        .await?;
+    reserved(&fixture, &kaaboosd, &entry, 7, 110, SECOND_RESERVED_UNTIL).await?;
+
+    // Between the reservations the derived release ends nothing: the renewed lease serves its own
+    // expiry and the ENSv1 grace period.
+    fixture.apply(6, FamilyMode::Normal).await?;
+    check(
+        &served(&fixture, &kaaboosd).await?,
+        json!({"status": "active", "lifecycle_status": "active",
+               "registered_at": block_time(2), "resource_id": lease,
+               "ens_v1_expiry": RENEWED_UNTIL.to_string(), "expires_at": RENEWED_UNTIL,
+               "grace_ends_at": RENEWED_UNTIL + 90 * DAY, "owner": OWNER}),
+    )?;
+    // The second reservation dates the lease it stands for.
+    fixture.apply(8, FamilyMode::Normal).await?;
+    check(
+        &served(&fixture, &kaaboosd).await?,
+        json!({"status": "active", "lifecycle_status": "active",
+               "registered_at": block_time(2), "resource_id": lease,
+               "identity_resource_id": lease, "ens_v1_expiry": RENEWED_UNTIL.to_string(),
+               "expires_at": SECOND_RESERVED_UNTIL, "owner": OWNER}),
+    )?;
+    fixture.assert_rebuild_equal(8).await?;
     fixture.cleanup().await
 }

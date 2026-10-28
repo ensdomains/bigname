@@ -5014,6 +5014,42 @@ Project statement, `project:families.resolution_paths.prepare`.
   manifest-authority fingerprint and the compiled watch plan are unchanged, so
   stamp no Ingest redo.
 
+## A migrated `.eth` name serves its BaseRegistrar lease
+
+The build that composes a `.eth` name the January 2020 registrar migration moved on its
+[implied lease](glossary.md#implied-lease)
+([projections](projections.md#exact-name-projection), implied lease) changes the lifecycle composition
+Project stores (`crates/storage/src/families/control/lifecycle/`). It rotates the
+[projection content hash](glossary.md#projection-content-hash) for every chain. The
+[interpreter content hash](glossary.md#interpreter-content-hash) does not rotate.
+
+What changes for names:
+
+- A migrated name renewed since the migration serves its lease's `registration_id`,
+  `ens_v1.expires_at` and `registered_at`, the time of the migration's own transaction. A
+  lease lapsed past grace serves `released`. Before, the name served `active` with no lease.
+- A migrated name whose registry owner is zero serves the same lease as registered, or
+  released once lapsed, with no `authority` and no registry owner. Before, it served
+  `unregistered`.
+- A cut-over registrar lease whose premigration reservation was replaced keeps its
+  `registered_at` and `registration_id`.
+- A reservation already expired when written no longer supplies an ENSv1 name's expiry or
+  status. The lease's own expiry and grace serve until a later reservation.
+
+These rows arrive through re-derivation. Every chain needs one full-range Project redo and no
+Interpret redo, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary)
+under matching runner and API binaries. The change rides the next release that redoes
+Project and shares that release's Project redo. Do not mark old rows ready under the new
+hash.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
+and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+Before the release is recorded, confirm that the Project redo adopted the new projection
+content hash, then check on Ethereum Mainnet that `GET /v1/names/coathup.eth` serves a
+`registered_at`, a `registration_id` and `ens_v1.expires_at`, and that
+`GET /v1/names/kaaboosd.eth` serves `active` with a `registered_at`.
+
 ## Read indexes for history windows, search prefixes and `resolves_to`
 
 The build that adds four read-only btree indexes changes no stored row and no response

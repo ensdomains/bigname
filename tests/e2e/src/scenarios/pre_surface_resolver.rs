@@ -104,10 +104,15 @@ async fn exercise(ownerless: bool) -> Result<()> {
     .fetch_one(&run.db.pool)
     .await?;
     if ownerless {
-        assert_eq!(
-            name_body["declared_state"]["registration"]["status"],
-            "unregistered"
-        );
+        // A cleared registry record does not end the BaseRegistrar lease: the name serves the
+        // lease's registration with no authority and no registry custody (docs/projections.md).
+        let registration = &name_body["declared_state"]["registration"];
+        assert_eq!(registration["status"], "active", "{name_body}");
+        assert_eq!(registration["lifecycle_status"], "active", "{name_body}");
+        assert!(registration["resource_id"].is_string(), "{name_body}");
+        assert!(!registration["registered_at"].is_null(), "{name_body}");
+        assert!(!registration["ens_v1_expiry"].is_null(), "{name_body}");
+        assert_eq!(registration["authority_kind"], Value::Null);
         assert_eq!(
             name_body["declared_state"]["control"]["status"],
             "unregistered"

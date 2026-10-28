@@ -41,7 +41,7 @@ const LEASE_KINDS: [&str; 4] = [
 ];
 
 /// The registrar lease of an ENSv1 `.eth` second-level name whose selected registry-only
-/// binding records none.
+/// binding records none, or that is in the ownerless-registry profile.
 /// The 2020 registrar migration moved such names onto the BaseRegistrar without a controller
 /// `NameRegistered`, so no grant opened their lease, and the adapter first names the lease at
 /// its first controller renewal, with a grant derived there. The lease is the resource of the
@@ -174,10 +174,15 @@ impl<'a> Authority<'a> {
                     && event.resource_id.as_deref() == Some(resource)
             })
         };
-        let binding = self.registry_only_binding()?;
+        // The ownerless-registry profile selects no binding: the cleared registry record
+        // leaves the BaseRegistrar lease standing.
+        let binding = self.registry_only_binding();
+        let ownerless = selection.ownerless_registry && self.binding.is_none();
+        if binding.is_none() && !ownerless {
+            return None;
+        }
         if binding
-            .lease_resource_id
-            .as_deref()
+            .and_then(|binding| binding.lease_resource_id.as_deref())
             .is_some_and(carries_lease)
         {
             return None;
