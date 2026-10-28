@@ -4936,3 +4936,106 @@ content hash, then check on Sepolia that `GET /v1/names/phantombug01.eth` serves
 `0x8948458626811dd0c23eb25cc74291247077cc51`, equal to its `ens_v1.resolver` (registry
 `NewResolver` at block 11982720), and that `GET /v1/names/phantombug01.eth/records?keys=addr:61`
 finds the record.
+
+## Read indexes for history windows, search prefixes and `resolves_to`
+
+The build that adds four read-only btree indexes changes no stored row and no response
+body. Each serves an API read that otherwise scans its whole table:
+
+- History, address-history and events pages with `from_timestamp` or `to_timestamp` map each
+  bound to a block through `chain_lineage_timestamp_idx` on `chain_lineage`.
+- `GET /v1/search` with a raw-name prefix reads its matches as one range of
+  `name_surfaces_name_prefix_idx` on `name_surfaces`.
+- `relation=resolves_to` on `GET /v1/addresses/{address}/names` finds its candidate
+  resources through `project_resource_pointer_namehash_resolver_idx` on
+  `project_resource_pointer`, and the names that reach them through
+  `project_registry_pointer_resource_idx` on `project_registry_pointer`.
+
+[Table ownership](storage.md#table-ownership) lists each index with the statement it
+serves.
+
+- Neither content hash rotates. The baselines and schema-migrations are inputs of neither
+  hash. The served statements are in files that are inputs of neither, and the Rust change
+  only names them for their plan tests. No redo is needed. The change ships as an image
+  swap plus the schema-migration.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Schema-migration `20261028120000_serving_read_indexes.sql` installs the four indexes. An
+index that already exists under its name, with the reviewed definition, is adopted without a
+build and without a lock on its table. This covers an index an operator created
+concurrently under the same name before the release. A missing index is built with an
+ordinary `CREATE INDEX`, which holds a SHARE lock on its table until the schema-migration
+commits and blocks the table's writers. Apply the schema-migration with the phase runner,
+redo processes and API stopped, with the same `lock_timeout`, `statement_timeout` and retry
+procedure as the other index schema-migrations and `--target-version 20261028120000`.
+
+On a large initialized database, prebuild the missing indexes concurrently first, outside a
+transaction. The phase runner and API can keep running while they build. The
+schema-migration then finds them by name and skips the builds:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS chain_lineage_timestamp_idx
+    ON bigname_phase.chain_lineage (chain_id, block_timestamp, block_number);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS project_resource_pointer_namehash_resolver_idx
+    ON bigname_phase.project_resource_pointer (chain_id, namehash, resolver_address);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_name_prefix_idx
+    ON bigname_phase.name_surfaces (raw_name text_pattern_ops, namespace, namehash, logical_name_id)
+    WHERE visibility_state = 'active'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND octet_length(raw_name) <= 2000;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS project_registry_pointer_resource_idx
+    ON bigname_phase.project_registry_pointer (chain_id, resource_id);
+```
+
+`IF NOT EXISTS` matches the index name only. An interrupted concurrent build leaves an
+invalid index. The schema-migration checks all four names before its own builds and again
+after them. It refuses a name that is not an index, is on another table, is not valid and
+ready, or has another definition, and its error names the index. Check the same things
+yourself after each concurrent build, so the schema-migration does not stop inside the
+maintenance window:
+
+```sql
+SET search_path = pg_catalog;
+SELECT c.relname, c.relkind, i.indrelid::regclass, i.indisvalid, i.indisready,
+       pg_get_indexdef(i.indexrelid)
+FROM pg_class AS c
+LEFT JOIN pg_index AS i ON i.indexrelid = c.oid
+WHERE c.relnamespace = 'bigname_phase'::regnamespace
+  AND c.relname IN (
+      'chain_lineage_timestamp_idx',
+      'project_resource_pointer_namehash_resolver_idx',
+      'name_surfaces_name_prefix_idx',
+      'project_registry_pointer_resource_idx');
+RESET search_path;
+```
+
+Each row has `relkind` `i`, its own table as `indrelid`, and `indisvalid` and `indisready`
+true. The definitions must be exactly these lines, which are the text the schema-migration
+compares:
+
+```text
+CREATE INDEX chain_lineage_timestamp_idx ON bigname_phase.chain_lineage USING btree (chain_id, block_timestamp, block_number)
+CREATE INDEX project_resource_pointer_namehash_resolver_idx ON bigname_phase.project_resource_pointer USING btree (chain_id, namehash, resolver_address)
+CREATE INDEX name_surfaces_name_prefix_idx ON bigname_phase.name_surfaces USING btree (raw_name text_pattern_ops, namespace, namehash, logical_name_id) WHERE ((visibility_state = 'active'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (octet_length(raw_name) <= 2000))
+CREATE INDEX project_registry_pointer_resource_idx ON bigname_phase.project_registry_pointer USING btree (chain_id, resource_id)
+```
+
+A missing index has no row. The schema-migration then builds it under the SHARE lock, so
+build it concurrently first.
+
+The remedy depends on the refusal:
+
+- A name that is not an index: remove or rename that relation, then build the index.
+- An index of the name on another table, or one that is not valid and ready: drop it with
+  `DROP INDEX CONCURRENTLY bigname_phase.<index name>`, then build it again with the
+  statement above.
+- Another definition: the error prints the definition it found and the one it expects.
+  Drop the index the same way and build it again with the statement above.
+
+Before any drop, confirm in `pg_stat_progress_create_index` that no build of the index is
+still running. Then run the schema-migrations again.
+
+Ingest writes one more btree entry for each block it stores. Project writes one more for
+each resource pointer and registry pointer it stores. Interpret writes one more for each
+readable, active name surface whose raw name is at most 2000 bytes.
