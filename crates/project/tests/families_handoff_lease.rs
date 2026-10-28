@@ -115,7 +115,11 @@ async fn renewal(
     let after = json!({"authority_kind": "registrar", "source_event": "NameRenewed",
                        "registrant": ZERO, "expiry": expiry, "namehash": node(name)});
     let kinds: &[&str] = if first {
-        &["RegistrationGranted", "RegistrationRenewed", "ExpiryChanged"]
+        &[
+            "RegistrationGranted",
+            "RegistrationRenewed",
+            "ExpiryChanged",
+        ]
     } else {
         &["RegistrationRenewed", "ExpiryChanged"]
     };
@@ -250,7 +254,11 @@ async fn served(fixture: &Fixture, name: &str) -> Result<Value> {
 
 fn check(row: &Value, expected: Value) -> Result<()> {
     for (key, value) in expected.as_object().expect("expected is an object") {
-        ensure!(&row[key] == value, "{key}: {} != {value} in {row}", row[key]);
+        ensure!(
+            &row[key] == value,
+            "{key}: {} != {value} in {row}",
+            row[key]
+        );
     }
     Ok(())
 }
@@ -505,7 +513,15 @@ async fn a_replaced_reservation_does_not_undate_the_lease_it_stood_for() -> Resu
     let kaaboosd = surface(&fixture, "kaaboosd.eth").await?;
     let lease = uuid(0x1001);
     registered(&fixture, &kaaboosd, 1, &lease, 1).await?;
-    reserved(&fixture, &kaaboosd, &uuid(0x2001), 3, 10, RESERVED_EXPIRY - DAY).await?;
+    reserved(
+        &fixture,
+        &kaaboosd,
+        &uuid(0x2001),
+        3,
+        10,
+        RESERVED_EXPIRY - DAY,
+    )
+    .await?;
     reserved(&fixture, &kaaboosd, &uuid(0x2001), 5, 10, RESERVED_EXPIRY).await?;
 
     let taken = surface(&fixture, "taken.eth").await?;

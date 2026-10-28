@@ -505,8 +505,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
             registration.get("authority_kind").and_then(Value::as_str),
             Some("registrar" | "registry_only")
         );
-    let serves_control =
-        !(ownerless || selection.released_tombstone || v2_release);
+    let serves_control = !(ownerless || selection.released_tombstone || v2_release);
     let owner = served_owner(facts, folded, owner_required && serves_control)?;
     // A wrapper grant's control is built like any other grant's.
     let live_control = || {
