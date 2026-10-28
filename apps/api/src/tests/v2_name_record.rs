@@ -2143,10 +2143,15 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
             // serves that lease's registration (docs/projections.md, ownerless registry profile).
             // The records route carries no registration fields.
             assert_eq!(
-                payload["data"]["registration_id"],
-                json!("00000000-0000-0000-0000-000000002200")
+                payload["data"].get("registration_id"),
+                Some(&json!("00000000-0000-0000-0000-000000002200")),
+                "ownerless exact-name payload serves its lease: {payload}"
             );
-            assert_eq!(payload["data"]["status"], json!("active"));
+            assert_eq!(
+                payload["data"].get("status"),
+                Some(&json!("active")),
+                "{payload}"
+            );
             assert!(
                 payload["data"].get("token_id").is_none(),
                 "ownerless exact-name payload must not imply token control: {payload}"
@@ -2165,7 +2170,7 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
     )
     .await?;
     let lookup_record = &lookup["data"][0]["record"];
-    assert_eq!(lookup_record["status"], json!("active"));
+    assert_eq!(lookup_record.get("status"), Some(&json!("active")), "{lookup}");
     assert!(
         lookup_record.get("token_id").is_none(),
         "ownerless batch lookup must not imply token control: {lookup}"
