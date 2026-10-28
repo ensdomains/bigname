@@ -9,6 +9,9 @@
 #[allow(dead_code)]
 mod support;
 
+#[path = "bounded_adoption/migration.rs"]
+mod migration;
+
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -2613,8 +2616,8 @@ impl Fixture {
         Ok(())
     }
 
-    /// A redo requested from `START + 1` is refused with the full range and the bounded start
-    /// `from`, not with a reason for keeping the full range.
+    /// A redo requested from the block above the bounded start `from` is refused with the full
+    /// range and `from`, not with a reason for keeping the full range.
     async fn assert_bounded_refusal(&self, token: &str, from: i64) -> Result<()> {
         let run = self.run(Some(token), None);
         let error = run
@@ -2622,7 +2625,7 @@ impl Fixture {
             .redo(
                 &chain()?,
                 RedoPhase::Phase(PhaseName::Interpret),
-                BlockRange::new(START + 1, self.head)?,
+                BlockRange::new(from + 1, self.head)?,
                 CancellationToken::new(),
             )
             .await
