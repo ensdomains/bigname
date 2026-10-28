@@ -13,8 +13,8 @@ use super::{
     control::{control_owner, served_owner},
     expiry::{choose, classify_expiry, live_entry},
     laterals::{
-        authority_context, expiry_event, implied_registered_at, latest_event_kind, migrated_lease,
-        registered_at, registrant, registrar_resource,
+        authority_context, expiry_event, latest_event_kind, migrated_lease, registered_at,
+        registrant, registrar_resource,
     },
     select::select_v2,
     tombstone::deciding_fact,
@@ -74,9 +74,28 @@ fn opt_text(value: Option<&str>) -> Value {
     value.map_or(Value::Null, |text| Value::String(text.to_owned()))
 }
 
-/// The admission inputs of one name (`Authority::of`).
+/// The admission inputs of one name: its selection, binding candidates, selected binding,
+/// wrapper modifier and retained events.
 pub(super) fn authority_of(facts: &NameFacts) -> Authority<'_> {
-    Authority::of(facts)
+    let selection = &facts.input.selection;
+    Authority {
+        name: &facts.input.logical_name_id,
+        selection,
+        candidates: &facts.candidates,
+        lease_candidates: &facts.lease_candidates,
+        binding: selection.surface_binding_id.as_deref().and_then(|id| {
+            facts
+                .candidates
+                .iter()
+                .find(|candidate| candidate.surface_binding_id == id)
+        }),
+        wrapper_modifier: selection
+            .resource_id
+            .as_deref()
+            .and_then(|resource| facts.wrappers.get(resource))
+            .is_some_and(|wrapper| wrapper.has_modifier),
+        events: &facts.events,
+    }
 }
 
 /// Every retained event of the name with its staged name, admission and ENSv2 lifecycle key.
@@ -128,9 +147,6 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     let tagged = tag(facts, &authority);
 
     let mut trace = Map::new();
-    if let Some(lease) = authority.implied_lease {
-        trace.insert("implied_lease".into(), json!(lease.resource));
-    }
     // A released ENSv2 tombstone serves the fact that decided it, on the tombstone's resource;
     // every other ENSv2 name the registration fold.
     let tombstone = deciding_fact(facts, clock)?;
@@ -254,15 +270,12 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         |tagged| &tagged.event.position,
     )
     .map(|tagged| tagged.event);
-    let registered_at = match authority.implied_lease {
-        Some(lease) => implied_registered_at(facts, lease, &in_scope, &mut trace),
-        None => grant.map_or(Value::Null, |grant| {
-            registered_at(
-                facts,
-                migrated_lease(facts, &tagged, grant).unwrap_or(grant),
-            )
-        }),
-    };
+    let registered_at = grant.map_or(Value::Null, |grant| {
+        registered_at(
+            facts,
+            migrated_lease(facts, &tagged, grant).unwrap_or(grant),
+        )
+    });
 
     let wrapper_row = event_resource.and_then(|resource| facts.wrappers.get(resource));
     let effective = wrapper_row.map(|row| effective_wrapper(row, clock.timestamp_seconds));

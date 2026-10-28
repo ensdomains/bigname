@@ -269,15 +269,12 @@ pub(super) fn apply(
             // A later allocation cannot revive the premigration lease, even when current
             // control falls back to its retained ENSv1 binding after the ENSv2 release.
             // A lease registered after that allocation ended is a registration of its own.
-            // An earlier reservation is not such an allocation: premigration reserves only a
-            // name its ENSv1 lease still holds, so a reservation after the lease and before the
-            // current instance stood for the same lease.
             && !tagged.iter().any(|item| {
                 item.staged == StagedName::Ours
                     && item.event.is_v2_family()
                     && item.event.position < instance.origin.position
                     && lease.is_none_or(|lease| *lease < item.event.position)
-                    && item.event.event_kind == "RegistrationGranted"
+                    && matches!(item.event.event_kind.as_str(), "RegistrationGranted" | "RegistrationReserved")
                     && matches!(item.event.source_event.as_deref(), Some("LabelRegistered" | "LabelReserved"))
                     && item.event.derived_from.as_deref() != Some("registry_state")
             })
@@ -372,9 +369,6 @@ pub(super) fn apply(
     {
         (Grace::None, Boundary::Exclusive)
     } else {
-        // A release of an implied lease is terminal even without an expiry to schedule from.
-        terminal = trace.contains_key("implied_lease")
-            && registration.get("status").and_then(Value::as_str) == Some("released");
         match facts.input.place {
             NamePlace::EthSecondLevel => (Grace::EnsV1, Boundary::InclusiveGrace),
             NamePlace::BasenamesSecondLevel => (Grace::Basenames, Boundary::InclusiveGrace),

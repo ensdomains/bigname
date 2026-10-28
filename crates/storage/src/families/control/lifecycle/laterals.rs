@@ -3,11 +3,11 @@
 //! selected ENSv2 lifecycle key) and ordered by the facts' order, the canonical order in every
 //! read.
 use anyhow::Result;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use super::{
     NameFacts,
-    admission::{Authority, ImpliedLease, Probe, REGISTRAR, StagedName, WRAPPER},
+    admission::{Authority, Probe, REGISTRAR, StagedName, WRAPPER},
     membership::merged_for,
     served::{Selected, Tagged, latest},
 };
@@ -15,8 +15,6 @@ use crate::families::control::{
     position::Position,
     rows::{BindingCandidate, LifecycleEvent, Mark},
 };
-
-const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
 /// The five kinds `latest_event_kind` reads.
 const FIVE_KINDS: [&str; 5] = [
@@ -44,52 +42,6 @@ pub(super) fn registered_at(facts: &NameFacts, grant: &LifecycleEvent) -> Value 
         .block_timestamps
         .get(&grant.position.block_number)
         .cloned()
-        .unwrap_or(Value::Null)
-}
-
-/// The registration time of a registration on its implied lease (`ImpliedLease`): the lease's
-/// own grant from a controller registration, else the registry handoff block's time, else the
-/// lease's first admitted event's block. A grant the adapter derives at the lease's first renewal
-/// (source event `NameRenewed`) dates only the renewal. The 2020 registrar migration emitted the
-/// BaseRegistrar's own `NameRegistered` in the transaction that wrote the name's first
-/// current-registry record, so the handoff block is the migration's registration block
-/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L155 @ ens_v1@91c966f).
-pub(super) fn implied_registered_at(
-    facts: &NameFacts,
-    lease: ImpliedLease<'_>,
-    in_scope: &[&Tagged<'_>],
-    trace: &mut Map<String, Value>,
-) -> Value {
-    let on_lease: Vec<&LifecycleEvent> = in_scope
-        .iter()
-        .map(|tagged| tagged.event)
-        .filter(|event| event.resource_id.as_deref() == Some(lease.resource))
-        .collect();
-    let grant = latest(
-        on_lease.iter().copied().filter(|event| {
-            event.event_kind == "RegistrationGranted"
-                && event.source_event.as_deref() != Some("NameRenewed")
-        }),
-        |event| &event.position,
-    );
-    if let Some(grant) = grant {
-        trace.insert("registered_at_source".into(), json!("grant"));
-        return registered_at(facts, grant);
-    }
-    let (source, block) = match lease.from_block {
-        Some(block) => ("registry_handoff", Some(block)),
-        None => (
-            "lease_first_event",
-            on_lease
-                .iter()
-                .map(|event| &event.position)
-                .min()
-                .map(|position| position.block_number),
-        ),
-    };
-    trace.insert("registered_at_source".into(), json!(source));
-    block
-        .and_then(|block| facts.block_timestamps.get(&block).cloned())
         .unwrap_or(Value::Null)
 }
 
@@ -177,7 +129,6 @@ pub(super) fn registrant(
         selection.unsupported_reason.is_none()
             && selection.authority_arm.as_deref() == Some("ens_v1")
     });
-    let implied = authority.implied_lease;
     let after_handoff = |tagged: &&Tagged<'_>| {
         let event = tagged.event;
         !tagged.admitted
@@ -187,11 +138,8 @@ pub(super) fn registrant(
             && event.authority_kind == "registrar"
             && handoff.is_some_and(|binding| {
                 let (block, transaction, log, _) = binding.order();
-                let lease = implied
-                    .map(|lease| lease.resource)
-                    .or(binding.lease_resource_id.as_deref());
-                lease.is_some()
-                    && lease == event.resource_id.as_deref()
+                binding.lease_resource_id.is_some()
+                    && binding.lease_resource_id == event.resource_id
                     && event.position.bound() > (block, transaction, log)
             })
             && (!is_v2 || (event.is_v2_family() && tagged.key.as_deref() == selected_key))
@@ -239,19 +187,10 @@ pub(super) fn registrant(
                         }))
             })
     };
-    // The adapter derives a migrated lease's grant at its first renewal with the zero address
-    // as its registrant, and a release of that lease without a transfer names it too. Neither is
-    // a holder.
-    let value = |event: &LifecycleEvent| {
-        match event.event_kind.as_str() {
-            "TokenControlTransferred" => event.to_address.clone(),
-            "RegistrationReleased" => event.before_registrant.clone(),
-            _ => event.registrant.clone(),
-        }
-        .filter(|holder| {
-            implied.is_none_or(|lease| event.resource_id.as_deref() != Some(lease.resource))
-                || holder != ZERO_ADDRESS
-        })
+    let value = |event: &LifecycleEvent| match event.event_kind.as_str() {
+        "TokenControlTransferred" => event.to_address.clone(),
+        "RegistrationReleased" => event.before_registrant.clone(),
+        _ => event.registrant.clone(),
     };
     let candidates = in_scope
         .iter()
@@ -331,15 +270,13 @@ pub(super) fn authority_context(
     is_v2: bool,
     selected_key: Option<&str>,
 ) -> AuthorityContext {
-    // An implied lease names the registration, never the authority, as a successor lease does.
     let successor_lease = |event: &LifecycleEvent| {
         authority.binding.is_some_and(|binding| {
             binding.registry_only
                 && binding.lease_resource_id.is_some()
                 && binding.lease_resource_id == event.resource_id
                 && binding.lease_resource_id != binding.predecessor_resource_id
-        }) || (authority.implied_resource().is_some()
-            && authority.implied_resource() == event.resource_id.as_deref())
+        })
     };
     let mut found: Vec<(Position, Value, Value)> = in_scope
         .iter()
