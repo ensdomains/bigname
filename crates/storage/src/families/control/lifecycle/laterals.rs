@@ -129,8 +129,8 @@ impl Start<'_> {
 /// BaseRegistrar's `_register` mints, writes the registry record when `updateRegistry` is set, and
 /// emits `NameRegistered` in one call, and only the `eth` node's owner or its operator can write
 /// a `.eth` second-level record. The sampled migration transactions show the record written in
-/// that call (`docs/upstream.md`, migrated `.eth` names). A record first written after the
-/// derived grant is not that registration, so the grant dates the lease then.
+/// that call (`docs/upstream.md`, migrated `.eth` names). The record dates the lease even when
+/// the derived grant is older, as the implied lease, which admits nothing before the record, does.
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L152 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L21 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L81 @ ens_v1@91c966f)
@@ -143,9 +143,7 @@ pub(super) fn registration_start<'a>(
     let derived = lease_grant.source_family == REGISTRAR
         && lease_grant.source_event.as_deref() == Some("NameRenewed");
     match first_current_record(facts) {
-        Some(block) if derived && block <= lease_grant.position.block_number => {
-            Start::FirstRecord(block)
-        }
+        Some(block) if derived => Start::FirstRecord(block),
         _ => Start::Grant(lease_grant),
     }
 }

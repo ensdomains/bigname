@@ -2,12 +2,12 @@
 //! ENSv1 authority records no lease: which names have one, and which resource it is.
 use std::{collections::BTreeMap, sync::Arc};
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::{
     AuthoritySelection, NameFacts, NameInput, NamePlace,
     admission::{Authority, Probe, StagedName},
-    laterals::{Start, registration_start},
+    laterals::{Start, implied_registered_at, registration_start},
     served::Tagged,
 };
 use crate::families::control::{
@@ -320,9 +320,10 @@ fn start_of(facts: &NameFacts, grant: usize) -> String {
 
 /// Rows u and c of the registration start. A lease whose only grant is the one derived at its
 /// first renewal starts at the first current-registry record, on ENSv1 and through the grant the
-/// ENSv1→ENSv2 migration wrote. A controller grant dates itself. A migrated name with no
-/// registrar grant, such as a subname, keeps the ENSv2 grant. A derived grant before the first
-/// record, or with no record, dates the lease itself.
+/// ENSv1→ENSv2 migration wrote, even when the derived grant is older than the record. A
+/// controller grant dates itself. A migrated name with no registrar grant, such as a subname,
+/// keeps the ENSv2 grant. A derived grant with no current-registry record dates the lease
+/// itself.
 #[test]
 fn the_registration_start_of_each_grant_class() {
     const MIGRATION: i64 = 20;
@@ -384,7 +385,7 @@ fn the_registration_start_of_each_grant_class() {
     let facts = Name::migrated(renewed(9, LEASE)).facts();
     assert_eq!(
         start_of(&facts, 0),
-        facts.events[0].position.event_identity,
+        record,
         "derived grant before the first record"
     );
     let mut unrecorded = Name::migrated(vec![derived()]);
@@ -395,4 +396,63 @@ fn the_registration_start_of_each_grant_class() {
         facts.events[0].position.event_identity,
         "derived grant with no current-registry record"
     );
+}
+
+/// Row u2: a derived grant at 9, the first current-registry record at 10, a renewal at 12 and the
+/// ENSv1→ENSv2 migration at 20. The implied lease admits nothing before the record, so ENSv1
+/// dates the name at 10. The migration's grant continues that lease and is dated at 10 too.
+#[test]
+fn a_derived_grant_before_the_first_record_keeps_its_start_across_the_migration() {
+    let times = || -> Arc<BTreeMap<i64, Value>> {
+        Arc::new((9..=20).map(|block| (block, json!(block))).collect())
+    };
+    let mut events = renewed(9, LEASE);
+    events.push(renewed(12, LEASE).remove(1));
+    let mut before = Name::migrated(events.clone()).facts();
+    before.block_timestamps = times();
+    let authority = Authority::of(&before);
+    let lease = authority
+        .implied_lease
+        .expect("the renewal at 12 implies the lease");
+    let tagged: Vec<Tagged<'_>> = before
+        .events
+        .iter()
+        .map(|event| Tagged {
+            event,
+            staged: StagedName::Ours,
+            admitted: authority.admits(&Probe::of(event)),
+            key: None,
+        })
+        .collect();
+    let in_scope: Vec<&Tagged<'_>> = tagged.iter().filter(|tagged| tagged.admitted).collect();
+    let on_v1 = implied_registered_at(&before, lease, &tagged, &in_scope, &mut Map::new());
+
+    events.push(event(
+        "RegistrationGranted",
+        20,
+        "00000000-0000-0000-0000-0000000000c1",
+        json!({"source_family": "ens_v2_registry_l1", "source_event": "LabelRegistered"}),
+    ));
+    let mut after = Name::migrated(events).facts();
+    after.block_timestamps = times();
+    after.migration = Some(Position {
+        block_number: 20,
+        transaction_index: Some(0),
+        log_index: Some(1),
+        event_identity: "MigrationApplied".to_owned(),
+    });
+    let tagged: Vec<Tagged<'_>> = after
+        .events
+        .iter()
+        .map(|event| Tagged {
+            event,
+            staged: StagedName::Ours,
+            admitted: true,
+            key: None,
+        })
+        .collect();
+    let on_v2 = registration_start(&after, &tagged, &after.events[3]).time(&after, &mut Map::new());
+
+    assert_eq!(on_v1, json!(HANDOFF));
+    assert_eq!(on_v2, on_v1);
 }

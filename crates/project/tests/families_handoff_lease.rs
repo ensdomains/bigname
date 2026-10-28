@@ -1772,8 +1772,15 @@ async fn a_recorded_lease_handoff_keeps_its_transfer_window() -> Result<()> {
 
 /// A NameWrapper `wrapETH2LD` of `name` at `block`, as `families_expiry_grace.rs` writes one: the
 /// wrapper binding `0x400 + n` on resource `0x5000 + n`, which records `lease` as the wrapped
-/// registrar lease, with its epoch, expiry and fuses. Returns the binding id.
-async fn wrapped(fixture: &Fixture, name: &str, n: u32, lease: &str, block: i64) -> Result<String> {
+/// registrar lease, with its epoch, expiry and fuses, CANNOT_UNWRAP among them when `locked`.
+/// Returns the binding id.
+async fn wrapped(
+    fixture: &Fixture,
+    name: &str,
+    (n, locked): (u32, bool),
+    lease: &str,
+    block: i64,
+) -> Result<String> {
     let (binding, wrapper) = (uuid(0x400 + n), uuid(0x5000 + n));
     let log = i64::from(n) * 10;
     fixture
@@ -1810,7 +1817,13 @@ async fn wrapped(fixture: &Fixture, name: &str, n: u32, lease: &str, block: i64)
             )
             .await?;
     }
-    // PARENT_CANNOT_CONTROL | IS_DOT_ETH, which `wrapETH2LD` burns, and no CANNOT_UNWRAP.
+    // PARENT_CANNOT_CONTROL | IS_DOT_ETH, which `wrapETH2LD` burns, plus CANNOT_UNWRAP when
+    // locked.
+    let (state, fuses) = if locked {
+        ("locked", 196_609)
+    } else {
+        ("emancipated", 196_608)
+    };
     fixture
         .write(
             block,
@@ -1819,8 +1832,7 @@ async fn wrapped(fixture: &Fixture, name: &str, n: u32, lease: &str, block: i64)
             "ens_v1_wrapper_l1",
             None,
             Some(&wrapper),
-            json!({"source_event": "NameWrapped", "wrapper_state": "emancipated",
-                   "fuses": 196_608}),
+            json!({"source_event": "NameWrapped", "wrapper_state": state, "fuses": fuses}),
             NAME_WRAPPER,
         )
         .await?;
@@ -1883,11 +1895,17 @@ async fn migrated(
     Ok(())
 }
 
-/// Rows a, a-w and a-o: a 2020-migrated name whose lease only its first renewal names, then
-/// reserved and moved to ENSv2. The lease has no observed registration, so the name is dated at
-/// its first current-registry record, the 2020 migration's transaction, on ENSv1 and after the
-/// ENSv1→ENSv2 migration alike. That holds unwrapped, wrapped (migrated by the unlocked-wrapped
-/// path) and with the record cleared, so `registered_at` does not move across the migration.
+/// Rows a, a-w, a-o, a-l and a-r: a 2020-migrated name whose lease only its first renewal
+/// names, then reserved and moved to ENSv2. The lease has no observed registration, so the name
+/// is dated at its first current-registry record, the 2020 migration's transaction, on ENSv1 and
+/// after the ENSv1→ENSv2 migration alike, so `registered_at` does not move across the migration.
+/// That holds unwrapped, wrapped and migrated by the unlocked-wrapped path, with the record
+/// cleared, locked-wrapped and migrated by the locked path, and under a registry-only binding
+/// that records the lease. The locked migration sends the wrapped token to the graveyard, so the
+/// name stays wrapped in ENSv1 and its wrapper binding stays open, and it registers the reserved
+/// entry the same way.
+/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/LockedWrapperReceiver.sol:L146 @ ens_v2_mainnet_20261002@b1f97b91)
+/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/LockedMigrationController.sol:L103-L110 @ ens_v2_mainnet_20261002@b1f97b91)
 #[tokio::test]
 async fn a_migrated_name_keeps_its_first_record_time_across_the_ens_v2_migration() -> Result<()> {
     let fixture = Fixture::new("families_handoff_lease_v2_migrated", 8).await?;
@@ -1897,36 +1915,90 @@ async fn a_migrated_name_keeps_its_first_record_time_across_the_ens_v2_migration
         (1, "unwrapped.eth"),
         (2, "wrapped.eth"),
         (3, "ownerless.eth"),
+        (4, "locked.eth"),
+        (5, "recorded.eth"),
     ] {
         let name = surface(&fixture, label).await?;
         let lease = uuid(0x1000 + n);
         let registry = uuid(0x3000 + n);
         let log = i64::from(n) * 10;
         let handoff_binding = uuid(100 + n);
-        registry_only_bound(
-            &fixture,
-            &name,
-            RegistryOnly {
-                binding: &handoff_binding,
-                resource: &registry,
-                block: 1,
-                log,
-                owner: OWNER,
-                closed_at: (n != 1).then_some(3),
-            },
-            false,
-        )
-        .await?;
+        if n == 5 {
+            // The record names the lease: a registrar binding of it, closed by a registry
+            // `Transfer` at 3 that opens a registry-only binding recording the lease.
+            owner_write(&fixture, &name, &lease, 1, log, OWNER, false).await?;
+            fixture
+                .binding(
+                    &handoff_binding,
+                    &name,
+                    &lease,
+                    "ens_v1",
+                    1,
+                    log + 1,
+                    Some(3),
+                )
+                .await?;
+            fixture
+                .write(
+                    1,
+                    log + 1,
+                    "SurfaceBound",
+                    "ens_v1_registrar_l1",
+                    Some(&name),
+                    Some(&lease),
+                    json!({"authority_kind": "registrar", "state_derived": false,
+                           "registry_contract": REGISTRY, "owner_getter": OWNER}),
+                    REGISTRAR,
+                )
+                .await?;
+        } else {
+            registry_only_bound(
+                &fixture,
+                &name,
+                RegistryOnly {
+                    binding: &handoff_binding,
+                    resource: &registry,
+                    block: 1,
+                    log,
+                    owner: OWNER,
+                    closed_at: (n != 1).then_some(3),
+                },
+                false,
+            )
+            .await?;
+        }
         renewal(&fixture, &name, &lease, 2, log, json!(LEASE_EXPIRY), true).await?;
         let (closing, path) = match n {
             1 => (Some(handoff_binding), "unwrapped"),
             2 => (
-                Some(wrapped(&fixture, &name, n, &lease, 3).await?),
+                Some(wrapped(&fixture, &name, (n, false), &lease, 3).await?),
                 "unlocked_wrapped",
             ),
-            _ => {
+            3 => {
                 owner_write(&fixture, &name, &registry, 3, log, ZERO, false).await?;
                 (None, "unwrapped")
+            }
+            4 => {
+                wrapped(&fixture, &name, (n, true), &lease, 3).await?;
+                (None, "locked_wrapped")
+            }
+            _ => {
+                let recorded = uuid(0x200 + n);
+                registry_only_bound(
+                    &fixture,
+                    &name,
+                    RegistryOnly {
+                        binding: &recorded,
+                        resource: &registry,
+                        block: 3,
+                        log,
+                        owner: OTHER,
+                        closed_at: None,
+                    },
+                    false,
+                )
+                .await?;
+                (Some(recorded), "unwrapped")
             }
         };
         label_reserved(&fixture, GENERIC, &name, n, 4, RESERVED_EXPIRY).await?;

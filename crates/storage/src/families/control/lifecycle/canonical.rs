@@ -367,6 +367,8 @@ pub(super) fn apply(
         let lease_released = lease_continues && registration.contains_key("lapsed_registration");
         if let Some(grant) = instance.grant {
             let start = super::laterals::registration_start(facts, tagged, grant);
+            // This start replaces the one served above, so the trace names only this one's.
+            trace.remove("registered_at_source");
             registration.insert("registered_at".into(), start.time(facts, trace));
             registration.insert("identity_resource_id".into(), json!(instance.resource_id));
         } else if continuing_lease {
@@ -375,6 +377,7 @@ pub(super) fn apply(
                 registration["resource_id"].clone(),
             );
         } else {
+            trace.remove("registered_at_source");
             registration.insert("registered_at".into(), Value::Null);
             registration.insert("identity_resource_id".into(), Value::Null);
             registration.remove("lapsed_registration");
