@@ -250,7 +250,7 @@ fn a_change_without_revival_leaves_the_instance_dateless() {
 }
 
 #[test]
-fn a_live_start_over_a_detached_dateless_instance_opens_a_new_one() {
+fn a_registry_state_start_over_a_detached_dateless_instance_opens_a_new_one() {
     let other = event(
         "other",
         4,
@@ -258,14 +258,22 @@ fn a_live_start_over_a_detached_dateless_instance_opens_a_new_one() {
         Some("ens:0xother"),
         json!({"source_event": "LabelRegistered", "expiry": 300}),
     );
+    let snapshot = event(
+        "snapshot",
+        5,
+        "RegistrationReserved",
+        Some(NAME),
+        json!({"source_event": "ExpiryUpdated", "derived_from": "registry_state", "expiry": 500}),
+    );
     let events = on_key(&[
         reserved("live", 1, 100),
         reserved("replacement", 3, 2),
         other,
-        reserved("again", 5, 500),
+        snapshot,
     ]);
     assert_eq!(
         selected(&events, &["replacement"]),
-        Some(("again".to_owned(), json!(500), false))
+        Some(("snapshot".to_owned(), json!(500), false)),
+        "a snapshot opens no instance over a dated one, so only the dateless rule opens this one"
     );
 }
