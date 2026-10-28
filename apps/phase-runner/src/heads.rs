@@ -1,3 +1,4 @@
+mod lag;
 mod persist;
 
 use sqlx::{PgPool, Postgres, Transaction};
@@ -251,41 +252,53 @@ async fn load_highest_at_least(
 }
 
 pub async fn publish_heads(pool: &PgPool, chain_id: &str, heads: &HeadMarkers) -> RunnerResult<()> {
-    heads.validate()?;
+    publish_lagged_heads(pool, chain_id, heads, 0).await
+}
+
+/// Publish `observed`, whose latest is the newest loaded block, with the readable head `lag`
+/// blocks below it (heads/lag.rs). Lag 0 publishes `observed` itself.
+pub async fn publish_lagged_heads(
+    pool: &PgPool,
+    chain_id: &str,
+    observed: &HeadMarkers,
+    lag: u32,
+) -> RunnerResult<()> {
+    observed.validate()?;
     let mut transaction = pool.begin().await.map_err(|error| {
         RunnerError::transient(format!(
             "failed to begin head publication for chain {chain_id}: {error}"
         ))
     })?;
     let previous_boundary =
-        crate::head_finality::require_monotonic(&mut transaction, chain_id, heads).await?;
+        crate::head_finality::require_monotonic(&mut transaction, chain_id, observed).await?;
     let mut path_floor =
         crate::head_finality::path_floor(&mut transaction, chain_id, previous_boundary.as_ref())
             .await?;
-    if let Some(proposed_boundary) = heads.finalized.as_ref().or(heads.safe.as_ref()) {
+    if let Some(proposed_boundary) = observed.finalized.as_ref().or(observed.safe.as_ref()) {
         path_floor = path_floor.min(proposed_boundary.number);
     }
     let path = load_latest_path(
         &mut transaction,
         chain_id,
-        &heads.latest,
+        &observed.latest,
         path_floor,
         previous_boundary.as_ref(),
     )
     .await?;
-    require_marker_on_path("safe", heads.safe.as_ref(), &path)?;
-    require_marker_on_path("finalized", heads.finalized.as_ref(), &path)?;
+    require_marker_on_path("safe", observed.safe.as_ref(), &path)?;
+    require_marker_on_path("finalized", observed.finalized.as_ref(), &path)?;
     let hashes = path
         .iter()
         .map(|(_, hash)| hash.as_str())
         .collect::<Vec<_>>();
+    let heads = &lag::readable_heads(&mut transaction, chain_id, observed, &path, lag).await?;
 
     let (orphaned_from, previous_orphaning_epoch) = replace_readable_path(
         &mut transaction,
         chain_id,
         &hashes,
         path_floor,
-        heads.latest.number,
+        observed.latest.number,
     )
     .await?;
     let orphaned_readable_lineage = orphaned_from.is_some();
@@ -299,6 +312,7 @@ pub async fn publish_heads(pool: &PgPool, chain_id: &str, heads: &HeadMarkers) -
     if let Some(from) = orphaned_from {
         crate::redo_stamp::stamp_orphaned_suffix(&mut transaction, chain_id, from).await?;
     }
+    let hashes = lag::readable_hashes(&path, heads.latest.number);
     promote_to_canonical(&mut transaction, chain_id, &hashes).await?;
     if let Some(safe) = &heads.safe {
         promote_to_safe(&mut transaction, chain_id, &hashes, safe.number).await?;
@@ -565,52 +579,4 @@ pub(crate) fn head_write_error(action: &str, chain_id: &str, error: sqlx::Error)
 }
 
 #[cfg(test)]
-mod retain_finality_tests {
-    use super::{BlockMarker, HeadMarkers, retain_higher_finality};
-
-    fn marker(number: i64) -> BlockMarker {
-        BlockMarker {
-            number,
-            hash: format!("0x{number:x}"),
-        }
-    }
-
-    #[test]
-    fn lower_provider_markers_keep_the_stored_ones() {
-        let proposed = HeadMarkers {
-            latest: marker(100),
-            safe: Some(marker(60)),
-            finalized: Some(marker(30)),
-        };
-        let retained =
-            retain_higher_finality("chain", &proposed, Some(&marker(90)), Some(&marker(40)));
-        assert_eq!(retained.latest, marker(100));
-        assert_eq!(retained.safe, Some(marker(90)));
-        assert_eq!(retained.finalized, Some(marker(40)));
-    }
-
-    #[test]
-    fn equal_or_higher_provider_markers_are_published_as_reported() {
-        let proposed = HeadMarkers {
-            latest: marker(100),
-            safe: Some(marker(95)),
-            finalized: Some(marker(40)),
-        };
-        let retained =
-            retain_higher_finality("chain", &proposed, Some(&marker(90)), Some(&marker(40)));
-        assert_eq!(retained, proposed);
-    }
-
-    #[test]
-    fn missing_markers_are_left_for_the_publication_check() {
-        let proposed = HeadMarkers {
-            latest: marker(100),
-            safe: None,
-            finalized: None,
-        };
-        let retained = retain_higher_finality("chain", &proposed, Some(&marker(90)), None);
-        assert_eq!(retained, proposed);
-        let retained = retain_higher_finality("chain", &proposed, None, None);
-        assert_eq!(retained, proposed);
-    }
-}
+mod retain_finality_tests;

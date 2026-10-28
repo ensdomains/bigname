@@ -2646,3 +2646,202 @@ async fn in_a_mixed_batch_a_touched_name_expands_only_for_its_own_change() -> Re
     }
     Ok(())
 }
+
+/// A classification case: its name, the journal's before-image, the row the block left and the
+/// names it selects.
+type ClassificationCase<'a> = (&'a str, Option<Value>, Option<Value>, &'a [&'a str]);
+
+/// The classification row of `resolver` as the publication at block 5 left it, `current`
+/// (none for a deleted row), and its journal row with the before-image `before` (none for an
+/// inserted row). Both images hold the four fields a composition reads.
+async fn classification_changed(
+    world: &World,
+    resolver: &str,
+    before: Option<Value>,
+    current: Option<Value>,
+) -> Result<()> {
+    if let Some(row) = current {
+        sqlx::query(
+            "INSERT INTO project_resolver_classification (chain_id, resolver_address,
+                 block_number, event_identity, classification, support_status,
+                 unsupported_reason, manifest_id)
+             VALUES ($1, $2, 5, 'classified', $3 -> 'classification', $3 ->> 'support_status',
+                     $3 ->> 'unsupported_reason', ($3 ->> 'manifest_id')::bigint)",
+        )
+        .bind(CHAIN)
+        .bind(resolver)
+        .bind(row)
+        .execute(&world.pool)
+        .await?;
+    }
+    world
+        .journal(
+            5,
+            "project_resolver_classification",
+            json!([CHAIN, resolver]),
+            before,
+        )
+        .await
+}
+
+// A resolution path reads a classification only while it is supported (storage
+// `families/name/resolution_path.rs`, `Walk::evaluate`, and `families/records/mirror.rs`,
+// `classify`). An unsupported or missing row decides the path as not projected whatever its
+// fields say. So a change between two unsupported rows, or between no row and an unsupported
+// one, selects nothing. Any change with a supported side selects the names that point at the
+// resolver, a deleted supported row included. A null `manifest_id` on both sides is no change.
+#[tokio::test]
+async fn a_classification_change_selects_its_readers_only_when_a_side_is_supported() -> Result<()> {
+    const CHANGED: &str = "0x00000000000000000000000000000000000000c7";
+    let image = |kind: &str, status: &str, reason: Option<&str>, manifest: Option<i64>| {
+        json!({"classification": {"kind": kind}, "support_status": status,
+               "unsupported_reason": reason, "manifest_id": manifest})
+    };
+    let unsupported = image("a", "unsupported", Some("resolver_not_declared"), Some(1));
+    let supported = image("a", "supported", None, Some(1));
+    let readers: &[&str] = &["foo.eth", "a.foo.eth", "bar.eth", "a.bar.eth"];
+    let cases: [ClassificationCase<'_>; 10] = [
+        (
+            "unsupported re-filed with a new reason, manifest and classification",
+            Some(image(
+                "b",
+                "unsupported",
+                Some("resolver_manifest_not_active"),
+                None,
+            )),
+            Some(unsupported.clone()),
+            &[],
+        ),
+        (
+            "unsupported, manifest only",
+            Some(image(
+                "a",
+                "unsupported",
+                Some("resolver_not_declared"),
+                Some(2),
+            )),
+            Some(unsupported.clone()),
+            &[],
+        ),
+        (
+            "unsupported row inserted",
+            None,
+            Some(unsupported.clone()),
+            &[],
+        ),
+        (
+            "unsupported row deleted",
+            Some(unsupported.clone()),
+            None,
+            &[],
+        ),
+        (
+            "supported row inserted",
+            None,
+            Some(supported.clone()),
+            readers,
+        ),
+        (
+            "supported row deleted",
+            Some(supported.clone()),
+            None,
+            readers,
+        ),
+        (
+            "support withdrawn",
+            Some(supported.clone()),
+            Some(unsupported.clone()),
+            readers,
+        ),
+        (
+            "supported, manifest re-stamped",
+            Some(image("a", "supported", None, Some(2))),
+            Some(supported.clone()),
+            readers,
+        ),
+        (
+            "supported, classification changed",
+            Some(image("b", "supported", None, Some(1))),
+            Some(supported.clone()),
+            readers,
+        ),
+        (
+            "supported, nothing changed, no manifest",
+            Some(image("a", "supported", None, None)),
+            Some(image("a", "supported", None, None)),
+            &[],
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (case, before, current, expected) in cases {
+        let mut world = World::new().await?;
+        world
+            .surfaces(&[
+                "eth",
+                "foo.eth",
+                "a.foo.eth",
+                "bar.eth",
+                "a.bar.eth",
+                "other.eth",
+            ])
+            .await?;
+        world.eth().await?;
+        for name in ["foo.eth", "bar.eth"] {
+            world
+                .registry_pointer_changed(2, name, ZERO_ADDR, CHANGED)
+                .await?;
+        }
+        classification_changed(&world, CHANGED, before, current).await?;
+        let call = Call {
+            block: 5,
+            after: 4,
+            root: Some(ROOT),
+        };
+        if let Err(error) = world.assert_selects(call, expected).await {
+            wrong.push(format!("{case}: {error:#}"));
+        }
+        world.cleanup().await?;
+    }
+    ensure!(wrong.is_empty(), "wrong selections: {wrong:#?}");
+    Ok(())
+}
+
+// The declared ENSv1 mirror resolver, re-filed from one unsupported row to another, is no
+// global change: the walk reads the mirror only while it is supported. Withdrawing its support
+// is one, and selects every `.eth` name.
+#[tokio::test]
+async fn a_declared_mirror_refiled_as_unsupported_selects_no_name() -> Result<()> {
+    const MIRROR: &str = "0x394d8eb4a4fdf599384deab25f31d111d755c398";
+    let unsupported = json!({"classification": {"role": "ensv1_mirror_resolver"},
+        "support_status": "unsupported", "unsupported_reason": "resolver_not_declared",
+        "manifest_id": 1});
+    let refiled = json!({"classification": {}, "support_status": "unsupported",
+        "unsupported_reason": "resolver_manifest_not_active", "manifest_id": null});
+    let supported = json!({"classification": {"role": "ensv1_mirror_resolver"},
+        "support_status": "supported", "unsupported_reason": null, "manifest_id": 1});
+    for (case, before, expected) in [
+        ("re-filed", refiled, &[][..]),
+        ("withdrawn", supported, &["eth", "foo.eth", "bar.eth"][..]),
+    ] {
+        let mut world = World::new().await?;
+        world
+            .surfaces(&["eth", "foo.eth", "bar.eth", "xyz"])
+            .await?;
+        world.eth().await?;
+        world
+            .declare_mirror("ens_v2_mainnet_20261002", MIRROR)
+            .await?;
+        classification_changed(&world, MIRROR, Some(before), Some(unsupported.clone())).await?;
+        let call = Call {
+            block: 5,
+            after: 4,
+            root: Some(ROOT),
+        };
+        world
+            .assert_selects(call, expected)
+            .await
+            .with_context(|| format!("mirror case {case}"))?;
+        world.cleanup().await?;
+    }
+    Ok(())
+}

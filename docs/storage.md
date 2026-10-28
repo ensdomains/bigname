@@ -753,6 +753,19 @@ Family indexes serve these concrete readers:
   family marker. No index is added.
 
 
+Three read-only indexes serve other API reads. The baselines and
+`20261028120000_serving_read_indexes.sql` install them, with `name_surfaces_name_prefix_idx`
+below. They change no row:
+
+| Index | Table and writer | Serves |
+| --- | --- | --- |
+| `chain_lineage_timestamp_idx` | `chain_lineage`, Ingest | the history timestamp window (`resolve_chain_block_ranges`): the first readable block at or after a `from_timestamp` bound and the last at or before a `to_timestamp` bound, one ordered probe for each |
+| `project_resource_pointer_namehash_resolver_idx` | `project_resource_pointer`, Project | the `resolves_to` candidates (`candidates.rs` under `crates/storage/src/families/records`): the resource pointers at an inverse-index row's node or name and resolver |
+| `project_registry_pointer_resource_idx` | `project_registry_pointer`, Project | `storage:families.records.names_reaching_resources`: the registry pointers on each candidate resource |
+
+The timestamp index has no canonicality column. The window statement filters each probed
+row's state, and readable blocks are almost every row of the table.
+
 Interpret writes `discovery_edges` and `contract_instance_addresses`. A phase
 that reads them may add read-only indexes through its own schema-migration, never
 changing a row, when it records each index here with the statement it serves.
@@ -767,13 +780,20 @@ The owned key families add six, named for their reader:
 | `project_families_discovery_edges_resolver_destination_idx` | `project:families.classification.activated`: whether an address that starts or stops at the block is any resolver edge's destination, deactivated edges included. `project:families.input.work_blocks`: the same test, one probe for each address that starts or stops in the requested range |
 | `project_families_discovery_edges_resolver_admission_idx` | `project:families.classification.classify`: one active resolver edge per active manifest to each touched resolver's contract instance |
 
-Interpret also writes `name_surfaces`. The API's name-ordered readers add one read-only
-index on it, installed by the identity baseline and its own schema-migration and changing no
-row:
+Interpret also writes `name_surfaces`. The API's name-ordered readers add two read-only
+indexes on it, installed by the identity baseline and their own schema-migrations and changing
+no row:
 
 | Index | Serves |
 | --- | --- |
 | `name_surfaces_name_order_idx` | `storage:families.name.search_candidates`: readable surfaces in name order after the keyset cursor |
+| `name_surfaces_name_prefix_idx` | `storage:families.name.search_candidates`, raw-name statement: the surfaces whose raw name has the searched prefix, as one range |
+
+`name_surfaces_name_prefix_idx` keys the raw name with the `text_pattern_ops` operator class,
+so a `LIKE` prefix becomes a range on it under any database collation. The name order index
+gives that range only under the C collation. The prefix index has the name order index's
+predicate, and the reader carries the same bounds. Its order is byte order, so the reader
+sorts the matched rows into name order.
 
 The same reader, `storage:families.records.reverse_candidates` and Project's raw-name sweep
 (`project:families.derived.summary_raw_name_sweep`) also read
