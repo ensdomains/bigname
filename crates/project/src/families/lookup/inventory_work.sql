@@ -17,7 +17,13 @@ WITH changed AS MATERIALIZED (
           OR COALESCE(old.before_image -> 'classification', 'null'::jsonb)
               IS DISTINCT FROM COALESCE(current.classification, 'null'::jsonb)
           OR old.before_image ->> 'support_status' IS DISTINCT FROM current.support_status
-          OR old.before_image ->> 'unsupported_reason' IS DISTINCT FROM current.unsupported_reason)
+          OR old.before_image ->> 'unsupported_reason' IS DISTINCT FROM current.unsupported_reason
+          -- An inventory reads `manifest_id` only while the resolver is supported: the guarded
+          -- partition and the declaration namespace (storage `records/rows.rs`, `serving.rs`).
+          OR (COALESCE(old.before_image -> 'manifest_id', 'null'::jsonb)
+                IS DISTINCT FROM COALESCE(to_jsonb(current.manifest_id), 'null'::jsonb)
+              AND (old.before_image ->> 'support_status' = 'supported'
+                OR current.support_status = 'supported')))
     UNION SELECT 'registry_node', key ->> 1, key ->> 2, '' FROM changed
       WHERE family='project_registry_pointer'
     UNION SELECT 'partition', old.key ->> 1, old.key ->> 2, old.key ->> 3 FROM changed old
