@@ -266,7 +266,8 @@ pub(super) async fn close_lease_predecessor(
     // a plain DELETE leaves the table as the reconciliation would. When the writer opened the
     // deleted binding it capped its predecessor at its start, the cleanup instant, so the
     // predecessor stays closed there. The guard below still runs and stops on anything left.
-    let mut deleted: Vec<(Uuid, String, String, time::OffsetDateTime)> = sqlx::query_as(&format!(
+    let mut deleted: Vec<(Uuid, Uuid, String, String, time::OffsetDateTime)> =
+        sqlx::query_as(&format!(
         "DELETE FROM surface_bindings
          WHERE chain_id = $1
            AND logical_name_id = $2
@@ -279,8 +280,10 @@ pub(super) async fn close_lease_predecessor(
            ) <= ($4, $5, $6)
            AND active_from >= $7
            AND (active_to IS NULL OR active_to > $7)
+           AND block_number = $4
+           AND resource_id = $8
            AND ({narrowing})
-         RETURNING surface_binding_id, binding_kind, authority_arm, active_from",
+         RETURNING surface_binding_id, resource_id, binding_kind, authority_arm, active_from",
         transaction_index = seam::TRANSACTION_INDEX_KEY,
         log_index = seam::LOG_INDEX_KEY,
         narrowing = INCIDENT_SEL16_DELETE_NARROWING,
@@ -292,6 +295,7 @@ pub(super) async fn close_lease_predecessor(
     .bind(predecessor_at.1)
     .bind(predecessor_at.2)
     .bind(predecessor_time)
+    .bind(leases[0])
     .fetch_all(&mut **transaction)
     .await
     .map_err(|error| {
@@ -302,10 +306,11 @@ pub(super) async fn close_lease_predecessor(
     })?;
     deleted.sort_by_key(|(id, ..)| *id);
     let deleted_ids = deleted.iter().map(|(id, ..)| *id).collect::<Vec<_>>();
-    for (surface_binding_id, binding_kind, authority_arm, active_from) in &deleted {
+    for (surface_binding_id, resource_id, binding_kind, authority_arm, active_from) in &deleted {
         tracing::error!(
             boundary = %transition.boundary_event_identity,
             surface_binding_id = %surface_binding_id,
+            resource_id = %resource_id,
             binding_kind = %binding_kind,
             authority_arm = %authority_arm,
             active_from = ?active_from,
