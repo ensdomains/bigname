@@ -641,6 +641,189 @@ async fn a_self_only_parent_change_visits_the_same_surfaces_when_the_namespace_g
     result
 }
 
+/// The node of the fixture's `eth` surface.
+const ETH_NODE: &str = "0x00000000000000000000000000000000000000000000000000000000000e7e7e";
+const POINTER_INDEX: &str = "project_registry_pointer_pkey";
+
+// Row L. A pointer-only change at `eth`, at its most skewed, and at a second-level name, its
+// least, selects the node and exactly the names of three or more labels under it that have no
+// resolver of their own. A third of the third-level names and a fifth of the fourth-level
+// names have one, and a third and a fifth have a pointer row that clears. Half the
+// second-level names have a resolver, which plays no part. In both plan modes, before and
+// after ANALYZE, the statement reads `project_registry_pointer` under `affected` only through
+// its primary key, at most once per name of three or more labels under the node.
+#[tokio::test]
+async fn a_pointer_change_probes_each_deeper_name_once_by_its_own_pointer() -> Result<()> {
+    let (database, pool) = database().await?;
+    let result = async {
+        let mut connection = pool.acquire().await?;
+        let tree = Tree::of(SMALL);
+        let Tree {
+            second,
+            third,
+            fourth,
+        } = tree;
+        install(&mut connection, tree).await?;
+        let s1 = "'0x' || md5('n2' || 1) || md5(1 || 'n2')";
+        raw_sql(&format!(
+            "INSERT INTO name_surfaces (logical_name_id, namespace, namehash, labelhashes,
+                 normalizer_version, visibility_state, chain_id, block_hash, block_number,
+                 canonicality_state)
+             VALUES ('ens:{ETH_NODE}', 'ens', '{ETH_NODE}', ARRAY['{ETH_LABEL}'], 'fixture',
+                     'active', '{CHAIN}', '{zero}', 0, 'canonical');
+
+             INSERT INTO project_registry_pointer (chain_id, namespace, node, block_number,
+                 event_identity, resolver_address, source_family)
+             SELECT '{CHAIN}', 'ens', node, 1, 'pointer', resolver, 'ens_v1_registry_l1'
+             FROM (
+                 SELECT '0x' || md5('n2' || n) || md5(n || 'n2'),
+                        '0x00000000000000000000000000000000000000d2'
+                 FROM generate_series(0, {second} - 1) n WHERE n % 2 = 0
+                 UNION ALL
+                 SELECT '0x' || md5('n3' || n) || md5(n || 'n3'),
+                        CASE n % 3 WHEN 0 THEN '0x00000000000000000000000000000000000000d3'
+                             ELSE '0x0000000000000000000000000000000000000000' END
+                 FROM generate_series(0, {third} - 1) n WHERE n % 3 < 2
+                 UNION ALL
+                 SELECT '0x' || md5('n4' || n) || md5(n || 'n4'),
+                        CASE n % 5 WHEN 0 THEN '0x00000000000000000000000000000000000000d4'
+                             ELSE '' END
+                 FROM generate_series(0, {fourth} - 1) n WHERE n % 5 < 2
+                 UNION ALL
+                 SELECT '{ETH_NODE}', '0x00000000000000000000000000000000000000c1'
+                 UNION ALL
+                 SELECT {s1}, '0x00000000000000000000000000000000000000c1'
+             ) pointer (node, resolver);
+
+             INSERT INTO project_family_undo (chain_id, block_number, block_hash, family, key,
+                 before_image)
+             VALUES ('{CHAIN}', 10, '{ten}', 'project_registry_pointer',
+                     jsonb_build_array('{CHAIN}', 'ens', '{ETH_NODE}')::text,
+                     '{{\"resolver_address\": \"0x00000000000000000000000000000000000000c0\"}}'::jsonb),
+                    ('{CHAIN}', 11, '{eleven}', 'project_registry_pointer',
+                     jsonb_build_array('{CHAIN}', 'ens', {s1})::text,
+                     '{{\"resolver_address\": \"0x00000000000000000000000000000000000000c0\"}}'::jsonb)",
+            zero = hash(0),
+            ten = hash(10),
+            eleven = hash(11),
+        ))
+        .execute(&mut *connection)
+        .await
+        .context("seed the pointers and their changes")?;
+        // The expected names follow the seeding rule, not the tables.
+        let deeper = |filter3: &str, filter4: &str| {
+            format!(
+                "SELECT 'ens:0x' || md5('n3' || n) || md5(n || 'n3')
+                 FROM generate_series(0, {third} - 1) n WHERE n % 3 <> 0 AND {filter3}
+                 UNION ALL
+                 SELECT 'ens:0x' || md5('n4' || n) || md5(n || 'n4')
+                 FROM generate_series(0, {fourth} - 1) n WHERE n % 5 <> 0 AND {filter4}"
+            )
+        };
+        let mut publications = Vec::new();
+        for (label, block, own, filter3, filter4, under) in [
+            (
+                "eth",
+                10,
+                format!("'ens:{ETH_NODE}'"),
+                "true".to_owned(),
+                "true".to_owned(),
+                third + fourth,
+            ),
+            (
+                "a second-level name",
+                11,
+                format!("'ens:' || {s1}"),
+                format!("n % {second} = 1"),
+                format!("(n % {third}) % {second} = 1"),
+                0,
+            ),
+        ] {
+            let expected: BTreeSet<String> = sqlx::query_scalar(&format!(
+                "SELECT {own} UNION ALL {}",
+                deeper(&filter3, &filter4)
+            ))
+            .fetch_all(&mut *connection)
+            .await?
+            .into_iter()
+            .collect();
+            let under: i64 = if under > 0 {
+                under
+            } else {
+                sqlx::query_scalar(&format!(
+                    "SELECT (SELECT count(*) FROM generate_series(0, {third} - 1) n WHERE {filter3})
+                          + (SELECT count(*) FROM generate_series(0, {fourth} - 1) n WHERE {filter4})"
+                ))
+                .fetch_one(&mut *connection)
+                .await?
+            };
+            ensure!(
+                usize::try_from(under)? + 1 > expected.len() && expected.len() > 1,
+                "{label}: the fixture gives no name under the node a resolver, or every one"
+            );
+            publications.push((label, block, expected, under));
+        }
+        prepare_statements(&mut connection).await?;
+        let mut failures = Vec::new();
+        for analyzed in [false, true] {
+            if analyzed {
+                raw_sql("ANALYZE").execute(&mut *connection).await?;
+            }
+            for (label, block, expected, under) in &publications {
+                for mode in PLAN_MODES {
+                    set_mode(&mut connection, mode).await?;
+                    let run = run(&mut connection, "path_work", *block).await?;
+                    let leg = format!("{label}, {mode}, analyzed {analyzed}");
+                    if run.selected != *expected {
+                        failures.push(format!(
+                            "{leg}: selects {} names, not the {} without a resolver of their own",
+                            run.selected.len(),
+                            expected.len()
+                        ));
+                    }
+                    let mut scans = Vec::new();
+                    executed_scans(&run.plan["Plan"], "", &mut scans);
+                    let probes: Vec<&Value> = scans
+                        .into_iter()
+                        .filter(|(cte, node)| {
+                            *cte == "affected" && node["Relation Name"] == "project_registry_pointer"
+                        })
+                        .map(|(_, node)| node)
+                        .collect();
+                    if probes.is_empty() {
+                        failures.push(format!("{leg}: affected never reads a name's own pointer"));
+                    }
+                    let mut loops = 0;
+                    for node in probes {
+                        loops += node["Actual Loops"].as_i64().unwrap_or(0);
+                        if !reads_through(node, &[POINTER_INDEX]) {
+                            failures.push(format!(
+                                "{leg}: affected reads project_registry_pointer by {} over {:?}",
+                                node["Node Type"],
+                                indexes_read(node)
+                            ));
+                        }
+                    }
+                    if loops > *under {
+                        failures.push(format!(
+                            "{leg}: {loops} pointer probes for {under} names under the node"
+                        ));
+                    }
+                }
+            }
+        }
+        ensure!(
+            failures.is_empty(),
+            "the pointer-only expansion:\n{}",
+            failures.join("\n")
+        );
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
 // The statement's cost at scale, run by hand:
 //
 //     PREPARE_COST_SURFACES=100000 cargo test -p bigname-project --lib \
