@@ -105,7 +105,7 @@ async fn resolver_arms_probe_the_candidate_lineage_by_key() -> Result<()> {
         for mode in [Mode::Custom, Mode::Generic] {
             let cell = format!("{label}, {mode:?}");
             let plan = explain(connection, mode, &page.sql, &page.arguments).await?;
-            failures.extend(probe_failures(&cell, &plan));
+            failures.extend(probe_failures(&cell, &plan, false));
             raw_sql("SET enable_nestloop = off")
                 .execute(&mut *connection)
                 .await?;
@@ -115,7 +115,7 @@ async fn resolver_arms_probe_the_candidate_lineage_by_key() -> Result<()> {
                 .execute(&mut *connection)
                 .await?;
             let cell = format!("{cell}, nested loops off");
-            failures.extend(probe_failures(&cell, &plan?));
+            failures.extend(probe_failures(&cell, &plan?, true));
             let before = before?;
             if candidate_scans(&before)
                 .into_iter()
@@ -298,8 +298,9 @@ async fn explain(
 }
 
 /// Every arm part probes its candidate's lineage row by key, and every other lineage read of the
-/// page does too.
-fn probe_failures(cell: &str, plan: &Value) -> Vec<String> {
+/// page does too. With `nested_loops_off`, a hash or merge join may still read another lookup's
+/// keyed probe as its inner side, as the registration identity's lease-release check does there.
+fn probe_failures(cell: &str, plan: &Value, nested_loops_off: bool) -> Vec<String> {
     let mut failures = Vec::new();
     let candidates = candidate_scans(plan);
     if candidates.len() != ARM_PARTS {
@@ -309,6 +310,9 @@ fn probe_failures(cell: &str, plan: &Value) -> Vec<String> {
         ));
     }
     for (node, hashed) in lineage_scans(plan) {
+        // With nested loops off, the page's other lookups may run as hash or merge joins with
+        // their keyed lineage probe on the inner side. Only the arm parts' probe must not.
+        let hashed = hashed && (!nested_loops_off || candidate(node));
         if !keyed(node) || hashed {
             failures.push(format!(
                 "{} is read by {} with index condition {:?}{}",
@@ -351,12 +355,14 @@ fn lineage_scans(plan: &Value) -> Vec<(&Value, bool)> {
 fn candidate_scans(plan: &Value) -> Vec<(&Value, bool)> {
     lineage_scans(plan)
         .into_iter()
-        .filter(|(node, _)| {
-            node["Alias"]
-                .as_str()
-                .is_some_and(|alias| alias.starts_with("candidate_lineage"))
-        })
+        .filter(|(node, _)| candidate(node))
         .collect()
+}
+
+fn candidate(node: &Value) -> bool {
+    node["Alias"]
+        .as_str()
+        .is_some_and(|alias| alias.starts_with("candidate_lineage"))
 }
 
 /// An index scan keyed by the lineage key, `(chain_id, block_hash)`.

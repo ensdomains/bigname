@@ -5037,8 +5037,10 @@ it), the child-registration arm (`child_arm.rs`), the resolver page arms
 - Other request-path lineage reads keep their plain joins, for a follow-up that measures
   each route first: the address evidence read (`address_evidence.rs`), the readable surface
   (`push_readable_surface`: attribution, mirror and address walk), the anchor loads in
-  `wrapped_registrar.rs`, the page decorations in `token_ids.rs`, `payment_values.rs` and
-  `registry_handoffs.rs`, and the fork walk of a non-canonical read in `lineage.rs`.
+  `wrapped_registrar.rs`, and the page decorations in `token_ids.rs`, `payment_values.rs`
+  and `registry_handoffs.rs`.
+- The fork walk of a non-canonical read in `lineage.rs` keeps its plain joins too. It is off
+  the request path, because no route makes a non-canonical read.
 - The address-pair lookup (`pair_lineage` in `address_pairs.rs`) stays as it is, because
   outer parameters bind its key.
 - The history source is an input of the
