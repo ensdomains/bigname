@@ -720,7 +720,7 @@ Family indexes serve these concrete readers:
   `project_registry_binding_observation` primary key and
   `project_binding_candidate_resource_idx`.
 - The [ENSv2 registry entry](projections.md#ensv2-registry-entries) tables carry the indexes
-  the registry operator read will use and no reader uses yet:
+  the registry operator read will use, two of which no reader uses yet:
   `project_ens_v2_entry_owner_owner_idx` `(chain_id, owner, registry, entry_key)` over rows
   with an owner, from an approval's owner to the entries it owns in the approving registry;
   `project_ens_v2_entry_owner_resource_idx` `(chain_id, resource_id)` over rows with a

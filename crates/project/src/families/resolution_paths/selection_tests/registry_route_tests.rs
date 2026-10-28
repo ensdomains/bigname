@@ -751,7 +751,12 @@ async fn a_mixed_block_with_a_changed_registry_selects_the_union() -> Result<()>
     world.entry_changed(5, ETH, &labelhash("baz")).await?;
     world.registry_pointer_at("c.bar.eth", RESOLVER).await?;
     world
-        .registry_pointer_changed(5, "bar.eth", RESOLVER, "0x00000000000000000000000000000000000000c2")
+        .registry_pointer_changed(
+            5,
+            "bar.eth",
+            RESOLVER,
+            "0x00000000000000000000000000000000000000c2",
+        )
         .await?;
     world
         .registry_pointer_at("qux.eth", "0x00000000000000000000000000000000000000c3")
@@ -786,7 +791,14 @@ async fn a_mixed_block_with_a_changed_registry_selects_the_union() -> Result<()>
 async fn a_range_that_creates_and_mounts_a_registry_selects_as_its_blocks_do() -> Result<()> {
     let mut world = World::new().await?;
     world
-        .surfaces(&["eth", "foo.eth", "a.foo.eth", "x.a.foo.eth", "b.foo.eth", "bar.eth"])
+        .surfaces(&[
+            "eth",
+            "foo.eth",
+            "a.foo.eth",
+            "x.a.foo.eth",
+            "b.foo.eth",
+            "bar.eth",
+        ])
         .await?;
     world.eth().await?;
     world.unmounted(ETH, &labelhash("foo")).await?;
@@ -794,7 +806,9 @@ async fn a_range_that_creates_and_mounts_a_registry_selects_as_its_blocks_do() -
     world
         .repoint(ETH, &labelhash("foo"), &registry(1), 10)
         .await?;
-    world.entry_changed(12, &registry(1), &labelhash("a")).await?;
+    world
+        .entry_changed(12, &registry(1), &labelhash("a"))
+        .await?;
     let under_foo = ["foo.eth", "a.foo.eth", "x.a.foo.eth", "b.foo.eth"];
     let range = Call {
         block: 12,
