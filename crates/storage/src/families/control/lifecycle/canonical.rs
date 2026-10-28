@@ -366,11 +366,8 @@ pub(super) fn apply(
         // That block names the lease's holder, so it keeps the lease's own release.
         let lease_released = lease_continues && registration.contains_key("lapsed_registration");
         if let Some(grant) = instance.grant {
-            let start = super::laterals::migrated_lease(facts, tagged, grant).unwrap_or(grant);
-            registration.insert(
-                "registered_at".into(),
-                super::laterals::registered_at(facts, start),
-            );
+            let start = super::laterals::registration_start(facts, tagged, grant);
+            registration.insert("registered_at".into(), start.time(facts, trace));
             registration.insert("identity_resource_id".into(), json!(instance.resource_id));
         } else if continuing_lease {
             registration.insert(

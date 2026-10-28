@@ -22,6 +22,7 @@ use support::{
 const REGISTRAR: &str = "0x00000000000000000000000000000000000000e3";
 const REGISTRY: &str = "0x00000000000000000000000000000000000000e5";
 const V2_REGISTRY: &str = "0x00000000000000000000000000000000000000e6";
+const NAME_WRAPPER: &str = "0x00000000000000000000000000000000000000e7";
 const OWNER: &str = "0x00000000000000000000000000000000000000aa";
 const HOLDER: &str = "0x00000000000000000000000000000000000000bb";
 const OTHER: &str = "0x00000000000000000000000000000000000000cc";
@@ -1766,5 +1767,190 @@ async fn a_recorded_lease_handoff_keeps_its_transfer_window() -> Result<()> {
         json!({"resource_id": lease, "owner": OTHER, "registrant": NEW_HOLDER}),
     )?;
     fixture.assert_rebuild_equal(5).await?;
+    fixture.cleanup().await
+}
+
+/// A NameWrapper `wrapETH2LD` of `name` at `block`, as `families_expiry_grace.rs` writes one: the
+/// wrapper binding `0x400 + n` on resource `0x5000 + n`, which records `lease` as the wrapped
+/// registrar lease, with its epoch, expiry and fuses. Returns the binding id.
+async fn wrapped(fixture: &Fixture, name: &str, n: u32, lease: &str, block: i64) -> Result<String> {
+    let (binding, wrapper) = (uuid(0x400 + n), uuid(0x5000 + n));
+    let log = i64::from(n) * 10;
+    fixture
+        .binding(&binding, name, &wrapper, "ens_v1", block, log, None)
+        .await?;
+    for (offset, kind, after) in [
+        (
+            0,
+            "SurfaceBound",
+            json!({"source_event": "NameWrapped", "authority_kind": "wrapper",
+                   "wrapped_registrar_resource_id": lease, "node": node(name)}),
+        ),
+        (
+            1,
+            "AuthorityEpochChanged",
+            json!({"source_event": "NameWrapped", "authority_kind": "wrapper", "owner": OWNER}),
+        ),
+        (
+            2,
+            "ExpiryChanged",
+            json!({"source_event": "NameWrapped", "expiry": LEASE_EXPIRY + 90 * DAY}),
+        ),
+    ] {
+        fixture
+            .write(
+                block,
+                log + offset,
+                kind,
+                "ens_v1_wrapper_l1",
+                Some(name),
+                Some(&wrapper),
+                after,
+                NAME_WRAPPER,
+            )
+            .await?;
+    }
+    // PARENT_CANNOT_CONTROL | IS_DOT_ETH, which `wrapETH2LD` burns, and no CANNOT_UNWRAP.
+    fixture
+        .write(
+            block,
+            log + 3,
+            "PermissionScopeChanged",
+            "ens_v1_wrapper_l1",
+            None,
+            Some(&wrapper),
+            json!({"source_event": "NameWrapped", "wrapper_state": "emancipated",
+                   "fuses": 196_608}),
+            NAME_WRAPPER,
+        )
+        .await?;
+    Ok(binding)
+}
+
+/// `name`'s ENSv1→ENSv2 migration at `block` by `path`, as `families_expiry_grace.rs` writes
+/// one: the ENSv1 binding `closing` closes, and in one transaction the entry `0x2000 + n` that
+/// `label_reserved` reserved is registered and bound, with the MigrationApplied at the grant's
+/// position (`boundary_event` in `crates/adapters/src/schema_v2/migration/support.rs`).
+async fn migrated(
+    fixture: &Fixture,
+    name: &str,
+    n: u32,
+    closing: Option<&str>,
+    block: i64,
+    path: &str,
+) -> Result<()> {
+    if let Some(closing) = closing {
+        sqlx::query(
+            "UPDATE surface_bindings SET active_to = to_timestamp(1800000000 + $2 * 12)
+             WHERE surface_binding_id = $1::uuid",
+        )
+        .bind(closing)
+        .bind(block)
+        .execute(&fixture.pool)
+        .await?;
+    }
+    let entry = uuid(0x2000 + n);
+    let log = i64::from(n) * 10;
+    fixture
+        .binding(&uuid(0x300 + n), name, &entry, "ens_v2", block, log, None)
+        .await?;
+    fixture
+        .write(
+            block,
+            log,
+            "RegistrationGranted",
+            "ens_v2_registry_l1",
+            Some(name),
+            Some(&entry),
+            json!({"registry_contract_instance_id": GENERIC.instance, "token_id": n.to_string(),
+                   "status": "registered", "registrant": OWNER, "owner": OWNER,
+                   "expiry": RESERVED_EXPIRY}),
+            GENERIC.address,
+        )
+        .await?;
+    fixture
+        .write(
+            block,
+            log,
+            "MigrationApplied",
+            "ens_v2_migration_l1",
+            Some(name),
+            Some(&entry),
+            json!({"migration_path": path}),
+            GENERIC.address,
+        )
+        .await?;
+    Ok(())
+}
+
+/// Rows a, a-w and a-o: a 2020-migrated name whose lease only its first renewal names, then
+/// reserved and moved to ENSv2. The lease has no observed registration, so the name is dated at
+/// its first current-registry record, the 2020 migration's transaction, on ENSv1 and after the
+/// ENSv1→ENSv2 migration alike. That holds unwrapped, wrapped (migrated by the unlocked-wrapped
+/// path) and with the record cleared, so `registered_at` does not move across the migration.
+#[tokio::test]
+async fn a_migrated_name_keeps_its_first_record_time_across_the_ens_v2_migration() -> Result<()> {
+    let fixture = Fixture::new("families_handoff_lease_v2_migrated", 8).await?;
+    declared_path::root_eth_entry(&fixture).await?;
+    let mut names = Vec::new();
+    for (n, label) in [
+        (1, "unwrapped.eth"),
+        (2, "wrapped.eth"),
+        (3, "ownerless.eth"),
+    ] {
+        let name = surface(&fixture, label).await?;
+        let lease = uuid(0x1000 + n);
+        let registry = uuid(0x3000 + n);
+        let log = i64::from(n) * 10;
+        let handoff_binding = uuid(100 + n);
+        registry_only_bound(
+            &fixture,
+            &name,
+            RegistryOnly {
+                binding: &handoff_binding,
+                resource: &registry,
+                block: 1,
+                log,
+                owner: OWNER,
+                closed_at: (n != 1).then_some(3),
+            },
+            false,
+        )
+        .await?;
+        renewal(&fixture, &name, &lease, 2, log, json!(LEASE_EXPIRY), true).await?;
+        let (closing, path) = match n {
+            1 => (Some(handoff_binding), "unwrapped"),
+            2 => (
+                Some(wrapped(&fixture, &name, n, &lease, 3).await?),
+                "unlocked_wrapped",
+            ),
+            _ => {
+                owner_write(&fixture, &name, &registry, 3, log, ZERO, false).await?;
+                (None, "unwrapped")
+            }
+        };
+        label_reserved(&fixture, GENERIC, &name, n, 4, RESERVED_EXPIRY).await?;
+        migrated(&fixture, &name, n, closing.as_deref(), 6, path).await?;
+        names.push(name);
+    }
+
+    // Block 5: reserved, still on ENSv1.
+    fixture.apply(5, FamilyMode::Normal).await?;
+    for name in &names {
+        check(
+            &served(&fixture, name).await?,
+            json!({"registered_at": block_time(1)}),
+        )?;
+    }
+    // Block 6: migrated to ENSv2, which serves no ENSv1 resource.
+    fixture.apply(6, FamilyMode::Normal).await?;
+    for name in &names {
+        check(
+            &served(&fixture, name).await?,
+            json!({"registered_at": block_time(1), "resource_id": Value::Null}),
+        )?;
+    }
+    fixture.assert_undo_restores(6).await?;
+    fixture.assert_rebuild_equal(6).await?;
     fixture.cleanup().await
 }

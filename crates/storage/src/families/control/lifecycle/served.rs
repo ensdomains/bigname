@@ -13,8 +13,8 @@ use super::{
     control::{control_owner, served_owner},
     expiry::{choose, classify_expiry, live_entry},
     laterals::{
-        authority_context, expiry_event, implied_registered_at, latest_event_kind, migrated_lease,
-        registered_at, registrant, registrar_resource,
+        authority_context, expiry_event, implied_registered_at, latest_event_kind, registrant,
+        registrar_resource, registration_start,
     },
     select::select_v2,
     tombstone::deciding_fact,
@@ -255,12 +255,9 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     )
     .map(|tagged| tagged.event);
     let registered_at = match authority.implied_lease {
-        Some(lease) => implied_registered_at(facts, lease, &in_scope, &mut trace),
+        Some(lease) => implied_registered_at(facts, lease, &tagged, &in_scope, &mut trace),
         None => grant.map_or(Value::Null, |grant| {
-            registered_at(
-                facts,
-                migrated_lease(facts, &tagged, grant).unwrap_or(grant),
-            )
+            registration_start(facts, &tagged, grant).time(facts, &mut trace)
         }),
     };
 

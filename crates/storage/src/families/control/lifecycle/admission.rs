@@ -53,6 +53,16 @@ pub(crate) struct ImpliedLease<'a> {
     pub(crate) from_block: Option<i64>,
 }
 
+/// The block of the name's first current-registry record (`registry_generation`), none for a
+/// node only the 2017 registry recorded.
+pub(crate) fn first_current_record(facts: &NameFacts) -> Option<i64> {
+    facts
+        .registry_node
+        .as_ref()
+        .filter(|node| node.namespace == "ens")
+        .and_then(|node| node.first_current_record_block)
+}
+
 /// The name an event carries once staging has run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StagedName {
@@ -187,11 +197,7 @@ impl<'a> Authority<'a> {
         {
             return None;
         }
-        let from_block = facts
-            .registry_node
-            .as_ref()
-            .filter(|node| node.namespace == "ens")
-            .and_then(|node| node.first_current_record_block);
+        let from_block = first_current_record(facts);
         let name = self.name;
         let latest = latest(
             events.iter().filter(|event| {

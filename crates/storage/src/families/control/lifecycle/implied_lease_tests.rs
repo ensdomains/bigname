@@ -6,9 +6,12 @@ use serde_json::{Value, json};
 
 use super::{
     AuthoritySelection, NameFacts, NameInput, NamePlace,
-    admission::{Authority, Probe},
+    admission::{Authority, Probe, StagedName},
+    laterals::{Start, registration_start},
+    served::Tagged,
 };
 use crate::families::control::{
+    position::Position,
     registry::RegistryNode,
     rows::{BindingCandidate, LifecycleEvent},
 };
@@ -294,4 +297,102 @@ fn the_implied_lease_admits_its_four_lifecycle_kinds_from_the_handoff_on() {
         .map(|event| authority.admits(&Probe::of(event)))
         .collect();
     assert_eq!(admitted, vec![true, true, true, false, false]);
+}
+
+/// The start `registration_start` gives `grant` among `facts`' events, all the name's own: a
+/// grant's event identity, or `record:<block>` for the first current-registry record.
+fn start_of(facts: &NameFacts, grant: usize) -> String {
+    let tagged: Vec<Tagged<'_>> = facts
+        .events
+        .iter()
+        .map(|event| Tagged {
+            event,
+            staged: StagedName::Ours,
+            admitted: true,
+            key: None,
+        })
+        .collect();
+    match registration_start(facts, &tagged, &facts.events[grant]) {
+        Start::Grant(event) => event.position.event_identity.clone(),
+        Start::FirstRecord(block) => format!("record:{block}"),
+    }
+}
+
+/// Rows u and c of the registration start. A lease whose only grant is the one derived at its
+/// first renewal starts at the first current-registry record, on ENSv1 and through the grant the
+/// ENSv1→ENSv2 migration wrote. A controller grant dates itself. A migrated name with no
+/// registrar grant, such as a subname, keeps the ENSv2 grant. A derived grant before the first
+/// record, or with no record, dates the lease itself.
+#[test]
+fn the_registration_start_of_each_grant_class() {
+    const MIGRATION: i64 = 20;
+    let derived = || renewed(12, LEASE).remove(0);
+    let controller = || {
+        event(
+            "RegistrationGranted",
+            12,
+            LEASE,
+            json!({"source_event": "NameRegistered"}),
+        )
+    };
+    let v2_grant = || {
+        event(
+            "RegistrationGranted",
+            MIGRATION,
+            "00000000-0000-0000-0000-0000000000c1",
+            json!({"source_family": "ens_v2_registry_l1", "source_event": "LabelRegistered"}),
+        )
+    };
+    let migrated = |events: Vec<LifecycleEvent>| {
+        let mut facts = Name::migrated(events).facts();
+        facts.migration = Some(Position {
+            block_number: MIGRATION,
+            transaction_index: Some(0),
+            log_index: Some(1),
+            event_identity: "MigrationApplied".to_owned(),
+        });
+        facts
+    };
+    let record = format!("record:{HANDOFF}");
+
+    let facts = Name::migrated(vec![derived()]).facts();
+    assert_eq!(start_of(&facts, 0), record, "derived grant on ENSv1");
+    let facts = Name::migrated(vec![controller()]).facts();
+    assert_eq!(
+        start_of(&facts, 0),
+        facts.events[0].position.event_identity,
+        "controller grant on ENSv1"
+    );
+    let facts = migrated(vec![derived(), v2_grant()]);
+    assert_eq!(
+        start_of(&facts, 1),
+        record,
+        "migration over a derived grant"
+    );
+    let facts = migrated(vec![controller(), v2_grant()]);
+    assert_eq!(
+        start_of(&facts, 1),
+        facts.events[0].position.event_identity,
+        "migration over a controller grant"
+    );
+    let facts = migrated(vec![v2_grant()]);
+    assert_eq!(
+        start_of(&facts, 0),
+        facts.events[0].position.event_identity,
+        "migration with no registrar grant"
+    );
+    let facts = Name::migrated(renewed(9, LEASE)).facts();
+    assert_eq!(
+        start_of(&facts, 0),
+        facts.events[0].position.event_identity,
+        "derived grant before the first record"
+    );
+    let mut unrecorded = Name::migrated(vec![derived()]);
+    unrecorded.handoff = None;
+    let facts = unrecorded.facts();
+    assert_eq!(
+        start_of(&facts, 0),
+        facts.events[0].position.event_identity,
+        "derived grant with no current-registry record"
+    );
 }

@@ -7,7 +7,9 @@ use serde_json::{Map, Value, json};
 
 use super::{
     NameFacts,
-    admission::{Authority, ImpliedLease, Probe, REGISTRAR, StagedName, WRAPPER},
+    admission::{
+        Authority, ImpliedLease, Probe, REGISTRAR, StagedName, WRAPPER, first_current_record,
+    },
     membership::merged_for,
     served::{Selected, Tagged, latest},
 };
@@ -47,42 +49,37 @@ pub(super) fn registered_at(facts: &NameFacts, grant: &LifecycleEvent) -> Value 
         .unwrap_or(Value::Null)
 }
 
-/// The registration time of a registration on its implied lease (`ImpliedLease`): the lease's
-/// own grant from a controller registration, else the registry handoff block's time, else the
-/// lease's first admitted event's block. A grant the adapter derives at the lease's first renewal
-/// (source event `NameRenewed`) dates only the renewal. The handoff block is taken as the 2020
-/// registrar migration's registration block. The BaseRegistrar's `_register` mints, writes the
-/// registry record when `updateRegistry` is set, and emits `NameRegistered` in one call, and only
-/// the `eth` node's owner or its operator can write a `.eth` second-level record. The sampled
-/// migration transactions show the record written in that call (`docs/upstream.md`, migrated
-/// `.eth` names).
-/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L152 @ ens_v1@91c966f)
-/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L21 @ ens_v1@91c966f)
-/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L81 @ ens_v1@91c966f)
-pub(super) fn implied_registered_at(
+/// The registration time of a registration on its implied lease (`ImpliedLease`): the start of
+/// the lease's latest grant (`registration_start`), else the first current-registry record's
+/// time, else the lease's first admitted event's block.
+pub(super) fn implied_registered_at<'a>(
     facts: &NameFacts,
     lease: ImpliedLease<'_>,
-    in_scope: &[&Tagged<'_>],
+    tagged: &[Tagged<'a>],
+    in_scope: &[&Tagged<'a>],
     trace: &mut Map<String, Value>,
 ) -> Value {
-    let on_lease: Vec<&LifecycleEvent> = in_scope
+    let on_lease: Vec<&'a LifecycleEvent> = in_scope
         .iter()
         .map(|tagged| tagged.event)
         .filter(|event| event.resource_id.as_deref() == Some(lease.resource))
         .collect();
     let grant = latest(
-        on_lease.iter().copied().filter(|event| {
-            event.event_kind == "RegistrationGranted"
-                && event.source_event.as_deref() != Some("NameRenewed")
-        }),
+        on_lease
+            .iter()
+            .copied()
+            .filter(|event| event.event_kind == "RegistrationGranted"),
         |event| &event.position,
     );
     if let Some(grant) = grant {
-        trace.insert("registered_at_source".into(), json!("grant"));
-        return registered_at(facts, grant);
+        let start = registration_start(facts, tagged, grant);
+        if matches!(start, Start::Grant(_)) {
+            trace.insert("registered_at_source".into(), json!("grant"));
+        }
+        return start.time(facts, trace);
     }
     let (source, block) = match lease.from_block {
-        Some(block) => ("registry_handoff", Some(block)),
+        Some(block) => ("first_current_record", Some(block)),
         None => (
             "lease_first_event",
             on_lease
@@ -98,6 +95,61 @@ pub(super) fn implied_registered_at(
         .unwrap_or(Value::Null)
 }
 
+/// What dates a registration (`registration_start`).
+#[derive(Clone, Copy)]
+pub(super) enum Start<'a> {
+    /// A grant, dated by `registered_at`.
+    Grant(&'a LifecycleEvent),
+    /// The block of the name's first current-registry record.
+    FirstRecord(i64),
+}
+
+impl Start<'_> {
+    /// The start's time. A first-record start is recorded in the trace.
+    pub(super) fn time(self, facts: &NameFacts, trace: &mut Map<String, Value>) -> Value {
+        match self {
+            Self::Grant(grant) => registered_at(facts, grant),
+            Self::FirstRecord(block) => {
+                trace.insert("registered_at_source".into(), json!("first_current_record"));
+                facts
+                    .block_timestamps
+                    .get(&block)
+                    .cloned()
+                    .unwrap_or(Value::Null)
+            }
+        }
+    }
+}
+
+/// The start of the registration `grant` dates. For the grant the ENSv1→ENSv2 migration wrote,
+/// that is the lease's start (`migrated_lease`). A lease whose only grant is the one the adapter
+/// derives at its first renewal (source event `NameRenewed`) has no observed registration, so it
+/// starts at the name's first current-registry record, under any ENSv1 authority and after the
+/// migration alike. That record is taken as the 2020 registrar migration's registration. The
+/// BaseRegistrar's `_register` mints, writes the registry record when `updateRegistry` is set, and
+/// emits `NameRegistered` in one call, and only the `eth` node's owner or its operator can write
+/// a `.eth` second-level record. The sampled migration transactions show the record written in
+/// that call (`docs/upstream.md`, migrated `.eth` names). A record first written after the
+/// derived grant is not that registration, so the grant dates the lease then.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L152 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L21 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L81 @ ens_v1@91c966f)
+pub(super) fn registration_start<'a>(
+    facts: &NameFacts,
+    tagged: &[Tagged<'a>],
+    grant: &'a LifecycleEvent,
+) -> Start<'a> {
+    let lease_grant = migrated_lease(facts, tagged, grant).unwrap_or(grant);
+    let derived = lease_grant.source_family == REGISTRAR
+        && lease_grant.source_event.as_deref() == Some("NameRenewed");
+    match first_current_record(facts) {
+        Some(block) if derived && block <= lease_grant.position.block_number => {
+            Start::FirstRecord(block)
+        }
+        _ => Start::Grant(lease_grant),
+    }
+}
+
 /// The ENSv1 grant an ENSv2 grant continues: for the grant the name's latest ENSv1→ENSv2
 /// migration wrote in its own transaction, the name's latest registrar grant before that
 /// migration. The adapter gives the MigrationApplied the ENSv2 grant's own block, transaction and
@@ -108,10 +160,10 @@ pub(super) fn implied_registered_at(
 /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/UnlockedMigrationController.sol:L92-L121 @ ens_v2_sepolia_20260916@366de741)
 /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/UnlockedMigrationController.sol:L153-L165 @ ens_v2_sepolia_20260916@366de741)
 /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L473-L475 @ ens_v2_sepolia_20260916@366de741).
-/// Upstream says nothing about a registration start; bigname's own rule is that the migration
+/// Upstream says nothing about a registration start. bigname's own rule is that the migration
 /// does not start a new registration, so the ENSv2 registration keeps the lease's registration
 /// time, and a name with no registrar grant (a subname) has none to keep.
-pub(super) fn migrated_lease<'a>(
+fn migrated_lease<'a>(
     facts: &NameFacts,
     tagged: &[Tagged<'a>],
     grant: &LifecycleEvent,

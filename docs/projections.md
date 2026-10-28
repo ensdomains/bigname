@@ -639,11 +639,12 @@ no token. The registration then serves the lease's `resource_id` and identity, i
 lease is `released` even when its release carries no expiry. `registered_at` is the time of
 the first current-registry record's block, the migration's own registration block, or of the
 lease's first row when the node has none. A grant a controller registration wrote dates the
-lease itself. The derived grant does not, and its zero-address registrant names no holder. The
-selected binding, its authority kind and the registry owner stay as they were. A name whose
-binding records a lease with registrar rows, a name with no binding outside the
-ownerless-registry profile, a wrapper-selected name, a name selected under
-ENSv2 and any name other than a `.eth` second-level name have no implied lease. The migration's
+lease itself. The derived grant does not, and its zero-address registrant names no holder. A
+lease whose only grant is the derived one dates from the first current-registry record under a
+NameWrapper binding too, and the ENSv1→ENSv2 migration keeps that start. The selected binding,
+its authority kind and the registry owner stay as they were. A name whose binding records a
+lease with registrar rows, a name with no binding outside the ownerless-registry profile, a
+wrapper-selected name, a name selected under ENSv2 and any name other than a `.eth` second-level name have no implied lease. The migration's
 own `NameRegistered` is still not interpreted, so a migrated name never renewed has no lease
 row and serves as before.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L155 @ ens_v1@91c966f)

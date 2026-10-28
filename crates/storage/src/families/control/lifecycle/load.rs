@@ -257,7 +257,7 @@ pub async fn load_name_facts_on(
         })
         .collect();
     let nodes = load_registry_nodes_on(&mut *conn, chain_id, &node_keys).await?;
-    // The handoff blocks date a registration on an implied lease (`laterals::implied_registered_at`).
+    // First current-registry record blocks date a lease no grant opened (`registration_start`).
     let blocks: Vec<i64> = events
         .iter()
         .map(|event| event.position.block_number)
