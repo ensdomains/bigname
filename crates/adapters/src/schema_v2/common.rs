@@ -155,7 +155,43 @@ impl EventStringSelector {
     }
 }
 
+/// INCIDENT-ONLY sel17 (never ships): the largest record key, in bytes, written as a key.
+/// Project stores `record_key` in btree primary keys whose row limit is 2,704 bytes after
+/// compression, so an incompressible ~2.7 KB key failed the block on every retry.
+pub(super) const INCIDENT_SEL17_MAX_RECORD_KEY_BYTES: usize = 1_000;
+
+thread_local! {
+    /// INCIDENT-ONLY sel17: the oversized keys `event_string_selector` refused since the last
+    /// take, as (record family, key bytes, record key written instead). The session drains it
+    /// around each log's adapter call and logs each with the log's position.
+    static INCIDENT_SEL17_OVERSIZED_KEYS: std::cell::RefCell<Vec<(String, usize, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// INCIDENT-ONLY sel17: drains the oversized keys refused since the last call.
+pub(super) fn take_incident_sel17_oversized_keys() -> Vec<(String, usize, String)> {
+    INCIDENT_SEL17_OVERSIZED_KEYS.with_borrow_mut(std::mem::take)
+}
+
 pub(super) fn event_string_selector(record_family: &str, raw_key: &[u8]) -> EventStringSelector {
+    // INCIDENT-ONLY sel17: a key over the cap is unsupported, as an oversized label is not
+    // admitted: the raw key stays as data, and the record is filed under the
+    // `{family}_unsupported` family by the key's keccak256, which no hydration or exact-key read
+    // selects.
+    if raw_key.len() > INCIDENT_SEL17_MAX_RECORD_KEY_BYTES {
+        let record_family = format!("{record_family}_unsupported");
+        let selector_key = hash_hex(raw_key);
+        let record_key = format!("{record_family}:{selector_key}");
+        INCIDENT_SEL17_OVERSIZED_KEYS.with_borrow_mut(|refused| {
+            refused.push((record_family.clone(), raw_key.len(), record_key.clone()));
+        });
+        return EventStringSelector {
+            record_key,
+            record_family,
+            selector_key: Value::String(selector_key),
+            raw_selector_key: Some(event_string_value(raw_key)),
+        };
+    }
     if let Some(selector_key) = decoded_label(raw_key)
         && !selector_key.trim().is_empty()
     {
@@ -297,5 +333,41 @@ mod tests {
         assert_eq!(selector.record_family, "text_opaque");
         assert_eq!(selector.selector_key, Value::String("0x20".to_owned()));
         assert!(selector.raw_selector_key.is_some());
+    }
+
+    /// INCIDENT-ONLY sel17 (never ships): a key over 1,000 bytes is filed by its hash under an
+    /// unsupported family; a key at the cap is unchanged.
+    #[test]
+    fn incident_only_sel17_oversized_record_key_is_unsupported() {
+        let _ = take_incident_sel17_oversized_keys();
+        let at_cap = vec![b'k'; INCIDENT_SEL17_MAX_RECORD_KEY_BYTES];
+        let selector = event_string_selector("text", &at_cap);
+        assert_eq!(selector.record_family, "text");
+        assert_eq!(
+            selector.record_key,
+            format!("text:{}", "k".repeat(INCIDENT_SEL17_MAX_RECORD_KEY_BYTES))
+        );
+        assert!(take_incident_sel17_oversized_keys().is_empty());
+
+        let oversized = vec![b'k'; INCIDENT_SEL17_MAX_RECORD_KEY_BYTES + 1];
+        let selector = event_string_selector("text", &oversized);
+        let hash = hash_hex(&oversized);
+        assert_eq!(selector.record_family, "text_unsupported");
+        assert_eq!(selector.record_key, format!("text_unsupported:{hash}"));
+        assert_eq!(selector.selector_key, Value::String(hash.clone()));
+        assert_eq!(
+            selector.raw_selector_key,
+            Some(Value::String(
+                "k".repeat(INCIDENT_SEL17_MAX_RECORD_KEY_BYTES + 1)
+            ))
+        );
+        assert_eq!(
+            take_incident_sel17_oversized_keys(),
+            [(
+                "text_unsupported".to_owned(),
+                INCIDENT_SEL17_MAX_RECORD_KEY_BYTES + 1,
+                format!("text_unsupported:{hash}")
+            )]
+        );
     }
 }

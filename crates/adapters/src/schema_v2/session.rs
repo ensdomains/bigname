@@ -431,6 +431,8 @@ fn interpret_raw(
     // decoder. Interpret each log on a structurally shared candidate and commit it only after the
     // whole protocol dispatch succeeds, so a non-fatal malformed log cannot change retained state.
     let mut candidate_state = state.clone();
+    // INCIDENT-ONLY sel17: start this log's record of oversized record keys empty.
+    let _ = super::common::take_incident_sel17_oversized_keys();
     let mut interpreted =
         match super::protocol::interpret(&selected, raw, &mut candidate_state, registrar_context) {
             Ok(interpreted) => interpreted,
@@ -482,6 +484,24 @@ fn interpret_raw(
                 });
             }
         };
+    for (record_family, key_bytes, record_key) in
+        super::common::take_incident_sel17_oversized_keys()
+    {
+        tracing::warn!(
+            chain_id = %raw.chain_id,
+            block_number = raw.block_number,
+            block_hash = %raw.block_hash,
+            transaction_hash = %raw.transaction_hash,
+            log_index = raw.log_index,
+            emitting_address = %raw.emitting_address,
+            source_family = %selected.source.source_family,
+            event = %selected.event.name,
+            record_family = %record_family,
+            key_bytes,
+            record_key = %record_key,
+            "INCIDENT-ONLY sel17: record key over 1000 bytes recorded as unsupported under its keccak256, not written as a key"
+        );
+    }
     prepare_v1(
         catalog,
         &selected,
