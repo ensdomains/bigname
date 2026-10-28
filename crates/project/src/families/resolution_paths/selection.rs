@@ -471,6 +471,7 @@ pub(super) fn statement(normal_work: &str) -> String {
                 WHERE changed.entry_key=left(lower(label),58)||'00000000')
             OFFSET 0
         ) probe
+        WHERE NOT EXISTS (SELECT 1 FROM changed_registries)
     ), wanted AS MATERIALIZED (
         SELECT DISTINCT candidate.labelhashes[depth:] AS labelhashes
         FROM candidates candidate CROSS JOIN LATERAL generate_series(1,cardinality(candidate.labelhashes)) depth
