@@ -95,12 +95,23 @@ fn push_bounded_candidate_canonicality(
     }
 }
 
+/// Join each history row to its block's lineage row as `rb`, the block time and canonicality
+/// the history columns and filters read. The lookup is correlated and ends in `LIMIT 1`, so it
+/// cannot be pulled up into a plain join: it can only run as one index probe per row. As a plain
+/// `LEFT JOIN` the planner may hash, merge or walk the whole lineage table, and on a mainnet-sized
+/// lineage table those methods can cost the same on paper as the probe. `(chain_id, block_hash)`
+/// is the lineage primary key, so `LIMIT 1` drops no row, and a row without a block hash keeps a
+/// null `rb` as it did under the join.
 pub(super) fn push_history_lineage_join(builder: &mut QueryBuilder<'_, Postgres>) {
     builder.push(
         r#"
-        LEFT JOIN bigname_phase.chain_lineage rb
-          ON rb.chain_id = ne.chain_id
-         AND rb.block_hash = ne.block_hash
+        LEFT JOIN LATERAL (
+            SELECT rb.block_timestamp, rb.canonicality_state
+            FROM bigname_phase.chain_lineage rb
+            WHERE rb.chain_id = ne.chain_id
+              AND rb.block_hash = ne.block_hash
+            LIMIT 1
+        ) rb ON TRUE
         "#,
     );
 }
