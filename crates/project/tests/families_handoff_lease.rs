@@ -295,7 +295,9 @@ async fn reserved_on(
     Ok(())
 }
 
-/// The registration block, the control owner and the summary row of a composed name.
+/// The registration block, the control owner and registry owner, and the summary row of a
+/// composed name. The control owner is the token holder, else the registry owner
+/// (`docs/api-v1.md`, `owner`).
 async fn served(fixture: &Fixture, name: &str) -> Result<Value> {
     let row = load_family_name(&fixture.pool, name)
         .await?
@@ -324,6 +326,11 @@ async fn served(fixture: &Fixture, name: &str) -> Result<Value> {
         "lapsed_owner": registration.pointer("/lapsed_registration/owner").cloned().unwrap_or(Value::Null),
         "registrant": field("registrant"),
         "owner": row.declared_summary.pointer("/control/owner").cloned().unwrap_or(Value::Null),
+        "registry_owner": row
+            .declared_summary
+            .pointer("/control/registry_owner")
+            .cloned()
+            .unwrap_or(Value::Null),
     }))
 }
 
@@ -1654,8 +1661,9 @@ async fn an_ownerless_name_serves_its_lease_and_holder() -> Result<()> {
 /// Rows e, e2 and f: a migrated name whose holder cleared the registry record and then
 /// `reclaim`ed it. The reclaim opens a newer registry-only binding but moves no token, so the
 /// transfer before it still names the holder, both while the record is cleared and after the
-/// reclaim, whether the reclaim goes to another address or back to the holder. A transfer after
-/// the reclaim names the new holder.
+/// reclaim, whether the reclaim goes to another address or back to the holder. The holder stays
+/// the owner and the reclaim sets only the registry owner. A transfer after the reclaim names the
+/// new holder as registrant and owner.
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
 #[tokio::test]
 async fn a_reclaimed_implied_lease_keeps_its_holder() -> Result<()> {
@@ -1715,15 +1723,16 @@ async fn a_reclaimed_implied_lease_keeps_its_holder() -> Result<()> {
         check(
             &served(&fixture, name).await?,
             json!({"status": "active", "registered_at": block_time(1), "resource_id": lease,
-                   "authority_kind": "registry_only", "owner": reclaimed_to,
-                   "registrant": HOLDER}),
+                   "authority_kind": "registry_only", "owner": HOLDER,
+                   "registry_owner": reclaimed_to, "registrant": HOLDER}),
         )?;
     }
     // Block 7: the token moves after the reclaim.
     fixture.apply(7, FamilyMode::Normal).await?;
     check(
         &served(&fixture, moved).await?,
-        json!({"resource_id": moved_lease, "owner": OTHER, "registrant": NEW_HOLDER}),
+        json!({"resource_id": moved_lease, "owner": NEW_HOLDER, "registry_owner": OTHER,
+               "registrant": NEW_HOLDER}),
     )?;
     fixture.assert_rebuild_equal(7).await?;
     fixture.cleanup().await
@@ -1731,8 +1740,9 @@ async fn a_reclaimed_implied_lease_keeps_its_holder() -> Result<()> {
 
 /// Row g: a recorded lease's handoff keeps the binding-position rule. A controller registration
 /// whose token moved before a registry `Transfer` opened a registry-only binding serves the
-/// holder, because the binding records the lease and the handoff window admits the transfer. A
-/// transfer after the binding moves the registrant.
+/// holder as registrant and owner, because the binding records the lease and the handoff window
+/// admits the transfer. The registry `Transfer` sets only the registry owner. A transfer after
+/// the binding moves the registrant and the owner.
 #[tokio::test]
 async fn a_recorded_lease_handoff_keeps_its_transfer_window() -> Result<()> {
     let fixture = Fixture::new("families_handoff_lease_recorded", 6).await?;
@@ -1759,12 +1769,14 @@ async fn a_recorded_lease_handoff_keeps_its_transfer_window() -> Result<()> {
     check(
         &served(&fixture, &name).await?,
         json!({"status": "active", "registered_at": block_time(2), "resource_id": lease,
-               "authority_kind": "registry_only", "owner": OTHER, "registrant": HOLDER}),
+               "authority_kind": "registry_only", "owner": HOLDER, "registry_owner": OTHER,
+               "registrant": HOLDER}),
     )?;
     fixture.apply(5, FamilyMode::Normal).await?;
     check(
         &served(&fixture, &name).await?,
-        json!({"resource_id": lease, "owner": OTHER, "registrant": NEW_HOLDER}),
+        json!({"resource_id": lease, "owner": NEW_HOLDER, "registry_owner": OTHER,
+               "registrant": NEW_HOLDER}),
     )?;
     fixture.assert_rebuild_equal(5).await?;
     fixture.cleanup().await
