@@ -434,10 +434,31 @@ fn interpret_raw(
     let mut interpreted =
         match super::protocol::interpret(&selected, raw, &mut candidate_state, registrar_context) {
             Ok(interpreted) => interpreted,
-            Err(error)
-                if crate::evm_abi::is_malformed_event_log(&error)
-                    && !selected.manifest_declared_emitter =>
-            {
+            // INCIDENT-ONLY sel17 (never ships): an emitter the manifest does not declare (for
+            // example any contract that announced itself with `RegistryCreated()`) skips the log
+            // on every adapter error, not only on a malformed ABI decode. A well-formed log that
+            // fails a consistency check (label not hashing to labelHash, TransferBatch length
+            // mismatch, a conflicting TokenResource link) used to stop Interpret for the chain.
+            // Declared emitters keep the bail below. The malformed-decode skip is unchanged.
+            Err(error) if !selected.manifest_declared_emitter => {
+                let decode_context = if crate::evm_abi::is_malformed_event_log(&error) {
+                    error.to_string()
+                } else {
+                    let decode_context = format!("{error:#}").replace('\0', "\u{fffd}");
+                    tracing::warn!(
+                        chain_id = %raw.chain_id,
+                        block_number = raw.block_number,
+                        block_hash = %raw.block_hash,
+                        transaction_hash = %raw.transaction_hash,
+                        log_index = raw.log_index,
+                        emitting_address = %raw.emitting_address,
+                        source_family = %selected.source.source_family,
+                        event = %selected.event.name,
+                        error = %decode_context,
+                        "INCIDENT-ONLY sel17: adapter error from an undeclared emitter recorded as a decode skip; log not interpreted"
+                    );
+                    decode_context
+                };
                 output.decode_skips.push(super::DecodeSkip {
                     chain_id: raw.chain_id.clone(),
                     block_hash: raw.block_hash.clone(),
@@ -448,7 +469,7 @@ fn interpret_raw(
                     source_family: selected.source.source_family.clone(),
                     selection_topic0: selected.event.topic0.clone(),
                     match_all: selected.match_all,
-                    decode_context: error.to_string(),
+                    decode_context,
                 });
                 return Ok(true);
             }

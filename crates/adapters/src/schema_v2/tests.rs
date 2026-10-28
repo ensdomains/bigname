@@ -4882,6 +4882,105 @@ fn a_resolver_or_implementation_self_target_opens_no_edge_and_writes_no_row() ->
     Ok(())
 }
 
+/// INCIDENT-ONLY sel17 (never ships): a well-formed log from an undeclared (announced) registry
+/// that fails an adapter consistency check is a decode skip; the same log from a declared
+/// registry still stops the batch.
+#[test]
+fn incident_only_sel17_undeclared_emitter_consistency_failures_are_decode_skips()
+-> anyhow::Result<()> {
+    let sender: Address = Address::repeat_byte(0x51);
+    let mismatched_label = v2_registry::LabelRegistered {
+        tokenId: U256::from(7),
+        labelHash: keccak256(b"x"),
+        label: "y".to_owned(),
+        owner: sender,
+        expiry: 42,
+        sender,
+    }
+    .encode_log_data();
+    let uneven_batch = v2_registry::TransferBatch {
+        operator: sender,
+        from: sender,
+        to: Address::repeat_byte(0x52),
+        ids: vec![U256::from(7), U256::from(8)],
+        values: vec![U256::from(1)],
+    }
+    .encode_log_data();
+    let cases = [
+        (
+            (
+                "LabelRegistered",
+                "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)",
+                &["registry"][..],
+                &["RegistrationGranted", "PreimageObserved"][..],
+            ),
+            mismatched_label,
+            "label does not hash to labelHash",
+        ),
+        (
+            (
+                "TransferBatch",
+                "event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)",
+                &["registry"][..],
+                &["TokenControlTransferred"][..],
+            ),
+            uneven_batch,
+            "ids and values differ in length",
+        ),
+    ];
+    for (event, log, expected) in cases {
+        let mut announced = admission(68, "registry");
+        announced.discovery_edge_kind = Some("registry_announcement".to_owned());
+        announced.discovery_from_contract_instance_id = Some(announced.contract_instance_id);
+        announced.discovery_observation_key = Some("registry-announcement:self".to_owned());
+        let batch = |admitted: AddressAdmissionInput| BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![manifest_with_events(
+                68,
+                "ens",
+                "ens_v2_registry_l1",
+                &[event],
+            )],
+            discovery_rules: vec![DiscoveryRuleInput {
+                manifest_id: 68,
+                edge_kind: "registry_announcement".to_owned(),
+                from_role: Some("registry".to_owned()),
+                admission: "reachable_from_root".to_owned(),
+            }],
+            admissions: vec![admitted],
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: vec![raw_at(log.clone(), 1, 0, CONTRACT)],
+        };
+
+        let output = interpret_test_batch(batch(announced))
+            .with_context(|| format!("undeclared {}", event.0))?;
+        assert_eq!(output.decode_skips.len(), 1, "undeclared {}", event.0);
+        let skip = &output.decode_skips[0];
+        assert_eq!((skip.block_number, skip.log_index), (1, 0));
+        assert_eq!(skip.emitting_address, CONTRACT);
+        assert_eq!(skip.source_family, "ens_v2_registry_l1");
+        assert!(
+            skip.decode_context.contains(expected),
+            "{}",
+            skip.decode_context
+        );
+        assert!(
+            output.normalized_events.iter().all(|normalized| {
+                normalized.event_kind != "RegistrationGranted"
+                    && normalized.event_kind != "TokenControlTransferred"
+            }),
+            "undeclared {}: the skipped log interprets nothing",
+            event.0
+        );
+
+        let error = interpret_test_batch(batch(admission(68, "registry")))
+            .expect_err("a declared emitter's consistency failure still stops the batch");
+        assert!(format!("{error:#}").contains(expected), "{error:#}");
+    }
+    Ok(())
+}
+
 #[test]
 fn registry_created_selects_the_rule_role_independent_of_admission_order() -> anyhow::Result<()> {
     let root = admission(2, "ETHRegistry");
