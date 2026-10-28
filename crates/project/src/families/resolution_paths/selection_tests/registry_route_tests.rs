@@ -461,6 +461,7 @@ async fn an_orphaned_mount_or_creation_selects_nothing_until_it_is_canonical() -
 // A touched name of two labels counts as its own ancestor, and a name of one label has none.
 // `mig.eth` is touched at block 5 and its ENSv1→ENSv2 migration holds the registry mounted at
 // `m.eth`. `xyz` is touched at block 7 and its migration holds the registry mounted at `n.eth`.
+// `xyz` is selected as the touched name, and nothing under `n.eth` is.
 #[tokio::test]
 async fn a_touched_migrated_name_counts_as_its_own_ancestor() -> Result<()> {
     let mut world = World::new().await?;
@@ -485,7 +486,7 @@ async fn a_touched_migrated_name_counts_as_its_own_ancestor() -> Result<()> {
     world
         .assert_selects(at(5), &["mig.eth", "s.mig.eth", "m.eth", "k.m.eth"])
         .await?;
-    world.assert_selects(at(7), &[]).await?;
+    world.assert_selects(at(7), &["xyz"]).await?;
     world.cleanup().await
 }
 
