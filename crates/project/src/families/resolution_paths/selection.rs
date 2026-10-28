@@ -439,22 +439,6 @@ pub(super) fn statement(normal_work: &str) -> String {
         CROSS JOIN LATERAL (
             SELECT entry.entry_key FROM project_ens_v2_entry_owner entry
             WHERE entry.chain_id=$1 AND entry.resource_id=named.resource_id
-            UNION ALL
-            -- An entry row with no resource is tied to its pointer by the event that last
-            -- wrote the row. That event is one of the resource's, and the row's key is its
-            -- emitter and the entry key of the token it names (families/ens_v2_registry.rs).
-            -- The canonical test on that event lets the lookup read the resource history
-            -- index. It drops no entry: the entry rows are undone with the journal before a
-            -- replay, so at a publication no entry row cites an orphaned event.
-            SELECT entry.entry_key FROM normalized_events origin
-            CROSS JOIN LATERAL (VALUES (origin.after_state->>'token_id'),
-                                       (origin.after_state->>'new_token_id')) token(id)
-            JOIN project_ens_v2_entry_owner entry ON entry.chain_id=$1
-              AND entry.registry=lower(origin.raw_fact_ref->>'emitting_address')
-              AND entry.entry_key=left(lower(token.id),58)||'00000000'
-            WHERE origin.resource_id=named.resource_id
-              AND origin.canonicality_state IN ('canonical','safe','finalized')
-              AND entry.resource_id IS NULL AND entry.event_identity=origin.event_identity
             OFFSET 0
         ) slot
     ), candidates AS MATERIALIZED (
