@@ -13,7 +13,9 @@
 //! block, and every name surface as a path member whatever its block, visibility or
 //! canonicality. Only its last step keeps the readable surfaces at or below the block.
 //!
-//! `scaling_tests.rs` holds the tests on how many surfaces a selection reads.
+//! `scaling_tests.rs` holds the tests on how many surfaces a selection reads, and
+//! `registry_pointer_tests.rs` the rows on which names a registry pointer change expands.
+mod registry_pointer_tests;
 mod scaling_tests;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -312,6 +314,22 @@ impl World {
             Some(before),
         )
         .await
+    }
+
+    /// The registry pointer of `name` holds `resolver` since block 1, with no journal row: an
+    /// earlier publication wrote it.
+    async fn registry_pointer_at(&self, name: &str, resolver: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO project_registry_pointer (chain_id, namespace, node, block_number,
+                 event_identity, resolver_address, source_family)
+             VALUES ($1, 'ens', $2, 1, 'pointer', $3, 'ens_v1_registry_l1')",
+        )
+        .bind(CHAIN)
+        .bind(node(name))
+        .bind(resolver)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// The resource pointer of `resource` came from an ENSv1 registry `ResolverChanged` for
@@ -947,7 +965,8 @@ async fn a_touched_name_selects_itself_only() -> Result<()> {
 
 // An owner-only change of a parent entry recomposes the parent and no descendant: the
 // entry's owner is not one of the fields a descendant reads through its ancestors. A
-// resolver-pointer change of the same parent still recomposes its whole subtree.
+// registry pointer change of the same parent still recomposes the names under it without a
+// pointer of their own, which here is every one.
 #[tokio::test]
 async fn an_owner_only_parent_change_selects_the_parent_only() -> Result<()> {
     let mut world = World::new().await?;

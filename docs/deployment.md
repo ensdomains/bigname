@@ -4985,6 +4985,35 @@ content hash, then check on Sepolia that `GET /v1/names/phantombug01.eth` serves
 `NewResolver` at block 11982720), and that `GET /v1/names/phantombug01.eth/records?keys=addr:61`
 finds the record.
 
+## A registry pointer change recomposes only the names that read it
+
+The build that narrows which names an ENSv1 registry pointer change recomposes
+(see [owned key families](projections.md#owned-key-families)) changes one
+Project statement, `project:families.resolution_paths.prepare`.
+
+- A name whose only change in a publication is its registry pointer recomposes
+  itself and the `.eth` names under it that read that pointer: names of three or
+  more labels with no resolver of their own. Before, it recomposed every name
+  under it, so a pointer change at `eth` recomposed every `.eth` name.
+- One ENSv1 `ResolverChanged` of a name with a resource also changes the
+  resource's pointer. That change counts as the same registry pointer change,
+  so the rule applies to registered names too.
+- A name that also has another change in the publication still recomposes every
+  name under it.
+- Which names Project recomposes in each batch changes, not what they serve.
+  Stored rows and API responses are the same as before.
+- The statement is in `crates/project/src`, an input of the
+  [projection content hash](glossary.md#projection-content-hash) only. That hash
+  rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, at a
+  planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+  matching runner and API binaries. The change rides the next release that
+  redoes Project and shares that release's Project redo.
+- It adds no table, schema-migration, manifest or setting. The
+  manifest-authority fingerprint and the compiled watch plan are unchanged, so
+  stamp no Ingest redo.
+
 ## Resolvers that both protocols name stay ENSv1
 
 The build that ranks a resolver's ENSv2 candidates after its ENSv1 evidence, and lets an ENSv2
