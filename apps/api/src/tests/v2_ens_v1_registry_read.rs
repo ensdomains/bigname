@@ -37,6 +37,8 @@ const NEXT: &str = "0x8948458626811dd0c23eb25cc74291247077cc51";
 /// The ENSv1 mirror resolver the Sepolia profile declares, premigration's ENSv2 resolver.
 const MIRROR: &str = "0x322b7581ca210a69c6d0e0d7c88a7688d2789cb0";
 const ZERO: &str = "0x0000000000000000000000000000000000000000";
+/// An address no Sepolia resolver manifest declares.
+const UNDECLARED: &str = "0x00000000000000000000000000000000000000c3";
 /// The coin-60 address only `NEXT` holds for the node.
 const NEXT_HOLDER: &str = "0x00000000000000000000000000000000000000b2";
 const KEYS: &str = "addr:60,addr:61,text:name,text:avatar";
@@ -528,6 +530,26 @@ async fn r5_a_registry_pointer_on_the_lease_serves_as_composed() -> Result<()> {
     Ok(())
 }
 
+/// Row 8: the registry points the node at an address no Sepolia resolver manifest declares,
+/// through the registry-only resource. Project classifies it `unsupported` with
+/// `resolver_not_declared`. Name detail and both records reads serve that address and its
+/// inventory, as the same logs on the lease do, which is how any name pointing at an undeclared
+/// resolver is served.
+#[tokio::test]
+async fn r8_a_registry_pointer_to_an_undeclared_resolver_serves_it() -> Result<()> {
+    let (wrong, right) = both(|| Ok(vec![pointer(lease_node(), UNDECLARED)?]), &[1]).await?;
+    for field in RESOLVER_FIELDS {
+        assert_eq!(wrong[field], resolver(UNDECLARED), "{field}: {wrong:#}");
+    }
+    assert_ne!(
+        wrong["keyed"]["text:avatar"],
+        json!({"status": "ok", "value": "first.png"}),
+        "{wrong:#}"
+    );
+    assert_eq!(wrong, right);
+    Ok(())
+}
+
 /// Row 6, Sepolia pinned: a registry child below the reserved `.eth` name with its own pointer,
 /// which no label-bearing event names, so bigname knows it only by its label hash. bigname's
 /// composed row withholds it with `ens_v2_path_no_resolver`. This pins bigname's served answer,
@@ -643,9 +665,6 @@ async fn r2_the_default_read_answers_an_unretained_text_through_the_verified_rea
     database.cleanup().await
 }
 
-/// An address no Sepolia resolver manifest declares.
-const NOT_DECLARED: &str = "0x00000000000000000000000000000000000000c3";
-
 /// The lease's pointer cleared on the lease, then the registry pointing the node at `resolver`
 /// through the registry-only resource with `then`'s logs in the same block. The composed row
 /// serves no resolver, and the registry names `resolver`.
@@ -744,7 +763,7 @@ async fn ra1_a_verified_read_of_a_cleared_lease_serving_a_registry_resolver_is_n
 #[tokio::test]
 async fn ra2_a_verified_read_of_a_cleared_lease_serving_an_undeclared_resolver_is_not_stale()
 -> Result<()> {
-    let database = published(cleared_then(NOT_DECLARED, Ok(Vec::new()))?, &[2]).await?;
+    let database = published(cleared_then(UNDECLARED, Ok(Vec::new()))?, &[2]).await?;
     let (status, body, read_chain) = with_chain(
         &database,
         &format!("/v1/names/{NAME}/records?namespace=ens&source=verified&keys=text:name"),
@@ -753,7 +772,7 @@ async fn ra2_a_verified_read_of_a_cleared_lease_serving_an_undeclared_resolver_i
     .await?;
     database.cleanup().await?;
     assert_eq!(status, StatusCode::OK, "{body:#}");
-    assert_eq!(body["data"]["resolver"], resolver(NOT_DECLARED), "{body:#}");
+    assert_eq!(body["data"]["resolver"], resolver(UNDECLARED), "{body:#}");
     assert_eq!(body["meta"]["source"], "verified", "{body:#}");
     assert!(read_chain);
     Ok(())
@@ -903,7 +922,7 @@ async fn ra6_an_auto_fallback_of_a_cleared_lease_serving_a_registry_resolver_is_
 #[tokio::test]
 async fn ra7_an_auto_fallback_of_a_cleared_lease_serving_an_undeclared_resolver_is_not_stale()
 -> Result<()> {
-    let database = published(cleared_then(NOT_DECLARED, Ok(Vec::new()))?, &[2]).await?;
+    let database = published(cleared_then(UNDECLARED, Ok(Vec::new()))?, &[2]).await?;
     let (status, body, read_chain) = with_chain(
         &database,
         &format!("/v1/names/{NAME}/records?namespace=ens&source=auto&keys=text:name"),
@@ -912,7 +931,7 @@ async fn ra7_an_auto_fallback_of_a_cleared_lease_serving_an_undeclared_resolver_
     .await?;
     database.cleanup().await?;
     assert_eq!(status, StatusCode::OK, "{body:#}");
-    assert_eq!(body["data"]["resolver"], resolver(NOT_DECLARED), "{body:#}");
+    assert_eq!(body["data"]["resolver"], resolver(UNDECLARED), "{body:#}");
     assert_eq!(
         body["data"]["records"]["text:name"],
         json!({"status": "ok", "value": "Test"}),
@@ -931,7 +950,7 @@ async fn ra7_an_auto_fallback_of_a_cleared_lease_serving_an_undeclared_resolver_
 #[tokio::test]
 async fn ra8_verified_name_detail_of_a_cleared_lease_serving_an_undeclared_resolver_is_stale()
 -> Result<()> {
-    let database = published(cleared_then(NOT_DECLARED, Ok(Vec::new()))?, &[2]).await?;
+    let database = published(cleared_then(UNDECLARED, Ok(Vec::new()))?, &[2]).await?;
     let unavailable = json!({"__rpc_error": {"code": -32000, "message": "header not found"}});
     let (status, body, _) = with_chain_answers(
         &database,
@@ -941,7 +960,7 @@ async fn ra8_verified_name_detail_of_a_cleared_lease_serving_an_undeclared_resol
     .await?;
     database.cleanup().await?;
     assert_eq!(status, StatusCode::OK, "{body:#}");
-    assert_eq!(body["data"]["resolver"], resolver(NOT_DECLARED), "{body:#}");
+    assert_eq!(body["data"]["resolver"], resolver(UNDECLARED), "{body:#}");
     assert_eq!(body["data"]["read_status"], "stale", "{body:#}");
     assert_eq!(
         body["data"]["failure_reason"], "verified_answer_stale_for_snapshot",
@@ -1029,8 +1048,8 @@ async fn rb2_a_registry_clear_omits_record_count() -> Result<()> {
 #[tokio::test]
 async fn rb3_record_count_follows_an_undeclared_registry_resolver() -> Result<()> {
     let (wrong, right) =
-        both_counted(|| Ok(vec![pointer(lease_node(), NOT_DECLARED)?]), &[1]).await?;
-    assert_eq!(wrong["resolver"], resolver(NOT_DECLARED), "{wrong:#}");
+        both_counted(|| Ok(vec![pointer(lease_node(), UNDECLARED)?]), &[1]).await?;
+    assert_eq!(wrong["resolver"], resolver(UNDECLARED), "{wrong:#}");
     assert_eq!(wrong, right);
     Ok(())
 }
@@ -1097,23 +1116,23 @@ async fn rb7_record_count_parity_covers_an_undeclared_resolver_holding_records()
     let (wrong, right) = both_counted(
         || {
             Ok(vec![
-                pointer(lease_node(), NOT_DECLARED)?,
+                pointer(lease_node(), UNDECLARED)?,
                 logs(vec![
                     records(
-                        NOT_DECLARED,
+                        UNDECLARED,
                         lease_node(),
                         NEXT_HOLDER,
                         None,
                         &[("name", "Undeclared"), ("url", "https://undeclared.test")],
                     ),
-                    contenthash(NOT_DECLARED, lease_node()),
+                    contenthash(UNDECLARED, lease_node()),
                 ])?,
             ])
         },
         &[1],
     )
     .await?;
-    assert_eq!(wrong["resolver"], resolver(NOT_DECLARED), "{wrong:#}");
+    assert_eq!(wrong["resolver"], resolver(UNDECLARED), "{wrong:#}");
     assert_eq!(wrong["record_count"], 4, "{wrong:#}");
     assert_eq!(wrong, right);
     Ok(())

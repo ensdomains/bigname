@@ -826,9 +826,10 @@ collection route carry neither header.
   names, `ens_v1.resolver`, whenever its stored resolver names another one, and
   `records` and `primary_address` come from that resolver's records for the
   node. The pointer is read on the request's snapshot. A registry clear serves
-  no resolver and no records. A pointer to a resolver bigname has no
-  classification for keeps the stored resolver and its records, because no
-  record inventory can be assembled for an unclassified resolver. Migrated
+  no resolver and no records. A pointer to an address no resolver manifest
+  declares serves that address, with no readable records and the
+  `resolver_not_declared` inventory any name pointing at an undeclared
+  resolver is served. Migrated
   (`ens_v2`) names and Basenames names are served as stored. Other routes,
   such as `POST /v1/lookup`, subname rows and address-name rows, serve the
   stored resolver.
@@ -1248,8 +1249,8 @@ its value map:
   `authority` is `ens_v1` or `ens_v0` serves the resolver its ENSv1 registry
   pointer names, `ens_v1.resolver`, and that resolver's records for the node,
   whenever its stored resolver names another one. A registry clear serves no
-  resolver and no records. A pointer to a resolver bigname has no
-  classification for keeps the stored resolver and its records.
+  resolver and no records. A pointer to an address no resolver manifest
+  declares serves that address with its `resolver_not_declared` inventory.
   `source=verified` and the verified keys of `source=auto` read the chain as
   for any other name. Whether that read runs Universal Resolver discovery
   still follows the stored resolver.
@@ -1454,11 +1455,12 @@ its value map:
   the verified lookup's RPC timeouts. A key the lookup answers `ok` or
   `not_found` takes that answer, and the response then reports
   `meta.source=verified`, even when most keys kept their indexed answers. A
-  lookup that fails or is refused leaves the indexed answers as they are. Such
-  a request is admitted as verified execution whether or not a key needs the
-  lookup: it counts against the verified-execution in-flight ceiling and the
-  enabled client rate limit, and can answer `503 overloaded` or `429
-  rate_limited` as `source=verified` does. A response that reports
+  lookup that fails or is refused leaves the indexed answers as they are. Only
+  a read that has a key to fill is admitted as verified execution, and only
+  for the fill: it takes the client's verified rate-limit token and a
+  verified-execution in-flight slot before the lookup and holds the slot
+  across it. When either is refused, the read keeps its indexed answers and
+  still answers `200`. A read with nothing to fill takes neither. A response that reports
   `meta.source=verified` carries neither caching header. An explicit
   `source=indexed` never reads the chain and keeps both. A verified read has two closed refusal
   reasons of its own, reported per key on this route and as `data.unsupported_reason` on the verified
