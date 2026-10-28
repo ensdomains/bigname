@@ -422,6 +422,25 @@ fn push_product_registration_id_with_anchors(
 ) {
     let fork = |evidence| same_fork_as(evidence, anchors, canonical_only);
     let wrapper_fork = fork("wrapper_binding");
+    // A canonical read keeps the wrapper lookup keyed by the row's resource. The derived table
+    // holds only the resource key and the canonical states, which
+    // `normalized_events_resource_history_idx` serves. As a plain scan, a table with few
+    // SurfaceBound rows lets the planner key it by event kind, which reads every SurfaceBound
+    // row for each history row.
+    let wrapper_source = if canonical_only {
+        "(
+                        SELECT * FROM bigname_phase.normalized_events wrapper_binding
+                        WHERE wrapper_binding.resource_id = ne.resource_id
+                          AND wrapper_binding.canonicality_state IN (
+                              'canonical'::bigname_phase.canonicality_state,
+                              'safe'::bigname_phase.canonicality_state,
+                              'finalized'::bigname_phase.canonicality_state
+                          )
+                        OFFSET 0
+                    ) wrapper_binding"
+    } else {
+        "bigname_phase.normalized_events wrapper_binding"
+    };
     // Classify the event from retained lifecycle facts, never current resource state.
     // A later grant must not turn earlier reservation updates into registration rows.
     let reservation_fork = fork("reservation_state");
@@ -489,7 +508,7 @@ fn push_product_registration_id_with_anchors(
                     SELECT
                         (wrapper_binding.after_state ->>
                             'wrapped_registrar_resource_id')::uuid
-                    FROM bigname_phase.normalized_events wrapper_binding
+                    FROM {wrapper_source}
                     LEFT JOIN bigname_phase.chain_lineage wrapper_lineage
                       ON wrapper_lineage.chain_id = wrapper_binding.chain_id
                      AND wrapper_lineage.block_hash = wrapper_binding.block_hash

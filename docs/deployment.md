@@ -5014,6 +5014,32 @@ Project statement, `project:families.resolution_paths.prepare`.
   manifest-authority fingerprint and the compiled watch plan are unchanged, so
   stamp no Ingest redo.
 
+## History reads probe each event's lineage row by key
+
+The build that makes history reads look up each event's `chain_lineage` row by key changes
+the history source (`crates/storage/src/history/source.rs`) and the registration identity
+(`crates/storage/src/history/registration_identity.rs`).
+
+- Every history read joins an event to its block's lineage row through a correlated lookup
+  that ends in `LIMIT 1`. PostgreSQL can only run it as one index probe per event. Before,
+  it was a plain join, and a registration-scoped events page or count on mainnet could hash
+  or walk the whole lineage table to join a few hundred events.
+- The two lookups that judge a surface binding at an event's time read that event's lineage
+  row themselves, instead of the joined row.
+- The registration identity's NameWrapper lookup stays keyed by the event's resource on a
+  canonical read.
+- Stored rows and API responses are the same as before. Only the plans change.
+- The history source is an input of the
+  [projection content hash](glossary.md#projection-content-hash) only, because Project's
+  history-catalogue membership reads through it. That hash rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not. Every chain
+  needs one full-range Project redo and no Interpret redo, at a planned
+  [re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and
+  API binaries. The change rides the next release that redoes Project and shares that
+  release's Project redo.
+- It adds no table, schema-migration, manifest or setting. The manifest-authority
+  fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
 ## Read indexes for history windows, search prefixes and `resolves_to`
 
 The build that adds four read-only btree indexes changes no stored row and no response
