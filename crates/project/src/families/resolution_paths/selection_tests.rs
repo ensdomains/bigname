@@ -3,8 +3,10 @@
 //!
 //! The statement is a function of the tables it reads and its five parameters, and it writes only
 //! the work table. So a row test seeds those tables directly, runs `prepare` and compares the
-//! names it selected with a literal set. Any seeded state is a valid input, including ones Interpret never
-//! writes: a null or upper-case label hash, a surface first observed above the publication.
+//! names it selected with a literal set and with `oracle::statement`, the selection as it stood
+//! before a changed registry was looked up by the entries that point at it. Any seeded state is
+//! a valid input, including ones Interpret never writes: a null or upper-case label hash, a
+//! surface first observed above the publication.
 //!
 //! Each test names the ordering or edge fact it holds in place. A publication is one
 //! transaction: it journals the rows of its block, or of every block of its rebuild range under
@@ -13,9 +15,13 @@
 //! block, and every name surface as a path member whatever its block, visibility or
 //! canonicality. Only its last step keeps the readable surfaces at or below the block.
 //!
-//! `scaling_tests.rs` holds the tests on how many surfaces a selection reads, and
-//! `registry_pointer_tests.rs` the rows on which names a registry pointer change expands.
+//! `registry_pointer_tests.rs` holds the rows on which names a registry pointer change expands,
+//! and `registry_route_tests.rs` the rows of the selections that start from a changed registry
+//! or from ENSv1→ENSv2 migration evidence. `scaling_tests.rs` holds the tests on how many
+//! surfaces a selection reads.
+mod oracle;
 mod registry_pointer_tests;
+mod registry_route_tests;
 mod scaling_tests;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -39,6 +45,8 @@ const ROOT: &str = "0x00000000000000000000000000000000000000a0";
 /// The registry the root's `eth` entry points at.
 const ETH: &str = "0x00000000000000000000000000000000000000a1";
 const PLAN_MODES: [&str; 2] = ["force_custom_plan", "force_generic_plan"];
+const WORK_TABLE: &str = "CREATE TEMP TABLE bigname_resolution_path_work (
+    logical_name_id text PRIMARY KEY) ON COMMIT DROP";
 
 /// A registry other than the root's and `eth`'s.
 fn registry(n: u8) -> String {
@@ -662,6 +670,70 @@ impl World {
         .await
     }
 
+    /// The resource `mount` gives the entry of `labelhash` in `registry`.
+    async fn resource(&self, registry: &str, labelhash: &str) -> Result<String> {
+        Ok(sqlx::query_scalar("SELECT md5($1 || $2)::uuid::text")
+            .bind(registry)
+            .bind(labelhash)
+            .fetch_one(&self.pool)
+            .await?)
+    }
+
+    /// A later `SubregistryChanged` event of a mounted entry: from `block` the entry points at
+    /// `subregistry`. Returns the event's identity.
+    async fn repoint(
+        &self,
+        registry: &str,
+        labelhash: &str,
+        subregistry: &str,
+        block: i64,
+    ) -> Result<String> {
+        let resource = self.resource(registry, labelhash).await?;
+        let identity = format!("repoint:{registry}:{labelhash}:{block}");
+        self.event(
+            &identity,
+            "SubregistryChanged",
+            "ens_v2_registry_l1",
+            block,
+            None,
+            Some(&resource),
+            json!({"subregistry": subregistry, "token_id": labelhash.to_lowercase()}),
+            registry,
+        )
+        .await?;
+        Ok(identity)
+    }
+
+    /// An event at `block` that makes `registry` a changed registry: `RegistryCreated` carries
+    /// it as `registry`, `Upgraded` and `ContractDiscovered` as `proxy_address`. Returns the
+    /// event's identity.
+    async fn registry_changed(
+        &self,
+        kind: &str,
+        family: &str,
+        registry: &str,
+        block: i64,
+    ) -> Result<String> {
+        let identity = format!("{kind}:{registry}:{block}");
+        let field = if kind == "RegistryCreated" {
+            "registry"
+        } else {
+            "proxy_address"
+        };
+        self.event(
+            &identity,
+            kind,
+            family,
+            block,
+            None,
+            None,
+            json!({field: registry}),
+            registry,
+        )
+        .await?;
+        Ok(identity)
+    }
+
     /// An ENSv1 to ENSv2 migration of `name`, applied at `block`, whose evidence is the
     /// creation of `registry` at block 1.
     async fn migrated(&self, name: &str, registry: &str, block: i64) -> Result<()> {
@@ -696,6 +768,25 @@ impl World {
         .await
     }
 
+    /// The names the frozen statement before this one selects for `call`.
+    async fn before(&self, call: Call<'_>) -> Result<BTreeSet<String>> {
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction = connection.begin().await?;
+        raw_sql(WORK_TABLE).execute(&mut *transaction).await?;
+        sqlx::query(&oracle::statement(SUMMARY_WORK_LIST))
+            .bind(CHAIN)
+            .bind(call.block)
+            .bind(call.time())
+            .bind(call.after)
+            .bind(call.root)
+            .execute(&mut *transaction)
+            .await
+            .context("the statement before the mount lookup")?;
+        let names = work(&mut transaction).await?;
+        transaction.rollback().await?;
+        Ok(names)
+    }
+
     /// The names `prepare` selects for `call` under plan cache mode `mode`.
     async fn selected(&self, call: Call<'_>, mode: &str) -> Result<BTreeSet<String>> {
         let mut connection = self.pool.acquire().await?;
@@ -722,7 +813,7 @@ impl World {
         Ok(names)
     }
 
-    /// `prepare` selects exactly `expected` for `call`.
+    /// `prepare` and the frozen statement before it both select exactly `expected` for `call`.
     async fn assert_selects(&self, call: Call<'_>, expected: &[&str]) -> Result<()> {
         let expected: BTreeSet<String> = expected.iter().map(|name| (*name).to_owned()).collect();
         ensure!(
@@ -740,6 +831,11 @@ impl World {
                 .map(|id| self.names.get(&id).cloned().unwrap_or(id))
                 .collect()
         };
+        let before = spelled(self.before(call).await?);
+        ensure!(
+            before == expected,
+            "the statement before the mount lookup selects {before:?}, not {expected:?}"
+        );
         for mode in PLAN_MODES {
             let selected = spelled(self.selected(call, mode).await?);
             ensure!(
@@ -1410,11 +1506,12 @@ async fn a_null_label_hash_element_keeps_the_scan_result() -> Result<()> {
     world.cleanup().await
 }
 
-// A registry created, upgraded or announced in the publication still expands through every
-// observed name. The registry mounted at `foo.eth` is created at block 5. Its mount is an older
-// entry that no changed entry names, so only the whole walk finds it. `bar`'s entry changes too.
+// A registry created, upgraded or announced in the publication selects the names under each
+// path that reaches it. The registry mounted at `foo.eth` is created at block 5. Its mount is an
+// older entry that no changed entry names. `bar`'s entry changes too. The same registry is
+// upgraded at block 7 and announced at block 9.
 #[tokio::test]
-async fn a_changed_registry_keeps_the_whole_walk() -> Result<()> {
+async fn a_registry_changed_after_its_mount_selects_the_names_under_it() -> Result<()> {
     let mut world = World::new().await?;
     world
         .surfaces(&[
@@ -1449,12 +1546,29 @@ async fn a_changed_registry_keeps_the_whole_walk() -> Result<()> {
     world
         .assert_selects(call, &["foo.eth", "a.foo.eth", "x.a.foo.eth", "bar.eth"])
         .await?;
+    for (block, kind, family) in [
+        (7, "Upgraded", "ens_v2_registry_l1"),
+        (9, "ContractDiscovered", "ens_v2_migration_l1"),
+    ] {
+        world
+            .registry_changed(kind, family, &registry(1), block)
+            .await?;
+        let call = Call {
+            block,
+            after: block - 1,
+            root: Some(ROOT),
+        };
+        world
+            .assert_selects(call, &["foo.eth", "a.foo.eth", "x.a.foo.eth"])
+            .await?;
+    }
     world.cleanup().await
 }
 
-// A change of the fallback resolver's classification, or of the root registry itself, selects
-// every readable `.eth` name: not a name of another top-level label, a shadow surface, or a
-// surface first observed above the publication.
+// A change of the fallback resolver's classification selects every readable `.eth` name: not a
+// name of another top-level label, a shadow surface, or a surface first observed above the
+// publication. `registry_route_tests.rs` holds the same selection for a change of the root
+// registry itself.
 #[tokio::test]
 async fn a_global_change_selects_every_eth_name() -> Result<()> {
     const FALLBACK: &str = "0x322b7581ca210a69c6d0e0d7c88a7688d2789cb0";
@@ -1479,25 +1593,6 @@ async fn a_global_change_selects_every_eth_name() -> Result<()> {
         root: Some(ROOT),
     };
     world.assert_selects(classified, &every).await?;
-
-    world
-        .event(
-            "upgraded",
-            "Upgraded",
-            "ens_v2_registry_l1",
-            7,
-            None,
-            None,
-            json!({"proxy_address": ROOT}),
-            ROOT,
-        )
-        .await?;
-    let upgraded = Call {
-        block: 7,
-        after: 6,
-        root: Some(ROOT),
-    };
-    world.assert_selects(upgraded, &every).await?;
     world.cleanup().await
 }
 
@@ -2460,12 +2555,12 @@ async fn a_resolver_classification_change_selects_the_names_that_read_the_resolv
     Ok(())
 }
 
-// Each kind of registry change in the window keeps the whole walk: an upgrade or a discovery
-// from the ENSv2 registry or migration family. The registry mounted at `foo.eth` changes, and
-// the names under that mount are selected. The same upgrade at the marker's block selects
-// nothing.
+// Each kind of registry change in the window selects the names under the entries that point at
+// the registry: an upgrade or a discovery from the ENSv2 registry or migration family. The
+// registry mounted at `foo.eth` changes, and the names under that mount are selected. The same
+// upgrade at the marker's block selects nothing.
 #[tokio::test]
-async fn each_registry_change_kind_keeps_the_whole_walk() -> Result<()> {
+async fn each_registry_change_kind_selects_the_names_under_its_mounts() -> Result<()> {
     let under: &[&str] = &["foo.eth", "a.foo.eth", "x.a.foo.eth"];
     for (kind, family, block, expected) in [
         ("Upgraded", "ens_v2_registry_l1", 5, under),
