@@ -5028,9 +5028,10 @@ What changes for names:
 - A migrated name renewed since the migration serves its lease's `registration_id`,
   `ens_v1.expires_at` and `registered_at`, the time of the migration's own transaction. A
   lease lapsed past grace serves `released`. Before, the name served `active` with no lease.
-- A migrated name whose registry owner is zero serves the same lease as registered, or
-  released once lapsed, with no `authority` and no registry owner. Before, it served
-  `unregistered`.
+- A `.eth` second-level name whose registry owner is zero and whose lease has a registrar row,
+  migrated or not, serves that lease as registered, or released once lapsed. Its registrant is
+  the lease's token holder when the lease records one. It serves no `authority` and no registry
+  owner. Before, it served `unregistered`.
 - A cut-over registrar lease whose premigration reservation was replaced keeps its
   `registered_at` and `registration_id`.
 - A reservation already expired when written no longer supplies an ENSv1 name's expiry or

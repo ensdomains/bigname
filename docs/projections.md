@@ -401,7 +401,10 @@ register the name, and its token holder can `reclaim` the record
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f).
 The row then serves the lease's registration as the implied lease paragraph
 below states, `active`, `expired` or `released` by the ENSv1 schedule. Its
-authority kind, registrant, registry owner and control stay absent.
+registrant is the token holder the lease's registrar rows record, the latest
+token transfer from the first current-registry record on included, and null
+when they record none. Its authority kind and registry owner stay absent, and
+its control stays `unregistered`.
 
 After the [Universal Resolver cutover](glossary.md#universal-resolver-cutover),
 ENSv1-selected descendants below `.eth` share one publication-scoped ENSv2 path

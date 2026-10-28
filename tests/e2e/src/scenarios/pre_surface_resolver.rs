@@ -113,6 +113,9 @@ async fn exercise(ownerless: bool) -> Result<()> {
         assert!(!registration["registered_at"].is_null(), "{name_body}");
         assert!(!registration["ens_v1_expiry"].is_null(), "{name_body}");
         assert_eq!(registration["authority_kind"], Value::Null);
+        // The registrant is the lease's holder when its registrar rows record one. Here the
+        // registrar's own mint precedes the lease the renewal names, so the lease records none.
+        assert!(registration["registrant"].is_null(), "{name_body}");
         assert_eq!(
             name_body["declared_state"]["control"]["status"],
             "unregistered"

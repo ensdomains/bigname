@@ -378,7 +378,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         }
     });
     // A cleared ENSv1 registry record does not end the BaseRegistrar lease: an ownerless name
-    // with an implied lease serves it, with no authority and no registry custody.
+    // with an implied lease serves it and its holder, with no authority and no registry custody.
     let ownerless_unleased = selection.ownerless_registry && authority.implied_lease.is_none();
     let status = if ownerless_unleased {
         json!("unregistered")
@@ -424,10 +424,11 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     let v2_release = selected_kind == Some("RegistrationReleased") && is_v2;
     let mut unreleased = None;
     if selection.ownerless_registry {
+        // The registrant is a lease field: the token holder the lease's registrar rows record.
         let fields: &[&str] = if ownerless_unleased {
             &["authority_kind", "authority_key", "registrant", "expiry"]
         } else {
-            &["authority_kind", "authority_key", "registrant"]
+            &["authority_kind", "authority_key"]
         };
         for field in fields {
             registration.insert((*field).into(), Value::Null);

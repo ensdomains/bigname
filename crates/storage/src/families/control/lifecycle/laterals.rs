@@ -178,6 +178,9 @@ pub(super) fn registrant(
             && selection.authority_arm.as_deref() == Some("ens_v1")
     });
     let implied = authority.implied_lease;
+    // An ownerless name's lease has no handoff binding: its token transfers from the first
+    // current-registry record on name the holder.
+    let ownerless_lease = implied.filter(|_| handoff.is_none() && selection.ownerless_registry);
     let after_handoff = |tagged: &&Tagged<'_>| {
         let event = tagged.event;
         !tagged.admitted
@@ -185,7 +188,7 @@ pub(super) fn registrant(
             && event.event_kind == "TokenControlTransferred"
             && event.source_family == REGISTRAR
             && event.authority_kind == "registrar"
-            && handoff.is_some_and(|binding| {
+            && (handoff.is_some_and(|binding| {
                 let (block, transaction, log, _) = binding.order();
                 let lease = implied
                     .map(|lease| lease.resource)
@@ -193,7 +196,12 @@ pub(super) fn registrant(
                 lease.is_some()
                     && lease == event.resource_id.as_deref()
                     && event.position.bound() > (block, transaction, log)
-            })
+            }) || ownerless_lease.is_some_and(|lease| {
+                event.resource_id.as_deref() == Some(lease.resource)
+                    && lease
+                        .from_block
+                        .is_none_or(|from| event.position.block_number >= from)
+            }))
             && (!is_v2 || (event.is_v2_family() && tagged.key.as_deref() == selected_key))
     };
     let admitted_grants: Vec<&LifecycleEvent> = tagged

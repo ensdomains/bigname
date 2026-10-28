@@ -249,6 +249,7 @@ async fn served(fixture: &Fixture, name: &str) -> Result<Value> {
         "authority_kind": field("authority_kind"),
         "lifecycle_status": field("lifecycle_status"),
         "lapsed_owner": registration.pointer("/lapsed_registration/owner").cloned().unwrap_or(Value::Null),
+        "registrant": field("registrant"),
         "owner": row.declared_summary.pointer("/control/owner").cloned().unwrap_or(Value::Null),
     }))
 }
@@ -616,5 +617,122 @@ async fn a_reservation_replaced_after_lapsing_leaves_the_renewed_lease_registere
                "expires_at": SECOND_RESERVED_UNTIL, "owner": OWNER}),
     )?;
     fixture.assert_rebuild_equal(8).await?;
+    fixture.cleanup().await
+}
+
+/// A reservation live when written that lapses later, on a migrated name's implied lease.
+/// Premigration reserved the name at the lease's expiry plus 62 days, so while the reservation
+/// is live the name serves its expiry and the ENSv2 grace. Its lapse, with the path-expiry release
+/// Interpret writes at the first block past it, makes the name `expired`, not `released`, and the
+/// grace ends on the second the ENSv1 grace does.
+#[tokio::test]
+async fn a_live_reservation_that_lapses_later_leaves_the_lease_in_grace() -> Result<()> {
+    let fixture = Fixture::new("families_handoff_lease_live_reservation", 8).await?;
+    declared_path::root_eth_entry(&fixture).await?;
+    let name = surface(&fixture, "graced.eth").await?;
+    let lease = uuid(0x1001);
+    let entry = uuid(0x2001);
+    let reserved_until = block_time(7);
+    let lease_expiry = reserved_until - 62 * DAY;
+    handoff(&fixture, &name, 1, 1, false).await?;
+    renewal(&fixture, &name, &lease, 3, 1, json!(lease_expiry), true).await?;
+    reserved(&fixture, &name, &entry, 5, 1, reserved_until).await?;
+    fixture
+        .event(
+            Event::new(
+                "graced-reservation-expired",
+                7,
+                0,
+                "RegistrationReleased",
+                "ens_v2_registry_l1",
+            )
+            .name(&name)
+            .resource(&entry)
+            .synthesised()
+            .before(json!({"status": "reserved", "expiry": reserved_until,
+                           "registrant": Value::Null}))
+            .after(json!({"source_event": "RegistryPathExpired",
+                          "derived_from": "interpreter_state",
+                          "terminal_reason": "registry_name_binding_expired",
+                          "registry": V2_REGISTRY, "token_id": "1",
+                          "registry_contract_instance_id": "eth",
+                          "expiry": reserved_until, "status": "released",
+                          "released_at": block_time(7)}))
+            .raw(json!({"kind": "raw_block", "emitting_address": V2_REGISTRY})),
+        )
+        .await?;
+
+    let grace_ends = reserved_until + 28 * DAY;
+    fixture.apply(6, FamilyMode::Normal).await?;
+    check(
+        &served(&fixture, &name).await?,
+        json!({"status": "active", "lifecycle_status": "active",
+               "registered_at": block_time(1), "identity_resource_id": lease,
+               "ens_v1_expiry": lease_expiry.to_string(), "expires_at": reserved_until,
+               "grace_ends_at": grace_ends}),
+    )?;
+    fixture.apply(8, FamilyMode::Normal).await?;
+    check(
+        &served(&fixture, &name).await?,
+        json!({"status": "expired", "lifecycle_status": "expired",
+               "registered_at": block_time(1), "identity_resource_id": lease,
+               "expires_at": reserved_until, "grace_ends_at": grace_ends}),
+    )?;
+    assert_eq!(grace_ends, lease_expiry + 90 * DAY);
+    fixture.assert_rebuild_equal(8).await?;
+    fixture.cleanup().await
+}
+
+/// The ownerless-registry profile with a live lease: a controller registration whose holder later
+/// moved the token and then cleared the registry record. The cleared record does not end the
+/// lease, so the name serves it, with the token holder as registrant and no authority, owner or
+/// registry custody.
+#[tokio::test]
+async fn an_ownerless_name_serves_its_lease_and_holder() -> Result<()> {
+    let fixture = Fixture::new("families_handoff_lease_ownerless", 6).await?;
+    let name = surface(&fixture, "cleared.eth").await?;
+    let lease = uuid(0x1001);
+    owner_write(&fixture, &name, &lease, 1, 0, OWNER, false).await?;
+    fixture
+        .binding(&uuid(101), &name, &lease, "ens_v1", 1, 10, Some(4))
+        .await?;
+    fixture
+        .write(
+            1,
+            10,
+            "SurfaceBound",
+            "ens_v1_registrar_l1",
+            Some(&name),
+            Some(&lease),
+            json!({"authority_kind": "registrar", "state_derived": false,
+                   "registry_contract": REGISTRY, "owner_getter": OWNER}),
+            REGISTRAR,
+        )
+        .await?;
+    fixture
+        .write(
+            2,
+            10,
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            Some(&name),
+            Some(&lease),
+            json!({"authority_kind": "registrar", "source_event": "NameRegistered",
+                   "status": "registered", "registrant": OWNER, "expiry": LEASE_EXPIRY}),
+            REGISTRAR,
+        )
+        .await?;
+    transfer(&fixture, &name, &lease, 3, 1, HOLDER).await?;
+    owner_write(&fixture, &name, &lease, 4, 0, ZERO, false).await?;
+    fixture.apply(5, FamilyMode::Normal).await?;
+    check(
+        &served(&fixture, &name).await?,
+        json!({"status": "active", "lifecycle_status": "active",
+               "registered_at": block_time(2), "resource_id": lease,
+               "identity_resource_id": lease, "ens_v1_expiry": LEASE_EXPIRY.to_string(),
+               "expires_at": LEASE_EXPIRY, "registrant": HOLDER,
+               "authority_kind": Value::Null, "owner": Value::Null}),
+    )?;
+    fixture.assert_rebuild_equal(5).await?;
     fixture.cleanup().await
 }
