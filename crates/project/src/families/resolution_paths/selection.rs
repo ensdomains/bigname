@@ -37,6 +37,19 @@
 //! `project_resolver_classification` counts in `changed_resolvers` only with a supported side:
 //! a field change while supported, support starting or ending, or a supported row deleted.
 //!
+//! A touched name whose only such change is its registry pointer is a narrow name, and its
+//! path a narrow prefix. Under a narrow prefix only the names that read the prefix's pointer
+//! recompose: names of three or more labels with no resolver of their own. A path that any
+//! other change also names, of this name or another, keeps its whole subtree.
+//!
+//! One ENSv1 `ResolverChanged` of a name with a resource writes both the node's registry
+//! pointer and the resource's pointer (`families/resolver.rs`). A resource pointer change
+//! counts as a registry pointer change when the row is an ENSv1 pointer before and after it
+//! and did not move. No descendant reads an ENSv1 resource pointer of an ancestor: the mirror
+//! walk reads the registry pointer, and the ENSv2 path walk reads only ENSv2 pointer events
+//! (storage `name/resolution_path/facts.rs`). An ENSv2 resource pointer, or one that changes
+//! family, keeps the whole subtree.
+//!
 //! A name whose surface is anchored in the publication's window also becomes a prefix. The
 //! window is every block after the family marker's block, up to the publication's block,
 //! the window the summary work list uses for new surfaces. The ENSv1 mirror lookup reads an
@@ -78,6 +91,34 @@ pub(super) fn statement(normal_work: &str) -> String {
     let under_prefix = "cardinality(prefix.labelhashes)<=cardinality(child.labelhashes)
               AND (cardinality(prefix.labelhashes)=0 OR
                 child.labelhashes[cardinality(child.labelhashes)-cardinality(prefix.labelhashes)+1:]=prefix.labelhashes)";
+    // The name summary and lookup name work this statement feeds read an ancestor's registry
+    // pointer only in the ENSv1 mirror walk (storage `records/mirror.rs`, `nearest`). Their
+    // composition runs it only for a name below a `.eth` second-level name (storage
+    // `families/name/batch.rs:527-529`, `NamePlace::BelowEthSecondLevel`), so there a name of
+    // fewer than three labels never reads one. The record inventory walks at any depth, but it
+    // recomposes through its own `registry_node` dependency on each node it read
+    // (`lookup/inventory_work.sql`), not through this statement.
+    let walks_ancestor_pointers = "cardinality(child.labelhashes)>=3";
+    // The walk returns the nearest pointer that is not cleared (null, empty or the zero
+    // address), as ENSv1 resolution does
+    // (upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f).
+    // A name with its own resolver never reads its ancestors'. The scalar subquery is one
+    // primary-key probe per name, in both plan modes (`scaling_tests.rs`, row L).
+    let has_no_own_resolver = "COALESCE((SELECT own.resolver_address FROM project_registry_pointer own
+                  WHERE own.chain_id=$1 AND own.namespace=child.namespace AND own.node=child.namehash), '')
+                IN ('', '0x0000000000000000000000000000000000000000')";
+    // An ENSv1 resource pointer row before and after the change, at the same name. A row with
+    // no before-image, or a before-image with no pointer (a version boundary alone), had no
+    // family and no name.
+    let v1_family = "('ens_v1_registry_l1','ens_v1_registrar_l1','ens_v1_wrapper_l1')";
+    let v1_pointer_in_place = format!(
+        "(pointer.source_family IN {v1_family}
+            AND (journal.before_image->>'source_family' IS NULL
+              OR journal.before_image->>'source_family' IN {v1_family})
+            AND (journal.before_image->>'namespace' IS NULL
+              OR (pointer.namespace=journal.before_image->>'namespace'
+                AND pointer.namehash=journal.before_image->>'namehash')))"
+    );
     format!(
         r#"/* project:families.resolution_paths.prepare */
     INSERT INTO pg_temp.bigname_resolution_path_work (logical_name_id)
@@ -87,15 +128,16 @@ pub(super) fn statement(normal_work: &str) -> String {
           AND family IN ('project_ens_v2_entry_owner', 'project_registry_pointer',
             'project_resource_pointer', 'project_resolver_classification',
             'project_registry_node_state', 'project_wrapper_state')
-    ), names_whose_change_can_move_descendants AS MATERIALIZED (
+    ), pointer_moved AS MATERIALIZED (
         SELECT pointer.namespace || ':' || lower(pointer.node) AS logical_name_id
         FROM journal JOIN project_registry_pointer pointer
           ON journal.family='project_registry_pointer' AND pointer.chain_id=$1
          AND pointer.namespace=journal.key->>1 AND pointer.node=journal.key->>2
         WHERE journal.before_image IS NULL
            OR pointer.resolver_address IS DISTINCT FROM journal.before_image->>'resolver_address'
-        UNION
-        SELECT pointer.namespace || ':' || lower(pointer.namehash)
+    ), resource_pointer_changed AS MATERIALIZED (
+        SELECT pointer.namespace || ':' || lower(pointer.namehash) AS logical_name_id,
+               COALESCE({v1_pointer_in_place}, false) AS v1_in_place
         FROM journal LEFT JOIN project_resource_pointer pointer
           ON journal.family='project_resource_pointer' AND pointer.chain_id=$1
          AND pointer.resource_id=(journal.key->>1)::uuid
@@ -106,6 +148,12 @@ pub(super) fn statement(normal_work: &str) -> String {
            OR pointer.nonzero_resolver_address IS DISTINCT FROM journal.before_image->>'nonzero_resolver_address'
            OR pointer.namespace IS DISTINCT FROM journal.before_image->>'namespace'
            OR pointer.namehash IS DISTINCT FROM journal.before_image->>'namehash')
+    ), v1_pointer_moved AS MATERIALIZED (
+        -- The ENSv1 resource pointer changes that count as a registry pointer change (see the
+        -- module docs).
+        SELECT logical_name_id FROM resource_pointer_changed WHERE v1_in_place
+    ), otherwise_moved AS MATERIALIZED (
+        SELECT logical_name_id FROM resource_pointer_changed WHERE NOT v1_in_place
         UNION
         SELECT (journal.before_image->>'namespace') || ':' || lower(journal.before_image->>'namehash')
         FROM journal LEFT JOIN project_resource_pointer pointer
@@ -114,6 +162,7 @@ pub(super) fn statement(normal_work: &str) -> String {
         WHERE journal.family='project_resource_pointer'
           AND journal.before_image->>'namespace' IS NOT NULL
           AND journal.before_image->>'namehash' IS NOT NULL
+          AND NOT COALESCE({v1_pointer_in_place}, false)
           AND (journal.before_image IS NULL
            OR pointer.resolver_address IS DISTINCT FROM journal.before_image->>'resolver_address'
            OR pointer.nonzero_resolver_address IS DISTINCT FROM journal.before_image->>'nonzero_resolver_address'
@@ -189,6 +238,9 @@ pub(super) fn statement(normal_work: &str) -> String {
               (CASE WHEN wrapper.expiry_seconds::text ~ '^[0-9]+$'
                      AND wrapper.expiry_seconds <= 18446744073709551615
                     THEN wrapper.expiry_seconds END))
+    ), names_whose_change_can_move_descendants AS MATERIALIZED (
+        SELECT logical_name_id FROM pointer_moved UNION SELECT logical_name_id FROM v1_pointer_moved
+        UNION SELECT logical_name_id FROM otherwise_moved
     ), normal AS MATERIALIZED ({normal_work}),
     changed_resolvers AS MATERIALIZED (
         -- The walks read a classification only while it is supported, and an unsupported or
@@ -217,17 +269,27 @@ pub(super) fn statement(normal_work: &str) -> String {
          AND lower(declared.declared_address)=changed.resolver
         JOIN manifest_versions manifest ON manifest.manifest_id=declared.manifest_id
          AND manifest.chain_id=declared.chain_id AND manifest.source_family='ens_v2_resolver_l1'
-    ), source_names AS MATERIALIZED (
-        SELECT logical_name_id FROM normal
-        WHERE logical_name_id IN (SELECT logical_name_id FROM names_whose_change_can_move_descendants)
-        UNION
-        SELECT pointer.namespace || ':' || lower(pointer.namehash)
+    ), resolver_readers AS MATERIALIZED (
+        SELECT pointer.namespace || ':' || lower(pointer.namehash) AS logical_name_id
         FROM changed_resolvers changed JOIN project_resource_pointer pointer
           ON pointer.chain_id=$1 AND pointer.resolver_address=changed.resolver
         UNION
         SELECT pointer.namespace || ':' || lower(pointer.node)
         FROM changed_resolvers changed JOIN project_registry_pointer pointer
           ON pointer.chain_id=$1 AND pointer.resolver_address=changed.resolver
+    ), source_names AS MATERIALIZED (
+        SELECT logical_name_id FROM normal
+        WHERE logical_name_id IN (SELECT logical_name_id FROM names_whose_change_can_move_descendants)
+        UNION
+        SELECT logical_name_id FROM resolver_readers
+    ), narrow_names AS MATERIALIZED (
+        -- The touched names whose only change that can move other names is their registry
+        -- pointer (see the module docs).
+        SELECT logical_name_id FROM normal
+        WHERE logical_name_id IN (SELECT logical_name_id FROM pointer_moved
+            UNION SELECT logical_name_id FROM v1_pointer_moved)
+        EXCEPT SELECT logical_name_id FROM otherwise_moved
+        EXCEPT SELECT logical_name_id FROM resolver_readers
     ), source_ancestors AS MATERIALIZED (
         -- An ancestor of two or more labels is the child's suffix from `depth`. The index
         -- finds the surfaces with that suffix's hash and the suffix comparison decides.
@@ -326,8 +388,12 @@ pub(super) fn statement(normal_work: &str) -> String {
           AND created.event_kind='RegistryCreated' AND created.consumer_visibility='activated'
           AND created.canonicality_state IN ('canonical','safe','finalized')
     ), logical_prefixes AS MATERIALIZED (
+        -- A narrow name's surface is a full prefix only when it has no first label hash to
+        -- look its descendants up by.
         SELECT DISTINCT surface.labelhashes FROM source_names name JOIN name_surfaces surface
           ON surface.logical_name_id=name.logical_name_id AND surface.chain_id=$1 AND surface.namespace='ens'
+        WHERE name.logical_name_id NOT IN (SELECT logical_name_id FROM narrow_names)
+           OR surface.labelhashes[1] IS NULL
         UNION
         -- A surface anchored in the publication's window is a prefix too (see the module docs).
         -- The summary work list holds every such name, so its surfaces are read by key.
@@ -392,6 +458,12 @@ pub(super) fn statement(normal_work: &str) -> String {
           AND changed.entry_key=left(lower(next.labelhashes[1]),58)||'00000000'
     ), prefixes AS MATERIALIZED (
         SELECT labelhashes FROM logical_prefixes UNION SELECT labelhashes FROM physical_prefixes
+    ), narrow_prefixes AS MATERIALIZED (
+        -- A path that any other change also names keeps its whole subtree.
+        SELECT DISTINCT surface.labelhashes FROM narrow_names name JOIN name_surfaces surface
+          ON surface.logical_name_id=name.logical_name_id AND surface.chain_id=$1 AND surface.namespace='ens'
+        WHERE surface.labelhashes[1] IS NOT NULL
+        EXCEPT SELECT labelhashes FROM prefixes
     ), affected AS MATERIALIZED (
         -- A fallback resolver change or a prefix of no labels affects every `.eth` name.
         SELECT child.logical_name_id FROM name_surfaces child
@@ -411,6 +483,19 @@ pub(super) fn statement(normal_work: &str) -> String {
             OFFSET 0
         ) probe
         WHERE prefix.labelhashes[1] IS NOT NULL
+        UNION
+        -- Under a narrow prefix, only the names that read the prefix's registry pointer.
+        SELECT probe.logical_name_id FROM narrow_prefixes prefix
+        CROSS JOIN LATERAL (
+            SELECT child.logical_name_id FROM name_surfaces child
+            WHERE entry_key_hashes(child.labelhashes)
+                @> ARRAY[hashtextextended(left(lower(prefix.labelhashes[1]),58)||'00000000',0)]
+              AND {eth_name}
+              AND {under_prefix}
+              AND {walks_ancestor_pointers}
+              AND {has_no_own_resolver}
+            OFFSET 0
+        ) probe
         UNION
         -- A first label hash that is null has no key to look up. Label hash arrays compare
         -- two nulls as equal, so such a prefix keeps the read of every surface.
