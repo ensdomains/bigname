@@ -28,7 +28,8 @@ async fn point_an_ensv1_node_at(
     pointer.before_state = json!({});
     pointer.after_state =
         json!({"node": bigname_lookup::ens_namehash_hex(other)?, "resolver": resolver});
-    pointer.raw_fact_ref = json!({"emitting_address": "0x4444444444444444444444444444444444444401"});
+    pointer.raw_fact_ref =
+        json!({"emitting_address": "0x4444444444444444444444444444444444444401"});
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[pointer]).await?;
     rebuild_fixture_families(&database.pool, chain, block, hash).await
 }
@@ -46,21 +47,37 @@ async fn a_mirrored_eth_name_keeps_its_records_when_an_ensv1_name_points_at_the_
             v2_mirror_records_database("alice.eth", MIRROR, MirrorFixtureSource::Exact, "resolver")
                 .await?;
         if !edge {
-            sqlx::query("DELETE FROM discovery_edges WHERE chain_id = $1 AND edge_kind = 'resolver'")
-                .bind(CHAIN)
-                .execute(&database.pool)
-                .await?;
-        }
-        point_an_ensv1_node_at(&database, CHAIN, (21000003, "0xmirror"), "other.eth", MIRROR)
+            sqlx::query(
+                "DELETE FROM discovery_edges WHERE chain_id = $1 AND edge_kind = 'resolver'",
+            )
+            .bind(CHAIN)
+            .execute(&database.pool)
             .await?;
+        }
+        point_an_ensv1_node_at(
+            &database,
+            CHAIN,
+            (21000003, "0xmirror"),
+            "other.eth",
+            MIRROR,
+        )
+        .await?;
         let payload = v2_name_record_payload_for_database(
             &database,
             "/v1/names/alice.eth/records?keys=addr:60,text:description",
         )
         .await?;
         let records = &payload["data"]["records"];
-        assert_eq!(payload["data"]["resolver"]["address"], json!(MIRROR), "{row}: {payload:#}");
-        assert_eq!(records["addr:60"]["status"], json!("ok"), "{row}: {payload:#}");
+        assert_eq!(
+            payload["data"]["resolver"]["address"],
+            json!(MIRROR),
+            "{row}: {payload:#}"
+        );
+        assert_eq!(
+            records["addr:60"]["status"],
+            json!("ok"),
+            "{row}: {payload:#}"
+        );
         assert_eq!(
             records["addr:60"]["value"],
             json!("0x0000000000000000000000000000000000000def"),
@@ -80,12 +97,14 @@ async fn a_mirrored_eth_name_keeps_its_records_when_an_ensv1_name_points_at_the_
 /// also points at, keeps that resolver's records, with an ENSv2 registry edge to the resolver
 /// and without one.
 #[tokio::test]
-async fn a_public_resolver_v2_name_keeps_its_records_when_an_ensv1_name_points_at_it()
--> Result<()> {
+async fn a_public_resolver_v2_name_keeps_its_records_when_an_ensv1_name_points_at_it() -> Result<()>
+{
     let name = "precedence-v2.eth";
     for (row, edge) in [("P1 with an edge", true), ("P1 without an edge", false)] {
         let database = TestDatabase::new_migrated().await?;
-        database.seed_default_ens_snapshot_selector_position().await?;
+        database
+            .seed_default_ens_snapshot_selector_position()
+            .await?;
         seed_abi_public_resolver_v2_name(&database, name, &[]).await?;
         let (hash, number) = abi_head(&database).await?;
         if edge {

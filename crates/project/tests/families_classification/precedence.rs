@@ -122,7 +122,13 @@ async fn target(fixture: &Fixture, address: &str) -> Result<String> {
 
 /// An ENSv2 registry `ResolverChanged` of entry `entry` to `resolver`, on the entry's resource,
 /// so it writes an F5 row of the ENSv2 family.
-async fn v2_event(fixture: &Fixture, block: i64, log: i64, entry: u32, resolver: &str) -> Result<()> {
+async fn v2_event(
+    fixture: &Fixture,
+    block: i64,
+    log: i64,
+    entry: u32,
+    resolver: &str,
+) -> Result<()> {
     fixture
         .write(
             block,
@@ -293,20 +299,43 @@ async fn an_ensv2_pointer_leaves_an_address_with_ensv1_evidence_in_ensv1() -> Re
             UNDECLARED_IMPLEMENTATION,
         )
         .await?;
-        edge(&fixture, 0x60_0006, &instance[&a6], m.v2_resolver, Some(8), None, false).await?;
+        edge(
+            &fixture,
+            0x60_0006,
+            &instance[&a6],
+            m.v2_resolver,
+            Some(8),
+            None,
+            false,
+        )
+        .await?;
 
         fixture.apply(7, FamilyMode::Normal).await?;
         let mut before = std::collections::BTreeMap::new();
-        for (row, address) in [("A1", &a1), ("U1", &u1), ("A4", &a4), ("A1x", &a1x), ("A6", &a6)]
-        {
+        for (row, address) in [
+            ("A1", &a1),
+            ("U1", &u1),
+            ("A4", &a4),
+            ("A1x", &a1x),
+            ("A6", &a6),
+        ] {
             let fields = served(&fixture, address).await?;
             assert_eq!(brief(&fields), v1_undeclared(), "{row} at 7 ({mode})");
-            assert_eq!(fields["manifest_id"], json!(m.v1_resolver), "{row} at 7 ({mode})");
+            assert_eq!(
+                fields["manifest_id"],
+                json!(m.v1_resolver),
+                "{row} at 7 ({mode})"
+            );
             before.insert(row, fields);
         }
         fixture.apply(8, FamilyMode::Normal).await?;
-        for (row, address) in [("A1", &a1), ("U1", &u1), ("A4", &a4), ("A1x", &a1x), ("A6", &a6)]
-        {
+        for (row, address) in [
+            ("A1", &a1),
+            ("U1", &u1),
+            ("A4", &a4),
+            ("A1x", &a1x),
+            ("A6", &a6),
+        ] {
             assert_eq!(
                 served(&fixture, address).await?,
                 before[row],
@@ -342,11 +371,23 @@ async fn an_upgraded_proxy_stays_ensv2_beside_ensv1_evidence() -> Result<()> {
     let supported = filed("ens_v2_resolver_l1", Some("permissioned_resolver"), None);
 
     fixture.apply(5, FamilyMode::Normal).await?;
-    assert_eq!(brief(&served(&fixture, &a1u).await?), v1_undeclared(), "A1u at 5");
+    assert_eq!(
+        brief(&served(&fixture, &a1u).await?),
+        v1_undeclared(),
+        "A1u at 5"
+    );
     assert_eq!(brief(&served(&fixture, &a2u).await?), supported, "A2u at 5");
     fixture.apply(8, FamilyMode::Normal).await?;
-    assert_eq!(brief(&served(&fixture, &a1u).await?), supported, "A1u: one flip, at 8");
-    assert_eq!(brief(&served(&fixture, &a2u).await?), supported, "A2u stays ENSv2");
+    assert_eq!(
+        brief(&served(&fixture, &a1u).await?),
+        supported,
+        "A1u: one flip, at 8"
+    );
+    assert_eq!(
+        brief(&served(&fixture, &a2u).await?),
+        supported,
+        "A2u stays ENSv2"
+    );
     fixture.assert_undo_restores(8).await?;
     fixture.assert_rebuild_equal(8).await?;
     fixture.cleanup().await
@@ -370,10 +411,18 @@ async fn ensv1_evidence_refiles_an_ensv2_address_once() -> Result<()> {
     pointer(&fixture, 12, 1, 2, &a2).await?;
 
     fixture.apply(3, FamilyMode::Normal).await?;
-    assert_eq!(brief(&served(&fixture, &a2).await?), v2_unknown(), "A2 at 3");
+    assert_eq!(
+        brief(&served(&fixture, &a2).await?),
+        v2_unknown(),
+        "A2 at 3"
+    );
     fixture.apply(6, FamilyMode::Normal).await?;
     let a2_at_6 = served(&fixture, &a2).await?;
-    assert_eq!(brief(&a2_at_6), v1_undeclared(), "A2: the ENSv1 pointer re-files it");
+    assert_eq!(
+        brief(&a2_at_6),
+        v1_undeclared(),
+        "A2: the ENSv1 pointer re-files it"
+    );
     assert_eq!(
         brief(&served(&fixture, &a5).await?),
         v1_undeclared(),
@@ -401,12 +450,7 @@ async fn an_address_one_protocol_names_keeps_its_family() -> Result<()> {
     let fixture = Fixture::new("classification_rb_single", 20).await?;
     let [v1, v1d, v2, v2u, d1, c2, n1] =
         [0xe1_u32, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7].map(|n| address(0x1000 + n));
-    let m = manifests(
-        &fixture,
-        &[&v1d, &d1],
-        &[(&n1, "public_resolver_v2")],
-    )
-    .await?;
+    let m = manifests(&fixture, &[&v1d, &d1], &[(&n1, "public_resolver_v2")]).await?;
     namespaced_manifest(
         &fixture,
         "basenames",
@@ -425,7 +469,16 @@ async fn an_address_one_protocol_names_keeps_its_family() -> Result<()> {
     v2_pointer(&fixture, &m, 5, 3, 41, &v2, &i2, None).await?;
     v2_pointer(&fixture, &m, 5, 4, 42, &v2u, &i2u, None).await?;
     upgraded(&fixture, 5, 5, "ens_v2_resolver_l1", &v2u, IMPLEMENTATION).await?;
-    edge(&fixture, 0x60_00e5, &id1, m.v2_registry, Some(5), None, false).await?;
+    edge(
+        &fixture,
+        0x60_00e5,
+        &id1,
+        m.v2_registry,
+        Some(5),
+        None,
+        false,
+    )
+    .await?;
     fixture
         .write(
             5,
@@ -476,8 +529,16 @@ async fn an_address_one_protocol_names_keeps_its_family() -> Result<()> {
     ] {
         assert_eq!(brief(&served(&fixture, address).await?), expected, "{row}");
     }
-    assert_eq!(served(&fixture, &d1).await?["admission_namespace"], json!("ens"), "D1");
-    assert_eq!(served(&fixture, &n1).await?["admission_namespace"], Value::Null, "N1");
+    assert_eq!(
+        served(&fixture, &d1).await?["admission_namespace"],
+        json!("ens"),
+        "D1"
+    );
+    assert_eq!(
+        served(&fixture, &n1).await?["admission_namespace"],
+        Value::Null,
+        "N1"
+    );
     fixture.assert_undo_restores(5).await?;
     fixture.assert_rebuild_equal(5).await?;
     fixture.cleanup().await
@@ -498,7 +559,12 @@ async fn a_declared_ensv2_resolver_is_never_demoted() -> Result<()> {
         let m = manifests(
             &fixture,
             &[],
-            &[(&m1, mirror), (&m2, mirror), (&p1, public_v2), (&p1b, public_v2)],
+            &[
+                (&m1, mirror),
+                (&m2, mirror),
+                (&p1, public_v2),
+                (&p1b, public_v2),
+            ],
         )
         .await?;
         let (i1, ip) = (target(&fixture, &m1).await?, target(&fixture, &p1).await?);
@@ -578,7 +644,16 @@ async fn an_ensv2_declaration_holds_while_the_edges_to_it_change() -> Result<()>
             v2_pointer(&fixture, &m, 5, log, entry, &eth, &ie, Some(8)).await?;
             v2_event(&fixture, 8, log, entry, ZERO).await?;
         }
-        edge(&fixture, 0x60_00a3, &ic, m.v2_registry, Some(5), Some(8), false).await?;
+        edge(
+            &fixture,
+            0x60_00a3,
+            &ic,
+            m.v2_registry,
+            Some(5),
+            Some(8),
+            false,
+        )
+        .await?;
         let c3_supported = filed("ens_v2_resolver_l1", Some("public_resolver_v2"), None);
 
         fixture.apply(2, FamilyMode::Normal).await?;
@@ -619,7 +694,11 @@ async fn an_ensv2_declaration_holds_while_the_edges_to_it_change() -> Result<()>
             filed("ens_v2_resolver_l1", Some("ensv1_mirror_resolver"), None),
             "X2: the declaration holds with no ENSv2 edge to it ({mode})"
         );
-        assert_eq!(eth_at_11["admission_namespace"], json!("ens"), "X2 ({mode})");
+        assert_eq!(
+            eth_at_11["admission_namespace"],
+            json!("ens"),
+            "X2 ({mode})"
+        );
         assert_eq!(
             served(&fixture, &c3).await?,
             c3_at_2,
@@ -640,8 +719,7 @@ async fn a_manifest_update_refiles_only_the_address_it_declares() -> Result<()> 
     for mode in PLAN_MODES {
         let fixture = Fixture::new(&format!("classification_rb_manifest_{mode}"), 20).await?;
         plan_mode(&fixture, mode).await?;
-        let [a1, a2, m1, v2, v1] =
-            [0xb1_u32, 0xb2, 0xb3, 0xb4, 0xb5].map(|n| address(0x3000 + n));
+        let [a1, a2, m1, v2, v1] = [0xb1_u32, 0xb2, 0xb3, 0xb4, 0xb5].map(|n| address(0x3000 + n));
         let m = manifests(&fixture, &[], &[(&m1, "ensv1_mirror_resolver")]).await?;
         let mut instance = std::collections::BTreeMap::new();
         for address in [&a1, &a2, &m1, &v2] {
@@ -720,7 +798,11 @@ async fn a_reorg_across_the_evidence_restores_the_rows() -> Result<()> {
         filed("ens_v2_resolver_l1", Some("permissioned_resolver"), None),
         "O2 at 8"
     );
-    assert_eq!(brief(&served(&fixture, &o3).await?), v1_undeclared(), "O3 at 8");
+    assert_eq!(
+        brief(&served(&fixture, &o3).await?),
+        v1_undeclared(),
+        "O3 at 8"
+    );
 
     sqlx::query(
         "UPDATE chain_lineage SET canonicality_state = 'orphaned'
@@ -752,7 +834,10 @@ async fn a_reorg_across_the_evidence_restores_the_rows() -> Result<()> {
     )
     .await?;
     assert_eq!(outcome.undone_blocks, 1);
-    for (row, (address, was)) in ["O1", "O2", "O3"].into_iter().zip([&o1, &o2, &o3].into_iter().zip(&before)) {
+    for (row, (address, was)) in ["O1", "O2", "O3"]
+        .into_iter()
+        .zip([&o1, &o2, &o3].into_iter().zip(&before))
+    {
         assert_eq!(
             &served(&fixture, address).await?,
             was,
