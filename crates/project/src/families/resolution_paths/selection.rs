@@ -34,7 +34,8 @@
 //!   of its `namespace` or `namehash`. A move counts for the name before it and the name
 //!   after it. A change of `boundary_kind` alone does not count.
 //!
-//! `project_resolver_classification` is already field-exact in `changed_resolvers`.
+//! `project_resolver_classification` counts in `changed_resolvers` only with a supported side:
+//! a field change while supported, support starting or ending, or a supported row deleted.
 //!
 //! A name whose surface is anchored in the publication's window also becomes a prefix. The
 //! window is every block after the family marker's block, up to the publication's block,
