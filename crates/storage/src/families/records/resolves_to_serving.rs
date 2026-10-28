@@ -417,19 +417,9 @@ fn serves_records_through(row: &NameCurrentRow) -> Option<Uuid> {
     }
 }
 
-/// Every name that may serve records through one of `resources`: the names bound to it (F1
-/// binding candidates) and the names its pointers carry (F5 resource pointers and F4 registry
-/// pointers on it, and an ENSv2 root-registry pointer's `namespace:namehash`), which is where a
-/// composed row's serving resource comes from (`families::name::serving`). A superset: the
-/// composed rows decide.
-async fn names_reaching(
-    conn: &mut PgConnection,
-    chain_id: &str,
-    resources: &[Uuid],
-    namespaces: Option<&[String]>,
-) -> Result<Vec<String>> {
-    sqlx::query_scalar(
-        "/* storage:families.records.names_reaching_resources */
+/// The names that may serve records through one of the resources `$2` on chain `$1`, kept to
+/// the namespaces `$3` when it is not null. See `names_reaching`.
+const NAMES_REACHING_SQL: &str = "/* storage:families.records.names_reaching_resources */
          SELECT names.logical_name_id FROM (
          SELECT candidate.logical_name_id
          FROM bigname_phase.project_binding_candidate candidate
@@ -458,14 +448,26 @@ async fn names_reaching(
          WHERE $3::text[] IS NULL OR EXISTS (
              SELECT 1 FROM bigname_phase.name_surfaces surface
              WHERE surface.logical_name_id = names.logical_name_id
-               AND surface.namespace = ANY($3::text[]))",
-    )
-    .bind(chain_id)
-    .bind(resources)
-    .bind(namespaces)
-    .fetch_all(&mut *conn)
-    .await
-    .context("failed to load the names reaching the record resources")
+               AND surface.namespace = ANY($3::text[]))";
+
+/// Every name that may serve records through one of `resources`: the names bound to it (F1
+/// binding candidates) and the names its pointers carry (F5 resource pointers and F4 registry
+/// pointers on it, and an ENSv2 root-registry pointer's `namespace:namehash`), which is where a
+/// composed row's serving resource comes from (`families::name::serving`). A superset: the
+/// composed rows decide.
+async fn names_reaching(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    resources: &[Uuid],
+    namespaces: Option<&[String]>,
+) -> Result<Vec<String>> {
+    sqlx::query_scalar(NAMES_REACHING_SQL)
+        .bind(chain_id)
+        .bind(resources)
+        .bind(namespaces)
+        .fetch_all(&mut *conn)
+        .await
+        .context("failed to load the names reaching the record resources")
 }
 
 fn address_record_row(
@@ -503,3 +505,7 @@ fn address_record_row(
         "last_recomputed_at": crate::time::format_timestamp(row.last_recomputed_at),
     })
 }
+
+#[cfg(test)]
+#[path = "resolves_to_serving_plan_tests.rs"]
+mod plan_tests;

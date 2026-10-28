@@ -57,6 +57,16 @@ async fn run(
 
 async fn manifest(fixture: &Fixture, block: i64, active: bool) -> Result<()> {
     let payload = json!({"contracts":[{"address":RESOLVER,"role":"public_resolver","read_features":["text"]}]});
+    manifest_update(fixture, block, active, payload).await
+}
+
+/// An update of the fixture's one manifest at `block` with `payload`.
+async fn manifest_update(
+    fixture: &Fixture,
+    block: i64,
+    active: bool,
+    payload: Value,
+) -> Result<()> {
     let id = match sqlx::query_scalar::<_, i64>("SELECT manifest_id FROM manifest_versions LIMIT 1")
         .fetch_optional(&fixture.pool).await? {
         Some(id) => id,
@@ -281,6 +291,139 @@ async fn text_admission_loss_retracts_without_rpc_and_undo_restores_the_overlay(
         "normal family undo restores the whole row"
     );
     assert_eq!(entry(&fixture).await?["value"], "admitted");
+    fixture.cleanup().await
+}
+
+/// The text keys `text_keys.sql` reads from the classification images of `block`, as the
+/// block's publication passes them (`hydrate::work::images`): the before-image the journal holds
+/// and the row the block wrote, read while that row is still stored. The before-image differs
+/// from the stored row exactly as the written row differed from the stored row before the write.
+/// Returns the before-image, the written row and the keys.
+async fn classification_text_keys(fixture: &Fixture, block: i64) -> Result<(Value, Value, Value)> {
+    let (before, written): (Value, Value) = sqlx::query_as(
+        "SELECT journal.before_image || jsonb_build_object('chain_id', journal.chain_id,
+                'resolver_address', journal.key::jsonb ->> 1),
+            to_jsonb(stored)
+        FROM project_family_undo journal
+        JOIN project_resolver_classification stored
+          ON stored.chain_id = journal.chain_id AND stored.resolver_address = journal.key::jsonb ->> 1
+        WHERE journal.chain_id = $1 AND journal.block_number = $2
+          AND journal.family = 'project_resolver_classification'",
+    )
+    .bind(CHAIN)
+    .bind(block)
+    .fetch_one(&fixture.pool)
+    .await?;
+    let keys: Vec<Value> =
+        sqlx::query_scalar(include_str!("../src/families/hydrate/text_keys.sql"))
+            .bind(CHAIN)
+            .bind(json!([]))
+            .bind(json!([]))
+            .bind(json!([before.clone(), written.clone()]))
+            .fetch_all(&fixture.pool)
+            .await?;
+    Ok((before, written, json!(keys)))
+}
+
+// Text hydration reads a classification only while it is supported (text_eligible.sql, storage
+// `records/text_hydration.rs`). Support is withdrawn at block 2, and at block 3 the resolver is
+// re-filed from no active manifest to a manifest that does not declare it. Neither block
+// hydrates, so the overlay read at block 1 is still stored. The withdrawal re-derives the
+// resolver's keys and the re-file re-derives none. The work index still holds the overlay to
+// clear, as a full refresh derives it, nothing serves it, and the next hydrating block clears it
+// with no call.
+#[tokio::test]
+async fn an_unsupported_re_file_rederives_no_text_keys() -> Result<()> {
+    let (fixture, rpc) = fixture().await?;
+    text(&fixture, 1, None).await?;
+    rpc.answer(1, Some("admitted"));
+    run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(entry(&fixture).await?["value"], "admitted");
+    manifest(&fixture, 2, false).await?;
+    manifest_update(
+        &fixture,
+        3,
+        true,
+        json!({"contracts":[{"address":"0x00000000000000000000000000000000000000c8",
+            "role":"public_resolver","read_features":["text"]}]}),
+    )
+    .await?;
+    rpc::head(&fixture.pool, 4).await?;
+
+    let (_, error) = apply(&fixture, 2, FamilyMode::Normal, &rpc).await;
+    assert!(error.is_none(), "{error:?}");
+    let (before, written, keys) = classification_text_keys(&fixture, 2).await?;
+    assert_eq!(
+        (&before["support_status"], &written["support_status"]),
+        (&json!("supported"), &json!("unsupported")),
+        "block 2 withdraws support"
+    );
+    assert_eq!(
+        keys.as_array()
+            .map(|keys| keys.iter().map(|key| key["record_key"].clone()).collect()),
+        Some(vec![json!("text:url")]),
+        "the withdrawal re-derives the resolver's key: {keys}"
+    );
+
+    let (_, error) = apply(&fixture, 3, FamilyMode::Normal, &rpc).await;
+    assert!(error.is_none(), "{error:?}");
+    let (before, written, keys) = classification_text_keys(&fixture, 3).await?;
+    assert_eq!(
+        (&before["support_status"], &written["support_status"]),
+        (&json!("unsupported"), &json!("unsupported")),
+        "block 3 re-files an unsupported row"
+    );
+    assert_ne!(
+        before["unsupported_reason"], written["unsupported_reason"],
+        "block 3 changes the reason"
+    );
+    assert_eq!(keys, json!([]), "the re-file re-derives no key");
+    assert_eq!(rpc.calls().len(), 1, "neither block hydrates");
+    assert!(!value_row(&fixture).await?["hydrated_value"].is_null());
+    assert_eq!(entry(&fixture).await?["status"], "unsupported");
+
+    let stored: Value = sqlx::query_scalar(
+        "SELECT COALESCE(jsonb_agg(to_jsonb(w) ORDER BY w.record_key), '[]')
+        FROM project_text_hydration_work w",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    let targets: Value = sqlx::query_scalar(
+        "SELECT COALESCE(jsonb_agg(to_jsonb(v)), '[]') FROM project_node_record_value v",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    let work: Vec<Value> = sqlx::query_scalar(&text_selection_sql())
+        .bind(CHAIN)
+        .bind(3_i64)
+        .bind(json!([]))
+        .bind(json!([]))
+        .bind(json!([]))
+        .bind(vec![RESOLVER])
+        .bind(250_i64)
+        .bind(targets)
+        .bind(true)
+        .fetch_all(&fixture.pool)
+        .await?;
+    let refreshed: Value = sqlx::query_scalar(
+        "SELECT COALESCE(jsonb_agg(to_jsonb(w) ORDER BY w.record_key), '[]')
+        FROM jsonb_populate_recordset(NULL::project_text_hydration_work, $1) w",
+    )
+    .bind(json!(work))
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(stored, refreshed, "the work index is a full refresh's");
+    assert_eq!(
+        pending_text(&fixture).await?,
+        1,
+        "the overlay waits to be cleared"
+    );
+
+    let outcome = run(&fixture, 4, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(rpc.calls().len(), 1, "clearing needs no call");
+    assert_eq!(outcome.hydration.text.value_writes, 1);
+    assert!(value_row(&fixture).await?["hydrated_value"].is_null());
+    assert_eq!(pending_text(&fixture).await?, 0);
     fixture.cleanup().await
 }
 

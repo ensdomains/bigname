@@ -85,3 +85,7 @@ async fn create(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
         .execute(&mut **transaction).await.map_err(|e| ProjectError::database("failed to create lookup record work", e))?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "work_tests.rs"]
+mod tests;

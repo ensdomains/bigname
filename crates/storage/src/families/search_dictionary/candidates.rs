@@ -227,3 +227,7 @@ pub(super) async fn load(
         .await
         .context("failed to merge search candidates")
 }
+
+#[cfg(test)]
+#[path = "candidates_plan_tests.rs"]
+mod plan_tests;
