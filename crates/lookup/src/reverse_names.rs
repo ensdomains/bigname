@@ -151,6 +151,15 @@ fn decode_multicall_results(return_data: &[u8]) -> Result<Vec<EnsReverseNameMult
                     });
                 }
             };
+            // INCIDENT-ONLY sel17 (never ships): PostgreSQL jsonb rejects `\u0000`, so a name
+            // with a NUL byte failed the head block's Project transaction on every retry. It is
+            // a failed read instead, which commits and backs the selector off like a malformed
+            // return. Project logs it with the resolver, node and block.
+            if value.contains('\0') {
+                return Ok(EnsReverseNameMulticallResult::Failed {
+                    message: crate::INCIDENT_SEL17_NUL_VALUE.to_owned(),
+                });
+            }
             Ok(if value.is_empty() {
                 EnsReverseNameMulticallResult::NotFound
             } else {
@@ -233,6 +242,39 @@ mod tests {
         assert!(
             message.starts_with("resolver name call return data is malformed:"),
             "{message}"
+        );
+        Ok(())
+    }
+
+    /// INCIDENT-ONLY sel17 (never ships): a name containing a NUL byte is a failed read, not a
+    /// value Project would write into jsonb.
+    #[test]
+    fn incident_only_sel17_name_with_a_nul_byte_is_a_failed_read() -> Result<()> {
+        let nul_return = ("a\0b.eth".to_owned(),).abi_encode_params();
+        let name_return = ("ab.eth".to_owned(),).abi_encode_params();
+        let encoded = (vec![
+            abi::Result3 {
+                success: true,
+                returnData: Bytes::copy_from_slice(&nul_return),
+            },
+            abi::Result3 {
+                success: true,
+                returnData: Bytes::copy_from_slice(&name_return),
+            },
+        ],)
+            .abi_encode_params();
+
+        let results = decode_multicall_results(&encoded)?;
+        assert_eq!(
+            results,
+            [
+                EnsReverseNameMulticallResult::Failed {
+                    message: crate::INCIDENT_SEL17_NUL_VALUE.to_owned()
+                },
+                EnsReverseNameMulticallResult::Success {
+                    value: "ab.eth".to_owned()
+                },
+            ]
         );
         Ok(())
     }

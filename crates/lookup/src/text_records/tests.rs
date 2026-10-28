@@ -169,6 +169,39 @@ fn decodes_multicall_text_results() -> Result<()> {
     Ok(())
 }
 
+/// INCIDENT-ONLY sel17 (never ships): a text value containing a NUL byte is a failed read, not a
+/// value Project would write into jsonb.
+#[test]
+fn incident_only_sel17_text_value_with_a_nul_byte_is_a_failed_read() -> Result<()> {
+    let nul_return = ("a\0b".to_owned(),).abi_encode_params();
+    let text_return = ("ab".to_owned(),).abi_encode_params();
+    let encoded = (vec![
+        abi::Result3 {
+            success: true,
+            returnData: Bytes::copy_from_slice(&nul_return),
+        },
+        abi::Result3 {
+            success: true,
+            returnData: Bytes::copy_from_slice(&text_return),
+        },
+    ],)
+        .abi_encode_params();
+
+    let results = decode_multicall_results(&encoded)?;
+    assert_eq!(
+        results,
+        [
+            EnsTextRecordMulticallResult::Failed {
+                message: crate::INCIDENT_SEL17_NUL_VALUE.to_owned()
+            },
+            EnsTextRecordMulticallResult::Success {
+                value: "ab".to_owned()
+            },
+        ]
+    );
+    Ok(())
+}
+
 #[test]
 fn encodes_text_call_targets() -> Result<()> {
     let call = multicall_call_for_text_request(&EnsTextRecordMulticallRequest {

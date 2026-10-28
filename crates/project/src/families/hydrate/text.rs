@@ -397,6 +397,21 @@ impl Prepared {
             // `None` is a selector with no read to make: one no longer eligible, whose overlay
             // is cleared, or one that changed between preparation and this transaction.
             let read = matched.and_then(|(_, read)| read.as_ref());
+            // INCIDENT-ONLY sel17 (never ships): a value with a NUL byte is a failed read; say so.
+            if let Some(Read::Answered(EnsTextRecordMulticallResult::Failed { message })) = read
+                && message == bigname_lookup::INCIDENT_SEL17_NUL_VALUE
+            {
+                let request = candidate.request.as_ref();
+                tracing::warn!(
+                    chain_id = context.chain_id,
+                    block_number = context.block.number,
+                    block_hash = %context.block.hash,
+                    resolver = request.map_or("", |request| request.resolver_address.as_str()),
+                    namehash = request.map_or("", |request| request.namehash.as_str()),
+                    text_key = ?request.map(|request| request.text_key.as_str()),
+                    "INCIDENT-ONLY sel17: text hydration read a value containing a NUL byte; recorded as a failed read"
+                );
+            }
             match read {
                 Some(Read::Unobserved) => continue,
                 Some(Read::Answered(EnsTextRecordMulticallResult::Success { value })) => {

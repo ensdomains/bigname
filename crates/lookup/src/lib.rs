@@ -40,6 +40,11 @@ pub use types::{
     LookupRequest, LookupResponse,
 };
 
+/// INCIDENT-ONLY sel17 (never ships): the failure message of a hydration read whose decoded
+/// string contains a NUL byte. Project matches it to log the selector.
+pub const INCIDENT_SEL17_NUL_VALUE: &str =
+    "INCIDENT-ONLY sel17: resolver returned a string containing a NUL byte; recorded as a failed read";
+
 pub const ENS_NAMESPACE: &str = Namespace::Ens.as_str();
 pub const BASENAMES_NAMESPACE: &str = Namespace::Basenames.as_str();
 pub const BASE_MAINNET_CHAIN_ID: &str = ChainId::BaseMainnet.as_str();

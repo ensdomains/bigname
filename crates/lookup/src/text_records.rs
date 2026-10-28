@@ -201,6 +201,17 @@ fn decode_multicall_results(return_data: &[u8]) -> Result<Vec<EnsTextRecordMulti
                     });
                 }
             };
+            // INCIDENT-ONLY sel17 (never ships): PostgreSQL jsonb rejects `\u0000`, so a text
+            // value with a NUL byte failed the head block's Project transaction on every retry.
+            // It is a failed read instead, which commits and backs the selector off like a
+            // malformed return. Project logs it with the resolver, node, key and block. The
+            // guard sits here, not in `abi::decode_record_result`, so verified API lookups are
+            // unchanged.
+            if value.as_deref().is_some_and(|value| value.contains('\0')) {
+                return Ok(EnsTextRecordMulticallResult::Failed {
+                    message: crate::INCIDENT_SEL17_NUL_VALUE.to_owned(),
+                });
+            }
             Ok(match value {
                 Some(value) => EnsTextRecordMulticallResult::Success { value },
                 None => EnsTextRecordMulticallResult::NotFound,

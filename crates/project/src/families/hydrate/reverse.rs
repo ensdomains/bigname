@@ -413,6 +413,20 @@ impl Prepared {
             if matches!(read, Some(Read::Unobserved)) {
                 continue;
             }
+            // INCIDENT-ONLY sel17 (never ships): a name with a NUL byte is a failed read; say so.
+            if let Some(Read::Answered(EnsReverseNameMulticallResult::Failed { message })) = read
+                && message == bigname_lookup::INCIDENT_SEL17_NUL_VALUE
+            {
+                tracing::warn!(
+                    chain_id = context.chain_id,
+                    block_number = context.block.number,
+                    block_hash = %context.block.hash,
+                    resolver = candidate.resolver.as_deref().unwrap_or(""),
+                    reverse_node = candidate.node.as_deref().unwrap_or(""),
+                    key = %key_text(&tables::REVERSE_TUPLE, &candidate.key),
+                    "INCIDENT-ONLY sel17: reverse-name hydration read a name containing a NUL byte; recorded as a failed read"
+                );
+            }
             let name = match read {
                 Some(Read::Unobserved) => unreachable!(),
                 Some(Read::Deferred { limit }) => {
