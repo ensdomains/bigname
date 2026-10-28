@@ -1,9 +1,10 @@
-//! The work selection at the head of the registry pointer narrowing (TYR-380), before a changed
-//! registry was looked up by the entries that point at it: any changed registry made every
-//! observed surface a candidate. The row and scaling tests compare the current statement with
-//! this one, so the body below is a frozen copy and is never edited to follow the current
-//! statement. It records which names the selection chose at that point. The last change of the
-//! stack that narrows changed-registry selection without changing its result removes it.
+//! The work selection at the head of the registry pointer narrowing (TYR-380) and the exact
+//! resolver-change predicates (TYR-398), before a changed registry was looked up by the entries
+//! that point at it: any changed registry made every observed surface a candidate. The row and
+//! scaling tests compare the current statement with this one, so the body below is a frozen copy
+//! and is never edited to follow the current statement. It records which names the selection
+//! chose at that point. The last change of the stack that narrows changed-registry selection
+//! without changing its result removes it.
 use bigname_storage::families::name::PHYSICAL_POINTER_EVENT_SQL;
 
 pub(super) fn statement(normal_work: &str) -> String {
@@ -167,13 +168,23 @@ pub(super) fn statement(normal_work: &str) -> String {
         UNION SELECT logical_name_id FROM otherwise_moved
     ), normal AS MATERIALIZED ({normal_work}),
     changed_resolvers AS MATERIALIZED (
+        -- The walks read a classification only while it is supported, and an unsupported or
+        -- missing row decides the same whatever its fields (storage `name/resolution_path.rs`,
+        -- `records/mirror.rs`). So a change counts only with a supported side, a deleted row
+        -- included.
         SELECT journal.key->>1 AS resolver FROM journal
-        JOIN project_resolver_classification current ON current.chain_id=$1
+        LEFT JOIN project_resolver_classification current ON current.chain_id=$1
           AND journal.family='project_resolver_classification' AND current.resolver_address=journal.key->>1
-        WHERE current.classification IS DISTINCT FROM journal.before_image->'classification'
-           OR current.support_status IS DISTINCT FROM journal.before_image->>'support_status'
-           OR current.unsupported_reason IS DISTINCT FROM journal.before_image->>'unsupported_reason'
-           OR to_jsonb(current.manifest_id) IS DISTINCT FROM journal.before_image->'manifest_id'
+        WHERE journal.family='project_resolver_classification'
+          AND (current.support_status='supported'
+            OR journal.before_image->>'support_status'='supported')
+          AND (current.chain_id IS NULL
+            OR COALESCE(current.classification, 'null'::jsonb)
+              IS DISTINCT FROM COALESCE(journal.before_image->'classification', 'null'::jsonb)
+            OR current.support_status IS DISTINCT FROM journal.before_image->>'support_status'
+            OR current.unsupported_reason IS DISTINCT FROM journal.before_image->>'unsupported_reason'
+            OR COALESCE(to_jsonb(current.manifest_id), 'null'::jsonb)
+              IS DISTINCT FROM COALESCE(journal.before_image->'manifest_id', 'null'::jsonb))
     ), global_change AS MATERIALIZED (
         -- Any ENSv1 mirror resolver an ENSv2 resolver manifest of the chain declares. The walk
         -- reads the publication's own declaration, one of these (resolution_path.rs).
