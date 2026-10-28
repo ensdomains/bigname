@@ -802,6 +802,234 @@ async fn a_live_reservation_on_the_reviewed_registry_lapses_into_its_grace() -> 
     fixture.cleanup().await
 }
 
+/// A migrated name's implied lease `0x1000 + n`, renewed at block 3 to 62 days before block 7's
+/// time, and a premigration reservation of it on `registry`, entry `0x2000 + n` and token `n`,
+/// written live at block 5 until block 7's time. A BaseRegistrar renewal at block 6 extends the
+/// lease a year, past the reservation, and no ENSv2 `ExpiryUpdated` follows before the
+/// path-expiry release Interpret writes at block 7. Returns the name and its lease.
+async fn renewed_past_reservation(
+    fixture: &Fixture,
+    registry: Registry<'_>,
+    label: &str,
+    n: u32,
+) -> Result<(String, String)> {
+    let name = surface(fixture, label).await?;
+    let lease = uuid(0x1000 + n);
+    let entry = uuid(0x2000 + n);
+    let token = n.to_string();
+    let log = i64::from(n) * 10;
+    let reserved_until = block_time(7);
+    let lease_expiry = reserved_until - 62 * DAY;
+    handoff(fixture, &name, n, 1, false).await?;
+    renewal(fixture, &name, &lease, 3, log, json!(lease_expiry), true).await?;
+    fixture
+        .write(
+            5,
+            log,
+            "RegistrationReserved",
+            "ens_v2_registry_l1",
+            Some(&name),
+            Some(&entry),
+            json!({"registry_contract_instance_id": registry.instance, "token_id": token,
+                   "source_event": "LabelReserved", "status": "reserved",
+                   "expiry": reserved_until}),
+            registry.address,
+        )
+        .await?;
+    renewal(
+        fixture,
+        &name,
+        &lease,
+        6,
+        log,
+        json!(lease_expiry + 365 * DAY),
+        false,
+    )
+    .await?;
+    fixture
+        .event(
+            Event::new(
+                &format!("{label}-reservation-expired"),
+                7,
+                0,
+                "RegistrationReleased",
+                "ens_v2_registry_l1",
+            )
+            .name(&name)
+            .resource(&entry)
+            .synthesised()
+            .before(json!({"status": "reserved", "expiry": reserved_until,
+                           "registrant": Value::Null}))
+            .after(json!({"source_event": "RegistryPathExpired",
+                          "derived_from": "interpreter_state",
+                          "terminal_reason": "registry_name_binding_expired",
+                          "registry": registry.address, "token_id": token,
+                          "registry_contract_instance_id": registry.instance,
+                          "expiry": reserved_until, "status": "released",
+                          "released_at": block_time(7)}))
+            .raw(json!({"kind": "raw_block", "emitting_address": registry.address})),
+        )
+        .await?;
+    Ok((name, lease))
+}
+
+/// The late ENSv2 `ExpiryUpdated` of `renewed_past_reservation`'s reservation `n` at `block`, as
+/// the adapter writes it for an entry whose expiry had passed: an `ExpiryChanged` and a
+/// `RegistrationRenewed` that revive it.
+async fn expiry_updated(
+    fixture: &Fixture,
+    registry: Registry<'_>,
+    name: &str,
+    n: u32,
+    block: i64,
+    expiry: i64,
+) -> Result<()> {
+    let entry = uuid(0x2000 + n);
+    for (log, kind) in [(0, "ExpiryChanged"), (1, "RegistrationRenewed")] {
+        fixture
+            .write(
+                block,
+                log,
+                kind,
+                "ens_v2_registry_l1",
+                Some(name),
+                Some(&entry),
+                json!({"source_event": "ExpiryUpdated", "token_id": n.to_string(),
+                       "expiry": expiry, "sender": OWNER, "revived_from_expiry": true,
+                       "registry_contract_instance_id": registry.instance}),
+                registry.address,
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+/// The row-21 fields of a name ENSv1 selects through its implied lease `lease`.
+fn on_lease(
+    status: &str,
+    lease: &str,
+    ens_v1_expiry: i64,
+    expires_at: i64,
+    grace_ends_at: i64,
+) -> Value {
+    json!({"status": status, "lifecycle_status": status, "registered_at": block_time(1),
+           "identity_resource_id": lease, "authority_kind": "registry_only",
+           "ens_v1_expiry": ens_v1_expiry.to_string(), "expires_at": expires_at,
+           "grace_ends_at": grace_ends_at})
+}
+
+/// Row 21 with the lease renewed past its reservation: a BaseRegistrar renewal extends the lease
+/// after premigration reserved the name, and the reservation lapses before the matching ENSv2
+/// `ExpiryUpdated` arrives. The row pins the documented contract and passes on the base branch.
+/// Crossing an expiry "never switches a name on a cut-over chain back to a different
+/// registration's dates" (`canonical.rs:1-3`). Past the cutover `expires_at` is the retained
+/// canonical ENSv2 entry's expiry "whichever arm holds authority" (`docs/api-v1.md:56`), and the
+/// reservation "supplies E/G through expiry and release", with "Passage of time never falls back
+/// to the older lease" (`docs/api-v1.md:2166-2169`). So ENSv1 stays selected with the renewed
+/// lease as `ens_v1_expiry`, and the reservation's expiry and grace set the status. On the
+/// reviewed registry it is `expired` through the registrar's 28 days, then `released`. On the
+/// generic registry it is `released` at the expiry. An `ExpiryUpdated` inside the grace renews
+/// the reservation, and the name is `active` on the new expiry.
+#[tokio::test]
+async fn a_reservation_that_lapses_after_its_lease_renewed_keeps_its_own_schedule() -> Result<()> {
+    let fixture = Fixture::new("families_handoff_lease_renewed_past_reservation", 8).await?;
+    let instance = declared_path::reviewed_root_eth_entry(&fixture).await?;
+    let reviewed = Registry {
+        instance: &instance,
+        address: declared_path::ETH,
+    };
+    let (generic, generic_lease) =
+        renewed_past_reservation(&fixture, GENERIC, "generic.eth", 1).await?;
+    let (lapsed, lapsed_lease) =
+        renewed_past_reservation(&fixture, reviewed, "lapsed.eth", 2).await?;
+    let (updated, updated_lease) =
+        renewed_past_reservation(&fixture, reviewed, "updated.eth", 3).await?;
+    let reserved_until = block_time(7);
+    let renewed_until = reserved_until - 62 * DAY + 365 * DAY;
+    let grace_ends = reserved_until + 28 * DAY;
+    let updated_until = renewed_until + 62 * DAY;
+
+    // Before the reservation's expiry every name is active on it, after the lease's renewal.
+    fixture.apply(6, FamilyMode::Normal).await?;
+    for (name, lease, grace) in [
+        (&generic, &generic_lease, reserved_until),
+        (&lapsed, &lapsed_lease, grace_ends),
+        (&updated, &updated_lease, grace_ends),
+    ] {
+        check(
+            &served(&fixture, name).await?,
+            on_lease("active", lease, renewed_until, reserved_until, grace),
+        )?;
+    }
+    // Past it the renewed lease does not take the dates back.
+    fixture.apply(8, FamilyMode::Normal).await?;
+    check(
+        &served(&fixture, &generic).await?,
+        on_lease(
+            "released",
+            &generic_lease,
+            renewed_until,
+            reserved_until,
+            reserved_until,
+        ),
+    )?;
+    for (name, lease) in [(&lapsed, &lapsed_lease), (&updated, &updated_lease)] {
+        check(
+            &served(&fixture, name).await?,
+            on_lease("expired", lease, renewed_until, reserved_until, grace_ends),
+        )?;
+    }
+    // The ExpiryUpdated lands inside the grace.
+    fixture.block_at(9, reserved_until + 14 * DAY).await?;
+    expiry_updated(&fixture, reviewed, &updated, 3, 9, updated_until).await?;
+    fixture.apply(9, FamilyMode::Normal).await?;
+    check(
+        &served(&fixture, &updated).await?,
+        on_lease(
+            "active",
+            &updated_lease,
+            renewed_until,
+            updated_until,
+            updated_until + 28 * DAY,
+        ),
+    )?;
+    check(
+        &served(&fixture, &lapsed).await?,
+        on_lease(
+            "expired",
+            &lapsed_lease,
+            renewed_until,
+            reserved_until,
+            grace_ends,
+        ),
+    )?;
+    // At the grace end the name with no ExpiryUpdated is released.
+    fixture.block_at(10, grace_ends).await?;
+    fixture.apply(10, FamilyMode::Normal).await?;
+    check(
+        &served(&fixture, &lapsed).await?,
+        on_lease(
+            "released",
+            &lapsed_lease,
+            renewed_until,
+            reserved_until,
+            grace_ends,
+        ),
+    )?;
+    check(
+        &served(&fixture, &updated).await?,
+        on_lease(
+            "active",
+            &updated_lease,
+            renewed_until,
+            updated_until,
+            updated_until + 28 * DAY,
+        ),
+    )?;
+    fixture.assert_rebuild_equal(10).await?;
+    fixture.cleanup().await
+}
+
 /// The ownerless-registry profile with a live lease: a controller registration whose holder later
 /// moved the token and then cleared the registry record. The cleared record does not end the
 /// lease, so the name serves it, with the token holder as registrant and no authority, owner or
