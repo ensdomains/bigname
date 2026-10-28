@@ -24,6 +24,8 @@ const REGISTRY: &str = "0x00000000000000000000000000000000000000e5";
 const V2_REGISTRY: &str = "0x00000000000000000000000000000000000000e6";
 const OWNER: &str = "0x00000000000000000000000000000000000000aa";
 const HOLDER: &str = "0x00000000000000000000000000000000000000bb";
+const OTHER: &str = "0x00000000000000000000000000000000000000cc";
+const NEW_HOLDER: &str = "0x00000000000000000000000000000000000000dd";
 const ZERO: &str = "0x0000000000000000000000000000000000000000";
 const DAY: i64 = 86_400;
 const LEASE_EXPIRY: i64 = 2_000_000_000;
@@ -43,9 +45,51 @@ fn node(logical_name_id: &str) -> &str {
 /// record is the 2017 registry's instead and the node has no current-registry record.
 async fn handoff(fixture: &Fixture, name: &str, n: u32, block: i64, old: bool) -> Result<String> {
     let resource = uuid(0x3000 + n);
-    let log = i64::from(n) * 10;
+    registry_only_bound(
+        fixture,
+        name,
+        RegistryOnly {
+            binding: &uuid(100 + n),
+            resource: &resource,
+            block,
+            log: i64::from(n) * 10,
+            owner: OWNER,
+            closed_at: None,
+        },
+        old,
+    )
+    .await?;
+    Ok(resource)
+}
+
+/// A registry write of `owner` at `block` that opens the registry-only binding `binding` of a
+/// name on the registry resource `resource`, closing at `closed_at`.
+struct RegistryOnly<'a> {
+    binding: &'a str,
+    resource: &'a str,
+    block: i64,
+    log: i64,
+    owner: &'a str,
+    closed_at: Option<i64>,
+}
+
+/// The SurfaceBound, epoch and owner write of `bound`, with its binding.
+async fn registry_only_bound(
+    fixture: &Fixture,
+    name: &str,
+    bound: RegistryOnly<'_>,
+    old: bool,
+) -> Result<()> {
+    let RegistryOnly {
+        binding,
+        resource,
+        block,
+        log,
+        owner,
+        closed_at,
+    } = bound;
     fixture
-        .binding(&uuid(100 + n), name, &resource, "ens_v1", block, log, None)
+        .binding(binding, name, resource, "ens_v1", block, log, closed_at)
         .await?;
     fixture
         .write(
@@ -54,8 +98,8 @@ async fn handoff(fixture: &Fixture, name: &str, n: u32, block: i64, old: bool) -
             "SurfaceBound",
             "ens_v1_registry_l1",
             Some(name),
-            Some(&resource),
-            json!({"authority_kind": "registry_only", "state_derived": true, "owner": OWNER}),
+            Some(resource),
+            json!({"authority_kind": "registry_only", "state_derived": true, "owner": owner}),
             REGISTRY,
         )
         .await?;
@@ -66,13 +110,12 @@ async fn handoff(fixture: &Fixture, name: &str, n: u32, block: i64, old: bool) -
             "AuthorityEpochChanged",
             "ens_v1_registry_l1",
             Some(name),
-            Some(&resource),
+            Some(resource),
             json!({"authority_kind": "registry_only"}),
             REGISTRY,
         )
         .await?;
-    owner_write(fixture, name, &resource, block, log + 2, OWNER, old).await?;
-    Ok(resource)
+    owner_write(fixture, name, resource, block, log + 2, owner, old).await
 }
 
 async fn owner_write(
@@ -1546,18 +1589,12 @@ async fn a_never_live_replacement_keeps_an_older_registrys_release_from_dating_t
     fixture.cleanup().await
 }
 
-/// The ownerless-registry profile with a live lease: a controller registration whose holder later
-/// moved the token and then cleared the registry record. The cleared record does not end the
-/// lease, so the name serves it, with the token holder as registrant and no authority, owner or
-/// registry custody.
-#[tokio::test]
-async fn an_ownerless_name_serves_its_lease_and_holder() -> Result<()> {
-    let fixture = Fixture::new("families_handoff_lease_ownerless", 6).await?;
-    let name = surface(&fixture, "cleared.eth").await?;
-    let lease = uuid(0x1001);
-    owner_write(&fixture, &name, &lease, 1, 0, OWNER, false).await?;
+/// A controller registration of `name` on `lease`: the registry record for OWNER at block 1
+/// with the lease's registrar binding, which closes at block 4, and the grant to OWNER at 2.
+async fn registered_by_controller(fixture: &Fixture, name: &str, lease: &str) -> Result<()> {
+    owner_write(fixture, name, lease, 1, 0, OWNER, false).await?;
     fixture
-        .binding(&uuid(101), &name, &lease, "ens_v1", 1, 10, Some(4))
+        .binding(&uuid(101), name, lease, "ens_v1", 1, 10, Some(4))
         .await?;
     fixture
         .write(
@@ -1565,8 +1602,8 @@ async fn an_ownerless_name_serves_its_lease_and_holder() -> Result<()> {
             10,
             "SurfaceBound",
             "ens_v1_registrar_l1",
-            Some(&name),
-            Some(&lease),
+            Some(name),
+            Some(lease),
             json!({"authority_kind": "registrar", "state_derived": false,
                    "registry_contract": REGISTRY, "owner_getter": OWNER}),
             REGISTRAR,
@@ -1578,13 +1615,26 @@ async fn an_ownerless_name_serves_its_lease_and_holder() -> Result<()> {
             10,
             "RegistrationGranted",
             "ens_v1_registrar_l1",
-            Some(&name),
-            Some(&lease),
+            Some(name),
+            Some(lease),
             json!({"authority_kind": "registrar", "source_event": "NameRegistered",
                    "status": "registered", "registrant": OWNER, "expiry": LEASE_EXPIRY}),
             REGISTRAR,
         )
         .await?;
+    Ok(())
+}
+
+/// The ownerless-registry profile with a live lease: a controller registration whose holder later
+/// moved the token and then cleared the registry record. The cleared record does not end the
+/// lease, so the name serves it, with the token holder as registrant and no authority, owner or
+/// registry custody.
+#[tokio::test]
+async fn an_ownerless_name_serves_its_lease_and_holder() -> Result<()> {
+    let fixture = Fixture::new("families_handoff_lease_ownerless", 6).await?;
+    let name = surface(&fixture, "cleared.eth").await?;
+    let lease = uuid(0x1001);
+    registered_by_controller(&fixture, &name, &lease).await?;
     transfer(&fixture, &name, &lease, 3, 1, HOLDER).await?;
     owner_write(&fixture, &name, &lease, 4, 0, ZERO, false).await?;
     fixture.apply(5, FamilyMode::Normal).await?;
@@ -1595,6 +1645,125 @@ async fn an_ownerless_name_serves_its_lease_and_holder() -> Result<()> {
                "identity_resource_id": lease, "ens_v1_expiry": LEASE_EXPIRY.to_string(),
                "expires_at": LEASE_EXPIRY, "registrant": HOLDER,
                "authority_kind": Value::Null, "owner": Value::Null}),
+    )?;
+    fixture.assert_rebuild_equal(5).await?;
+    fixture.cleanup().await
+}
+
+/// Rows e, e2 and f: a migrated name whose holder cleared the registry record and then
+/// `reclaim`ed it. The reclaim opens a newer registry-only binding but moves no token, so the
+/// transfer before it still names the holder, both while the record is cleared and after the
+/// reclaim, whether the reclaim goes to another address or back to the holder. A transfer after
+/// the reclaim names the new holder.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+#[tokio::test]
+async fn a_reclaimed_implied_lease_keeps_its_holder() -> Result<()> {
+    let fixture = Fixture::new("families_handoff_lease_reclaimed", 8).await?;
+    let mut names = Vec::new();
+    for (n, label, reclaimed_to) in [
+        (1, "reclaimed.eth", OTHER),
+        (2, "reclaimed-self.eth", HOLDER),
+        (3, "reclaimed-moved.eth", OTHER),
+    ] {
+        let name = surface(&fixture, label).await?;
+        let lease = uuid(0x1000 + n);
+        let registry = uuid(0x3000 + n);
+        let log = i64::from(n) * 10;
+        let (handoff_binding, reclaim_binding) = (uuid(100 + n), uuid(200 + n));
+        let bound = |binding, block, owner, closed_at| RegistryOnly {
+            binding,
+            resource: &registry,
+            block,
+            log,
+            owner,
+            closed_at,
+        };
+        registry_only_bound(
+            &fixture,
+            &name,
+            bound(handoff_binding.as_str(), 1, OWNER, Some(4)),
+            false,
+        )
+        .await?;
+        renewal(&fixture, &name, &lease, 2, log, json!(LEASE_EXPIRY), true).await?;
+        transfer(&fixture, &name, &lease, 3, log, HOLDER).await?;
+        owner_write(&fixture, &name, &registry, 4, log, ZERO, false).await?;
+        registry_only_bound(
+            &fixture,
+            &name,
+            bound(reclaim_binding.as_str(), 5, reclaimed_to, None),
+            false,
+        )
+        .await?;
+        names.push((name, lease, reclaimed_to));
+    }
+    let (moved, moved_lease, _) = &names[2];
+    transfer(&fixture, moved, moved_lease, 7, 30, NEW_HOLDER).await?;
+
+    // Block 4: the record is cleared.
+    fixture.apply(4, FamilyMode::Normal).await?;
+    for (name, lease, _) in &names {
+        check(
+            &served(&fixture, name).await?,
+            json!({"resource_id": lease, "registrant": HOLDER}),
+        )?;
+    }
+    // Block 6: the reclaim at 5 opened a registry-only binding.
+    fixture.apply(6, FamilyMode::Normal).await?;
+    for (name, lease, reclaimed_to) in &names {
+        check(
+            &served(&fixture, name).await?,
+            json!({"status": "active", "registered_at": block_time(1), "resource_id": lease,
+                   "authority_kind": "registry_only", "owner": reclaimed_to,
+                   "registrant": HOLDER}),
+        )?;
+    }
+    // Block 7: the token moves after the reclaim.
+    fixture.apply(7, FamilyMode::Normal).await?;
+    check(
+        &served(&fixture, moved).await?,
+        json!({"resource_id": moved_lease, "owner": OTHER, "registrant": NEW_HOLDER}),
+    )?;
+    fixture.assert_rebuild_equal(7).await?;
+    fixture.cleanup().await
+}
+
+/// Row g: a recorded lease's handoff keeps the binding-position rule. A controller registration
+/// whose token moved before a registry `Transfer` opened a registry-only binding serves the
+/// holder, because the binding records the lease and the handoff window admits the transfer. A
+/// transfer after the binding moves the registrant.
+#[tokio::test]
+async fn a_recorded_lease_handoff_keeps_its_transfer_window() -> Result<()> {
+    let fixture = Fixture::new("families_handoff_lease_recorded", 6).await?;
+    let name = surface(&fixture, "recorded.eth").await?;
+    let lease = uuid(0x1001);
+    registered_by_controller(&fixture, &name, &lease).await?;
+    transfer(&fixture, &name, &lease, 3, 1, HOLDER).await?;
+    registry_only_bound(
+        &fixture,
+        &name,
+        RegistryOnly {
+            binding: &uuid(201),
+            resource: &uuid(0x3001),
+            block: 4,
+            log: 10,
+            owner: OTHER,
+            closed_at: None,
+        },
+        false,
+    )
+    .await?;
+    transfer(&fixture, &name, &lease, 5, 1, NEW_HOLDER).await?;
+    fixture.apply(4, FamilyMode::Normal).await?;
+    check(
+        &served(&fixture, &name).await?,
+        json!({"status": "active", "registered_at": block_time(2), "resource_id": lease,
+               "authority_kind": "registry_only", "owner": OTHER, "registrant": HOLDER}),
+    )?;
+    fixture.apply(5, FamilyMode::Normal).await?;
+    check(
+        &served(&fixture, &name).await?,
+        json!({"resource_id": lease, "owner": OTHER, "registrant": NEW_HOLDER}),
     )?;
     fixture.assert_rebuild_equal(5).await?;
     fixture.cleanup().await

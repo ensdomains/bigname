@@ -167,9 +167,10 @@ pub(super) fn expiry_event<'a>(in_scope: &[&Tagged<'a>]) -> Option<&'a Lifecycle
 }
 
 /// The registrant: the latest admitted grant,
-/// release or transfer, plus the registry-only lease's transfers after the handoff, without the
-/// custody transfer into the wrapper and without a registrar release of a lease a wrapper of the
-/// name stands for; a release names its before-state registrant.
+/// release or transfer, plus the implied lease's transfers or the registry-only lease's transfers
+/// after the handoff, without the custody transfer into the wrapper and without a registrar
+/// release of a lease a wrapper of the name stands for. A release names its before-state
+/// registrant.
 pub(super) fn registrant(
     authority: &Authority<'_>,
     tagged: &[Tagged<'_>],
@@ -183,9 +184,6 @@ pub(super) fn registrant(
             && selection.authority_arm.as_deref() == Some("ens_v1")
     });
     let implied = authority.implied_lease;
-    // An ownerless name's lease has no handoff binding: its token transfers from the first
-    // current-registry record on name the holder.
-    let ownerless_lease = implied.filter(|_| handoff.is_none() && selection.ownerless_registry);
     let after_handoff = |tagged: &&Tagged<'_>| {
         let event = tagged.event;
         !tagged.admitted
@@ -193,20 +191,26 @@ pub(super) fn registrant(
             && event.event_kind == "TokenControlTransferred"
             && event.source_family == REGISTRAR
             && event.authority_kind == "registrar"
-            && (handoff.is_some_and(|binding| {
-                let (block, transaction, log, _) = binding.order();
-                let lease = implied
-                    .map(|lease| lease.resource)
-                    .or(binding.lease_resource_id.as_deref());
-                lease.is_some()
-                    && lease == event.resource_id.as_deref()
-                    && event.position.bound() > (block, transaction, log)
-            }) || ownerless_lease.is_some_and(|lease| {
-                event.resource_id.as_deref() == Some(lease.resource)
-                    && lease
-                        .from_block
-                        .is_none_or(|from| event.position.block_number >= from)
-            }))
+            && match implied {
+                // An implied lease's token transfers name the holder from the first
+                // current-registry record on, under any later binding or none. A `reclaim` after
+                // a cleared record opens a newer binding but moves no token.
+                // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+                Some(lease) => {
+                    event.resource_id.as_deref() == Some(lease.resource)
+                        && lease
+                            .from_block
+                            .is_none_or(|from| event.position.block_number >= from)
+                }
+                // A recorded lease's transfers up to the binding are admitted through the handoff
+                // window, so only later ones join here.
+                None => handoff.is_some_and(|binding| {
+                    let (block, transaction, log, _) = binding.order();
+                    binding.lease_resource_id.is_some()
+                        && binding.lease_resource_id == event.resource_id
+                        && event.position.bound() > (block, transaction, log)
+                }),
+            }
             && (!is_v2 || (event.is_v2_family() && tagged.key.as_deref() == selected_key))
     };
     let admitted_grants: Vec<&LifecycleEvent> = tagged

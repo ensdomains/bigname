@@ -631,9 +631,10 @@ lease's resource there and derives a `RegistrationGranted` beside the renewal. T
 name's [implied lease](glossary.md#implied-lease): the resource of the name's latest own
 `RegistrationGranted`, `RegistrationRenewed`, `RegistrationReleased` or `ExpiryChanged` row of
 the `ens_v1_registrar_l1` family with registrar authority kind, at or after the name's first
-current-registry record. Those four kinds on that resource reach the registration, and its
-token transfers from the handoff on reach the registrant as a recorded lease's do. The
-registration then serves the lease's `resource_id` and identity, its expiry and
+current-registry record. Those four kinds on that resource reach the registration. Its token
+transfers from the first current-registry record on reach the registrant, under any later
+registry-only binding or none. A `reclaim` after a cleared record opens such a binding but moves
+no token. The registration then serves the lease's `resource_id` and identity, its expiry and
 `ens_v1.expires_at`, and `active`, `expired` or `released` by the ENSv1 schedule. A released
 lease is `released` even when its release carries no expiry. `registered_at` is the time of
 the first current-registry record's block, the migration's own registration block, or of the
@@ -647,6 +648,7 @@ own `NameRegistered` is still not interpreted, so a migrated name never renewed 
 row and serves as before.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L155 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
 
 On a cut-over chain an ENSv1 `.eth` name with an ownerless ENSv2 reservation keeps its lease's
 `registered_at` and identity, unless an ENSv2 registration of the name came after the lease and
