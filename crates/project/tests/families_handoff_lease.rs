@@ -802,11 +802,12 @@ async fn a_live_reservation_on_the_reviewed_registry_lapses_into_its_grace() -> 
     fixture.cleanup().await
 }
 
-/// A migrated name's implied lease `0x1000 + n`, renewed at block 3 to 62 days before block 7's
-/// time, and a premigration reservation of it on `registry`, entry `0x2000 + n` and token `n`,
-/// written live at block 5 until block 7's time. A BaseRegistrar renewal at block 6 extends the
-/// lease a year, past the reservation, and no ENSv2 `ExpiryUpdated` follows before the
-/// path-expiry release Interpret writes at block 7. Returns the name and its lease.
+/// A controller registration of lease `0x1000 + n` (`registered_until`, granted at block 2 until
+/// 62 days before block 7's time), and a premigration reservation of it on `registry`, entry
+/// `0x2000 + n` and token `n`, written live at block 5 until block 7's time. A BaseRegistrar
+/// renewal at block 6 extends the lease a year, past the reservation, and no ENSv2
+/// `ExpiryUpdated` follows before the path-expiry release Interpret writes at block 7. Returns
+/// the name and its lease.
 async fn renewed_past_reservation(
     fixture: &Fixture,
     registry: Registry<'_>,
@@ -820,8 +821,7 @@ async fn renewed_past_reservation(
     let log = i64::from(n) * 10;
     let reserved_until = block_time(7);
     let lease_expiry = reserved_until - 62 * DAY;
-    handoff(fixture, &name, n, 1, false).await?;
-    renewal(fixture, &name, &lease, 3, log, json!(lease_expiry), true).await?;
+    registered_until(fixture, &name, n, &lease, 1, lease_expiry).await?;
     fixture
         .write(
             5,
@@ -874,8 +874,10 @@ async fn renewed_past_reservation(
 }
 
 /// The late ENSv2 `ExpiryUpdated` of `renewed_past_reservation`'s reservation `n` at `block`, as
-/// the adapter writes it for an entry whose expiry had passed: an `ExpiryChanged` and a
-/// `RegistrationRenewed` that revive it.
+/// the adapter writes it for a reservation whose expiry had passed: the `ExpiryChanged` that
+/// revives it, and the `RegistrationReserved` snapshot (`derived_from` `registry_state`) of the
+/// name it is current for again (`v2_registry.rs` and `v2_registry/topology.rs` in the
+/// adapters).
 async fn expiry_updated(
     fixture: &Fixture,
     registry: Registry<'_>,
@@ -885,42 +887,59 @@ async fn expiry_updated(
     expiry: i64,
 ) -> Result<()> {
     let entry = uuid(0x2000 + n);
-    for (log, kind) in [(0, "ExpiryChanged"), (1, "RegistrationRenewed")] {
-        fixture
-            .write(
-                block,
-                log,
-                kind,
-                "ens_v2_registry_l1",
-                Some(name),
-                Some(&entry),
-                json!({"source_event": "ExpiryUpdated", "token_id": n.to_string(),
-                       "expiry": expiry, "sender": OWNER, "revived_from_expiry": true,
-                       "registry_contract_instance_id": registry.instance}),
-                registry.address,
-            )
-            .await?;
-    }
+    let token = n.to_string();
+    fixture
+        .write(
+            block,
+            0,
+            "ExpiryChanged",
+            "ens_v2_registry_l1",
+            Some(name),
+            Some(&entry),
+            json!({"source_event": "ExpiryUpdated", "token_id": token, "expiry": expiry,
+                   "sender": OWNER, "revived_from_expiry": true,
+                   "registry_contract_instance_id": registry.instance}),
+            registry.address,
+        )
+        .await?;
+    fixture
+        .write(
+            block,
+            1,
+            "RegistrationReserved",
+            "ens_v2_registry_l1",
+            Some(name),
+            Some(&entry),
+            json!({"source_event": "ExpiryUpdated", "status": "reserved",
+                   "derived_from": "registry_state", "expiry": expiry, "token_id": token,
+                   "current_token_id": token, "reservation_resource": true,
+                   "registry_contract_instance_id": registry.instance}),
+            registry.address,
+        )
+        .await?;
     Ok(())
 }
 
-/// The row-21 fields of a name ENSv1 selects through its implied lease `lease`.
+/// The fields of a name ENSv1 selects through `renewed_past_reservation`'s lease `lease`,
+/// registered at block 2.
 fn on_lease(
     status: &str,
+    authority_kind: &str,
     lease: &str,
     ens_v1_expiry: i64,
     expires_at: i64,
     grace_ends_at: i64,
 ) -> Value {
-    json!({"status": status, "lifecycle_status": status, "registered_at": block_time(1),
-           "identity_resource_id": lease, "authority_kind": "registry_only",
+    json!({"status": status, "lifecycle_status": status, "registered_at": block_time(2),
+           "identity_resource_id": lease, "authority_kind": authority_kind,
            "ens_v1_expiry": ens_v1_expiry.to_string(), "expires_at": expires_at,
            "grace_ends_at": grace_ends_at})
 }
 
-/// Row 21 with the lease renewed past its reservation: a BaseRegistrar renewal extends the lease
-/// after premigration reserved the name, and the reservation lapses before the matching ENSv2
-/// `ExpiryUpdated` arrives. The row pins the documented contract and passes on the base branch.
+/// A controller-registered lease renewed past its reservation: a BaseRegistrar renewal extends
+/// the lease after premigration reserved the name, and the reservation lapses before the matching
+/// ENSv2 `ExpiryUpdated` arrives. The row pins the documented contract and passes on the base
+/// branch.
 /// Crossing an expiry "never switches a name on a cut-over chain back to a different
 /// registration's dates" (`canonical.rs:1-3`). Past the cutover `expires_at` is the retained
 /// canonical ENSv2 entry's expiry "whichever arm holds authority" (`docs/api-v1.md:56`), and the
@@ -958,7 +977,14 @@ async fn a_reservation_that_lapses_after_its_lease_renewed_keeps_its_own_schedul
     ] {
         check(
             &served(&fixture, name).await?,
-            on_lease("active", lease, renewed_until, reserved_until, grace),
+            on_lease(
+                "active",
+                "registrar",
+                lease,
+                renewed_until,
+                reserved_until,
+                grace,
+            ),
         )?;
     }
     // Past it the renewed lease does not take the dates back.
@@ -967,6 +993,7 @@ async fn a_reservation_that_lapses_after_its_lease_renewed_keeps_its_own_schedul
         &served(&fixture, &generic).await?,
         on_lease(
             "released",
+            "registrar",
             &generic_lease,
             renewed_until,
             reserved_until,
@@ -976,7 +1003,14 @@ async fn a_reservation_that_lapses_after_its_lease_renewed_keeps_its_own_schedul
     for (name, lease) in [(&lapsed, &lapsed_lease), (&updated, &updated_lease)] {
         check(
             &served(&fixture, name).await?,
-            on_lease("expired", lease, renewed_until, reserved_until, grace_ends),
+            on_lease(
+                "expired",
+                "registrar",
+                lease,
+                renewed_until,
+                reserved_until,
+                grace_ends,
+            ),
         )?;
     }
     // The ExpiryUpdated lands inside the grace.
@@ -987,6 +1021,7 @@ async fn a_reservation_that_lapses_after_its_lease_renewed_keeps_its_own_schedul
         &served(&fixture, &updated).await?,
         on_lease(
             "active",
+            "registrar",
             &updated_lease,
             renewed_until,
             updated_until,
@@ -997,6 +1032,7 @@ async fn a_reservation_that_lapses_after_its_lease_renewed_keeps_its_own_schedul
         &served(&fixture, &lapsed).await?,
         on_lease(
             "expired",
+            "registrar",
             &lapsed_lease,
             renewed_until,
             reserved_until,
@@ -1010,6 +1046,7 @@ async fn a_reservation_that_lapses_after_its_lease_renewed_keeps_its_own_schedul
         &served(&fixture, &lapsed).await?,
         on_lease(
             "released",
+            "registrar",
             &lapsed_lease,
             renewed_until,
             reserved_until,
@@ -1020,6 +1057,7 @@ async fn a_reservation_that_lapses_after_its_lease_renewed_keeps_its_own_schedul
         &served(&fixture, &updated).await?,
         on_lease(
             "active",
+            "registrar",
             &updated_lease,
             renewed_until,
             updated_until,
