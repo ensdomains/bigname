@@ -197,9 +197,37 @@ async fn release(
     Ok(())
 }
 
+/// The ENSv2 registry a reservation is written on: the contract instance its events name and the
+/// address that emits them.
+#[derive(Clone, Copy)]
+struct Registry<'a> {
+    instance: &'a str,
+    address: &'a str,
+}
+
+/// The generic test registry. Its string identifier `eth` is no reviewed deployment's contract
+/// instance, so the registrar grace policy (`lifecycle/policy.rs`) gives it no grace.
+const GENERIC: Registry<'static> = Registry {
+    instance: "eth",
+    address: V2_REGISTRY,
+};
+
 /// A premigration-shaped reservation of `name` on ENSv2 entry `entry`.
 async fn reserved(
     fixture: &Fixture,
+    name: &str,
+    entry: &str,
+    block: i64,
+    log: i64,
+    expiry: i64,
+) -> Result<()> {
+    reserved_on(fixture, GENERIC, name, entry, block, log, expiry).await
+}
+
+/// `reserved` on `registry`.
+async fn reserved_on(
+    fixture: &Fixture,
+    registry: Registry<'_>,
     name: &str,
     entry: &str,
     block: i64,
@@ -214,9 +242,9 @@ async fn reserved(
             "ens_v2_registry_l1",
             Some(name),
             Some(entry),
-            json!({"registry_contract_instance_id": "eth", "token_id": "1",
+            json!({"registry_contract_instance_id": registry.instance, "token_id": "1",
                    "source_event": "LabelReserved", "status": "reserved", "expiry": expiry}),
-            V2_REGISTRY,
+            registry.address,
         )
         .await?;
     Ok(())
@@ -620,25 +648,26 @@ async fn a_reservation_replaced_after_lapsing_leaves_the_renewed_lease_registere
     fixture.cleanup().await
 }
 
-/// A reservation live when written that lapses later, on a migrated name's implied lease. Only a
-/// reservation already expired when written is set aside, so this one is the canonical
-/// allocation: while live and after it lapses the name serves its expiry, not the lease's, and
-/// the path-expiry release Interpret writes at the first block past it changes nothing. Grace
-/// belongs to a reviewed ETHRegistry deployment (`lifecycle/policy.rs`), and the fixture's
-/// registry is not one, so the grace ends at the expiry and the lapse releases the name there,
-/// as `families_expiry_grace.rs` pins for the same registry. The lease keeps dating it.
-#[tokio::test]
-async fn a_live_reservation_that_lapses_later_keeps_its_own_schedule() -> Result<()> {
-    let fixture = Fixture::new("families_handoff_lease_live_reservation", 8).await?;
-    declared_path::root_eth_entry(&fixture).await?;
-    let name = surface(&fixture, "graced.eth").await?;
+/// What `lapsing_reservation` wrote: the name, its lease and the two expiries.
+struct Lapsing {
+    name: String,
+    lease: String,
+    reserved_until: i64,
+    lease_expiry: i64,
+}
+
+/// Row 21's fixture: a migrated name's implied lease, renewed at block 3 to 62 days before block
+/// 7's time, and a premigration reservation on `registry` written live at block 5 until block 7's
+/// time, with the path-expiry release Interpret writes at block 7.
+async fn lapsing_reservation(fixture: &Fixture, registry: Registry<'_>) -> Result<Lapsing> {
+    let name = surface(fixture, "graced.eth").await?;
     let lease = uuid(0x1001);
     let entry = uuid(0x2001);
     let reserved_until = block_time(7);
     let lease_expiry = reserved_until - 62 * DAY;
-    handoff(&fixture, &name, 1, 1, false).await?;
-    renewal(&fixture, &name, &lease, 3, 1, json!(lease_expiry), true).await?;
-    reserved(&fixture, &name, &entry, 5, 1, reserved_until).await?;
+    handoff(fixture, &name, 1, 1, false).await?;
+    renewal(fixture, &name, &lease, 3, 1, json!(lease_expiry), true).await?;
+    reserved_on(fixture, registry, &name, &entry, 5, 1, reserved_until).await?;
     fixture
         .event(
             Event::new(
@@ -656,19 +685,46 @@ async fn a_live_reservation_that_lapses_later_keeps_its_own_schedule() -> Result
             .after(json!({"source_event": "RegistryPathExpired",
                           "derived_from": "interpreter_state",
                           "terminal_reason": "registry_name_binding_expired",
-                          "registry": V2_REGISTRY, "token_id": "1",
-                          "registry_contract_instance_id": "eth",
+                          "registry": registry.address, "token_id": "1",
+                          "registry_contract_instance_id": registry.instance,
                           "expiry": reserved_until, "status": "released",
                           "released_at": block_time(7)}))
-            .raw(json!({"kind": "raw_block", "emitting_address": V2_REGISTRY})),
+            .raw(json!({"kind": "raw_block", "emitting_address": registry.address})),
         )
         .await?;
+    Ok(Lapsing {
+        name,
+        lease,
+        reserved_until,
+        lease_expiry,
+    })
+}
+
+/// Row 21 on the generic test registry. A reservation live when written that lapses later, on a
+/// migrated name's implied lease. Only a reservation already expired when written is set aside,
+/// so this one is the canonical allocation: while live and after it lapses the name serves its
+/// expiry, not the lease's, and the path-expiry release changes nothing. The ENSv1 registry-only
+/// binding stays selected and the lease keeps dating it. Grace belongs to a reviewed ETHRegistry
+/// deployment (`lifecycle/policy.rs`), and this registry is not one, so the grace ends at the
+/// expiry, as `families_expiry_grace.rs` pins for the same registry. The release at the expiry
+/// follows from the exclusive boundary the `schedule()` unit test in `canonical.rs` pins.
+#[tokio::test]
+async fn a_live_reservation_that_lapses_later_keeps_its_own_schedule() -> Result<()> {
+    let fixture = Fixture::new("families_handoff_lease_live_reservation", 8).await?;
+    declared_path::root_eth_entry(&fixture).await?;
+    let Lapsing {
+        name,
+        lease,
+        reserved_until,
+        lease_expiry,
+    } = lapsing_reservation(&fixture, GENERIC).await?;
 
     fixture.apply(6, FamilyMode::Normal).await?;
     check(
         &served(&fixture, &name).await?,
         json!({"status": "active", "lifecycle_status": "active",
                "registered_at": block_time(1), "identity_resource_id": lease,
+               "authority_kind": "registry_only",
                "ens_v1_expiry": lease_expiry.to_string(), "expires_at": reserved_until,
                "grace_ends_at": reserved_until}),
     )?;
@@ -677,9 +733,71 @@ async fn a_live_reservation_that_lapses_later_keeps_its_own_schedule() -> Result
         &served(&fixture, &name).await?,
         json!({"status": "released", "lifecycle_status": "released",
                "registered_at": block_time(1), "identity_resource_id": lease,
-               "expires_at": reserved_until, "grace_ends_at": reserved_until}),
+               "authority_kind": "registry_only",
+               "ens_v1_expiry": lease_expiry.to_string(), "expires_at": reserved_until,
+               "grace_ends_at": reserved_until}),
     )?;
     fixture.assert_rebuild_equal(8).await?;
+    fixture.cleanup().await
+}
+
+/// Row 21 on the reviewed Sepolia ETHRegistry, a deployment `lifecycle/policy.rs` lists, where
+/// premigration writes its reservations. The policy gives it the reviewed registrar's 28-day
+/// grace, so after the lapse at E the name is `expired` until E + 28 days and `released` from
+/// then, the exclusive boundary. Premigration reserves a name until its lease's expiry plus 62
+/// days, so that grace ends with the lease's 90-day ENSv1 grace. Selection, identity and expiry
+/// are the generic registry's.
+#[tokio::test]
+async fn a_live_reservation_on_the_reviewed_registry_lapses_into_its_grace() -> Result<()> {
+    let fixture = Fixture::new("families_handoff_lease_reviewed_reservation", 8).await?;
+    let instance = declared_path::reviewed_root_eth_entry(&fixture).await?;
+    let registry = Registry {
+        instance: &instance,
+        address: declared_path::ETH,
+    };
+    let Lapsing {
+        name,
+        lease,
+        reserved_until,
+        lease_expiry,
+    } = lapsing_reservation(&fixture, registry).await?;
+    let grace_ends = reserved_until + 28 * DAY;
+
+    fixture.apply(6, FamilyMode::Normal).await?;
+    check(
+        &served(&fixture, &name).await?,
+        json!({"status": "active", "lifecycle_status": "active",
+               "registered_at": block_time(1), "identity_resource_id": lease,
+               "authority_kind": "registry_only",
+               "ens_v1_expiry": lease_expiry.to_string(), "expires_at": reserved_until,
+               "grace_ends_at": grace_ends}),
+    )?;
+    fixture.apply(8, FamilyMode::Normal).await?;
+    let lapsed = served(&fixture, &name).await?;
+    check(
+        &lapsed,
+        json!({"status": "expired", "lifecycle_status": "expired",
+               "registered_at": block_time(1), "identity_resource_id": lease,
+               "authority_kind": "registry_only",
+               "ens_v1_expiry": lease_expiry.to_string(), "expires_at": reserved_until,
+               "grace_ends_at": grace_ends}),
+    )?;
+    ensure!(
+        lapsed["grace_ends_at"] == json!(lease_expiry + 90 * DAY),
+        "the reservation's grace ends with the lease's ENSv1 grace: {lapsed}"
+    );
+    // A block exactly at the grace end: the exclusive boundary releases the name there.
+    fixture.block_at(9, grace_ends).await?;
+    fixture.apply(9, FamilyMode::Normal).await?;
+    check(
+        &served(&fixture, &name).await?,
+        json!({"status": "released", "lifecycle_status": "released",
+               "registered_at": block_time(1), "identity_resource_id": lease,
+               "authority_kind": "registry_only",
+               "ens_v1_expiry": lease_expiry.to_string(), "expires_at": reserved_until,
+               "grace_ends_at": grace_ends}),
+    )?;
+    fixture.assert_rebuild_equal(9).await?;
     fixture.cleanup().await
 }
 
