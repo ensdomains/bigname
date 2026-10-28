@@ -620,13 +620,15 @@ async fn a_reservation_replaced_after_lapsing_leaves_the_renewed_lease_registere
     fixture.cleanup().await
 }
 
-/// A reservation live when written that lapses later, on a migrated name's implied lease.
-/// Premigration reserved the name at the lease's expiry plus 62 days, so while the reservation
-/// is live the name serves its expiry and the ENSv2 grace. Its lapse, with the path-expiry release
-/// Interpret writes at the first block past it, makes the name `expired`, not `released`, and the
-/// grace ends on the second the ENSv1 grace does.
+/// A reservation live when written that lapses later, on a migrated name's implied lease. Only a
+/// reservation already expired when written is set aside, so this one is the canonical
+/// allocation: while live and after it lapses the name serves its expiry, not the lease's, and
+/// the path-expiry release Interpret writes at the first block past it changes nothing. Grace
+/// belongs to a reviewed ETHRegistry deployment (`lifecycle/policy.rs`), and the fixture's
+/// registry is not one, so the grace ends at the expiry and the lapse releases the name there,
+/// as `families_expiry_grace.rs` pins for the same registry. The lease keeps dating it.
 #[tokio::test]
-async fn a_live_reservation_that_lapses_later_leaves_the_lease_in_grace() -> Result<()> {
+async fn a_live_reservation_that_lapses_later_keeps_its_own_schedule() -> Result<()> {
     let fixture = Fixture::new("families_handoff_lease_live_reservation", 8).await?;
     declared_path::root_eth_entry(&fixture).await?;
     let name = surface(&fixture, "graced.eth").await?;
@@ -662,23 +664,21 @@ async fn a_live_reservation_that_lapses_later_leaves_the_lease_in_grace() -> Res
         )
         .await?;
 
-    let grace_ends = reserved_until + 28 * DAY;
     fixture.apply(6, FamilyMode::Normal).await?;
     check(
         &served(&fixture, &name).await?,
         json!({"status": "active", "lifecycle_status": "active",
                "registered_at": block_time(1), "identity_resource_id": lease,
                "ens_v1_expiry": lease_expiry.to_string(), "expires_at": reserved_until,
-               "grace_ends_at": grace_ends}),
+               "grace_ends_at": reserved_until}),
     )?;
     fixture.apply(8, FamilyMode::Normal).await?;
     check(
         &served(&fixture, &name).await?,
-        json!({"status": "expired", "lifecycle_status": "expired",
+        json!({"status": "released", "lifecycle_status": "released",
                "registered_at": block_time(1), "identity_resource_id": lease,
-               "expires_at": reserved_until, "grace_ends_at": grace_ends}),
+               "expires_at": reserved_until, "grace_ends_at": reserved_until}),
     )?;
-    assert_eq!(grace_ends, lease_expiry + 90 * DAY);
     fixture.assert_rebuild_equal(8).await?;
     fixture.cleanup().await
 }
