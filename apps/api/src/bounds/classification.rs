@@ -12,8 +12,10 @@ pub(super) fn is_verified_execution_request(method: &Method, uri: &Uri) -> bool 
             query_absent_blank_or_matches(uri, "source", &["verified"])
         }
         ["v1", "names", _] => query_matches(uri, "source", &["verified"]),
+        // A records read that names no `source` answers its `value_not_retained` keys through
+        // verified execution, so it takes the same admission as `source=verified`.
         ["v1", "names", _, "records"] => {
-            query_matches(uri, "source", &["verified"])
+            query_absent_blank_or_matches(uri, "source", &["verified"])
                 || (query_matches(uri, "source", &["auto"]) && query_has_csv_item(uri, "keys"))
         }
         ["v1", "diagnostics", "names", _, "records"] => true,
