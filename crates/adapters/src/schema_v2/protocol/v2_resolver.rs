@@ -143,6 +143,15 @@ pub(super) fn interpret(
             let node = hex_string(event.node);
             let value_length = event.value.len();
             let selector = event_string_selector("text", &event.key);
+            // INCIDENT-ONLY sel17 (never ships): an over-cap key is skipped like a key mismatch.
+            if crate::schema_v2::common::incident_sel17_record_key_over_cap(
+                selected,
+                raw,
+                &selector.record_family,
+                &selector.record_key,
+            ) {
+                return Ok(Interpreted::new());
+            }
             let mut after_state = json!({
                 "source_event": "TextChanged",
                 "resolver": raw.emitting_address,

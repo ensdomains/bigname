@@ -155,6 +155,40 @@ impl EventStringSelector {
     }
 }
 
+/// INCIDENT-ONLY sel17 (never ships): the largest formatted `record_key`, in bytes, a record
+/// write may carry. Project keeps `record_key` in btree indexes whose tightest bound is about
+/// 2,500 bytes of key (project_text_hydration_work_order_idx), so a longer incompressible key
+/// failed the block on every retry. The largest key indexed on mainnet is 2,126 bytes.
+pub(super) const INCIDENT_SEL17_MAX_RECORD_KEY_BYTES: usize = 2_400;
+
+/// INCIDENT-ONLY sel17 (never ships): whether a formatted record key is over the cap. An
+/// over-cap key is logged here; the caller skips the log as it skips a key-hash mismatch,
+/// returning `Interpreted::new()`, so no record event or row is written.
+pub(super) fn incident_sel17_record_key_over_cap(
+    selected: &super::catalog::Selected,
+    raw: &RawLogInput,
+    record_family: &str,
+    record_key: &str,
+) -> bool {
+    if record_key.len() <= INCIDENT_SEL17_MAX_RECORD_KEY_BYTES {
+        return false;
+    }
+    tracing::warn!(
+        chain_id = %raw.chain_id,
+        block_number = raw.block_number,
+        block_hash = %raw.block_hash,
+        transaction_hash = %raw.transaction_hash,
+        log_index = raw.log_index,
+        emitting_address = %raw.emitting_address,
+        source_family = %selected.source.source_family,
+        event = %selected.event.name,
+        record_family = %record_family,
+        record_key_bytes = record_key.len(),
+        "INCIDENT-ONLY sel17: record key over 2400 bytes; log skipped, no record written"
+    );
+    true
+}
+
 pub(super) fn event_string_selector(record_family: &str, raw_key: &[u8]) -> EventStringSelector {
     if let Some(selector_key) = decoded_label(raw_key)
         && !selector_key.trim().is_empty()

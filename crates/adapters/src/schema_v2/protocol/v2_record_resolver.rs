@@ -148,6 +148,15 @@ pub(super) fn interpret(
                 "data"
             };
             let selector = event_string_selector(family, &key);
+            // INCIDENT-ONLY sel17 (never ships): an over-cap key is skipped like a key mismatch.
+            if crate::schema_v2::common::incident_sel17_record_key_over_cap(
+                selected,
+                raw,
+                &selector.record_family,
+                &selector.record_key,
+            ) {
+                return Ok(Interpreted::new());
+            }
             let mut after = json!({"record_family":selector.record_family, "record_key":selector.record_key,
                 "selector_key":selector.selector_key, "value_retained":true, "value_length":value.len(),
                 "value":if family == "text" { event_string_value(&value) } else { json!(hex_string(&value)) }});

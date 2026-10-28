@@ -8,7 +8,10 @@ use super::support::single_event;
 use crate::evm_abi::{address_hex, decode_event_log, decode_event_log_data_as, hex_string};
 use crate::schema_v2::{
     catalog::Selected,
-    common::{event_string_has_content, event_string_selector, event_string_value},
+    common::{
+        event_string_has_content, event_string_selector, event_string_value,
+        incident_sel17_record_key_over_cap,
+    },
     model::RawLogInput,
     state::State,
 };
@@ -426,6 +429,22 @@ pub(in crate::schema_v2::protocol) fn interpret(
         }
         name => bail!("unsupported resolver event {name}"),
     };
+    // INCIDENT-ONLY sel17 (never ships): every record write above (text, data, dns and the
+    // fixed-shape keys) passes here before anything is emitted. An over-cap key is skipped like
+    // a key-hash mismatch.
+    if let Some(record_key) = after.get("record_key").and_then(Value::as_str)
+        && incident_sel17_record_key_over_cap(
+            selected,
+            raw,
+            after
+                .get("record_family")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            record_key,
+        )
+    {
+        return Ok(Interpreted::new());
+    }
     ensure_declared(selected, &[kind])?;
     let affected_node = after
         .get("node")

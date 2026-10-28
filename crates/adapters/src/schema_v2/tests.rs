@@ -17741,6 +17741,176 @@ fn nul_text_value_is_retained_as_tagged_raw_bytes() -> anyhow::Result<()> {
     Ok(())
 }
 
+mod incident_sel17_dns {
+    use alloy_sol_types::sol;
+
+    sol! {
+        event DNSRecordChanged(bytes32 indexed node, bytes name, uint16 resource, bytes record);
+    }
+}
+
+/// INCIDENT-ONLY sel17 (never ships): the record keys of the RecordChanged events one batch of
+/// ENSv1 resolver logs emits.
+fn incident_sel17_record_keys(
+    event: (&str, &str),
+    logs: Vec<alloy_primitives::LogData>,
+) -> anyhow::Result<Vec<(String, serde_json::Value)>> {
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            57,
+            "ens_v1_resolver_l1",
+            event.0,
+            event.1,
+            &[],
+            &["RecordChanged"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: Vec::new(),
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: logs
+            .into_iter()
+            .enumerate()
+            .map(|(index, log)| raw_at(log, 1, i64::try_from(index).unwrap(), CONTRACT))
+            .collect(),
+    })?;
+    Ok(output
+        .normalized_events
+        .iter()
+        .filter(|event| event.event_kind == "RecordChanged")
+        .map(|event| {
+            (
+                event.after_state["record_key"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                event.after_state["value"].clone(),
+            )
+        })
+        .collect())
+}
+
+const INCIDENT_SEL17_TEXT: (&str, &str) = (
+    "TextChanged",
+    "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+);
+
+fn incident_sel17_text_log(key: &[u8], value: &[u8]) -> alloy_primitives::LogData {
+    with_topic0(
+        raw_resolver_strings::RawTextChanged {
+            node: B256::repeat_byte(0x57),
+            indexedKey: keccak256(key),
+            key: key.to_vec().into(),
+            value: value.to_vec().into(),
+        }
+        .encode_log_data(),
+        resolver_strings::TextChanged::SIGNATURE_HASH,
+    )
+}
+
+/// INCIDENT-ONLY sel17 (never ships): the cap is on the formatted record key. A key of
+/// exactly 2,400 bytes is written; 2,401 bytes skips the log and writes no record.
+#[test]
+fn incident_only_sel17_text_key_cap_is_on_the_formatted_key() -> anyhow::Result<()> {
+    // `text:` is 5 bytes.
+    let at_cap = vec![b'k'; 2_400 - 5];
+    let keys = incident_sel17_record_keys(
+        INCIDENT_SEL17_TEXT,
+        vec![incident_sel17_text_log(&at_cap, b"v")],
+    )?;
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].0.len(), 2_400);
+    assert_eq!(keys[0].0, format!("text:{}", "k".repeat(2_400 - 5)));
+
+    let over_cap = vec![b'k'; 2_401 - 5];
+    let keys = incident_sel17_record_keys(
+        INCIDENT_SEL17_TEXT,
+        vec![incident_sel17_text_log(&over_cap, b"v")],
+    )?;
+    assert!(keys.is_empty(), "a 2,401-byte record key writes no record");
+    Ok(())
+}
+
+/// INCIDENT-ONLY sel17 (never ships): an opaque key is measured after hex formatting, which
+/// doubles its bytes.
+#[test]
+fn incident_only_sel17_opaque_key_cap_counts_the_hex_form() -> anyhow::Result<()> {
+    // `text_opaque:0x` is 14 bytes; each raw byte is two hex digits.
+    let at_cap = vec![0xff_u8; (2_400 - 14) / 2];
+    let keys = incident_sel17_record_keys(
+        INCIDENT_SEL17_TEXT,
+        vec![incident_sel17_text_log(&at_cap, b"v")],
+    )?;
+    assert_eq!(keys.len(), 1);
+    assert!(keys[0].0.starts_with("text_opaque:0x"), "{}", &keys[0].0[..20]);
+    assert_eq!(keys[0].0.len(), 2_400);
+
+    let over_cap = vec![0xff_u8; (2_400 - 14) / 2 + 1];
+    assert_eq!(14 + 2 * over_cap.len(), 2_402);
+    let keys = incident_sel17_record_keys(
+        INCIDENT_SEL17_TEXT,
+        vec![incident_sel17_text_log(&over_cap, b"v")],
+    )?;
+    assert!(keys.is_empty(), "an opaque key over the cap once hex-formatted is skipped");
+    Ok(())
+}
+
+/// INCIDENT-ONLY sel17 (never ships): `dns:{resource}:{hex(name)}` keys from the declared
+/// DNSRecordChanged pass the same cap.
+#[test]
+fn incident_only_sel17_dns_key_over_the_cap_is_skipped() -> anyhow::Result<()> {
+    let dns = (
+        "DNSRecordChanged",
+        "event DNSRecordChanged(bytes32 indexed node, bytes name, uint16 resource, bytes record)",
+    );
+    let log = |name: Vec<u8>| {
+        incident_sel17_dns::DNSRecordChanged {
+            node: B256::repeat_byte(0x58),
+            name: name.into(),
+            resource: 1,
+            record: vec![0x01_u8].into(),
+        }
+        .encode_log_data()
+    };
+    let keys = incident_sel17_record_keys(dns, vec![log(b"abc".to_vec())])?;
+    assert_eq!(
+        keys.iter().map(|(key, _)| key.as_str()).collect::<Vec<_>>(),
+        ["dns:1:0x616263"]
+    );
+
+    // `dns:1:0x` is 8 bytes.
+    let over_cap = vec![0x61_u8; (2_400 - 8) / 2 + 1];
+    assert_eq!(8 + 2 * over_cap.len(), 2_402);
+    let keys = incident_sel17_record_keys(dns, vec![log(over_cap)])?;
+    assert!(keys.is_empty(), "a dns record key over the cap is skipped");
+    Ok(())
+}
+
+/// INCIDENT-ONLY sel17 (never ships): a key as long as the longest one indexed on mainnet
+/// (2,126 bytes) still updates under its own key.
+#[test]
+fn incident_only_sel17_existing_2126_byte_key_still_updates() -> anyhow::Result<()> {
+    let key = vec![b'k'; 2_126 - 5];
+    let keys = incident_sel17_record_keys(
+        INCIDENT_SEL17_TEXT,
+        vec![
+            incident_sel17_text_log(&key, b"first"),
+            incident_sel17_text_log(&key, b"second"),
+        ],
+    )?;
+    let expected = format!("text:{}", "k".repeat(2_126 - 5));
+    assert_eq!(expected.len(), 2_126);
+    assert_eq!(
+        keys,
+        [
+            (expected.clone(), json!("first")),
+            (expected, json!("second")),
+        ]
+    );
+    Ok(())
+}
+
 #[test]
 fn nul_text_key_hashes_raw_bytes_and_uses_a_lossless_selector() -> anyhow::Result<()> {
     let raw_key = b"x\0y";
