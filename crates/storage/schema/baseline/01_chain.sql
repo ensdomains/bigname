@@ -40,6 +40,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS chain_lineage_readable_height_idx
 CREATE INDEX IF NOT EXISTS chain_lineage_state_idx
     ON chain_lineage (chain_id, canonicality_state, block_number DESC);
 
+-- The history timestamp window (resolve_chain_block_ranges) maps each timestamp bound to
+-- the first or last readable block in timestamp order, one ordered probe per bound.
+CREATE INDEX IF NOT EXISTS chain_lineage_timestamp_idx
+    ON chain_lineage (chain_id, block_timestamp, block_number);
+
 CREATE TABLE IF NOT EXISTS chain_header_audit (
     chain_id text NOT NULL,
     block_hash text NOT NULL,
