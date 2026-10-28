@@ -36,6 +36,9 @@ const FILTER_EDGES: u32 = 0xa8;
 const HOT_NODE: u32 = 0xa9;
 const NO_SURFACE: u32 = 0xee;
 
+/// An expected row: chain, block and the lease resource as a number.
+type GrantRow = (&'static str, i64, u128);
+
 /// The previous statement, verbatim with `$1`, split where `canonical_only` adds its filters.
 const BEFORE_HEAD: &str = r#"
         SELECT DISTINCT
@@ -155,7 +158,7 @@ async fn registrar_grants_rows_and_oracle_parity() -> Result<()> {
         let hot_node = (1..=100_u16)
             .map(|n| (MAINNET, 200 + i64::from(n), 0x9000 + u128::from(n)))
             .collect();
-        let cases: [(&str, u32, Vec<(&str, i64, u128)>); 10] = [
+        let cases: [(&str, u32, Vec<GrantRow>); 10] = [
             ("no grant", NO_GRANT, vec![]),
             ("one grant", ONE_GRANT, vec![(MAINNET, 100, 0xa10)]),
             (
