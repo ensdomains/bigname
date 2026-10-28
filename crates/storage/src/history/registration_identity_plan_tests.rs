@@ -1,7 +1,9 @@
 //! Plan and row tests for how a registration read reaches `chain_lineage`: the history source's
 //! own lineage row `rb`, the binding active at a resource-less event
 //! (`push_registration_binding_at_event`), the binding covering a registry-only resolver write
-//! (the `binding` lookup of the registration identity), and the identity's NameWrapper lookup.
+//! (the `binding` lookup of the registration identity), the identity's NameWrapper lookup, and the
+//! lineage join of every other lookup in the statement, of the precheck and of the
+//! child-registration arm.
 //!
 //! The two binding lookups used to read the event's block timestamp from `rb`. A predicate that
 //! references `rb` can only run on that join. PostgreSQL charges it per joined row in a nested
@@ -9,8 +11,11 @@
 //! of the chain to join a handful of candidate rows. Each lookup now probes the event's lineage
 //! row by key. `rb` itself is a correlated `LIMIT 1` lookup, so no planner state can hash or walk
 //! the lineage for it: the plan test also plans each statement with nested loops disabled and
-//! still expects the probe. The NameWrapper lookup must stay keyed by resource. The fixture's few
-//! SurfaceBound rows are what let a plain scan key it by event kind.
+//! still expects the probe. Every other lookup reads its row's lineage row the same way. On this
+//! fixture their plain joins probe by cost, so their red row is the planner state with nested
+//! loops disabled, where each plain join scans the lineage whole and the lookup still probes. The
+//! NameWrapper lookup must stay keyed by resource. The fixture's few SurfaceBound rows are what
+//! let a plain scan key it by event kind.
 //!
 //! The fixture needs enough lineage and enough events that the previous statements' hash of the
 //! lineage is the cheaper plan on paper. The plan test checks that it still is in every cell, so
@@ -27,8 +32,13 @@ use uuid::Uuid;
 
 use super::super::{
     ChainBlockRange, EventHistoryReadFilter, HistoryBlockWindow, HistoryCursor, HistoryOrder,
-    HistoryPosition, keyset::HistoryKeyset, paging::push_history_page_query,
-    selectors::HistorySelector, summary::push_history_count_query,
+    HistoryPosition,
+    child_arm::{ChildArm, push_child_arm_order, push_child_arm_source},
+    keyset::HistoryKeyset,
+    lineage::{lineage_probe, lineage_probe_at_block},
+    paging::push_history_page_query,
+    selectors::HistorySelector,
+    summary::push_history_count_query,
 };
 use super::push_public_registration_id_query;
 
@@ -41,6 +51,8 @@ const PAGE_LIMIT: i64 = 201;
 /// registration with 2,000 permission changes.
 const N: u32 = 0xa1;
 const H: u32 = 0xb1;
+/// A parent name whose child registrations are the fixture's 100 unrelated grants.
+const P: u32 = 0xc1;
 /// Resources, by the number their uuid encodes. L1, L2 and L3 are leases of N, X a registry-only
 /// resource of N, LH the lease of H.
 const L1: u128 = 0xa10;
@@ -141,7 +153,6 @@ const LINEAGE_NOW: &str = r#"        LEFT JOIN LATERAL (
         ) rb ON TRUE
 "#;
 const WRAPPER_BEFORE: &str = r#"                    FROM bigname_phase.normalized_events wrapper_binding
-                    LEFT JOIN bigname_phase.chain_lineage wrapper_lineage
 "#;
 const WRAPPER_NOW: &str = r#"                    FROM (
                         SELECT * FROM bigname_phase.normalized_events wrapper_binding
@@ -153,7 +164,6 @@ const WRAPPER_NOW: &str = r#"                    FROM (
                           )
                         OFFSET 0
                     ) wrapper_binding
-                    LEFT JOIN bigname_phase.chain_lineage wrapper_lineage
 "#;
 const A_SOURCE_BEFORE: &str = r#"            FROM (SELECT ne.chain_id, ne.block_hash, ne.block_number, ne.log_index,
                          ne.logical_name_id, ne.namespace, ne.after_state) history_event
@@ -204,6 +214,56 @@ const B_BOUNDS_NOW: &str = r#"                                  AND binding.acti
                                       OR binding.active_to > binding_event.event_time
                                   )
 "#;
+/// Every other lookup's lineage join, now a keyed probe and before a plain join: the lineage
+/// alias, the lookup's row, and the join kind of a lookup whose join also compared the block
+/// number. The precheck and the registration witness both join `ne` to `rb`.
+const PROBES: [(&str, &str, Option<&str>); 11] = [
+    ("rb", "ne", None),
+    ("binding_lineage", "history_binding", Some("LEFT JOIN")),
+    ("binding_lineage", "binding", Some("JOIN")),
+    ("lifecycle_lineage", "lifecycle_grant", None),
+    ("reservation_lineage", "reservation_state", None),
+    ("wrapper_lineage", "wrapper_binding", None),
+    ("registry_epoch_lineage", "registry_epoch", None),
+    ("registry_control_lineage", "registry_control", None),
+    ("registry_grant_lineage", "registry_lease_grant", None),
+    ("registry_release_lineage", "registry_lease_release", None),
+    ("registry_name_lineage", "registry_name", None),
+];
+/// The lineage aliases the count, the page and the precheck of a registration read probe, as
+/// EXPLAIN names them once a numeric suffix is dropped.
+const LOOKUP_ALIASES: [&str; 10] = [
+    "rb",
+    "binding_lineage",
+    "lifecycle_lineage",
+    "reservation_lineage",
+    "wrapper_lineage",
+    "registry_epoch_lineage",
+    "registry_control_lineage",
+    "registry_grant_lineage",
+    "registry_release_lineage",
+    "registry_name_lineage",
+];
+
+/// A lookup's lineage join as the builders write it now and as it read before.
+fn probe_texts((lineage, row, at_block): (&str, &str, Option<&str>)) -> (String, String) {
+    let key =
+        format!("{lineage}.chain_id = {row}.chain_id AND {lineage}.block_hash = {row}.block_hash");
+    match at_block {
+        None => (
+            lineage_probe(lineage, row),
+            format!("LEFT JOIN bigname_phase.chain_lineage {lineage} ON {key}"),
+        ),
+        Some(join) => (
+            lineage_probe_at_block(join, lineage, row),
+            format!(
+                "{join} bigname_phase.chain_lineage {lineage} \
+                 ON {key} AND {lineage}.block_number = {row}.block_number"
+            ),
+        ),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Custom,
@@ -252,19 +312,11 @@ async fn binding_lookups_probe_the_event_lineage_by_key() -> Result<()> {
                              this fixture proves nothing about it\n{before:#}"
                         ));
                     }
-                    // With nested loops disabled a plain join to `rb` turns into a hash join.
-                    // The correlated lookup has no plan but the probe.
                     let cell = format!("{cell}, nested loops off");
-                    raw_sql("SET enable_nestloop = off")
-                        .execute(&mut *connection)
-                        .await?;
-                    let plan =
-                        explain(connection, mode, &statement.sql, &statement.arguments).await;
-                    raw_sql("RESET enable_nestloop")
-                        .execute(&mut *connection)
-                        .await?;
-                    let plan = plan.with_context(|| cell.clone())?;
-                    failures.extend(probe_failures(&cell, &plan));
+                    failures.extend(
+                        nested_loop_failures(connection, &cell, mode, statement, &LOOKUP_ALIASES)
+                            .await?,
+                    );
                 }
             }
         }
@@ -278,7 +330,23 @@ async fn binding_lookups_probe_the_event_lineage_by_key() -> Result<()> {
                     .with_context(|| cell.clone())?;
                 failures.extend(lineage_failures(&cell, &plan));
                 failures.extend(wrapper_failures(&cell, &plan));
+                let cell = format!("{cell}, nested loops off");
+                failures.extend(
+                    nested_loop_failures(connection, &cell, mode, &precheck, &LOOKUP_ALIASES)
+                        .await?,
+                );
             }
+        }
+        let child = child_arm_statement(&child_arm())?;
+        child.check_previous("child arm", &mut failures);
+        for mode in [Mode::Custom, Mode::Generic] {
+            let cell = format!("child arm, {mode:?}");
+            let plan = explain(connection, mode, &child.sql, &child.arguments)
+                .await
+                .with_context(|| cell.clone())?;
+            failures.extend(lineage_failures(&cell, &plan));
+            let cell = format!("{cell}, nested loops off");
+            failures.extend(nested_loop_failures(connection, &cell, mode, &child, &["rb"]).await?);
         }
         ensure!(
             failures.is_empty(),
@@ -456,6 +524,15 @@ async fn binding_lookups_keep_every_row() -> Result<()> {
             }
         }
 
+        // The child-registration arm of P: one row per child grant, with its block time.
+        let child = child_arm_statement(&child_arm())?;
+        child.check_previous("child arm", &mut failures);
+        let now = child_rows(connection, &child.sql, &child.arguments).await?;
+        let before = child_rows(connection, &child.previous, &child.arguments).await?;
+        if now != before || now.len() != 100 || now.iter().any(|(_, time)| time.is_none()) {
+            failures.push(format!("child arm: rows {now:?}\nprevious {before:?}"));
+        }
+
         // Without `canonical_only`, which no reader passes, the lookups also prove that the
         // binding and the event lie on one fork.
         for registration in [L1, L2, L3] {
@@ -519,6 +596,10 @@ impl Statement {
         for (now, before) in LOOKUPS {
             previous = previous.replace(now, before);
         }
+        for probe in PROBES {
+            let (now, before) = probe_texts(probe);
+            previous = previous.replace(&now, &before);
+        }
         let arguments = builder
             .build()
             .take_arguments()
@@ -537,6 +618,9 @@ impl Statement {
             || self.previous.contains("event_lineage")
             || self.previous.contains("binding_event")
             || LOOKUPS.iter().any(|(now, _)| self.previous.contains(now))
+            || PROBES
+                .into_iter()
+                .any(|probe| self.previous.contains(&probe_texts(probe).0))
         {
             failures.push(format!(
                 "{read}: the lookups no longer read as this test expects, so the previous \
@@ -581,6 +665,27 @@ fn precheck_statement(registration: u128) -> Result<Statement> {
         Some(&published),
     );
     Statement::new(builder)
+}
+
+/// The child-registration arm of a page of P's history, oldest first.
+fn child_arm_statement(arm: &ChildArm) -> Result<Statement> {
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "SELECT ne.event_identity, rb.block_timestamp::text AS block_time",
+    );
+    push_child_arm_source(&mut builder, arm, None, true);
+    push_child_arm_order(&mut builder, HistoryOrder::Asc);
+    builder.push(" LIMIT ");
+    builder.push_bind(PAGE_LIMIT);
+    Statement::new(builder)
+}
+
+fn child_arm() -> ChildArm {
+    ChildArm {
+        parent_logical_name_id: logical_name(P),
+        chain_id: MAINNET.to_owned(),
+        from_block: None,
+        to_block: Some(PUBLISHED),
+    }
 }
 
 fn logical_name(k: u32) -> String {
@@ -736,6 +841,22 @@ async fn page_rows(
         .collect()
 }
 
+async fn child_rows(
+    connection: &mut PgConnection,
+    sql: &str,
+    arguments: &PgArguments,
+) -> Result<Vec<(String, Option<String>)>> {
+    sqlx::query_with(sql, arguments.clone())
+        .persistent(false)
+        .fetch_all(&mut *connection)
+        .await?
+        .iter()
+        .map(|row| -> Result<(String, Option<String>)> {
+            Ok((row.try_get("event_identity")?, row.try_get("block_time")?))
+        })
+        .collect()
+}
+
 async fn total(connection: &mut PgConnection, sql: &str, arguments: &PgArguments) -> Result<i64> {
     Ok(sqlx::query_scalar_with(sql, arguments.clone())
         .persistent(false)
@@ -825,28 +946,112 @@ fn hashes_lineage(plan: &Value) -> bool {
         .any(|join| join == "Hash Join over chain_lineage")
 }
 
-/// `chain_lineage` must never be scanned whole or joined by hash or merge, and the event's own
-/// lineage row `rb` must be read by an index probe.
+/// `chain_lineage` must never be joined by hash or merge, every read of it must be an index scan
+/// keyed by the lineage key, and the event's own lineage row `rb` must be one such probe.
 fn lineage_failures(cell: &str, plan: &Value) -> Vec<String> {
     let mut failures = lineage_joins(plan);
-    for (node, _) in plan_nodes(plan) {
-        if node["Node Type"] == "Seq Scan" && node["Relation Name"] == "chain_lineage" {
-            failures.push(format!(
-                "a sequential scan of chain_lineage {}",
-                node["Alias"].as_str().unwrap_or_default()
-            ));
-        }
-    }
+    failures.extend(unkeyed_failures(plan));
     failures.extend(rb_failures(plan));
     report(cell, plan, failures)
 }
 
-/// The event's own lineage row `rb` alone: one index scan keyed by the lineage key, never the
-/// inner side of a hash or merge join.
-fn probe_failures(cell: &str, plan: &Value) -> Vec<String> {
-    report(cell, plan, rb_failures(plan))
+/// With nested loops disabled, where a plain join would hash or scan the lineage whole: every
+/// read of `chain_lineage` is still a keyed index scan, `rb` is still the one probe, and each of
+/// `lookups` is in the plan. The previous statement must read each of `lookups` some other way,
+/// or the cell proves nothing about it.
+async fn nested_loop_failures(
+    connection: &mut PgConnection,
+    cell: &str,
+    mode: Mode,
+    statement: &Statement,
+    lookups: &[&str],
+) -> Result<Vec<String>> {
+    raw_sql("SET enable_nestloop = off")
+        .execute(&mut *connection)
+        .await?;
+    let plan = explain(connection, mode, &statement.sql, &statement.arguments).await;
+    let before = explain(connection, mode, &statement.previous, &statement.arguments).await;
+    raw_sql("RESET enable_nestloop")
+        .execute(&mut *connection)
+        .await?;
+    let plan = plan.with_context(|| cell.to_owned())?;
+    let before = before.with_context(|| format!("{cell}, previous statement"))?;
+    let mut failures = unkeyed_failures(&plan);
+    failures.extend(rb_failures(&plan));
+    let mut previous = Vec::new();
+    for lookup in lookups {
+        if lookup_scans(&plan, lookup).is_empty() {
+            failures.push(format!("no {lookup} lookup in the plan"));
+        }
+        if lookup_scans(&before, lookup).into_iter().all(keyed) {
+            previous.push(format!(
+                "the previous statement also probes {lookup} by key"
+            ));
+        }
+    }
+    let mut failures = report(cell, &plan, failures);
+    failures.extend(report(
+        &format!("{cell}, previous statement"),
+        &before,
+        previous,
+    ));
+    Ok(failures)
 }
 
+/// The scans of `chain_lineage` that a lookup's alias names.
+fn lookup_scans<'a>(plan: &'a Value, lookup: &str) -> Vec<&'a Value> {
+    lineage_scans(plan)
+        .into_iter()
+        .filter(|node| lineage_alias(node) == Some(lookup))
+        .collect()
+}
+
+/// Every scan of `chain_lineage` in the plan.
+fn lineage_scans(plan: &Value) -> Vec<&Value> {
+    plan_nodes(plan)
+        .into_iter()
+        .map(|(node, _)| node)
+        .filter(|node| node["Relation Name"] == "chain_lineage")
+        .collect()
+}
+
+/// A lineage scan's alias without the numeric suffix EXPLAIN adds where an alias repeats.
+fn lineage_alias(node: &Value) -> Option<&str> {
+    node["Alias"].as_str().map(|alias| {
+        alias
+            .trim_end_matches(|c: char| c.is_ascii_digit())
+            .trim_end_matches('_')
+    })
+}
+
+/// An index scan keyed by the lineage key, `(chain_id, block_hash)`.
+fn keyed(node: &Value) -> bool {
+    let condition = node["Index Cond"].as_str().unwrap_or_default();
+    (node["Node Type"] == "Index Scan" || node["Node Type"] == "Index Only Scan")
+        && condition.contains("chain_id =")
+        && condition.contains("block_hash =")
+}
+
+fn unkeyed_failures(plan: &Value) -> Vec<String> {
+    lineage_scans(plan)
+        .into_iter()
+        .filter(|node| !keyed(node))
+        .map(|node| {
+            format!(
+                "{} is read by {} with index condition {:?}",
+                node["Alias"].as_str().unwrap_or_default(),
+                node["Node Type"].as_str().unwrap_or_default(),
+                node["Index Cond"].as_str().unwrap_or_default()
+            )
+        })
+        .collect()
+}
+
+/// The event's own lineage row `rb`: one index scan keyed by the lineage key, never the inner
+/// side of a hash or merge join. This relies on EXPLAIN naming the probe's inner relation `rb`,
+/// which holds while PostgreSQL elides the Subquery Scan over the lateral lookup. When it keeps
+/// that node, the scan is named `rb_1` and this reports no scan of `rb`: a false red, never a
+/// false green.
 fn rb_failures(plan: &Value) -> Vec<String> {
     /// Each `rb` scan, with whether a hash or merge join reads it as its inner side.
     fn walk<'a>(node: &'a Value, hashed: bool, scans: &mut Vec<(&'a Value, bool)>) {
@@ -1095,4 +1300,13 @@ SELECT pg_temp.ev('h:grant', 'RegistrationGranted', 'ens_v1_registrar_l1', pg_te
 SELECT pg_temp.bind(177, pg_temp.rid(2832), 'ens_v1', pg_temp.at(10), NULL, 10);
 SELECT pg_temp.ev('h:perm:' || n, 'PermissionChanged', 'ens_v1_registry_l1', NULL, 177, 11 + n % 9000, n / 9000, '{}')
 FROM generate_series(0, 2000 - 1) n;
+
+-- P (193): the parent of the unrelated grants' names, one child registration per grant.
+INSERT INTO child_registration_events (parent_logical_name_id, event_identity,
+    child_logical_name_id, namespace, chain_id, block_number, block_hash, transaction_order_key,
+    log_order_key, event_kind, manifest_version, target_block_number, target_block_hash)
+SELECT 'ens:' || pg_temp.node(193), event_identity, logical_name_id, 'ens', chain_id,
+    block_number, block_hash, -1, -1, event_kind, 1, block_number, block_hash
+FROM normalized_events
+WHERE event_identity LIKE 'noise:%' AND event_kind = 'RegistrationGranted';
 ANALYZE;"#;

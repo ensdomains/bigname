@@ -16,7 +16,7 @@ use super::{
         push_attributed_record_filter_where, push_attributing_resource_is_registration,
         push_publication_bound,
     },
-    lineage::{same_fork_as, same_fork_predicate},
+    lineage::{lineage_probe, lineage_probe_at_block, same_fork_as, same_fork_predicate},
 };
 
 /// The per-chain published block a product read is bound to. Every row that establishes
@@ -63,15 +63,14 @@ fn push_public_registration_id_query(
     canonical_only: bool,
     published: PublicationBounds<'_>,
 ) {
-    builder.push(
+    builder.push(format!(
         "SELECT EXISTS (
             SELECT 1
             FROM bigname_phase.normalized_events ne
-            LEFT JOIN bigname_phase.chain_lineage rb
-              ON rb.chain_id = ne.chain_id
-             AND rb.block_hash = ne.block_hash
+            {}
             WHERE ne.resource_id = ",
-    );
+        lineage_probe("rb", "ne"),
+    ));
     builder.push_bind(registration_id);
     builder.push(" AND ne.consumer_visibility = 'activated'");
     push_publication_bound(builder, "ne", published);
@@ -170,15 +169,13 @@ fn push_registration_binding_at_event(
                      ne.logical_name_id, ne.namespace, ne.after_state,
                      ",
     );
+    let binding_lineage = lineage_probe_at_block("LEFT JOIN", "binding_lineage", "history_binding");
     builder.push(format!(
         "EXISTS (
             SELECT 1
             FROM {history_event} history_event
             CROSS JOIN bigname_phase.surface_bindings history_binding
-            LEFT JOIN bigname_phase.chain_lineage binding_lineage
-              ON binding_lineage.chain_id = history_binding.chain_id
-             AND binding_lineage.block_hash = history_binding.block_hash
-             AND binding_lineage.block_number = history_binding.block_number
+            {binding_lineage}
             WHERE history_binding.logical_name_id = ne.logical_name_id
               AND history_binding.chain_id = ne.chain_id
               AND history_binding.active_from <= history_event.event_time
@@ -290,13 +287,13 @@ fn push_registration_resource_witness(
             .push(" AND resource_event.canonicality_state IN ('canonical', 'safe', 'finalized')");
     }
     push_publication_bound(builder, "resource_event", published);
-    builder.push(
+    builder.push(format!(
         " OFFSET 0
             ) ne
-            LEFT JOIN bigname_phase.chain_lineage rb
-              ON rb.chain_id = ne.chain_id AND rb.block_hash = ne.block_hash
+            {}
             WHERE ne.chain_id = history_event.chain_id",
-    );
+        lineage_probe("rb", "ne"),
+    ));
     if require_lifecycle {
         builder.push(
             " AND (ne.logical_name_id IS NULL
@@ -375,18 +372,17 @@ fn push_registration_lifecycle_witness(
         builder.push(" AND grant_event.canonicality_state IN ('canonical', 'safe', 'finalized')");
     }
     push_publication_bound(builder, "grant_event", published);
-    builder.push(
+    builder.push(format!(
         " OFFSET 0
                   ) lifecycle_grant
-                  LEFT JOIN bigname_phase.chain_lineage lifecycle_lineage
-                    ON lifecycle_lineage.chain_id = lifecycle_grant.chain_id
-                   AND lifecycle_lineage.block_hash = lifecycle_grant.block_hash
+                  {}
                   WHERE lifecycle_grant.event_kind = 'RegistrationGranted'
                     AND lifecycle_grant.source_family = 'ens_v1_registrar_l1'
                     AND lifecycle_grant.chain_id = ne.chain_id
                     AND (lifecycle_grant.logical_name_id IS NULL
                          OR lifecycle_grant.logical_name_id = ne.logical_name_id)",
-    );
+        lineage_probe("lifecycle_lineage", "lifecycle_grant"),
+    ));
     if canonical_only {
         builder.push(
             " AND (lifecycle_grant.block_hash IS NULL
@@ -447,6 +443,9 @@ fn push_product_registration_id_with_anchors(
     let resource_fork = fork("event_resource");
     let binding_fork = fork("binding");
     let binding_event = event_at_time("");
+    let reservation_lineage = lineage_probe("reservation_lineage", "reservation_state");
+    let wrapper_lineage = lineage_probe("wrapper_lineage", "wrapper_binding");
+    let binding_lineage = lineage_probe_at_block("JOIN", "binding_lineage", "binding");
     let registry_only =
         registry_registration::is_registry_only("ne.resource_id", "ne", canonical_only);
     let registry_lease =
@@ -474,9 +473,7 @@ fn push_product_registration_id_with_anchors(
                 ELSE (
                     SELECT reservation_state.event_kind = 'RegistrationReserved'
                     FROM bigname_phase.normalized_events reservation_state
-                    LEFT JOIN bigname_phase.chain_lineage reservation_lineage
-                      ON reservation_lineage.chain_id = reservation_state.chain_id
-                     AND reservation_lineage.block_hash = reservation_state.block_hash
+                    {reservation_lineage}
                     WHERE reservation_state.resource_id = ne.resource_id
                       AND reservation_state.chain_id = ne.chain_id
                       AND reservation_state.source_family = 'ens_v2_registry_l1'
@@ -509,9 +506,7 @@ fn push_product_registration_id_with_anchors(
                         (wrapper_binding.after_state ->>
                             'wrapped_registrar_resource_id')::uuid
                     FROM {wrapper_source}
-                    LEFT JOIN bigname_phase.chain_lineage wrapper_lineage
-                      ON wrapper_lineage.chain_id = wrapper_binding.chain_id
-                     AND wrapper_lineage.block_hash = wrapper_binding.block_hash
+                    {wrapper_lineage}
                     WHERE wrapper_binding.resource_id = ne.resource_id
                       AND {wrapper_fork}
                       AND wrapper_binding.logical_name_id = ne.logical_name_id
@@ -572,10 +567,7 @@ fn push_product_registration_id_with_anchors(
                                 SELECT 1
                                 FROM {binding_event} binding_event
                                 CROSS JOIN bigname_phase.surface_bindings binding
-                                JOIN bigname_phase.chain_lineage binding_lineage
-                                  ON binding_lineage.chain_id = binding.chain_id
-                                 AND binding_lineage.block_hash = binding.block_hash
-                                 AND binding_lineage.block_number = binding.block_number
+                                {binding_lineage}
                                 WHERE binding.resource_id = ne.resource_id
                                   AND {binding_fork}
                                   AND binding.chain_id = ne.chain_id

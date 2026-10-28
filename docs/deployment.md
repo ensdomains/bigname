@@ -5017,13 +5017,17 @@ Project statement, `project:families.resolution_paths.prepare`.
 ## History reads probe each event's lineage row by key
 
 The build that makes history reads look up each event's `chain_lineage` row by key changes
-the history source (`crates/storage/src/history/source.rs`) and the registration identity
-(`crates/storage/src/history/registration_identity.rs`).
+the history source (`crates/storage/src/history/source.rs`), the registration identity and
+its lookups (`registration_identity.rs`, `registry_registration.rs` and `filters.rs` beside
+it), the child-registration arm (`child_arm.rs`) and the registry reads
+(`crates/storage/src/registries/reads.rs`).
 
 - Every history read joins an event to its block's lineage row through a correlated lookup
   that ends in `LIMIT 1`. PostgreSQL can only run it as one index probe per event. Before,
   it was a plain join, and a registration-scoped events page or count on mainnet could hash
   or walk the whole lineage table to join a few hundred events.
+- Each registration lookup, the precheck of a registration handle, the child-registration
+  arm and the registry reads reach their rows' lineage rows the same way.
 - The two lookups that judge a surface binding at an event's time read that event's lineage
   row themselves, instead of the joined row.
 - The registration identity's NameWrapper lookup stays keyed by the event's resource on a

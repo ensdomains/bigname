@@ -14,7 +14,8 @@ use std::cmp::Ordering;
 use sqlx::{PgConnection, Postgres, QueryBuilder};
 
 use super::{
-    EventHistoryReadFilter, HistoryCursor, HistoryOrder, source::push_history_canonicality_filter,
+    EventHistoryReadFilter, HistoryCursor, HistoryOrder,
+    source::{push_history_canonicality_filter, push_history_lineage_join},
 };
 
 /// Stored kinds of the friendly `registration` history type; every membership row has one.
@@ -104,14 +105,9 @@ pub(super) fn push_child_arm_source<'a>(
         " JOIN bigname_phase.name_surfaces child_surface
             ON child_surface.logical_name_id = ne.logical_name_id",
     );
-    builder.push(
-        r#"
-        LEFT JOIN bigname_phase.chain_lineage rb
-          ON rb.chain_id = ne.chain_id
-         AND rb.block_hash = ne.block_hash
-        WHERE ne.consumer_visibility = 'activated'
-        "#,
-    );
+    // The child's lineage row is `rb`, probed by key as on the name arm.
+    push_history_lineage_join(builder);
+    builder.push(" WHERE ne.consumer_visibility = 'activated' ");
     push_arm_bounds(builder, arm);
     if let Some(kinds) = kinds.filter(|kinds| !kinds.is_empty()) {
         builder.push(" AND ne.event_kind = ANY(");
