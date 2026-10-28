@@ -6,6 +6,16 @@
 /// `summarized`, one row per resolver with a candidate (the manifest with the lowest id when
 /// several of its family are active).
 ///
+/// Precedence below rank 0 keeps an address with ENSv1 evidence in the ENSv1 family: an
+/// `ens_v2_resolver_l1` candidate ranks after every other one when the address also has an
+/// `ens_v1_resolver_l1` candidate of any source, its latest ENSv2 `Upgraded` names no
+/// implementation the classifying manifest declares, and no ENSv2 declaration names it. A
+/// pointer or an edge from either protocol names any address, so only a declaration or such an
+/// `Upgraded` shows the ENSv2 record model. ENSv1 evidence and `Upgraded` observations only
+/// accumulate, so pointers that come and go never re-file an address. An ENSv2 declaration
+/// also takes rank 0 from any candidate whose family's active manifest is in its namespace, not
+/// only from an edge, so it holds while the edges to it change.
+///
 /// `admissions` starts from the input addresses and asks, per active manifest, for one
 /// qualifying resolver edge: a resolver many names point at has far more edges than the block
 /// has touched resolvers, and every consumer reads only the (address, namespace, family) set.
@@ -121,20 +131,69 @@ combined AS (
       ON declaration.namespace = admission.namespace
      AND declaration.resolver_address = admission.resolver_address
     UNION ALL
+    SELECT pointed.resolver_address, declaration.source_family,
+           declaration.classification_role, 0, declaration.manifest_id, pointed.namespace,
+           declaration.declaration_start_block,
+           declaration.classification_declaration_ordinality
+    FROM (
+        SELECT DISTINCT input.resolver_address, manifest.namespace
+        FROM input
+        CROSS JOIN LATERAL jsonb_array_elements(input.item -> 'candidates') candidate
+        JOIN manifests manifest ON manifest.source_family = candidate ->> 'family'
+    ) pointed
+    JOIN declared declaration
+      ON declaration.source_family = 'ens_v2_resolver_l1'
+     AND declaration.namespace = pointed.namespace
+     AND declaration.resolver_address = pointed.resolver_address
+    UNION ALL
     SELECT input.resolver_address, candidate ->> 'family', NULL, (candidate ->> 'priority')::int,
            NULL, NULL, NULL, NULL
     FROM input
     CROSS JOIN LATERAL jsonb_array_elements(input.item -> 'candidates') candidate
 ),
-candidates AS (
-    SELECT DISTINCT ON (combined.resolver_address) combined.*
+ensv2_evidence AS (
+    SELECT input.resolver_address
+    FROM input
+    WHERE EXISTS (
+        SELECT 1 FROM declared declaration
+        WHERE declaration.source_family = 'ens_v2_resolver_l1'
+          AND declaration.resolver_address = input.resolver_address
+    ) OR EXISTS (
+        SELECT 1 FROM (
+            SELECT manifest.manifest_payload FROM manifests manifest
+            WHERE manifest.source_family = 'ens_v2_resolver_l1'
+            ORDER BY manifest.manifest_id
+            LIMIT 1
+        ) manifest
+        CROSS JOIN LATERAL jsonb_array_elements(COALESCE(
+            manifest.manifest_payload -> 'resolver_implementations', '[]'::jsonb
+        )) implementation
+        WHERE lower(implementation ->> 'address') =
+              lower(input.item #>> '{upgrades,ens_v2_resolver_l1,implementation}')
+    )
+),
+ranked AS (
+    SELECT combined.*,
+           combined.priority > 0
+           AND combined.source_family = 'ens_v2_resolver_l1'
+           AND bool_or(combined.priority > 0
+                       AND combined.source_family = 'ens_v1_resolver_l1')
+               OVER (PARTITION BY combined.resolver_address)
+           AND evidence.resolver_address IS NULL AS demoted
     FROM combined
+    LEFT JOIN ensv2_evidence evidence
+      ON evidence.resolver_address = combined.resolver_address
     WHERE combined.source_family IS NOT NULL
-    ORDER BY combined.resolver_address, combined.priority, combined.source_family,
-             combined.classification_manifest_id NULLS LAST,
-             COALESCE(combined.classification_declaration_start_block, 0) DESC,
-             combined.classification_declaration_ordinality DESC NULLS LAST,
-             combined.classification_role
+),
+candidates AS (
+    -- Family name order breaks the remaining ties, ENSv1 before ENSv2.
+    SELECT DISTINCT ON (ranked.resolver_address) ranked.*
+    FROM ranked
+    ORDER BY ranked.resolver_address, ranked.demoted, ranked.priority, ranked.source_family,
+             ranked.classification_manifest_id NULLS LAST,
+             COALESCE(ranked.classification_declaration_start_block, 0) DESC,
+             ranked.classification_declaration_ordinality DESC NULLS LAST,
+             ranked.classification_role
 ),
 classified AS (
     SELECT DISTINCT ON (candidate.resolver_address)

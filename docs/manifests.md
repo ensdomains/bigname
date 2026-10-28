@@ -2094,12 +2094,16 @@ instance (the same instance the log's `proxy_implementation` edge names),
 because only registry announcements and `ResolverCreated` observations may produce self-edges. The
 announcement edge never closes: a later registry pointer to another resolver
 closes only the pointer edge. A registry-pointer edge is binding history only
-and admits nothing. A resolver that announces nothing (no `ResolverCreated()`,
+and admits nothing for capture. Project still reads it when it classifies the
+address: it admits a same-namespace declaration at rank 0, and it proposes its
+family at rank 1 only for an address without ENSv1 evidence
+([architecture.md § Discovery graph](architecture.md#discovery-graph)). A resolver that announces nothing (no `ResolverCreated()`,
 and no `Upgraded` or `ProxyDeployed` naming a declared implementation) is not
 admitted, so none of its events are read, including any record events it
 emitted before or after a registry pointed a name at it. This is expected
 behaviour, not a gap to repair. Names that point at such a resolver still show
-it, and it stays `unsupported` with `resolver_implementation_unknown`
+it, and it stays `unsupported` with `resolver_implementation_unknown`, or with
+`resolver_not_declared` when an ENSv1 name points at it too
 ([projections.md](projections.md#resolver-and-records)).
 
 Same-block admission: when a discovery observation admits an address at block

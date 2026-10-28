@@ -207,21 +207,21 @@ async fn migrated_subname_ensv1_pointer_at_permissioned_resolver_ancestor_stays_
 }
 
 /// A PublicResolverV2 under a retained ENSv1 pointer is not a PermissionedResolver, so the
-/// child stays withheld. Reached through an ENSv1 pointer, its classification is an undeclared
-/// ENSv1 resolver, so the target is unproved.
+/// child stays withheld. The ENSv1 pointer admits its ENSv2 declaration, so it is a supported
+/// resolver, but not a target whose records the mirror projects.
 #[tokio::test]
 async fn migrated_subname_ensv1_pointer_at_public_resolver_v2_stays_unsupported() -> Result<()> {
     let (database, resolver) = retained().await?;
     step(&database, 122, vec![point(PUBLIC_RESOLVER_V2)?], None).await?;
     assert_withheld(
         &detail(&database, CHILD).await?,
-        "ens_v2_path_not_projected",
+        "ens_v2_path_target_not_projected",
     );
     assert_consumers(
         &database,
         false,
         resolver,
-        Some("ens_v2_path_not_projected"),
+        Some("ens_v2_path_target_not_projected"),
     )
     .await?;
     database.cleanup().await

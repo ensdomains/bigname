@@ -4936,3 +4936,30 @@ content hash, then check on Sepolia that `GET /v1/names/phantombug01.eth` serves
 `0x8948458626811dd0c23eb25cc74291247077cc51`, equal to its `ens_v1.resolver` (registry
 `NewResolver` at block 11982720), and that `GET /v1/names/phantombug01.eth/records?keys=addr:61`
 finds the record.
+
+## Resolvers that both protocols name stay ENSv1
+
+The build that ranks a resolver's ENSv2 candidates after its ENSv1 evidence, and lets an ENSv2
+declaration take rank 0 without a resolver edge
+([architecture](architecture.md#discovery-graph)), changes the resolver classification Project
+stores (`crates/project/src/families/classification/sql.rs`). It rotates the
+[projection content hash](glossary.md#projection-content-hash) for every chain. The
+[interpreter content hash](glossary.md#interpreter-content-hash) does not rotate.
+
+What changes for names:
+
+- A handful of undeclared resolvers that both protocols name move back to the ENSv1 family,
+  unsupported before and after. Names that point at one see the coverage reason of their
+  records change once, from `resolver_implementation_unknown` to `resolver_not_declared`.
+- An ENSv2 registry `ResolverUpdated` that names a resolver an ENSv1 name already points at
+  no longer re-files that resolver, so it recomposes nothing that reads its classification.
+- A declared ENSv2 resolver that an ENSv1 name points at keeps its declaration with or without
+  an ENSv2 edge to it.
+
+These rows arrive through re-derivation. Every chain needs one full-range Project redo and no
+Interpret redo, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary)
+under matching runner and API binaries. The change shares the release's Project redo. Do not
+mark old rows ready under the new hash.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
+and the compiled watch plan are unchanged, so stamp no Ingest redo.
