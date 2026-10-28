@@ -479,7 +479,8 @@ pub(super) fn statement(normal_work: &str) -> String {
         -- ($5, project families/marker.rs `Composition`). With no admission it reaches nothing.
         -- A changed root registry is reached by this row alone, with no entry to look up.
         SELECT ARRAY[]::text[], $5::text
-        WHERE $5::text IS NOT NULL AND EXISTS (SELECT 1 FROM wanted)
+        WHERE $5::text IS NOT NULL AND (EXISTS (SELECT 1 FROM wanted)
+            OR EXISTS (SELECT 1 FROM changed_registries changed WHERE changed.registry=$5::text))
         UNION
         SELECT next.labelhashes, pointer.subregistry
         FROM reached current JOIN wanted next ON cardinality(next.labelhashes)=cardinality(current.labelhashes)+1
