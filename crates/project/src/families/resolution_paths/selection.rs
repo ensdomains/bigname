@@ -380,13 +380,30 @@ pub(super) fn statement(normal_work: &str) -> String {
         UNION ALL
         -- With changed entries alone, a candidate holds a label of a changed entry key. The
         -- index finds the surfaces with the key's hash and the label comparison decides.
-        SELECT probe.labelhashes FROM (SELECT DISTINCT entry_key FROM changed_entries) changed
+        -- PROD HOT PATCH 2026-10-27 (sel11): the label must sit directly below the changed
+        -- registry's mount. In the root registry that is the last label; in a registry mounted at
+        -- a known parent, the labels after it are the parent's path. A registry with no known
+        -- mount keeps the corpus-wide label match. Without this, an entry keyed `eth` in any
+        -- registry (eth.eth is reserved in the ETH registry) made every `.eth` name a candidate
+        -- and the walk below visited 3.5 M suffixes.
+        SELECT probe.labelhashes FROM (SELECT DISTINCT registry, entry_key FROM changed_entries) changed
+        LEFT JOIN LATERAL (
+            SELECT parent.labelhashes FROM project_parent_subregistry mount
+            JOIN name_surfaces parent ON parent.logical_name_id=mount.logical_name_id
+              AND parent.chain_id=$1 AND parent.namespace='ens'
+            WHERE mount.chain_id=$1 AND lower(mount.subregistry_address)=changed.registry
+            ORDER BY cardinality(parent.labelhashes) LIMIT 1
+        ) mount ON true
         CROSS JOIN LATERAL (
             SELECT surface.labelhashes FROM name_surfaces surface
             WHERE entry_key_hashes(surface.labelhashes) @> ARRAY[hashtextextended(changed.entry_key,0)]
               AND surface.chain_id=$1 AND surface.namespace='ens' AND cardinality(surface.labelhashes)>0
-              AND EXISTS (SELECT 1 FROM unnest(surface.labelhashes) label
-                WHERE changed.entry_key=left(lower(label),58)||'00000000')
+              AND EXISTS (SELECT 1 FROM unnest(surface.labelhashes) WITH ORDINALITY label(hash, position)
+                WHERE changed.entry_key=left(lower(label.hash),58)||'00000000'
+                  AND CASE
+                    WHEN changed.registry=lower($5::text) THEN label.position=cardinality(surface.labelhashes)
+                    WHEN mount.labelhashes IS NOT NULL THEN surface.labelhashes[label.position+1:]=mount.labelhashes
+                    ELSE true END)
             OFFSET 0
         ) probe
         WHERE NOT EXISTS (SELECT 1 FROM changed_registries WHERE registry=lower($5::text))
