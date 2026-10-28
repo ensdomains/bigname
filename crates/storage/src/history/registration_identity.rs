@@ -6,6 +6,10 @@ use uuid::Uuid;
 #[path = "registry_registration.rs"]
 mod registry_registration;
 
+#[cfg(test)]
+#[path = "registration_identity_plan_tests.rs"]
+mod plan_tests;
+
 use super::{
     EventHistoryReadFilter,
     filters::{
@@ -48,7 +52,18 @@ pub(super) async fn is_public_registration_id(
     canonical_only: bool,
     published: PublicationBounds<'_>,
 ) -> Result<bool, sqlx::Error> {
-    let mut builder = QueryBuilder::new(
+    let mut builder = QueryBuilder::new("");
+    push_public_registration_id_query(&mut builder, registration_id, canonical_only, published);
+    builder.build_query_scalar().fetch_one(pool).await
+}
+
+fn push_public_registration_id_query(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    registration_id: Uuid,
+    canonical_only: bool,
+    published: PublicationBounds<'_>,
+) {
+    builder.push(
         "SELECT EXISTS (
             SELECT 1
             FROM bigname_phase.normalized_events ne
@@ -59,7 +74,7 @@ pub(super) async fn is_public_registration_id(
     );
     builder.push_bind(registration_id);
     builder.push(" AND ne.consumer_visibility = 'activated'");
-    push_publication_bound(&mut builder, "ne", published);
+    push_publication_bound(builder, "ne", published);
     if canonical_only {
         builder.push(
             " AND ne.canonicality_state IN ('canonical', 'safe', 'finalized')
@@ -70,13 +85,12 @@ pub(super) async fn is_public_registration_id(
         );
     }
     builder.push(" AND ");
-    push_public_registration_witness(&mut builder, canonical_only, &["ne"], published);
+    push_public_registration_witness(builder, canonical_only, &["ne"], published);
     builder.push(" AND (");
-    push_product_registration_id(&mut builder, canonical_only);
+    push_product_registration_id(builder, canonical_only);
     builder.push(" = ");
     builder.push_bind(registration_id);
     builder.push(") LIMIT 1)");
-    builder.build_query_scalar().fetch_one(pool).await
 }
 
 /// Keep only the rows of one registration. A row on a resource belongs to it when its
