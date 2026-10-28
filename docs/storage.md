@@ -728,6 +728,8 @@ Family indexes serve these concrete readers:
   `project_ens_v2_registry_parent_entry_idx` `(chain_id, parent, parent_entry_key)` over rows
   with a parent, from a parent entry to the registries that name it. Schema-migration
   `20261005140000_project_ens_v2_registry_entries.sql` adds the two tables and these indexes.
+  One of the three now has a reader: `project:families.resolution_paths.prepare` reads
+  `project_ens_v2_entry_owner_resource_idx` in its `mounts` step, listed below.
 - The composed name reader's resource pointer lookup
   (`storage:families.name.resource_pointers`) can probe `project_resource_pointer_pkey` by
   resource and the partial `project_resource_pointer_root_node_idx` (ENSv2 root registry
@@ -792,6 +794,25 @@ Project's selection of the names under a changed ENSv2 path
 | --- | --- |
 | `name_surfaces_project_path_hash_idx` | `project:families.resolution_paths.prepare`, step `source_ancestors`: the ancestors of a touched name, one probe for each suffix of its label hash path |
 | `name_surfaces_project_entry_keys_idx` | `project:families.resolution_paths.prepare`, steps `candidates` and `affected`: the surfaces that hold a label of a changed ENSv2 entry, and the names under a changed path, found by its first label |
+
+The same statement finds the entries that point at a registry changed in the
+publication, and the ENSv1→ENSv2 migration evidence of a touched name's
+ancestors, through
+four indexes that already exist. It adds none:
+
+| Index | Serves |
+| --- | --- |
+| `normalized_events_v2_key_probe_idx` | `project:families.resolution_paths.prepare`, step `mounts`: the `SubregistryChanged` events that name a changed registry, one probe for each registry |
+| `project_ens_v2_entry_owner_resource_idx` | the same step: the entry of each such event's resource |
+| `normalized_events_resource_history_idx` | the same step: the events of that resource, for an entry row that holds no resource yet and is tied to its pointer by the event that last wrote it. The `reached` step reads each entry's latest pointer through the same index |
+| `normalized_events_name_history_idx` | `project:families.resolution_paths.prepare`, step `changed_registries`: the `MigrationApplied` events of each ancestor of a touched name |
+
+`normalized_events_v2_key_probe_idx` is an index of Interpret's lookahead loader
+(see [walk index set](#walk-index-set)). The `mounts` step repeats
+the index's array expression and its two predicates, so a change to that index
+must change the step with it. The plan test
+`the_registry_route_probes_read_their_indexes` fails when the step stops reading
+the index.
 
 - `name_surfaces_project_path_hash_idx` is a btree on
   `(namespace, hash_array_extended(labelhashes, 0))`.
@@ -3014,7 +3035,7 @@ The 17 kept indexes and the statements that read them:
 | `normalized_events_chain_block_number_idx`, `normalized_events_chain_block_number_desc_idx` | the redo-range clear and preparation, the full-state restore, the loader-choice family probe and the due-names block-before-batch read; either twin serves each |
 | `normalized_events_projection_idx` | the manifest sync's retained admission history (`retained_admission_manifests` in `crates/manifests/src/schema_v2_persistence.rs`), which reads every `SourceManifestUpdated` row by kind |
 | `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |
-| `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows |
+| `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows. Project also reads `normalized_events_v2_key_probe_idx`, in the `mounts` step of `project:families.resolution_paths.prepare` ([table ownership](#table-ownership)) |
 
 The other 32 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
 these: `normalized_events_history_account_owner_idx`,
