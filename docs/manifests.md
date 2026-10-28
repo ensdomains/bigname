@@ -823,7 +823,8 @@ fallback's mirror from the `ensv1_mirror_resolver` contract of the active
 [deployment epoch](glossary.md#deployment-epoch) of the chain. A path that reaches the
 fallback with no such declaration, or with two, is unknown. Project's resolution path
 selection treats a classification change of any mirror a chain's ENSv2 resolver manifest
-declares as a change of every `.eth` name. The mainnet deployment's mirror is
+declares as a change of every `.eth` name, when the mirror is supported before or after the
+change. The mainnet deployment's mirror is
 `0x394d8eb4a4fdf599384deab25f31d111d755c398`, and it applies once a mainnet manifest declares
 it. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ENSV1Resolver.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
 

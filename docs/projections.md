@@ -2254,7 +2254,10 @@ says which names it expands.
 - A resource pointer is deleted or moves to another name. This expands the name
   it named before and the names under it. After a move it also expands the name
   it names now and the names under that.
-- A resolver's classification changes. This expands the names whose registry or
+- A resolver's classification changes while it is supported before or after the
+  change, a deleted supported row included. A walk reads a classification only
+  while it is supported, so a change between two unsupported or missing rows
+  expands nothing. This expands the names whose registry or
   resource pointer names that resolver, and the names under each. When an ENSv2
   event set such a resource pointer, the name at that event's entry and the
   names mounted below it expand too. An ENSv2 resource pointer cleared when its
@@ -2746,7 +2749,12 @@ reader supplies its admitted publication to the same inventory selector.
 
 Lookup captures name work before summary clocks are consumed, reuses the shared
 resolution-path work, and refreshes after the other derived families and before
-the marker advances. It adds no range boundary. Only changed rows enter the
+the marker advances. An inventory reads a resolver's classification object and
+unsupported reason in every state, and its manifest only while it is supported.
+So a classification change refreshes the inventories that depend on the
+resolver whenever one of those fields changes, but not for a manifest change
+between two unsupported rows. Text hydration re-derives a resolver's keys only
+for a classification change with a supported side. It adds no range boundary. Only changed rows enter the
 existing first-before-image journal. Resource inventories are shared by aliases
 and retained only while referenced. The factored tables and indexes are detailed
 in [storage](storage.md#published-lookup-state).
