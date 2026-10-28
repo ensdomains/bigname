@@ -13,9 +13,12 @@
 //! the lineage for it: the plan test also plans each statement with nested loops disabled and
 //! still expects the probe. Every other lookup reads its row's lineage row the same way. On this
 //! fixture their plain joins probe by cost, so their red row is the planner state with nested
-//! loops disabled, where each plain join scans the lineage whole and the lookup still probes. The
-//! NameWrapper lookup must stay keyed by resource. The fixture's few SurfaceBound rows are what
-//! let a plain scan key it by event kind.
+//! loops disabled, where each plain join scans the lineage whole and the lookup still probes.
+//!
+//! The NameWrapper lookup is keyed by resource on production-shaped statistics, where
+//! SurfaceBound is a common event kind. This fixture has no SurfaceBound row, so there the
+//! planner keys the lookup by event kind, which reads no row. A separate test adds NameWrapped
+//! tokens and checks the lookup there.
 //!
 //! The fixture needs enough lineage and enough events that the previous statements' hash of the
 //! lineage is the cheaper plan on paper. The plan test checks that it still is in every cell, so
@@ -132,13 +135,12 @@ const REGISTRATION_IDS: [(&str, u128); 8] = [
 
 /// The lookups' text before this change and now. The previous statement is the current one with
 /// each text now put back as it was, so the two share every other byte.
-const LOOKUPS: [(&str, &str); 6] = [
+const LOOKUPS: [(&str, &str); 5] = [
     (A_SOURCE_NOW, A_SOURCE_BEFORE),
     (A_BOUNDS_NOW, A_BOUNDS_BEFORE),
     (B_SOURCE_NOW, B_SOURCE_BEFORE),
     (B_BOUNDS_NOW, B_BOUNDS_BEFORE),
     (LINEAGE_NOW, LINEAGE_BEFORE),
-    (WRAPPER_NOW, WRAPPER_BEFORE),
 ];
 const LINEAGE_BEFORE: &str = r#"        LEFT JOIN bigname_phase.chain_lineage rb
           ON rb.chain_id = ne.chain_id
@@ -151,19 +153,6 @@ const LINEAGE_NOW: &str = r#"        LEFT JOIN LATERAL (
               AND rb.block_hash = ne.block_hash
             LIMIT 1
         ) rb ON TRUE
-"#;
-const WRAPPER_BEFORE: &str = r#"                    FROM bigname_phase.normalized_events wrapper_binding
-"#;
-const WRAPPER_NOW: &str = r#"                    FROM (
-                        SELECT * FROM bigname_phase.normalized_events wrapper_binding
-                        WHERE wrapper_binding.resource_id = ne.resource_id
-                          AND wrapper_binding.canonicality_state IN (
-                              'canonical'::bigname_phase.canonicality_state,
-                              'safe'::bigname_phase.canonicality_state,
-                              'finalized'::bigname_phase.canonicality_state
-                          )
-                        OFFSET 0
-                    ) wrapper_binding
 "#;
 const A_SOURCE_BEFORE: &str = r#"            FROM (SELECT ne.chain_id, ne.block_hash, ne.block_number, ne.log_index,
                          ne.logical_name_id, ne.namespace, ne.after_state) history_event
@@ -301,7 +290,6 @@ async fn binding_lookups_probe_the_event_lineage_by_key() -> Result<()> {
                         .await
                         .with_context(|| cell.clone())?;
                     failures.extend(lineage_failures(&cell, &plan));
-                    failures.extend(wrapper_failures(&cell, &plan));
                     let before =
                         explain(connection, mode, &statement.previous, &statement.arguments)
                             .await
@@ -329,7 +317,6 @@ async fn binding_lookups_probe_the_event_lineage_by_key() -> Result<()> {
                     .await
                     .with_context(|| cell.clone())?;
                 failures.extend(lineage_failures(&cell, &plan));
-                failures.extend(wrapper_failures(&cell, &plan));
                 let cell = format!("{cell}, nested loops off");
                 failures.extend(
                     nested_loop_failures(connection, &cell, mode, &precheck, &LOOKUP_ALIASES)
@@ -351,6 +338,80 @@ async fn binding_lookups_probe_the_event_lineage_by_key() -> Result<()> {
         ensure!(
             failures.is_empty(),
             "registration lineage plans:\n{}",
+            failures.join("\n\n")
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// NameWrapped tokens, one SurfaceBound row each without a block, so that SurfaceBound is a
+/// common event kind as it is on a served chain.
+const WRAPPED_TOKENS: &str = r#"
+INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state)
+SELECT lpad(to_hex(2097152 + n), 32, '0')::uuid, 'ethereum-mainnet', 'm:1', 1, 'canonical'
+FROM generate_series(0, 2000 - 1) n;
+INSERT INTO normalized_events (event_identity, namespace, logical_name_id, resource_id, event_kind,
+    source_family, manifest_version, chain_id, derivation_kind, canonicality_state, after_state)
+SELECT 'wrapped:' || n, 'ens', 'ens:0x' || lpad(to_hex(65536 + n % 1000), 64, '0'),
+    lpad(to_hex(2097152 + n), 32, '0')::uuid, 'SurfaceBound', 'ens_v1_wrapper_l1', 1,
+    'ethereum-mainnet', 'ens_v1_unwrapped_authority', 'canonical',
+    jsonb_build_object('wrapped_registrar_resource_id', lpad(to_hex(3145728 + n), 32, '0'))
+FROM generate_series(0, 2000 - 1) n;
+ANALYZE;"#;
+
+/// The NameWrapper lookup of the count, the page and the precheck is keyed by the row's resource
+/// once SurfaceBound is a common event kind. On the fixture's own statistics, with no
+/// SurfaceBound row, the planner keys it by event kind instead, and each cell must see that, or
+/// the added tokens prove nothing.
+#[tokio::test]
+async fn wrapper_lookup_is_keyed_by_resource_on_served_statistics() -> Result<()> {
+    with_fixture("registration_wrapper_plan", async |connection| {
+        let permission = event_kinds("permission");
+        let mut statements = Vec::new();
+        for (shape, filter) in [
+            ("one candidate", registration_read(N, L1, &permission)),
+            ("many candidates", registration_read(H, LH, &permission)),
+        ] {
+            statements.push((format!("{shape}, count"), count_statement(&filter, true)?));
+            let page = page_statement(&filter, None, true, false, PAGE_LIMIT)?;
+            statements.push((format!("{shape}, page"), page));
+        }
+        for registration in [L1, LH] {
+            let label = format!("precheck of {registration:x}");
+            statements.push((label, precheck_statement(registration)?));
+        }
+        let mut failures = Vec::new();
+        for (label, statement) in &statements {
+            for mode in [Mode::Custom, Mode::Generic] {
+                let cell = format!("{label}, {mode:?}, no SurfaceBound row");
+                let plan = explain(connection, mode, &statement.sql, &statement.arguments)
+                    .await
+                    .with_context(|| cell.clone())?;
+                if wrapper_failures(&cell, &plan).is_empty() {
+                    failures.push(format!(
+                        "{cell}: the lookup is keyed by resource without the NameWrapped tokens, \
+                         so they prove nothing\n{plan:#}"
+                    ));
+                }
+            }
+        }
+        raw_sql(WRAPPED_TOKENS)
+            .execute(&mut *connection)
+            .await
+            .context("install the NameWrapped tokens")?;
+        for (label, statement) in &statements {
+            for mode in [Mode::Custom, Mode::Generic] {
+                let cell = format!("{label}, {mode:?}");
+                let plan = explain(connection, mode, &statement.sql, &statement.arguments)
+                    .await
+                    .with_context(|| cell.clone())?;
+                failures.extend(wrapper_failures(&cell, &plan));
+            }
+        }
+        ensure!(
+            failures.is_empty(),
+            "registration wrapper plans:\n{}",
             failures.join("\n\n")
         );
         Ok(())

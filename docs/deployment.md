@@ -5031,8 +5031,6 @@ it), the child-registration arm (`child_arm.rs`), the resolver page arms
   way.
 - The two lookups that judge a surface binding at an event's time read that event's lineage
   row themselves, instead of the joined row.
-- The registration identity's NameWrapper lookup stays keyed by the event's resource on a
-  canonical read.
 - Stored rows and API responses are the same as before. Only the plans change.
 - Other request-path lineage reads keep their plain joins, for a follow-up that measures
   each route first: the address evidence read (`address_evidence.rs`), the readable surface
