@@ -1753,7 +1753,8 @@ rotating a proxy to an unflagged implementation removes the rule on the same
 scoped rebuild. Full and incremental rebuilds select the feature from the same
 current resolver classification.
 
-A pointer from `ens_v2_registry_l1` or `ens_v2_root_l1` whose target is a
+A pointer from `ens_v2_registry_l1`, `ens_v2_root_l1`, `ens_v1_registry_l1`,
+`ens_v1_registrar_l1`, or `ens_v1_wrapper_l1` whose target is a
 supported
 [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
 (`classification.role = ensv1_mirror_resolver`, declared under
@@ -1777,6 +1778,11 @@ receives `resolve(name, data)` and answers by its own logic.
 (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L66-L70 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L88-L96 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L108-L127 @ ens_v1@91c966f)
+An ENSv1 name that points at the mirror is walked the same way. Its own
+registry node names the mirror, so the mirror would call itself, and the walk
+selects the mirror and serves `unsupported` below, never an empty record set.
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/AbstractMirrorResolver.sol:L67-L69 @ ens_v2_mainnet_20261002@b1f97b91)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_mainnet_20261002@b1f97b91)
 
 The family inventory reader reproduces this from current pointer keys and
 classification at the selected publication. The registry's

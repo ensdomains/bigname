@@ -9,11 +9,14 @@
 /// Precedence below rank 0 keeps an address with ENSv1 evidence in the ENSv1 family: an
 /// `ens_v2_resolver_l1` candidate ranks after every other one when the address also has an
 /// `ens_v1_resolver_l1` candidate of any source, it has no `Upgraded` of the ENSv2 resolver
-/// family, and no ENSv2 declaration names it. A pointer or an edge from either protocol names
-/// any address, so only a declaration or such an `Upgraded` shows the ENSv2 record model. The
-/// test is that an `Upgraded` exists, not which implementation the latest one names: the
-/// family tag already keeps unrelated proxies out, and an upgrade to an undeclared
-/// implementation stays ENSv2 with `resolver_implementation_not_declared`. ENSv1 evidence and
+/// family, and no ENSv2 declaration names it. Either registry stores whatever resolver address
+/// its caller sets
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L95 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registry/PermissionedRegistry.sol:L156-L161 @ ens_v2_mainnet_20261002@b1f97b91),
+/// so only a declaration or such an `Upgraded` shows the ENSv2 record model. The test is that
+/// an `Upgraded` exists, not which implementation the latest one names: the family tag already
+/// keeps unrelated proxies out, and an upgrade to an undeclared implementation stays ENSv2 with
+/// `resolver_implementation_not_declared`. ENSv1 evidence and
 /// `Upgraded` observations only accumulate, so pointers that come and go, and upgrades between
 /// declared and undeclared implementations, never re-file an address. An ENSv2 declaration
 /// also takes rank 0 from any candidate whose family's active manifest is in its namespace, not

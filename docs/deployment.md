@@ -5019,7 +5019,9 @@ Project statement, `project:families.resolution_paths.prepare`.
 The build that ranks a resolver's ENSv2 candidates after its ENSv1 evidence, and lets an ENSv2
 declaration take rank 0 without a resolver edge
 ([architecture](architecture.md#discovery-graph)), changes the resolver classification Project
-stores (`crates/project/src/families/classification/sql.rs`). It rotates the
+stores (`crates/project/src/families/classification/sql.rs`). It also walks an ENSv1 pointer at
+an ENSv1 mirror resolver as the mirror would (`crates/storage/src/families/records/mirror.rs`),
+which changes the record inventories Project stores. It rotates the
 [projection content hash](glossary.md#projection-content-hash) for every chain. The
 [interpreter content hash](glossary.md#interpreter-content-hash) does not rotate.
 
@@ -5032,6 +5034,9 @@ What changes for names:
   no longer re-files that resolver, so it recomposes nothing that reads its classification.
 - A declared ENSv2 resolver that an ENSv1 name points at keeps its declaration with or without
   an ENSv2 edge to it.
+- An ENSv1 name whose own resolver is a declared ENSv1 mirror resolver serves its records as
+  `unsupported` with `mirrored_resolver_not_projected`, not as an empty record set
+  ([projections](projections.md#resolver-and-records)).
 
 These rows arrive through re-derivation. Every chain needs one full-range Project redo and no
 Interpret redo, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary)

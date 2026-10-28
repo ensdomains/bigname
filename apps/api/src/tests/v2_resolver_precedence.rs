@@ -1,6 +1,7 @@
 //! A declared ENSv2 resolver that an ENSv1 name also points at stays supported, with or without
-//! an ENSv2 registry edge to it, so the names it serves keep their records. Rows M1, M2 and P1
-//! of the resolver classification precedence table, asserted on the name records route.
+//! an ENSv2 registry edge to it, so the names it serves keep their records, and an ENSv1 name
+//! pointing at a declared mirror is unsupported. Rows M1, M2, M3 and P1 of the resolver
+//! classification precedence table, asserted on the name records route.
 use super::*;
 
 /// An ENSv1 registry `ResolverChanged` that carries no name and points `other`'s node at
@@ -155,6 +156,120 @@ async fn a_public_resolver_v2_name_keeps_its_records_when_an_ensv1_name_points_a
             payload["data"]["records"]["text:url"],
             json!({"status": "ok", "value": "https://example.test"}),
             "{row}: {payload:#}"
+        );
+        database.cleanup().await?;
+    }
+    Ok(())
+}
+
+/// M3: an ENSv1 name whose registry resolver is the declared ENSv1 mirror. The mirror stores no
+/// records and would find itself in the ENSv1 registry, so the name's records are unsupported,
+/// never an authoritative `not_found`, whether an ENSv2 registry edge reaches the mirror (M3,
+/// red before the ENSv1 pointer was walked) or only the ENSv2 entry's pointer names it (M3
+/// without an edge, red once that pointer admitted the declaration).
+#[tokio::test]
+async fn an_ensv1_name_pointing_at_the_mirror_is_unsupported_not_absent() -> Result<()> {
+    const CHAIN: &str = "ethereum-sepolia";
+    const BLOCK: (i64, &str) = (21000003, "0xmirror");
+    const MIRROR: &str = "0x1010101010101010101010101010101010101010";
+    const NAME: &str = "precedence-v1.eth";
+    const UNSUPPORTED: &str = "mirrored_resolver_not_projected";
+    for (row, edge) in [("M3", true), ("M3 without an edge", false)] {
+        let database =
+            v2_mirror_records_database("alice.eth", MIRROR, MirrorFixtureSource::Exact, "resolver")
+                .await?;
+        if !edge {
+            sqlx::query(
+                "DELETE FROM discovery_edges WHERE chain_id = $1 AND edge_kind = 'resolver'",
+            )
+            .bind(CHAIN)
+            .execute(&database.pool)
+            .await?;
+        }
+        let resource = Uuid::from_u128(0x6200);
+        let logical = seed_family_identity_inputs(
+            &database.pool,
+            "ens",
+            NAME,
+            CHAIN,
+            BLOCK.0,
+            BLOCK.1,
+            resource,
+            Uuid::from_u128(0x6201),
+            Uuid::from_u128(0x6202),
+            "ens_v1",
+        )
+        .await?;
+        let node = bigname_lookup::ens_namehash_hex(NAME)?;
+        let facts = [
+            (
+                "AuthorityTransferred",
+                "ens_v1_registry_l1",
+                json!({"source_event": "Transfer", "node": node,
+                       "owner": "0x00000000000000000000000000000000000000bb"}),
+            ),
+            (
+                "RegistrationGranted",
+                "ens_v1_registrar_l1",
+                json!({"authority_kind": "registrar",
+                       "registrant": "0x00000000000000000000000000000000000000bb",
+                       "expiry": 4_102_444_800_u64}),
+            ),
+            (
+                "ResolverChanged",
+                "ens_v1_registry_l1",
+                json!({"node": node, "resolver": MIRROR}),
+            ),
+        ];
+        let mut events = Vec::new();
+        for (index, (kind, family, after)) in facts.into_iter().enumerate() {
+            let mut event = history_event(
+                &format!("precedence-v1-{kind}"),
+                Some(&logical),
+                Some(resource),
+                Some(CHAIN),
+                Some(BLOCK.0),
+                Some(BLOCK.1),
+                Some("0xprecedence-v1"),
+                Some(91 + index as i64),
+                CanonicalityState::Canonical,
+            );
+            event.source_family = family.into();
+            event.event_kind = kind.into();
+            event.before_state = json!({});
+            event.after_state = after;
+            event.raw_fact_ref =
+                json!({"emitting_address": "0x4444444444444444444444444444444444444401"});
+            events.push(event);
+        }
+        bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+        rebuild_fixture_families(&database.pool, CHAIN, BLOCK.0, BLOCK.1).await?;
+
+        let payload = v2_name_record_payload_for_database(
+            &database,
+            &format!("/v1/names/{NAME}/records?source=indexed&keys=text:url"),
+        )
+        .await?;
+        assert_eq!(
+            payload["data"]["resolver"]["address"],
+            json!(MIRROR),
+            "{row}: {payload:#}"
+        );
+        assert_eq!(
+            payload["data"]["records"]["text:url"],
+            json!({"status": "unsupported", "unsupported_reason": UNSUPPORTED}),
+            "{row}: {payload:#}"
+        );
+        // The mirrored .eth name keeps its records.
+        let mirrored = v2_name_record_payload_for_database(
+            &database,
+            "/v1/names/alice.eth/records?keys=text:description",
+        )
+        .await?;
+        assert_eq!(
+            mirrored["data"]["records"]["text:description"],
+            json!({"status": "ok", "value": "Alice profile"}),
+            "{row}: {mirrored:#}"
         );
         database.cleanup().await?;
     }

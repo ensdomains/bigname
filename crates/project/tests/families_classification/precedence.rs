@@ -1,8 +1,11 @@
-//! Which family an address that both protocols name is filed under. A pointer from either
-//! protocol names any address, so only an ENSv2 declaration or an `Upgraded` of the ENSv2
-//! resolver family keeps an address with ENSv1 evidence in the ENSv2 family, and an ENSv2
-//! declaration takes rank 0 from any candidate in its namespace, edge or not. Each case names
-//! its rows of the input-class table and ends with the undo and rebuild checks.
+//! Which family an address that both protocols name is filed under. Either registry stores
+//! whatever resolver address its caller sets
+//! (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L95 @ ens_v1@91c966f)
+//! (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registry/PermissionedRegistry.sol:L156-L161 @ ens_v2_mainnet_20261002@b1f97b91),
+//! so only an ENSv2 declaration or an `Upgraded` of the ENSv2 resolver family keeps an address
+//! with ENSv1 evidence in the ENSv2 family, and an ENSv2 declaration takes rank 0 from any
+//! candidate in its namespace, edge or not. Each case names its rows of the input-class table
+//! and ends with the undo and rebuild checks.
 use anyhow::Result;
 use bigname_project::{
     Marker,
