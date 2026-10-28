@@ -95,11 +95,12 @@ fn push_public_registration_id_query(
 
 /// Keep only the rows of one registration. A row on a resource belongs to it when its
 /// registration identity is that registration; a row with no resource (a record write) belongs
-/// to it while one of the registration's bindings is active, or when a resolver pointer at or
-/// below the read's published block attributed the write to the registration itself or to a
-/// NameWrapper resource that wrapped it. The candidate rows also hold the writes of the name's other registrations, so attribution
-/// to a candidate resource alone is not membership. Every binding, grant and wrapper-link
-/// witness lies at or below the read's published block of its chain.
+/// to it while one of the registration's bindings is active at the row's time, or when a
+/// resolver pointer at or below the read's published block attributed the write to the
+/// registration itself or to a NameWrapper resource that wrapped it. The candidate rows also
+/// hold the writes of the name's other registrations, so attribution to a candidate resource
+/// alone is not membership. Every binding, grant and wrapper-link witness lies at or below the
+/// read's published block of its chain.
 pub(super) fn push_registration_filter<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a EventHistoryReadFilter,
@@ -139,18 +140,40 @@ pub(super) fn push_registration_filter<'a>(
     builder.push("))");
 }
 
-// Resource-less name events belong to a registration only while its binding is active.
+/// The event row `ne` with its position in time, `event_time`: its block's timestamp plus one
+/// microsecond per log index, the encoding Interpret opens and closes surface bindings with. The
+/// timestamp is read from the event's own `chain_lineage` row by its key, so an event with no
+/// block has no row and no binding is active at it. No lookup may read the statement's joined
+/// lineage row `rb` instead: a predicate that references `rb` can only run on the join, where
+/// the planner charges it per joined row and hashes all of `chain_lineage` to avoid that.
+fn event_at_time(columns: &str) -> String {
+    format!(
+        "(SELECT {columns}event_lineage.block_timestamp
+                    + GREATEST(COALESCE(ne.log_index, 0), 0) * interval '1 microsecond'
+                    AS event_time
+              FROM bigname_phase.chain_lineage event_lineage
+              WHERE event_lineage.chain_id = ne.chain_id
+                AND event_lineage.block_hash = ne.block_hash)"
+    )
+}
+
+// Resource-less name events belong to a registration only while its binding is active at the
+// event's time.
 fn push_registration_binding_at_event(
     builder: &mut QueryBuilder<'_, Postgres>,
     registration_id: Uuid,
     canonical_only: bool,
     published: PublicationBounds<'_>,
 ) {
-    builder.push(
+    let history_event = event_at_time(
+        "ne.chain_id, ne.block_hash, ne.block_number, ne.log_index,
+                     ne.logical_name_id, ne.namespace, ne.after_state,
+                     ",
+    );
+    builder.push(format!(
         "EXISTS (
             SELECT 1
-            FROM (SELECT ne.chain_id, ne.block_hash, ne.block_number, ne.log_index,
-                         ne.logical_name_id, ne.namespace, ne.after_state) history_event
+            FROM {history_event} history_event
             CROSS JOIN bigname_phase.surface_bindings history_binding
             LEFT JOIN bigname_phase.chain_lineage binding_lineage
               ON binding_lineage.chain_id = history_binding.chain_id
@@ -158,13 +181,10 @@ fn push_registration_binding_at_event(
              AND binding_lineage.block_number = history_binding.block_number
             WHERE history_binding.logical_name_id = ne.logical_name_id
               AND history_binding.chain_id = ne.chain_id
-              AND history_binding.active_from <= rb.block_timestamp
-                  + GREATEST(COALESCE(ne.log_index, 0), 0) * interval '1 microsecond'
+              AND history_binding.active_from <= history_event.event_time
               AND (history_binding.active_to IS NULL
-                   OR history_binding.active_to > rb.block_timestamp
-                       + GREATEST(COALESCE(ne.log_index, 0), 0)
-                         * interval '1 microsecond')",
-    );
+                   OR history_binding.active_to > history_event.event_time)",
+    ));
     push_publication_bound(builder, "history_binding", published);
     if canonical_only {
         builder.push(
@@ -407,6 +427,7 @@ fn push_product_registration_id_with_anchors(
     let reservation_fork = fork("reservation_state");
     let resource_fork = fork("event_resource");
     let binding_fork = fork("binding");
+    let binding_event = event_at_time("");
     let registry_only =
         registry_registration::is_registry_only("ne.resource_id", "ne", canonical_only);
     let registry_lease =
@@ -530,7 +551,8 @@ fn push_product_registration_id_with_anchors(
                             )
                             AND NOT EXISTS (
                                 SELECT 1
-                                FROM bigname_phase.surface_bindings binding
+                                FROM {binding_event} binding_event
+                                CROSS JOIN bigname_phase.surface_bindings binding
                                 JOIN bigname_phase.chain_lineage binding_lineage
                                   ON binding_lineage.chain_id = binding.chain_id
                                  AND binding_lineage.block_hash = binding.block_hash
@@ -538,14 +560,10 @@ fn push_product_registration_id_with_anchors(
                                 WHERE binding.resource_id = ne.resource_id
                                   AND {binding_fork}
                                   AND binding.chain_id = ne.chain_id
-                                  AND binding.active_from <= rb.block_timestamp
-                                      + GREATEST(COALESCE(ne.log_index, 0), 0)
-                                        * interval '1 microsecond'
+                                  AND binding.active_from <= binding_event.event_time
                                   AND (
                                       binding.active_to IS NULL
-                                      OR binding.active_to > rb.block_timestamp
-                                          + GREATEST(COALESCE(ne.log_index, 0), 0)
-                                            * interval '1 microsecond'
+                                      OR binding.active_to > binding_event.event_time
                                   )
                                   AND (NOT {canonical_only} OR binding.canonicality_state IN (
                                       'canonical'::bigname_phase.canonicality_state,
