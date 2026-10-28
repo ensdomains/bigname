@@ -5035,7 +5035,8 @@ What changes for names:
 - A cut-over registrar lease whose premigration reservation was replaced keeps its
   `registered_at` and `registration_id`.
 - A reservation already expired when written no longer supplies an ENSv1 name's expiry or
-  status. The lease's own expiry and grace serve until a later reservation.
+  status, and neither does the lapsed reservation it replaced. The lease's own expiry and
+  grace serve until a later reservation.
 
 These rows arrive through re-derivation. Every chain needs one full-range Project redo and no
 Interpret redo, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary)

@@ -24,16 +24,14 @@ struct Instance<'a> {
 /// Retain one instance per admitted registry/token/resource key. The origin is distinct from the
 /// public registration handle. Unnamed changes belong only while the key still names this name;
 /// another name's association cannot renew or terminate its predecessor's retained instance.
-/// An event `never_live` names takes no part.
+/// An event `never_live` names supplies nothing. When it is the name's own label allocation it
+/// still supersedes the key's instance, so the key has none until a later allocation.
 fn v2_instance<'a>(
     tagged: &[Tagged<'a>],
     never_live: impl Fn(&LifecycleEvent) -> bool,
 ) -> Option<Instance<'a>> {
     let mut keys: BTreeMap<&str, Vec<&Tagged<'a>>> = BTreeMap::new();
-    for item in tagged
-        .iter()
-        .filter(|item| item.event.is_v2_family() && !never_live(item.event))
-    {
+    for item in tagged.iter().filter(|item| item.event.is_v2_family()) {
         if let Some(key) = item.key.as_deref() {
             keys.entry(key).or_default().push(item);
         }
@@ -44,6 +42,22 @@ fn v2_instance<'a>(
         let mut current: Option<Instance<'a>> = None;
         for item in events {
             let event = item.event;
+            let explicit_origin = matches!(
+                event.source_event.as_deref(),
+                Some("LabelRegistered" | "LabelReserved")
+            ) && event.derived_from.as_deref() != Some("registry_state");
+            if never_live(event) {
+                // A re-reservation of a reserved entry keeps its token and resource, because the
+                // registry bumps their versions only when the previous owner is not zero. So a
+                // reservation already expired when written lands on the key of the reservation
+                // it replaces, and ends that one: the name's dates fall back to its ENSv1 lease.
+                // (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registry/PermissionedRegistry.sol:L486-L494 @ ens_v2_mainnet_20261002@b1f97b91)
+                // (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registry/PermissionedRegistry.sol:L499 @ ens_v2_mainnet_20261002@b1f97b91)
+                if item.staged == StagedName::Ours && explicit_origin {
+                    current = None;
+                }
+                continue;
+            }
             if item.staged == StagedName::Other {
                 // A path expiry ends the other name's path on this key and never detaches this
                 // one. When the registry moves at a block boundary, the grant that moved the key
@@ -64,10 +78,6 @@ fn v2_instance<'a>(
                     && current
                         .as_ref()
                         .is_some_and(|instance| instance.reserved && instance.terminal.is_none());
-                let explicit_origin = matches!(
-                    event.source_event.as_deref(),
-                    Some("LabelRegistered" | "LabelReserved")
-                ) && event.derived_from.as_deref() != Some("registry_state");
                 // Topology reassertions can emit a reserved/granted snapshot after renewal or
                 // token regeneration. Only an actual label allocation starts a new instance.
                 if current.is_none() || (!claim && explicit_origin) {
@@ -209,8 +219,9 @@ pub(super) fn apply(
     trace: &mut Map<String, Value>,
 ) -> anyhow::Result<()> {
     // For a name ENSv1 decides, a reservation already expired when written is never live
-    // (`membership::expired_when_written`): it opens no instance, so its lapse supplies no dates
-    // over the ENSv1 lease, which stays the registration until premigration reserves it again.
+    // (`membership::expired_when_written`): it opens no instance and ends the one it replaces, so
+    // no lapse supplies dates over the ENSv1 lease, which stays the registration until
+    // premigration reserves the name again.
     let mut never_live = BTreeSet::new();
     if !facts.input.selection.is_v2() {
         for item in tagged {
@@ -521,3 +532,7 @@ mod tests {
 #[cfg(test)]
 #[path = "canonical_move_tests.rs"]
 mod move_tests;
+
+#[cfg(test)]
+#[path = "canonical_never_live_tests.rs"]
+mod never_live_tests;

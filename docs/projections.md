@@ -654,12 +654,15 @@ before the current ENSv2 entry. An earlier reservation is not such a registratio
 reserves a name only for its ENSv1 lease, so a reservation that was replaced by a later one
 stood for the same lease. A reservation already expired when written is never live
 (`docs/architecture.md`, authority selection) and supplies none of an ENSv1-selected name's
-dates. Premigration reserves at the lease's expiry plus 62 days, so a lease more than 62 days
+dates. A re-reservation keeps the entry's token and resource, so it lands on the key of the
+reservation it replaces and ends it: a live reservation that lapsed before it supplies none
+either. Premigration reserves at the lease's expiry plus 62 days, so a lease more than 62 days
 into its 90-day grace is reserved already expired, and a later run reserves the name again once
 it reads as available. Until then the lease serves its own expiry and the ENSv1 grace, a renewal
 included, and the release Interpret derives for that reservation ends nothing.
 (upstream: .refs/ens_v2_mainnet_20261002/contracts/script/preMigration.ts:L775-L792 @ ens_v2_mainnet_20261002@b1f97b91)
 (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registrar/BatchRegistrar.sol:L48-L72 @ ens_v2_mainnet_20261002@b1f97b91)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registry/PermissionedRegistry.sol:L486-L494 @ ens_v2_mainnet_20261002@b1f97b91)
 
 The release of the retained lease releases the name like any other lapse. On chain the registry
 keeps the owner and resolver it held after an ordinary lapse too; what makes a lapsed `.eth`
