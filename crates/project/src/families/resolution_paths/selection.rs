@@ -382,10 +382,14 @@ pub(super) fn statement(normal_work: &str) -> String {
         -- index finds the surfaces with the key's hash and the label comparison decides.
         -- PROD HOT PATCH 2026-10-27 (sel11): the label must sit directly below the changed
         -- registry's mount. In the root registry that is the last label; in a registry mounted at
-        -- a known parent, the labels after it are the parent's path. A registry with no known
-        -- mount keeps the corpus-wide label match. Without this, an entry keyed `eth` in any
-        -- registry (eth.eth is reserved in the ETH registry) made every `.eth` name a candidate
-        -- and the walk below visited 3.5 M suffixes.
+        -- a known parent, the labels after it are the parent's path. Without this, an entry
+        -- keyed `eth` in any registry (eth.eth is reserved in the ETH registry) made every
+        -- `.eth` name a candidate and the walk below visited 3.5 M suffixes.
+        -- PROD HOT PATCH 2026-10-28 (sel12): a registry no name points at (no mount row) sits on
+        -- no name's path, so its entries select nothing. Any emitter of `RegistryCreated()` is
+        -- admitted as a registry and its entry events are indexed with no name, so the former
+        -- corpus-wide fallback let one transaction select every `.eth` name. A later mount is
+        -- the parent's own changed entry, which composes the subtree through the walk below.
         SELECT probe.labelhashes FROM (SELECT DISTINCT registry, entry_key FROM changed_entries) changed
         LEFT JOIN LATERAL (
             SELECT parent.labelhashes FROM project_parent_subregistry mount
@@ -403,7 +407,7 @@ pub(super) fn statement(normal_work: &str) -> String {
                   AND CASE
                     WHEN changed.registry=lower($5::text) THEN label.position=cardinality(surface.labelhashes)
                     WHEN mount.labelhashes IS NOT NULL THEN surface.labelhashes[label.position+1:]=mount.labelhashes
-                    ELSE true END)
+                    ELSE false END)
             OFFSET 0
         ) probe
         WHERE NOT EXISTS (SELECT 1 FROM changed_registries WHERE registry=lower($5::text))
