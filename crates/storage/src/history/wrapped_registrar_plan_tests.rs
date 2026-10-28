@@ -1,8 +1,9 @@
 //! Plan and row tests for the registrar-grant lease lookup of name history
 //! (`push_registrar_grant_resources_query`).
 //!
-//! The node probe index's key is an expression, and production collects no statistics for it, so
-//! the planner estimates the probe at the default equality selectivity whatever the node. The
+//! The node probe index's key is an expression and the index is partial. The planner never reads a
+//! partial index's expression statistics, so it estimates the probe at the default equality
+//! selectivity whatever the node and whatever `ANALYZE` collected. The
 //! previous statement joined that expression to the surface's, and against the estimate the
 //! planner ANDed the probe with the event-kind index over every `RegistrationGranted` row of the
 //! chain. The fixture reproduces that: unrelated ENSv1 rows interleaved as on a live chain, 3.2%
@@ -239,7 +240,8 @@ async fn registrar_grants_rows_and_oracle_parity() -> Result<()> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Statistics {
-    /// The production state: no statistics on the probe expression, so the default selectivity.
+    /// No statistics on the probe expression. The planner ignores them on a partial index either
+    /// way, so both variants should plan alike. The pair guards against that ever changing.
     Off,
     On,
 }
