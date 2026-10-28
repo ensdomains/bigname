@@ -19,13 +19,16 @@ struct Instance<'a> {
     terminal: Option<&'a LifecycleEvent>,
     reserved: bool,
     attached: bool,
+    /// A never-live label allocation of the name: it keeps the key's position and dates nothing.
+    dateless: bool,
 }
 
 /// Retain one instance per admitted registry/token/resource key. The origin is distinct from the
 /// public registration handle. Unnamed changes belong only while the key still names this name;
 /// another name's association cannot renew or terminate its predecessor's retained instance.
 /// An event `never_live` names supplies nothing. When it is the name's own label allocation it
-/// still supersedes the key's instance, so the key has none until a later allocation.
+/// still supersedes the key's instance. The replacement keeps the key's position but supplies no
+/// dates, until a later allocation or a revival of its entry.
 fn v2_instance<'a>(
     tagged: &[Tagged<'a>],
     never_live: impl Fn(&LifecycleEvent) -> bool,
@@ -50,11 +53,25 @@ fn v2_instance<'a>(
                 // A re-reservation of a reserved entry keeps its token and resource, because the
                 // registry bumps their versions only when the previous owner is not zero. So a
                 // reservation already expired when written lands on the key of the reservation
-                // it replaces, and ends that one: the name's dates fall back to its ENSv1 lease.
+                // it replaces, and ends that one. The replacement keeps the key's position, so an
+                // older entry on another registry is not selected again, but it supplies no dates,
+                // so the name's dates fall back to its ENSv1 lease.
                 // (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registry/PermissionedRegistry.sol:L486-L494 @ ens_v2_mainnet_20261002@b1f97b91)
                 // (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registry/PermissionedRegistry.sol:L499 @ ens_v2_mainnet_20261002@b1f97b91)
                 if item.staged == StagedName::Ours && explicit_origin {
-                    current = None;
+                    current = Some(Instance {
+                        origin: event,
+                        association: event,
+                        grant: None,
+                        resource_id: event.resource_id.as_deref(),
+                        key: key.to_owned(),
+                        latest: event,
+                        expiry: Value::Null,
+                        terminal: None,
+                        reserved: event.event_kind == "RegistrationReserved",
+                        attached: true,
+                        dateless: true,
+                    });
                 }
                 continue;
             }
@@ -80,7 +97,9 @@ fn v2_instance<'a>(
                         .is_some_and(|instance| instance.reserved && instance.terminal.is_none());
                 // Topology reassertions can emit a reserved/granted snapshot after renewal or
                 // token regeneration. Only an actual label allocation starts a new instance.
-                if current.is_none() || (!claim && explicit_origin) {
+                if current.as_ref().is_none_or(|instance| instance.dateless)
+                    || (!claim && explicit_origin)
+                {
                     current = Some(Instance {
                         origin: event,
                         association: event,
@@ -92,6 +111,7 @@ fn v2_instance<'a>(
                         terminal: None,
                         reserved: kind == "RegistrationReserved",
                         attached: true,
+                        dateless: false,
                     });
                     continue;
                 }
@@ -132,13 +152,18 @@ fn v2_instance<'a>(
                     // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L664-L666 @ ens_v2_sepolia_20261001@07e55a05)
                     // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L671-L673 @ ens_v2_sepolia_20261001@07e55a05)
                     // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L41 @ ens_v2_sepolia_20261001@07e55a05)
-                    if event.source_event.as_deref() != Some("LabelUnregistered")
-                        && !event.expiry.is_null()
-                    {
+                    let dated = event.source_event.as_deref() != Some("LabelUnregistered")
+                        && !event.expiry.is_null();
+                    if dated {
                         instance.expiry = event.expiry.clone();
                     }
-                    if starts || event.revived_from_expiry == Some(true) {
+                    let revived = event.revived_from_expiry == Some(true);
+                    if starts || revived {
                         instance.terminal = None;
+                    }
+                    // A change that revives the entry of a never-live replacement dates it again.
+                    if revived && dated {
+                        instance.dateless = false;
                     }
                 }
                 _ => {}
@@ -219,9 +244,9 @@ pub(super) fn apply(
     trace: &mut Map<String, Value>,
 ) -> anyhow::Result<()> {
     // For a name ENSv1 decides, a reservation already expired when written is never live
-    // (`membership::expired_when_written`): it opens no instance and ends the one it replaces, so
-    // no lapse supplies dates over the ENSv1 lease, which stays the registration until
-    // premigration reserves the name again.
+    // (`membership::expired_when_written`): it opens no dated instance and ends the one it
+    // replaces, so no lapse supplies dates over the ENSv1 lease, which stays the registration
+    // until premigration reserves the name again.
     let mut never_live = BTreeSet::new();
     if !facts.input.selection.is_v2() {
         for item in tagged {
@@ -230,10 +255,23 @@ pub(super) fn apply(
             }
         }
     }
-    let canonical = v2_instance(tagged, |event| {
+    let selected = v2_instance(tagged, |event| {
         never_live.contains(event.position.event_identity.as_str())
     })
     .filter(|_| facts.input.selection.is_v2() || facts.resolution_cutover);
+    // A selected never-live replacement dates nothing, so the name is dated as if no ENSv2
+    // instance were selected. It still keeps any older entry from being selected instead.
+    if let Some(instance) = selected.as_ref().filter(|instance| instance.dateless) {
+        trace.insert(
+            "dateless_instance".into(),
+            json!({
+                "state_key": instance.origin.state_key,
+                "event_identity": instance.origin.position.event_identity,
+                "source_family": instance.origin.source_family,
+            }),
+        );
+    }
+    let canonical = selected.filter(|instance| !instance.dateless);
     let mut terminal = false;
     // An authority-kind hint or a binding alone is not an observed allocation. During a
     // historical rebuild a later authority can already have a resource identity while its
