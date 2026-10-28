@@ -40,6 +40,7 @@ fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
         chain_id: "ethereum-mainnet".to_owned(),
         observed_head_block_number: Some(104),
         publication_block_number: Some(100),
+        publication_gap_blocks: Some(0),
     }]);
     metrics
         .universal_resolver
@@ -214,10 +215,13 @@ fn served_gauges_reconcile_chains_the_query_no_longer_returns() -> Result<()> {
         RunnerLoopHeartbeat::default(),
         RunnerPhaseProgress::default(),
     )?;
-    metrics.served_lag.configure(&[
-        "project-row-gone".to_owned(),
-        "configured-emptied".to_owned(),
-    ]);
+    metrics.served_lag.configure(
+        &[
+            "project-row-gone".to_owned(),
+            "configured-emptied".to_owned(),
+        ],
+        0,
+    );
     let phase = |chain: &str, phase: &str| PhaseMetricRow {
         chain_id: chain.to_owned(),
         ..metric_row(phase)
@@ -226,6 +230,7 @@ fn served_gauges_reconcile_chains_the_query_no_longer_returns() -> Result<()> {
         chain_id: chain.to_owned(),
         observed_head_block_number: Some(104),
         publication_block_number: Some(100),
+        publication_gap_blocks: Some(0),
     };
     metrics.apply_rows(&[
         phase("configured-emptied", "project"),

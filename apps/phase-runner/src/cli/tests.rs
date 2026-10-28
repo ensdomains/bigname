@@ -1003,3 +1003,45 @@ fn ingest_environment_and_cli_precedence() {
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
 }
+
+#[test]
+fn run_cli_carries_the_live_publication_lag_and_refuses_one_above_three_blocks() {
+    configure_redo_source_endpoint();
+    let parse = |extra: &[&str]| {
+        let mut arguments = vec![
+            "phase-runner",
+            "run",
+            "--database-url",
+            "postgres://phase-runner.invalid/fresh",
+            "--verification-database-url",
+            "postgres://phase-runner.invalid/verification",
+            "--chain",
+            "ethereum-mainnet",
+            "--source",
+            REDO_SOURCE,
+        ];
+        arguments.extend_from_slice(extra);
+        Cli::try_parse_from(arguments)
+    };
+    let lag = |extra: &[&str]| {
+        let ResolvedCommand::Run {
+            live_publication_lag_blocks,
+            ..
+        } = parse(extra)
+            .expect("run options must parse")
+            .resolve()
+            .expect("run options must resolve")
+        else {
+            panic!("expected run command");
+        };
+        live_publication_lag_blocks
+    };
+    assert_eq!(lag(&[]), 0);
+    assert_eq!(lag(&["--live-publication-lag-blocks", "3"]), 3);
+    let error = parse(&["--live-publication-lag-blocks", "4"])
+        .expect_err("a publication lag above three blocks must be refused at startup");
+    assert!(
+        error.to_string().contains("live-publication-lag-blocks"),
+        "{error}"
+    );
+}
