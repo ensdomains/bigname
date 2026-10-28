@@ -19,6 +19,8 @@ const RESOLVER: &str = "0x00000000000000000000000000000000000000c7";
 const MIRROR: &str = "0x00000000000000000000000000000000000000d7";
 /// Another ENSv1 resolver, the only one the undeclaring manifests declare.
 const OTHER: &str = "0x00000000000000000000000000000000000000c8";
+/// The ENSv2 public resolver `foo`'s entry points at in the guarded world.
+const PUBLIC_V2: &str = "0x00000000000000000000000000000000000000d9";
 const V1_REGISTRY: &str = "0x00000000000000000000000000000000000000e5";
 const V1_REGISTRAR: &str = "0x00000000000000000000000000000000000000e3";
 
@@ -82,6 +84,11 @@ fn v1_resolvers(address: &str, read_features: &[&str]) -> Value {
 
 /// `RESOLVER`'s classification row: its support status, reason and manifest.
 async fn classification(fixture: &Fixture) -> Result<Value> {
+    classification_of(fixture, RESOLVER).await
+}
+
+/// The classification row of `resolver`.
+async fn classification_of(fixture: &Fixture, resolver: &str) -> Result<Value> {
     Ok(sqlx::query_scalar(
         "SELECT jsonb_build_object('support_status', support_status,
              'unsupported_reason', unsupported_reason, 'manifest_id', manifest_id,
@@ -89,7 +96,7 @@ async fn classification(fixture: &Fixture) -> Result<Value> {
          FROM project_resolver_classification WHERE chain_id = $1 AND resolver_address = $2",
     )
     .bind(CHAIN)
-    .bind(RESOLVER)
+    .bind(resolver)
     .fetch_one(&fixture.pool)
     .await?)
 }
@@ -461,4 +468,132 @@ async fn each_kind_of_classification_change_rebuilds_equal() -> Result<()> {
         fixture.cleanup().await?;
     }
     Ok(())
+}
+
+/// An ENSv2 resolver manifest payload declaring `PUBLIC_V2` as a public resolver.
+fn v2_public_resolver() -> Value {
+    json!({"contracts": [{"role": "public_resolver_v2", "address": PUBLIC_V2,
+                          "proxy_kind": "none", "read_features": ["addr", "text"]}]})
+}
+
+/// Whether a stored lookup inventory serves the record `record_key`.
+async fn serves(fixture: &Fixture, record_key: &str) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM project_lookup_record
+             WHERE chain_id = $1 AND record_key = $2)",
+    )
+    .bind(CHAIN)
+    .bind(record_key)
+    .fetch_one(&fixture.pool)
+    .await?)
+}
+
+/// The guarded world, published through block 3. Returns the manifest that declares `PUBLIC_V2`.
+///
+/// - 0: the root registry is admitted with its `eth` entry. An ENSv2 resolver manifest declares
+///   `PUBLIC_V2` as a public resolver.
+/// - 1: `foo` is registered in the `.eth` registry, and its entry's resolver is `PUBLIC_V2`, by
+///   an event that names `foo.eth`.
+/// - 2: `PUBLIC_V2` writes a text record for the node of `foo.eth`, by an event that names no
+///   name and carries the declaring manifest. It lands in the guarded partition of that
+///   manifest (records.rs, `partition`).
+/// - 3: a block that names nothing.
+async fn guarded_world(fixture: &Fixture) -> Result<i64> {
+    let eth = ens_v2_path::admit(fixture).await?;
+    let declaring = manifest(
+        fixture,
+        None,
+        "ens_v2_resolver_l1",
+        0,
+        v2_public_resolver(),
+        "active",
+    )
+    .await?;
+    let foo = ens_v2_path::surface(fixture, "foo.eth").await?;
+    let resource = ens_v2_path::entry_resource(&eth, "foo");
+    fixture
+        .binding(&uuid(201), &foo, &resource, "ens_v2", 1, 0, None)
+        .await?;
+    ens_v2_path::register(fixture, 1, 1, &eth, "foo", 1_900_000_000).await?;
+    ens_v2_path::point_named(
+        fixture,
+        1,
+        3,
+        &eth,
+        "foo",
+        Pointer::Resolver(PUBLIC_V2),
+        &foo,
+    )
+    .await?;
+    let written = fixture
+        .write(
+            2,
+            1,
+            "RecordChanged",
+            "ens_v2_resolver_l1",
+            None,
+            None,
+            json!({"node": foo.trim_start_matches("ens:"), "record_key": "text:guarded",
+                   "record_family": "text", "selector_key": "guarded", "value": "one",
+                   "source_event": "TextChanged"}),
+            PUBLIC_V2,
+        )
+        .await?;
+    sqlx::query(
+        "UPDATE normalized_events SET source_manifest_id = $2 WHERE normalized_event_id = $1",
+    )
+    .bind(written)
+    .bind(declaring)
+    .execute(&fixture.pool)
+    .await?;
+    ens_v2_path::filler(fixture, 3).await?;
+    fixture.apply(3, FamilyMode::Normal).await?;
+    Ok(declaring)
+}
+
+// A lookup inventory reads a supported resolver's manifest through the guarded partition key
+// (storage `records/rows.rs`, `admitted_partitions`). At block 4 the declaring manifest is
+// withdrawn and another declares `PUBLIC_V2` the same way, so only the row's manifest changes
+// and the resolver stays supported in the same namespace. A walk decides the same, but the
+// inventory now reads the new manifest's partition, which holds no record. An inventory
+// predicate that skipped a supported manifest change would keep serving block 2's record, which
+// the rebuild does not write.
+#[tokio::test]
+async fn a_supported_manifest_change_moves_the_guarded_partition() -> Result<()> {
+    let family = "ens_v2_resolver_l1";
+    let fixture = Fixture::new("families_reclassification_guarded", 12).await?;
+    let declaring = guarded_world(&fixture).await?;
+    let row = classification_of(&fixture, PUBLIC_V2).await?;
+    ensure!(
+        row["support_status"] == "supported" && row["manifest_id"] == json!(declaring),
+        "at 3 the public resolver is supported by its manifest: {row}"
+    );
+    ensure!(
+        serves(&fixture, "text:guarded").await?,
+        "at 3 the inventory serves the guarded record"
+    );
+    fixture.assert_rebuild_equal(3).await?;
+
+    manifest(
+        &fixture,
+        Some(declaring),
+        family,
+        4,
+        v2_public_resolver(),
+        "deprecated",
+    )
+    .await?;
+    let restamped = manifest(&fixture, None, family, 4, v2_public_resolver(), "active").await?;
+    fixture.apply(4, FamilyMode::Normal).await?;
+    let row = classification_of(&fixture, PUBLIC_V2).await?;
+    ensure!(
+        row["support_status"] == "supported" && row["manifest_id"] == json!(restamped),
+        "at 4 only the public resolver's manifest changed: {row}"
+    );
+    ensure!(
+        !serves(&fixture, "text:guarded").await?,
+        "at 4 the inventory reads the new manifest's partition, which holds no record"
+    );
+    fixture.assert_rebuild_equal(4).await?;
+    fixture.cleanup().await
 }

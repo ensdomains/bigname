@@ -24,7 +24,7 @@ fn image(kind: &str, status: &str, reason: Option<&str>, manifest: Option<i64>) 
 async fn a_classification_change_recomposes_the_inventories_that_read_its_fields() -> Result<()> {
     let unsupported = image("a", "unsupported", Some("resolver_not_declared"), Some(1));
     let supported = image("a", "supported", None, Some(1));
-    let cases: [(&str, Option<Value>, Option<Value>, bool); 11] = [
+    let cases: [(&str, Option<Value>, Option<Value>, bool); 12] = [
         (
             "unsupported re-filed with a new reason, manifest and classification",
             Some(image(
@@ -42,6 +42,18 @@ async fn a_classification_change_recomposes_the_inventories_that_read_its_fields
                 "a",
                 "unsupported",
                 Some("resolver_implementation_unknown"),
+                Some(1),
+            )),
+            Some(unsupported.clone()),
+            true,
+        ),
+        // `classify` and `is_mirror_pointer` read `role` and `source_family` before support.
+        (
+            "unsupported, classification only",
+            Some(image(
+                "b",
+                "unsupported",
+                Some("resolver_not_declared"),
                 Some(1),
             )),
             Some(unsupported.clone()),
