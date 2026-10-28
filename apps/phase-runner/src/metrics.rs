@@ -456,7 +456,10 @@ pub async fn start(
     feed: RunnerMetricsFeed,
 ) -> Result<SocketAddr> {
     let metrics = PipelineMetrics::new(heartbeat_stale_after_secs, loop_heartbeat, phase_progress)?;
-    metrics.served_lag.configure(&feed.configured_chains());
+    metrics.served_lag.configure(
+        &feed.configured_chains(),
+        feed.live_publication_lag_blocks(),
+    );
     metrics.rpc_chains.apply(feed.rpc_chains());
     metrics
         .ingest_rpc

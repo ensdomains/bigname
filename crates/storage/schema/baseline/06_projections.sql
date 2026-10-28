@@ -1116,6 +1116,7 @@ CREATE TABLE IF NOT EXISTS project_registry_pointer (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 CREATE INDEX IF NOT EXISTS project_registry_pointer_resolver_idx ON project_registry_pointer (chain_id, resolver_address);
+CREATE INDEX IF NOT EXISTS project_registry_pointer_resource_idx ON project_registry_pointer (chain_id, resource_id);
 COMMENT ON TABLE project_registry_pointer IS
     'Project-owned ENSv1 registry-node resolver pointer of family F4: the latest ResolverChanged per node, clears included, from the ENSv1 registry, registrar and wrapper families only (record_inventory/mirror.rs:100). A ResolverChanged of another family with no resource, such as a Basenames reverse node pointer, lands in neither F4 nor F5, where the served reverse-claim resolver (builders/primary_names.rs:103-113) reads the latest ResolverChanged at the node from any family.';
 COMMENT ON COLUMN project_registry_pointer.chain_id IS
@@ -1163,6 +1164,7 @@ CREATE TABLE IF NOT EXISTS project_resource_pointer (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 CREATE INDEX IF NOT EXISTS project_resource_pointer_resolver_idx ON project_resource_pointer (chain_id, resolver_address, resource_id);
+CREATE INDEX IF NOT EXISTS project_resource_pointer_namehash_resolver_idx ON project_resource_pointer (chain_id, namehash, resolver_address);
 CREATE INDEX IF NOT EXISTS project_resource_pointer_root_node_idx
     ON project_resource_pointer (chain_id, namespace, namehash)
     WHERE source_family = 'ens_v2_root_l1';

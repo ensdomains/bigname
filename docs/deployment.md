@@ -397,6 +397,7 @@ The implemented phases use:
 - `BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR`
 - `BIGNAME_PHASE_RUNNER_REDO_METRICS_BIND_ADDR`
 - `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS`
+- `BIGNAME_PHASE_RUNNER_LIVE_PUBLICATION_LAG_BLOCKS` — optional, 0 (default) to 3; see [Live publication lag](#live-publication-lag)
 
 An unset optional ceiling configures no limit; Docker inspection may show its bare
 variable name without `=`. An explicitly empty `KEY=` value is invalid.
@@ -407,6 +408,53 @@ the unchanged CLI accepts zero. Direct CLI defaults remain floor zero, path `.`
 and no ceiling; the existing capacity poll interval remains five seconds.
 These settings are read at startup. Shell values override `--env-file`, so inspect
 both interpolation inputs and the effective service/container configuration.
+
+### Live publication lag
+
+`BIGNAME_PHASE_RUNNER_LIVE_PUBLICATION_LAG_BLOCKS` (`--live-publication-lag-blocks`)
+makes live follow publish the readable head that many blocks below the newest block
+it has loaded. The blocks above it stay `observed`, and Interpret, Project,
+hydration and the API read none of them. A reorg that replaces only those blocks
+orphans them with no downstream redo. Without the lag, a one-block reorg at the
+head redoes Interpret and Project for that block, and the API refuses to serve the
+chain until the redo completes. A reorg deeper than the lag still redoes the
+readable blocks it replaces.
+
+Served data runs N blocks behind head, about 24 seconds at N=2. Each live poll
+loads those N blocks again from the node. The writes are no-ops, so the cost is N
+block reads per poll. The setting applies to every chain the runner follows.
+Finite Ingest and a rewind publish without it. A redo publishes no heads.
+Server Compose forwards the variable to the phase-runner service, 0 when unset or empty.
+
+The API's `BIGNAME_API_PUBLICATION_LAG_TOLERANCE_BLOCKS` keeps its default. The
+stored head itself lags, so the publication stands at the head as before. The
+runner refuses a value above 3 at startup. `/v1/status` reads `stale` once the
+published block is more than 60 seconds (`DEFAULT_MAX_LAG_SECS`) older than the
+network head. On a chain with 12-second blocks, each lagged block adds 12 seconds
+to the age the head already has, up to one block plus the five-second network-head
+refresh. That makes 53 seconds at 3 blocks and 65 at 4.
+
+Metrics under the lag:
+
+- `phase_runner_publication_lag_blocks{chain}` is the configured lag.
+- `phase_runner_publication_gap_blocks{chain}` is the newest block Live has loaded
+  minus the published chain head. At steady state it equals the configured lag,
+  and it is 0 without one. It also reads 0 while the node reports a head below
+  the published one: Live then records the published head as its position, even
+  though the observed blocks above it are still stored. Both gauges carry the
+  same `chain` label, so the two join on instance and chain.
+- `phase-runner redo` exports `phase_runner_publication_lag_blocks` as 0 on its
+  own metrics listener, whatever `run` was given.
+- `phase_runner_chain_head_block` is the published, lagged head.
+- `phase_runner_head_lag_blocks{phase="live"}` reads 0 when Live is caught up.
+  Live's target is the node's head and its position the newest block it loaded,
+  which match once it has caught up.
+  Interpret and Project stand on the published head, so theirs read 0 too.
+- `phase_runner_served_lag_blocks` measures from the node's head, so at steady
+  state it reads the lag rather than 0. A rule that alerts on it above 1 fires at
+  a lag of 2.
+- `/v1/status` reports the network head beside the canonical block, so its
+  `ingestion_lag_blocks` reads the lag.
 
 The runner syncs every manifest in the
 [deployment profile](glossary.md#deployment-profile), whichever chains
@@ -4963,3 +5011,106 @@ mark old rows ready under the new hash.
 
 It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
 and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## Read indexes for history windows, search prefixes and `resolves_to`
+
+The build that adds four read-only btree indexes changes no stored row and no response
+body. Each serves an API read that otherwise scans its whole table:
+
+- History, address-history and events pages with `from_timestamp` or `to_timestamp` map each
+  bound to a block through `chain_lineage_timestamp_idx` on `chain_lineage`.
+- `GET /v1/search` with a raw-name prefix reads its matches as one range of
+  `name_surfaces_name_prefix_idx` on `name_surfaces`.
+- `relation=resolves_to` on `GET /v1/addresses/{address}/names` finds its candidate
+  resources through `project_resource_pointer_namehash_resolver_idx` on
+  `project_resource_pointer`, and the names that reach them through
+  `project_registry_pointer_resource_idx` on `project_registry_pointer`.
+
+[Table ownership](storage.md#table-ownership) lists each index with the statement it
+serves.
+
+- Neither content hash rotates. The baselines and schema-migrations are inputs of neither
+  hash. The served statements are in files that are inputs of neither, and the Rust change
+  only names them for their plan tests. No redo is needed. The change ships as an image
+  swap plus the schema-migration.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Schema-migration `20261028120000_serving_read_indexes.sql` installs the four indexes. An
+index that already exists under its name, with the reviewed definition, is adopted without a
+build and without a lock on its table. This covers an index an operator created
+concurrently under the same name before the release. A missing index is built with an
+ordinary `CREATE INDEX`, which holds a SHARE lock on its table until the schema-migration
+commits and blocks the table's writers. Apply the schema-migration with the phase runner,
+redo processes and API stopped, with the same `lock_timeout`, `statement_timeout` and retry
+procedure as the other index schema-migrations and `--target-version 20261028120000`.
+
+On a large initialized database, prebuild the missing indexes concurrently first, outside a
+transaction. The phase runner and API can keep running while they build. The
+schema-migration then finds them by name and skips the builds:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS chain_lineage_timestamp_idx
+    ON bigname_phase.chain_lineage (chain_id, block_timestamp, block_number);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS project_resource_pointer_namehash_resolver_idx
+    ON bigname_phase.project_resource_pointer (chain_id, namehash, resolver_address);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_name_prefix_idx
+    ON bigname_phase.name_surfaces (raw_name text_pattern_ops, namespace, namehash, logical_name_id)
+    WHERE visibility_state = 'active'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND octet_length(raw_name) <= 2000;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS project_registry_pointer_resource_idx
+    ON bigname_phase.project_registry_pointer (chain_id, resource_id);
+```
+
+`IF NOT EXISTS` matches the index name only. An interrupted concurrent build leaves an
+invalid index. The schema-migration checks all four names before its own builds and again
+after them. It refuses a name that is not an index, is on another table, is not valid and
+ready, or has another definition, and its error names the index. Check the same things
+yourself after each concurrent build, so the schema-migration does not stop inside the
+maintenance window:
+
+```sql
+SET search_path = pg_catalog;
+SELECT c.relname, c.relkind, i.indrelid::regclass, i.indisvalid, i.indisready,
+       pg_get_indexdef(i.indexrelid)
+FROM pg_class AS c
+LEFT JOIN pg_index AS i ON i.indexrelid = c.oid
+WHERE c.relnamespace = 'bigname_phase'::regnamespace
+  AND c.relname IN (
+      'chain_lineage_timestamp_idx',
+      'project_resource_pointer_namehash_resolver_idx',
+      'name_surfaces_name_prefix_idx',
+      'project_registry_pointer_resource_idx');
+RESET search_path;
+```
+
+Each row has `relkind` `i`, its own table as `indrelid`, and `indisvalid` and `indisready`
+true. The definitions must be exactly these lines, which are the text the schema-migration
+compares:
+
+```text
+CREATE INDEX chain_lineage_timestamp_idx ON bigname_phase.chain_lineage USING btree (chain_id, block_timestamp, block_number)
+CREATE INDEX project_resource_pointer_namehash_resolver_idx ON bigname_phase.project_resource_pointer USING btree (chain_id, namehash, resolver_address)
+CREATE INDEX name_surfaces_name_prefix_idx ON bigname_phase.name_surfaces USING btree (raw_name text_pattern_ops, namespace, namehash, logical_name_id) WHERE ((visibility_state = 'active'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (octet_length(raw_name) <= 2000))
+CREATE INDEX project_registry_pointer_resource_idx ON bigname_phase.project_registry_pointer USING btree (chain_id, resource_id)
+```
+
+A missing index has no row. The schema-migration then builds it under the SHARE lock, so
+build it concurrently first.
+
+The remedy depends on the refusal:
+
+- A name that is not an index: remove or rename that relation, then build the index.
+- An index of the name on another table, or one that is not valid and ready: drop it with
+  `DROP INDEX CONCURRENTLY bigname_phase.<index name>`, then build it again with the
+  statement above.
+- Another definition: the error prints the definition it found and the one it expects.
+  Drop the index the same way and build it again with the statement above.
+
+Before any drop, confirm in `pg_stat_progress_create_index` that no build of the index is
+still running. Then run the schema-migrations again.
+
+Ingest writes one more btree entry for each block it stores. Project writes one more for
+each resource pointer and registry pointer it stores. Interpret writes one more for each
+readable, active name surface whose raw name is at most 2000 bytes.
