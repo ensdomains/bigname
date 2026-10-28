@@ -174,6 +174,7 @@ async fn release(
     expiry: Value,
     holder: &str,
 ) -> Result<()> {
+    fixture.resource(lease).await?;
     let identity = format!("release-{lease}-{block}");
     fixture
         .event(
