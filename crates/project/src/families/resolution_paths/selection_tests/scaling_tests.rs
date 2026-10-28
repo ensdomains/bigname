@@ -38,6 +38,8 @@ const KEY_INDEX: &str = "name_surfaces_project_entry_keys_idx";
 const STATE_KEY_INDEX: &str = "normalized_events_v2_key_probe_idx";
 const EVENTS: &str = "normalized_events";
 const ENTRIES: &str = "project_ens_v2_entry_owner";
+/// The owner and owner getter of a touched name's registry node state.
+const HOLDER: &str = "0x00000000000000000000000000000000000000aa";
 
 /// The tree's size: second, third and fourth level names.
 #[derive(Clone, Copy)]
@@ -324,8 +326,9 @@ async fn change_registry(
                 nth < tree.second * 3 / 4,
                 "the tree is too small for the route"
             );
-            let name =
-                |tag: &str| format!("'ens:0x' || md5('{tag}' || {nth}) || md5({nth} || '{tag}')");
+            let node =
+                |tag: &str| format!("'0x' || md5('{tag}' || {nth}) || md5({nth} || '{tag}')");
+            let name = |tag: &str| format!("'ens:' || {}", node(tag));
             let creation = format!("evidence:{block}");
             let evidence = format!(
                 "jsonb_build_object('evidence', jsonb_build_array(jsonb_build_object(
@@ -348,13 +351,20 @@ async fn change_registry(
                     &name("n2"),
                     &evidence,
                 ),
+                // The touch is a change that can move the names under the touched name, so the
+                // statement reads its ancestors' migration evidence: its registry node state
+                // gains a holder.
                 format!(
-                    "INSERT INTO project_family_undo (chain_id, block_number, block_hash, family,
+                    "INSERT INTO project_registry_node_state (chain_id, namespace, node,
+                         block_number, event_identity, owner, owner_getter, owner_word_unmasked)
+                     VALUES ('{CHAIN}', 'ens', {touched}, {block}, 'node:{block}', '{HOLDER}',
+                             '{HOLDER}', false);
+                     INSERT INTO project_family_undo (chain_id, block_number, block_hash, family,
                          key)
-                     VALUES ('{CHAIN}', {block}, '{hash}', 'project_name_state',
+                     VALUES ('{CHAIN}', {block}, '{hash}', 'project_registry_node_state',
                              jsonb_build_array('{CHAIN}', 'ens', {touched})::text)",
                     hash = hash(block),
-                    touched = name("n3"),
+                    touched = node("n3"),
                 ),
             ]
             .concat()

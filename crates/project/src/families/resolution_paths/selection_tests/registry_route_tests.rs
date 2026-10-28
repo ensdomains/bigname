@@ -20,6 +20,8 @@ const REGISTRY_FAMILY: &str = "ens_v2_registry_l1";
 const MIGRATION_FAMILY: &str = "ens_v2_migration_l1";
 /// The subregistry value of an entry that points at no registry.
 const NO_REGISTRY: &str = "0x0000000000000000000000000000000000000000";
+/// The owner and owner getter of a touched name's registry node state.
+const HOLDER: &str = "0x00000000000000000000000000000000000000aa";
 
 fn at(block: i64) -> Call<'static> {
     Call {
@@ -51,6 +53,20 @@ impl World {
         .await?;
         anyhow::ensure!(updated.rows_affected() == 1, "no event {identity}");
         Ok(())
+    }
+
+    /// The publication at `block` touches `name` with a change that can move the names under
+    /// it: its registry node state gains a holder. Only such a change reads the migration
+    /// evidence of the name and its ancestors. A write of the name state alone selects the name
+    /// and reads no ancestor.
+    async fn touch_owner(&self, block: i64, name: &str) -> Result<()> {
+        self.registry_node_state_changed(
+            block,
+            name,
+            None,
+            Some((Some(HOLDER), Some(HOLDER), None, false)),
+        )
+        .await
     }
 
     /// `registry`'s entry for `labelhash` as a row with no resource of its own, pointing at
@@ -464,8 +480,8 @@ async fn a_touched_migrated_name_counts_as_its_own_ancestor() -> Result<()> {
     world.migrated("mig.eth", &registry(1), 3).await?;
     world.mount(ETH, &labelhash("n"), &registry(2)).await?;
     world.migrated("xyz", &registry(2), 3).await?;
-    world.touch(5, "mig.eth").await?;
-    world.touch(7, "xyz").await?;
+    world.touch_owner(5, "mig.eth").await?;
+    world.touch_owner(7, "xyz").await?;
     world
         .assert_selects(at(5), &["mig.eth", "s.mig.eth", "m.eth", "k.m.eth"])
         .await?;
@@ -485,8 +501,8 @@ async fn a_redo_ignores_a_migration_after_the_publication() -> Result<()> {
     world.eth().await?;
     world.mount(ETH, &labelhash("m"), &registry(1)).await?;
     world.migrated("mig.eth", &registry(1), 9).await?;
-    world.touch(5, "t.mig.eth").await?;
-    world.touch(10, "t.mig.eth").await?;
+    world.touch_owner(5, "t.mig.eth").await?;
+    world.touch_owner(10, "t.mig.eth").await?;
     world.assert_selects(at(5), &["t.mig.eth"]).await?;
     world
         .assert_selects(at(10), &["t.mig.eth", "m.eth", "k.m.eth"])
@@ -557,7 +573,7 @@ async fn migration_evidence_that_is_orphaned_empty_or_dangling_selects_nothing()
         if case == "uncreated" {
             world.set_canonicality(&creation, "orphaned").await?;
         }
-        world.touch(5, &child).await?;
+        world.touch_owner(5, &child).await?;
         touched.push(child);
     }
     let mut expected: Vec<&str> = touched.iter().map(String::as_str).collect();
@@ -599,8 +615,8 @@ async fn a_migration_and_its_mount_in_either_order_select_the_same_names() -> Re
             .await?;
     }
     for block in [3, 6] {
-        world.touch(block, "t.mig1.eth").await?;
-        world.touch(block, "t.mig2.eth").await?;
+        world.touch_owner(block, "t.mig1.eth").await?;
+        world.touch_owner(block, "t.mig2.eth").await?;
     }
     world
         .assert_selects(at(3), &["t.mig1.eth", "t.mig2.eth"])
