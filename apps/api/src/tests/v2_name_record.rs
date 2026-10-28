@@ -2128,12 +2128,6 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
             payload["data"]["resolver"]["address"],
             json!("0x0000000000000000000000000000000000000abc")
         );
-        // The cleared registry record leaves the BaseRegistrar lease standing, so the name
-        // serves that lease's registration (docs/projections.md, ownerless registry profile).
-        assert_eq!(
-            payload["data"]["registration_id"],
-            json!("00000000-0000-0000-0000-000000002200")
-        );
         if uri.contains("/records") {
             assert_eq!(payload["meta"]["source"], json!("indexed"));
             assert_eq!(
@@ -2145,6 +2139,13 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
                 json!("inventory_not_available")
             );
         } else {
+            // The cleared registry record leaves the BaseRegistrar lease standing, so the name
+            // serves that lease's registration (docs/projections.md, ownerless registry profile).
+            // The records route carries no registration fields.
+            assert_eq!(
+                payload["data"]["registration_id"],
+                json!("00000000-0000-0000-0000-000000002200")
+            );
             assert_eq!(payload["data"]["status"], json!("active"));
             assert!(
                 payload["data"].get("token_id").is_none(),
