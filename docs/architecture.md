@@ -684,11 +684,15 @@ protocol's registry can point a name at any address
 so a pointer says nothing about the address's record model. When an address
 has an `ens_v1_resolver_l1` candidate of any source (a pointer, an observed
 event or an edge), its `ens_v2_resolver_l1` candidates rank after every other
-candidate, unless an ENSv2 declaration names the address or its latest
-`Upgraded` names an implementation the resolver manifest declares. A
+candidate, unless an ENSv2 declaration names the address or it has an
+`Upgraded` of the `ens_v2_resolver_l1` family. Any such `Upgraded` counts,
+whichever implementation the latest one names: an upgrade to an implementation
+the manifest does not declare stays ENSv2 with
+`resolver_implementation_not_declared`. A
 [creation self-edge](glossary.md#resolver-creation-capture) is not such
 evidence. ENSv1 evidence and `Upgraded` observations only accumulate, so a
-pointer that comes and goes never moves an address between families. An
+pointer that comes and goes, or an upgrade between declared and undeclared
+implementations, never moves an address between families. An
 address that both protocols name and that neither a declaration nor such an
 `Upgraded` identifies is therefore unsupported as an undeclared ENSv1
 resolver.

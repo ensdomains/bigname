@@ -1500,7 +1500,7 @@ The resolver classification's `unsupported_reason` for an ENSv2 resolver (and th
 vocabulary: `resolver_not_declared` when an exact `public_resolver_v2`
 declaration is required and absent (also the ENSv1 and Basenames reason for an
 undeclared address, which includes an address both protocols name that no
-declaration or declared `Upgraded` identifies, as
+declaration or ENSv2 `Upgraded` identifies, as
 [architecture.md § Discovery graph](architecture.md#discovery-graph) files it
 under ENSv1); `resolver_implementation_unknown` when a discovered proxy
 has no canonical `Upgraded` observation — neither an ERC-1967 `Upgraded` log

@@ -1,6 +1,6 @@
 //! Which family an address that both protocols name is filed under. A pointer from either
-//! protocol names any address, so only an ENSv2 declaration or an `Upgraded` to a declared
-//! implementation keeps an address with ENSv1 evidence in the ENSv2 family, and an ENSv2
+//! protocol names any address, so only an ENSv2 declaration or an `Upgraded` of the ENSv2
+//! resolver family keeps an address with ENSv1 evidence in the ENSv2 family, and an ENSv2
 //! declaration takes rank 0 from any candidate in its namespace, edge or not. Each case names
 //! its rows of the input-class table and ends with the undo and rebuild checks.
 use anyhow::Result;
@@ -14,6 +14,7 @@ use super::{REGISTRY as V1_REGISTRY, columns, edge, manifest, namespaced_manifes
 use crate::families_support::{CHAIN, CONTENT_HASH, Fixture, hash, uuid};
 
 const V2_REGISTRY: &str = "0x00000000000000000000000000000000000000e2";
+const UNMOUNTED_REGISTRY: &str = "0x00000000000000000000000000000000000000e3";
 const IMPLEMENTATION: &str = "0x00000000000000000000000000000000000000c1";
 const UNDECLARED_IMPLEMENTATION: &str = "0x00000000000000000000000000000000000000c2";
 const ZERO: &str = "0x0000000000000000000000000000000000000000";
@@ -258,20 +259,24 @@ async fn plan_mode(fixture: &Fixture, mode: &str) -> Result<()> {
     Ok(())
 }
 
-// A1, U1, A3, A4, A1x, A6: an address an ENSv1 name points at stays ENSv1 when ENSv2 entries
+// A1, U1, A3, A4, A6, C1: an address an ENSv1 name points at stays ENSv1 when ENSv2 entries
 // point at it too. The ENSv2 events and edges arrive at block 8, after the ENSv1 pointers of
 // block 5 (A1, three ENSv2 entries; U1, three ENSv1 pointers and one entry), in the same block
-// (A3), beside a registry proxy's `Upgraded` (A4), beside an `Upgraded` to an undeclared
-// implementation (A1x), or as a creation self-edge of the ENSv2 resolver manifest (A6).
+// (A3), beside a registry proxy's `Upgraded` (A4), as a creation self-edge of the ENSv2
+// resolver manifest (A6), or as an unmounted registry's nameless event with its edge (C1). The
+// selection of names to recompose reads only these fields (resolution_paths/selection.rs,
+// `changed_resolvers`), so an unchanged row selects no name that points at it. A1x is the
+// contrast: an `Upgraded` of the ENSv2 resolver family to an undeclared implementation is ENSv2
+// evidence, so A1x moves once, to ENSv2 with `resolver_implementation_not_declared`.
 #[tokio::test]
 async fn an_ensv2_pointer_leaves_an_address_with_ensv1_evidence_in_ensv1() -> Result<()> {
     for mode in PLAN_MODES {
         let fixture = Fixture::new(&format!("classification_rb_{mode}"), 20).await?;
         plan_mode(&fixture, mode).await?;
         let m = manifests(&fixture, &[], &[]).await?;
-        let [a1, u1, a3, a4, a1x, a6] = [0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6].map(address);
+        let [a1, u1, a3, a4, a1x, a6, c1] = [0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7].map(address);
         let mut instance = std::collections::BTreeMap::new();
-        for address in [&a1, &u1, &a3, &a4, &a1x, &a6] {
+        for address in [&a1, &u1, &a3, &a4, &a1x, &a6, &c1] {
             instance.insert(address.clone(), target(&fixture, address).await?);
         }
         pointer(&fixture, 5, 1, 1, &a1).await?;
@@ -281,6 +286,7 @@ async fn an_ensv2_pointer_leaves_an_address_with_ensv1_evidence_in_ensv1() -> Re
         pointer(&fixture, 5, 5, 5, &a4).await?;
         pointer(&fixture, 5, 6, 6, &a1x).await?;
         pointer(&fixture, 5, 7, 7, &a6).await?;
+        pointer(&fixture, 5, 8, 9, &c1).await?;
         for (log, entry) in [(1, 11), (2, 12), (3, 13)] {
             v2_pointer(&fixture, &m, 8, log, entry, &a1, &instance[&a1], None).await?;
         }
@@ -309,6 +315,28 @@ async fn an_ensv2_pointer_leaves_an_address_with_ensv1_evidence_in_ensv1() -> Re
             false,
         )
         .await?;
+        edge(
+            &fixture,
+            0x60_0007,
+            &instance[&c1],
+            m.v2_registry,
+            Some(8),
+            None,
+            false,
+        )
+        .await?;
+        fixture
+            .write(
+                8,
+                11,
+                "ResolverChanged",
+                "ens_v2_registry_l1",
+                None,
+                None,
+                json!({"node": node(18), "resolver": c1}),
+                UNMOUNTED_REGISTRY,
+            )
+            .await?;
 
         fixture.apply(7, FamilyMode::Normal).await?;
         let mut before = std::collections::BTreeMap::new();
@@ -318,6 +346,7 @@ async fn an_ensv2_pointer_leaves_an_address_with_ensv1_evidence_in_ensv1() -> Re
             ("A4", &a4),
             ("A1x", &a1x),
             ("A6", &a6),
+            ("C1", &c1),
         ] {
             let fields = served(&fixture, address).await?;
             assert_eq!(brief(&fields), v1_undeclared(), "{row} at 7 ({mode})");
@@ -333,8 +362,8 @@ async fn an_ensv2_pointer_leaves_an_address_with_ensv1_evidence_in_ensv1() -> Re
             ("A1", &a1),
             ("U1", &u1),
             ("A4", &a4),
-            ("A1x", &a1x),
             ("A6", &a6),
+            ("C1", &c1),
         ] {
             assert_eq!(
                 served(&fixture, address).await?,
@@ -342,6 +371,32 @@ async fn an_ensv2_pointer_leaves_an_address_with_ensv1_evidence_in_ensv1() -> Re
                 "{row}: the ENSv2 pointers at 8 re-file nothing ({mode})"
             );
         }
+        let c1_row = fixture
+            .rows("project_resolver_classification")
+            .await?
+            .into_iter()
+            .find(|row| row["resolver_address"] == json!(c1))
+            .expect("C1 row");
+        assert_eq!(
+            c1_row["observed_families"]["ens_v2_resolver_l1"],
+            json!(3),
+            "C1: the nameless event reached the row ({mode})"
+        );
+        let a1x_at_8 = served(&fixture, &a1x).await?;
+        assert_eq!(
+            brief(&a1x_at_8),
+            filed(
+                "ens_v2_resolver_l1",
+                None,
+                Some("resolver_implementation_not_declared"),
+            ),
+            "A1x: an undeclared implementation is still ENSv2 evidence ({mode})"
+        );
+        assert_eq!(
+            a1x_at_8["manifest_id"],
+            json!(m.v2_resolver),
+            "A1x at 8 ({mode})"
+        );
         assert_eq!(
             brief(&served(&fixture, &a3).await?),
             v1_undeclared(),
@@ -390,6 +445,53 @@ async fn an_upgraded_proxy_stays_ensv2_beside_ensv1_evidence() -> Result<()> {
     );
     fixture.assert_undo_restores(8).await?;
     fixture.assert_rebuild_equal(8).await?;
+    fixture.cleanup().await
+}
+
+// F1: a proxy an ENSv1 name points at, with an ENSv2 entry and edge to it, upgraded to a declared
+// implementation (block 4), then to an undeclared one (6), then to the declared one again (9).
+// Any `Upgraded` of the ENSv2 resolver family is ENSv2 evidence, so the family stays ENSv2 and
+// only the support and reason move with the implementation.
+#[tokio::test]
+async fn an_upgrade_to_an_undeclared_implementation_keeps_the_proxy_ensv2() -> Result<()> {
+    let fixture = Fixture::new("classification_rb_flip", 20).await?;
+    let m = manifests(&fixture, &[], &[]).await?;
+    let proxy = address(0x10c3);
+    let instance = target(&fixture, &proxy).await?;
+    pointer(&fixture, 3, 1, 1, &proxy).await?;
+    v2_pointer(&fixture, &m, 3, 2, 23, &proxy, &instance, None).await?;
+    upgraded(&fixture, 4, 1, "ens_v2_resolver_l1", &proxy, IMPLEMENTATION).await?;
+    upgraded(
+        &fixture,
+        6,
+        1,
+        "ens_v2_resolver_l1",
+        &proxy,
+        UNDECLARED_IMPLEMENTATION,
+    )
+    .await?;
+    upgraded(&fixture, 9, 1, "ens_v2_resolver_l1", &proxy, IMPLEMENTATION).await?;
+    let supported = filed("ens_v2_resolver_l1", Some("permissioned_resolver"), None);
+    let not_declared = filed(
+        "ens_v2_resolver_l1",
+        None,
+        Some("resolver_implementation_not_declared"),
+    );
+
+    fixture.apply(3, FamilyMode::Normal).await?;
+    assert_eq!(
+        brief(&served(&fixture, &proxy).await?),
+        v1_undeclared(),
+        "F1 at 3"
+    );
+    for (block, expected) in [(4, &supported), (6, &not_declared), (9, &supported)] {
+        fixture.apply(block, FamilyMode::Normal).await?;
+        let fields = served(&fixture, &proxy).await?;
+        assert_eq!(&brief(&fields), expected, "F1 at {block}");
+        assert_eq!(fields["manifest_id"], json!(m.v2_resolver), "F1 at {block}");
+    }
+    fixture.assert_undo_restores(9).await?;
+    fixture.assert_rebuild_equal(9).await?;
     fixture.cleanup().await
 }
 

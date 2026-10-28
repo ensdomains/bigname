@@ -15,7 +15,7 @@
 //! or, for an ENSv2 declaration, by any candidate in its namespace, and priority 1 the edges
 //! themselves, declaration_precedence.rs) and the manifests are read at the block. Below
 //! priority 0 an ENSv2 candidate ranks last when the address has ENSv1 evidence and neither an
-//! ENSv2 declaration nor an `Upgraded` to a declared implementation (sql.rs). A resolver is
+//! ENSv2 declaration nor an `Upgraded` of the ENSv2 resolver family (sql.rs). A resolver is
 //! classified again when an event of the block names it, when a pointer row moves to or from it,
 //! when a resolver edge, its contract address or a manifest declaration of it starts or stops at
 //! the block, and, every stored resolver and every address an active resolver edge reaches, when
