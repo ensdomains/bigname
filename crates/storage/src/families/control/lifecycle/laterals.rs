@@ -185,26 +185,15 @@ pub(super) fn registrant(
             && event.event_kind == "TokenControlTransferred"
             && event.source_family == REGISTRAR
             && event.authority_kind == "registrar"
-            && match (handoff, implied) {
-                (Some(binding), _) => {
-                    let (block, transaction, log, _) = binding.order();
-                    let lease = implied
-                        .map(|lease| lease.resource)
-                        .or(binding.lease_resource_id.as_deref());
-                    lease.is_some()
-                        && lease == event.resource_id.as_deref()
-                        && event.position.bound() > (block, transaction, log)
-                }
-                // An ownerless registry record has no binding: its implied lease's transfers
-                // from the handoff on name the holder.
-                (None, Some(lease)) => {
-                    event.resource_id.as_deref() == Some(lease.resource)
-                        && lease
-                            .from_block
-                            .is_none_or(|from| event.position.block_number >= from)
-                }
-                (None, None) => false,
-            }
+            && handoff.is_some_and(|binding| {
+                let (block, transaction, log, _) = binding.order();
+                let lease = implied
+                    .map(|lease| lease.resource)
+                    .or(binding.lease_resource_id.as_deref());
+                lease.is_some()
+                    && lease == event.resource_id.as_deref()
+                    && event.position.bound() > (block, transaction, log)
+            })
             && (!is_v2 || (event.is_v2_family() && tagged.key.as_deref() == selected_key))
     };
     let admitted_grants: Vec<&LifecycleEvent> = tagged

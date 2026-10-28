@@ -40,8 +40,8 @@ const LEASE_KINDS: [&str; 4] = [
     "ExpiryChanged",
 ];
 
-/// The registrar lease of an ENSv1 `.eth` second-level name whose selected authority records
-/// none: a registry-only binding with no lease, or no binding on an ownerless registry record.
+/// The registrar lease of an ENSv1 `.eth` second-level name whose selected registry-only
+/// binding records none.
 /// The 2020 registrar migration moved such names onto the BaseRegistrar without a controller
 /// `NameRegistered`, so no grant opened their lease, and the adapter first names the lease at
 /// its first controller renewal, with a grant derived there. The lease is the resource of the
@@ -174,17 +174,12 @@ impl<'a> Authority<'a> {
                     && event.resource_id.as_deref() == Some(resource)
             })
         };
-        let unleased = match self.binding {
-            Some(binding) => {
-                self.registry_only_binding().is_some()
-                    && binding
-                        .lease_resource_id
-                        .as_deref()
-                        .is_none_or(|lease| !carries_lease(lease))
-            }
-            None => selection.ownerless_registry,
-        };
-        if !unleased {
+        let binding = self.registry_only_binding()?;
+        if binding
+            .lease_resource_id
+            .as_deref()
+            .is_some_and(carries_lease)
+        {
             return None;
         }
         let from_block = facts

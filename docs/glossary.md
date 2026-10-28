@@ -921,10 +921,8 @@ migration boundary.
 <a id="implied-lease"></a>
 ## Implied lease
 
-the BaseRegistrar lease of an ENSv1 `.eth` second-level name whose selected
-authority records none: a [registry-only handoff](#registry-only-handoff) with no
-lease, or no binding at all because the registry record's owner is the zero
-address. The January 2020 registrar migration moved names onto the current
+the BaseRegistrar lease of an ENSv1 `.eth` second-level name selected through a
+[registry-only handoff](#registry-only-handoff) that records no lease. The January 2020 registrar migration moved names onto the current
 BaseRegistrar with the registrar's own `NameRegistered` and no controller event,
 so bigname holds no grant for them. Their later controller renewals still name
 the lease. The implied lease is the resource of the name's latest own registrar

@@ -2,8 +2,8 @@
 //! lease (TYR-405). The January 2020 registrar migration moved such names onto the
 //! BaseRegistrar with no controller `NameRegistered`, so no grant opens their lease. Their first
 //! controller renewal names it, with a grant the adapter derives there. The name is selected
-//! through a registry-only binding that stands for no lease, or through no binding when its
-//! registry owner is the zero address. Each test is one input class of the implied lease
+//! through a registry-only binding that stands for no lease. Each test is one input class of
+//! the implied lease
 //! (`docs/projections.md`, registry-only bindings), plus the cut-over registrar lease that an
 //! earlier, replaced reservation left undated.
 #[path = "families_support/mod.rs"]
@@ -413,56 +413,6 @@ async fn a_reserved_implied_lease_that_lapsed_keeps_its_release() -> Result<()> 
         json!({"status": "released", "registered_at": block_time(1),
                "identity_resource_id": lease, "lapsed_owner": HOLDER,
                "expires_at": lapsed + 62 * DAY}),
-    )?;
-    fixture.assert_rebuild_equal(5).await?;
-    fixture.cleanup().await
-}
-
-/// Shape D: the registry owner was set to the zero address after the handoff, so no binding is
-/// open, while the renewed lease is alive. The name serves that lease, with no authority kind.
-#[tokio::test]
-async fn an_ownerless_registry_record_serves_its_live_implied_lease() -> Result<()> {
-    let fixture = Fixture::new("families_handoff_lease_ownerless", 7).await?;
-    let name = surface(&fixture, "pitchbookdata.eth").await?;
-    let lease = uuid(0x1001);
-    let registry = uuid(0x3001);
-    fixture
-        .binding(&uuid(101), &name, &registry, "ens_v1", 1, 10, Some(4))
-        .await?;
-    fixture
-        .write(
-            1,
-            10,
-            "SurfaceBound",
-            "ens_v1_registry_l1",
-            Some(&name),
-            Some(&registry),
-            json!({"authority_kind": "registry_only", "state_derived": true, "owner": OWNER}),
-            REGISTRY,
-        )
-        .await?;
-    fixture
-        .write(
-            1,
-            11,
-            "AuthorityEpochChanged",
-            "ens_v1_registry_l1",
-            Some(&name),
-            Some(&registry),
-            json!({"authority_kind": "registry_only"}),
-            REGISTRY,
-        )
-        .await?;
-    owner_write(&fixture, &name, &registry, 1, 12, OWNER, false).await?;
-    renewal(&fixture, &name, &lease, 2, 1, json!(LEASE_EXPIRY), true).await?;
-    transfer(&fixture, &name, &lease, 3, 1, HOLDER).await?;
-    owner_write(&fixture, &name, &registry, 4, 1, ZERO, false).await?;
-    fixture.apply(5, FamilyMode::Normal).await?;
-    check(
-        &served(&fixture, &name).await?,
-        json!({"status": "active", "registered_at": block_time(1), "resource_id": lease,
-               "ens_v1_expiry": LEASE_EXPIRY.to_string(), "expires_at": LEASE_EXPIRY,
-               "authority_kind": Value::Null, "owner": HOLDER}),
     )?;
     fixture.assert_rebuild_equal(5).await?;
     fixture.cleanup().await

@@ -614,8 +614,7 @@ which Project builds before it reaches the block's grants.
 A name the January 2020 registrar migration moved has a lease that no grant opened. The
 migration emitted the BaseRegistrar's own `NameRegistered` in the transaction that wrote the
 name's first current-registry record, and no controller event, so the name is selected through
-a registry-only binding that stands for no lease, or through no binding when its registry owner
-is the zero address. Its first controller renewal names the lease: the adapter mints the
+a registry-only binding that stands for no lease. Its first controller renewal names the lease: the adapter mints the
 lease's resource there and derives a `RegistrationGranted` beside the renewal. That lease is the
 name's [implied lease](glossary.md#implied-lease): the resource of the name's latest own
 `RegistrationGranted`, `RegistrationRenewed`, `RegistrationReleased` or `ExpiryChanged` row of
@@ -628,9 +627,9 @@ lease is `released` even when its release carries no expiry. `registered_at` is 
 the first current-registry record's block, the migration's own registration block, or of the
 lease's first row when the node has none. A grant a controller registration wrote dates the
 lease itself. The derived grant does not, and its zero-address registrant names no holder. The
-selected binding, its authority kind and the registry owner stay as they were, and a name on
-an ownerless registry record keeps no authority kind and is served registered. A name whose
-binding records a lease with registrar rows, a wrapper-selected name, a name selected under
+selected binding, its authority kind and the registry owner stay as they were. A name whose
+binding records a lease with registrar rows, a name with no binding (the ownerless-registry
+profile among them), a wrapper-selected name, a name selected under
 ENSv2 and any name other than a `.eth` second-level name have no implied lease. The migration's
 own `NameRegistered` is still not interpreted, so a migrated name never renewed has no lease
 row and serves as before.

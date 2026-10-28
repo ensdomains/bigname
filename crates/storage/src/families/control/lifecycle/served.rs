@@ -126,8 +126,6 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     let binding = authority.binding;
     let binding_resource = binding.map(|binding| binding.resource_id.as_str());
     let tagged = tag(facts, &authority);
-    // A name on its implied lease is registered, whatever its registry record's owner.
-    let ownerless = selection.ownerless_registry && authority.implied_lease.is_none();
 
     let mut trace = Map::new();
     if let Some(lease) = authority.implied_lease {
@@ -379,7 +377,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
             event.released_at.clone()
         }
     });
-    let status = if ownerless {
+    let status = if selection.ownerless_registry {
         json!("unregistered")
     } else {
         match selected_kind {
@@ -422,7 +420,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     // the trace records that difference under its own cause.
     let v2_release = selected_kind == Some("RegistrationReleased") && is_v2;
     let mut unreleased = None;
-    if ownerless {
+    if selection.ownerless_registry {
         for field in ["authority_kind", "authority_key", "registrant", "expiry"] {
             registration.insert(field.into(), Value::Null);
         }
@@ -505,7 +503,8 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
             registration.get("authority_kind").and_then(Value::as_str),
             Some("registrar" | "registry_only")
         );
-    let serves_control = !(ownerless || selection.released_tombstone || v2_release);
+    let serves_control =
+        !(selection.ownerless_registry || selection.released_tombstone || v2_release);
     let owner = served_owner(facts, folded, owner_required && serves_control)?;
     // A wrapper grant's control is built like any other grant's.
     let live_control = || {

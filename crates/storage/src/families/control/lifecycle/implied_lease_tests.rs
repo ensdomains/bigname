@@ -261,15 +261,14 @@ fn a_binding_that_records_a_lease_or_is_not_registry_only_has_no_implied_lease()
 }
 
 #[test]
-fn an_ownerless_registry_record_with_no_binding_implies_the_lease() {
-    let mut ownerless = Name::migrated(renewed(12, LEASE));
-    ownerless.binding = None;
-    ownerless.ownerless = true;
-    assert_eq!(implied(ownerless), Some(LEASE.to_owned()));
-    // With no binding and an owned registry record, nothing is selected to imply it under.
-    let mut unselected = Name::migrated(renewed(12, LEASE));
-    unselected.binding = None;
-    assert_eq!(implied(unselected), None);
+fn a_name_with_no_binding_has_no_implied_lease_even_on_an_ownerless_record() {
+    // The ownerless-registry profile is unregistered whatever its lease (docs/projections.md).
+    for ownerless in [true, false] {
+        let mut name = Name::migrated(renewed(12, LEASE));
+        name.binding = None;
+        name.ownerless = ownerless;
+        assert_eq!(implied(name), None, "ownerless {ownerless}");
+    }
 }
 
 #[test]
