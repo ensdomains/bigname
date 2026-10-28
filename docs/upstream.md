@@ -761,6 +761,13 @@ to the applicable entries below.
 > **Why**: the field is derived from indexed logs. Reading the getter per node at serve time would add a chain read to every name row and make the response depend on an execution client's state rather than the published block.
 > **Since**: `2026-10-09`
 
+<a id="migrated-eth-names-dated-at-the-registry-handoff"></a>
+> **`.eth` names moved by the 2020 registrar migration are dated at the registry handoff** — the migration moved each legacy name onto the current BaseRegistrar with the registrar's own `NameRegistered`, and bigname does not interpret that event as a grant. A name it moved that was renewed since is composed on the lease its renewals name, with `registered_at` the time of its first current-registry record's block, which is the migration's transaction. Its original 2017–2019 registration time, held by the earlier registrars, is not served.
+> **Upstream**: `register` and `registerOnly` both emit `NameRegistered(id, owner, expires)` `(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L155 @ ens_v1@91c966f)`. The migration contract itself is not pinned.
+> **Our rule**: `docs/projections.md` § the registry-only binding paragraphs (implied lease), `docs/glossary.md` § Implied lease.
+> **Why**: the registrar-emitted `NameRegistered` is mapped only to a release (`docs/manifests.md`), and the migration date is the earliest registration time the indexed registrars prove.
+> **Since**: `2026-10-28`
+
 Per-entry format:
 
 > **Surface** — one-line description of what differs.
