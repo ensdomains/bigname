@@ -18,11 +18,8 @@ WITH values_changed AS (
         WHERE (stored.chain_id, stored.resolver_address) = (change.chain_id, change.resolver_address)
         OFFSET 0
     ) stored ON true
-    -- Only a supported resolver's selectors are eligible or serve an overlay
-    -- (text_eligible.sql, storage `records/text_hydration.rs`).
     WHERE (change.classification, change.support_status, change.unsupported_reason, change.manifest_id)
         IS DISTINCT FROM (stored.classification, stored.support_status, stored.unsupported_reason, stored.manifest_id)
-      AND (change.support_status = 'supported' OR stored.support_status = 'supported')
 ), affected AS (
     SELECT chain_id, resolver_address, arm, arm_identity, record_key FROM values_changed
     UNION
