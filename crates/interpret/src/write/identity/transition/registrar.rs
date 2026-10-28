@@ -36,6 +36,12 @@ const LEASE_EVIDENCE_EVENT_KINDS: &[&str] = &[
     seam::TOKEN_CONTROL_TRANSFERRED_EVENT_KIND,
 ];
 
+/// INCIDENT-ONLY (hotfix sel16, never ships): an extra SQL condition on the `surface_bindings`
+/// rows `close_lease_predecessor` deletes at the cleanup. `TRUE` deletes every survivor; narrow
+/// it here in one line, e.g. `binding_kind = 'declared_registry_path'`. Survivors it excludes
+/// still stop the batch at the guard.
+const INCIDENT_SEL16_DELETE_NARROWING: &str = "TRUE";
+
 /// Resolves the lease and closes the ENSv1 side of the name at `predecessor_time`.
 ///
 /// The lease is the one resource of the name that carries an activated canonical registrar
@@ -248,6 +254,73 @@ pub(super) async fn close_lease_predecessor(
     .map_err(|error| {
         InterpretError::database("failed to apply migration authority transition", error)
     })?;
+
+    // INCIDENT-ONLY (hotfix sel16, 2026-10-28, never ships). Delete the ENSv1 bindings the UPDATE
+    // above could not close, log them, and go on instead of stopping at the guard below. The
+    // predicate is the guard's own plus `active_from >= cleanup`; after the UPDATE every row the
+    // guard would find has that start, so this deletes exactly the guard's set. It mirrors the
+    // adapters' unwrapped-migration reconciliation
+    // (`crates/adapters/src/schema_v2/protocol/v1/reconcile_support/unwrapped_migration.rs`),
+    // which drops the registrar reopening at the cleanup from the batch so it is never written.
+    // That keeps no undo journal or provenance record, and `surface_bindings` has no triggers, so
+    // a plain DELETE leaves the table as the reconciliation would. When the writer opened the
+    // deleted binding it capped its predecessor at its start, the cleanup instant, so the
+    // predecessor stays closed there. The guard below still runs and stops on anything left.
+    let mut deleted: Vec<(Uuid, String, String, time::OffsetDateTime)> = sqlx::query_as(&format!(
+        "DELETE FROM surface_bindings
+         WHERE chain_id = $1
+           AND logical_name_id = $2
+           AND authority_arm = $3
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND (
+               block_number,
+               COALESCE((provenance ->> '{transaction_index}')::bigint, -1),
+               COALESCE((provenance ->> '{log_index}')::bigint, -1)
+           ) <= ($4, $5, $6)
+           AND active_from >= $7
+           AND (active_to IS NULL OR active_to > $7)
+           AND ({narrowing})
+         RETURNING surface_binding_id, binding_kind, authority_arm, active_from",
+        transaction_index = seam::TRANSACTION_INDEX_KEY,
+        log_index = seam::LOG_INDEX_KEY,
+        narrowing = INCIDENT_SEL16_DELETE_NARROWING,
+    ))
+    .bind(&transition.chain_id)
+    .bind(&transition.logical_name_id)
+    .bind(&transition.expected_predecessor_arm)
+    .bind(predecessor_at.0)
+    .bind(predecessor_at.1)
+    .bind(predecessor_at.2)
+    .bind(predecessor_time)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|error| {
+        InterpretError::database(
+            "failed to delete ENSv1 bindings reopened at the migration predecessor cleanup",
+            error,
+        )
+    })?;
+    deleted.sort_by_key(|(id, ..)| *id);
+    let deleted_ids = deleted.iter().map(|(id, ..)| *id).collect::<Vec<_>>();
+    for (surface_binding_id, binding_kind, authority_arm, active_from) in &deleted {
+        tracing::error!(
+            boundary = %transition.boundary_event_identity,
+            surface_binding_id = %surface_binding_id,
+            binding_kind = %binding_kind,
+            authority_arm = %authority_arm,
+            active_from = ?active_from,
+            cleanup_time = ?predecessor_time,
+            "activated migration boundary {} leaves {} ENSv1 bindings open at its predecessor cleanup (bindings {:?}); INCIDENT-ONLY sel16 deleted binding {} (binding_kind {}, authority_arm {}, active_from {:?}, cleanup_time {:?}) and continued",
+            transition.boundary_event_identity,
+            deleted_ids.len(),
+            deleted_ids,
+            surface_binding_id,
+            binding_kind,
+            authority_arm,
+            active_from,
+            predecessor_time,
+        );
+    }
 
     // An ENSv1 binding opened at the cleanup instant itself cannot be closed there (a binding is
     // never empty), so it would outlive the boundary. Ordinary interpretation of a complete

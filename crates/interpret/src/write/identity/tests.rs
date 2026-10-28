@@ -960,12 +960,13 @@ async fn a_lease_granted_without_a_token_id_is_found_by_its_cleanup_transfer() -
     Ok(())
 }
 
-/// An ENSv1 binding opened at the cleanup instant itself cannot be closed there, so it would
-/// outlive the boundary. Ordinary interpretation of a complete migration transaction opens none
-/// (the adapters reconcile the transaction first), so this shape is only constructible directly;
-/// the writer must still refuse it rather than publish two current authorities.
+/// INCIDENT-ONLY (hotfix sel16, 2026-10-28, never ships). An ENSv1 binding opened at the
+/// cleanup instant itself cannot be closed there, so it would outlive the boundary. The shipped
+/// writer stops the batch on it; this incident build deletes it, as the adapters' unwrapped
+/// reconciliation would have kept it out of the batch, logs it, and applies the boundary. The
+/// binding open before the cleanup stays closed at the cleanup.
 #[tokio::test]
-async fn a_binding_opened_at_the_cleanup_instant_stops_the_boundary() -> TestResult {
+async fn incident_sel16_a_binding_opened_at_the_cleanup_instant_is_deleted() -> TestResult {
     let database = database().await?;
     let pool = database.pool();
     insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
@@ -992,16 +993,22 @@ async fn a_binding_opened_at_the_cleanup_instant_stops_the_boundary() -> TestRes
     .execute(pool)
     .await?;
 
-    let error = apply(pool, &output).await.unwrap_err().to_string();
-    assert!(
-        error.contains("leaves 1 ENSv1 bindings open at its predecessor cleanup"),
-        "{error}"
-    );
+    apply(pool, &output).await?;
+    let survivors: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM surface_bindings WHERE surface_binding_id = $1")
+            .bind(Uuid::from_u128(15))
+            .fetch_one(pool)
+            .await?;
+    assert_eq!(survivors, 0, "INCIDENT-ONLY: the binding at the cleanup instant is deleted");
     assert_eq!(
-        active_to(pool, 15).await?,
-        None,
-        "the writer does not clamp it shut"
+        active_to(pool, 11).await?,
+        Some(
+            time::OffsetDateTime::from_unix_timestamp(2)?
+                + time::Duration::microseconds(REGISTRAR_CLEANUP_LOG_INDEX)
+        ),
+        "the pre-existing binding stays closed at the recorded registrar cleanup"
     );
+    assert_eq!(active_to(pool, 12).await?, None, "the successor stays open");
     database.cleanup().await?;
     Ok(())
 }
