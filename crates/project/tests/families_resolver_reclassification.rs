@@ -509,10 +509,10 @@ async fn guarded_world(fixture: &Fixture) -> Result<i64> {
         "active",
     )
     .await?;
-    let foo = ens_v2_path::surface(fixture, "foo.eth").await?;
+    let named = ens_v2_path::surface(fixture, "foo.eth").await?;
     let resource = ens_v2_path::entry_resource(&eth, "foo");
     fixture
-        .binding(&uuid(201), &foo, &resource, "ens_v2", 1, 0, None)
+        .binding(&uuid(201), &named, &resource, "ens_v2", 1, 0, None)
         .await?;
     ens_v2_path::register(fixture, 1, 1, &eth, "foo", 1_900_000_000).await?;
     ens_v2_path::point_named(
@@ -522,7 +522,7 @@ async fn guarded_world(fixture: &Fixture) -> Result<i64> {
         &eth,
         "foo",
         Pointer::Resolver(PUBLIC_V2),
-        &foo,
+        &named,
     )
     .await?;
     let written = fixture
@@ -533,7 +533,7 @@ async fn guarded_world(fixture: &Fixture) -> Result<i64> {
             "ens_v2_resolver_l1",
             None,
             None,
-            json!({"node": foo.trim_start_matches("ens:"), "record_key": "text:guarded",
+            json!({"node": named.trim_start_matches("ens:"), "record_key": "text:guarded",
                    "record_family": "text", "selector_key": "guarded", "value": "one",
                    "source_event": "TextChanged"}),
             PUBLIC_V2,
