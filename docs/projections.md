@@ -2250,7 +2250,12 @@ says which names it expands.
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L148-L161 @ ens_v2_sepolia_20261001@07e55a05).
 - A resource pointer row is new, or its resolver address changes. A change of
   its last nonzero resolver address counts too. This expands the name the
-  pointer names and the names under it.
+  pointer names and the names under it. An ENSv1 resource pointer that was an
+  ENSv1 pointer before the change, or no pointer, and names the same name
+  expands as an ENSv1 registry pointer change does, below. One ENSv1
+  `ResolverChanged` of a name with a resource writes both rows, and no name
+  reads an ENSv1 resource pointer of its ancestor: the ENSv1 mirror walk reads
+  the registry pointer, and the ENSv2 path walk reads only ENSv2 pointer events.
 - An ENSv1 registry pointer row is new, or its resolver address changes. This
   expands the name the pointer names and the names under it that read the
   pointer: names of three or more labels with no resolver of their own. ENSv1

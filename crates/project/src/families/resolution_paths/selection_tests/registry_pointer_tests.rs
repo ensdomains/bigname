@@ -6,6 +6,11 @@
 //! node that have no resolver of their own. A name whose path any other change also names keeps
 //! its whole subtree.
 //!
+//! One ENSv1 `ResolverChanged` of a name with a resource writes the resource's pointer too.
+//! That change counts as a registry pointer change while the row is an ENSv1 pointer before
+//! and after it and names the same name. `an_ensv1_resource_pointer_change_counts_as_a_registry_pointer_change`
+//! holds its input classes.
+//!
 //! The tree is `eth`, `foo.eth`, `a.foo.eth`, `b.foo.eth`, `c.foo.eth`, `x.a.foo.eth`, `bar.eth`
 //! and `z.bar.eth`. Unless a row says otherwise, `foo.eth` and `a.foo.eth` have a resolver,
 //! `c.foo.eth` has a pointer row with the zero address, and the others have no pointer row.
@@ -430,4 +435,152 @@ async fn a_reclassified_resolver_widens_only_the_names_that_point_at_it() -> Res
         )
         .await?;
     world.cleanup().await
+}
+
+const V1: &str = "ens_v1_registry_l1";
+const V2: &str = "ens_v2_registry_l1";
+const RESOURCE: &str = "00000000-0000-0000-0000-0000000000f5";
+
+/// The publication at block 5 wrote the resource pointer of `RESOURCE` as a `ResolverChanged`
+/// of `family` naming `name`, at `resolver`. `before` is the row it replaced, or `None` for the
+/// resource's first row.
+async fn resource_pointer(
+    world: &World,
+    name: &str,
+    family: &str,
+    resolver: &str,
+    before: Option<serde_json::Value>,
+) -> Result<()> {
+    let position = json!({"block_number": 5, "event_identity": format!("pointer:{name}")});
+    sqlx::query(
+        "INSERT INTO project_resource_pointer (chain_id, resource_id, block_number,
+             event_identity, resolver_address, pointer_position, namespace, source_family,
+             namehash, nonzero_resolver_address, nonzero_position, boundary_kind,
+             boundary_position)
+         VALUES ($1, $2::uuid, 5, 'pointer', $3, $4, 'ens', $5, $6, $3, $4, 'ResolverChanged', $4)",
+    )
+    .bind(CHAIN)
+    .bind(RESOURCE)
+    .bind(resolver)
+    .bind(&position)
+    .bind(family)
+    .bind(node(name))
+    .execute(&world.pool)
+    .await?;
+    world
+        .journal(
+            5,
+            "project_resource_pointer",
+            json!([CHAIN, RESOURCE]),
+            before,
+        )
+        .await
+}
+
+/// The row a resource pointer change replaced.
+#[derive(Clone, Copy)]
+enum Before {
+    /// No row: the resource's first.
+    None,
+    /// A version boundary alone, with no pointer.
+    Boundary,
+    /// A pointer of `family` naming `name`.
+    Pointer(&'static str, &'static str),
+}
+
+impl Before {
+    fn image(self) -> Option<serde_json::Value> {
+        match self {
+            Self::None => None,
+            Self::Boundary => Some(json!({
+                "resolver_address": null, "nonzero_resolver_address": null, "namespace": null,
+                "namehash": null, "source_family": null, "boundary_kind": "RecordVersionChanged"
+            })),
+            Self::Pointer(family, name) => Some(json!({
+                "resolver_address": FOO_RESOLVER, "nonzero_resolver_address": FOO_RESOLVER,
+                "namespace": "ens", "namehash": node(name), "source_family": family,
+                "boundary_kind": "ResolverChanged"
+            })),
+        }
+    }
+}
+
+// The input classes of an ENSv1 resource pointer change at `foo.eth`. It selects what a
+// registry pointer change there selects, `foo.eth` and the names under it without a resolver
+// of their own, when the row was an ENSv1 pointer of `foo.eth` or no pointer at all. With an
+// ENSv2 row on either side, a move from another name, or another change of the same name, the
+// whole subtree is selected. A pointer change at `eth` in the same publication adds its own
+// readers. Every case but the first changes `foo.eth`'s registry pointer too, as the one event
+// does.
+#[tokio::test]
+async fn an_ensv1_resource_pointer_change_counts_as_a_registry_pointer_change() -> Result<()> {
+    const READERS: &[&str] = &["foo.eth", "b.foo.eth", "c.foo.eth", "x.a.foo.eth"];
+    const SUBTREE: &[&str] = &[
+        "foo.eth",
+        "a.foo.eth",
+        "b.foo.eth",
+        "c.foo.eth",
+        "x.a.foo.eth",
+    ];
+    const MOVED: &[&str] = &[
+        "foo.eth",
+        "a.foo.eth",
+        "b.foo.eth",
+        "c.foo.eth",
+        "x.a.foo.eth",
+        "bar.eth",
+        "z.bar.eth",
+    ];
+    const WITH_ETH: &[&str] = &[
+        "eth",
+        "foo.eth",
+        "b.foo.eth",
+        "c.foo.eth",
+        "x.a.foo.eth",
+        "z.bar.eth",
+    ];
+    let foo = |family| Before::Pointer(family, "foo.eth");
+    let bar = Before::Pointer(V1, "bar.eth");
+    let cases: [(&str, &str, Before, &[&str]); 10] = [
+        ("ENSv1 row alone", V1, foo(V1), READERS),
+        ("ENSv1 row", V1, foo(V1), READERS),
+        ("ENSv1 first row", V1, Before::None, READERS),
+        ("ENSv1 row over a boundary", V1, Before::Boundary, READERS),
+        ("ENSv2 row", V2, foo(V2), SUBTREE),
+        ("ENSv2 first row", V2, Before::None, SUBTREE),
+        ("ENSv1 row over an ENSv2 row", V1, foo(V2), SUBTREE),
+        ("ENSv1 row moved from bar.eth", V1, bar, MOVED),
+        ("with an owner getter class change", V1, foo(V1), SUBTREE),
+        ("with an eth pointer change", V1, foo(V1), WITH_ETH),
+    ];
+    let mut failures = Vec::new();
+    for (case, family, before, expected) in cases {
+        let world = tree(&POINTERS, None).await?;
+        resource_pointer(&world, "foo.eth", family, AFTER, before.image()).await?;
+        if case != "ENSv1 row alone" {
+            pointer_changed(&world, "foo.eth", Some(FOO_RESOLVER), AFTER).await?;
+        }
+        match case {
+            "with an owner getter class change" => {
+                world
+                    .registry_node_state_changed(
+                        5,
+                        "foo.eth",
+                        None,
+                        Some((Some(HOLDER_ADDR), Some(HOLDER_ADDR), None, false)),
+                    )
+                    .await?;
+            }
+            "with an eth pointer change" => {
+                pointer_changed(&world, "eth", Some(BEFORE), AFTER).await?;
+            }
+            _ => {}
+        }
+        if let Err(error) = world.assert_selects(CALL, expected).await {
+            failures.push(format!("resource pointer case {case}: {error:#}"));
+        }
+        world.cleanup().await?;
+    }
+    ensure!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
 }

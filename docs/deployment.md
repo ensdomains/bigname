@@ -4947,6 +4947,9 @@ Project statement, `project:families.resolution_paths.prepare`.
   itself and the `.eth` names under it that read that pointer: names of three or
   more labels with no resolver of their own. Before, it recomposed every name
   under it, so a pointer change at `eth` recomposed every `.eth` name.
+- One ENSv1 `ResolverChanged` of a name with a resource also changes the
+  resource's pointer. That change counts as the same registry pointer change,
+  so the rule applies to registered names too.
 - A name that also has another change in the publication still recomposes every
   name under it.
 - Which names Project recomposes in each batch changes, not what they serve.
