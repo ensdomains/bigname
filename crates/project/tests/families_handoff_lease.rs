@@ -1192,7 +1192,9 @@ fn lease_row(
 /// first reservation, so the lease supplies the dates and the status: `expired` through its
 /// 90-day grace, E + 91 days, and `released` after it, on the reviewed registry as on the generic
 /// one. A live re-reservation after the replacement opens a new instance and dates the name
-/// again. An ENSv2 `ExpiryUpdated` is not a reservation and the rule does not reach it: a
+/// again, and so does a renewal that revives the replacement: ETHRenewerV1 renews the lease and
+/// the entry, and the adapter writes the revival as an `ExpiryChanged` and a `registry_state`
+/// `RegistrationReserved` snapshot of the name the entry is current for again. An ENSv2 `ExpiryUpdated` is not a reservation and the rule does not reach it: a
 /// one-day renewal of the lapsed reservation in its grace, to E + 63 days, renews the first
 /// reservation, which is `expired` until its 28-day grace ends at E + 91 days and `released`
 /// from then.
@@ -1224,12 +1226,15 @@ async fn a_never_live_replacement_ends_the_reservation_it_replaces() -> Result<(
         lapsed_then_renewed(&fixture, reviewed, "rereserved.eth", 3, e).await?;
     let (extended, extended_lease) =
         lapsed_then_renewed(&fixture, reviewed, "extended.eth", 4, e).await?;
+    let (revived, revived_lease) =
+        lapsed_then_renewed(&fixture, reviewed, "revived.eth", 5, e).await?;
     // The replacement, already expired when written, and the release Interpret derives for it in
     // the same block.
     for (registry, name, n) in [
         (reviewed, &replaced, 1),
         (GENERIC, &generic, 2),
         (reviewed, &rereserved, 3),
+        (reviewed, &revived, 5),
     ] {
         label_reserved(&fixture, registry, name, n, 6, renewed + 62 * DAY).await?;
         path_expired(
@@ -1245,6 +1250,18 @@ async fn a_never_live_replacement_ends_the_reservation_it_replaces() -> Result<(
     }
     let reserved_again = renewed + 365 * DAY + 62 * DAY;
     label_reserved(&fixture, reviewed, &rereserved, 3, 7, reserved_again).await?;
+    let revived_lease_expiry = renewed + 365 * DAY;
+    renewal(
+        &fixture,
+        &revived,
+        &revived_lease,
+        7,
+        50,
+        json!(revived_lease_expiry),
+        false,
+    )
+    .await?;
+    expiry_updated(&fixture, reviewed, &revived, 5, 7, reserved_again).await?;
     // The ETHRenewerV1 renewal writes the BaseRegistrar renewal and the ENSv2 `ExpiryUpdated` in
     // one transaction. The new expiry has passed too, so it revives nothing.
     fixture
@@ -1276,6 +1293,16 @@ async fn a_never_live_replacement_ends_the_reservation_it_replaces() -> Result<(
             "active",
             &rereserved_lease,
             renewed,
+            reserved_again,
+            reserved_again + 28 * DAY,
+        ),
+    )?;
+    check(
+        &served(&fixture, &revived).await?,
+        lease_row(
+            "active",
+            &revived_lease,
+            revived_lease_expiry,
             reserved_again,
             reserved_again + 28 * DAY,
         ),
@@ -1322,6 +1349,16 @@ async fn a_never_live_replacement_ends_the_reservation_it_replaces() -> Result<(
             "active",
             &rereserved_lease,
             renewed,
+            reserved_again,
+            reserved_again + 28 * DAY,
+        ),
+    )?;
+    check(
+        &served(&fixture, &revived).await?,
+        lease_row(
+            "active",
+            &revived_lease,
+            revived_lease_expiry,
             reserved_again,
             reserved_again + 28 * DAY,
         ),
