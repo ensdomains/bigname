@@ -723,3 +723,61 @@ async fn a_failed_fill_read_serves_the_composed_registration_and_keeps_the_snaps
     unprotected.rollback().await?;
     database.cleanup().await
 }
+
+/// The savepoint is taken only for a read. On a read transaction a failed statement has aborted,
+/// a row without its chain and a snapshot without the row's chain still return the composed
+/// registration, so neither issued a statement. A shaped row's savepoint fails there, and the
+/// fill returns that error. Its failure has ended the read transaction, as the plain statement
+/// after it runs, so the route answers 500 rather than serving on a snapshot it no longer holds.
+#[tokio::test]
+async fn a_savepoint_is_taken_only_for_a_read_and_a_failed_one_is_an_error() -> Result<()> {
+    let database = new_database().await?;
+    let logical = seed_registry_only(&database, "migrated.eth", 0x7af0, true).await?;
+    seed_lease(
+        &database,
+        &logical,
+        Uuid::from_u128(0x7aff),
+        &renewed_lease(),
+    )
+    .await?;
+    publish(&database).await?;
+    let row = composed(&database, &logical).await?;
+    let snapshot = SelectedSnapshot {
+        chain_positions: ChainPositions::from_value(&row.chain_positions)?,
+        consistency: SnapshotConsistency::Head,
+    };
+    let elsewhere = SelectedSnapshot {
+        chain_positions: ChainPositions::new(BTreeMap::new()),
+        consistency: SnapshotConsistency::Head,
+    };
+
+    let mut reads = bigname_storage::begin_read_snapshot(&database.pool).await?;
+    sqlx::query("SELECT 1 / 0")
+        .execute(&mut *reads)
+        .await
+        .expect_err("a failed statement aborts the read transaction");
+
+    let mut chainless = row.clone();
+    chainless.chain_positions = json!({});
+    assert!(
+        !crate::v2::support::serve_legacy_lease_in_savepoint(&mut reads, &mut chainless, &snapshot)
+            .await?
+    );
+    let mut unread = row.clone();
+    assert!(
+        !crate::v2::support::serve_legacy_lease_in_savepoint(&mut reads, &mut unread, &elsewhere)
+            .await?
+    );
+    assert_eq!(unread, row);
+
+    let mut shaped = row.clone();
+    assert!(
+        crate::v2::support::serve_legacy_lease_in_savepoint(&mut reads, &mut shaped, &snapshot)
+            .await
+            .is_err()
+    );
+    assert_eq!(shaped.declared_summary, row.declared_summary);
+    sqlx::query("SELECT 1").execute(&mut *reads).await?;
+    drop(reads);
+    database.cleanup().await
+}

@@ -64,8 +64,8 @@ pub(crate) struct ServedName {
     /// Whether a verified read runs Universal Resolver discovery
     /// (`name_records::verified_discovery`). The lookup engine reloads the composed row, not
     /// `row` as the registry read left it, so this is decided before the registry read. It is
-    /// decided on the registration `serve_legacy_lease` serves, which changes it only for a
-    /// released lease, whose verified read does not execute.
+    /// decided on the registration `serve_legacy_lease_in_savepoint` serves, which changes it
+    /// only for a released lease, whose verified read does not execute.
     pub(crate) lookup_discovery: bool,
 }
 
@@ -74,8 +74,8 @@ pub(crate) struct ServedName {
 /// served under the requested path, if it is still the token's own row. A path that reaches
 /// nothing serves what it served before, the row or `404 not_found`. Every read runs on
 /// `conn`'s one snapshot. A requested name's own row serves the ENSv1 lease its registrar events
-/// prove when its registration does not carry one (`serve_legacy_lease`). An ENSv1 name serves
-/// the resolver its registry record holds (`serve_ens_v1_registry_resolver`).
+/// prove when its registration does not carry one (`serve_legacy_lease_in_savepoint`). An ENSv1
+/// name serves the resolver its registry record holds (`serve_ens_v1_registry_resolver`).
 pub(crate) async fn load_served_name_for_selected_snapshot(
     conn: &mut PgConnection,
     namespace: &str,
@@ -87,12 +87,16 @@ pub(crate) async fn load_served_name_for_selected_snapshot(
     // A registration that does not carry its ENSv1 lease serves the lease its registrar events
     // prove, and discovery and the registry read are decided on that registration. A failed
     // read rolls back to its savepoint and serves the composed registration. A failed savepoint
-    // leaves the snapshot unusable, so the route fails.
+    // may leave the snapshot unusable, so the route fails.
     if alias.is_none() {
         serve_legacy_lease_in_savepoint(&mut *conn, &mut row, selected_snapshot)
             .await
             .map_err(|error| {
-                error!(service = "api", error = %error, "the legacy lease savepoint failed");
+                error!(
+                    service = "api",
+                    error = %error,
+                    "legacy lease savepoint or rollback failed for {namespace}/{name}"
+                );
                 ApiError::internal_error(format!(
                     "failed to read the ENSv1 lease of {namespace}/{name}"
                 ))

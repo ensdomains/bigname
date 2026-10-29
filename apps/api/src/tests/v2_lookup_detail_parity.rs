@@ -34,7 +34,7 @@ const SHARED_DETAIL_FIELDS: &[&str] = &[
 /// The fields name detail fills for the ownerless fixture, whose stored registration does not
 /// carry its lease. Lookup serves the stored registration, so they are the read-time fill's limit
 /// on parity for that name (`registered_at` in `docs/api-v1.md`). Other filled names diverge on
-/// more fields.
+/// other fields.
 const OWNERLESS_FILL_FIELDS: &[&str] =
     &["registration_id", "registered_at", "expires_at", "grace_ends_at"];
 
