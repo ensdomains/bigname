@@ -1,5 +1,14 @@
 //! The composed shapes `legacy_lease_shape` matches and what the fill writes into each, on
 //! constructed registrations and lease events.
+//!
+//! The status the fill takes from a lease applies only where it supplies the expiry. A canonical
+//! ENSv2 allocation that a cut-over chain composes on the ENSv1 arm
+//! (`crates/storage/src/families/control/lifecycle/canonical.rs:205`) stores its instance's
+//! expiry (`canonical.rs:313`). The classification nulls that expiry only in a wrapper or root
+//! context, not for a `.eth` second-level name
+//! (`crates/storage/src/families/control/lifecycle/expiry.rs:163`). So such an allocation reaches
+//! the status only if its origin event carries no expiry, and an ENSv2 label allocation carries
+//! one (`crates/adapters/src/schema_v2/protocol/v2_registry.rs:308` and `:322`).
 use bigname_storage::public_name_fields::{
     RegistrationStatus, ens_v1, has_registration_identity, registration_fields,
 };
@@ -545,21 +554,4 @@ fn a_stored_unregistered_lifecycle_keeps_its_status_when_the_fill_supplies_the_e
         registration_fields("ens", &summary, true).status,
         RegistrationStatus::Unregistered
     );
-}
-
-/// An ENSv2 allocation keeps its own schedule when the fill supplies a lease expiry.
-#[test]
-fn an_ens_v2_allocation_keeps_its_status_when_the_fill_supplies_the_expiry() {
-    let mut summary = registry_only_summary();
-    summary["registration"]["expiry"] = Value::Null;
-    summary["registration"]["grace_ends_at"] = Value::Null;
-    summary["registration"]["canonical_allocation"] = json!(true);
-    let events = vec![event(
-        "RegistrationGranted",
-        130,
-        LEASE,
-        Some(SNAPSHOT_SECONDS - 1),
-    )];
-    assert!(heal(&mut summary, &events));
-    assert_eq!(summary["registration"]["lifecycle_status"], json!("active"));
 }
