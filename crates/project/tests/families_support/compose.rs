@@ -61,7 +61,12 @@ pub fn node(n: u64) -> String {
 
 /// The history described at the top, on canonical blocks 0 to 300.
 pub async fn seeded(prefix: &str) -> Result<Fixture> {
-    let fixture = Fixture::new(prefix, 0).await?;
+    seeded_with(prefix, 1).await
+}
+
+/// The same history on a pool of `connections`.
+pub async fn seeded_with(prefix: &str, connections: u32) -> Result<Fixture> {
+    let fixture = Fixture::with_connections(prefix, 0, connections).await?;
     for script in [SEED, REGISTRY_CHILDREN] {
         raw_sql(
             &script

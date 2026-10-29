@@ -14,6 +14,7 @@ use sqlx::{PgPool, raw_sql};
 
 pub mod compose;
 pub mod ens_v2_path;
+pub mod workers;
 mod expiry_policy;
 pub use expiry_policy::expected_registration_expiry;
 
@@ -113,8 +114,16 @@ pub struct Fixture {
 impl Fixture {
     /// A phase schema with canonical blocks `0..=blocks`.
     pub async fn new(prefix: &str, blocks: i64) -> Result<Self> {
-        let database =
-            TestDatabase::create(TestDatabaseConfig::new(prefix).pool_max_connections(1)).await?;
+        Self::with_connections(prefix, blocks, 1).await
+    }
+
+    /// The same, with a pool of `connections`: a composition pass on several workers needs one
+    /// more than its workers.
+    pub async fn with_connections(prefix: &str, blocks: i64, connections: u32) -> Result<Self> {
+        let database = TestDatabase::create(
+            TestDatabaseConfig::new(prefix).pool_max_connections(connections),
+        )
+        .await?;
         let pool = database.pool().clone();
         let name: String = sqlx::query_scalar("SELECT current_database()")
             .fetch_one(&pool)

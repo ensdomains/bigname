@@ -256,9 +256,9 @@ COMMENT ON COLUMN project_repair_record.reset_sequence IS
 COMMENT ON COLUMN project_repair_record.composed_block IS
     'This value is the block a rebuild''s composition pass composed at, -1 when it composed nothing; null before the pass and for an undo-then-replay. Every rebuild generation above it composes and journals.';
 COMMENT ON COLUMN project_repair_record.compose_stream IS
-    'This value is the composition pass stream under way: 0 names, 1 record nodes, 2 record ids, 3 history catalogue build; null outside a pass.';
+    'This value is the composition pass stream under way: 0 names, 1 record nodes, 2 record ids, 4 lookup inventories, 3 history catalogue build, run in that order; null outside a pass.';
 COMMENT ON COLUMN project_repair_record.compose_cursor IS
-    'This value is the last key the composition pass committed in its stream, a work list serial in the names stream and the last step and partition with the partition counts and server version in the history catalogue build; null at a stream''s start and outside a pass.';
+    'This value is the last key the composition pass committed in its stream, a lookup name in the lookup inventories stream and the last step and partition with the partition counts and server version in the history catalogue build; null throughout the names stream, whose workers claim the work list''s names not yet composed, at a stream''s start and outside a pass.';
 COMMENT ON COLUMN project_repair_record.compose_chunks IS
     'This value is how many chunks the latest composition pass committed; zero before a pass. The pass refreshes the planner statistics of the composed tables after 1, 2, 4, 8, ... chunks.';
 COMMENT ON COLUMN project_repair_record.prefix_recorded IS
@@ -2844,7 +2844,7 @@ COMMENT ON COLUMN bigname_phase.project_lookup_name.chain_id IS
 COMMENT ON COLUMN bigname_phase.project_lookup_name.logical_name_id IS
     'Stable identity of the logical name.';
 COMMENT ON COLUMN bigname_phase.project_lookup_name.record_serving_resource_id IS
-    'Resource whose factored record inventory serves this name, or null when absent.';
+    'Resource whose factored record inventory serves this name, or null when absent. In a rebuild''s composition pass the names stream writes it null and the lookup inventories stream sets it with the inventory it composes. Nothing serves the table in that window, since the family marker is not live until the rebuild''s completing block.';
 COMMENT ON COLUMN bigname_phase.project_lookup_name.core IS
     'Shared composed lookup core with omission and null semantics preserved; null records an evaluated absence.';
 COMMENT ON COLUMN bigname_phase.project_lookup_name.supported IS

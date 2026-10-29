@@ -20,6 +20,9 @@ const MIGRATION: &str =
 /// this one.
 const BUILDER: &str =
     include_str!("../../../migrations/20261027120000_project_compose_history_builder.sql");
+/// The comment-only migration after it, which names the lookup inventories stream.
+const STREAM_COMMENTS: &str =
+    include_str!("../../../migrations/20261027130000_project_compose_stream_comments.sql");
 /// The record as the release before this one defines it.
 const PREDECESSOR: &str = "DROP TABLE IF EXISTS project_compose_history_work;
      DROP TABLE IF EXISTS project_compose_name_work;
@@ -130,6 +133,7 @@ async fn the_migration_gives_the_record_its_composition_pass() -> Result<()> {
 
     sqlx::raw_sql(MIGRATION).execute(&fixture.pool).await?;
     sqlx::raw_sql(BUILDER).execute(&fixture.pool).await?;
+    sqlx::raw_sql(STREAM_COMMENTS).execute(&fixture.pool).await?;
     ensure!(
         shape(&fixture).await? == baseline,
         "the migrated record is the baseline's: {:?} against {baseline:?}",
@@ -182,6 +186,7 @@ async fn the_migration_gives_the_record_its_composition_pass() -> Result<()> {
     );
     sqlx::raw_sql(MIGRATION).execute(&fixture.pool).await?;
     sqlx::raw_sql(BUILDER).execute(&fixture.pool).await?;
+    sqlx::raw_sql(STREAM_COMMENTS).execute(&fixture.pool).await?;
     ensure!(
         shape(&fixture).await? == baseline,
         "applied again, the migration changes nothing"

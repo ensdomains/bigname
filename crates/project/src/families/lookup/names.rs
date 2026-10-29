@@ -11,10 +11,15 @@ use sqlx::{Postgres, Transaction};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
+/// Compose the lookup names of the name work. With `serving` false, as a composition pass's names
+/// chunk writes them, a name's serving resource stays null until the pass's inventories stream
+/// composes that resource's inventory and sets it (`serve`), so no names chunk needs an
+/// inventory row another chunk may be writing.
 pub(super) async fn refresh(
     transaction: &mut Transaction<'_, Postgres>,
     publication: &FamilyPublication,
     block: &BlockHeader,
+    serving: bool,
     stats: &mut BlockStats,
 ) -> Result<()> {
     let chain = &publication.chain_id;
@@ -61,7 +66,7 @@ pub(super) async fn refresh(
                 resources.extend(resource);
             }
             new_names.push(json!({"chain_id":chain, "logical_name_id":name,
-                "record_serving_resource_id":resource,
+                "record_serving_resource_id":resource.filter(|_| serving),
                 "supported":selected.core.as_ref().is_some_and(|core| core.coverage["status"] != "unsupported"),
                 "core":selected.core}));
             for relation in selected.relations {
@@ -96,5 +101,31 @@ pub(super) async fn refresh(
         )
         .await?;
     }
+    Ok(())
+}
+
+/// Set the serving resource of each composed lookup name of a composition pass's inventories
+/// chunk to the one its core records.
+pub(super) async fn serve(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain: &str,
+    served: &[(String, Uuid)],
+) -> Result<()> {
+    let (names, resources): (Vec<&str>, Vec<Uuid>) = served
+        .iter()
+        .map(|(name, resource)| (name.as_str(), *resource))
+        .unzip();
+    sqlx::query(
+        "/* project:families.lookup.serve */ UPDATE project_lookup_name name
+        SET record_serving_resource_id = served.resource
+        FROM unnest($2::text[], $3::uuid[]) served (logical_name_id, resource)
+        WHERE name.chain_id = $1 AND name.logical_name_id = served.logical_name_id",
+    )
+    .bind(chain)
+    .bind(names)
+    .bind(resources)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|e| ProjectError::database("failed to set the lookup serving resources", e))?;
     Ok(())
 }
