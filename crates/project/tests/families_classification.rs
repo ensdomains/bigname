@@ -3,6 +3,8 @@
 //! and the discovery edges and declarations that start there. Each case undoes its last block
 //! byte for byte and equals a rebuild, which visits the activation blocks as work blocks.
 mod families_support;
+#[path = "families_classification/precedence.rs"]
+mod precedence;
 
 use anyhow::Result;
 use bigname_project::families::FamilyMode;

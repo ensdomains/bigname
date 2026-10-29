@@ -11,10 +11,18 @@
 //! never changes the selection. Each lookup sits in a `LATERAL (... OFFSET 0)` subquery, which
 //! the planner runs once per outer row and cannot turn into a join over every surface.
 //!
-//! Three cases read every observed ENS surface, because they can move every name: a changed
-//! registry, a classification change of a declared ENSv1 mirror resolver (the v1 fallback),
-//! and a prefix of no labels.
-//! A prefix whose first label hash is null has no entry key to look up and also reads them all.
+//! A registry changed in the publication moves the names under the entries that point at it.
+//! Those entries are found from the registry: `normalized_events_v2_key_probe_idx`, an index of
+//! Interpret's lookahead loader, files a `SubregistryChanged` event under the registry it
+//! names, and the event's resource leads to its entry. The entry's key then joins the changed
+//! entry keys above. Every entry that ever pointed at the registry is found, and the walk
+//! decides which still do. The lookup must repeat the index's expression and predicates
+//! exactly, or it reads every event.
+//!
+//! Two cases read every observed ENS surface, because they can move every name: a
+//! classification change of a declared ENSv1 mirror resolver (the v1 fallback), and a prefix
+//! of no labels. A prefix whose first label hash is null has no entry key to look up and also
+//! reads them all.
 //! Missing/current/former membership and divergence evidence never restrict this candidate set.
 //! SourceManifestUpdated has no block position. Supported manifest sync invalidates phase hashes
 //! and requires a complete Interpret/Project redo. It is not an incremental event-range trigger.
@@ -81,6 +89,18 @@
 //! (`project_parent_subregistry`, `project_binding_candidate`, `project_name_state` and
 //! `project_lifecycle_event`) moves only the name it names, never its descendants.
 use bigname_storage::families::name::PHYSICAL_POINTER_EVENT_SQL;
+
+/// The array `normalized_events_v2_key_probe_idx` indexes, over the event row `pointer`. Its
+/// last element is the registry a `SubregistryChanged` event names. Keep it identical to the
+/// index definition in the normalized events baseline.
+const POINTER_STATE_KEYS: &str = "array_remove(ARRAY[
+            lower(split_part(pointer.raw_fact_ref ->> 'state_scope', ':', 1)) || ':' || lower(left(split_part(pointer.raw_fact_ref ->> 'state_scope', ':', 3), greatest(length(split_part(pointer.raw_fact_ref ->> 'state_scope', ':', 3)) - 8, 0))) || '00000000',
+            lower(split_part(pointer.raw_fact_ref ->> 'state_scope', ':', 1)) || ':*',
+            lower(split_part(pointer.raw_fact_ref ->> 'state_scope', ':', 1)) || ':' || lower(left(pointer.after_state ->> 'new_token_id', greatest(length(pointer.after_state ->> 'new_token_id') - 8, 0))) || '00000000',
+            lower(split_part(pointer.raw_fact_ref ->> 'state_scope', ':', 1)) || ':' || lower(left(COALESCE(pointer.after_state ->> 'resource', pointer.after_state ->> 'upstream_resource'), greatest(length(COALESCE(pointer.after_state ->> 'resource', pointer.after_state ->> 'upstream_resource')) - 8, 0))) || '00000000',
+            lower(split_part(pointer.raw_fact_ref ->> 'state_scope', ':', 1)) || ':' || lower(left(pointer.after_state ->> 'labelhash', greatest(length(pointer.after_state ->> 'labelhash') - 8, 0))) || '00000000',
+            lower(pointer.after_state ->> 'subregistry') || ':00000000'
+        ]::text[], NULL)";
 
 pub(super) fn statement(normal_work: &str) -> String {
     // The `.eth` names among the surfaces `child`, and the test that `child` is `prefix` or a
@@ -376,13 +396,19 @@ pub(super) fn statement(normal_work: &str) -> String {
         UNION
         -- An original wrapper child's owner/fuses can affect a registry now mounted at another
         -- logical parent. Read retained activated migration evidence, never discovery diagnostics.
+        -- One lookup by name for each ancestor, never a read of every ENSv1→ENSv2 migration
+        -- on the chain.
         SELECT lower(created.after_state->>'registry')
         FROM source_ancestors ancestor
-        JOIN normalized_events migration ON migration.logical_name_id=ancestor.logical_name_id
-          AND migration.chain_id=$1 AND migration.event_kind='MigrationApplied'
-          AND migration.block_number<=$2 AND migration.consumer_visibility='activated'
-          AND migration.canonicality_state IN ('canonical','safe','finalized')
-        CROSS JOIN LATERAL jsonb_array_elements(COALESCE(migration.after_state->'evidence','[]'::jsonb)) evidence
+        CROSS JOIN LATERAL (
+            SELECT migration.after_state FROM normalized_events migration
+            WHERE migration.logical_name_id=ancestor.logical_name_id
+              AND migration.chain_id=$1 AND migration.event_kind='MigrationApplied'
+              AND migration.block_number<=$2 AND migration.consumer_visibility='activated'
+              AND migration.canonicality_state IN ('canonical','safe','finalized')
+            OFFSET 0
+        ) applied
+        CROSS JOIN LATERAL jsonb_array_elements(COALESCE(applied.after_state->'evidence','[]'::jsonb)) evidence
         JOIN normalized_events created ON created.event_identity=evidence->>'event_identity'
           AND evidence->>'event_kind'='RegistryCreated' AND created.chain_id=$1
           AND created.event_kind='RegistryCreated' AND created.consumer_visibility='activated'
@@ -400,15 +426,54 @@ pub(super) fn statement(normal_work: &str) -> String {
         SELECT DISTINCT surface.labelhashes FROM normal name JOIN name_surfaces surface
           ON surface.logical_name_id=name.logical_name_id AND surface.chain_id=$1 AND surface.namespace='ens'
         WHERE surface.block_number>$4 AND surface.block_number<=$2
+    ), mounts AS MATERIALIZED (
+        -- Each changed registry with the keys of the entries whose `SubregistryChanged` event
+        -- names it. Every test on that event is one the walk below applies to the pointer it
+        -- follows, or the index's own predicate, which those imply. So no entry the walk would
+        -- follow to a changed registry is missed. An entry that pointed at one earlier, or
+        -- points at one only above the publication, is found too, and the walk passes it by.
+        -- A block bound here would only add a second index to the lookup.
+        SELECT DISTINCT changed.registry, slot.entry_key
+        FROM (SELECT DISTINCT registry FROM changed_registries WHERE registry IS NOT NULL) changed
+        CROSS JOIN LATERAL (
+            SELECT pointer.resource_id FROM normalized_events pointer
+            WHERE {POINTER_STATE_KEYS} @> ARRAY[changed.registry || ':00000000']
+              AND pointer.canonicality_state IN ('canonical','safe','finalized')
+              AND pointer.source_family LIKE 'ens\_v2\_%'
+              AND pointer.chain_id=$1 AND pointer.event_kind='SubregistryChanged'
+              AND pointer.source_family IN ('ens_v2_root_l1','ens_v2_registry_l1')
+              AND pointer.consumer_visibility='activated'
+              AND pointer.after_state->>'subregistry'=changed.registry
+              AND pointer.resource_id IS NOT NULL
+            OFFSET 0
+        ) named
+        CROSS JOIN LATERAL (
+            SELECT entry.entry_key FROM project_ens_v2_entry_owner entry
+            WHERE entry.chain_id=$1 AND entry.resource_id=named.resource_id
+            UNION ALL
+            -- An entry row with no resource is tied to its pointer by the event that last
+            -- wrote the row. That event is one of the resource's, and the row's key is its
+            -- emitter and the entry key of the token it names (families/ens_v2_registry.rs).
+            -- The canonical test on that event lets the lookup read the resource history
+            -- index. It drops no entry: the entry rows are undone with the journal before a
+            -- replay, so at a publication no entry row cites an orphaned event.
+            SELECT entry.entry_key FROM normalized_events origin
+            CROSS JOIN LATERAL (VALUES (origin.after_state->>'token_id'),
+                                       (origin.after_state->>'new_token_id')) token(id)
+            JOIN project_ens_v2_entry_owner entry ON entry.chain_id=$1
+              AND entry.registry=lower(origin.raw_fact_ref->>'emitting_address')
+              AND entry.entry_key=left(lower(token.id),58)||'00000000'
+            WHERE origin.resource_id=named.resource_id
+              AND origin.canonicality_state IN ('canonical','safe','finalized')
+              AND entry.resource_id IS NULL AND entry.event_identity=origin.event_identity
+            OFFSET 0
+        ) slot
     ), candidates AS MATERIALIZED (
-        -- A changed registry can sit below any name, so every surface is a candidate.
-        SELECT surface.labelhashes FROM name_surfaces surface
-        WHERE EXISTS (SELECT 1 FROM changed_registries)
-          AND surface.chain_id=$1 AND surface.namespace='ens' AND cardinality(surface.labelhashes)>0
-        UNION ALL
-        -- With changed entries alone, a candidate holds a label of a changed entry key. The
-        -- index finds the surfaces with the key's hash and the label comparison decides.
-        SELECT probe.labelhashes FROM (SELECT DISTINCT entry_key FROM changed_entries) changed
+        -- A candidate holds a label of a changed entry's key, or of the key of an entry that
+        -- points at a changed registry. The index finds the surfaces with the key's hash and
+        -- the label comparison decides.
+        SELECT probe.labelhashes
+        FROM (SELECT entry_key FROM changed_entries UNION SELECT entry_key FROM mounts) changed
         CROSS JOIN LATERAL (
             SELECT surface.labelhashes FROM name_surfaces surface
             WHERE entry_key_hashes(surface.labelhashes) @> ARRAY[hashtextextended(changed.entry_key,0)]
@@ -417,15 +482,16 @@ pub(super) fn statement(normal_work: &str) -> String {
                 WHERE changed.entry_key=left(lower(label),58)||'00000000')
             OFFSET 0
         ) probe
-        WHERE NOT EXISTS (SELECT 1 FROM changed_registries)
     ), wanted AS MATERIALIZED (
         SELECT DISTINCT candidate.labelhashes[depth:] AS labelhashes
         FROM candidates candidate CROSS JOIN LATERAL generate_series(1,cardinality(candidate.labelhashes)) depth
     ), reached(labelhashes, registry) AS (
         -- The walk starts at the root registry the publication's captured manifest set admits
         -- ($5, project families/marker.rs `Composition`). With no admission it reaches nothing.
+        -- A changed root registry is reached by this row alone, with no entry to look up.
         SELECT ARRAY[]::text[], $5::text
-        WHERE EXISTS (SELECT 1 FROM wanted) AND $5::text IS NOT NULL
+        WHERE $5::text IS NOT NULL AND (EXISTS (SELECT 1 FROM wanted)
+            OR EXISTS (SELECT 1 FROM changed_registries changed WHERE changed.registry=$5::text))
         UNION
         SELECT next.labelhashes, pointer.subregistry
         FROM reached current JOIN wanted next ON cardinality(next.labelhashes)=cardinality(current.labelhashes)+1

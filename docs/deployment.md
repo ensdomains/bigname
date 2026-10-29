@@ -5014,6 +5014,70 @@ Project statement, `project:families.resolution_paths.prepare`.
   manifest-authority fingerprint and the compiled watch plan are unchanged, so
   stamp no Ingest redo.
 
+## Changed registries in the resolution path selection
+
+The build that makes a publication with a changed ENSv2 registry read only the
+names under the entries that point at it (see
+[owned key families](projections.md#owned-key-families) and
+[table ownership](storage.md#table-ownership)) changes one Project statement
+and no schema.
+
+- `project:families.resolution_paths.prepare` read every `name_surfaces` row of
+  the namespace when a publication created, upgraded or announced a registry,
+  or touched a name at or under one whose ENSv1→ENSv2 migration evidence holds
+  a created registry. It now finds the entries that point at the registry
+  through indexes that already exist. The names it selects are the same.
+- Stored rows do not change. API responses do not change.
+- It adds no schema-migration, index, table, manifest or setting.
+- The statement now reads `normalized_events_v2_key_probe_idx`. That index is
+  in the [walk index set](storage.md#walk-index-set), so
+  `ops/walk-index-set/drop.sql` does not drop it.
+- The statement is in `crates/project/src`, an input of the
+  [projection content hash](glossary.md#projection-content-hash) only. That hash
+  rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, at a
+  planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+  matching runner and API binaries. The change rides the next release that
+  redoes Project and shares that release's Project redo. The
+  manifest-authority fingerprint and the compiled watch plan are unchanged, so
+  stamp no Ingest redo.
+- The lookup by registry reads a GIN index. Flush its pending list before a
+  Project redo:
+  `SELECT gin_clean_pending_list('bigname_phase.normalized_events_v2_key_probe_idx');`
+
+## Resolvers that both protocols name stay ENSv1
+
+The build that ranks a resolver's ENSv2 candidates after its ENSv1 evidence, and lets an ENSv2
+declaration take rank 0 without a resolver edge
+([architecture](architecture.md#discovery-graph)), changes the resolver classification Project
+stores (`crates/project/src/families/classification/sql.rs`). It also walks an ENSv1 pointer at
+an ENSv1 mirror resolver as the mirror would (`crates/storage/src/families/records/mirror.rs`),
+which changes the record inventories Project stores. It rotates the
+[projection content hash](glossary.md#projection-content-hash) for every chain. The
+[interpreter content hash](glossary.md#interpreter-content-hash) does not rotate.
+
+What changes for names:
+
+- A handful of undeclared resolvers that both protocols name move back to the ENSv1 family,
+  unsupported before and after. Names that point at one see the coverage reason of their
+  records change once, from `resolver_implementation_unknown` to `resolver_not_declared`.
+- An ENSv2 registry `ResolverUpdated` that names a resolver an ENSv1 name already points at
+  no longer re-files that resolver, so it recomposes nothing that reads its classification.
+- A declared ENSv2 resolver that an ENSv1 name points at keeps its declaration with or without
+  an ENSv2 edge to it.
+- An ENSv1 name whose own resolver is a declared ENSv1 mirror resolver serves its records as
+  `unsupported` with `mirrored_resolver_not_projected`, not as an empty record set
+  ([projections](projections.md#resolver-and-records)).
+
+These rows arrive through re-derivation. Every chain needs one full-range Project redo and no
+Interpret redo, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary)
+under matching runner and API binaries. The change shares the release's Project redo. Do not
+mark old rows ready under the new hash.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
+and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
 ## History reads probe each event's lineage row by key
 
 The build that makes history reads look up each event's `chain_lineage` row by key changes
