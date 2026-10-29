@@ -159,7 +159,7 @@ pub(in crate::schema_v2) fn unwrapped_reconciliations(
             boundary.transaction_hash.as_deref().unwrap_or_default(),
         ));
         let Some(transaction) = transaction else {
-            refuse("registrar transfers in the boundary transaction");
+            refuse("registrar observations in the boundary transaction");
             continue;
         };
         let label = transition.predecessor_selector["resource"]["labelhash"]
@@ -172,7 +172,7 @@ pub(in crate::schema_v2) fn unwrapped_reconciliations(
             .collect::<Vec<_>>();
         transfers.sort_by_key(|observation| observation.raw.log_index);
         let [.., incoming, cleanup] = transfers.as_slice() else {
-            refuse("registrar transfers in the boundary transaction");
+            refuse("incoming and cleanup registrar transfers of the label");
             continue;
         };
         // Earlier ordinary transfers remain in the prefix. Only the unique terminal pair

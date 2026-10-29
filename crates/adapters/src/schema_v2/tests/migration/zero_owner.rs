@@ -25,6 +25,8 @@ const CATALOG_UNWRAPPED_HOLDER: [u8; 20] = [0x51; 20];
 const CATALOG_WRAPPED_HOLDER: [u8; 20] = [0x11; 20];
 const EARLIER_HOLDER: [u8; 20] = [0x50; 20];
 const STRANGER: [u8; 20] = [0x77; 20];
+/// The resolver the constructed registry history sets for debut.eth.
+const PRIOR_RESOLVER: [u8; 20] = [0x52; 20];
 const GRACE_PERIOD: u64 = 90 * 24 * 60 * 60;
 
 /// Every warning logged on the test's thread, as its recorded fields.
@@ -123,6 +125,24 @@ fn lease(output: &BatchOutput, logical_name_id: &str) -> Uuid {
         })
         .and_then(|event| event.resource_id)
         .unwrap_or_else(|| panic!("{logical_name_id}: no registrar lease"))
+}
+
+/// The name's lease was granted with no known holder: its first observed registrar event was a
+/// controller renewal.
+fn assert_no_known_holder(output: &BatchOutput, logical_name_id: &str) {
+    let grant = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "RegistrationGranted"
+                && event.source_family == "ens_v1_registrar_l1"
+                && event.logical_name_id.as_deref() == Some(logical_name_id)
+        })
+        .unwrap_or_else(|| panic!("{logical_name_id}: no synthetic grant"));
+    assert_eq!(
+        grant.after_state["authority_owner"], ZERO_ADDRESS,
+        "{logical_name_id}: the grant records no holder"
+    );
 }
 
 /// The migration in `block` reconciled for this name: one activated boundary, no ENSv1 binding
@@ -362,31 +382,154 @@ fn debut_registered_to(owner: Address) -> anyhow::Result<BatchInput> {
 }
 
 /// Mainnet block 26,289,806: debut.eth's lease never moved on the BaseRegistrar before the
-/// migration, and no holder was ever recorded for it. Red on the base, where the holder
-/// comparison refuses the proof and the cleanup transfer reopens an ENSv1 binding.
+/// migration, and no holder was ever recorded for it. Its migration block must read exactly as
+/// the same migration of a lease whose registration names the holder. The rows compared are each
+/// event's family and kind and whether it sits on the lease. States are left out because the
+/// two leases' grants record different holders.
 #[test]
 fn a_lease_with_no_known_holder_migrates_like_one_with_a_holder() -> anyhow::Result<()> {
     let input = real::input(&["debut"])?;
     let block = migration_block(&input);
     let debut = eth_name("debut");
     let (output, warnings) = interpret_with_warnings(input)?;
-    let grant = output
-        .normalized_events
+    assert_no_known_holder(&output, &debut);
+    let known = interpret_test_batch(debut_registered_to(debut_holder()?)?)?;
+    assert_eq!(
+        name_rows(&output, block, &debut),
+        name_rows(&known, block, &debut),
+        "the migration of a lease with no known holder reads unlike one with a holder"
+    );
+    assert_reconciled(&output, &warnings, block, &debut);
+    assert!(warnings.all().is_empty(), "{:?}", warnings.all());
+    Ok(())
+}
+
+/// The history a legacy `renew` leaves when the registry records came before the indexed range:
+/// the registry's `NewOwner` and `NewResolver` for debut.eth in an earlier block, then the
+/// BaseRegistrar `NameRenewed` and the controller `NameRenewed` of one renewal. The captured
+/// `NewResolver(node, 0)` of the migration only fires on a value change, so debut.eth had a
+/// resolver set. The registry logs and the BaseRegistrar renewal are constructed.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L167 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L179-L182 @ ens_v1@91c966f)
+fn debut_with_registry_records() -> anyhow::Result<BatchInput> {
+    let mut input = real::input(&["debut"])?;
+    let block = migration_block(&input);
+    let captured = |log_index: i64| {
+        input
+            .raw_logs
+            .iter()
+            .find(|raw| raw.block_number == block && raw.log_index == log_index)
+            .expect("captured log")
+            .clone()
+    };
+    let (base, registry) = (captured(470), captured(471));
+    let renewal = debut_history(&mut input);
+    renewal.log_index = 1;
+    let renewal = renewal.clone();
+    let expires = U256::from(
+        real::fixture()?["names"][0]["v2_expiry"]
+            .as_u64()
+            .expect("expiry"),
+    );
+    let mut base_renewal = RawLogInput {
+        emitting_address: base.emitting_address,
+        log_index: 0,
+        ..renewal.clone()
+    };
+    replace_log(
+        &mut base_renewal,
+        with_topic0(
+            BaseNameRenewed {
+                id: U256::from_be_slice(keccak256(b"debut").as_slice()),
+                expires,
+            }
+            .encode_log_data(),
+            keccak256(b"NameRenewed(uint256,uint256)"),
+        ),
+    );
+    let records = renewal.block_number - 1;
+    let history_block = input
+        .blocks
         .iter()
-        .find(|event| {
-            event.event_kind == "RegistrationGranted"
-                && event.source_family == "ens_v1_registrar_l1"
-                && event.logical_name_id.as_deref() == Some(debut.as_str())
-        })
-        .expect("synthetic grant");
-    assert_eq!(grant.after_state["authority_owner"], ZERO_ADDRESS);
+        .find(|history| history.block_number == renewal.block_number)
+        .expect("history block")
+        .clone();
+    input.blocks.push(RawBlockInput {
+        block_hash: format!("0x{records:064x}"),
+        block_number: records,
+        block_timestamp: history_block.block_timestamp - time::Duration::seconds(12),
+        ..history_block
+    });
+    let at_records = |log_index: i64, log: alloy_primitives::LogData| {
+        let mut raw = RawLogInput {
+            block_hash: format!("0x{records:064x}"),
+            block_number: records,
+            block_timestamp: renewal.block_timestamp - time::Duration::seconds(12),
+            transaction_hash: format!("0x{:064x}", records << 8),
+            transaction_index: 0,
+            log_index,
+            emitting_address: registry.emitting_address.clone(),
+            ..renewal.clone()
+        };
+        replace_log(&mut raw, log);
+        raw
+    };
+    let node: B256 = eth_name("debut")
+        .strip_prefix("ens:")
+        .expect("namehash")
+        .parse()?;
+    let registry_logs = [
+        at_records(
+            0,
+            super::super::v1_registry::NewOwner {
+                node: super::super::common::namehash(&["eth".to_owned()]).parse()?,
+                label: keccak256(b"debut"),
+                owner: debut_holder()?,
+            }
+            .encode_log_data(),
+        ),
+        at_records(
+            1,
+            super::super::v1_registry::NewResolver {
+                node,
+                resolver: Address::from(PRIOR_RESOLVER),
+            }
+            .encode_log_data(),
+        ),
+    ];
+    input.raw_logs.push(base_renewal);
+    input.raw_logs.extend(registry_logs);
+    input
+        .raw_logs
+        .sort_by_key(|raw| (raw.block_number, raw.transaction_index, raw.log_index));
+    input.blocks.sort_by_key(|block| block.block_number);
+    Ok(input)
+}
+
+/// debut.eth with registry records and a resolver from before its renewal, so the predecessor
+/// carries ENSv1 resolver state, and still no known holder.
+#[test]
+fn a_lease_with_no_known_holder_and_a_resolver_reconciles() -> anyhow::Result<()> {
+    let input = debut_with_registry_records()?;
+    let block = migration_block(&input);
+    let debut = eth_name("debut");
+    let (output, warnings) = interpret_with_warnings(input)?;
+    assert_no_known_holder(&output, &debut);
+    assert!(
+        output.normalized_events.iter().any(|event| {
+            event.source_family == "ens_v1_registry_l1"
+                && event.event_kind == "ResolverChanged"
+                && event.block_number == Some(block - 2)
+        }),
+        "the constructed history sets a resolver"
+    );
     assert_reconciled(&output, &warnings, block, &debut);
     assert!(warnings.all().is_empty(), "{:?}", warnings.all());
     Ok(())
 }
 
 /// The same migration of a lease whose legacy-controller registration names the holder, the
-/// shape that already reconciled. Green on the base.
+/// shape that already reconciled.
 #[test]
 fn a_lease_with_a_known_holder_migrates_as_before() -> anyhow::Result<()> {
     let input = debut_registered_to(debut_holder()?)?;
@@ -521,7 +664,7 @@ fn a_resolver_left_set_is_refused() -> anyhow::Result<()> {
 }
 
 /// Mainnet block 26,294,386: one transaction migrates seven holderless leases of one holder,
-/// each in its own run of nine logs. Red on the base for every name.
+/// each in its own run of nine logs.
 #[test]
 fn seven_holderless_leases_in_one_transaction_each_reconcile() -> anyhow::Result<()> {
     let input = real::input(&["batch"])?;
@@ -530,6 +673,7 @@ fn seven_holderless_leases_in_one_transaction_each_reconcile() -> anyhow::Result
     let names = names("batch")?;
     assert_eq!(names.len(), 7);
     for name in &names {
+        assert_no_known_holder(&output, &name.logical);
         assert_reconciled(&output, &warnings, block, &name.logical);
     }
     assert!(warnings.all().is_empty(), "{:?}", warnings.all());
@@ -596,7 +740,9 @@ fn batch_of(
 
 /// Three names' migrations interleaved log by log in one transaction, so each name's window from
 /// its first registrar transfer to its cleanup holds the other names' rows. Every name reconciles
-/// and keeps exactly the rows it has when it migrates alone.
+/// and keeps exactly the rows it has when it migrates alone. No chain has this shape, since each
+/// migration's receiver completes before the next transfer starts. The constructed shape shows
+/// each name's window is read per name.
 #[test]
 fn interleaved_migrations_in_one_transaction_reconcile_per_name() -> anyhow::Result<()> {
     const KEPT: usize = 3;
@@ -663,6 +809,7 @@ fn the_same_holder_migrating_twice_reconciles_both() -> anyhow::Result<()> {
         if index == 1 {
             raw.block_number += 1;
             raw.block_hash = format!("0x{:064x}", raw.block_number);
+            raw.transaction_hash = format!("0x{:064x}", (raw.block_number << 8) | 1);
             raw.block_timestamp += time::Duration::seconds(12);
         }
     })?;
@@ -904,17 +1051,18 @@ fn assert_wrapped_boundary(input: BatchInput, logical: &str) -> anyhow::Result<(
     Ok(())
 }
 
-/// Never moved, migrated unwrapped. Red on the base: the holder comparison refuses.
+/// Never moved, migrated unwrapped, so no holder is recorded for the lease.
 #[test]
 fn catalog_lease_never_moved_migrated_unwrapped_reconciles() -> anyhow::Result<()> {
     let (input, block, logical) = catalog_unwrapped(Vec::new())?;
     let (output, warnings) = interpret_with_warnings(input)?;
+    assert_no_known_holder(&output, &logical);
     assert_reconciled(&output, &warnings, block, &logical);
     Ok(())
 }
 
-/// Moved between holders on the BaseRegistrar, then migrated unwrapped. Green on the base: the
-/// transfer records the holder.
+/// Moved between holders on the BaseRegistrar, then migrated unwrapped. The transfer records the
+/// holder.
 #[test]
 fn catalog_lease_moved_unwrapped_migrated_unwrapped_reconciles() -> anyhow::Result<()> {
     let scenario = catalog_scenario("U-01")?;
@@ -935,8 +1083,8 @@ fn catalog_lease_moved_unwrapped_migrated_unwrapped_reconciles() -> anyhow::Resu
     Ok(())
 }
 
-/// Wrapped and unwrapped again, then migrated unwrapped. Green on the base: the unwrap's token
-/// transfer records the holder.
+/// Wrapped and unwrapped again, then migrated unwrapped. The unwrap's token transfer records the
+/// holder.
 #[test]
 fn catalog_lease_moved_wrapped_migrated_unwrapped_reconciles() -> anyhow::Result<()> {
     let scenario = catalog_scenario("U-01")?;
@@ -986,7 +1134,7 @@ fn catalog_lease_moved_wrapped_migrated_unwrapped_reconciles() -> anyhow::Result
 
 /// Never moved on the BaseRegistrar, migrated wrapped. No chain has this history, since
 /// wrapping moves the token into the NameWrapper. The constructed shape shows the proof is not
-/// consulted. Green on the base.
+/// consulted.
 #[test]
 fn catalog_lease_never_moved_migrated_wrapped_is_not_proved() -> anyhow::Result<()> {
     let scenario = catalog_scenario("W-01")?;
@@ -1000,8 +1148,7 @@ fn catalog_lease_never_moved_migrated_wrapped_is_not_proved() -> anyhow::Result<
     assert_wrapped_boundary(input, &logical)
 }
 
-/// Moved between holders on the BaseRegistrar, migrated wrapped. Green on the base: the proof
-/// is not consulted.
+/// Moved between holders on the BaseRegistrar, migrated wrapped. The proof is not consulted.
 #[test]
 fn catalog_lease_moved_unwrapped_migrated_wrapped_is_not_proved() -> anyhow::Result<()> {
     let scenario = catalog_scenario("W-01")?;
@@ -1028,7 +1175,7 @@ fn catalog_lease_moved_unwrapped_migrated_wrapped_is_not_proved() -> anyhow::Res
     assert_wrapped_boundary(input, &logical)
 }
 
-/// Wrapped with `wrapETH2LD`, migrated wrapped. Green on the base: the proof is not consulted.
+/// Wrapped with `wrapETH2LD`, migrated wrapped. The proof is not consulted.
 #[test]
 fn catalog_lease_moved_wrapped_migrated_wrapped_is_not_proved() -> anyhow::Result<()> {
     let scenario = catalog_scenario("W-01")?;

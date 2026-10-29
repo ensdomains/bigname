@@ -2437,8 +2437,9 @@ mod zero_owner_migration_connected {
     use anyhow::Result;
     use bigname_adapters::schema_v2::{self as adapter, StateCacheCapacity};
 
-    /// Red on the base: the boundary stops with "leaves 1 ENSv1 bindings open at its predecessor
-    /// cleanup", because the cleanup transfer reopened the lease binding.
+    /// The migration block writes, and only the ENSv2 binding is left open. A refused proof would
+    /// stop the boundary with "leaves 1 ENSv1 bindings open at its predecessor cleanup", because
+    /// the cleanup transfer reopens the lease binding.
     #[tokio::test]
     async fn a_lease_with_no_known_holder_closes_at_its_migration() -> Result<()> {
         let input = fixture::input(&["debut"])?;
