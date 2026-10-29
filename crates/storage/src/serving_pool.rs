@@ -37,7 +37,7 @@ pub(crate) const ROLLED_BACK_LEFT_OPEN: &str =
     "rolled back a transaction left open on a pooled read connection";
 
 /// How long past the request deadline a session may sit idle inside a transaction.
-const IDLE_IN_TRANSACTION_MARGIN_MS: u64 = 5_000;
+pub const IDLE_IN_TRANSACTION_MARGIN_MS: u64 = 5_000;
 const IDLE_IN_TRANSACTION_MARGIN: Duration = Duration::from_millis(IDLE_IN_TRANSACTION_MARGIN_MS);
 
 /// The longest request deadline in milliseconds whose idle-in-transaction timeout PostgreSQL

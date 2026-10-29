@@ -196,7 +196,7 @@ pub use resolution_support::{
     supports_resolution_verified_lookup_record, try_classify_supported_resolution_topology,
 };
 pub use resolver::ResolverCurrentRow;
-pub use serving_pool::MAX_REQUEST_DEADLINE_MS;
+pub use serving_pool::{IDLE_IN_TRANSACTION_MARGIN_MS, MAX_REQUEST_DEADLINE_MS};
 pub use snapshot_selection::{
     ChainPosition, ChainPositions, PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS, SelectedSnapshot,
     SnapshotAt, SnapshotConsistency, SnapshotPositionRequirement, SnapshotProjectionRead,

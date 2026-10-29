@@ -127,9 +127,10 @@ impl ApiBoundsConfig {
         ensure!(
             self.request_timeout_ms <= bigname_storage::MAX_REQUEST_DEADLINE_MS,
             "BIGNAME_API_REQUEST_TIMEOUT_MS must be at most {} ms: each database connection's \
-             idle_in_transaction_session_timeout is that deadline plus 5000 ms, and PostgreSQL \
+             idle_in_transaction_session_timeout is that deadline plus {} ms, and PostgreSQL \
              accepts at most {} ms",
             bigname_storage::MAX_REQUEST_DEADLINE_MS,
+            bigname_storage::IDLE_IN_TRANSACTION_MARGIN_MS,
             i32::MAX
         );
         if let Some(grace) = self.stop_grace_ms {

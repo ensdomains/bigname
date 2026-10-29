@@ -677,8 +677,9 @@ fn stop_grace_requires_request_deadline_and_margin() {
     }
     config.stop_grace_ms = Some(65_000);
     assert!(config.validate().is_ok());
-    config.request_timeout_ms = u64::MAX;
-    assert!(config.validate().is_err());
+    config.request_timeout_ms = 61_000;
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("STOP_GRACE_MS"));
 }
 
 #[test]
