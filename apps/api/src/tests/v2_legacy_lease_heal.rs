@@ -849,19 +849,24 @@ async fn a_lease_with_more_events_than_the_history_window_starts_at_its_first_ev
     database.cleanup().await
 }
 
-/// The first-event statement on the long lease reads the lease's own index backward from its
-/// first block and stops at one row, with no sort. As the registrar lease index test does, the
-/// table first holds enough other rows of the name for the planner to weigh the index scans
-/// against a sequential scan on real statistics.
+/// The first-event statement on the long lease reads only the lease's own events. Beside the
+/// name's other events, the table holds registrar events of many other leases, unnamed, below
+/// and above the snapshot, so an index on the event kind, chain and block is unselective after
+/// ANALYZE, as on a real chain. The row pins what bounds the read, not one plan: no sequential
+/// scan, every index read keyed by the lease, and no more rows read than the lease's own events.
+/// Whether the planner reads the lease's history index backward under the limit or reads the
+/// lease's events and sorts them depends on its estimate of how many of them match, so the row
+/// does not pin that choice. Both read at most the lease's events.
 #[tokio::test]
-async fn the_first_lease_event_is_one_backward_read_of_the_lease_index() -> Result<()> {
+async fn the_first_lease_event_reads_only_the_leases_own_events() -> Result<()> {
     let database = new_database().await?;
     let registry = Uuid::from_u128(0x7b30);
     let logical = seed_registry_only(&database, "migrated.eth", 0x7b30, false).await?;
     let lease = Uuid::from_u128(0x7b3f);
-    seed_lease(&database, &logical, lease, &long_lease()).await?;
+    let events = long_lease();
+    seed_lease(&database, &logical, lease, &events).await?;
     publish(&database).await?;
-    let noise: Vec<NormalizedEvent> = (0..4000)
+    let name_noise: Vec<NormalizedEvent> = (0..4000)
         .map(|log| {
             event(
                 Some(logical.as_str()),
@@ -874,10 +879,28 @@ async fn the_first_lease_event_is_one_backward_read_of_the_lease_index() -> Resu
             )
         })
         .collect();
-    bigname_storage::insert_normalized_event_fixtures(&database.pool, &noise).await?;
-    sqlx::raw_sql("ANALYZE bigname_phase.normalized_events")
-        .execute(&database.pool)
-        .await?;
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &name_noise).await?;
+    seed_v2_history_blocks(&database, HEAD + 1..=UNPUBLISHED).await?;
+    sqlx::raw_sql(&format!(
+        "INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state)
+         SELECT md5('legacy-lease-plan-lease:' || n)::uuid, '{CHAIN}', '{block_hash}', {HEAD},
+             'canonical'
+         FROM generate_series(1, 2000) n;
+         INSERT INTO normalized_events (event_identity, namespace, resource_id, event_kind,
+             source_family, manifest_version, chain_id, block_number, block_hash,
+             derivation_kind, canonicality_state)
+         SELECT 'legacy-lease-plan-event:' || n || ':' || k, 'ens',
+             md5('legacy-lease-plan-lease:' || n)::uuid,
+             (ARRAY['RegistrationGranted', 'RegistrationRenewed', 'ExpiryChanged'])[k % 3 + 1],
+             '{REGISTRAR}', 1, '{CHAIN}', {HANDOFF} + (n + k) % 16,
+             '0xhistory' || ({HANDOFF} + (n + k) % 16), 'ens_v1_unwrapped_authority',
+             'canonical'
+         FROM generate_series(1, 2000) n, generate_series(0, 9) k;
+         ANALYZE bigname_phase.normalized_events;",
+        block_hash = hash(HEAD),
+    ))
+    .execute(&database.pool)
+    .await?;
 
     let plan: Value = sqlx::query_scalar(&format!(
         "EXPLAIN (ANALYZE, FORMAT JSON) {}",
@@ -890,21 +913,40 @@ async fn the_first_lease_event_is_one_backward_read_of_the_lease_index() -> Resu
     .fetch_one(&database.pool)
     .await?;
     let nodes = plan_nodes(&plan);
-    let scans: Vec<_> = nodes
-        .iter()
-        .filter(|node| node["Index Name"] == json!("normalized_events_resource_history_idx"))
-        .collect();
-    assert_eq!(scans.len(), 1, "{plan:#}");
-    assert_eq!(scans[0]["Scan Direction"], json!("Backward"), "{plan:#}");
-    assert_eq!(scans[0]["Actual Rows"], json!(1), "{plan:#}");
+    let mut rows_read = 0;
+    for node in &nodes {
+        let index = node["Index Name"].as_str().unwrap_or_default();
+        let heap = node["Relation Name"] == json!("normalized_events");
+        assert!(
+            !(heap && node["Node Type"] == json!("Seq Scan")),
+            "no sequential scan: {plan:#}"
+        );
+        if index.starts_with("normalized_events") {
+            let condition = node["Index Cond"].as_str().unwrap_or_default();
+            assert!(
+                condition.contains("resource_id = ")
+                    && (condition.contains(&lease.to_string()) || condition.contains("$1")),
+                "{index} reads by the lease: {plan:#}"
+            );
+        }
+        if heap {
+            let count = |field: &str| node[field].as_u64().unwrap_or(0);
+            rows_read += (count("Actual Rows")
+                + count("Rows Removed by Filter")
+                + count("Rows Removed by Index Recheck"))
+                * count("Actual Loops").max(1);
+        }
+    }
     assert!(
-        nodes.iter().all(|node| {
-            !matches!(
-                node["Node Type"].as_str(),
-                Some("Sort" | "Incremental Sort" | "Seq Scan")
-            )
-        }),
+        nodes
+            .iter()
+            .any(|node| node["Relation Name"] == json!("normalized_events")),
         "{plan:#}"
+    );
+    assert!(
+        rows_read <= events.len() as u64,
+        "{rows_read} rows read for {} lease events: {plan:#}",
+        events.len()
     );
     assert_eq!(plan[0]["Plan"]["Actual Rows"], json!(1), "{plan:#}");
     database.cleanup().await
