@@ -1745,7 +1745,7 @@ mod numeric_short_lease_connected {
     use serde_json::Value;
     use sqlx::{PgPool, types::Uuid};
 
-    async fn database(input: &BatchInput) -> Result<TestDatabase> {
+    pub(super) async fn database(input: &BatchInput) -> Result<TestDatabase> {
         let database = TestDatabase::create(TestDatabaseConfig::new("numeric_short_lease")).await?;
         let pool = database.pool();
         sqlx::raw_sql("CREATE SCHEMA bigname_phase")
@@ -1816,15 +1816,19 @@ mod numeric_short_lease_connected {
         }
         for admission in &input.admissions {
             sqlx::query("INSERT INTO contract_instances (contract_instance_id,chain_id,contract_kind) VALUES ($1,$2,'contract')")
-                .bind(admission.contract_instance_id).bind(fixture::CHAIN).execute(pool).await?;
+                .bind(admission.contract_instance_id).bind(&input.chain_id).execute(pool).await?;
             sqlx::query("INSERT INTO contract_instance_addresses (contract_instance_id,chain_id,address,active_from_block_number,source_manifest_id) VALUES ($1,$2,$3,0,$4)")
-                .bind(admission.contract_instance_id).bind(fixture::CHAIN).bind(&admission.address)
+                .bind(admission.contract_instance_id).bind(&input.chain_id).bind(&admission.address)
                 .bind(admission.source_manifest_id).execute(pool).await?;
         }
         Ok(database)
     }
 
-    async fn write(pool: &PgPool, input: &BatchInput, output: &BatchOutput) -> Result<()> {
+    pub(super) async fn write(
+        pool: &PgPool,
+        input: &BatchInput,
+        output: &BatchOutput,
+    ) -> Result<()> {
         let mut output = output.clone();
         // Existing identity-writer tests isolate diagnostic persistence in the same way.
         output.migration_event_associations.clear();
@@ -1838,7 +1842,7 @@ mod numeric_short_lease_connected {
             .collect::<Vec<_>>();
         crate::write::batch(
             pool,
-            fixture::CHAIN,
+            &input.chain_id,
             None,
             false,
             false,
@@ -2417,6 +2421,104 @@ mod numeric_short_lease_connected {
         )
         .await?;
         database.cleanup().await?;
+        Ok(())
+    }
+}
+
+#[path = "../../../../adapters/tests/fixtures/interpreters/zero_owner_migration.rs"]
+mod zero_owner_migration_fixture;
+
+/// debut.eth's ENSv1→ENSv2 migration at Ethereum mainnet block 26,289,806, through the identity
+/// writer. Its lease was first seen through a legacy-controller renewal, so it records no holder.
+mod zero_owner_migration_connected {
+    use super::numeric_short_lease_connected::{database, write};
+    use super::numeric_short_lease_fixture::range;
+    use super::zero_owner_migration_fixture as fixture;
+    use anyhow::Result;
+    use bigname_adapters::schema_v2::{self as adapter, BatchInput, StateCacheCapacity};
+    use sqlx::types::Uuid;
+    use time::OffsetDateTime;
+
+    /// A written binding: arm, resource, kind, active from and active to.
+    type Binding = (String, Uuid, String, OffsetDateTime, Option<OffsetDateTime>);
+
+    /// Writes `input`'s history block and then its migration block through the identity writer,
+    /// and returns every binding written for debut.eth.
+    async fn migrate(input: BatchInput) -> Result<Vec<Binding>> {
+        let migration = input
+            .blocks
+            .iter()
+            .map(|block| block.block_number)
+            .max()
+            .expect("migration block");
+        let database = database(&input).await?;
+        let result = async {
+            let pool = database.pool();
+            let history = range(&input, migration - 1, migration - 1);
+            let (output, session) = adapter::prepare_schema_v2_batch_incremental(
+                history.clone(),
+                None,
+                StateCacheCapacity::Unlimited,
+            )?
+            .finish(Vec::new())?;
+            let logical = output
+                .normalized_events
+                .iter()
+                .find(|event| event.event_kind == "RegistrationGranted")
+                .and_then(|event| event.logical_name_id.clone())
+                .expect("debut.eth lease");
+            write(pool, &history, &output).await?;
+            let part = range(&input, migration, migration);
+            let (output, _) = adapter::prepare_schema_v2_batch_incremental(
+                part.clone(),
+                Some(session),
+                StateCacheCapacity::Unlimited,
+            )?
+            .finish(Vec::new())?;
+            assert_eq!(output.migration_authority_transitions.len(), 1);
+            write(pool, &part, &output).await?;
+            let bindings: Vec<Binding> = sqlx::query_as(
+                "SELECT authority_arm, resource_id, binding_kind, active_from, active_to
+                 FROM surface_bindings WHERE logical_name_id = $1
+                 ORDER BY authority_arm, active_from, resource_id",
+            )
+            .bind(&logical)
+            .fetch_all(pool)
+            .await?;
+            Ok(bindings)
+        }
+        .await;
+        database.cleanup().await?;
+        result
+    }
+
+    fn open(bindings: &[Binding]) -> Vec<&str> {
+        bindings
+            .iter()
+            .filter(|(_, _, _, _, active_to)| active_to.is_none())
+            .map(|(arm, _, _, _, _)| arm.as_str())
+            .collect()
+    }
+
+    /// The migration block writes, and only the ENSv2 binding is left open. A refused proof would
+    /// stop the boundary with "leaves 1 ENSv1 bindings open at its predecessor cleanup", because
+    /// the cleanup transfer reopens the lease binding.
+    #[tokio::test]
+    async fn a_lease_with_no_known_holder_closes_at_its_migration() -> Result<()> {
+        let bindings = migrate(fixture::input(&["debut"])?).await?;
+        assert_eq!(open(&bindings), ["ens_v2"]);
+        Ok(())
+    }
+
+    /// The same migration of a lease whose registration names the holder. The writer closes the
+    /// predecessor at the same time and leaves the same bindings as for the lease with no known
+    /// holder.
+    #[tokio::test]
+    async fn a_lease_with_a_known_holder_closes_at_the_same_time() -> Result<()> {
+        let known = migrate(fixture::registered(&["debut"])?).await?;
+        assert_eq!(open(&known), ["ens_v2"]);
+        let unknown = migrate(fixture::input(&["debut"])?).await?;
+        assert_eq!(unknown, known);
         Ok(())
     }
 }
