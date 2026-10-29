@@ -72,7 +72,10 @@ impl Worker {
         {
             return Err(block::revision_error(
                 chain_id,
-                self.family.current.as_ref().map_or(0, |marker| marker.number),
+                self.family
+                    .current
+                    .as_ref()
+                    .map_or(0, |marker| marker.number),
                 read.as_ref(),
                 &self.revision,
             ));
@@ -85,10 +88,9 @@ impl Worker {
     /// the budget, so a drained stream spends nothing. A chunk that does not commit is rolled
     /// back before this returns, so no claim outlives the worker's transaction.
     async fn chunk(&self) -> Result<std::result::Result<BlockStats, Drained>> {
-        let mut transaction =
-            self.pool.begin().await.map_err(|error| {
-                ProjectError::database("failed to begin a composition chunk", error)
-            })?;
+        let mut transaction = self.pool.begin().await.map_err(|error| {
+            ProjectError::database("failed to begin a composition chunk", error)
+        })?;
         match self.compose(&mut transaction).await {
             Ok(Ok(stats)) => {
                 commit(transaction).await?;
@@ -141,7 +143,10 @@ impl Worker {
 
     /// Commit chunks until the stream is drained, the budget is spent or the pass stops, sending
     /// each committed chunk's statistics to the coordinator.
-    async fn work(self: Arc<Self>, committed: mpsc::UnboundedSender<BlockStats>) -> Result<Drained> {
+    async fn work(
+        self: Arc<Self>,
+        committed: mpsc::UnboundedSender<BlockStats>,
+    ) -> Result<Drained> {
         while !self.stop.load(Ordering::SeqCst) {
             match self.chunk().await {
                 Ok(Ok(stats)) => {
@@ -161,7 +166,9 @@ impl Worker {
 /// Spend one block of the run's budget, or say none is left.
 fn take(budget: &AtomicU64) -> bool {
     budget
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1))
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+            left.checked_sub(1)
+        })
         .is_ok()
 }
 

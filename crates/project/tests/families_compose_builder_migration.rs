@@ -138,7 +138,9 @@ async fn the_migration_gives_the_pass_its_catalogue_build() -> Result<()> {
         "the catalogue build's migration alone leaves the stream comment without the \
          inventories stream: {before}"
     );
-    sqlx::raw_sql(STREAM_COMMENTS).execute(&fixture.pool).await?;
+    sqlx::raw_sql(STREAM_COMMENTS)
+        .execute(&fixture.pool)
+        .await?;
     ensure!(
         shape(&fixture).await? == baseline,
         "the migrated tables are the baseline's: {:?} against {baseline:?}",
@@ -159,7 +161,9 @@ async fn the_migration_gives_the_pass_its_catalogue_build() -> Result<()> {
     .await?;
     ensure!(kept == (false, None), "the row is kept: {kept:?}");
     sqlx::raw_sql(MIGRATION).execute(&fixture.pool).await?;
-    sqlx::raw_sql(STREAM_COMMENTS).execute(&fixture.pool).await?;
+    sqlx::raw_sql(STREAM_COMMENTS)
+        .execute(&fixture.pool)
+        .await?;
     let again: String = sqlx::query_scalar(SERVING_COMMENT)
         .fetch_one(&fixture.pool)
         .await?;

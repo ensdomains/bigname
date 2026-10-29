@@ -133,7 +133,9 @@ async fn the_migration_gives_the_record_its_composition_pass() -> Result<()> {
 
     sqlx::raw_sql(MIGRATION).execute(&fixture.pool).await?;
     sqlx::raw_sql(BUILDER).execute(&fixture.pool).await?;
-    sqlx::raw_sql(STREAM_COMMENTS).execute(&fixture.pool).await?;
+    sqlx::raw_sql(STREAM_COMMENTS)
+        .execute(&fixture.pool)
+        .await?;
     ensure!(
         shape(&fixture).await? == baseline,
         "the migrated record is the baseline's: {:?} against {baseline:?}",
@@ -186,7 +188,9 @@ async fn the_migration_gives_the_record_its_composition_pass() -> Result<()> {
     );
     sqlx::raw_sql(MIGRATION).execute(&fixture.pool).await?;
     sqlx::raw_sql(BUILDER).execute(&fixture.pool).await?;
-    sqlx::raw_sql(STREAM_COMMENTS).execute(&fixture.pool).await?;
+    sqlx::raw_sql(STREAM_COMMENTS)
+        .execute(&fixture.pool)
+        .await?;
     ensure!(
         shape(&fixture).await? == baseline,
         "applied again, the migration changes nothing"

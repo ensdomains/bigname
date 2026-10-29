@@ -71,7 +71,9 @@ fn a_worker_fence_refuses_a_record_that_differs_in_any_field() {
         ("prefix_revision", |record| {
             record.prefix_revision = Some((Some("h2".to_owned()), Some(1)))
         }),
-        ("invalidation_from", |record| record.invalidation_from = Some(4)),
+        ("invalidation_from", |record| {
+            record.invalidation_from = Some(4)
+        }),
         ("pending_undo_target", |record| {
             record.pending_undo_target = Some(4)
         }),

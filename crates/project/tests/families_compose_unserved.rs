@@ -24,8 +24,9 @@ use bigname_storage::{
     },
 };
 use families_support::{
-    CHAIN, CONTENT_HASH, Fixture, hash,
+    CHAIN, CONTENT_HASH, Fixture,
     compose::seeded_with,
+    hash,
     workers::{FIRST_LOOKED_UP, held, hold, side, stream, until},
 };
 use sqlx::PgPool;
@@ -179,14 +180,17 @@ async fn read_at_hold(
         })
     };
     let control = async {
-        let formed = until(BOUND, || held(side)).await?;
-        let answers = if formed {
-            Some((served(side, reads).await?, stream(side).await?.0))
-        } else {
-            None
-        };
+        let observed = async {
+            let formed = until(BOUND, || held(side)).await?;
+            anyhow::Ok(if formed {
+                Some((served(side, reads).await?, stream(side).await?.0))
+            } else {
+                None
+            })
+        }
+        .await;
         held_chunk.release().await?;
-        answers.ok_or_else(|| anyhow::anyhow!("no names chunk reached its hold"))
+        observed?.ok_or_else(|| anyhow::anyhow!("no names chunk reached its hold"))
     };
     let (outcome, answers) = tokio::join!(run, control);
     let outcome = outcome?;
@@ -226,7 +230,10 @@ async fn nothing_serves_the_lookup_names_during_a_redo_names_stream() -> Result<
         at == Some(0) && answers == [None, None, None],
         "in the names stream ({at:?}) every reader refuses: {answers:?}"
     );
-    ensure!(fixture.marker().await?.0 == Some(TARGET), "the redo completes");
+    ensure!(
+        fixture.marker().await?.0 == Some(TARGET),
+        "the redo completes"
+    );
     admitted(&fixture, 2, None).await?;
     require_served(&side, &reads, "after the redo").await?;
     fixture.cleanup().await
@@ -254,7 +261,10 @@ async fn nothing_serves_the_lookup_names_during_a_reorg_rebuilds_names_stream() 
             .fetch_one(&fixture.pool)
             .await?;
     let orphaned = pass_block.ok_or_else(|| anyhow::anyhow!("the rebuild ran no pass"))?;
-    ensure!(0 < orphaned && orphaned < TARGET, "the pass block {orphaned}");
+    ensure!(
+        0 < orphaned && orphaned < TARGET,
+        "the pass block {orphaned}"
+    );
     sqlx::query(
         "UPDATE chain_lineage SET canonicality_state = 'orphaned'
          WHERE chain_id = $1 AND block_number >= $2",

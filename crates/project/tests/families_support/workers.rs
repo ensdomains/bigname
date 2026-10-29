@@ -11,7 +11,7 @@ use std::{
 };
 
 use anyhow::{Result, ensure};
-use sqlx::{PgPool, pool::PoolConnection, postgres::PgPoolOptions, raw_sql};
+use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions, raw_sql};
 use tokio::task::JoinHandle;
 
 use super::{CHAIN, Fixture};
@@ -36,9 +36,12 @@ pub const LAST_LOOKED_UP: &str = "NEW.logical_name_id = (SELECT logical_name_id
     ORDER BY serial DESC LIMIT 1)";
 
 /// A names chunk stopped at its commit: the chunk has written every row and committed none, and
-/// holds its claim. It waits on the advisory lock `key`, which the test's connection holds.
+/// holds its claim. It waits on the advisory lock `key`, which a connection of the test's own
+/// holds. The connection is detached from its pool, so dropping the hold on any path, an early
+/// return or a panic included, closes the session and frees the lock, and no hold outlives its
+/// test.
 pub struct Hold {
-    connection: PoolConnection<sqlx::Postgres>,
+    connection: PgConnection,
     key: i64,
 }
 
@@ -78,21 +81,22 @@ pub async fn hold(
     ))
     .execute(&fixture.pool)
     .await?;
-    let mut connection = side.acquire().await?;
+    let mut connection = side.acquire().await?.detach();
     sqlx::query("SELECT pg_advisory_lock($1)")
         .bind(key)
-        .execute(&mut *connection)
+        .execute(&mut connection)
         .await?;
     Ok(Hold { connection, key })
 }
 
 impl Hold {
-    /// Let the held chunk go on to its commit.
+    /// Let the held chunk go on to its commit, and close the hold's session.
     pub async fn release(mut self) -> Result<()> {
         sqlx::query("SELECT pg_advisory_unlock($1)")
             .bind(self.key)
-            .execute(&mut *self.connection)
+            .execute(&mut self.connection)
             .await?;
+        self.connection.close().await?;
         Ok(())
     }
 }
@@ -189,6 +193,35 @@ pub async fn transitions(fixture: &Fixture) -> Result<Vec<(i64, String)>> {
     )
 }
 
+/// Log the lookup inventory rows standing each time the repair record leaves the names stream
+/// (`names_end_inventories`). No names chunk writes one, so each count is zero.
+pub async fn log_names_end_inventories(fixture: &Fixture) -> Result<()> {
+    raw_sql(
+        "CREATE TABLE names_end_inventories (seen bigserial PRIMARY KEY, rows bigint NOT NULL);
+         CREATE FUNCTION names_end_inventories() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             INSERT INTO names_end_inventories (rows)
+             SELECT count(*) FROM project_lookup_inventory;
+             RETURN NULL;
+         END $$;
+         CREATE TRIGGER names_end_inventories AFTER UPDATE ON project_repair_record
+         FOR EACH ROW WHEN (OLD.compose_stream = 0 AND NEW.compose_stream = 1)
+         EXECUTE FUNCTION names_end_inventories();",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    Ok(())
+}
+
+/// The lookup inventory rows logged at each end of the names stream, in order.
+pub async fn names_end_inventories(fixture: &Fixture) -> Result<Vec<i64>> {
+    Ok(
+        sqlx::query_scalar("SELECT rows FROM names_end_inventories ORDER BY seen")
+            .fetch_all(&fixture.pool)
+            .await?,
+    )
+}
+
 /// Require every id the latest pass listed to have moved to composed exactly once.
 pub async fn require_composed_once(fixture: &Fixture, listed: i64) -> Result<()> {
     let seen = transitions(fixture).await?;
@@ -204,9 +237,11 @@ pub async fn require_composed_once(fixture: &Fixture, listed: i64) -> Result<()>
     Ok(())
 }
 
-/// A sampler of the database's backends waiting on a heavyweight lock, every 50 ms until
-/// stopped. A hold's advisory wait is the test's own, and a relation extension wait is two
-/// inserts into one table growing it, not a key two chunks share, so neither is kept.
+/// A sampler of the database's client backends waiting on a heavyweight lock another client
+/// backend holds, every 50 ms until stopped. A hold's advisory wait is the test's own, and a
+/// relation extension wait is two inserts into one table growing it, not a key two chunks
+/// share, so neither is kept. Neither is a wait on autovacuum, which can hold a table's share
+/// update exclusive lock against the coordinator's `ANALYZE`.
 pub struct LockWaits {
     stop: Arc<AtomicBool>,
     task: JoinHandle<Result<Vec<String>>>,
@@ -219,9 +254,15 @@ pub fn lock_waits(side: PgPool) -> LockWaits {
         let mut seen = Vec::new();
         while !running.load(Ordering::SeqCst) {
             let waits: Vec<String> = sqlx::query_scalar(
-                "SELECT wait_event || ': ' || left(query, 120) FROM pg_stat_activity
-                 WHERE datname = current_database() AND pid <> pg_backend_pid()
-                   AND wait_event_type = 'Lock' AND wait_event NOT IN ('advisory', 'extend')",
+                "SELECT waiter.wait_event || ': ' || left(waiter.query, 120)
+                 FROM pg_stat_activity waiter
+                 WHERE waiter.datname = current_database() AND waiter.pid <> pg_backend_pid()
+                   AND waiter.backend_type = 'client backend'
+                   AND waiter.wait_event_type = 'Lock'
+                   AND waiter.wait_event NOT IN ('advisory', 'extend')
+                   AND EXISTS (SELECT 1 FROM pg_stat_activity blocker
+                               WHERE blocker.pid = ANY (pg_blocking_pids(waiter.pid))
+                                 AND blocker.backend_type = 'client backend')",
             )
             .fetch_all(&side)
             .await?;

@@ -17,8 +17,9 @@ use families_support::{
     CHAIN, CONTENT_HASH, Fixture,
     compose::{install_probe, probe_chunks, probe_list, seeded, seeded_with},
     workers::{
-        FIRST_LOOKED_UP, LAST_LOOKED_UP, composed, held, hold, lock_waits, log_transitions,
-        require_composed_once, side, stream, transitions, uncomposed, until,
+        FIRST_LOOKED_UP, LAST_LOOKED_UP, composed, held, hold, lock_waits,
+        log_names_end_inventories, log_transitions, names_end_inventories, require_composed_once,
+        side, stream, transitions, uncomposed, until,
     },
 };
 use sqlx::raw_sql;
@@ -41,7 +42,9 @@ async fn block_by_block(fixture: &Fixture) -> Result<Vec<(String, String)>> {
     let off = FamilyOptions::new(CONTENT_HASH)
         .with_max_blocks_per_run(u64::MAX)
         .with_rebuild_ranges(RebuildRanges::Off);
-    fixture.apply_with(TARGET, FamilyMode::Rebuild, &off).await?;
+    fixture
+        .apply_with(TARGET, FamilyMode::Rebuild, &off)
+        .await?;
     fixture.exact().await
 }
 
@@ -110,8 +113,8 @@ where
 // stream sets from the lookup core's resource, equals the column a block's lookup refresh writes
 // from the resource itself. The chunk count is the same and is the names, the node and record id
 // pairs, the inventories' names, the catalogue build's 1 + 64 + 5 * 16 + 1 partitions and the
-// pass end, no backend waited on a lock other than the hold, and the pass ends with its marker
-// row and no work rows.
+// pass end, no backend waited on a lock other than the hold, no lookup inventory row stood when
+// the names stream ended, and the pass ends with its marker row and no work rows.
 #[tokio::test]
 async fn a_pass_with_three_workers_equals_one_worker_and_block_by_block() -> Result<()> {
     let fixture = seeded_with("families_workers_equal", 4).await?;
@@ -130,25 +133,31 @@ async fn a_pass_with_three_workers_equals_one_worker_and_block_by_block() -> Res
     require_equal(&fixture, &expected, "one worker").await?;
 
     install_probe(&fixture).await?;
+    log_names_end_inventories(&fixture).await?;
     let side = side(&fixture).await?;
     let first = format!("NEW.logical_name_id = '{}'", shared.0);
     let held_chunk = hold(&fixture, &side, 71, &first, false).await?;
     let waits = lock_waits(side.clone());
     let second = shared.1.clone();
     let (outcome, overlapped) = run_with(&fixture, FamilyMode::Rebuild, &options(3), || async {
-        let formed = until(BOUND, || held(&side)).await?;
-        let overlapped = formed
-            && until(BOUND, || async {
-                Ok(sqlx::query_scalar(
-                    "SELECT EXISTS (SELECT 1 FROM project_compose_name_work
-                     WHERE logical_name_id = $1 AND composed)",
-                )
-                .bind(&second)
-                .fetch_one(&side)
-                .await?)
-            })
-            .await?;
+        let observed = async {
+            let formed = until(BOUND, || held(&side)).await?;
+            let overlapped = formed
+                && until(BOUND, || async {
+                    Ok(sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM project_compose_name_work
+                         WHERE logical_name_id = $1 AND composed)",
+                    )
+                    .bind(&second)
+                    .fetch_one(&side)
+                    .await?)
+                })
+                .await?;
+            anyhow::Ok((formed, overlapped))
+        }
+        .await;
         held_chunk.release().await?;
+        let (formed, overlapped) = observed?;
         ensure!(
             overlapped,
             "the second name's chunk committed while the first's was held (hold formed {formed})"
@@ -161,6 +170,11 @@ async fn a_pass_with_three_workers_equals_one_worker_and_block_by_block() -> Res
     let outcome = outcome?;
     require_equal(&fixture, &expected, "three workers").await?;
     ensure!(waits.is_empty(), "lock waits in the pass: {waits:?}");
+    let at_names_end = names_end_inventories(&fixture).await?;
+    ensure!(
+        at_names_end == vec![0],
+        "no names chunk wrote a lookup inventory row: {at_names_end:?}"
+    );
 
     let chunks = probe_chunks(&fixture).await?;
     let of = |stream: i16| {
@@ -253,16 +267,21 @@ async fn chunks_overlap_under_workers() -> Result<()> {
     let side = side(&fixture).await?;
     let held_chunk = hold(&fixture, &side, 72, FIRST_LOOKED_UP, false).await?;
     let (outcome, control) = run_with(&fixture, FamilyMode::Rebuild, &options(3), || async {
-        let formed = until(BOUND, || held(&side)).await?;
-        let at_hold = composed(&side).await?;
-        let counted_at_hold = stream(&side).await?.1;
-        let overlapped = formed
-            && until(BOUND, || async {
-                Ok(composed(&side).await? >= at_hold + 2
-                    && stream(&side).await?.1 >= counted_at_hold + 2)
-            })
-            .await?;
+        let observed = async {
+            let formed = until(BOUND, || held(&side)).await?;
+            let at_hold = composed(&side).await?;
+            let counted_at_hold = stream(&side).await?.1;
+            let overlapped = formed
+                && until(BOUND, || async {
+                    Ok(composed(&side).await? >= at_hold + 2
+                        && stream(&side).await?.1 >= counted_at_hold + 2)
+                })
+                .await?;
+            anyhow::Ok((formed, at_hold, overlapped))
+        }
+        .await;
         held_chunk.release().await?;
+        let (formed, at_hold, overlapped) = observed?;
         ensure!(
             overlapped,
             "two more chunks committed and were counted while one was held (hold formed \
@@ -279,7 +298,8 @@ async fn chunks_overlap_under_workers() -> Result<()> {
 
 // T15. A live worker holds the marker's generation: while its chunk is held, and once another
 // chunk has committed beside it, a transaction that would move the generation cannot take the
-// marker, and once the pass ends it can. A reset during the pass leaves no work row.
+// marker, and once the pass ends it can. That a reset during the pass leaves no work row is
+// `a_redo_resumes_or_restarts_a_rebuild_in_its_pass` (families_compose.rs).
 #[tokio::test]
 async fn a_live_worker_holds_the_generation() -> Result<()> {
     let fixture = seeded_with("families_workers_generation", 4).await?;
@@ -287,17 +307,22 @@ async fn a_live_worker_holds_the_generation() -> Result<()> {
     let held_chunk = hold(&fixture, &side, 73, FIRST_LOOKED_UP, false).await?;
     let probe = "SELECT 1 FROM project_family_marker WHERE chain_id = $1 FOR UPDATE NOWAIT";
     let (outcome, control) = run_with(&fixture, FamilyMode::Rebuild, &options(3), || async {
-        let formed = until(BOUND, || held(&side)).await?;
-        let at_hold = composed(&side).await?;
-        let overlapped = formed
-            && until(BOUND, || async { Ok(composed(&side).await? > at_hold) }).await?;
-        let mut transaction = side.begin().await?;
-        let locked = sqlx::query(probe)
-            .bind(CHAIN)
-            .execute(&mut *transaction)
-            .await;
-        drop(transaction);
+        let observed = async {
+            let formed = until(BOUND, || held(&side)).await?;
+            let at_hold = composed(&side).await?;
+            let overlapped =
+                formed && until(BOUND, || async { Ok(composed(&side).await? > at_hold) }).await?;
+            let mut transaction = side.begin().await?;
+            let locked = sqlx::query(probe)
+                .bind(CHAIN)
+                .execute(&mut *transaction)
+                .await;
+            drop(transaction);
+            anyhow::Ok((formed, overlapped, locked))
+        }
+        .await;
         held_chunk.release().await?;
+        let (formed, overlapped, locked) = observed?;
         ensure!(
             overlapped,
             "a chunk committed beside the held one (hold formed {formed})"
@@ -339,9 +364,15 @@ async fn a_failed_chunk_beside_a_live_worker_is_composed_once_more() -> Result<(
     let side = side(&fixture).await?;
     let held_chunk = hold(&fixture, &side, 74, FIRST_LOOKED_UP, true).await?;
     let (outcome, control) = run_with(&fixture, FamilyMode::Rebuild, &options(3), || async {
-        let formed = until(BOUND, || held(&side)).await?;
-        let rest = formed && until(BOUND, || async { Ok(uncomposed(&side).await? == 1) }).await?;
+        let observed = async {
+            let formed = until(BOUND, || held(&side)).await?;
+            let rest =
+                formed && until(BOUND, || async { Ok(uncomposed(&side).await? == 1) }).await?;
+            anyhow::Ok((formed, rest))
+        }
+        .await;
         held_chunk.release().await?;
+        let (formed, rest) = observed?;
         ensure!(
             rest,
             "the other workers composed every other id (hold formed {formed})"
@@ -366,7 +397,10 @@ async fn a_failed_chunk_beside_a_live_worker_is_composed_once_more() -> Result<(
     )
     .fetch_one(&fixture.pool)
     .await?;
-    ensure!(left == vec![first.clone()], "only {first} is left: {left:?}");
+    ensure!(
+        left == vec![first.clone()],
+        "only {first} is left: {left:?}"
+    );
     ensure!(
         stream(&side).await?.0 == Some(0) && catalogue_rows(&fixture).await? == 0,
         "the record stays in the names stream with no catalogue row"
@@ -393,26 +427,30 @@ async fn the_build_waits_for_the_last_worker() -> Result<()> {
         let side = side(&fixture).await?;
         let key = if fail { 76 } else { 75 };
         let held_chunk = hold(&fixture, &side, key, LAST_LOOKED_UP, fail).await?;
-        let (outcome, control) =
-            run_with(&fixture, FamilyMode::Rebuild, &options(3), || async {
+        let (outcome, control) = run_with(&fixture, FamilyMode::Rebuild, &options(3), || async {
+            let observed = async {
                 let formed = until(BOUND, || held(&side)).await?;
-                let rest = formed
-                    && until(BOUND, || async { Ok(uncomposed(&side).await? == 1) }).await?;
+                let rest =
+                    formed && until(BOUND, || async { Ok(uncomposed(&side).await? == 1) }).await?;
                 // The other workers find nothing left to claim; give the coordinator time to
                 // act on that before looking.
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 let waiting = stream(&side).await?.0 == Some(0)
                     && uncomposed(&side).await? == 1
                     && catalogue_rows(&fixture).await? == 0;
-                held_chunk.release().await?;
-                ensure!(
-                    rest && waiting,
-                    "fail {fail}: while the last chunk is held the record stays in the names \
-                     stream and the build has not begun (hold formed {formed}, rest {rest})"
-                );
-                Ok(())
-            })
+                anyhow::Ok((formed, rest, waiting))
+            }
             .await;
+            held_chunk.release().await?;
+            let (formed, rest, waiting) = observed?;
+            ensure!(
+                rest && waiting,
+                "fail {fail}: while the last chunk is held the record stays in the names \
+                     stream and the build has not begun (hold formed {formed}, rest {rest})"
+            );
+            Ok(())
+        })
+        .await;
         control?;
         if fail {
             let error = outcome.expect_err("the held chunk fails");
@@ -438,10 +476,12 @@ async fn the_build_waits_for_the_last_worker() -> Result<()> {
 
 // T10. Two names serve one resource, and the first's chunk is held at its commit while the
 // second's commits, so the two chunk transactions overlap. No names chunk writes the inventory:
-// when the names stream ends no inventory row exists, and the inventories stream composes the
-// resource's rows as block by block has them, with no unique violation or deadlock.
+// when the names stream ends no inventory row exists. The inventories stream composes the
+// resource in each of its chunks that holds a name serving it, twice here at one name to a
+// chunk, from the same base rows, and leaves the rows block by block has, with no unique
+// violation or deadlock.
 #[tokio::test]
-async fn two_names_on_one_resource_compose_their_inventory_once() -> Result<()> {
+async fn two_names_on_one_resource_leave_its_inventory_to_the_inventories_stream() -> Result<()> {
     let fixture = seeded_with("families_workers_inventory", 4).await?;
     let expected = block_by_block(&fixture).await?;
     let (resource, first, second): (uuid::Uuid, String, String) = sqlx::query_as(
@@ -452,36 +492,29 @@ async fn two_names_on_one_resource_compose_their_inventory_once() -> Result<()> 
     )
     .fetch_one(&fixture.pool)
     .await?;
-    raw_sql(
-        "CREATE TABLE names_end_inventories (rows bigint NOT NULL);
-         CREATE FUNCTION names_end_inventories() RETURNS trigger LANGUAGE plpgsql AS $$
-         BEGIN
-             INSERT INTO names_end_inventories SELECT count(*) FROM project_lookup_inventory;
-             RETURN NULL;
-         END $$;
-         CREATE TRIGGER names_end_inventories AFTER UPDATE ON project_repair_record
-         FOR EACH ROW WHEN (OLD.compose_stream = 0 AND NEW.compose_stream = 1)
-         EXECUTE FUNCTION names_end_inventories();",
-    )
-    .execute(&fixture.pool)
-    .await?;
+    log_names_end_inventories(&fixture).await?;
     let side = side(&fixture).await?;
     let predicate = format!("NEW.logical_name_id = '{first}'");
     let held_chunk = hold(&fixture, &side, 77, &predicate, false).await?;
     let (outcome, control) = run_with(&fixture, FamilyMode::Rebuild, &options(3), || async {
-        let formed = until(BOUND, || held(&side)).await?;
-        let overlapped = formed
-            && until(BOUND, || async {
-                Ok(sqlx::query_scalar(
-                    "SELECT EXISTS (SELECT 1 FROM project_compose_name_work
-                     WHERE logical_name_id = $1 AND composed)",
-                )
-                .bind(&second)
-                .fetch_one(&side)
-                .await?)
-            })
-            .await?;
+        let observed = async {
+            let formed = until(BOUND, || held(&side)).await?;
+            let overlapped = formed
+                && until(BOUND, || async {
+                    Ok(sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM project_compose_name_work
+                         WHERE logical_name_id = $1 AND composed)",
+                    )
+                    .bind(&second)
+                    .fetch_one(&side)
+                    .await?)
+                })
+                .await?;
+            anyhow::Ok((formed, overlapped))
+        }
+        .await;
         held_chunk.release().await?;
+        let (formed, overlapped) = observed?;
         ensure!(
             overlapped,
             "{second}'s chunk committed while {first}'s was held (hold formed {formed})"
@@ -491,9 +524,7 @@ async fn two_names_on_one_resource_compose_their_inventory_once() -> Result<()> 
     .await;
     control?;
     outcome?;
-    let at_names_end: Vec<i64> = sqlx::query_scalar("SELECT rows FROM names_end_inventories")
-        .fetch_all(&fixture.pool)
-        .await?;
+    let at_names_end = names_end_inventories(&fixture).await?;
     ensure!(
         at_names_end == vec![0],
         "no inventory row when the names stream ends: {at_names_end:?}"
@@ -539,8 +570,10 @@ async fn a_pool_smaller_than_the_workers_is_refused() -> Result<()> {
 
 // T2 and T5, T7. The first run applies the ranges only, then runs of budget four with three,
 // one, two, three, ... workers in turn, each a normal run as the runner continues one. Every run
-// returns with no chunk open, a run in the names stream composes no block, every id moves to
-// composed exactly once whatever the worker count, and the families equal block by block.
+// returns with no chunk open, the ids composed in the names stream are its committed chunks
+// times five, less a short last chunk once one composed the list's last id, a run in the names
+// stream composes no block, every id moves to composed exactly once whatever the worker count,
+// and the families equal block by block.
 #[tokio::test]
 async fn the_worker_count_may_change_between_runs() -> Result<()> {
     let fixture = seeded_with("families_workers_counts", 4).await?;
@@ -587,8 +620,34 @@ async fn the_worker_count_may_change_between_runs() -> Result<()> {
         )
         .fetch_one(&side)
         .await?;
-        ensure!(open == 0, "run {runs} returned with {open} open transactions");
-        if in_names && stream(&side).await?.0 == Some(0) {
+        ensure!(
+            open == 0,
+            "run {runs} returned with {open} open transactions"
+        );
+        let (at, chunks) = stream(&side).await?;
+        if at == Some(0) {
+            // Every chunk the record counts so far is a names chunk that committed its claim of
+            // five ids with them. Only the claim that reaches the list's last id can be short,
+            // and it can commit while an earlier claim finds no budget and rolls back.
+            let marked = composed(&side).await?;
+            let tail: bool = sqlx::query_scalar(
+                "SELECT composed FROM project_compose_name_work WHERE chain_id = $1
+                 ORDER BY serial DESC LIMIT 1",
+            )
+            .bind(CHAIN)
+            .fetch_one(&side)
+            .await?;
+            ensure!(
+                if tail {
+                    (chunks * 5 - 4..=chunks * 5).contains(&marked)
+                } else {
+                    marked == chunks * 5
+                },
+                "run {runs}: {marked} ids composed by {chunks} committed chunks of five, the \
+                 last id composed {tail}"
+            );
+        }
+        if in_names && at == Some(0) {
             names_runs += 1;
             ensure!(
                 outcome.blocks == 0 && fixture.marker().await?.0 == before,
@@ -637,11 +696,10 @@ async fn the_claim_locks_the_rows_its_limit_returns() -> Result<()> {
         raw_sql(&format!("SET plan_cache_mode = {mode}"))
             .execute(&mut *connection)
             .await?;
-        let plan: Vec<String> = sqlx::query_scalar(&format!(
-            "EXPLAIN EXECUTE claim('{CHAIN}', 1000)"
-        ))
-        .fetch_all(&mut *connection)
-        .await?;
+        let plan: Vec<String> =
+            sqlx::query_scalar(&format!("EXPLAIN EXECUTE claim('{CHAIN}', 1000)"))
+                .fetch_all(&mut *connection)
+                .await?;
         let text = plan.join("\n");
         let (limit, rows) = (text.find("Limit"), text.find("LockRows"));
         ensure!(
