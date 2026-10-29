@@ -1,13 +1,18 @@
 //! How many name surfaces a selection reads.
 //!
 //! A publication reads the surfaces of the names it touched, of their ancestors and
-//! descendants, of the names that hold a changed entry's label, and of the names under the
-//! entries that point at a changed registry. That number must not grow with the number of
-//! surfaces on the chain. Two cases read every observed ENS surface by design and are not
-//! measured here:
+//! descendants, of the names that hold a changed entry's label directly above a label of an
+//! entry that points at its registry, and of the names under the entries that point at a
+//! changed registry. That number must not grow with the number of surfaces on the chain. Two
+//! cases read every observed ENS surface by design and are not measured here:
 //!
 //! - A change of the fallback resolver's classification.
 //! - A changed path of zero labels (the root registry itself).
+//!
+//! One more reads every surface that holds `eth`: a change of the `eth` entry of the registry
+//! the root's `eth` entry points at. The entry's key and the key above it are both `eth`, and no
+//! key of another label lies above that. `an_eth_keyed_entry_of_the_eth_registry_reads_every_eth_surface`
+//! pins it.
 //!
 //! The measure is taken from `EXPLAIN (ANALYZE, FORMAT JSON)`: over every scan of
 //! `name_surfaces` and every join above one, the rows returned plus the rows a filter, an index
@@ -1081,9 +1086,9 @@ async fn the_registry_route_probes_read_their_indexes() -> Result<()> {
             let mut scans = Vec::new();
             executed_scans(&run.plan["Plan"], "", &mut scans);
             for (cte, table, alias, indexes) in [
-                ("mounts", EVENTS, "pointer", &[STATE_KEY_INDEX][..]),
-                ("mounts", ENTRIES, "entry", &[ENTRY_RESOURCE, ENTRY_KEY][..]),
-                ("mounts", EVENTS, "origin", &[RESOURCE_HISTORY][..]),
+                ("slots", EVENTS, "pointer", &[STATE_KEY_INDEX][..]),
+                ("slots", ENTRIES, "entry", &[ENTRY_RESOURCE, ENTRY_KEY][..]),
+                ("slots", EVENTS, "origin", &[RESOURCE_HISTORY][..]),
                 (
                     "changed_registries",
                     EVENTS,
@@ -1195,6 +1200,390 @@ async fn a_changed_registry_no_slot_names_reads_no_surface() -> Result<()> {
         ensure!(
             failures.is_empty(),
             "a changed registry that no entry points at reads name surfaces:\n{}",
+            failures.join("\n")
+        );
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+/// A registry no entry points at.
+const UNMOUNTED: &str = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+/// The registry the `eth` entry of a mounted second-level name's registry points at.
+const NESTED: &str = "0xffffffffffffffffffffffffffffffffffffffff";
+
+/// The publication at `block` changes entries of registries below `.eth` whose labels many
+/// surfaces hold, or only the surfaces `grow` adds. With `m` the first mounted second-level name:
+///
+/// - The `eth` entry of the registry at `m`, mounted by `m`'s entry in `ETH`.
+/// - The `eth` entry of a registry no entry points at.
+/// - The `eth` entry of `NESTED`, which the `eth` entry of the registry at `m + 1` points at. The
+///   entry's key and its slot's are both `eth`, and `m + 1`'s label is the first other key above.
+/// - 500 entries of the registry at `m + 2`, whose labels only the surfaces `grow` adds hold.
+/// - The entry of second-level name `m + 3` in `ETH`, so that the publication selects names.
+async fn change_user_registry_entries(
+    connection: &mut PgConnection,
+    tree: Tree,
+    block: i64,
+) -> Result<()> {
+    let m = tree.second * 3 / 4;
+    let mounted = |offset: i64| registry(&(m + offset).to_string());
+    let (first, nested_parent, many) = (mounted(0), mounted(1), mounted(2));
+    let second_level = label('s', &(m + 3).to_string());
+    let late = label('h', "n");
+    raw_sql(&format!(
+        "INSERT INTO resources (resource_id, chain_id, block_hash, block_number,
+             canonicality_state)
+         VALUES (md5({nested_parent} || '{ETH_LABEL}')::uuid, '{CHAIN}', '{zero}', 0,
+                 'canonical');
+
+         INSERT INTO project_ens_v2_entry_owner (chain_id, registry, entry_key, token_id,
+             resource_id, status, block_number, event_identity)
+         VALUES ('{CHAIN}', {nested_parent}, left('{ETH_LABEL}', 58) || '00000000',
+                 '{ETH_LABEL}', md5({nested_parent} || '{ETH_LABEL}')::uuid, 'registered', 1,
+                 'mount:nested');
+
+         INSERT INTO normalized_events (event_identity, namespace, resource_id, event_kind,
+             source_family, manifest_version, chain_id, block_number, block_hash,
+             derivation_kind, canonicality_state, after_state, raw_fact_ref)
+         VALUES ('mount:nested', 'ens', md5({nested_parent} || '{ETH_LABEL}')::uuid,
+                 'SubregistryChanged', 'ens_v2_registry_l1', 1, '{CHAIN}', 1, '{one}',
+                 'ens_v2_registry_resource_surface', 'canonical',
+                 jsonb_build_object('subregistry', '{NESTED}', 'token_id', '{ETH_LABEL}'),
+                 jsonb_build_object('emitting_address', {nested_parent}));
+
+         INSERT INTO project_family_undo (chain_id, block_number, block_hash, family, key)
+         SELECT '{CHAIN}', {block}, '{hash}', 'project_ens_v2_entry_owner',
+                jsonb_build_array('{CHAIN}', registry, left(label, 58) || '00000000')::text
+         FROM (
+             SELECT {first}, '{ETH_LABEL}'
+             UNION ALL SELECT '{UNMOUNTED}', '{ETH_LABEL}'
+             UNION ALL SELECT '{NESTED}', '{ETH_LABEL}'
+             UNION ALL SELECT '{ETH}', {second_level}
+             UNION ALL SELECT {many}, {late} FROM generate_series(0, 499) n
+         ) entry (registry, label)",
+        zero = hash(0),
+        one = hash(1),
+        hash = hash(block),
+    ))
+    .execute(&mut *connection)
+    .await
+    .context("change entries of user registries")?;
+    Ok(())
+}
+
+// Rows V1 and C22. A changed entry of a registry below `.eth` reads the surfaces that hold its
+// label directly above a label of an entry that points at the registry, not every surface that
+// holds its label. The publication of `change_user_registry_entries` changes entries whose
+// labels are `eth`, which every surface holds, or labels only the added surfaces hold. It is
+// measured over the fixture and again after as many more surfaces.
+#[tokio::test]
+async fn entries_of_user_registries_visit_the_same_surfaces_when_the_namespace_grows() -> Result<()>
+{
+    let (database, pool) = database().await?;
+    let result = async {
+        let mut connection = pool.acquire().await?;
+        let tree = Tree::of(SMALL);
+        install(&mut connection, tree).await?;
+        change_user_registry_entries(&mut connection, tree, 10).await?;
+        raw_sql("ANALYZE").execute(&mut *connection).await?;
+        prepare_statements(&mut connection).await?;
+        let mut small = Vec::new();
+        for mode in PLAN_MODES {
+            set_mode(&mut connection, mode).await?;
+            small.push(run(&mut connection, "path_work", 10).await?);
+        }
+        grow(&mut connection, GROWTH).await?;
+        raw_sql("ANALYZE").execute(&mut *connection).await?;
+        let mut failures = Vec::new();
+        for (mode, small) in PLAN_MODES.into_iter().zip(&small) {
+            set_mode(&mut connection, mode).await?;
+            let large = run(&mut connection, "path_work", 10).await?;
+            let before = run_before(&mut connection, 10).await?;
+            ensure!(
+                !large.selected.is_empty()
+                    && large.selected == before
+                    && large.selected == small.selected,
+                "{mode}: the statement selects {} names over {SMALL} surfaces and {} over {}, \
+                 the one before the probes {}",
+                small.selected.len(),
+                large.selected.len(),
+                SMALL + GROWTH,
+                before.len()
+            );
+            let (few, many) = (small.visited(), large.visited());
+            for arm in ARMS {
+                let (few, many) = (
+                    few.get(arm).copied().unwrap_or(0),
+                    many.get(arm).copied().unwrap_or(0),
+                );
+                if many > few + 16 {
+                    failures.push(format!(
+                        "{mode}: {arm} visits {few} surfaces of {SMALL} and {many} of {}",
+                        SMALL + GROWTH
+                    ));
+                }
+            }
+            let (few, many) = (small.total(), large.total());
+            if many > few + 16 {
+                failures.push(format!(
+                    "{mode}: the statement visits {few} surfaces of {SMALL} and {many} of {}",
+                    SMALL + GROWTH
+                ));
+            }
+        }
+        ensure!(
+            failures.is_empty(),
+            "the reads of entry changes in user registries grow with the namespace:\n{}",
+            failures.join("\n")
+        );
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+// Row C6. An entry of a registry that no entry points at moves no name. The publication changes
+// the `eth` entry and a second-level label's entry of such a registry, and nothing else. It
+// selects nothing and reads no name surface.
+#[tokio::test]
+async fn an_entry_of_a_registry_no_slot_names_reads_no_surface() -> Result<()> {
+    let (database, pool) = database().await?;
+    let result = async {
+        let mut connection = pool.acquire().await?;
+        install(&mut connection, Tree::of(SMALL)).await?;
+        let second_level = label('s', "0");
+        raw_sql(&format!(
+            "INSERT INTO project_family_undo (chain_id, block_number, block_hash, family, key)
+             SELECT '{CHAIN}', 10, '{hash}', 'project_ens_v2_entry_owner',
+                    jsonb_build_array('{CHAIN}', '{UNMOUNTED}',
+                        left(label, 58) || '00000000')::text
+             FROM (SELECT '{ETH_LABEL}' UNION ALL SELECT {second_level}) entry (label);
+             ANALYZE",
+            hash = hash(10),
+        ))
+        .execute(&mut *connection)
+        .await?;
+        prepare_statements(&mut connection).await?;
+        let mut failures = Vec::new();
+        for mode in PLAN_MODES {
+            set_mode(&mut connection, mode).await?;
+            let run = run(&mut connection, "path_work", 10).await?;
+            let before = run_before(&mut connection, 10).await?;
+            ensure!(
+                run.selected.is_empty() && before.is_empty(),
+                "{mode}: selected {:?}, before the probes {before:?}",
+                run.selected
+            );
+            if run.total() != 0 {
+                failures.push(format!(
+                    "{mode}: the statement visits {:?} surfaces of {SMALL}",
+                    run.visited()
+                ));
+            }
+        }
+        ensure!(
+            failures.is_empty(),
+            "an entry of a registry that no entry points at reads name surfaces:\n{}",
+            failures.join("\n")
+        );
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+// Row V3, a pin. The registry the root's `eth` entry points at changes its own `eth` entry. The
+// entry's key and its slot's are both `eth` and the root is directly above, so the probe holds
+// `eth` alone: the `candidates` step reads every surface that holds `eth`, and its reads grow by
+// every surface added. The selection still equals the frozen statement's.
+#[tokio::test]
+async fn an_eth_keyed_entry_of_the_eth_registry_reads_every_eth_surface() -> Result<()> {
+    let (database, pool) = database().await?;
+    let result = async {
+        let mut connection = pool.acquire().await?;
+        install(&mut connection, Tree::of(SMALL)).await?;
+        raw_sql(&format!(
+            "INSERT INTO project_family_undo (chain_id, block_number, block_hash, family, key)
+             VALUES ('{CHAIN}', 10, '{hash}', 'project_ens_v2_entry_owner',
+                     jsonb_build_array('{CHAIN}', '{ETH}',
+                         left('{ETH_LABEL}', 58) || '00000000')::text);
+             ANALYZE",
+            hash = hash(10),
+        ))
+        .execute(&mut *connection)
+        .await?;
+        prepare_statements(&mut connection).await?;
+        let mut small = Vec::new();
+        for mode in PLAN_MODES {
+            set_mode(&mut connection, mode).await?;
+            small.push(run(&mut connection, "path_work", 10).await?);
+        }
+        grow(&mut connection, GROWTH).await?;
+        raw_sql("ANALYZE").execute(&mut *connection).await?;
+        for (mode, small) in PLAN_MODES.into_iter().zip(&small) {
+            set_mode(&mut connection, mode).await?;
+            let large = run(&mut connection, "path_work", 10).await?;
+            let before = run_before(&mut connection, 10).await?;
+            ensure!(
+                large.selected == before && large.selected == small.selected,
+                "{mode}: the statement selects {} names, the one before the probes {}",
+                large.selected.len(),
+                before.len()
+            );
+            let candidates = |run: &Run| run.visited().get("candidates").copied().unwrap_or(0);
+            let (few, many) = (candidates(small), candidates(&large));
+            ensure!(
+                many >= few + GROWTH,
+                "{mode}: candidates visits {few} surfaces of {SMALL} and {many} of {}, not every \
+                 surface that holds eth",
+                SMALL + GROWTH
+            );
+        }
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+/// The index conditions a scan node reads its table by: its own, or those of the bitmap index
+/// scans that feed it.
+fn index_conditions(node: &Value) -> Vec<&str> {
+    let mut conditions: Vec<&str> = node["Index Cond"].as_str().into_iter().collect();
+    for child in node["Plans"].as_array().into_iter().flatten() {
+        if !matches!(
+            child["Parent Relationship"].as_str(),
+            Some("SubPlan" | "InitPlan")
+        ) && child["Node Type"]
+            .as_str()
+            .is_some_and(|kind| kind.starts_with("Bitmap"))
+        {
+            conditions.extend(index_conditions(child));
+        }
+    }
+    conditions
+}
+
+// Row P1. The lookups that start from a changed entry's registry reach their tables through
+// indexes, under a custom and a generic plan, for the publication of
+// `change_user_registry_entries`. The events that name a registry as a subregistry come from the
+// ENSv2 state key index, for the registries of the changed entries (`slots`) and for the
+// registries above an entry whose key is its slot's (`chains`). The entries come from their
+// resource index or primary key, and the events of an entry's resource from the resource history
+// index. Every probe of `name_surfaces` in `candidates` reads the entry key index, and one holds
+// a changed entry's key and its slot's together. No part of the statement scans every name
+// surface or every normalized event.
+#[tokio::test]
+async fn the_changed_entry_probes_read_their_indexes() -> Result<()> {
+    const RESOURCE_HISTORY: &str = "normalized_events_resource_history_idx";
+    const ENTRY_RESOURCE: &str = "project_ens_v2_entry_owner_resource_idx";
+    const ENTRY_KEY: &str = "project_ens_v2_entry_owner_pkey";
+    let (database, pool) = database().await?;
+    let result = async {
+        let mut connection = pool.acquire().await?;
+        let tree = Tree::of(SMALL);
+        install(&mut connection, tree).await?;
+        change_user_registry_entries(&mut connection, tree, 10).await?;
+        raw_sql("ANALYZE").execute(&mut *connection).await?;
+        prepare_statements(&mut connection).await?;
+        let mut failures = Vec::new();
+        for mode in PLAN_MODES {
+            set_mode(&mut connection, mode).await?;
+            let run = run(&mut connection, "path_work", 10).await?;
+            let before = run_before(&mut connection, 10).await?;
+            ensure!(
+                !run.selected.is_empty() && run.selected == before,
+                "{mode}: the statement selects {} names, the one before the probes {}",
+                run.selected.len(),
+                before.len()
+            );
+            let mut scans = Vec::new();
+            executed_scans(&run.plan["Plan"], "", &mut scans);
+            for cte in ["slots", "chains"] {
+                for (table, alias, indexes) in [
+                    (EVENTS, "pointer", &[STATE_KEY_INDEX][..]),
+                    (ENTRIES, "entry", &[ENTRY_RESOURCE, ENTRY_KEY][..]),
+                    (EVENTS, "origin", &[RESOURCE_HISTORY][..]),
+                ] {
+                    let probes: Vec<&Value> = scans
+                        .iter()
+                        .filter(|(under, node)| {
+                            *under == cte
+                                && node["Relation Name"] == table
+                                && node["Alias"]
+                                    .as_str()
+                                    .is_some_and(|name| name.split('_').next() == Some(alias))
+                        })
+                        .map(|(_, node)| *node)
+                        .collect();
+                    if probes.is_empty() {
+                        failures.push(format!("{mode}: {cte} never read {table} {alias}"));
+                    }
+                    for node in &probes {
+                        if !reads_through(node, indexes) {
+                            failures.push(format!(
+                                "{mode}: {cte} reads {table} {alias} by {} over {:?}, not \
+                                 {indexes:?}",
+                                node["Node Type"],
+                                indexes_read(node)
+                            ));
+                        }
+                    }
+                    if table == ENTRIES
+                        && !probes
+                            .iter()
+                            .any(|node| reads_through(node, &[ENTRY_RESOURCE]))
+                    {
+                        failures.push(format!(
+                            "{mode}: {cte} never read {table} {alias} through {ENTRY_RESOURCE}"
+                        ));
+                    }
+                }
+            }
+            let probes: Vec<&Value> = scans
+                .iter()
+                .filter(|(under, node)| *under == "candidates" && node["Relation Name"] == SURFACES)
+                .map(|(_, node)| *node)
+                .collect();
+            for node in &probes {
+                if !reads_through(node, &[KEY_INDEX]) {
+                    failures.push(format!(
+                        "{mode}: candidates reads {SURFACES} by {} over {:?}, not {KEY_INDEX}",
+                        node["Node Type"],
+                        indexes_read(node)
+                    ));
+                }
+            }
+            if !probes.iter().any(|node| {
+                index_conditions(node)
+                    .iter()
+                    .any(|condition| condition.matches("hashtextextended(").count() >= 2)
+            }) {
+                failures.push(format!(
+                    "{mode}: no candidates probe of {SURFACES} reads {KEY_INDEX} by two keys"
+                ));
+            }
+            for (cte, node) in &scans {
+                if node["Node Type"] == "Seq Scan"
+                    && [SURFACES, EVENTS]
+                        .iter()
+                        .any(|table| node["Relation Name"] == *table)
+                {
+                    failures.push(format!(
+                        "{mode}: a sequential scan of {} {} under {cte:?}",
+                        node["Relation Name"], node["Alias"]
+                    ));
+                }
+            }
+        }
+        ensure!(
+            failures.is_empty(),
+            "the access paths of a selection that holds changed entries of user registries:\n{}",
             failures.join("\n")
         );
         Ok(())

@@ -5046,6 +5046,41 @@ and no schema.
   Project redo:
   `SELECT gin_clean_pending_list('bigname_phase.normalized_events_v2_key_probe_idx');`
 
+## Changed entries in the resolution path selection
+
+The build that makes a changed ENSv2 entry read only the names where the walk
+from the root registry can read it (see
+[owned key families](projections.md#owned-key-families) and
+[table ownership](storage.md#table-ownership)) changes one Project statement
+and no schema.
+
+- `project:families.resolution_paths.prepare` read every `name_surfaces` row
+  that held a changed entry's label, wherever the label sat and whether or not
+  anything pointed at the entry's registry. It now reads, for the root
+  registry, the names whose last label has the entry's key. For any other
+  registry it reads the names that hold the entry's label directly above the
+  label of an entry that points at the registry. A registry that nothing points
+  at reads no name. The names it selects are the same.
+- Stored rows do not change. API responses do not change.
+- It adds no schema-migration, index, table, manifest or setting.
+- The statement now reads `normalized_events_v2_key_probe_idx` for the registry
+  of each changed entry too. That index is in the
+  [walk index set](storage.md#walk-index-set), so
+  `ops/walk-index-set/drop.sql` does not drop it.
+- The statement is in `crates/project/src`, an input of the
+  [projection content hash](glossary.md#projection-content-hash) only. That hash
+  rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, at a
+  planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+  matching runner and API binaries. The change rides the next release that
+  redoes Project and shares that release's Project redo. The
+  manifest-authority fingerprint and the compiled watch plan are unchanged, so
+  stamp no Ingest redo.
+- The lookup by registry reads a GIN index. Flush its pending list before a
+  Project redo:
+  `SELECT gin_clean_pending_list('bigname_phase.normalized_events_v2_key_probe_idx');`
+
 ## Resolvers that both protocols name stay ENSv1
 
 The build that ranks a resolver's ENSv2 candidates after its ENSv1 evidence, and lets an ENSv2

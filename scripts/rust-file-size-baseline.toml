@@ -26,6 +26,11 @@ loc = 607
 justification = "Manifest state, address-epoch persistence, and derived-phase invalidation remain in one transaction boundary; PR #583 grew the file to 598 lines on main and this branch's nine-line no-effect notice crosses the threshold when rebased. Split on the next substantive touch."
 
 [[files]]
+path = "crates/project/src/families/resolution_paths/selection.rs"
+loc = 656
+justification = "One SQL statement selects the names a publication recomposes. Its steps read each other's CTEs, so the changed-entry slot lookup, its upward key search and the candidate probes stay in the statement they feed. Most of the file is the statement's text and the comments that say why each probe is exact."
+
+[[files]]
 path = "tools/benchmark-gate/src/api_load.rs"
 loc = 930
 justification = "The benchmark API orchestrator keeps target-identity boundaries, seed probes, timed sampling, and the single report contract together so a release gate cannot omit a validation phase."

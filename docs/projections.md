@@ -2382,22 +2382,34 @@ entries that point at a changed registry through indexes that already exist
 
 - It finds the ancestors of each name an item expands by name, by the hash of
   each suffix of that name's label hash path.
-- It finds the names that hold a changed entry's label, and the names under a
-  changed path, by the hash of the label's entry key. The entry key is the
-  label hash with its low 32 bits cleared, as
+- It finds the names under a changed path by the hash of its first label's
+  entry key. The entry key is the label hash with its low 32 bits cleared, as
   [ENSv2 registry entries](#ensv2-registry-entries) defines it.
+- The walk from the root registry reaches any other registry only through an
+  entry whose `SubregistryChanged` event names it, an entry that points at it.
+  For each registry that changed or holds a changed entry, the statement finds
+  the entries with such an event. That set holds every entry that points at
+  the registry at the publication. It can also hold an entry that pointed at it
+  earlier. The walk reads each entry's latest pointer and decides, as it did
+  before. An entry row that holds no resource is tied to its pointer by the
+  event that last wrote the row, and the lookup reads only canonical events.
+  That loses no entry: entry rows are undone with the journal before a replay,
+  so at a publication no entry row cites an orphaned event.
 - A registry is changed in a publication when an event of its blocks creates,
   upgrades or announces it, or when a name an item expands by name is, or sits
   under, a name whose retained ENSv1→ENSv2 migration evidence holds the
-  registry's creation. The statement finds the entries with a
-  `SubregistryChanged` event that names the registry, and treats their keys as
-  changed entry keys. That set holds every entry that points at the registry
-  at the publication. It can also hold an entry that pointed at it earlier.
-  The walk from the root registry reads each entry's latest pointer and
-  decides, as it did before. An entry row that holds no resource is tied to its
-  pointer by the event that last wrote the row, and the lookup reads only
-  canonical events. That loses no entry: entry rows are undone with the journal
-  before a replay, so at a publication no entry row cites an orphaned event.
+  registry's creation. The keys of the entries that point at it count as
+  changed entry keys, and the statement finds the names that hold one, by the
+  hash of the key.
+- A changed entry of the root registry moves only names whose last label has
+  its key. A changed entry of any other registry moves only names that hold its
+  label directly above the label of an entry that points at the registry. The
+  statement finds those names by the hashes of both keys, so the index returns
+  only the names that hold both. When the two keys are the same, it also looks
+  up the entries that point at the registry holding that entry, and so on up,
+  and adds the first key that differs, when there is one. A registry that no
+  entry points at is never reached by the walk, so its entries read no name and
+  select none.
 - A change of the root registry itself has no entry to look up. The walk's
   first row carries it.
 - It reads the ENSv1→ENSv2 migration evidence of each ancestor by name, one
@@ -2415,6 +2427,10 @@ Two cases still read every observed ENS surface:
   [v1 fallback resolver](glossary.md#v1-fallback-resolver-ensv1resolver-exposed-as-v1_resolver)
   changes.
 - A changed path has no labels, which is the root registry itself.
+
+One more reads every surface that holds `eth`: a change of the `eth` entry of
+the registry the root's `eth` entry points at. Its key and the key of the entry
+above it are both `eth`, and no entry of another key lies above that.
 
 A path whose first label hash is null also reads them all.
 
