@@ -1120,7 +1120,7 @@ async fn a_released_ownerless_name_is_served_without_an_alias_walk() -> Result<(
                 )
                 .await?;
             let status = response.status();
-            let body = read_json(response).await?;
+            let body: Value = read_json(response).await?;
             Ok::<_, anyhow::Error>((
                 status,
                 body,
