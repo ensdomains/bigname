@@ -26,7 +26,6 @@ pub(crate) struct RecordCallOutcome {
 enum ResolvedCallResult {
     Provider(JsonRpcCallResult),
     InternalFailure(&'static str),
-    InternalUnsupported(&'static str),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,7 +40,6 @@ pub(crate) struct RecordCallContext<'a> {
     pub node: [u8; 32],
     pub entrypoint_address: &'a str,
     pub block: &'a ExecutionBlock,
-    pub follow_ccip: bool,
     pub result_abi: ResolutionResultAbi,
     pub resolver_not_found_is_not_found: bool,
     pub rpc: &'a JsonRpcHttpClient,
@@ -91,8 +89,7 @@ pub(crate) async fn execute_record_call_with_resolver(
             )));
         }
     };
-    let (result, ccip_read) =
-        resolve_ccip_if_supported(context, initial, &block_selector, record).await?;
+    let (result, ccip_read) = resolve_ccip_read(context, initial, &block_selector, record).await?;
     decode_resolved_call_result(
         record,
         context.result_abi,
@@ -103,7 +100,9 @@ pub(crate) async fn execute_record_call_with_resolver(
     )
 }
 
-async fn resolve_ccip_if_supported(
+/// Every verified read follows an `OffchainLookup` revert through the one CCIP-Read transport in
+/// `ccip.rs`, whichever route made the call.
+async fn resolve_ccip_read(
     context: &RecordCallContext<'_>,
     initial: JsonRpcCallResult,
     block_selector: &Value,
@@ -119,12 +118,6 @@ async fn resolve_ccip_if_supported(
     })?;
     if !offchain_lookup {
         return Ok((ResolvedCallResult::Provider(initial), false));
-    }
-    if !context.follow_ccip {
-        return Ok((
-            ResolvedCallResult::InternalUnsupported("offchain_lookup_required"),
-            true,
-        ));
     }
     match follow_ccip_read(
         context.rpc,
@@ -170,9 +163,6 @@ fn decode_resolved_call_result(
         ),
         ResolvedCallResult::InternalFailure(reason) => {
             Ok(outcome(failed(record, reason, ccip_read), None))
-        }
-        ResolvedCallResult::InternalUnsupported(reason) => {
-            Ok(outcome(unsupported(record, reason, ccip_read), None))
         }
     }
 }
@@ -319,12 +309,6 @@ fn not_found(record: &RecordSelector, reason: &str, ccip_read: bool) -> LookupRe
 fn failed(record: &RecordSelector, reason: &str, ccip_read: bool) -> LookupRecordResult {
     let mut result = base_result(record, LookupRecordStatus::ExecutionFailed, None, ccip_read);
     result.failure_reason = Some(reason.to_owned());
-    result
-}
-
-fn unsupported(record: &RecordSelector, reason: &str, ccip_read: bool) -> LookupRecordResult {
-    let mut result = base_result(record, LookupRecordStatus::Unsupported, None, ccip_read);
-    result.unsupported_reason = Some(reason.to_owned());
     result
 }
 

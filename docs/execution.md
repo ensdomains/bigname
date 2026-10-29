@@ -114,9 +114,12 @@ arm-scoped. The supported topology classes are:
   `(upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)`
   `(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L63-L88 @ ens_v1@91c966f)`.
 
-Ancestor-selected paths, linked-subregistry ancestor selection,
-transport-assisted ENS paths, and CCIP-participating ENS paths remain explicit
-`unsupported` unless a retained route contract says otherwise.
+Ancestor-selected paths, linked-subregistry ancestor selection, and
+transport-assisted ENS paths remain explicit `unsupported` unless a retained
+route contract says otherwise. On every admitted ENS path, an `OffchainLookup`
+revert from the Universal Resolver is followed through the
+[CCIP-Read gateway transport](#ccip-read-gateway-transport), as it is for
+Basenames and the ENS/60 forward leg.
 
 Basenames verified resolution admits the exact-surface transport-assisted
 direct path through the manifest-selected L1 Resolver. That contract may use
@@ -136,8 +139,9 @@ selectors in the same request.
 
 For Universal Resolver ancestor discovery, `ResolverNotFound(bytes)` is a live
 `not_found` with reason `resolver_not_found` only when its embedded DNS name
-equals the request name. Other reverts fail execution, and `OffchainLookup`
-stays unsupported because ENS verified record resolution does not follow CCIP-Read.
+equals the request name. Other reverts fail execution. An `OffchainLookup`
+revert is followed through the gateway transport below, and the callback's
+answer names its effective resolver like a direct answer does.
 Every successfully decoded call for one name at one block must identify the
 same effective resolver. A `ResolverNotFound` outcome cannot coexist with a
 successfully decoded effective resolver; either inconsistency fails the request
@@ -164,8 +168,9 @@ reaches the network:
   CCIP-Read step the resolver's URL list is tried in order, at most four URLs,
   and a timed-out or unreachable URL falls through to the next; a resolution
   follows at most four steps, each followed by one JSON-RPC callback bounded by
-  `BIGNAME_API_RPC_TIMEOUT_MS`. The `x-batch-gateway:true` form is followed
-  for at most 8 inner requests, runs at most 4 of them at a time in request
+  `BIGNAME_API_RPC_TIMEOUT_MS`. A fourth callback that still reverts with
+  `OffchainLookup` fails the record in band as `ccip_read_failed`. The
+  `x-batch-gateway:true` form is followed for at most 8 inner requests, runs at most 4 of them at a time in request
   order, and lets their decoded responses total at most the same 1 MiB; a
   longer batch fails the record in band before any request is launched, and a
   batch whose responses pass that total fails it during the fan-out. A batch
@@ -254,7 +259,10 @@ bigname applies no allowlist to the resolver address or the gateway host before
 following; the only pre-fetch check is that the `OffchainLookup.sender` equals
 the Universal Resolver. Egress restriction for that case belongs to network
 policy around the API container, not to this client, and no such policy is
-described in the deployment docs today. Treat it as a prerequisite before `/v2`
+described in the deployment docs today. ENS verified record reads make the same
+Universal Resolver `resolve(name, data)` call with the same following, so the
+same parties choose their gateway URLs and the same `sender` check is the only
+pre-fetch check. Treat it as a prerequisite before `/v2`
 is admitted at the public edge, and see
 [`production.md`](production.md) for the current edge posture.
 
