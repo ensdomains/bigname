@@ -2490,7 +2490,13 @@ The runner marks that chain's Project row `failed`, with PostgreSQL's message
 in `last_error`, and that chain's supervisor stops with a data-integrity error.
 A one-shot redo stops with the same error. Nothing is dropped. The family
 marker stays before the block, or before the range in a bounded rebuild, and
-the API keeps serving that chain's last publication.
+the chain's last publication is kept. The API serves it only while it is within
+the [publication lag tolerance](glossary.md#publication-lag-tolerance) of the
+chain's stored head, one block by default. The stop itself leaves that head
+where it is, but a stop during catch-up already has it further ahead. A restart
+moves it too, because the runner runs Ingest to the source's head before Project
+meets the block again. That chain's reads then answer `409 stale` until it
+recovers.
 
 A runner exits nonzero once every chain it runs has stopped. A runner with one
 chain therefore exits on this stop. Under a restart policy it starts again,

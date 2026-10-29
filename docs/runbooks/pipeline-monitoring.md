@@ -468,7 +468,13 @@ the same block and stops again. That loop can also page
 `BignamePhaseRunnerContainerRestarting`, and `BignamePhaseRunnerDown` if the
 runner stays down between starts. Stop that runner's container until a build
 that handles the value is deployed. On a runner with several chains the others
-keep running. The API serves the stopped chain's last publication throughout.
+keep running. The stopped chain's last publication is kept, and the API serves
+it only while it is within the
+[publication lag tolerance](../glossary.md#publication-lag-tolerance) of the
+stored head. Each restart in that loop runs Ingest to the source's head before
+Project meets the block again, so on a one-chain runner reads soon answer
+`409 stale`. A stop during catch-up does the same on any runner. The chain
+recovers once a build that handles the value catches it up.
 Do not edit markers or delete the event. Report the message and block.
 
 ## Alerts
