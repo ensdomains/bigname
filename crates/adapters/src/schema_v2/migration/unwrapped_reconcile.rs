@@ -325,13 +325,7 @@ fn prove(
             .is_some_and(|value| value.eq_ignore_ascii_case(address))
     };
     *clause = "incoming transfer from the registrar owner";
-    let owner = registrar.owner.as_deref()?;
-    // A lease whose first observed registrar event was a controller renewal records the zero
-    // address as its holder. Only this comparison is skipped for it: the controller takes the
-    // token from whoever holds it, and every other clause still applies.
-    // (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L121 @ ens_v2@a971bd64)
-    let holder_known = owner.parse::<Address>().ok() != Some(Address::ZERO);
-    if holder_known && !equals(&incoming.decoded["from"], owner) {
+    if !equals(&incoming.decoded["from"], registrar.owner.as_deref()?) {
         return None;
     }
     *clause = "registrar transfers into the controller and from it to the Graveyard, in order";
