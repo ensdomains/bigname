@@ -644,6 +644,7 @@ fn an_announcement_first_block_holds_no_log_and_keeps_its_output() -> anyhow::Re
         [
             (Some(0), "RegistryCreated"),
             (Some(1), "RegistrationGranted"),
+            (Some(1), "PreimageObserved"),
             (Some(2), "TokenResourceLinked"),
             (Some(3), "TokenRegenerated"),
         ]
