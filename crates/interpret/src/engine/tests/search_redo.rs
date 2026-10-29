@@ -344,10 +344,29 @@ async fn assert_spelling(pool: &PgPool, id: &str, name: &str, class: i16) -> Tes
     Ok(())
 }
 
+/// Surfaces outside the byte-oriented shadow shape whose witness names no event, and events whose
+/// own state is not readable. The redo's lost-witness sets are exact only while both are 0.
+async fn witness_invariant_counts(pool: &PgPool) -> TestResult<(i64, i64)> {
+    Ok(sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM name_surfaces surface
+              WHERE surface.preimage_event_identity IS NOT NULL
+                AND NOT (surface.raw_name = '' AND surface.visibility_state = 'shadow')
+                AND NOT EXISTS (
+                    SELECT 1 FROM normalized_events event
+                    WHERE event.event_identity = surface.preimage_event_identity)),
+             (SELECT count(*) FROM normalized_events
+              WHERE canonicality_state NOT IN ('canonical', 'safe', 'finalized'))",
+    )
+    .fetch_one(pool)
+    .await?)
+}
+
 #[tokio::test]
 async fn resumed_middle_refreshes_label_fanout_and_empty_final_repairs_witnesses() -> TestResult {
     let fixture = transition().await?;
     let pool = fixture.db.pool();
+    assert_eq!(witness_invariant_counts(pool).await?, (0, 0));
     let from = SETUP_BLOCK + 2;
     let to = SETUP_BLOCK + 6;
     let before = lexical(pool, &fixture.fanout).await?.0;
@@ -414,6 +433,7 @@ async fn resumed_middle_refreshes_label_fanout_and_empty_final_repairs_witnesses
             .fetch_one(pool)
             .await?;
     assert_eq!(anchor, SETUP_BLOCK + 7);
+    assert_eq!(witness_invariant_counts(pool).await?, (0, 0));
     let expected = transition().await?;
     Engine::new(expected.db.pool().clone())
         .run_batch(request(from, to, None, RunMode::Redo))

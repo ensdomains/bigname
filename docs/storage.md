@@ -782,6 +782,20 @@ store no raw bytes, whose indexed expression is NULL, and to learn that none exi
 runs on the first family block after a completed Interpret redo attempt and reads every such
 surface of the chain once.
 
+An Interpret redo finds the surfaces whose raw labels lost their
+[preimage witness](glossary.md#preimage-witness) through two partial indexes of Interpret's
+own, installed by the identity baseline and
+`20261027130000_name_surfaces_lost_witness_indexes.sql`. They change no row:
+
+| Index | Serves |
+| --- | --- |
+| `name_surfaces_released_witness_idx` | `interpret:identity_search.redo_names` and `interpret:reanchor.repair_preimage_witnesses`: surfaces that keep raw labels without a witness |
+| `name_surfaces_byte_shadow_idx` | the same two statements: byte-oriented shadows, each probed for a readable witness, because a redo keeps their witness when it deletes the event |
+
+The same statements find the witnesses on orphaned blocks from the orphaned `chain_lineage`
+rows, through `chain_lineage_state_idx` and `normalized_events_block_idx`. No statement reads
+every surface of the chain.
+
 Project's selection of the names under a changed ENSv2 path
 (`project:families.resolution_paths.prepare`, see
 [projections](projections.md#owned-key-families)) adds two read-only indexes on

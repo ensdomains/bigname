@@ -381,6 +381,38 @@ async fn rich_chain_rpc_ingest_normalized_events_match_upfront_facts() -> Result
     Ok(())
 }
 
+/// The two counts an Interpret redo's lost-witness sets are exact under
+/// (docs/deployment.md, "Redo finds lost preimage witnesses without reading every surface"): no
+/// surface outside the byte-oriented shadow shape names a missing witness event, and no event
+/// has an unreadable state of its own.
+async fn assert_witness_invariants(pool: &sqlx::PgPool, at: &str) -> Result<()> {
+    let (witnessed, dangling, unreadable): (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM name_surfaces WHERE preimage_event_identity IS NOT NULL),
+             (SELECT count(*) FROM name_surfaces surface
+              WHERE surface.preimage_event_identity IS NOT NULL
+                AND NOT (surface.raw_name = '' AND surface.visibility_state = 'shadow')
+                AND NOT EXISTS (
+                    SELECT 1 FROM normalized_events event
+                    WHERE event.event_identity = surface.preimage_event_identity)),
+             (SELECT count(*) FROM normalized_events
+              WHERE canonicality_state NOT IN ('canonical', 'safe', 'finalized'))",
+    )
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("count witness invariants {at}"))?;
+    assert!(
+        witnessed > 0,
+        "{at}: the chain must carry preimage witnesses"
+    );
+    assert_eq!(
+        (dangling, unreadable),
+        (0, 0),
+        "{at}: dangling witnesses outside byte-oriented shadows, unreadable events"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn rich_chain_live_reorg_converges_to_winning_branch() -> Result<()> {
     let anvil = Anvil::spawn().await?;
@@ -511,6 +543,7 @@ async fn rich_chain_live_reorg_converges_to_winning_branch() -> Result<()> {
         readable_losing_rows_before_redo, 0,
         "the lineage join must exclude losing normalized rows before stamped redo"
     );
+    assert_witness_invariants(&db.pool, "after the rewind, before the stamped redo").await?;
     let logical_name_id = support::schema_v2_logical_name_id(&format!("ens:{NAME}"));
     // Until the stamped redo publishes again, the family marker still names the orphaned head,
     // so the read may refuse as unpublished (409 stale on the API). If it answers, it must not
@@ -652,6 +685,7 @@ async fn rich_chain_live_reorg_converges_to_winning_branch() -> Result<()> {
         losing_lineage_state, "orphaned",
         "losing block {losing_hash} must remain in permanent orphaned lineage"
     );
+    assert_witness_invariants(&db.pool, "after the stamped redo").await?;
 
     let reorg_run = support::serve_existing_db(db, scratch, &anvil).await?;
     assert_exact_resolver(&reorg_run, replacement_resolver.address).await?;

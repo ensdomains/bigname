@@ -338,6 +338,18 @@ CREATE INDEX IF NOT EXISTS name_surfaces_block_idx
 CREATE INDEX IF NOT EXISTS name_surfaces_chain_block_number_idx
     ON name_surfaces (chain_id, block_number);
 
+-- An Interpret redo finds the surfaces whose raw labels lost their preimage witness through
+-- these two (interpret:identity_search.redo_names and
+-- interpret:reanchor.repair_preimage_witnesses): the released witnesses, and the byte-oriented
+-- shadows, the only shape a redo leaves pointing at a deleted event.
+CREATE INDEX IF NOT EXISTS name_surfaces_released_witness_idx
+    ON name_surfaces (chain_id, logical_name_id)
+    WHERE raw_name IS NOT NULL AND preimage_event_identity IS NULL;
+
+CREATE INDEX IF NOT EXISTS name_surfaces_byte_shadow_idx
+    ON name_surfaces (chain_id, logical_name_id)
+    WHERE raw_name = '' AND visibility_state = 'shadow';
+
 -- The name-ordered readers (storage:families.name.search_candidates and
 -- storage:families.name.bound_candidates) walk readable surfaces in this order. raw_name has
 -- no length bound, and an index entry larger than about 2.7 KB fails the insert, so longer

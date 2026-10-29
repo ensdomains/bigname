@@ -532,7 +532,7 @@ refusal_assertions_passed=0
 expected_refusal_assertions=484
 predecessor_shape_proof_count=0
 # Includes registration_lifecycle applied after lookup_precomputation on the removal path.
-expected_predecessor_shape_proof_count=85
+expected_predecessor_shape_proof_count=86
 refusal_probe_seconds=0
 timing_started=$SECONDS
 unread_index_migration="$ROOT/migrations/20261012130000_drop_unread_indexes.sql"
@@ -823,6 +823,11 @@ check_served_projection_removal() {
                 emit_phase_migration "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" preceding-shape
             fi
             emit_phase_migration "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" baseline-first
+            # The lost-witness indexes: absent from the pre-7c shape, present in the baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261027130000_name_surfaces_lost_witness_indexes.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261027130000_name_surfaces_lost_witness_indexes.sql" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -978,7 +983,8 @@ for migration_file in \
     "$ROOT/migrations/20261015120000_project_address_controller_candidate_transfer_comments.sql" \
     "$unnamed_lease_index_migration" \
     "$ROOT/migrations/20261016130000_project_repair_record_composing.sql" \
-    "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql"
+    "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" \
+    "$ROOT/migrations/20261027130000_name_surfaces_lost_witness_indexes.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1318,7 +1324,9 @@ for migration_file in \
     "$ROOT/migrations/20261015120000_project_address_controller_candidate_transfer_comments.sql" \
     "$ROOT/migrations/20261015120000_project_address_controller_candidate_transfer_comments.sql" \
     "$ROOT/migrations/20261016130000_project_repair_record_composing.sql" \
-    "$ROOT/migrations/20261016130000_project_repair_record_composing.sql"
+    "$ROOT/migrations/20261016130000_project_repair_record_composing.sql" \
+    "$ROOT/migrations/20261027130000_name_surfaces_lost_witness_indexes.sql" \
+    "$ROOT/migrations/20261027130000_name_surfaces_lost_witness_indexes.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
@@ -6886,6 +6894,18 @@ BEGIN
                     'name_surfaces',
                     ARRAY['chain_id', 'block_number'],
                     NULL
+                ),
+                (
+                    'name_surfaces_released_witness_idx',
+                    'name_surfaces',
+                    ARRAY['chain_id', 'logical_name_id'],
+                    ARRAY['%raw_name IS NOT NULL%', '%preimage_event_identity IS NULL%']
+                ),
+                (
+                    'name_surfaces_byte_shadow_idx',
+                    'name_surfaces',
+                    ARRAY['chain_id', 'logical_name_id'],
+                    ARRAY['%raw_name = ''''::text%', '%visibility_state = ''shadow''::text%']
                 ),
                 (
                     'surface_bindings_chain_block_number_idx',
