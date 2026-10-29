@@ -518,6 +518,32 @@ async fn marker_sequence(scratch: &ScratchDatabase) -> Result<i64> {
     )
 }
 
+// The runner hands its composition pass worker count to the family loop: a full-history redo
+// that rebuilds in ranges with as many workers as its pool has connections is refused at the
+// pass start, naming the workers and the pool, since the pass's coordinator needs one more.
+#[tokio::test]
+async fn a_ranged_redo_composes_on_the_runner_worker_count() -> Result<()> {
+    let scratch = ready("families_compose_workers").await?;
+    let connections = scratch.pool().options().get_max_connections();
+    let settings = FamilySettings {
+        retry_family_failures: false,
+        rebuild_ranges: bigname_project::families::RebuildRanges::Through(HEAD),
+        compose_workers: u16::try_from(connections)?,
+        ..FamilySettings::default()
+    };
+    let error = redo(&scratch, settings)
+        .await
+        .expect_err("more workers than the pool can serve are refused");
+    let text = format!("{error:#}");
+    ensure!(
+        text.contains(&format!("runs {connections} workers"))
+            && text.contains(&format!("needs {}", connections + 1))
+            && text.contains(&format!("has {connections}")),
+        "{text}"
+    );
+    scratch.cleanup().await
+}
+
 fn budgeted() -> FamilySettings {
     FamilySettings {
         max_blocks_per_run: 10,

@@ -7,7 +7,9 @@
 //! interpreted events, never from the journal, which the ranges did not write. A composition
 //! reads base rows and Interpret rows, never another composed row, so composing a name once at
 //! the pass block gives the row its last composition at or below that block would have given
-//! (docs/projections.md, "Owned key families").
+//! (docs/projections.md, "Owned key families"). The one exception is a key source, not an input:
+//! the lookup inventories stream takes its resources from the lookup names the finished names
+//! stream composed.
 //!
 //! The pass journals nothing (`BlockHeader::journal`): its pass-end marker row ends the journal at
 //! its block.
@@ -16,6 +18,7 @@ use std::collections::BTreeMap;
 use bigname_storage::families::records::CurrentHistoryRelation;
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
+use uuid::Uuid;
 
 use super::{
     block::BlockStats,
@@ -34,10 +37,12 @@ pub(crate) type Reach = i16;
 const LOOKUP: Reach = 1;
 const COMPOSED: Reach = 2;
 
-/// The pass's streams in the order it runs them; `compose_stream` on the repair record.
+/// The pass's streams; `compose_stream` on the repair record. The pass runs them in the order of
+/// `next` (0, 1, 2, 4, 3), not of their values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Stream {
-    /// Every name id the incremental path composes or indexes, in the work list's order.
+    /// Every name id the incremental path composes or indexes. Workers claim the ids of the work
+    /// list not yet composed, so the stream has no cursor.
     Names = 0,
     /// The (resolver, node) pairs of the record values, for the address record node index.
     Nodes = 1,
@@ -46,6 +51,9 @@ pub(crate) enum Stream {
     /// The address history catalogue, built in steps of partitions. The cursor names the last
     /// partition committed (history_catalogue/build).
     Catalogue = 3,
+    /// The lookup inventories of the resources the composed lookup names serve, keyed by those
+    /// names. The cursor is the last name committed.
+    Inventories = 4,
 }
 
 impl Stream {
@@ -54,6 +62,7 @@ impl Stream {
             Some(1) => Self::Nodes,
             Some(2) => Self::RecordIds,
             Some(3) => Self::Catalogue,
+            Some(4) => Self::Catalogue,
             _ => Self::Names,
         }
     }
@@ -66,7 +75,8 @@ impl Stream {
         match self {
             Self::Names => Self::Nodes,
             Self::Nodes => Self::RecordIds,
-            Self::RecordIds | Self::Catalogue => Self::Catalogue,
+            Self::RecordIds => Self::Inventories,
+            Self::Inventories | Self::Catalogue => Self::Catalogue,
         }
     }
 }
@@ -163,11 +173,19 @@ const PREPARE_NAMES: &str = r#"/* project:families.compose.prepare_names */
     WHERE logical_name_id IS NOT NULL AND logical_name_id <> ''
     GROUP BY logical_name_id"#;
 
-const NAMES: &str = "/* project:families.compose.names */
+/// A worker's claim on the names stream: the next ids of the work list no chunk has composed,
+/// skipping those another worker's open chunk holds. The row locks last until the chunk commits
+/// or rolls back.
+const CLAIM: &str = "/* project:families.compose.claim */
     SELECT work.serial, work.logical_name_id, work.reach FROM project_compose_name_work work
-    WHERE work.chain_id = $1 AND work.serial > $2
+    WHERE work.chain_id = $1 AND NOT work.composed
     ORDER BY work.serial
-    LIMIT $3";
+    LIMIT $2
+    FOR UPDATE SKIP LOCKED";
+
+/// The ids of the work list no committed chunk has composed.
+const UNCOMPOSED: &str = "/* project:families.compose.uncomposed */
+    SELECT count(*) FROM project_compose_name_work WHERE chain_id = $1 AND NOT composed";
 
 const CLEAR_NAMES: &str = "/* project:families.compose.clear_names */
     DELETE FROM project_compose_name_work WHERE chain_id = $1";
@@ -195,6 +213,18 @@ const RECORD_IDS: &str = r#"/* project:families.compose.record_ids */
     WHERE value.chain_id = $1 AND (value.resolver_address, value.record_id) > ($2, $3)
     ORDER BY value.resolver_address, value.record_id
     LIMIT $4"#;
+
+/// The composed lookup names with a serving resource, after the name `$2`, each with the
+/// resource its core records. The names stream has ended and left the serving resource column
+/// null (lookup/names.rs), so these are the inventories stream's keys: nothing else writes the
+/// lookup names while the pass reads them.
+const INVENTORIES: &str = "/* project:families.compose.inventories */
+    SELECT name.logical_name_id, (name.core ->> 'record_serving_resource_id')::uuid
+    FROM project_lookup_name name
+    WHERE name.chain_id = $1 AND name.logical_name_id > $2
+      AND name.core ->> 'record_serving_resource_id' IS NOT NULL
+    ORDER BY name.logical_name_id
+    LIMIT $3";
 
 /// Write the pass's work list for the pass block `block`, in the transaction that begins the
 /// pass, over whatever list an interrupted beginning left.
@@ -230,27 +260,56 @@ pub(crate) async fn clear_names(
     Ok(())
 }
 
-/// The next ids of the work list after the serial `cursor`, at most `limit`, each with its
-/// serial.
-pub(crate) async fn names(
+/// Claim at most `limit` ids of the work list no chunk has composed, each with its serial, in
+/// the chunk's `transaction`.
+pub(crate) async fn claim(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    limit: usize,
+) -> Result<Vec<(i64, String, Reach)>> {
+    sqlx::query_as(CLAIM)
+        .bind(chain_id)
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to claim the names to compose", error))
+}
+
+/// Refuse a work list with ids no committed chunk composed, inside `transaction`, before
+/// `what`: the names stream's end and every partition of the catalogue build.
+pub(crate) async fn require_composed(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    what: &str,
+) -> Result<()> {
+    let uncomposed: i64 = sqlx::query_scalar(UNCOMPOSED)
+        .bind(chain_id)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to count the uncomposed names", error))?;
+    if uncomposed != 0 {
+        return Err(ProjectError::data_integrity(format!(
+            "chain {chain_id}'s {what} found {uncomposed} names of the work list not composed"
+        )));
+    }
+    Ok(())
+}
+
+/// The next names of the inventories stream after the name `cursor`, at most `limit`, each with
+/// the resource it serves.
+pub(crate) async fn inventories(
     pool: &PgPool,
     chain_id: &str,
     cursor: Option<&str>,
     limit: usize,
-) -> Result<Vec<(i64, String, Reach)>> {
-    let after = match cursor {
-        Some(cursor) => cursor.parse::<i64>().map_err(|error| {
-            ProjectError::data_integrity(format!("composition names cursor {cursor}: {error}"))
-        })?,
-        None => 0,
-    };
-    sqlx::query_as(NAMES)
+) -> Result<Vec<(String, Uuid)>> {
+    sqlx::query_as(INVENTORIES)
         .bind(chain_id)
-        .bind(after)
+        .bind(cursor.unwrap_or_default())
         .bind(i64::try_from(limit).unwrap_or(i64::MAX))
         .fetch_all(pool)
         .await
-        .map_err(|error| ProjectError::database("failed to read the names to compose", error))
+        .map_err(|error| ProjectError::database("failed to read the inventories to compose", error))
 }
 
 /// The next pairs of the node or record-id stream after `cursor`, at most `limit`.
@@ -292,9 +351,10 @@ pub(crate) fn pair_cursor(pair: &(String, String)) -> String {
 
 /// Compose one chunk of the names stream at `block`, the pass block's publication with the
 /// marker's composition: the address name index of every id, the summaries of the composed ones,
-/// then the lookup names and inventories of those that reach the lookup. Every id of the chunk is
-/// marked composed, a composed one with the current relations its summary gave, which the
-/// catalogue build reads.
+/// then the lookup names of those that reach the lookup. Every id of the chunk is marked
+/// composed, a composed one with the current relations its summary gave, which the catalogue
+/// build reads. The inventories the names serve are the inventories stream's, so no key a chunk
+/// writes is another chunk's.
 pub(crate) async fn names_chunk(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -330,7 +390,24 @@ pub(crate) async fn names_chunk(
     }
     mark_composed(transaction, chain_id, ids, &current).await?;
     lookup::prepare_names(transaction, &looked_up).await?;
-    lookup::refresh(transaction, chain_id, block, composition, stats).await
+    lookup::refresh_names(transaction, chain_id, block, composition, stats).await
+}
+
+/// Compose one chunk of the inventories stream at `block`: each name of `served` gets its serving
+/// resource, then every resource of the chunk its inventory. A resource several chunks' names
+/// serve is composed in each of them, from the same base rows, as the names chunks of a pass
+/// before the stream did.
+pub(crate) async fn inventories_chunk(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    block: &BlockHeader,
+    composition: &marker::Composition,
+    served: &[(String, Uuid)],
+    stats: &mut BlockStats,
+) -> Result<()> {
+    let resources: Vec<Uuid> = served.iter().map(|(_, resource)| *resource).collect();
+    lookup::prepare_resources(transaction, &resources).await?;
+    lookup::refresh_inventories(transaction, chain_id, block, composition, served, stats).await
 }
 
 /// Derive the address record index rows of one chunk of the node or record-id stream.
@@ -395,3 +472,7 @@ pub(crate) async fn catalogue_step(
 ) -> Result<(&'static str, u64)> {
     build::run(transaction, chain_id, block.number, cursor, work_mem).await
 }
+
+#[cfg(test)]
+#[path = "compose_tests.rs"]
+mod compose_tests;
