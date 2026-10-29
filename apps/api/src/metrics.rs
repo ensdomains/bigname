@@ -19,6 +19,7 @@ struct ApiMetrics {
     http_request_duration: HistogramVec,
     verified_execution: IntCounterVec,
     verified_execution_duration: HistogramVec,
+    ccip_gateway_destination_refused: IntCounterVec,
     http_requests_in_flight: IntGauge,
     verified_execution_in_flight: IntGauge,
 }
@@ -50,6 +51,11 @@ impl ApiMetrics {
             "Duration of on-demand verified execution.",
             &[],
         )?;
+        let ccip_gateway_destination_refused = registry.int_counter_vec(
+            "ccip_gateway_destination_refused_total",
+            "CCIP-Read lookups refused before any gateway connection, by destination class.",
+            &["class"],
+        )?;
         let http_requests_in_flight = registry.int_gauge(
             "http_requests_in_flight",
             "HTTP requests currently executing in API middleware.",
@@ -64,6 +70,7 @@ impl ApiMetrics {
             http_request_duration,
             verified_execution,
             verified_execution_duration,
+            ccip_gateway_destination_refused,
             http_requests_in_flight,
             verified_execution_in_flight,
         })
@@ -100,6 +107,20 @@ where
 #[cfg(test)]
 fn record_verified_execution_outcome(outcome: &'static str) {
     let _ = VERIFIED_EXECUTION_OUTCOMES.try_with(|outcomes| outcomes.borrow_mut().push(outcome));
+}
+
+/// The lookup crate's refusal observer: one count and one log line per refused lookup, labelled
+/// by the class's fixed name.
+pub(crate) fn observe_gateway_destination_refusal(class: bigname_lookup::GatewayRefusalClass) {
+    api_metrics()
+        .ccip_gateway_destination_refused
+        .with_label_values(&[class.as_str()])
+        .inc();
+    tracing::warn!(
+        service = "api",
+        class = class.as_str(),
+        "CCIP-Read gateway destination refused"
+    );
 }
 
 pub(crate) async fn bind(bind_addr: SocketAddr) -> anyhow::Result<MetricsServer> {
@@ -312,6 +333,38 @@ mod tests {
         let scrape = api_metrics().registry.encode()?;
         ensure!(!scrape.contains("alice.eth"));
         ensure!(!scrape.contains("bob.eth"));
+        Ok(())
+    }
+
+    #[test]
+    fn gateway_destination_refusals_count_under_their_class() -> Result<()> {
+        let class = bigname_lookup::GatewayRefusalClass::Private;
+        let counter = || {
+            api_metrics()
+                .ccip_gateway_destination_refused
+                .with_label_values(&[class.as_str()])
+                .get()
+        };
+        let before = counter();
+        observe_gateway_destination_refusal(class);
+        ensure!(counter() > before);
+        for each in bigname_lookup::GatewayRefusalClass::ALL {
+            api_metrics()
+                .ccip_gateway_destination_refused
+                .with_label_values(&[each.as_str()])
+                .inc_by(0);
+        }
+        let scrape = api_metrics().registry.encode()?;
+        ensure!(scrape.contains("# TYPE ccip_gateway_destination_refused_total counter"));
+        for each in bigname_lookup::GatewayRefusalClass::ALL {
+            let label = format!("class=\"{}\"", each.as_str());
+            ensure!(
+                scrape.lines().any(|line| line
+                    .starts_with("ccip_gateway_destination_refused_total{")
+                    && line.contains(&label)),
+                "the scrape lacks {label}"
+            );
+        }
         Ok(())
     }
 
