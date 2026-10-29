@@ -75,8 +75,7 @@ impl Stream {
         match self {
             Self::Names => Self::Nodes,
             Self::Nodes => Self::RecordIds,
-            Self::RecordIds => Self::Inventories,
-            Self::Inventories | Self::Catalogue => Self::Catalogue,
+            Self::RecordIds | Self::Inventories | Self::Catalogue => Self::Catalogue,
         }
     }
 }
@@ -390,7 +389,7 @@ pub(crate) async fn names_chunk(
     }
     mark_composed(transaction, chain_id, ids, &current).await?;
     lookup::prepare_names(transaction, &looked_up).await?;
-    lookup::refresh_names(transaction, chain_id, block, composition, stats).await
+    lookup::refresh(transaction, chain_id, block, composition, stats).await
 }
 
 /// Compose one chunk of the inventories stream at `block`: each name of `served` gets its serving
