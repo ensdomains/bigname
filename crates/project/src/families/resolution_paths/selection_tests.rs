@@ -16,9 +16,11 @@
 //! canonicality. Only its last step keeps the readable surfaces at or below the block.
 //!
 //! `registry_pointer_tests.rs` holds the rows on which names a registry pointer change expands,
-//! and `registry_route_tests.rs` the rows of the selections that start from a changed registry
-//! or from ENSv1→ENSv2 migration evidence. `scaling_tests.rs` holds the tests on how many
-//! surfaces a selection reads.
+//! `registry_route_tests.rs` the rows of the selections that start from a changed registry
+//! or from ENSv1→ENSv2 migration evidence, and `entry_slot_tests.rs` the rows of the names a
+//! changed entry selects by the registry that holds it. `scaling_tests.rs` holds the tests on
+//! how many surfaces a selection reads.
+mod entry_slot_tests;
 mod oracle;
 mod registry_pointer_tests;
 mod registry_route_tests;
