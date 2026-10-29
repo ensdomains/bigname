@@ -306,6 +306,58 @@ fn the_catalogue_build_flags_reach_the_family_settings() {
 }
 
 #[test]
+fn the_compose_workers_flag_reaches_the_family_settings_and_sizes_the_pools() {
+    configure_redo_source_endpoint();
+    let redo = |flags: &[&str]| {
+        let mut args = vec![
+            "phase-runner",
+            "redo",
+            "--database-url",
+            "postgres://phase-runner.invalid/fresh",
+            "--all-chains",
+            "--phase",
+            "recompute-flags",
+            "--from-block",
+            "1",
+            "--to-block",
+            "30",
+        ];
+        args.extend_from_slice(flags);
+        Cli::try_parse_from(args)
+    };
+    let workers = |flags: &[&str]| {
+        let command = redo(flags)
+            .expect("the workers flag must parse")
+            .resolve()
+            .expect("the workers flag must resolve");
+        let ResolvedCommand::Redo {
+            project_families, ..
+        } = command
+        else {
+            panic!("expected redo command");
+        };
+        project_families.compose_workers
+    };
+    assert_eq!(workers(&[]), 1);
+    assert_eq!(
+        workers(&[]),
+        bigname_project::families::COMPOSE_WORKERS,
+        "the flag's default is the crate's"
+    );
+    assert_eq!(workers(&["--project-families-compose-workers", "3"]), 3);
+    assert!(
+        redo(&["--project-families-compose-workers", "0"]).is_err(),
+        "no workers is refused"
+    );
+    assert_eq!(run_connections(1, 1), 5);
+    assert_eq!(run_connections(2, 2), 8);
+    assert_eq!(run_connections(3, 3), 15);
+    assert_eq!(run_connections(0, 1), 4);
+    assert_eq!(redo_connections(1), 5);
+    assert_eq!(redo_connections(3), 7);
+}
+
+#[test]
 fn run_takes_the_family_run_budget_and_retries_family_failures() {
     configure_redo_source_endpoint();
     let command = Cli::try_parse_from([
