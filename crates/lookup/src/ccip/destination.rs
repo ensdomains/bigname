@@ -275,7 +275,11 @@ fn judge(host: &str, peer: SocketAddr) -> std::result::Result<(), GatewayDestina
             peer: peer.ip(),
             host: host.to_owned(),
         }),
-        None => Ok(()),
+        None => {
+            #[cfg(test)]
+            seam::record_judged_admitted(peer);
+            Ok(())
+        }
     }
 }
 

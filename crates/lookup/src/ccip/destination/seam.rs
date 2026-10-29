@@ -22,6 +22,7 @@ pub(crate) const TEST_DENY_LIST: &str = "198.51.100.0/24, 2001:db8:1::/48";
 struct Seam {
     admitted: HashSet<SocketAddr>,
     hosts: HashMap<String, VecDeque<Vec<SocketAddr>>>,
+    judged_admitted: HashSet<SocketAddr>,
 }
 
 static SEAM: LazyLock<Mutex<Seam>> = LazyLock::new(Mutex::default);
@@ -41,6 +42,16 @@ pub(crate) fn withdraw(peer: SocketAddr) {
 
 pub(crate) fn is_admitted(peer: SocketAddr) -> bool {
     state().admitted.contains(&peer)
+}
+
+/// Records a peer the class table judged and let through. Peers a fake admitted skip the table
+/// and are not recorded.
+pub(super) fn record_judged_admitted(peer: SocketAddr) {
+    state().judged_admitted.insert(peer);
+}
+
+pub(crate) fn was_judged_admitted(peer: SocketAddr) -> bool {
+    state().judged_admitted.contains(&peer)
 }
 
 /// Each resolution of `host` takes the next answer, and the last answer repeats. An answer's

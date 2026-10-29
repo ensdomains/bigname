@@ -327,3 +327,34 @@ fn class_labels_are_distinct_snake_case() {
     unique.dedup();
     assert_eq!(unique.len(), labels.len());
 }
+
+/// Lists every variant as an exhaustive `match` and as an array. A new variant fails to compile
+/// until it is listed here, and then fails here until `ALL` lists it too, in the same order.
+macro_rules! every_class {
+    ($($variant:ident),+ $(,)?) => {{
+        const fn listed(class: Class) {
+            match class {
+                $(Class::$variant)|+ => {}
+            }
+        }
+        let _ = listed;
+        [$(Class::$variant),+]
+    }};
+}
+
+#[test]
+fn all_lists_every_class_once() {
+    let every = every_class!(
+        Loopback,
+        Private,
+        LinkLocal,
+        Cgnat,
+        UniqueLocal,
+        Unspecified,
+        Multicast,
+        Reserved,
+        Ipv4Compatible,
+        Operator,
+    );
+    assert_eq!(Class::ALL, every);
+}
