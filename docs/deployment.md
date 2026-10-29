@@ -1645,6 +1645,16 @@ with the reserved readiness connection, one API process can open at most
 collection request holds one request-pool connection while its read snapshot is
 open.
 
+Before either pool hands out an idle connection, the API asks the server in one
+statement whether the session is still inside a transaction. That statement
+takes the place of the empty ping the database driver sends otherwise. A request
+dropped while its `BEGIN` was in flight, as when its client disconnects, can
+return its connection with that transaction still open. The API rolls such a
+transaction back, logs a warning that it did, and then hands the connection out.
+A connection the check cannot reach is closed and replaced. A request's shared
+read snapshot that still meets such a transaction when it pins its isolation
+level rolls it back and starts again once, rather than failing with `500`.
+
 ### Database connection budget
 
 `BIGNAME_DATABASE_MAX_CONNECTIONS` is an API-only setting. The phase runner does

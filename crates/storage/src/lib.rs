@@ -5,10 +5,7 @@ use std::{str::FromStr, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use clap::Args;
-use sqlx::{
-    PgPool,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
+use sqlx::{PgPool, postgres::PgConnectOptions};
 
 mod address_names;
 mod api_preflight;
@@ -38,6 +35,7 @@ mod registry_token_ids;
 mod resolution_state;
 mod resolution_support;
 mod resolver;
+mod serving_pool;
 mod snapshot_selection;
 pub mod sql_row;
 mod time;
@@ -272,8 +270,7 @@ async fn connect_phase_inner(
     statement_timeout: Duration,
     max_connections: u32,
 ) -> Result<PgPool> {
-    PgPoolOptions::new()
-        .max_connections(max_connections)
+    serving_pool::serving_pool_options(max_connections)
         .connect_with(connect_options(
             config,
             application_name,

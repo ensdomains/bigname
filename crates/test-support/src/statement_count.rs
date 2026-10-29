@@ -50,6 +50,17 @@ pub struct StatementCounter {
 impl StatementCounter {
     /// Open a counted pool on the database of `pool`, with its options and size.
     pub async fn connect(pool: &PgPool) -> Result<Self> {
+        let pool_options =
+            PgPoolOptions::new().max_connections(pool.options().get_max_connections());
+        Self::connect_with_pool_options(pool, pool_options).await
+    }
+
+    /// Open a counted pool on the database of `pool`, built from `pool_options`, so a test can
+    /// count what a pool's own hooks send.
+    pub async fn connect_with_pool_options(
+        pool: &PgPool,
+        pool_options: PgPoolOptions,
+    ) -> Result<Self> {
         let options = pool.connect_options();
         ensure!(
             options.get_socket().is_none() && !options.get_host().starts_with('/'),
@@ -62,8 +73,7 @@ impl StatementCounter {
         let port = listener.local_addr()?.port();
         let sent = Sent::default();
         let relay = tokio::spawn(accept(listener, upstream, Arc::clone(&sent)));
-        let pool = PgPoolOptions::new()
-            .max_connections(pool.options().get_max_connections())
+        let pool = pool_options
             .connect_with(
                 options
                     .as_ref()
