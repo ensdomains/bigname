@@ -139,6 +139,9 @@ fn interpret_once(
     committed_state.begin_batch();
     let mut unselected = Vec::new();
     for block in blocks {
+        // This variant interprets each block once.
+        #[cfg(test)]
+        note_block_pass(block.block_number, 1);
         let mut block_output = BatchOutput::default();
         let mut block_raw_logs = Vec::new();
         let mut deferred = Vec::new();
@@ -256,4 +259,28 @@ fn record_pre_admission_skips(
             inconsistency_site: None,
         });
     }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static BLOCK_PASSES: std::cell::RefCell<std::collections::BTreeMap<i64, usize>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+#[cfg(test)]
+fn note_block_pass(block_number: i64, passes: usize) {
+    BLOCK_PASSES.with_borrow_mut(|blocks| {
+        blocks.insert(block_number, passes);
+    });
+}
+
+/// The passes the latest interpretation of each block took on this thread.
+#[cfg(test)]
+pub(in crate::schema_v2) fn block_passes() -> std::collections::BTreeMap<i64, usize> {
+    BLOCK_PASSES.with_borrow(Clone::clone)
+}
+
+#[cfg(test)]
+pub(in crate::schema_v2) fn reset_block_passes() {
+    BLOCK_PASSES.with_borrow_mut(std::collections::BTreeMap::clear);
 }
