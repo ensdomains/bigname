@@ -109,7 +109,10 @@ const V6_REFUSED: &[(Ipv6Net, Class)] = &[
     (v6([0xfc00, 0, 0, 0, 0, 0, 0, 0], 7), Class::UniqueLocal),
     (v6([0xfe80, 0, 0, 0, 0, 0, 0, 0], 10), Class::LinkLocal),
     (v6([0xff00, 0, 0, 0, 0, 0, 0, 0], 8), Class::Multicast),
-    (v6([0x64, 0xff9b, 1, 0, 0, 0, 0, 0], 48), Class::Nat64LocalUse),
+    (
+        v6([0x64, 0xff9b, 1, 0, 0, 0, 0, 0], 48),
+        Class::Nat64LocalUse,
+    ),
     (v6([0x2001, 0, 0, 0, 0, 0, 0, 0], 32), Class::Teredo),
 ];
 
