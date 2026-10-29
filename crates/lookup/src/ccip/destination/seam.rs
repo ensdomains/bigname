@@ -77,26 +77,33 @@ tokio::task_local! {
     static JUDGED_ADMITTED: RefCell<Vec<SocketAddr>>;
 }
 
-async fn capture<T, F>(sink: &'static LocalKey<RefCell<Vec<T>>>, future: F) -> (F::Output, Vec<T>)
+/// Boxes `future` before anything else holds it. A lookup future is large, and carrying it by
+/// value through nested captures overflows the test thread's stack.
+fn capture<T, F>(
+    sink: &'static LocalKey<RefCell<Vec<T>>>,
+    future: F,
+) -> impl Future<Output = (F::Output, Vec<T>)>
 where
     T: 'static,
     F: Future,
 {
+    let future = Box::pin(future);
     sink.scope(RefCell::new(Vec::new()), async move {
         let output = future.await;
         let captured = sink.with(|captured| std::mem::take(&mut *captured.borrow_mut()));
         (output, captured)
     })
-    .await
 }
 
 /// Runs `future` and returns the refusal classes the observer hook reported while it ran. The
 /// hook fires on the request task, so a task-local sink sees every refusal of that lookup.
-pub(crate) async fn capture_refusals<F>(future: F) -> (F::Output, Vec<GatewayRefusalClass>)
+pub(crate) fn capture_refusals<F>(
+    future: F,
+) -> impl Future<Output = (F::Output, Vec<GatewayRefusalClass>)>
 where
     F: Future,
 {
-    capture(&REFUSALS, future).await
+    capture(&REFUSALS, future)
 }
 
 pub(super) fn record_refusal(class: GatewayRefusalClass) {
@@ -107,11 +114,13 @@ pub(super) fn record_refusal(class: GatewayRefusalClass) {
 /// judgement. An IP-literal host is judged in `fetch_one` on the request task, so every literal
 /// judgement of the lookup is seen. A hostname is judged in the connector's resolver, which may
 /// run on another task, so its judgements may be missed. No test relies on them.
-pub(crate) async fn capture_judged_admitted<F>(future: F) -> (F::Output, Vec<SocketAddr>)
+pub(crate) fn capture_judged_admitted<F>(
+    future: F,
+) -> impl Future<Output = (F::Output, Vec<SocketAddr>)>
 where
     F: Future,
 {
-    capture(&JUDGED_ADMITTED, future).await
+    capture(&JUDGED_ADMITTED, future)
 }
 
 /// Records one address the class table admitted. It says nothing about the resolution it came
