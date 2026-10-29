@@ -31,10 +31,11 @@ const SHARED_DETAIL_FIELDS: &[&str] = &[
     "network",
 ];
 
-/// The fields name detail fills from a lease the stored registration does not carry. Lookup
-/// serves the stored registration, so they are the read-time fill's limit on parity
-/// (`registered_at` in `docs/api-v1.md`).
-const LEASE_FILL_FIELDS: &[&str] =
+/// The fields name detail fills for the ownerless fixture, whose stored registration does not
+/// carry its lease. Lookup serves the stored registration, so they are the read-time fill's limit
+/// on parity for that name (`registered_at` in `docs/api-v1.md`). Other filled names diverge on
+/// more fields.
+const OWNERLESS_FILL_FIELDS: &[&str] =
     &["registration_id", "registered_at", "expires_at", "grace_ends_at"];
 
 async fn assert_lookup_detail_matches_name_detail(
@@ -178,7 +179,7 @@ async fn lookup_detail_status_matches_name_detail_for_wrapped_and_ownerless_name
     // fill's limit, until the stored registration carries the lease.
     for (state, filled) in [
         (AliceInputState::Wrapped, &[][..]),
-        (AliceInputState::Ownerless, LEASE_FILL_FIELDS),
+        (AliceInputState::Ownerless, OWNERLESS_FILL_FIELDS),
     ] {
         let database = TestDatabase::new_migrated().await?;
         seed_alice_state_inputs(&database, state).await?;
