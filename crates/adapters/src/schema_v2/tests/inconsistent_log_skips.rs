@@ -64,6 +64,18 @@ fn registry_manifest() -> ManifestInput {
                 &["registry"],
                 &["TokenRegenerated"],
             ),
+            (
+                "SubregistryUpdated",
+                "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)",
+                &["registry"],
+                &["SubregistryChanged"],
+            ),
+            (
+                "ResolverUpdated",
+                "event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)",
+                &["registry"],
+                &["ResolverChanged"],
+            ),
         ],
     )
 }
@@ -98,12 +110,19 @@ fn batch(admissions: Vec<AddressAdmissionInput>, raw_logs: Vec<RawLogInput>) -> 
     BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![registry_manifest()],
-        discovery_rules: vec![DiscoveryRuleInput {
+        discovery_rules: [
+            ("registry_announcement", "reachable_from_root"),
+            ("subregistry", "linked_subregistry_event"),
+            ("resolver", "protocol_event"),
+        ]
+        .into_iter()
+        .map(|(edge_kind, admission)| DiscoveryRuleInput {
             manifest_id: MANIFEST,
-            edge_kind: "registry_announcement".to_owned(),
+            edge_kind: edge_kind.to_owned(),
             from_role: Some("registry".to_owned()),
-            admission: "reachable_from_root".to_owned(),
-        }],
+            admission: admission.to_owned(),
+        })
+        .collect(),
         admissions,
         prior_events: Vec::new(),
         blocks: blocks.into_values().collect(),
@@ -267,6 +286,31 @@ fn regenerated_without_predecessor() -> Vec<RawLogInput> {
     ])
 }
 
+fn regenerated(old_token: U256, new_token: U256) -> alloy_primitives::LogData {
+    v2_registry::TokenRegenerated {
+        oldTokenId: old_token,
+        newTokenId: new_token,
+    }
+    .encode_log_data()
+}
+
+/// One block of `CHILD` logs: `before`, then the `RegistryCreated` that admits `CHILD`, then
+/// `after`. No manifest declares `CHILD`.
+fn announced_between(
+    before: Vec<alloy_primitives::LogData>,
+    after: Vec<alloy_primitives::LogData>,
+) -> BatchInput {
+    let encoded = before
+        .into_iter()
+        .chain([RegistryCreated {}.encode_log_data()])
+        .chain(after);
+    let raw_logs = (0_i64..)
+        .zip(encoded)
+        .map(|(log_index, encoded)| raw_at(encoded, 1, log_index, CHILD))
+        .collect();
+    batch(Vec::new(), raw_logs)
+}
+
 #[test]
 fn an_undeclared_label_that_does_not_hash_to_its_label_hash_is_skipped() -> anyhow::Result<()> {
     let output = assert_skipped(
@@ -412,8 +456,8 @@ fn an_inconsistent_log_between_valid_logs_of_one_transaction_skips_only_itself()
 }
 
 /// A registry announced in the block of its inconsistent log is skipped there, whether the log
-/// comes after the announcement or before it and is read by the same-block second pass. The
-/// second-pass skip is not also recorded as a log that preceded its emitter's admission.
+/// comes after the announcement or before it and is read once the announcement admits the
+/// registry. That skip is not also recorded as a log that preceded its emitter's admission.
 #[test]
 fn an_inconsistent_log_in_its_registrys_announcement_block_is_skipped_once() -> anyhow::Result<()> {
     let announced = |log_index| raw_at(RegistryCreated {}.encode_log_data(), 1, log_index, CHILD);
@@ -450,6 +494,125 @@ fn an_inconsistent_log_in_its_registrys_announcement_block_is_skipped_once() -> 
                 .any(|edge| edge.edge_kind == "registry_announcement"),
             "{case}: the announcement still admits the registry"
         );
+    }
+    Ok(())
+}
+
+/// A registry's logs before its announcement are read as soon as the announcement admits it, so
+/// a check on a later log of that block sees them, as in log order. The skipped log is the one
+/// that contradicts them, not an earlier one.
+#[test]
+fn a_check_after_the_announcement_reads_the_registrys_earlier_logs_in_that_block()
+-> anyhow::Result<()> {
+    let (seven, eight) = (U256::from(7), U256::from(8));
+    for (site, before, after, skipped) in [
+        (
+            "token_resource_conflict",
+            vec![linked(seven, 99)],
+            vec![linked(seven, 100)],
+            2,
+        ),
+        (
+            "token_resource_ambiguous",
+            vec![linked(seven, 99)],
+            vec![linked(eight, 99), roles_changed(99)],
+            3,
+        ),
+        (
+            "token_resource_ambiguous",
+            vec![linked(seven, 99), linked(eight, 99)],
+            vec![roles_changed(99)],
+            3,
+        ),
+    ] {
+        assert_skipped(announced_between(before, after), &[skipped], site)
+            .with_context(|| format!("{site} at log {skipped}"))?;
+    }
+    Ok(())
+}
+
+/// Each log that gives the emitter state for a token comes before the registry's announcement in
+/// the same block, and that token's regeneration after it. The regeneration applies.
+#[test]
+fn a_regeneration_after_the_announcement_reads_each_predecessor_before_it() -> anyhow::Result<()> {
+    let (old_token, new_token) = (versioned_token("alice", 1), versioned_token("alice", 2));
+    let first_token = versioned_token("alice", 0);
+    for (predecessor, before) in [
+        (
+            "LabelRegistered",
+            vec![registered(old_token, "alice", "alice")],
+        ),
+        ("LabelReserved", vec![reserved(old_token, "alice", "alice")]),
+        ("TokenResource", vec![linked(old_token, 99)]),
+        (
+            "SubregistryUpdated",
+            vec![
+                v2_registry::SubregistryUpdated {
+                    tokenId: old_token,
+                    subregistry: Address::repeat_byte(0x53),
+                    sender: sender(),
+                }
+                .encode_log_data(),
+            ],
+        ),
+        (
+            "ResolverUpdated",
+            vec![
+                v2_registry::ResolverUpdated {
+                    tokenId: old_token,
+                    resolver: Address::repeat_byte(0x54),
+                    sender: sender(),
+                }
+                .encode_log_data(),
+            ],
+        ),
+        (
+            "TokenRegenerated",
+            vec![
+                registered(first_token, "alice", "alice"),
+                regenerated(first_token, old_token),
+            ],
+        ),
+    ] {
+        let regeneration = i64::try_from(before.len())? + 1;
+        let output = interpret_test_batch(announced_between(
+            before,
+            vec![regenerated(old_token, new_token)],
+        ))
+        .with_context(|| predecessor.to_owned())?;
+        assert!(
+            output.decode_skips.is_empty(),
+            "{predecessor}: {:#?}",
+            output.decode_skips
+        );
+        assert!(
+            output.normalized_events.iter().any(|event| {
+                event.log_index == Some(regeneration) && event.event_kind == "TokenRegenerated"
+            }),
+            "{predecessor}: the regeneration after the announcement applies"
+        );
+    }
+    Ok(())
+}
+
+/// Another token's registration before the announcement is no predecessor. A regeneration after
+/// the announcement is still skipped. A first link, and a role change on a resource one token
+/// links, still apply.
+#[test]
+fn a_check_after_the_announcement_without_a_predecessor_in_that_block_reads_none()
+-> anyhow::Result<()> {
+    let other = || vec![registered(versioned_token("bob", 1), "bob", "bob")];
+    assert_skipped(
+        announced_between(other(), vec![regenerated(U256::from(7), U256::from(8))]),
+        &[2],
+        "token_regenerated_without_predecessor",
+    )?;
+    for after in [
+        vec![linked(U256::from(7), 100)],
+        vec![linked(U256::from(8), 99), roles_changed(99)],
+    ] {
+        let output = interpret_test_batch(announced_between(other(), after))?;
+        assert!(output.decode_skips.is_empty(), "{:#?}", output.decode_skips);
     }
     Ok(())
 }

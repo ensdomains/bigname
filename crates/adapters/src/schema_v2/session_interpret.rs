@@ -142,6 +142,7 @@ fn interpret_once(
         let mut block_output = BatchOutput::default();
         let mut block_raw_logs = Vec::new();
         let mut deferred = Vec::new();
+        let mut recovered_events = false;
         let first_migration_observation = migration_observations.len();
         let mut block_state = committed_state.clone();
         crate::schema_v2::settle_block_boundary(
@@ -150,11 +151,17 @@ fn interpret_once(
             &mut block_state,
             &mut block_output,
         )?;
+        // A discovery observation admits its target from its own block, which includes the
+        // target's earlier logs in that block (an ERC-1967 proxy announces its implementation
+        // during construction, before any registry can point at it). Interpret those logs as
+        // soon as a log records the admitting discovery edge, before any later log of the block,
+        // so a later log of the same emitter reads the state they leave.
         while raw_logs.peek().is_some_and(|raw| {
             raw.block_number == block.block_number && raw.block_hash == block.block_hash
         }) {
             block_raw_logs.push(raw_logs.next().expect("peeked raw log"));
             let raw = block_raw_logs.last().expect("collected raw log");
+            let edges = block_output.discovery_edges.len();
             if !interpret_raw(
                 catalog,
                 raw,
@@ -164,28 +171,33 @@ fn interpret_once(
                 &transactions,
             )? {
                 deferred.push(block_raw_logs.len() - 1);
+            } else if block_output.discovery_edges.len() > edges && !deferred.is_empty() {
+                recovered_events |= recover_admitted(
+                    catalog,
+                    &block_raw_logs,
+                    &mut deferred,
+                    &mut block_state,
+                    &mut block_output,
+                    &mut migration_observations,
+                    &transactions,
+                )?;
             }
         }
-        // A discovery observation admits its target from its own block, which includes the
-        // target's earlier logs in that block (an ERC-1967 proxy announces its implementation
-        // during construction, before any registry can point at it). Interpret those logs
-        // once the block's admissions are settled, then restore chain order so stream-chained
-        // before-states follow log order rather than interpretation order.
-        let first_recovered_event = block_output.normalized_events.len();
-        for index in deferred {
-            let raw = &block_raw_logs[index];
-            if !interpret_raw(
+        if !deferred.is_empty() {
+            recovered_events |= recover_admitted(
                 catalog,
-                raw,
+                &block_raw_logs,
+                &mut deferred,
                 &mut block_state,
                 &mut block_output,
                 &mut migration_observations,
                 &transactions,
-            )? {
-                unselected.push(raw.clone());
-            }
+            )?;
+            unselected.extend(deferred.iter().map(|&index| block_raw_logs[index].clone()));
         }
-        if block_output.normalized_events.len() > first_recovered_event {
+        // Restore chain order so stream-chained before-states follow log order rather than
+        // interpretation order.
+        if recovered_events {
             block_output
                 .normalized_events
                 .sort_by_key(|event| (event.transaction_index, event.log_index));
@@ -222,6 +234,40 @@ fn interpret_once(
     crate::schema_v2::identity::compact_reserved_label_preimages(&mut output)?;
     crate::schema_v2::migration::correlate(catalog, migration_observations, &mut output)?;
     Ok(output)
+}
+
+/// Interprets, in log order, the deferred logs of the block that the catalog now selects, and
+/// again while those logs record discovery edges. Returns whether they wrote normalized events.
+fn recover_admitted(
+    catalog: &mut Catalog,
+    block_raw_logs: &[RawLogInput],
+    deferred: &mut Vec<usize>,
+    state: &mut State,
+    output: &mut BatchOutput,
+    migration_observations: &mut Vec<crate::schema_v2::protocol::MigrationObservation>,
+    transactions: &TransactionIndex,
+) -> anyhow::Result<bool> {
+    let first_event = output.normalized_events.len();
+    loop {
+        let edges = output.discovery_edges.len();
+        let mut still_deferred = Vec::new();
+        for index in std::mem::take(deferred) {
+            if !interpret_raw(
+                catalog,
+                &block_raw_logs[index],
+                state,
+                output,
+                migration_observations,
+                transactions,
+            )? {
+                still_deferred.push(index);
+            }
+        }
+        *deferred = still_deferred;
+        if deferred.is_empty() || output.discovery_edges.len() == edges {
+            return Ok(output.normalized_events.len() > first_event);
+        }
+    }
 }
 
 /// Discovery is forward-only and performs no lookback: a log from an address admitted later in

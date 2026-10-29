@@ -2118,13 +2118,16 @@ it, and it stays `unsupported` with `resolver_implementation_unknown`, or with
 
 Same-block admission: when a discovery observation admits an address at block
 `B`, Interpret also interprets that address's earlier logs in block `B` (lower
-log index) in a second pass after the block's remaining logs, then restores
-chain order for the block's normalized events so stream-chained before-states
-follow log order. The result is a pure function of the block's raw logs. A log
-whose emitter is admitted only in a later block of the same batch stays
-uninterpreted — no lookback — and is recorded as an operator diagnostic in
-`interpret_decode_skips` ([storage.md](storage.md#table-ownership)). A log the
-second pass skips as malformed or inconsistent is recorded once, as that skip.
+log index). It reads them right after the admitting log, before any later log
+of the block. A later log of the same address therefore reads the state they
+leave, as in chain order, and a consistency check on it sees them. Interpret
+then restores chain order for the block's normalized events so stream-chained
+before-states follow log order. The result is a pure function of the block's
+raw logs. A log whose emitter is admitted only in a later block of the same
+batch stays uninterpreted — no lookback — and is recorded as an operator
+diagnostic in `interpret_decode_skips` ([storage.md](storage.md#table-ownership)).
+An earlier same-block log skipped as malformed or inconsistent is recorded
+once, as that skip.
 
 The project support rule for `ens_v2_resolver_l1` is unchanged in shape: an
 exact `public_resolver_v2` declaration is supported directly; otherwise the
