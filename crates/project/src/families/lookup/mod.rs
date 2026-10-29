@@ -24,6 +24,7 @@ pub(super) async fn refresh(
 
 /// The lookup names of a composition pass's names chunk, their serving resources left to its
 /// inventories stream (`refresh_inventories`).
+#[allow(dead_code)] // The red stub removes its caller.
 pub(super) async fn refresh_names(
     transaction: &mut Transaction<'_, Postgres>,
     chain: &str,

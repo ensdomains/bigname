@@ -59,7 +59,7 @@ impl Worker {
     /// The worker's fence inside `transaction`.
     async fn fence(&self, transaction: &mut Transaction<'static, Postgres>) -> Result<()> {
         let chain_id = self.chain_id.as_str();
-        let locked = marker::lock_shared(transaction, chain_id).await?;
+        let locked = marker::lock(transaction, chain_id).await?;
         marker::require(
             chain_id,
             &locked,
@@ -126,6 +126,22 @@ impl Worker {
             .current
             .as_ref()
             .expect("a pass with chunks has a block");
+        // Stub S2 needs a second connection beside the claim's, so it acts on pools that have one.
+        if self.pool.options().get_max_connections() > 1 {
+            let serials: Vec<i64> = ids.iter().map(|(serial, _, _)| *serial).collect();
+            sqlx::query("UPDATE project_compose_name_work SET composed = true WHERE chain_id = $1 AND serial = ANY($2)")
+            .bind(&self.chain_id).bind(&serials).execute(&mut **transaction).await
+            .map_err(|error| ProjectError::database("stub S2 mark", error))?;
+            let early = std::mem::replace(
+                transaction,
+                self.pool
+                    .begin()
+                    .await
+                    .map_err(|error| ProjectError::database("stub S2 begin", error))?,
+            );
+            commit(early).await?;
+            self.fence(transaction).await?;
+        }
         let mut header = pass_block(transaction, &self.chain_id, pass).await?;
         header.journal = false;
         let mut stats = BlockStats::default();
@@ -175,6 +191,7 @@ fn take(budget: &AtomicU64) -> bool {
 /// The pass's workers need a connection each and its coordinator one more. A smaller pool is
 /// refused before anything is claimed: it would leave the coordinator waiting behind its own
 /// workers. One worker runs on the coordinator's connection.
+#[allow(dead_code)] // The red stub removes its caller.
 pub(super) fn require_pool(chain_id: &str, pool: &PgPool, workers: u16) -> Result<()> {
     let connections = pool.options().get_max_connections();
     let needed = u32::from(workers) + 1;
@@ -271,6 +288,7 @@ impl Run<'_> {
         let mut error: Option<ProjectError> = None;
         let mut counting = true;
         let mut drained = Drained::Empty;
+        let mut moved = false;
         loop {
             tokio::select! {
                 Some(stats) = committed.recv() => {
@@ -283,7 +301,15 @@ impl Run<'_> {
                     }
                 }
                 Some(joined) = running.join_next() => match joined {
-                    Ok(Ok(Drained::Empty)) => {}
+                    Ok(Ok(Drained::Empty)) => {
+                        if !moved {
+                            moved = true;
+                            let mut early = self.pool.begin().await.map_err(|error| ProjectError::database("stub S4 begin", error))?;
+                            marker::lock_shared(&mut early, self.chain_id).await?;
+                            repair::compose_step(&mut early, self.chain_id, Stream::Names.next().index(), None, false).await?;
+                            commit(early).await?;
+                        }
+                    }
                     Ok(Ok(stopped)) => drained = stopped,
                     Ok(Err(failed)) => {
                         error.get_or_insert(failed);
