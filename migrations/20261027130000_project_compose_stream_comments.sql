@@ -17,7 +17,7 @@ COMMENT ON COLUMN bigname_phase.project_repair_record.compose_stream IS
 $ddl$;
 EXECUTE $ddl$
 COMMENT ON COLUMN bigname_phase.project_repair_record.compose_cursor IS
-    'This value is the last key the composition pass committed in its stream, a lookup name in the lookup inventories stream and the last step and partition with the partition counts and server version in the history catalogue build; null throughout the names stream, whose workers claim the work list''s names not yet composed, at a stream''s start and outside a pass.'
+    'This value is the last key the composition pass committed in its stream: the last resolver and node pair, as a JSON array, in the record node stream, the last resolver and record id pair, as a JSON array, in the record id stream, a lookup name in the lookup inventories stream, and the last step and partition with the partition counts and server version in the history catalogue build; null throughout the names stream, whose workers claim the work list''s names not yet composed, at a stream''s start and outside a pass.'
 $ddl$;
 END IF;
 IF to_regclass('bigname_phase.project_lookup_name') IS NOT NULL THEN

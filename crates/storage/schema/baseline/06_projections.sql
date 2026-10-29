@@ -258,7 +258,7 @@ COMMENT ON COLUMN project_repair_record.composed_block IS
 COMMENT ON COLUMN project_repair_record.compose_stream IS
     'This value is the composition pass stream under way: 0 names, 1 record nodes, 2 record ids, 4 lookup inventories, 3 history catalogue build, run in that order; null outside a pass.';
 COMMENT ON COLUMN project_repair_record.compose_cursor IS
-    'This value is the last key the composition pass committed in its stream, a lookup name in the lookup inventories stream and the last step and partition with the partition counts and server version in the history catalogue build; null throughout the names stream, whose workers claim the work list''s names not yet composed, at a stream''s start and outside a pass.';
+    'This value is the last key the composition pass committed in its stream: the last resolver and node pair, as a JSON array, in the record node stream, the last resolver and record id pair, as a JSON array, in the record id stream, a lookup name in the lookup inventories stream, and the last step and partition with the partition counts and server version in the history catalogue build; null throughout the names stream, whose workers claim the work list''s names not yet composed, at a stream''s start and outside a pass.';
 COMMENT ON COLUMN project_repair_record.compose_chunks IS
     'This value is how many chunks the latest composition pass committed; zero before a pass. The pass refreshes the planner statistics of the composed tables after 1, 2, 4, 8, ... chunks.';
 COMMENT ON COLUMN project_repair_record.prefix_recorded IS
