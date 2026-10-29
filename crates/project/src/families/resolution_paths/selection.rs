@@ -11,6 +11,11 @@
 //! never changes the selection. Each lookup sits in a `LATERAL (... OFFSET 0)` subquery, which
 //! the planner runs once per outer row and cannot turn into a join over every surface.
 //!
+//! The last step reads the surfaces of the affected names. It counts them first. Up to
+//! `FEW_AFFECTED_NAMES` it reads each surface by primary key in such a subquery. Beyond that
+//! it full-joins the names to the surfaces, which the planner can only hash or merge, so each
+//! side is read once. Only the arm the count picks runs.
+//!
 //! The walk below reaches a registry other than the root only through a slot: an entry whose
 //! `SubregistryChanged` event names the registry. The slots of each registry that changed or
 //! holds a changed entry are found from the registry: `normalized_events_v2_key_probe_idx`, an
@@ -107,6 +112,10 @@ const POINTER_STATE_KEYS: &str = "array_remove(ARRAY[
             lower(split_part(pointer.raw_fact_ref ->> 'state_scope', ':', 1)) || ':' || lower(left(pointer.after_state ->> 'labelhash', greatest(length(pointer.after_state ->> 'labelhash') - 8, 0))) || '00000000',
             lower(pointer.after_state ->> 'subregistry') || ':00000000'
         ]::text[], NULL)";
+
+/// The most affected names whose surfaces the statement reads one primary-key probe at a time.
+/// Beyond it, the statement reads the surfaces in one pass and joins them to the names.
+const FEW_AFFECTED_NAMES: i64 = 10_000;
 
 /// The slots of the registry `registry`, an SQL expression of the outer row, as the lateral
 /// `slot`: each entry's key and the registry that holds it, `parent`.
@@ -643,11 +652,15 @@ pub(super) fn statement(normal_work: &str) -> String {
         -- Every touched name recomposes itself, whether or not its change can move
         -- other names' resolution paths.
         SELECT logical_name_id FROM normal
+    ), affected_count AS MATERIALIZED (
+        SELECT count(*) AS names FROM affected
     )
-    -- Each affected name's surface by its primary key. The planner's row estimate for
-    -- `affected` follows the estimates of every step above it, and a join here could read
-    -- every surface when that estimate is high.
-    SELECT DISTINCT readable.logical_name_id FROM affected
+    -- The statement counts the affected names before it reads their surfaces, and the count
+    -- picks one of two arms. The other arm's filter is false before it runs, so it reads
+    -- nothing. Up to {FEW_AFFECTED_NAMES} names, each one's surface is read by its primary key.
+    -- The planner's row estimate for `affected` follows every step above it, so a join here
+    -- could read every surface for a few names.
+    SELECT readable.logical_name_id FROM affected
     CROSS JOIN LATERAL (
         SELECT surface.logical_name_id FROM name_surfaces surface
         JOIN chain_lineage lineage ON lineage.chain_id=surface.chain_id AND lineage.block_hash=surface.block_hash
@@ -658,7 +671,25 @@ pub(super) fn statement(normal_work: &str) -> String {
           AND lineage.canonicality_state IN ('canonical','safe','finalized')
         OFFSET 0
     ) readable
-    WHERE EXISTS (SELECT 1 FROM affected)
+    WHERE (SELECT names FROM affected_count) BETWEEN 1 AND {FEW_AFFECTED_NAMES}
+    UNION ALL
+    -- Beyond that, the names are joined to the surfaces. A full join cannot run as a nested
+    -- loop, so the planner hashes or merges the two sides and reads each once, whatever its
+    -- estimate for `affected`. The last filter keeps the names that have a readable surface,
+    -- and the COALESCE keeps the planner from making the full join an inner one. A name
+    -- appears once in `affected` and every join is by key, so neither arm repeats a name.
+    SELECT readable.logical_name_id FROM affected
+    FULL JOIN (
+        SELECT surface.logical_name_id FROM name_surfaces surface
+        JOIN chain_lineage lineage ON lineage.chain_id=surface.chain_id AND lineage.block_hash=surface.block_hash
+        WHERE surface.chain_id=$1
+          AND surface.namespace='ens' AND cardinality(surface.labelhashes)>=1
+          AND surface.block_number<=$2 AND surface.visibility_state='active' AND surface.raw_name IS DISTINCT FROM ''
+          AND surface.canonicality_state IN ('canonical','safe','finalized')
+          AND lineage.canonicality_state IN ('canonical','safe','finalized')
+    ) readable ON readable.logical_name_id=affected.logical_name_id
+    WHERE (SELECT names FROM affected_count) > {FEW_AFFECTED_NAMES}
+      AND COALESCE(readable.logical_name_id=affected.logical_name_id, false)
     ON CONFLICT DO NOTHING"#
     )
 }

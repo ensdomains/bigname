@@ -14,6 +14,10 @@
 //! root's `eth` entry points at (`eth.eth`). The probe then holds that key alone.
 //! `an_eth_keyed_entry_of_the_eth_registry_reads_every_eth_surface` pins the `eth.eth` case.
 //!
+//! Past `FEW_AFFECTED_NAMES` affected names the last step reads every surface once instead of
+//! probing each name. Only `the_last_step_reads_few_names_by_key_and_many_in_one_pass` selects
+//! that many.
+//!
 //! The measure is taken from `EXPLAIN (ANALYZE, FORMAT JSON)`: over every scan of
 //! `name_surfaces` and every join above one, the rows returned plus the rows a filter, an index
 //! recheck or a join filter removed, times the loops. Row counts follow the plan and the data,
@@ -1478,15 +1482,15 @@ fn index_conditions(node: &Value) -> Vec<&str> {
 // index. Every probe of `name_surfaces` in `candidates` reads the entry key index, and one holds
 // a changed entry's key and its slot's together. The last step reads each selected name's
 // surface by key. No part of the statement scans every name surface or every normalized event.
+//
+// It is also the skewed row of the last step's table: a few affected names, below steps whose
+// row estimates follow arms that can read every surface. Red by run on the plain join the last
+// step had before, which read `name_surfaces` by a sequential scan under `""`.
 #[tokio::test]
 async fn the_changed_entry_probes_read_their_indexes() -> Result<()> {
     const RESOURCE_HISTORY: &str = "normalized_events_resource_history_idx";
     const ENTRY_RESOURCE: &str = "project_ens_v2_entry_owner_resource_idx";
     const ENTRY_KEY: &str = "project_ens_v2_entry_owner_pkey";
-    const SURFACE_KEYS: [&str; 2] = [
-        "name_surfaces_pkey",
-        "name_surfaces_chain_id_logical_name_id_key",
-    ];
     let (database, pool) = database().await?;
     let result = async {
         let mut connection = pool.acquire().await?;
@@ -1574,23 +1578,7 @@ async fn the_changed_entry_probes_read_their_indexes() -> Result<()> {
             }
             // The last step reads each affected name's surface by key, whatever the row
             // estimate of the steps above it.
-            let last: Vec<&Value> = scans
-                .iter()
-                .filter(|(under, node)| under.is_empty() && node["Relation Name"] == SURFACES)
-                .map(|(_, node)| *node)
-                .collect();
-            if last.is_empty() {
-                failures.push(format!("{mode}: the last step never read {SURFACES}"));
-            }
-            for node in last {
-                if !reads_through(node, &SURFACE_KEYS) {
-                    failures.push(format!(
-                        "{mode}: the last step reads {SURFACES} by {} over {:?}, not {SURFACE_KEYS:?}",
-                        node["Node Type"],
-                        indexes_read(node)
-                    ));
-                }
-            }
+            last_step_reads_by_key(mode, &scans, &mut failures);
             for (cte, node) in &scans {
                 if node["Node Type"] == "Seq Scan"
                     && [SURFACES, EVENTS]
@@ -1607,6 +1595,209 @@ async fn the_changed_entry_probes_read_their_indexes() -> Result<()> {
         ensure!(
             failures.is_empty(),
             "the access paths of a selection that holds changed entries of user registries:\n{}",
+            failures.join("\n")
+        );
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+/// The primary key and the unique key of `name_surfaces`, the keys the last step reads a few
+/// affected names' surfaces by.
+const SURFACE_KEYS: [&str; 2] = [
+    "name_surfaces_pkey",
+    "name_surfaces_chain_id_logical_name_id_key",
+];
+
+/// `FEW_AFFECTED_NAMES` in `selection.rs`: the most affected names whose surfaces the last step
+/// reads by key. The rows at it and one over it fail if the two differ.
+const FEW_AFFECTED_NAMES: i64 = 10_000;
+
+/// Push a failure unless the last step read `name_surfaces`, and read it only by key.
+fn last_step_reads_by_key(mode: &str, scans: &[(&str, &Value)], failures: &mut Vec<String>) {
+    let last: Vec<&Value> = scans
+        .iter()
+        .filter(|(under, node)| under.is_empty() && node["Relation Name"] == SURFACES)
+        .map(|(_, node)| *node)
+        .collect();
+    if last.is_empty() {
+        failures.push(format!("{mode}: the last step never read {SURFACES}"));
+    }
+    for node in last {
+        if !reads_through(node, &SURFACE_KEYS) {
+            failures.push(format!(
+                "{mode}: the last step reads {SURFACES} by {} over {:?}, not \
+                 {SURFACE_KEYS:?}",
+                node["Node Type"],
+                indexes_read(node)
+            ));
+        }
+    }
+}
+
+/// The plan nodes right below `node` in its own query: no CTE, initplan or subplan.
+fn own_children(node: &Value) -> impl Iterator<Item = &Value> {
+    node["Plans"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|child| {
+            !matches!(
+                child["Parent Relationship"].as_str(),
+                Some("InitPlan" | "SubPlan")
+            )
+        })
+}
+
+/// Whether `node`, or a node below it in its own query, ran and is one `kind` accepts.
+fn ran_below(node: &Value, kind: &dyn Fn(&Value) -> bool) -> bool {
+    (node["Actual Loops"].as_i64().unwrap_or(0) > 0 && kind(node))
+        || own_children(node).any(|child| ran_below(child, kind))
+}
+
+/// The lowest node of the statement's own query that ran and joins a scan of `affected` with a
+/// scan of `name_surfaces`.
+fn last_join(node: &Value) -> Option<&Value> {
+    if let Some(join) = own_children(node).find_map(last_join) {
+        return Some(join);
+    }
+    let affected = |node: &Value| node["Node Type"] == "CTE Scan" && node["CTE Name"] == "affected";
+    let surfaces = |node: &Value| node["Relation Name"] == SURFACES;
+    (ran_below(node, &affected) && ran_below(node, &surfaces)).then_some(node)
+}
+
+/// Journal a change of the name state of the first `count` fourth-level names at `block`. Such a
+/// change recomposes only the name it names.
+async fn touch_names(connection: &mut PgConnection, block: i64, count: i64) -> Result<()> {
+    raw_sql(&format!(
+        "INSERT INTO project_family_undo (chain_id, block_number, block_hash, family, key)
+         SELECT '{CHAIN}', {block}, '{hash}', 'project_name_state',
+                jsonb_build_array('{CHAIN}', 'ens',
+                    'ens:0x' || md5('n4' || n) || md5(n || 'n4'))::text
+         FROM generate_series(0, {count} - 1) n",
+        hash = hash(block),
+    ))
+    .execute(&mut *connection)
+    .await
+    .context("touch names")?;
+    Ok(())
+}
+
+// The last step reads the surfaces of the affected names, and their count picks how. The rows
+// are the count's cardinality classes, each under a custom and a generic plan:
+//
+// | Row            | Publication                          | Affected      | Last step |
+// |----------------|--------------------------------------|---------------|-----------|
+// | one            | one touched name                     | 1             | by key    |
+// | skewed         | P1's changed user registry entries   | a few         | by key    |
+// | at the limit   | `FEW_AFFECTED_NAMES` touched names   | the limit     | by key    |
+// | over the limit | one more touched name                | the limit + 1 | one pass  |
+// | most names     | the `.eth` registry upgraded         | every surface | one pass  |
+//
+// The skewed row is `the_changed_entry_probes_read_their_indexes` (P1).
+//
+// "By key" is every read of `name_surfaces` through its primary or unique key. "One pass" is
+// every read of it in one loop, joined to `affected` by a hash or merge join, never a nested
+// loop. Each row also selects what the frozen statement before it selects, and as many names
+// as the row says.
+//
+// Red, by trace. One and at the limit fail on the plain join the last step had before, as P1
+// did by run. Over the limit and most names fail on a last step that probes by key whatever the
+// count, which reads `name_surfaces` once per name. At the limit fails when the count's bound
+// excludes the limit itself, and over the limit when it admits one more.
+#[tokio::test]
+async fn the_last_step_reads_few_names_by_key_and_many_in_one_pass() -> Result<()> {
+    let (database, pool) = database().await?;
+    let result = async {
+        let mut connection = pool.acquire().await?;
+        let tree = Tree::of(SMALL);
+        install(&mut connection, tree).await?;
+        // Each publication changes only its own block, so none sees another's change.
+        let rows = [
+            ("one", 6, 1, true),
+            ("at the limit", 7, FEW_AFFECTED_NAMES, true),
+            ("over the limit", 8, FEW_AFFECTED_NAMES + 1, true),
+            ("most names", 9, SMALL, false),
+        ];
+        for (_, block, count, touched) in rows {
+            if touched {
+                touch_names(&mut connection, block, count).await?;
+            } else {
+                raw_sql(&format!(
+                    "INSERT INTO normalized_events (event_identity, namespace, event_kind,
+                         source_family, manifest_version, chain_id, block_number, block_hash,
+                         derivation_kind, canonicality_state, after_state)
+                     VALUES ('upgraded:{block}', 'ens', 'Upgraded', 'ens_v2_registry_l1', 1,
+                             '{CHAIN}', {block}, '{hash}', 'ens_v2_registry_resource_surface',
+                             'canonical', jsonb_build_object('proxy_address', '{ETH}'))",
+                    hash = hash(block),
+                ))
+                .execute(&mut *connection)
+                .await
+                .context("upgrade the .eth registry")?;
+            }
+        }
+        raw_sql("ANALYZE").execute(&mut *connection).await?;
+        prepare_statements(&mut connection).await?;
+        let mut failures = Vec::new();
+        for (row, block, count, _) in rows {
+            for mode in PLAN_MODES {
+                set_mode(&mut connection, mode).await?;
+                let run = run(&mut connection, "path_work", block).await?;
+                let before = run_before(&mut connection, block).await?;
+                ensure!(
+                    run.selected == before && i64::try_from(run.selected.len())? == count,
+                    "{row}, {mode}: the statement selects {} names, the one before it {}, not \
+                     {count}",
+                    run.selected.len(),
+                    before.len()
+                );
+                let scans = run.scans();
+                if count <= FEW_AFFECTED_NAMES {
+                    last_step_reads_by_key(&format!("{row}, {mode}"), &scans, &mut failures);
+                    continue;
+                }
+                let last: Vec<&Value> = scans
+                    .iter()
+                    .filter(|(under, _)| under.is_empty())
+                    .map(|(_, node)| *node)
+                    .collect();
+                if last.is_empty() {
+                    failures.push(format!(
+                        "{row}, {mode}: the last step never read {SURFACES}"
+                    ));
+                }
+                for node in last {
+                    let loops = node["Actual Loops"].as_i64().unwrap_or(0);
+                    if loops != 1 {
+                        failures.push(format!(
+                            "{row}, {mode}: the last step reads {SURFACES} by {} in {loops} \
+                             loops, not one",
+                            node["Node Type"]
+                        ));
+                    }
+                }
+                match last_join(&run.plan["Plan"]) {
+                    Some(join)
+                        if matches!(
+                            join["Node Type"].as_str(),
+                            Some("Hash Join" | "Merge Join")
+                        ) => {}
+                    Some(join) => failures.push(format!(
+                        "{row}, {mode}: the last step joins affected to {SURFACES} by {}",
+                        join["Node Type"]
+                    )),
+                    None => failures.push(format!(
+                        "{row}, {mode}: no join of affected and {SURFACES} ran"
+                    )),
+                }
+            }
+        }
+        ensure!(
+            failures.is_empty(),
+            "the last step's reads of the affected names' surfaces:\n{}",
             failures.join("\n")
         );
         Ok(())
