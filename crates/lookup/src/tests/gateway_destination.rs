@@ -94,6 +94,23 @@ async fn ens_read(
     ens_read_lookup(fixture, ens_offchain_lookup(urls)?, callback).await
 }
 
+/// An `x-batch-gateway:true` lookup from the Universal Resolver with one inner request per URL.
+fn ens_batch_lookup(urls: Vec<String>) -> AnyResult<String> {
+    let sender = Address::from_str(UNIVERSAL_RESOLVER)?;
+    let requests = urls
+        .into_iter()
+        .zip(0_u8..)
+        .map(|(url, index)| (sender, vec![url], vec![index]))
+        .collect();
+    Ok(encode_offchain_lookup_for_test(
+        sender,
+        vec!["x-batch-gateway:true".to_owned()],
+        encode_batch_query_for_test(requests),
+        CALLBACK,
+        vec![0xab],
+    ))
+}
+
 /// Reads through `urls` and returns the whole-request error the read fails with.
 async fn ens_read_error(
     fixture: &Fixture,
@@ -652,5 +669,66 @@ async fn redirect_to_a_refused_literal_is_an_unsuccessful_status() -> AnyResult<
 
     fixture.cleanup().await?;
     redirect.abort();
+    Ok(())
+}
+
+// Row 28. Batch results are taken in request order. A transport failure is held back while the
+// rest are read, and a refusal returns at once, so the refusal wins in either order and the
+// record never fails the whole request.
+#[tokio::test]
+async fn batch_refusal_outranks_an_inner_transport_failure_in_either_order() -> AnyResult<()> {
+    let fixture = ens_fixture(true).await?;
+    for case in ["refused first", "transport failure first"] {
+        let mut urls = vec!["http://10.0.0.1/".to_owned(), closed_port_url().await?];
+        if case == "transport failure first" {
+            urls.reverse();
+        }
+        let (record, refusals) = ens_read_lookup(&fixture, ens_batch_lookup(urls)?, None).await?;
+        assert_refused(&record, &refusals, Class::Private, case);
+    }
+    fixture.cleanup().await
+}
+
+// Row 29. A transport failure on an earlier URL is held back while later URLs are tried, so a
+// refused later URL is served in band rather than as a whole-request failure.
+#[tokio::test]
+async fn refusal_after_an_earlier_transport_failure_is_served_in_band() -> AnyResult<()> {
+    let fixture = ens_fixture(true).await?;
+    let urls = vec![closed_port_url().await?, "http://10.0.0.1/".to_owned()];
+    let (record, refusals) = ens_read(&fixture, urls, None).await?;
+    assert_refused(
+        &record,
+        &refusals,
+        Class::Private,
+        "transport failure first",
+    );
+    fixture.cleanup().await
+}
+
+// Row 30. Three 400 KiB answers pass the 1 MiB batch total before the refused fourth request is
+// taken, so the byte cap decides the record. The refusal is never read and never counted.
+#[tokio::test]
+async fn batch_byte_cap_reached_before_a_refused_request_is_ccip_read_failed() -> AnyResult<()> {
+    let (gateway_url, gateway) =
+        spawn_batch_gateway(3, vec![0x5a_u8; 400 * 1024], Duration::ZERO).await?;
+    let fixture = ens_fixture(true).await?;
+
+    let mut urls = vec![gateway_url; 3];
+    urls.push("http://10.0.0.1/".to_owned());
+    let (record, refusals) = ens_read_lookup(&fixture, ens_batch_lookup(urls)?, None).await?;
+    assert_eq!(
+        record.status,
+        LookupRecordStatus::ExecutionFailed,
+        "{record:?}"
+    );
+    assert_eq!(
+        record.failure_reason.as_deref(),
+        Some("ccip_read_failed"),
+        "{record:?}"
+    );
+    assert!(refusals.is_empty(), "{refusals:?}");
+
+    fixture.cleanup().await?;
+    gateway.abort();
     Ok(())
 }
