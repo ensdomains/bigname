@@ -384,8 +384,9 @@ collection route carry neither header.
   object, each with the value and presence it has on the `profile=detail`
   record for the same name, which are those of name detail and
   `GET /v1/names`. A name that carries the read-time lease fill under
-  [`registered_at`](api-v1.md#naming-dictionary) is the exception: name detail and the
-  records route carry the fill, list and lookup do not, until the stored registration
+  [`registered_at`](api-v1.md#naming-dictionary) is the exception: name detail serves the
+  fill, and the records route carries it through its gating, so a released lease serves no
+  resolver or records there. Every other route serves the stored registration until it
   carries the lease. Every other registration field (`owner`, `manager`,
   `registration_id`, `token_id`, `registered_at`,
   `created_at`, `lapsed_registration`, `authority`, `migrated_at`), the

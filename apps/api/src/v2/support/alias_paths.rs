@@ -86,16 +86,17 @@ pub(crate) async fn load_served_name_for_selected_snapshot(
         load_composed_served_name(&mut *conn, namespace, name, selected_snapshot).await?;
     // A registration that does not carry its ENSv1 lease serves the lease its registrar events
     // prove, and discovery and the registry read are decided on that registration. A failed
-    // read rolls back to its savepoint and serves the composed registration.
-    if alias.is_none()
-        && let Err(error) =
-            serve_legacy_lease_in_savepoint(&mut *conn, &mut row, selected_snapshot).await
-    {
-        error!(
-            service = "api",
-            error = %error,
-            "legacy lease read failed; serving the composed registration of {namespace}/{name}"
-        );
+    // read rolls back to its savepoint and serves the composed registration. A failed savepoint
+    // leaves the snapshot unusable, so the route fails.
+    if alias.is_none() {
+        serve_legacy_lease_in_savepoint(&mut *conn, &mut row, selected_snapshot)
+            .await
+            .map_err(|error| {
+                error!(service = "api", error = %error, "the legacy lease savepoint failed");
+                ApiError::internal_error(format!(
+                    "failed to read the ENSv1 lease of {namespace}/{name}"
+                ))
+            })?;
     }
     let lookup_discovery = crate::v2::name_records::verified_discovery(&row, alias.as_ref());
     let registry = serve_ens_v1_registry_resolver(&mut *conn, &mut row)
