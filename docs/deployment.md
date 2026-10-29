@@ -5061,9 +5061,14 @@ and no schema.
   an entry that points at the registry, and keeps those that hold them
   adjacent. A registry that nothing points at reads no name. A root registry
   entry still reads every name that holds its label and keeps those whose last
-  label has its key. The names it selects are the same.
-- Its row lookup of each selected name's own surface now runs by key for each
-  name, so a high row estimate cannot turn it into a read of every surface.
+  label has its key, or that hold it directly above a slot of the root. The
+  names it selects are the same.
+- Its last step, which reads the surfaces of the names it selects, now counts
+  them first. Up to 10,000 names it reads each surface by primary key, so a
+  high row estimate cannot turn a few names into a read of every surface.
+  Beyond that it reads the surfaces once, by a hash or merge join, never a
+  probe per name. A rebuild range journals all its blocks under its last one,
+  so a range that covers most registrations takes that arm.
 - Stored rows do not change. API responses do not change.
 - It adds no schema-migration, index, table, manifest or setting.
 - The statement now reads `normalized_events_v2_key_probe_idx` for the registry

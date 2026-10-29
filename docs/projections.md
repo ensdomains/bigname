@@ -2460,25 +2460,31 @@ entries that point at a changed registry through indexes that already exist
   registry's creation. The keys of the entries that point at it count as
   changed entry keys, and the statement finds the names that hold one, by the
   hash of the key.
-- A changed entry of the root registry moves only names whose last label has
-  its key. The statement still finds them by that key's hash alone. A changed
-  entry of any other registry, or of the root where an entry points at the
-  root, moves only names that hold its label directly above the label of an
-  entry that points at the registry. The statement finds those names by the
-  hashes of both keys, so the index returns only the names that hold both. When the two keys are the same, it also looks
-  up the entries that point at the registry holding that entry, and so on up,
-  and adds the first key that differs, when there is one. A registry that no
-  entry points at is never reached by the walk, so its entries read no name and
-  select none.
+- A changed entry of the root registry moves names whose last label has its
+  key, and, where an entry points at the root, names that hold its label
+  directly above that entry's label. The statement finds the first by that
+  key's hash alone. A changed entry of any other registry moves only names that
+  hold its label directly above the label of an entry that points at the
+  registry. The statement finds those names, and the second kind under the
+  root, by the hashes of both keys, so the index returns only the names that
+  hold both. When the two keys are the same, it also looks up the entries that
+  point at the registry holding that entry, and so on up, and adds the first
+  key that differs, when there is one. A registry that no entry points at is
+  never reached by the walk, so its entries read no name and select none.
 - A change of the root registry itself has no entry to look up. The walk's
   first row carries it.
 - It reads the ENSv1→ENSv2 migration evidence of each ancestor by name, one
   lookup for each ancestor.
+- It reads the surfaces of the affected names last, and counts the names
+  first. Up to 10,000 names it reads each surface by primary key. Beyond that
+  it full-joins the names to the surfaces, which the planner can only hash or
+  merge, so it reads each side once.
 
 The surfaces it reads then follow the names the publication touches and the
 names under the entries that point at a changed registry, not the number of
-names on the chain. A changed registry that no entry points at reads no
-surface. The indexes change how the statement finds its rows and not which
+names on the chain. Past 10,000 affected names the last step reads every
+surface once instead of probing each name. A changed registry that no entry
+points at reads no surface. The indexes change how the statement finds its rows and not which
 names it selects.
 
 Two cases still read every observed ENS surface:
