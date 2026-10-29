@@ -2119,19 +2119,25 @@ it, and it stays `unsupported` with `resolver_implementation_unknown`, or with
 Same-block admission: when a discovery observation admits an address at block
 `B`, Interpret also interprets that address's earlier logs in block `B` (lower
 log index). A log is held only until its emitter is admitted, and once the
-catalog selects it, it runs in log order before the block's next live log:
+catalog selects it, it runs in log order before the block's next live log. A
+log whose emitter is never admitted in the block, or whose selection is
+refused, stays held to the end of the block.
 
 | Step | What Interpret does |
 | --- | --- |
 | 1 | Interprets the block's next log. A log whose emitter is not admitted yet is held. |
-| 2 | If that log recorded a discovery edge, interprets every held log the catalog now selects, in log order. |
-| 3 | Repeats step 2 while the logs it interpreted recorded discovery edges. |
+| 2 | If that log recorded a discovery edge, interprets the held logs the catalog now selects, from the lowest log index up. |
+| 3 | Whenever a held log interpreted in step 2 records a discovery edge, restarts step 2 from the lowest held log index. |
 | 4 | Returns to step 1 for the next log of the block. |
-| 5 | At the end of the block, tries the held logs once more and leaves the rest uninterpreted, as before. |
+| 5 | At the end of the block, runs step 2 once more, with the same restarts, and leaves the rest uninterpreted, as before. |
 
 A discovery edge is only recorded by a log that is interpreted, and an
-interpreted held log is no longer held. So each repeat of step 2 consumes at
-least one held log, and the repeats are bounded by the block's log count.
+interpreted held log is no longer held. So each restart follows a consumed held
+log, and the restarts are at most the number of held logs.
+
+Held logs of two emitters admitted in reverse log order run in admission
+order. No consistency check reads another emitter's state, so a skip decision
+is the same either way.
 
 A later log of the same address therefore reads the state the held logs leave,
 as in chain order, and a consistency check on it sees them. Interpret then
