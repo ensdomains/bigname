@@ -41,19 +41,19 @@ pub(super) const PUBLIC_RESOLVER: &str = "0xf29100983e058b709f3d539b0c765937b804
 const ETH_REGISTRY: &str = "0xf60aba43e1f7f3dab1186ff03b561401c9df85e2";
 const BATCH_REGISTRAR: &str = "0xf0ccfbf6dba1e01ccb833ced6d551a8f000e9721";
 /// The ENSV1Resolver, the ENSv2 resolver premigration gives each reserved name.
-const MIRROR_RESOLVER: &str = "0x394d8eb4a4fdf599384deab25f31d111d755c398";
+pub(super) const MIRROR_RESOLVER: &str = "0x394d8eb4a4fdf599384deab25f31d111d755c398";
 pub(super) const OWNER: &str = "0x0000000000000000000000000000000000000051";
 /// The RootRegistry the 2026-10-13 redeploy replaced. No manifest declares it.
 const REPLACED_ROOT: &str = "0x51bbc58b3dae7d45b14fba8cf31b7c8f7904a750";
 const ARCHIVED_OWNER: &str = "0x0000000000000000000000000000000000000052";
 pub(super) const NAME: &str = "premigrated.eth";
 pub(super) const REGISTERED: u64 = 1_700_000_000;
-const RESERVED: u64 = 1_790_000_000;
+pub(super) const RESERVED: u64 = 1_790_000_000;
 const LEASE: u64 = 2_000_000_000;
 /// The ETHRegistry reservation's expiry. It is below the ENSv1 lease's, so a served `expires_at`
 /// of this value comes from the ENSv2 entry, neither from the lease nor from the later of the two.
 const RESERVATION_EXPIRY: u64 = 1_950_000_000;
-const DAY: u64 = 86_400;
+pub(super) const DAY: u64 = 86_400;
 
 pub(super) type Logs = Vec<(&'static str, alloy_primitives::LogData)>;
 
@@ -141,7 +141,7 @@ pub(super) fn text() -> Result<Logs> {
 /// resolver: `LabelReserved`, then `ResolverUpdated`.
 /// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registrar/BatchRegistrar.sol:L61-L71 @ ens_v2_mainnet_20261002@b1f97b91)
 /// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registry/PermissionedRegistry.sol:L498-L513 @ ens_v2_mainnet_20261002@b1f97b91)
-fn reservation() -> Result<Logs> {
+pub(super) fn reservation() -> Result<Logs> {
     let token = U256::from_be_bytes(keccak256(label().as_bytes()).0) >> 32 << 32;
     let sender: Address = BATCH_REGISTRAR.parse()?;
     Ok(vec![
