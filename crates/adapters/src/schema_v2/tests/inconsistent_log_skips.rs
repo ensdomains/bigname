@@ -76,6 +76,12 @@ fn registry_manifest() -> ManifestInput {
                 &["registry"],
                 &["ResolverChanged"],
             ),
+            (
+                "ParentUpdated",
+                "event ParentUpdated(address indexed parent, string label, address indexed sender)",
+                &["registry"],
+                &["ParentChanged"],
+            ),
         ],
     )
 }
@@ -456,8 +462,8 @@ fn an_inconsistent_log_between_valid_logs_of_one_transaction_skips_only_itself()
 }
 
 /// A registry announced in the block of its inconsistent log is skipped there, whether the log
-/// comes after the announcement or before it and is read once the announcement admits the
-/// registry. That skip is not also recorded as a log that preceded its emitter's admission.
+/// comes after the announcement or before it and is read in its place in the block's next pass.
+/// That skip is not also recorded as a log that preceded its emitter's admission.
 #[test]
 fn an_inconsistent_log_in_its_registrys_announcement_block_is_skipped_once() -> anyhow::Result<()> {
     let announced = |log_index| raw_at(RegistryCreated {}.encode_log_data(), 1, log_index, CHILD);
@@ -498,9 +504,9 @@ fn an_inconsistent_log_in_its_registrys_announcement_block_is_skipped_once() -> 
     Ok(())
 }
 
-/// A registry's logs before its announcement are read as soon as the announcement admits it, so
-/// a check on a later log of that block sees them, as in log order. The skipped log is the one
-/// that contradicts them, not an earlier one.
+/// A registry's logs before its announcement are read in log order once the block is interpreted
+/// again with the registry admitted, so a check on a later log of that block sees them. The
+/// skipped log is the one that contradicts them, not an earlier one.
 #[test]
 fn a_check_after_the_announcement_reads_the_registrys_earlier_logs_in_that_block()
 -> anyhow::Result<()> {
@@ -622,9 +628,10 @@ fn a_check_after_the_announcement_without_a_predecessor_in_that_block_reads_none
 /// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@a971bd64)
 /// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L467-L471 @ ens_v2@a971bd64)
 /// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L540 @ ens_v2@a971bd64).
-/// No log is held, so every output vector is the one written before held logs ran early.
+/// The block is interpreted again once the announcement admits the registry, and every output
+/// vector is the one a single pass writes.
 #[test]
-fn an_announcement_first_block_holds_no_log_and_keeps_its_output() -> anyhow::Result<()> {
+fn an_announcement_first_block_keeps_its_output() -> anyhow::Result<()> {
     let old_token = versioned_token("alice", 1);
     let output = interpret_test_batch(announced_between(
         Vec::new(),
@@ -659,11 +666,12 @@ fn an_announcement_first_block_holds_no_log_and_keeps_its_output() -> anyhow::Re
     Ok(())
 }
 
-/// A held pointer log of the announced registry records an edge when it runs, so the held logs
-/// are tried again. The log of an emitter admitted only in the next block stays held to the end
-/// of its block and is recorded once as preceding its admission.
+/// Discovery is forward-only across blocks. The log of an emitter announced only in the next block
+/// stays uninterpreted and is recorded once as preceding its admission. A pointer log before its
+/// own registry's announcement in the same block runs in its place.
 #[test]
-fn a_log_of_an_emitter_admitted_in_a_later_block_stays_held() -> anyhow::Result<()> {
+fn a_log_before_its_emitters_announcement_block_is_recorded_as_pre_admission() -> anyhow::Result<()>
+{
     const LATER: &str = "0x0000000000000000000000000000000000000062";
     let pointer = v2_registry::SubregistryUpdated {
         tokenId: U256::from(7),
@@ -717,6 +725,356 @@ fn a_log_of_an_emitter_admitted_in_a_later_block_stays_held() -> anyhow::Result<
         skip.decode_context
     );
     Ok(())
+}
+
+const FIRST: &str = "0x0000000000000000000000000000000000000071";
+const SECOND: &str = "0x0000000000000000000000000000000000000072";
+const THIRD: &str = "0x0000000000000000000000000000000000000073";
+
+fn parent_updated(parent: &str, label: &str) -> alloy_primitives::LogData {
+    v2_registry::ParentUpdated {
+        parent: parent.parse().expect("parent address"),
+        label: label.to_owned(),
+        sender: sender(),
+    }
+    .encode_log_data()
+}
+
+fn subregistry(token: U256, registry: &str) -> alloy_primitives::LogData {
+    v2_registry::SubregistryUpdated {
+        tokenId: token,
+        subregistry: registry.parse().expect("subregistry address"),
+        sender: sender(),
+    }
+    .encode_log_data()
+}
+
+/// Block 1: the declared `.eth` registry registers `alice` and points it at `registries[0]`.
+/// Block 2, one log per transaction: each undeclared registry claims its parent, registers its
+/// label and points it at the next registry. Then the registries announce themselves in
+/// `announced` order.
+fn connected_registries(registries: &[&str], labels: &[&str], announced: &[usize]) -> BatchInput {
+    let alice = versioned_token("alice", 1);
+    let mut raw_logs = vec![
+        raw_at_transaction(registered(alice, "alice", "alice"), 1, 0, 0, CONTRACT),
+        raw_at_transaction(subregistry(alice, registries[0]), 1, 0, 1, CONTRACT),
+    ];
+    let mut encoded = Vec::new();
+    for (index, (registry, label)) in registries.iter().zip(labels).enumerate() {
+        let (parent, parent_label) = match index {
+            0 => (CONTRACT, "alice"),
+            _ => (registries[index - 1], labels[index - 1]),
+        };
+        let token = versioned_token(label, 1);
+        encoded.push((*registry, parent_updated(parent, parent_label)));
+        encoded.push((*registry, registered(token, label, label)));
+        if let Some(next) = registries.get(index + 1) {
+            encoded.push((*registry, subregistry(token, next)));
+        }
+    }
+    for &index in announced {
+        encoded.push((registries[index], RegistryCreated {}.encode_log_data()));
+    }
+    raw_logs.extend(
+        (0_i64..)
+            .zip(encoded)
+            .map(|(log_index, (registry, encoded))| {
+                raw_at_transaction(encoded, 2, log_index, log_index, registry)
+            }),
+    );
+    batch(vec![declared()], raw_logs)
+}
+
+/// The first event that names `raw_name`: its log, transaction and kind.
+fn first_naming<'a>(
+    output: &'a BatchOutput,
+    raw_name: &str,
+) -> (Option<i64>, Option<&'a str>, &'a str) {
+    let logical_name_id = output
+        .name_surfaces
+        .iter()
+        .find(|surface| surface.raw_name() == Some(raw_name))
+        .map(|surface| surface.logical_name_id.as_str())
+        .unwrap_or_else(|| panic!("no surface for {raw_name}"));
+    output
+        .normalized_events
+        .iter()
+        .find(|event| event.logical_name_id.as_deref() == Some(logical_name_id))
+        .map(|event| {
+            (
+                event.log_index,
+                event.transaction_hash.as_deref(),
+                event.event_kind.as_str(),
+            )
+        })
+        .unwrap_or_else(|| panic!("no event names {raw_name}"))
+}
+
+/// `sub.alice.eth` points at the second registry before that registry claims it as its parent,
+/// and the second registry announces itself before the first. In log order the claim completes
+/// the mount, so `bob.sub.alice.eth` is granted at its own registration log.
+#[test]
+fn connected_registries_announced_in_reverse_order_grant_at_the_registration_log()
+-> anyhow::Result<()> {
+    let output = interpret_test_batch(connected_registries(
+        &[FIRST, SECOND],
+        &["sub", "bob"],
+        &[1, 0],
+    ))?;
+    assert_eq!(
+        first_naming(&output, "bob.sub.alice.eth"),
+        (Some(4), Some("transaction-2-4"), "RegistrationGranted")
+    );
+    assert!(output.decode_skips.is_empty(), "{:#?}", output.decode_skips);
+    Ok(())
+}
+
+#[test]
+fn connected_registries_announced_in_forward_order_grant_at_the_registration_log()
+-> anyhow::Result<()> {
+    let output = interpret_test_batch(connected_registries(
+        &[FIRST, SECOND],
+        &["sub", "bob"],
+        &[0, 1],
+    ))?;
+    assert_eq!(
+        first_naming(&output, "bob.sub.alice.eth"),
+        (Some(4), Some("transaction-2-4"), "RegistrationGranted")
+    );
+    assert!(output.decode_skips.is_empty(), "{:#?}", output.decode_skips);
+    Ok(())
+}
+
+/// Each registry's names are granted at their own registration logs although the chain
+/// announces from the bottom up.
+#[test]
+fn a_three_registry_chain_announced_in_reverse_grants_at_each_registration_log()
+-> anyhow::Result<()> {
+    let output = interpret_test_batch(connected_registries(
+        &[FIRST, SECOND, THIRD],
+        &["sub", "deep", "bob"],
+        &[2, 1, 0],
+    ))?;
+    for (raw_name, log_index) in [
+        ("sub.alice.eth", 1),
+        ("deep.sub.alice.eth", 4),
+        ("bob.deep.sub.alice.eth", 7),
+    ] {
+        assert_eq!(
+            first_naming(&output, raw_name),
+            (
+                Some(log_index),
+                Some(format!("transaction-2-{log_index}").as_str()),
+                "RegistrationGranted"
+            ),
+            "{raw_name}"
+        );
+    }
+    Ok(())
+}
+
+/// Two registries interleave their logs and announce after them. The first pass admits both,
+/// and the second admits nothing new, so it is the last.
+#[test]
+fn interleaved_announcements_take_exactly_two_passes() -> anyhow::Result<()> {
+    crate::schema_v2::session::reset_block_passes();
+    let output = interpret_test_batch(batch(
+        Vec::new(),
+        vec![
+            raw_at(registered(versioned_token("x", 1), "x", "x"), 1, 0, SECOND),
+            raw_at(registered(versioned_token("y", 1), "y", "y"), 1, 1, FIRST),
+            raw_at(RegistryCreated {}.encode_log_data(), 1, 2, FIRST),
+            raw_at(registered(versioned_token("z", 1), "z", "z"), 1, 3, SECOND),
+            raw_at(RegistryCreated {}.encode_log_data(), 1, 4, SECOND),
+        ],
+    ))?;
+    assert_eq!(
+        crate::schema_v2::session::block_passes(),
+        std::collections::BTreeMap::from([(1, 2)])
+    );
+    let granted = output
+        .normalized_events
+        .iter()
+        .filter(|event| event.event_kind == "RegistrationGranted")
+        .map(|event| event.log_index)
+        .collect::<Vec<_>>();
+    assert_eq!(granted, [Some(0), Some(1), Some(3)]);
+    assert!(output.decode_skips.is_empty(), "{:#?}", output.decode_skips);
+    Ok(())
+}
+
+/// Every admission a block makes is found in its first pass, so the second pass re-admits only
+/// entries the catalog holds and no block takes a third.
+#[test]
+fn no_block_takes_a_third_pass() -> anyhow::Result<()> {
+    crate::schema_v2::session::reset_block_passes();
+    interpret_test_batch(connected_registries(
+        &[FIRST, SECOND, THIRD],
+        &["sub", "deep", "bob"],
+        &[2, 1, 0],
+    ))?;
+    let passes = crate::schema_v2::session::block_passes();
+    assert!(passes.values().all(|passes| *passes <= 2), "{passes:?}");
+    Ok(())
+}
+
+/// A registry that never announces itself stays unselected in a block another registry
+/// announces in. No row is written, since no admission follows in the batch.
+#[test]
+fn logs_of_an_emitter_never_announced_stay_unselected_without_a_row() -> anyhow::Result<()> {
+    let output = interpret_test_batch(batch(
+        Vec::new(),
+        vec![
+            raw_at(registered(versioned_token("x", 1), "x", "x"), 1, 0, SECOND),
+            raw_at(RegistryCreated {}.encode_log_data(), 1, 1, FIRST),
+            raw_at(registered(versioned_token("y", 1), "y", "y"), 1, 2, SECOND),
+        ],
+    ))?;
+    assert!(
+        output
+            .normalized_events
+            .iter()
+            .all(|event| { event.raw_fact_ref["emitting_address"].as_str() != Some(SECOND) }),
+        "{:#?}",
+        output.normalized_events
+    );
+    assert!(output.decode_skips.is_empty(), "{:#?}", output.decode_skips);
+    Ok(())
+}
+
+/// A manifest-declared registry's inconsistent log in a block that announces another registry
+/// stops the batch in the block's first pass.
+#[test]
+fn a_declared_emitters_inconsistent_log_in_an_announcing_block_stops_in_the_first_pass() {
+    crate::schema_v2::session::reset_block_passes();
+    let mut raw_logs = vec![raw_at(RegistryCreated {}.encode_log_data(), 1, 0, CHILD)];
+    raw_logs.extend(
+        label_hash_mismatch()
+            .into_iter()
+            .map(|raw| raw_at_index(raw, 1)),
+    );
+    assert_stops(
+        batch(vec![declared()], raw_logs),
+        "LabelRegistered label does not hash to labelHash",
+    );
+    assert_eq!(
+        crate::schema_v2::session::block_passes(),
+        std::collections::BTreeMap::from([(1, 1)])
+    );
+}
+
+fn raw_at_index(mut raw: RawLogInput, log_index: i64) -> RawLogInput {
+    raw.log_index = log_index;
+    raw
+}
+
+/// The registry's log in the block before its announcement block stays uninterpreted with one
+/// row. Its log before the announcement in the announcing block runs in its place.
+#[test]
+fn an_emitter_announced_in_the_second_block_runs_its_first_block_logs_as_pre_admission()
+-> anyhow::Result<()> {
+    let output = interpret_test_batch(batch(
+        Vec::new(),
+        vec![
+            raw_at(registered(versioned_token("x", 1), "x", "x"), 1, 0, CHILD),
+            raw_at(registered(versioned_token("y", 1), "y", "y"), 2, 0, CHILD),
+            raw_at(RegistryCreated {}.encode_log_data(), 2, 1, CHILD),
+        ],
+    ))?;
+    let granted = output
+        .normalized_events
+        .iter()
+        .filter(|event| event.event_kind == "RegistrationGranted")
+        .map(|event| (event.block_number, event.log_index))
+        .collect::<Vec<_>>();
+    assert_eq!(granted, [(Some(2), Some(0))]);
+    let skips = output
+        .decode_skips
+        .iter()
+        .map(|skip| (skip.block_number, skip.log_index, skip.inconsistency_site))
+        .collect::<Vec<_>>();
+    assert_eq!(skips, [(1, 0, None)]);
+    Ok(())
+}
+
+/// A registry that points one of its tokens' resolver at itself in its announcement block logs
+/// one warning for the log, although the block is interpreted twice.
+#[test]
+fn a_resolver_pointer_to_its_own_registry_in_an_announcing_block_warns_once() -> anyhow::Result<()>
+{
+    let warnings = SelfTargetWarnings::default();
+    let input = batch(
+        Vec::new(),
+        vec![
+            raw_at(RegistryCreated {}.encode_log_data(), 1, 0, CHILD),
+            raw_at(
+                v2_registry::ResolverUpdated {
+                    tokenId: U256::from(7),
+                    resolver: CHILD.parse()?,
+                    sender: sender(),
+                }
+                .encode_log_data(),
+                1,
+                1,
+                CHILD,
+            ),
+        ],
+    );
+    tracing::subscriber::with_default(warnings.clone(), || {
+        crate::schema_v2::prepare_schema_v2_batch_incremental(
+            input,
+            None,
+            crate::schema_v2::StateCacheCapacity::Unlimited,
+        )
+    })?;
+    assert_eq!(warnings.count(), 1);
+    Ok(())
+}
+
+/// Counts the self-target discovery warnings logged on the test's thread.
+#[derive(Clone, Default)]
+struct SelfTargetWarnings(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl SelfTargetWarnings {
+    fn count(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+struct Message(bool);
+
+impl tracing::field::Visit for Message {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.0 = format!("{value:?}").starts_with("discovery pointer targets its own emitter");
+        }
+    }
+}
+
+impl tracing::Subscriber for SelfTargetWarnings {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() == tracing::Level::WARN
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut message = Message(false);
+        event.record(&mut message);
+        if message.0 {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
 }
 
 /// The token's link comes from an earlier batch, so the check reads restored state, on both
