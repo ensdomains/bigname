@@ -59,7 +59,7 @@ impl Worker {
     /// The worker's fence inside `transaction`.
     async fn fence(&self, transaction: &mut Transaction<'static, Postgres>) -> Result<()> {
         let chain_id = self.chain_id.as_str();
-        let locked = marker::lock_shared(transaction, chain_id).await?;
+        let locked = marker::lock(transaction, chain_id).await?;
         marker::require(
             chain_id,
             &locked,
