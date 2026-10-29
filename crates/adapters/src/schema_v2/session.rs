@@ -2,7 +2,7 @@
 mod interpret;
 use interpret::interpret_loaded;
 #[cfg(test)]
-pub(super) use interpret::{block_passes, reset_block_passes};
+pub(super) use interpret::{block_passes, migration_observation_count, reset_block_passes};
 #[path = "session_transaction.rs"]
 mod transaction;
 #[path = "session_wrapper.rs"]

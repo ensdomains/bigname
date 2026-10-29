@@ -486,6 +486,33 @@ fn proxy_deployed_naming_a_declared_implementation_admits_the_proxy() -> anyhow:
     Ok(())
 }
 
+/// The factory log admits the proxy, so its block is interpreted twice, and it is also a migration
+/// observation. Correlation receives the observation once, from the block's last pass. The
+/// correlation paths absorb a repeated observation, so the count is read where it is passed.
+#[test]
+fn a_migration_observation_in_a_block_interpreted_twice_is_counted_once() -> anyhow::Result<()> {
+    crate::schema_v2::session::reset_block_passes();
+    let deployed = raw_at(
+        ProxyDeployed {
+            sender: ACCOUNT.parse()?,
+            proxyAddress: RESOLVER.parse()?,
+            salt: U256::from(7),
+            implementation: IMPLEMENTATION.parse()?,
+        }
+        .encode_log_data(),
+        1,
+        0,
+        FACTORY,
+    );
+    interpret_with_factory(vec![deployed, text_changed(1, 1)])?;
+    assert_eq!(crate::schema_v2::session::migration_observation_count(), 1);
+    assert_eq!(
+        crate::schema_v2::session::block_passes(),
+        std::collections::BTreeMap::from([(1, 2)])
+    );
+    Ok(())
+}
+
 #[test]
 fn proxy_deployed_naming_an_undeclared_implementation_admits_nothing() -> anyhow::Result<()> {
     let deployed = raw_at(
