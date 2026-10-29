@@ -309,8 +309,6 @@ impl Engine {
             &output,
         )
         .await?;
-        let inconsistent_log_skips =
-            inconsistent_skips::report(&request.chain_id, &output.decode_skips);
         let ensv2_events = statistics::ensv2_events(
             (output.normalized_events.iter()).map(|event| event.source_family.as_str()),
         );
@@ -336,6 +334,8 @@ impl Engine {
             phase_started,
             Some(retained_state_count),
         );
+        let inconsistent_log_skips =
+            inconsistent_skips::report(&request.chain_id, &output.decode_skips);
         let current = Marker {
             number: *batch_to,
             hash: batch_hash.clone(),

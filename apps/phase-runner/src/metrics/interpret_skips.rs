@@ -47,7 +47,7 @@ impl InconsistentLogSkipCounters {
                 "phase_runner_interpret_inconsistent_log_skips_total",
                 "Event logs from emitters no manifest declares that committed Interpret batches \
                  skipped because they contradict themselves or the emitter's earlier logs, by \
-                 the check that failed. A redo counts the skips of its range again.",
+                 the check that failed. A retried batch or a redo counts its skips again.",
                 &["chain", "site"],
             )?,
         })

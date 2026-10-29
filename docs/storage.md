@@ -1259,12 +1259,14 @@ log inconsistent. Each is named in the row's `decode_context`, which reads
 - `transfer_batch_length_mismatch`: a `TransferBatch` whose `ids` and `values`
   differ in length.
 - `token_resource_conflict`: a `TokenResource` that links a token to a
-  different resource from the one the token is already linked to.
-- `token_resource_ambiguous`: an `EACRolesChanged` for a resource that two
-  earlier `TokenResource` logs linked to two different tokens of the emitter.
+  different resource from the one the token already holds, whether an earlier
+  `TokenResource` linked it or a `LabelReserved` assigned it.
+- `token_resource_ambiguous`: an `EACRolesChanged` for a resource that the
+  emitter's earlier logs linked to two different tokens.
   Every later role change on that resource from that emitter is skipped too.
 - `token_regenerated_without_predecessor`: a `TokenRegenerated` whose
-  `oldTokenId` the emitter never linked to a resource.
+  `oldTokenId` names a token the emitter holds no state for: never registered,
+  reserved or linked, or since released.
 
 The decision reads only the log and the state the emitter's earlier logs left,
 so a redo reproduces it. Interpret treats the log as absent: the batch's other

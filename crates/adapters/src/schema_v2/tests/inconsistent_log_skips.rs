@@ -450,6 +450,49 @@ fn an_inconsistent_log_in_its_registrys_announcement_block_is_skipped_once() -> 
     Ok(())
 }
 
+/// The token's link comes from an earlier batch, so the check reads restored state, on both
+/// loaders. The conflicting link is skipped, and the regeneration of the same token still applies.
+#[test]
+fn an_inconsistent_log_against_restored_state_is_skipped() -> anyhow::Result<()> {
+    let old_token = versioned_token("alice", 1);
+    let first = interpret_test_batch(batch(
+        vec![undeclared()],
+        logs(vec![
+            registered(old_token, "alice", "alice"),
+            linked(old_token, 99),
+        ]),
+    ))?;
+    let mut input = batch(
+        vec![undeclared()],
+        vec![
+            raw_at(linked(old_token, 100), 2, 0, CONTRACT),
+            raw_at(
+                v2_registry::TokenRegenerated {
+                    oldTokenId: old_token,
+                    newTokenId: versioned_token("alice", 2),
+                }
+                .encode_log_data(),
+                2,
+                1,
+                CONTRACT,
+            ),
+        ],
+    );
+    input.prior_events = first.normalized_events.iter().map(prior_event).collect();
+    let output = assert_skipped(input, &[0], "token_resource_conflict")?;
+    let kinds = output
+        .normalized_events
+        .iter()
+        .map(|event| (event.log_index, event.event_kind.as_str()))
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&(Some(1), "TokenRegenerated")), "{kinds:?}");
+    assert!(
+        kinds.iter().all(|(log_index, _)| *log_index != Some(0)),
+        "{kinds:?}"
+    );
+    Ok(())
+}
+
 #[test]
 fn an_undeclared_malformed_log_keeps_its_decode_context() -> anyhow::Result<()> {
     let mut raw_logs = label_hash_mismatch();
