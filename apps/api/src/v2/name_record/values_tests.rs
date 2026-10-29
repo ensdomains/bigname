@@ -76,3 +76,50 @@ fn a_retained_pointer_serves_no_released_basenames_registration() {
     assert!(!row_has_current_registration(&row), "{row:#?}");
     assert!(!row_serves_resolver(&row), "{row:#?}");
 }
+
+/// The identity row lookup serves, built from `row`.
+fn identity_row(row: &NameCurrentRow) -> bigname_storage::IdentityNameCurrentRow {
+    bigname_storage::IdentityNameCurrentRow {
+        logical_name_id: row.logical_name_id.clone(),
+        namespace: row.namespace.clone(),
+        canonical_display_name: row.canonical_display_name.clone(),
+        normalized_name: row.normalized_name.clone(),
+        namehash: row.namehash.clone(),
+        labelhash: None,
+        labelhash_count: None,
+        surface_binding_id: row.surface_binding_id,
+        resource_id: row.resource_id,
+        serving_resource_id: row.serving_resource_id,
+        binding_kind: row.binding_kind,
+        record_inventory_boundary_key: None,
+        declared_summary: row.declared_summary.clone(),
+        provenance: row.provenance.clone(),
+        coverage: row.coverage.clone(),
+        chain_positions: row.chain_positions.clone(),
+        last_recomputed_at: row.last_recomputed_at,
+    }
+}
+
+/// Lookup gates a stored released registration on the retained pointer as name detail does, so
+/// it serves no resolver and, with no record inventory, no primary address or records
+/// (`lookup/build.rs`). Its unreleased guard and the root-registry pointer still serve.
+#[test]
+fn lookup_serves_no_stored_released_registration_through_a_retained_pointer() {
+    let released = ownerless_row(json!({"authority_kind": null, "released_at": "1700000160"}));
+    let identity = identity_row(&released);
+    assert!(
+        !identity_row_has_current_registration(&identity),
+        "{identity:#?}"
+    );
+    assert!(!identity_row_serves_resolver(&identity), "{identity:#?}");
+
+    let unreleased = identity_row(&ownerless_row(json!({"authority_kind": null})));
+    assert!(identity_row_has_current_registration(&unreleased));
+    assert!(identity_row_serves_resolver(&unreleased));
+
+    let mut root = released;
+    root.provenance["read_reachability"]["basis"] = json!("root_registry_resolver_pointer");
+    let root = identity_row(&root);
+    assert!(identity_row_has_current_registration(&root));
+    assert!(identity_row_serves_resolver(&root));
+}
