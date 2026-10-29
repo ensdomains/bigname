@@ -15,6 +15,8 @@ const GRANT_BLOCK: i64 = 130;
 const GRANT_SECONDS: i64 = 1_700_000_130;
 const RELEASE_BLOCK: i64 = 160;
 const RELEASE_SECONDS: i64 = 1_700_000_160;
+/// The time of the snapshot's block, which the fill dates a filled expiry's status at.
+const SNAPSHOT_SECONDS: i64 = 1_700_000_170;
 
 fn event(kind: &str, block_number: i64, resource_id: &str, expiry: Option<i64>) -> LeaseEvent {
     LeaseEvent {
@@ -442,4 +444,80 @@ fn no_registrar_events_leave_the_registration_as_composed() {
     let before = summary.clone();
     assert!(!heal(&mut summary, &[]));
     assert_eq!(summary, before);
+}
+
+/// A stored term that outlives the released lease, as an ENSv2 reservation extended past the
+/// lease's grace does, keeps the composed status and its own dates. The lease is still the
+/// registration's identity.
+#[test]
+fn a_released_lease_under_a_stored_term_that_outlives_it_keeps_the_composed_status() {
+    let mut summary = registry_only_summary();
+    let events = vec![
+        event(
+            "RegistrationReleased",
+            RELEASE_BLOCK,
+            LEASE,
+            Some(1_690_000_000),
+        ),
+        event("RegistrationGranted", 130, LEASE, Some(1_690_000_000)),
+    ];
+    assert!(heal(&mut summary, &events));
+    let registration = &summary["registration"];
+    assert_eq!(registration["status"], json!("active"));
+    assert_eq!(registration["lifecycle_status"], json!("active"));
+    assert_eq!(registration["released_at"], Value::Null);
+    assert_eq!(registration["expiry"], json!("1900000000"));
+    assert_eq!(registration["grace_ends_at"], json!("1907776000"));
+    assert_eq!(registration["ens_v1_expiry"], json!("1690000000"));
+    assert_eq!(registration["resource_id"], json!(LEASE));
+    assert_eq!(
+        registration_fields("ens", &summary, true).status,
+        RegistrationStatus::Active
+    );
+}
+
+/// A stored term that ended before the snapshot does not hold the released lease open.
+#[test]
+fn a_released_lease_under_a_stored_term_that_ended_is_released() {
+    let mut summary = registry_only_summary();
+    summary["registration"]["expiry"] = json!("1600000000");
+    summary["registration"]["grace_ends_at"] = json!("1607776000");
+    let events = vec![
+        event(
+            "RegistrationReleased",
+            RELEASE_BLOCK,
+            LEASE,
+            Some(1_690_000_000),
+        ),
+        event("RegistrationGranted", 130, LEASE, Some(1_690_000_000)),
+    ];
+    assert!(heal(&mut summary, &events));
+    let registration = &summary["registration"];
+    assert_eq!(registration["status"], json!("released"));
+    assert_eq!(registration["lifecycle_status"], json!("released"));
+    assert_eq!(
+        registration["released_at"],
+        json!(RELEASE_SECONDS.to_string())
+    );
+    assert_eq!(registration["expiry"], json!("1600000000"));
+}
+
+/// When the fill supplies the expiry, the status is the lease's at the snapshot's block time: in
+/// grace once the expiry has passed.
+#[test]
+fn a_filled_expiry_in_grace_at_the_snapshot_serves_expired() {
+    let mut summary = registry_only_summary();
+    summary["registration"]["expiry"] = Value::Null;
+    summary["registration"]["grace_ends_at"] = Value::Null;
+    let expiry = SNAPSHOT_SECONDS - 1;
+    let events = vec![event("RegistrationGranted", 130, LEASE, Some(expiry))];
+    assert!(heal(&mut summary, &events));
+    let registration = &summary["registration"];
+    assert_eq!(registration["expiry"], json!(expiry.to_string()));
+    assert_eq!(registration["lifecycle_status"], json!("expired"));
+    assert_eq!(registration["released_at"], Value::Null);
+    assert_eq!(
+        registration_fields("ens", &summary, true).status,
+        RegistrationStatus::Expired
+    );
 }
