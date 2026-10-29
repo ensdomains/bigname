@@ -17,6 +17,10 @@ mod store;
 mod text_records;
 mod types;
 
+pub use ccip::{
+    GatewayDestinationPolicy, GatewayRefusalClass, install_gateway_destination_policy,
+    install_gateway_refusal_observer,
+};
 pub use engine::LookupEngine;
 pub use error::{ErrorKind, LookupError, LookupRefusal, Result};
 pub use json_rpc_envelope::rpc_error_reports_block_unavailable;
