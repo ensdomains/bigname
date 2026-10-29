@@ -435,12 +435,15 @@ target. While a rebuild applies its ranges, the composed tables (name
 summaries, lookup rows, address indexes and the history catalogue) read zero
 rows. During the [composition pass](../glossary.md#composition-pass) the
 marker sits still on one block for hours while the repair record's
-`compose_stream`, `compose_cursor` and `compose_chunks` move. That is progress,
+`compose_stream`, `compose_cursor` and `compose_chunks` move. In the names
+stream, `compose_stream` 0, the cursor stays empty and `compose_chunks` and the
+work list's `composed` rows move instead. That is progress,
 not a stall, and the runner continues through runs that only compose.
 On a mainnet-sized corpus `BignamePhaseRunnerHeartbeatStale` can fire once as
 the pass begins, because the batch that begins it also lists every name to
 compose in the same transaction. It clears when that batch ends and needs no
-action. In the last stream, `compose_stream` 3, the cursor names the history
+action. The lookup inventories stream, `compose_stream` 4, runs after the
+record id stream and before the last one. In the last stream, `compose_stream` 3, the cursor names the history
 catalogue build's step and partition, and the runner logs each partition it
 commits with its time. A partition longer than the heartbeat threshold fires
 the same alert. Raise

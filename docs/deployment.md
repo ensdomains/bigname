@@ -402,6 +402,7 @@ The implemented phases use:
 - `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_BLOCK_SPANS` — block spans of the [composition pass](glossary.md#composition-pass)'s history catalogue build, 64 by default; see [The composition pass builds the history catalogue once](#the-composition-pass-builds-the-history-catalogue-once)
 - `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_KEY_PARTITIONS` — key partitions of that build, a power of two, 16 by default
 - `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_WORK_MEM` — `work_mem` of each build transaction, the server's setting when unset
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_WORKERS` — workers composing the composition pass's names stream side by side, 1 by default; see [The composition pass composes its names stream on parallel workers](#the-composition-pass-composes-its-names-stream-on-parallel-workers)
 
 An unset optional ceiling configures no limit; Docker inspection may show its bare
 variable name without `=`. An explicitly empty `KEY=` value is invalid.
@@ -5035,3 +5036,35 @@ are the same, row for row.
   own projection content hash. Its reset leaves the build's work table, which it never reads,
   and the new binary clears it at its next reset or pass end. The manifest-authority
   fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## The composition pass composes its names stream on parallel workers
+
+The build whose [composition pass](glossary.md#composition-pass) can compose its names stream
+on several workers, and composes the lookup inventories in a stream of their own after the
+record id stream, changes `crates/project/src` and adds a comment-only schema-migration. It is
+an input of the [projection content hash](glossary.md#projection-content-hash) only. The served
+rows are the same, row for row, whatever the worker count.
+
+- The projection content hash rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not. Every chain needs
+  one full-range Project redo and no Interpret redo, under matching runner and API binaries.
+  The change rides the next re-derivation release and shares that release's Project redo.
+- `--project-families-compose-workers`
+  (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_WORKERS`, default 1, at least 1) is the
+  number of workers composing the names stream side by side. One is the serial pass. Each
+  worker holds a database connection for its chunk, so `run` and `redo` size their pools with
+  one connection per worker on top of their usual size. A pass with more workers than its pool
+  can serve beside its coordinator is refused at its start, naming both numbers. The workers
+  multiply the names stream's database load: each runs the same statements under the server's
+  `work_mem`, so size the count to the database's CPU and memory, not the runner's.
+- The schema-migration `20261027130000_project_compose_stream_comments.sql` changes three
+  column comments only: the repair record's `compose_stream` and `compose_cursor`, and the
+  lookup name's `record_serving_resource_id`. It changes no column, index or row, and the
+  runner works without it.
+- During the names stream the [repair record](glossary.md#repair-record)'s `compose_cursor`
+  stays empty while `compose_chunks` and the work list's `composed` rows move. The lookup
+  inventories stream is `compose_stream` 4, and its cursor names the last lookup name it
+  committed ([pipeline monitoring](runbooks/pipeline-monitoring.md)).
+- Rolling the runner back mid-pass is safe. The previous binary resets the chain under its
+  own projection content hash. The manifest-authority fingerprint and the compiled watch plan
+  are unchanged, so stamp no Ingest redo.
