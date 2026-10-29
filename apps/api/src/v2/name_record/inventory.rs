@@ -3,7 +3,7 @@ use bigname_storage::{
 };
 use sqlx::PgPool;
 
-use crate::v2::support::load_records_route_inventory;
+use crate::v2::support::{RegistryRead, load_records_route_inventory};
 
 /// The record inventory name detail reads for both sources: the records route's chain-neutral
 /// inventory, so indexed detail, verified detail and `GET /v1/names/{name}/records` derive their
@@ -13,9 +13,10 @@ use crate::v2::support::load_records_route_inventory;
 pub(super) async fn load_name_record_inventory(
     pool: &PgPool,
     row: &NameCurrentRow,
+    registry: &RegistryRead,
     selected_snapshot: &SelectedSnapshot,
 ) -> Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
     // A family inventory describes the family publication, which is the only position a composed
     // name row serves, so there is no older served row to widen the match to.
-    load_records_route_inventory(pool, row, selected_snapshot).await
+    load_records_route_inventory(pool, row, registry, selected_snapshot).await
 }

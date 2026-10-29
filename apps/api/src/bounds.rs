@@ -28,7 +28,10 @@ use crate::ApiError;
 
 #[path = "bounds/classification.rs"]
 mod classification;
+#[path = "bounds/fill.rs"]
+mod fill;
 use classification::is_verified_execution_request;
+pub(crate) use fill::FillAdmission;
 
 const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_DB_STATEMENT_TIMEOUT_MS: u64 = 25_000;
@@ -246,15 +249,20 @@ impl VerifiedExecutionAdmission {
 
 async fn enforce_verified_execution_bounds(
     State(admission): State<VerifiedExecutionAdmission>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
+    let client = client_key(&request, admission.trust_x_forwarded_for);
+    request.extensions_mut().insert(FillAdmission {
+        admission: admission.clone(),
+        client,
+    });
     if !is_verified_execution_request(request.method(), request.uri()) {
         return next.run(request).await;
     }
 
     if let Some(rate_limiter) = admission.rate_limiter.as_ref() {
-        match rate_limiter.check(client_key(&request, admission.trust_x_forwarded_for)) {
+        match rate_limiter.check(client) {
             RateLimitDecision::Allowed => {}
             RateLimitDecision::Limited => return rate_limited_response(),
             RateLimitDecision::TableFull {
