@@ -455,26 +455,25 @@ through that read path. The setting does not change stored output or the
 
 `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_BLOCKS` bounds the work one Project
 batch commits for the [owned key families](glossary.md#owned-key-family): the
-blocks it applies or undoes, where each block of a
-[rebuild range](glossary.md#rebuild-range), each chunk of the
-[composition pass](glossary.md#composition-pass) and each partition of its
-history catalogue build counts as one. The runner
-records progress and writes its heartbeat between batches, so a long rebuild
-runs as a series of batches within this budget.
-`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_RANGE_EVENTS` bounds the interpreted
-events one rebuild range folds in its one transaction. The composition pass's
-history catalogue build does not read it: its block spans and key partitions
-split the build's transactions. A range keeps every row it
+blocks it applies or undoes, where each block of a [rebuild
+range](glossary.md#rebuild-range), each chunk of the [composition
+pass](glossary.md#composition-pass) and each partition of its history catalogue
+build counts as one. The runner records progress and writes its heartbeat
+between batches, so a long rebuild runs as a series of batches within this
+budget. `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_RANGE_EVENTS` bounds the
+interpreted events one rebuild range folds in its one transaction. The
+composition pass's history catalogue build does not read it: its block spans and
+key partitions split the build's transactions. A range keeps every row it
 loaded, with its pre-range and pre-block images, in memory until it commits. A
 resource-bearing event loads at least its resource pointer row, so the working
-set grows with this value. The default of 4,096 is about twice Sepolia's
-densest block and keeps a range's working set to tens of megabytes. A larger
-value grows the working set and the transaction one failure has to redo. A
-smaller one gives up more of the saving a range makes, about fifteen round trips
-for each block after its first. Live follow applies one block to a transaction
-and never reads the cap. Zero counts as one for both settings. Neither setting
-changes stored output or the
-[projection content hash](glossary.md#projection-content-hash).
+set grows with this value. The default of 4,096 is about twice Sepolia's densest
+block and keeps a range's working set to tens of megabytes. A larger value grows
+the working set and the transaction one failure has to redo. A smaller one gives
+up more of the saving a range makes, about fifteen round trips for each block
+after its first. Live follow applies one block to a transaction and never reads
+the cap. Zero counts as one for the run budget and the range event cap, and
+neither of them changes stored output or the [projection content
+hash](glossary.md#projection-content-hash).
 
 Interpret chooses how it restores prior adapter state for each chain and each
 batch; there is nothing to enable. When every active or deprecated manifest of
