@@ -37,6 +37,12 @@ fn registry_manifest() -> ManifestInput {
                 &["RegistrationReserved"],
             ),
             (
+                "LabelUnregistered",
+                "event LabelUnregistered(uint256 indexed tokenId, address indexed sender)",
+                &["registry"],
+                &["RegistrationReleased"],
+            ),
+            (
                 "TokenResource",
                 "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)",
                 &["registry"],
@@ -490,6 +496,51 @@ fn an_inconsistent_log_against_restored_state_is_skipped() -> anyhow::Result<()>
         kinds.iter().all(|(log_index, _)| *log_index != Some(0)),
         "{kinds:?}"
     );
+    Ok(())
+}
+
+/// Batch 2 of the undeclared registry, restored from batch 1's events, holds one role change on
+/// resource 99.
+fn role_change_after(first: Vec<alloy_primitives::LogData>) -> anyhow::Result<BatchInput> {
+    let first = interpret_test_batch(batch(vec![undeclared()], logs(first)))?;
+    let mut input = batch(
+        vec![undeclared()],
+        vec![raw_at(roles_changed(99), 2, 0, CONTRACT)],
+    );
+    input.prior_events = first.normalized_events.iter().map(prior_event).collect();
+    Ok(input)
+}
+
+/// Both tokens linked to resource 99 come back from an earlier batch, on both loaders, so the
+/// role change still names two tokens.
+#[test]
+fn a_role_change_on_a_resource_two_restored_tokens_link_is_skipped() -> anyhow::Result<()> {
+    let input = role_change_after(vec![linked(U256::from(7), 99), linked(U256::from(8), 99)])?;
+    assert_skipped(input, &[0], "token_resource_ambiguous")?;
+    Ok(())
+}
+
+/// Token 8 is released in the earlier batch, so only token 7 is restored for resource 99 and the
+/// role change applies to it.
+#[test]
+fn a_role_change_after_one_of_two_linked_tokens_is_released_applies() -> anyhow::Result<()> {
+    let input = role_change_after(vec![
+        linked(U256::from(7), 99),
+        linked(U256::from(8), 99),
+        v2_registry::LabelUnregistered {
+            tokenId: U256::from(8),
+            sender: sender(),
+        }
+        .encode_log_data(),
+    ])?;
+    let output = interpret_test_batch(input)?;
+    assert!(output.decode_skips.is_empty(), "{:#?}", output.decode_skips);
+    let kinds = output
+        .normalized_events
+        .iter()
+        .map(|event| (event.log_index, event.event_kind.as_str()))
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&(Some(0), "PermissionChanged")), "{kinds:?}");
     Ok(())
 }
 
