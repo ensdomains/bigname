@@ -15,17 +15,29 @@ pub(in crate::v2) fn row_has_current_registration(row: &NameCurrentRow) -> bool 
     ) || row_has_event_linked_registry_serving(row)
 }
 
-/// Whether an event-linked registry pointer serves the row. A retained registry resolver pointer
-/// serves a registration that is not released, so a released lease, stored or filled at read
-/// time, ends it. An ENSv2 TLD's root-registry pointer serves as before.
+/// Whether an event-linked registry pointer serves the row.
 fn row_has_event_linked_registry_serving(row: &NameCurrentRow) -> bool {
     bigname_storage::name_current_has_event_linked_registry_serving(row)
-        && !(row
-            .provenance
-            .pointer("/read_reachability/basis")
-            .and_then(Value::as_str)
-            == Some("retained_registry_resolver_pointer")
-            && bigname_storage::public_name_fields::registration_released(&row.declared_summary))
+        && !released_under_a_retained_pointer(&row.provenance, &row.declared_summary)
+}
+
+/// [`row_has_event_linked_registry_serving`] for an identity row, which lookup serves.
+fn identity_row_has_event_linked_registry_serving(
+    row: &bigname_storage::IdentityNameCurrentRow,
+) -> bool {
+    bigname_storage::identity_name_current_has_event_linked_registry_serving(row)
+        && !released_under_a_retained_pointer(&row.provenance, &row.declared_summary)
+}
+
+/// Whether a retained registry resolver pointer stops serving the row. It serves a registration
+/// that is not released, so a released lease, stored or filled at read time, ends it. An ENSv2
+/// TLD's root-registry pointer serves as before.
+fn released_under_a_retained_pointer(provenance: &Value, declared_summary: &Value) -> bool {
+    provenance
+        .pointer("/read_reachability/basis")
+        .and_then(Value::as_str)
+        == Some("retained_registry_resolver_pointer")
+        && bigname_storage::public_name_fields::registration_released(declared_summary)
 }
 
 pub(in crate::v2) fn identity_row_has_current_registration(
@@ -35,7 +47,7 @@ pub(in crate::v2) fn identity_row_has_current_registration(
         &row.namespace,
         &row.declared_summary,
         row.resource_id.is_some(),
-    ) || bigname_storage::identity_name_current_has_event_linked_registry_serving(row)
+    ) || identity_row_has_event_linked_registry_serving(row)
 }
 
 /// Whether the row's declared resolver is served. A `current_authority_not_projected` row keeps
@@ -54,7 +66,7 @@ pub(in crate::v2) fn identity_row_serves_resolver(
     identity_row_has_current_registration(row)
         && (string_field(row.coverage.get("unsupported_reason")).as_deref()
             != Some(PARTIAL_SERVE_UNSUPPORTED_REASON)
-            || bigname_storage::identity_name_current_has_event_linked_registry_serving(row))
+            || identity_row_has_event_linked_registry_serving(row))
 }
 
 pub(super) fn json_chain_id(value: &Value) -> Option<u64> {
