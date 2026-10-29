@@ -62,7 +62,7 @@ impl Stream {
             Some(1) => Self::Nodes,
             Some(2) => Self::RecordIds,
             Some(3) => Self::Catalogue,
-            Some(4) => Self::Inventories,
+            Some(4) => Self::Catalogue,
             _ => Self::Names,
         }
     }
