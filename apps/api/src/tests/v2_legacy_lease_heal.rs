@@ -21,6 +21,8 @@ const RENEWED_EXPIRY: i64 = 1_850_000_000;
 const LATER_EXPIRY: i64 = 1_900_000_000;
 /// A lease expiry between the grant's block and the publication's, so the lease is in grace there.
 const LAPSED_EXPIRY: i64 = 1_700_000_125;
+/// A NameWrapper expiry: the lease expiry plus the registrar grace.
+const WRAPPED_EXPIRY: i64 = RENEWED_EXPIRY + GRACE_SECONDS;
 const GRACE_SECONDS: i64 = 90 * 24 * 60 * 60;
 const REGISTRAR: &str = "ens_v1_registrar_l1";
 const REGISTRY: &str = "ens_v1_registry_l1";
@@ -949,5 +951,85 @@ async fn the_first_lease_event_reads_only_the_leases_own_events() -> Result<()> 
         events.len()
     );
     assert_eq!(plan[0]["Plan"]["Actual Rows"], json!(1), "{plan:#}");
+    database.cleanup().await
+}
+
+/// A wrapped name's renewal `ExpiryChanged`, as the registrar family carries it: on `resource`,
+/// with the wrapper's authority kind and the NameWrapper expiry.
+async fn insert_wrapper_renewal(
+    database: &TestDatabase,
+    logical: &str,
+    resource: Uuid,
+    block: i64,
+) -> Result<()> {
+    upsert_test_resources(
+        &database.pool,
+        &[Resource {
+            resource_id: resource,
+            token_lineage_id: None,
+            chain_id: CHAIN.into(),
+            block_hash: hash(HANDOFF),
+            block_number: HANDOFF,
+            provenance: json!({}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    let renewal = event(
+        Some(logical),
+        resource,
+        "ExpiryChanged",
+        REGISTRAR,
+        block,
+        900,
+        json!({"source_event": "NameRenewed", "authority_kind": "wrapper",
+            "expiry": WRAPPED_EXPIRY, "registrar_expiry": RENEWED_EXPIRY}),
+    );
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[renewal]).await?;
+    Ok(())
+}
+
+/// A name once wrapped and now registry-only serves its BaseRegistrar lease, not the wrapper
+/// whose renewal is the newest event the registrar family carries for it.
+#[tokio::test]
+async fn a_later_wrapper_renewal_does_not_become_the_lease() -> Result<()> {
+    let database = new_database().await?;
+    let logical = seed_registry_only(&database, "migrated.eth", 0x7b50, false).await?;
+    let lease = Uuid::from_u128(0x7b5f);
+    seed_lease(&database, &logical, lease, &renewed_lease()).await?;
+    insert_wrapper_renewal(&database, &logical, Uuid::from_u128(0x7b5e), RENEWED + 1).await?;
+    publish(&database).await?;
+    assert_composed_unleased(&database, &logical).await?;
+
+    let data = detail(&database, "migrated.eth").await?;
+    assert_eq!(data["registration_id"], json!(lease.to_string()), "{data}");
+    assert_eq!(
+        data["ens_v1"]["expires_at"],
+        json!(RENEWED_EXPIRY.to_string()),
+        "{data}"
+    );
+    assert_eq!(
+        data["expires_at"],
+        json!(RENEWED_EXPIRY.to_string()),
+        "{data}"
+    );
+    assert_eq!(data["registered_at"], json!(seconds(GRANTED)), "{data}");
+    database.cleanup().await
+}
+
+/// A wrapper renewal on the lease's own resource before its grant does not start the lease.
+#[tokio::test]
+async fn a_wrapper_renewal_on_the_lease_does_not_start_it() -> Result<()> {
+    let database = new_database().await?;
+    let logical = seed_registry_only(&database, "migrated.eth", 0x7b60, false).await?;
+    let lease = Uuid::from_u128(0x7b6f);
+    seed_lease(&database, &logical, lease, &renewed_lease()).await?;
+    insert_wrapper_renewal(&database, &logical, lease, HANDOFF + 1).await?;
+    publish(&database).await?;
+    assert_composed_unleased(&database, &logical).await?;
+
+    let data = detail(&database, "migrated.eth").await?;
+    assert_eq!(data["registration_id"], json!(lease.to_string()), "{data}");
+    assert_eq!(data["registered_at"], json!(seconds(GRANTED)), "{data}");
     database.cleanup().await
 }
