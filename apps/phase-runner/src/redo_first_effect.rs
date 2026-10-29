@@ -195,7 +195,7 @@ fn address_of(emitter: &str) -> Option<String> {
         .flatten()
 }
 
-fn start_block(value: &Value) -> i64 {
+pub(crate) fn start_block(value: &Value) -> i64 {
     match value {
         Value::Number(number) => number.as_i64().unwrap_or(0),
         Value::String(text) => text.parse().unwrap_or(0),
@@ -238,11 +238,12 @@ impl FirstEffect {
     }
 }
 
-const READABLE: &str = "lineage.canonicality_state IN ('canonical', 'safe', 'finalized')";
+pub(crate) const READABLE: &str =
+    "lineage.canonicality_state IN ('canonical', 'safe', 'finalized')";
 
 /// The first canonical log each changed address emitted, at or below `$3`. Each address walks
 /// `raw_logs_emitter_idx` over its own logs only.
-const EMITTED_LOG: &str = "SELECT min(hit.block_number)
+pub(crate) const EMITTED_LOG: &str = "SELECT min(hit.block_number)
     FROM unnest($2::text[]) AS target(address)
     CROSS JOIN LATERAL (
         SELECT log.block_number FROM raw_logs log

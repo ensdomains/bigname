@@ -354,8 +354,9 @@ ABI entries use Alloy-parseable human-readable Solidity fragments, not handwritt
   that adding the event stamps, and the first-effect scan of that change. The
   scan can bound the Interpret and Project redo only where the runner bounds
   them ([Manifest-authority marker](deployment.md#manifest-authority-marker)),
-  which it never does for a change to an ENSv2 root, registry or migration
-  manifest. Adding or editing an event block also rotates the
+  which it never does for a change to an ENSv2 root or registry manifest, or
+  for an event block change of the ENSv2 migration manifest. Adding or editing
+  an event block also rotates the
   [interpreter content hash](glossary.md#interpreter-content-hash), so the
   Interpret and Project redo that follow run over the full range. Runtime
   intake and Interpret keep each emitter's own active range, and intake still
@@ -2019,8 +2020,12 @@ of a removed or narrowed discovery rule and a retired declaration are read from
 their old start. A move across namespaces retires one manifest and adds
 another, and is bounded the same way. Retiring a family that matches every
 emitter costs the full pair. A change to the ENSv2
-root, registry or migration family gains nothing from the timing, because
-stored rows of every name read it, so its redo stays the full range.
+root or registry family gains nothing from the timing, because stored rows of
+every name read it, so its redo stays the full range. An `ens_v2_migration_l1`
+change that only adds an address or moves a role to another address is bounded
+from the lowest start on either side. Every other change of that family keeps
+the full range ([manifest-authority
+marker](deployment.md#manifest-authority-marker)).
 
 The legacy resolver-profile authority journal, input queue, and reconciliation tables remain only in immutable migration history. Their Rust APIs and consumers have been deleted. Current manifests and schema-v2 discovery edges are the admission truth; legacy rows do not gate synchronization or interpretation.
 

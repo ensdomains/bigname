@@ -119,8 +119,16 @@ fn published_resource_ids(
     resource_ids
 }
 
-/// The grant rows are found through `normalized_events_v1_direct_node_probe_idx`, whose key is
-/// the namespace-qualified node an ENSv1 row carries, so the join repeats that expression.
+/// The grant rows are read through `normalized_events_v1_direct_node_probe_idx`, whose key is
+/// the namespace-qualified node an ENSv1 row carries. The probe is a lateral subquery holding only
+/// that key and the index's partial predicate. `OFFSET 0` keeps it from being merged into the
+/// join and keeps the lease filters out of it. Merged, the planner estimates the node join at the
+/// default selectivity and ANDs the event-kind index over every `RegistrationGranted` row of the
+/// chain on each call. The surface's chain and node reach the probe as the outer row's values, so
+/// neither the bound id nor a generic plan changes its shape. Interpret's lookahead loader
+/// (`crates/interpret/src/load/lookahead/events.sql`) fences the same probe. Without
+/// `canonical_only`, which no reader passes, the partial predicate is not implied and the probe
+/// cannot use the index, as before.
 pub(super) fn push_registrar_grant_resources_query<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     logical_name_id: &'a str,
@@ -136,18 +144,41 @@ pub(super) fn push_registrar_grant_resources_query<'a>(
         LEFT JOIN bigname_phase.chain_lineage surface_lineage
           ON surface_lineage.chain_id = surface.chain_id
          AND surface_lineage.block_hash = surface.block_hash
-        JOIN bigname_phase.normalized_events lease
-          ON lease.chain_id = surface.chain_id
-         AND COALESCE(
-                 lease.namespace || ':' || lower(COALESCE(
-                     lease.after_state ->> 'child_node',
-                     lease.after_state ->> 'namehash',
-                     lease.after_state ->> 'node',
-                     lease.after_state #>> '{grant_source,node}',
-                     lease.after_state #>> '{revocation_source,node}'
-                 )),
-                 lease.logical_name_id
-             ) = surface.namespace || ':' || lower(surface.namehash)
+        JOIN LATERAL (
+            SELECT node_row.chain_id,
+                   node_row.block_number,
+                   node_row.block_hash,
+                   node_row.resource_id,
+                   node_row.source_family,
+                   node_row.event_kind,
+                   node_row.consumer_visibility,
+                   node_row.canonicality_state,
+                   node_row.after_state ->> 'namehash' AS namehash,
+                   node_row.after_state ->> 'authority_kind' AS authority_kind
+            FROM bigname_phase.normalized_events node_row
+            WHERE node_row.chain_id = surface.chain_id
+              AND COALESCE(
+                      node_row.namespace || ':' || lower(COALESCE(
+                          node_row.after_state ->> 'child_node',
+                          node_row.after_state ->> 'namehash',
+                          node_row.after_state ->> 'node',
+                          node_row.after_state #>> '{grant_source,node}',
+                          node_row.after_state #>> '{revocation_source,node}'
+                      )),
+                      node_row.logical_name_id
+                  ) = surface.namespace || ':' || lower(surface.namehash)
+              AND node_row.source_family LIKE 'ens\_v1\_%'
+        "#,
+    );
+    if canonical_only {
+        builder.push(format!(
+            "  AND node_row.canonicality_state IN {CANONICAL_STATES}\n"
+        ));
+    }
+    builder.push(
+        r#"
+            OFFSET 0
+        ) lease ON TRUE
         LEFT JOIN bigname_phase.chain_lineage lease_lineage
           ON lease_lineage.chain_id = lease.chain_id
          AND lease_lineage.block_hash = lease.block_hash
@@ -157,13 +188,11 @@ pub(super) fn push_registrar_grant_resources_query<'a>(
     builder.push(
         r#"
           AND lease.resource_id IS NOT NULL
-          AND lease.source_family LIKE 'ens\_v1\_%'
           AND lease.source_family = 'ens_v1_registrar_l1'
           AND lease.event_kind = 'RegistrationGranted'
           AND lease.consumer_visibility = 'activated'
-          AND lower(lease.after_state ->> 'namehash') = lower(surface.namehash)
-          AND COALESCE(NULLIF(lease.after_state ->> 'authority_kind', ''), 'registrar')
-              = 'registrar'
+          AND lower(lease.namehash) = lower(surface.namehash)
+          AND COALESCE(NULLIF(lease.authority_kind, ''), 'registrar') = 'registrar'
         "#,
     );
     if canonical_only {
@@ -408,6 +437,13 @@ pub(super) fn push_namehash_surfaces_query<'a>(
     builder.push(" ORDER BY surface.logical_name_id");
 }
 
+/// The canonicality states a readable row may carry. The partial node probe index uses this list.
+const CANONICAL_STATES: &str = concat!(
+    "('canonical'::bigname_phase.canonicality_state, ",
+    "'safe'::bigname_phase.canonicality_state, ",
+    "'finalized'::bigname_phase.canonicality_state)",
+);
+
 fn push_canonical_row_filter(
     builder: &mut QueryBuilder<'_, Postgres>,
     row_alias: &str,
@@ -415,18 +451,10 @@ fn push_canonical_row_filter(
 ) {
     builder.push(format!(
         r#"
-        AND {row_alias}.canonicality_state IN (
-            'canonical'::bigname_phase.canonicality_state,
-            'safe'::bigname_phase.canonicality_state,
-            'finalized'::bigname_phase.canonicality_state
-        )
+        AND {row_alias}.canonicality_state IN {CANONICAL_STATES}
         AND (
             {row_alias}.block_hash IS NULL
-            OR {lineage_alias}.canonicality_state IN (
-                'canonical'::bigname_phase.canonicality_state,
-                'safe'::bigname_phase.canonicality_state,
-                'finalized'::bigname_phase.canonicality_state
-            )
+            OR {lineage_alias}.canonicality_state IN {CANONICAL_STATES}
         )
         "#,
     ));
