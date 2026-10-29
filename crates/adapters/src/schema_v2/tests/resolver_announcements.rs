@@ -519,7 +519,8 @@ fn a_migration_observation_in_a_block_interpreted_twice_is_counted_once() -> any
 /// A discarded pass puts back the entries it retired. The constructed catalog holds `RETIRED`
 /// under the observation the factory's `ProxyDeployed` replaces when it admits `RESOLVER`, so that
 /// log retires `RETIRED` in each of the block's two passes. `RETIRED`'s earlier log in the block is
-/// still read, and `RETIRED` stays retired after the block.
+/// still read, and `RETIRED` stays retired after the block. The shape is constructed because no
+/// current adapter retires another address's entry: every admission's key names its own address.
 #[test]
 fn an_emitter_retired_later_in_a_rerun_block_keeps_its_earlier_log() -> anyhow::Result<()> {
     crate::schema_v2::session::reset_block_passes();
