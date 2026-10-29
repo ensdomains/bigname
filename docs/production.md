@@ -103,7 +103,7 @@ recommended starting point before the public edge is undrained.
 
 | Environment variable | Default | Undrain starting value | Mechanism |
 | --- | ---: | ---: | --- |
-| `BIGNAME_API_REQUEST_TIMEOUT_MS` | `30000` | `30000` | Whole-request deadline on every v2 REST, status, and health route; returns `408 request_timeout`. |
+| `BIGNAME_API_REQUEST_TIMEOUT_MS` | `30000` | `30000` | Whole-request deadline on every v2 REST, status, and health route; returns `408 request_timeout`. Plus 5 s, it is each API connection's `idle_in_transaction_session_timeout`. |
 | `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS` | `25000` | `25000` | PostgreSQL `statement_timeout` applied to both API request pools. The readiness pool has a fixed two-second check limit. |
 | `BIGNAME_API_MAX_IN_FLIGHT` | `1024` | `256` | Shared process-wide in-flight ceiling; excess work is load-shed as `503 overloaded`. `/healthz` bypasses it. |
 | `BIGNAME_API_HEALTH_MAX_IN_FLIGHT` | `4` | `4` | Independent in-flight ceiling reserved for `/healthz`; excess health work is load-shed as `503 overloaded`. |
