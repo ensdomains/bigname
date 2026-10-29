@@ -71,7 +71,7 @@ async fn composed_read(pool: &PgPool) -> Result<()> {
 async fn begin_dropped_in_flight_leaves_no_transaction_on_the_next_acquire() -> Result<()> {
     let db = database("serving_pool_begin_dropped").await?;
     let pool = serving_pool(&db, 1).await?;
-    drop_begin_in_flight(&mut *pool.acquire().await?).await?;
+    drop_begin_in_flight(&mut pool.acquire().await?).await?;
 
     let mut conn = pool.acquire().await?;
     assert_eq!(server_state(db.pool(), &mut conn).await?, "idle");
