@@ -12,6 +12,8 @@ use std::{
     sync::{LazyLock, Mutex, MutexGuard, PoisonError},
 };
 
+use tokio::task::LocalKey;
+
 use super::GatewayRefusalClass;
 
 /// The operator list for every test in the process. Tests that need a public but unroutable
@@ -22,7 +24,6 @@ pub(crate) const TEST_DENY_LIST: &str = "198.51.100.0/24, 2001:db8:1::/48";
 struct Seam {
     admitted: HashSet<SocketAddr>,
     hosts: HashMap<String, VecDeque<Vec<SocketAddr>>>,
-    judged_admitted: HashSet<SocketAddr>,
 }
 
 static SEAM: LazyLock<Mutex<Seam>> = LazyLock::new(Mutex::default);
@@ -42,16 +43,6 @@ pub(crate) fn withdraw(peer: SocketAddr) {
 
 pub(crate) fn is_admitted(peer: SocketAddr) -> bool {
     state().admitted.contains(&peer)
-}
-
-/// Records a peer the class table judged and let through. Peers a fake admitted skip the table
-/// and are not recorded.
-pub(super) fn record_judged_admitted(peer: SocketAddr) {
-    state().judged_admitted.insert(peer);
-}
-
-pub(crate) fn was_judged_admitted(peer: SocketAddr) -> bool {
-    state().judged_admitted.contains(&peer)
 }
 
 /// Each resolution of `host` takes the next answer, and the last answer repeats. An answer's
@@ -83,6 +74,20 @@ pub(super) fn scripted_answer(host: &str) -> io::Result<Vec<SocketAddr>> {
 
 tokio::task_local! {
     static REFUSALS: RefCell<Vec<GatewayRefusalClass>>;
+    static JUDGED_ADMITTED: RefCell<Vec<SocketAddr>>;
+}
+
+async fn capture<T, F>(sink: &'static LocalKey<RefCell<Vec<T>>>, future: F) -> (F::Output, Vec<T>)
+where
+    T: 'static,
+    F: Future,
+{
+    sink.scope(RefCell::new(Vec::new()), async move {
+        let output = future.await;
+        let captured = sink.with(|captured| std::mem::take(&mut *captured.borrow_mut()));
+        (output, captured)
+    })
+    .await
 }
 
 /// Runs `future` and returns the refusal classes the observer hook reported while it ran. The
@@ -91,15 +96,27 @@ pub(crate) async fn capture_refusals<F>(future: F) -> (F::Output, Vec<GatewayRef
 where
     F: Future,
 {
-    REFUSALS
-        .scope(RefCell::new(Vec::new()), async move {
-            let output = future.await;
-            let refusals = REFUSALS.with(|refusals| std::mem::take(&mut *refusals.borrow_mut()));
-            (output, refusals)
-        })
-        .await
+    capture(&REFUSALS, future).await
 }
 
 pub(super) fn record_refusal(class: GatewayRefusalClass) {
     let _ = REFUSALS.try_with(|refusals| refusals.borrow_mut().push(class));
+}
+
+/// Runs `future` and returns each address the class table admitted while it ran, one entry per
+/// judgement. An IP-literal host is judged in `fetch_one` on the request task, so every literal
+/// judgement of the lookup is seen. A hostname is judged in the connector's resolver, which may
+/// run on another task, so its judgements may be missed. No test relies on them.
+pub(crate) async fn capture_judged_admitted<F>(future: F) -> (F::Output, Vec<SocketAddr>)
+where
+    F: Future,
+{
+    capture(&JUDGED_ADMITTED, future).await
+}
+
+/// Records one address the class table admitted. It says nothing about the resolution it came
+/// from, which a refused sibling address still refuses whole. Addresses a fake admitted skip the
+/// table and are not recorded.
+pub(super) fn record_judged_admitted(peer: SocketAddr) {
+    let _ = JUDGED_ADMITTED.try_with(|judged| judged.borrow_mut().push(peer));
 }
