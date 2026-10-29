@@ -2055,8 +2055,9 @@ with the marker, and the replayed block composes every name again. A followed
 publication therefore leaves the rows a rebuild under the same manifest set
 leaves at the same block. Manifest sync still moves the phase hashes, so an
 attested Interpret and Project redo adopts every manifest change. It starts at
-the change's first effect, except that a change to the ENSv2 root, registry or
-migration family keeps the full range
+the change's first effect, except that a change to the ENSv2 root or registry
+family keeps the full range, and so does a migration manifest change other than
+an address added or moved
 ([manifest-authority marker](deployment.md#manifest-authority-marker)).
 
 ## Owned key families
