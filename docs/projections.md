@@ -2483,18 +2483,24 @@ would meet it again at the same head. Two shapes reach this:
 
 - a string with a NUL byte, such as a text record or reverse name read from
   the resolver over RPC (SQLSTATE class 22, data exception)
-- a record key longer than a btree index row may be (SQLSTATE class 54,
-  program limit exceeded).
+- a record key longer than an index row may be (SQLSTATE class 54, program
+  limit exceeded).
 
 The runner marks that chain's Project row `failed`, with PostgreSQL's message
 in `last_error`, and that chain's supervisor stops with a data-integrity error.
-A one-shot redo stops with the same error. Other chains keep running, and
-nothing is dropped: the family marker stays on the block before, and the API
-keeps serving that chain's last publication. A restart replays the same block
-and stops again, so the chain resumes only on a build that stores or
-explicitly skips that value. The runner recognises these failures by
-PostgreSQL's English message text, so it assumes the server's `lc_messages` is
-English, the default. Under another language the failure is retried as before.
+A one-shot redo stops with the same error. Nothing is dropped. The family
+marker stays before the block, or before the range in a bounded rebuild, and
+the API keeps serving that chain's last publication.
+
+A runner exits nonzero once every chain it runs has stopped. A runner with one
+chain therefore exits on this stop. Under a restart policy it starts again,
+replays the same block and stops again, in a loop. Stop that runner until a
+build that stores or explicitly skips the value is deployed. On a runner with
+several chains the others keep running.
+
+The runner recognises these failures by PostgreSQL's English message text, so
+it assumes the server's `lc_messages` is English. Under another language the
+failure is retried as before.
 
 Verified lookup captures topology, inventory, participating publications and
 real manifest provenance in one snapshot. After RPC, the guarded ledger writer

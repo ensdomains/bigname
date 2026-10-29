@@ -297,8 +297,8 @@ async fn missing_hydration_rpc_fails_before_a_rebuild_publishes() -> Result<()> 
 
 /// A hydrated string with a NUL byte, which PostgreSQL cannot store, fails the head block's
 /// write and rolls the block back. Every retry would read the same answer at the same head, so the
-/// supervised runner stops the chain on it once with a data-integrity error, and so does the
-/// one-shot redo. A reverse name and a text record each reach the refusal. It is PostgreSQL's
+/// supervised runner stops the chain on it once with a data-integrity error, and so does a run
+/// with retries off. A reverse name and a text record each reach the refusal. It is PostgreSQL's
 /// own, so a change of its wording fails here.
 #[tokio::test]
 async fn a_hydrated_nul_byte_is_not_retried() -> Result<()> {

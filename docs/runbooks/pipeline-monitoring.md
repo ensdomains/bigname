@@ -462,10 +462,14 @@ PostgreSQL's message:
 - `index row size … exceeds btree version 4 maximum …` or
   `index row requires … bytes, maximum size is …` for an oversized record key.
 
-Other chains keep running and the API serves the stopped chain's last
-publication. Restarting the runner replays the same block and stops again. Do
-not edit markers or delete the event. Report the message and block, and
-restart once a build that handles that value is deployed.
+A runner exits nonzero once every chain it runs has stopped, so a runner with
+one chain exits on this stop. Its restart policy starts it again, and it replays
+the same block and stops again. That loop also pages
+`BignamePhaseRunnerContainerRestarting`, and `BignamePhaseRunnerDown` if the
+runner stays down between starts. Stop that runner's container until a build
+that handles the value is deployed. On a runner with several chains the others
+keep running. The API serves the stopped chain's last publication throughout.
+Do not edit markers or delete the event. Report the message and block.
 
 ## Alerts
 
