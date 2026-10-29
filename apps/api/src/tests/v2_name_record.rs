@@ -2128,8 +2128,8 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
             payload["data"]["resolver"]["address"],
             json!("0x0000000000000000000000000000000000000abc")
         );
-        assert_eq!(payload["data"]["registration_id"], Value::Null);
         if uri.contains("/records") {
+            assert_eq!(payload["data"]["registration_id"], Value::Null);
             assert_eq!(payload["meta"]["source"], json!("indexed"));
             assert_eq!(
                 payload["data"]["records"]["text:description"],
@@ -2144,6 +2144,17 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
                 payload["data"]["status"],
                 json!("unregistered")
             );
+            // The stored registration holds no lease, so name detail serves the lease the
+            // name's own registrar grant proves. The status stays as composed.
+            assert_eq!(
+                payload["data"]["registration_id"],
+                json!(Uuid::from_u128(0x2200).to_string()),
+                "{payload}"
+            );
+            assert_eq!(payload["data"]["registered_at"], json!("1704164645"), "{payload}");
+            assert_eq!(payload["data"]["expires_at"], json!("1798859045"), "{payload}");
+            assert_eq!(payload["data"]["grace_ends_at"], json!("1806635045"), "{payload}");
+            assert!(payload["data"]["ens_v1"].is_null(), "{payload}");
             assert!(
                 payload["data"].get("token_id").is_none(),
                 "ownerless exact-name payload must not imply token control: {payload}"
