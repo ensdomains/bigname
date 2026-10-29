@@ -159,7 +159,7 @@ pub(in crate::schema_v2) fn unwrapped_reconciliations(
             boundary.transaction_hash.as_deref().unwrap_or_default(),
         ));
         let Some(transaction) = transaction else {
-            refuse("registrar transfers in the boundary transaction");
+            refuse("registrar observations in the boundary transaction");
             continue;
         };
         let label = transition.predecessor_selector["resource"]["labelhash"]
@@ -172,7 +172,7 @@ pub(in crate::schema_v2) fn unwrapped_reconciliations(
             .collect::<Vec<_>>();
         transfers.sort_by_key(|observation| observation.raw.log_index);
         let [.., incoming, cleanup] = transfers.as_slice() else {
-            refuse("registrar transfers in the boundary transaction");
+            refuse("incoming and cleanup registrar transfers of the label");
             continue;
         };
         // Earlier ordinary transfers remain in the prefix. Only the unique terminal pair
@@ -327,9 +327,10 @@ fn prove(
     *clause = "incoming transfer from the registrar owner";
     let owner = registrar.owner.as_deref()?;
     // A lease whose first observed registrar event was a controller renewal records the zero
-    // address as its holder. Only this comparison is skipped for it: the controller takes the
-    // token from whoever holds it, and every other clause still applies.
-    // (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L121 @ ens_v2@a971bd64)
+    // address as its holder, so there is no recorded holder to compare `from` with. Only this
+    // comparison is skipped for it, and every other clause still applies. The controller's
+    // receiver ignores `from` and checks only its caller, the token and the migration data.
+    // (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L88-L121 @ ens_v2@a971bd64)
     let holder_known = owner.parse::<Address>().ok() != Some(Address::ZERO);
     if holder_known && !equals(&incoming.decoded["from"], owner) {
         return None;
