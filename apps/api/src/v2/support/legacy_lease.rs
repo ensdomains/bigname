@@ -10,9 +10,9 @@
 //!   name's activated registrar events at or below the snapshot becomes the registration's
 //!   resource and identity. Its newest expiry is the lease expiry, and also the registration's
 //!   expiry and grace end when those are null. An `active` registration the fill supplies the
-//!   expiry of takes the lease's status at the snapshot's block time. The
-//!   registration time is the block time of the name's first current-registry record, else of
-//!   the lease's earliest event, read on its own. A lease whose latest event is a release is
+//!   expiry of takes the lease's status at the snapshot's block time. The registration time is
+//!   the block time of the name's first current-registry record, else of the lease's earliest
+//!   event, read on its own. A lease whose latest event is a release is
 //!   served released at that event's block, unless the registration's stored term, such as an
 //!   ENSv2 reservation's, is still live at the snapshot. Events of an older lease are left out.
 //! - A registrar-selected registration whose lease is known but has no registration time. It is
@@ -130,10 +130,10 @@ pub(crate) struct LeaseDates {
 /// Writes the lease `events` (newest first) prove into `registration`. The latest event's lease is
 /// the registration's resource and identity, and its newest expiry the lease expiry. When the
 /// registration's expiry is null the lease supplies it and its grace end, and an `active` one that
-/// is not an ENSv2 allocation takes the lease's status at the snapshot's block time. The handoff block's time, else the
-/// lease's first event's, is the registration time. A lease whose latest event is a release is
-/// released at that event's block, unless a stored term outlives it at the snapshot. Events of an
-/// older lease are left out. Returns whether anything was written.
+/// is not an ENSv2 allocation takes the lease's status at the snapshot's block time. The handoff
+/// block's time, else the lease's first event's, is the registration time. A lease whose latest
+/// event is a release is released at that event's block, unless a stored term outlives it at the
+/// snapshot. Events of an older lease are left out. Returns whether anything was written.
 pub(crate) fn heal_registration(
     registration: &mut Map<String, Value>,
     events: &[LeaseEvent],
