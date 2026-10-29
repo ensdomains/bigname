@@ -11,7 +11,8 @@ use sqlx::{
 };
 
 use super::{
-    IN_TRANSACTION_BLOCK, ROLLED_BACK_LEFT_OPEN, idle_in_transaction_setting, serving_pool_options,
+    IN_TRANSACTION_BLOCK, MAX_REQUEST_DEADLINE_MS, ROLLED_BACK_LEFT_OPEN,
+    idle_in_transaction_setting, serving_pool_options,
 };
 
 /// A statement whose reply arrives long after [`DROP_AFTER`], so a stalled test host cannot let
@@ -400,6 +401,10 @@ fn sessions_end_a_transaction_left_idle_past_the_request_deadline() -> Result<()
     assert_eq!(
         idle_in_transaction_setting(Duration::from_secs(30)),
         ("idle_in_transaction_session_timeout", "35000ms".to_owned())
+    );
+    assert_eq!(
+        idle_in_transaction_setting(Duration::from_millis(MAX_REQUEST_DEADLINE_MS)).1,
+        format!("{}ms", i32::MAX)
     );
     let config = crate::DatabaseConfig {
         database_url: Some("postgres://bigname@localhost/bigname".to_owned()),

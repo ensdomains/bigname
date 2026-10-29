@@ -1661,9 +1661,11 @@ Each API connection also sets `idle_in_transaction_session_timeout` to
 `BIGNAME_API_REQUEST_TIMEOUT_MS` plus 5 seconds. A request never holds a
 transaction past its deadline, so the server only ends a session whose
 transaction was left open and that no request has taken again. The API logs a
-warning with SQLSTATE `25P03` when it then replaces that connection. On a hot
-standby such a transaction would otherwise hold back WAL replay that conflicts
-with its snapshot.
+warning with SQLSTATE `25P03` when it then replaces that connection. A
+transaction left open holds its locks and, after a snapshot pin, its snapshot.
+On a hot standby either can hold up WAL replay that conflicts with it, until the
+standby cancels the session. The request timeout may be at most 2147478647 ms,
+so that this setting stays within PostgreSQL's limit.
 
 ### Database connection budget
 
