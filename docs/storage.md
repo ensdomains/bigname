@@ -792,7 +792,7 @@ row:
 
 Interpret and the verified label-preimage importer write `name_search_documents`. The
 API's prefix search adds three read-only indexes on it, installed by the identity baseline
-and `20261030120000_search_prefix_bucket_indexes.sql` and changing no row:
+and `20261029120000_search_prefix_bucket_indexes.sql` and changing no row:
 
 | Index | Serves |
 | --- | --- |

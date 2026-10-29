@@ -493,7 +493,7 @@ const DURABLE_SEARCH: &str =
 const BOUND_NAMES: &str =
     include_str!("../../../migrations/20261014120000_project_name_summary_bound_names.sql");
 const SEARCH_PREFIX_BUCKETS: &str =
-    include_str!("../../../migrations/20261030120000_search_prefix_bucket_indexes.sql");
+    include_str!("../../../migrations/20261029120000_search_prefix_bucket_indexes.sql");
 /// The schema-migrations after the earlier search shape that touch these tables, in version
 /// order, as a real upgrade applies them.
 const SEARCH_UPGRADE: [&str; 4] = [
