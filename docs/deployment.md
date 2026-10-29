@@ -1651,9 +1651,19 @@ takes the place of the empty ping the database driver sends otherwise. A request
 dropped while its `BEGIN` was in flight, as when its client disconnects, can
 return its connection with that transaction still open. The API rolls such a
 transaction back, logs a warning that it did, and then hands the connection out.
-A connection the check cannot reach is closed and replaced. A request's shared
-read snapshot that still meets such a transaction when it pins its isolation
-level rolls it back and starts again once, rather than failing with `500`.
+A connection the server has already ended is closed and replaced. After a
+server restart this happens once per pooled connection and logs at info. A
+request's shared read snapshot that still meets such a transaction when it pins
+its isolation level rolls it back, logs the same warning and starts again once,
+rather than failing with `500`.
+
+Each API connection also sets `idle_in_transaction_session_timeout` to
+`BIGNAME_API_REQUEST_TIMEOUT_MS` plus 5 seconds. A request never holds a
+transaction past its deadline, so the server only ends a session whose
+transaction was left open and that no request has taken again. The API logs a
+warning with SQLSTATE `25P03` when it then replaces that connection. On a hot
+standby such a transaction would otherwise hold back WAL replay that conflicts
+with its snapshot.
 
 ### Database connection budget
 

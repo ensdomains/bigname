@@ -2,11 +2,7 @@
 use std::ops::{Deref, DerefMut};
 
 use anyhow::{Context, Result};
-use futures_util::future::BoxFuture;
-use sqlx::{
-    Executor, PgConnection, PgPool, Postgres, Transaction, pool::PoolConnection,
-    postgres::PgQueryResult,
-};
+use sqlx::{PgConnection, PgPool, Postgres, Transaction, pool::PoolConnection};
 
 /// A pool, where each reader takes its own connection and, for a multi-statement read, its own
 /// REPEATABLE READ snapshot; or a caller's connection already inside one read-only REPEATABLE
@@ -64,38 +60,35 @@ impl<'a> ReadDb<'a> {
 pub async fn begin_read_snapshot(pool: &PgPool) -> Result<Transaction<'static, Postgres>> {
     crate::families::name::seams::before_snapshot().await;
     let mut transaction = begin(pool).await?;
-    if let Err(error) = pin(&mut transaction).await {
+    let pinned = sqlx::query(PIN).execute(&mut *transaction).await;
+    if let Err(error) = pinned {
         if !ran_after_a_statement(&error) {
             return Err(error).context(PIN_FAILED);
         }
         // The connection came with a transaction an earlier request left open, and a statement
         // had run in it (`crate::serving_pool`). The rollback ends that transaction. The read
-        // starts again once.
+        // starts again once. The acquire check should have ended it first, so this warns.
         transaction
             .rollback()
             .await
             .context("failed to end a transaction left open on a pooled connection")?;
+        tracing::warn!("{}", crate::serving_pool::ROLLED_BACK_LEFT_OPEN);
         transaction = begin(pool).await?;
-        pin(&mut transaction).await.context(PIN_FAILED)?;
+        sqlx::query(PIN)
+            .execute(&mut *transaction)
+            .await
+            .context(PIN_FAILED)?;
     }
     Ok(transaction)
 }
 
+const PIN: &str = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY";
 const PIN_FAILED: &str = "failed to pin the read to one snapshot";
 
 async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres>> {
     pool.begin()
         .await
         .context("failed to begin a read snapshot")
-}
-
-fn pin(
-    transaction: &mut Transaction<'static, Postgres>,
-) -> BoxFuture<'_, sqlx::Result<PgQueryResult>> {
-    Executor::execute(
-        &mut **transaction,
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"),
-    )
 }
 
 /// SQLSTATE 25001: `SET TRANSACTION ISOLATION LEVEL` after a statement of the same transaction.
