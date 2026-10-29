@@ -200,6 +200,270 @@ async fn a_project_redo_rerun_after_an_interpret_revision_change_rebuilds() -> R
     scratch.cleanup().await
 }
 
+// The range event cap reaches the rebuild through the runner. With the chain's safe block at the
+// head, blocks 1 to 25 rebuild in ranges, one event to a block, and each range is one family
+// generation. Ranges right after the reset ask for 1, 2, 4, ... blocks, never more than the budget
+// has left and never more events than the cap. At the default cap and above it, a budget of 10
+// commits [1], [2, 3], [4 to 7] and [8 to 10]. A cap of 2 cuts them to [1], [2, 3], [4, 5],
+// [6, 7], [8, 9] and [10], a cap of 1 to single blocks. The families at the head, two composed
+// names among them, are the default run's. The crate's range and composition tests carry the
+// equality on full histories.
+#[tokio::test]
+async fn the_range_event_cap_at_or_above_the_default_ranges_as_the_default() -> Result<()> {
+    let expected = ranged_rebuild("families_cap_default", budget_and_cap(10, None)).await?;
+    ensure!(
+        expected.batches[0] == (Some(10), 4),
+        "{:?}",
+        expected.batches
+    );
+    for cap in [bigname_project::families::MAX_RANGE_EVENTS, 100_000] {
+        let capped = ranged_rebuild("families_cap_large", budget_and_cap(10, Some(cap))).await?;
+        capped.require(&expected, &format!("cap {cap}"))?;
+        ensure!(
+            capped.batches[0] == (Some(10), 4),
+            "cap {cap}: {:?}",
+            capped.batches
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_range_event_cap_of_two_cuts_the_rebuild_ranges_to_two_blocks() -> Result<()> {
+    let expected = ranged_rebuild("families_cap_two_default", budget_and_cap(10, None)).await?;
+    let capped = ranged_rebuild("families_cap_two", budget_and_cap(10, Some(2))).await?;
+    capped.require(&expected, "cap 2")?;
+    ensure!(capped.batches[0] == (Some(10), 6), "{:?}", capped.batches);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_range_event_cap_of_one_rebuilds_one_block_to_a_generation() -> Result<()> {
+    let expected = ranged_rebuild("families_cap_one_default", budget_and_cap(10, None)).await?;
+    let capped = ranged_rebuild("families_cap_one", budget_and_cap(10, Some(1))).await?;
+    capped.require(&expected, "cap 1")?;
+    ensure!(capped.batches[0] == (Some(10), 10), "{:?}", capped.batches);
+    Ok(())
+}
+
+// The cap alone, under the default budget: the rebuild completes in one batch. At the default cap
+// blocks 1 to 25 go in ranges [1], [2, 3], [4 to 7], [8 to 15] and [16 to 25], at a cap of 2 in
+// [1] then twelve ranges of two blocks. Then 26 to 29 and the target go one to a generation. The
+// composition pass between them advances no generation.
+#[tokio::test]
+async fn the_range_event_cap_alone_bounds_the_ranges_of_a_one_batch_rebuild() -> Result<()> {
+    let expected = ranged_rebuild("families_cap_alone_default", FamilySettings::default()).await?;
+    ensure!(
+        expected.batches == vec![(Some(HEAD), 5 + 4 + 1)],
+        "{:?}",
+        expected.batches
+    );
+    let capped = ranged_rebuild("families_cap_alone", budget_and_cap(256, Some(2))).await?;
+    capped.require(&expected, "cap 2")?;
+    ensure!(
+        capped.batches == vec![(Some(HEAD), 13 + 4 + 1)],
+        "{:?}",
+        capped.batches
+    );
+    Ok(())
+}
+
+// Budget 5 and cap 3. The first batch commits [1], [2, 3] and [4, 5], as the budget alone would.
+// A resumed batch asks for a range of its whole budget: under the default cap [6 to 10] in one
+// generation, under a cap of 3 [6 to 8] and [9, 10]. Both continue to the same families.
+#[tokio::test]
+async fn the_budget_and_the_range_event_cap_together_bound_each_range() -> Result<()> {
+    let expected = ranged_rebuild("families_cap_both_default", budget_and_cap(5, None)).await?;
+    ensure!(
+        expected.batches[..2] == [(Some(5), 3), (Some(10), 4)],
+        "{:?}",
+        expected.batches
+    );
+    let capped = ranged_rebuild("families_cap_both", budget_and_cap(5, Some(3))).await?;
+    capped.require(&expected, "budget 5, cap 3")?;
+    ensure!(
+        capped.batches[..2] == [(Some(5), 3), (Some(10), 5)],
+        "{:?}",
+        capped.batches
+    );
+    Ok(())
+}
+
+// Live follow never forms a range, so the cap is not read: with a cap of 1 and a budget of 1, each
+// batch after the rebuild follows one block in one generation until the head.
+#[tokio::test]
+async fn live_follow_under_a_range_event_cap_applies_a_block_a_batch() -> Result<()> {
+    let scratch = ready("families_cap_follow").await?;
+    let rebuilt = head_marker(&scratch, 20).await?;
+    let outcome = ProjectPhase::new(scratch.pool().clone())
+        .run_batch(context(&rebuilt, None))
+        .await?;
+    ensure!(
+        matches!(outcome, PhaseBatchOutcome::Complete(_)),
+        "{outcome:?}"
+    );
+    let head = head_marker(&scratch, HEAD).await?;
+    let project =
+        ProjectPhase::new(scratch.pool().clone()).with_family_settings(budget_and_cap(1, Some(1)));
+    let mut resume = Some(rebuilt);
+    let mut sequence = marker_sequence(&scratch).await?;
+    for block in 21..=HEAD {
+        let outcome = project.run_batch(context(&head, resume.as_ref())).await?;
+        let complete = matches!(outcome, PhaseBatchOutcome::Complete(_));
+        ensure!(complete == (block == HEAD), "block {block}: {outcome:?}");
+        resume = outcome.progress().current.clone();
+        let next = marker_sequence(&scratch).await?;
+        ensure!(
+            marker(&scratch).await? == Some(block) && next == sequence + 1,
+            "block {block}: one block in one generation, {sequence} then {next}"
+        );
+        sequence = next;
+    }
+    scratch.cleanup().await
+}
+
+// The one-shot redo carries the cap and completes as it does without it.
+#[tokio::test]
+async fn a_one_shot_redo_under_a_range_event_cap_completes() -> Result<()> {
+    let scratch = ready("families_cap_redo").await?;
+    let settings = FamilySettings {
+        retry_family_failures: false,
+        ..budget_and_cap(10, Some(1))
+    };
+    redo(&scratch, settings).await?;
+    ensure!(
+        project_state(&scratch).await? == ("completed".into(), Some(HEAD), false),
+        "the redo completed at the head"
+    );
+    ensure!(marker(&scratch).await? == Some(HEAD));
+    ensure!(repair_completed(&scratch).await?);
+    scratch.cleanup().await
+}
+
+fn budget_and_cap(budget: u64, cap: Option<u64>) -> FamilySettings {
+    let defaults = FamilySettings::default();
+    FamilySettings {
+        max_blocks_per_run: budget,
+        max_range_events: cap.unwrap_or(defaults.max_range_events),
+        ..defaults
+    }
+}
+
+/// A rebuild through the runner: the marker and the generations since the rebuild's reset after
+/// each batch, and the families at the head, at least one table of them non-empty.
+struct RangedRebuild {
+    batches: Vec<(Option<i64>, i64)>,
+    families: Vec<(String, String)>,
+}
+
+impl RangedRebuild {
+    fn require(&self, expected: &Self, label: &str) -> Result<()> {
+        for ((table, was), (_, now)) in expected.families.iter().zip(&self.families) {
+            ensure!(was == now, "{label}: {table} is {now}, by default {was}");
+        }
+        Ok(())
+    }
+}
+
+/// Rebuild a fresh scratch to the head with `settings`, batch after batch as the runner continues
+/// one, with the chain's safe block at the head so blocks 1 to 25 rebuild in ranges.
+async fn ranged_rebuild(prefix: &str, settings: FamilySettings) -> Result<RangedRebuild> {
+    let scratch = ready(prefix).await?;
+    // Two names surfaced at block 1, which the composition pass composes, so the families
+    // compared below hold rows.
+    for name in [0xa_u64, 0xb] {
+        sqlx::query(
+            "INSERT INTO name_surfaces (logical_name_id, namespace, namehash, labelhashes,
+                 normalizer_version, visibility_state, chain_id, block_hash, block_number,
+                 canonicality_state)
+             VALUES ('ens:' || $1, 'ens', $1, ARRAY[$1], 'fixture', 'active', $2,
+                 $2 || '-block-1', 1, 'canonical')",
+        )
+        .bind(format!("0x{name:064x}"))
+        .bind(CHAIN)
+        .execute(scratch.pool())
+        .await?;
+    }
+    let head = head_marker(&scratch, HEAD).await?;
+    sqlx::query("UPDATE chain_lineage SET canonicality_state = 'safe' WHERE chain_id = $1")
+        .bind(CHAIN)
+        .execute(scratch.pool())
+        .await?;
+    sqlx::query(
+        "INSERT INTO chain_heads (chain_id, latest_block_hash, latest_block_number,
+             safe_block_hash, safe_block_number)
+         VALUES ($1, $2, $3, $2, $3)",
+    )
+    .bind(CHAIN)
+    .bind(&head.hash)
+    .bind(HEAD)
+    .execute(scratch.pool())
+    .await?;
+    let project = ProjectPhase::new(scratch.pool().clone()).with_family_settings(settings);
+    let mut resume: Option<BlockMarker> = None;
+    let mut batches = Vec::new();
+    loop {
+        let outcome = project.run_batch(context(&head, resume.as_ref())).await?;
+        resume = outcome.progress().current.clone();
+        let (_, reset) = rebuild_record(&scratch).await?;
+        let reset = reset.ok_or_else(|| anyhow::anyhow!("the rebuild recorded no reset"))?;
+        batches.push((
+            marker(&scratch).await?,
+            marker_sequence(&scratch).await? - reset,
+        ));
+        match outcome {
+            PhaseBatchOutcome::Continue(_) => ensure!(batches.len() < 30, "{batches:?}"),
+            PhaseBatchOutcome::Complete(_) => break,
+            PhaseBatchOutcome::Idle(_) => anyhow::bail!("a family batch is never idle"),
+        }
+    }
+    ensure!(marker(&scratch).await? == Some(HEAD));
+    let families = families(&scratch).await?;
+    ensure!(
+        families
+            .iter()
+            .any(|(table, rows)| table != "project_family_marker" && rows != "[]"),
+        "the rebuild left every family table empty, so the comparison covers nothing"
+    );
+    scratch.cleanup().await?;
+    Ok(RangedRebuild { batches, families })
+}
+
+/// Every family table and the marker without their generations, as text.
+async fn families(scratch: &ScratchDatabase) -> Result<Vec<(String, String)>> {
+    let mut tables = Vec::new();
+    for table in bigname_project::families::family_tables() {
+        let row = if table == "project_history_catalogue_marker" {
+            "to_jsonb(t) - 'publication_sequence'"
+        } else {
+            "to_jsonb(t)"
+        };
+        let rows: String = sqlx::query_scalar(&format!(
+            "SELECT coalesce(jsonb_agg({row} ORDER BY ({row})::text), '[]')::text FROM {table} t"
+        ))
+        .fetch_one(scratch.pool())
+        .await?;
+        tables.push((table.to_owned(), rows));
+    }
+    let marker: String = sqlx::query_scalar(
+        "SELECT (to_jsonb(m) - 'sequence')::text FROM project_family_marker m WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .fetch_one(scratch.pool())
+    .await?;
+    tables.push(("project_family_marker".to_owned(), marker));
+    Ok(tables)
+}
+
+async fn marker_sequence(scratch: &ScratchDatabase) -> Result<i64> {
+    Ok(
+        sqlx::query_scalar("SELECT sequence FROM project_family_marker WHERE chain_id = $1")
+            .bind(CHAIN)
+            .fetch_one(scratch.pool())
+            .await?,
+    )
+}
+
 fn budgeted() -> FamilySettings {
     FamilySettings {
         max_blocks_per_run: 10,

@@ -23,6 +23,9 @@ use crate::{
 pub struct FamilySettings {
     /// Blocks applied or undone before returning progress to the runner.
     pub max_blocks_per_run: u64,
+    /// Most interpreted events one rebuild range, or one catalogue window of the composition
+    /// pass, applies.
+    pub max_range_events: u64,
     /// Supervised execution retries family failures; one-shot redo preserves the failure kind.
     pub retry_family_failures: bool,
     /// Rebuild blocks eligible for bounded range transactions.
@@ -39,6 +42,7 @@ impl Default for FamilySettings {
     fn default() -> Self {
         Self {
             max_blocks_per_run: bigname_project::families::MAX_BLOCKS_PER_RUN,
+            max_range_events: bigname_project::families::MAX_RANGE_EVENTS,
             retry_family_failures: true,
             rebuild_ranges: RebuildRanges::BelowSafe,
             require_hydration_url: true,

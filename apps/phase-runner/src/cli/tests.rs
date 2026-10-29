@@ -261,6 +261,110 @@ fn run_takes_the_family_run_budget_and_retries_family_failures() {
     assert!(project_families.require_hydration_url);
 }
 
+/// The family settings `run` or `redo` resolve with `extra` flags.
+fn family_settings(command: &str, extra: &[&str]) -> Result<FamilySettings, String> {
+    configure_redo_source_endpoint();
+    let mut args = vec![
+        "phase-runner",
+        command,
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+    ];
+    if command == "run" {
+        args.extend([
+            "--verification-database-url",
+            "postgres://phase-runner.invalid/verification",
+            "--chain",
+            "ethereum-mainnet",
+            "--source",
+            REDO_SOURCE,
+        ]);
+    } else {
+        args.extend([
+            "--all-chains",
+            "--phase",
+            "recompute-flags",
+            "--from-block",
+            "1",
+            "--to-block",
+            "30",
+        ]);
+    }
+    args.extend_from_slice(extra);
+    let command = Cli::try_parse_from(args)
+        .map_err(|error| error.to_string())?
+        .resolve()
+        .map_err(|error| error.to_string())?;
+    match command {
+        ResolvedCommand::Run {
+            project_families, ..
+        }
+        | ResolvedCommand::Redo {
+            project_families, ..
+        } => Ok(project_families),
+        _ => Err("expected run or redo".to_owned()),
+    }
+}
+
+#[test]
+fn run_and_redo_default_both_family_knobs_to_the_crate_constants() {
+    for command in ["run", "redo"] {
+        let settings = family_settings(command, &[]).unwrap();
+        assert_eq!(
+            (settings.max_blocks_per_run, settings.max_range_events),
+            (
+                bigname_project::families::MAX_BLOCKS_PER_RUN,
+                bigname_project::families::MAX_RANGE_EVENTS
+            ),
+            "{command}"
+        );
+        let budget = family_settings(command, &["--project-families-max-blocks", "10"]).unwrap();
+        assert_eq!(
+            (budget.max_blocks_per_run, budget.max_range_events),
+            (10, bigname_project::families::MAX_RANGE_EVENTS),
+            "{command}: the budget leaves the range event cap at its default"
+        );
+    }
+}
+
+#[test]
+fn run_and_redo_take_the_range_event_cap_and_count_zero_as_one() {
+    for command in ["run", "redo"] {
+        for (value, expected) in [("4096", 4096), ("100000", 100_000), ("2", 2), ("0", 1)] {
+            let settings =
+                family_settings(command, &["--project-families-max-range-events", value]).unwrap();
+            assert_eq!(
+                (settings.max_range_events, settings.max_blocks_per_run),
+                (expected, bigname_project::families::MAX_BLOCKS_PER_RUN),
+                "{command} {value}: the cap leaves the budget at its default"
+            );
+        }
+        let both = family_settings(
+            command,
+            &[
+                "--project-families-max-blocks",
+                "5",
+                "--project-families-max-range-events",
+                "3",
+            ],
+        )
+        .unwrap();
+        assert_eq!((both.max_blocks_per_run, both.max_range_events), (5, 3));
+        for flag in [
+            "--project-families-max-range-events=x",
+            "--project-families-max-range-events=-1",
+        ] {
+            let error = family_settings(command, &[flag])
+                .expect_err("a range event cap is a non-negative integer");
+            assert!(
+                error.contains("invalid value")
+                    && error.contains("--project-families-max-range-events"),
+                "{command} {flag}: {error}"
+            );
+        }
+    }
+}
+
 #[test]
 fn redo_default_metrics_listener_ignores_an_occupied_supervisor_address() {
     const CHILD: &str = "BIGNAME_TEST_REDO_METRICS_CHILD";
