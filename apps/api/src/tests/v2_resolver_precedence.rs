@@ -166,7 +166,9 @@ async fn a_public_resolver_v2_name_keeps_its_records_when_an_ensv1_name_points_a
 /// records and would find itself in the ENSv1 registry, so the name's records are unsupported,
 /// never an authoritative `not_found`, whether an ENSv2 registry edge reaches the mirror (M3,
 /// red before the ENSv1 pointer was walked) or only the ENSv2 entry's pointer names it (M3
-/// without an edge, red once that pointer admitted the declaration).
+/// without an edge, red once that pointer admitted the declaration)
+/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/AbstractMirrorResolver.sol:L67-L69 @ ens_v2_mainnet_20261002@b1f97b91)
+/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_mainnet_20261002@b1f97b91).
 #[tokio::test]
 async fn an_ensv1_name_pointing_at_the_mirror_is_unsupported_not_absent() -> Result<()> {
     const CHAIN: &str = "ethereum-sepolia";
