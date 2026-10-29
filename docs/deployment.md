@@ -5180,3 +5180,35 @@ still running. Then run the schema-migrations again.
 Ingest writes one more btree entry for each block it stores. Project writes one more for
 each resource pointer and registry pointer it stores. Interpret writes one more for each
 readable, active name surface whose raw name is at most 2000 bytes.
+
+## ENSv1→ENSv2 migration of a lease with no known holder
+
+The build that reconciles the unwrapped ENSv1→ENSv2 migration of a `.eth` lease bigname first
+learned of from a legacy-controller `NameRenewed`
+([storage](storage.md#ensv1ensv2-correlation-visibility)) changes the migration proof in
+`crates/adapters/src`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain. The
+[projection content hash](glossary.md#projection-content-hash) moves with it.
+
+What changes for names:
+
+- Interpret no longer stops at such a migration with "leaves 1 ENSv1 bindings open at its
+  predecessor cleanup". The name serves its ENSv2 registration after the migration block, like a
+  name with a known holder.
+- Such a lease records the zero address as its holder. The proof now skips only its holder
+  comparison for that lease, and checks every other clause. The writer's stop is unchanged.
+- A migration of such a lease that had already moved on the BaseRegistrar, or that went through
+  the NameWrapper, is unchanged.
+- Each unwrapped boundary that derives without the proof logs a warning,
+  `unwrapped ENSv1→ENSv2 migration boundary derives without its cleanup proof`, with a
+  `clause` field naming the check that refused it.
+
+These rows arrive through re-derivation, not through an in-place change. Every chain needs a
+full-history Interpret redo, then the Project redo it installs, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+binaries. A Project redo alone does not apply it. The change rides the next re-derivation
+release and shares that release's one Interpret and Project redo pair with its other
+hash-rotating changes. Do not mark old rows ready under the new hash.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
+and the compiled watch plan are unchanged, so stamp no Ingest redo.

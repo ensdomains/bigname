@@ -21435,6 +21435,8 @@ fn reconciliation_probe_event(
 use crate::schema_v2 as adapter_api;
 #[path = "../../tests/fixtures/interpreters/numeric_short_lease.rs"]
 mod numeric_short_lease_fixture;
+#[path = "../../tests/fixtures/interpreters/zero_owner_migration.rs"]
+mod zero_owner_migration_fixture;
 
 mod numeric_short_lease_tests {
     use super::{numeric_short_lease_fixture as fixture, *};
