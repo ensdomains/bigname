@@ -271,6 +271,7 @@ impl Run<'_> {
         let mut error: Option<ProjectError> = None;
         let mut counting = true;
         let mut drained = Drained::Empty;
+        let mut moved = false;
         loop {
             tokio::select! {
                 Some(stats) = committed.recv() => {
@@ -283,7 +284,15 @@ impl Run<'_> {
                     }
                 }
                 Some(joined) = running.join_next() => match joined {
-                    Ok(Ok(Drained::Empty)) => {}
+                    Ok(Ok(Drained::Empty)) => {
+                        if !moved {
+                            moved = true;
+                            let mut early = self.pool.begin().await.map_err(|error| ProjectError::database("stub S4 begin", error))?;
+                            marker::lock_shared(&mut early, self.chain_id).await?;
+                            repair::compose_step(&mut early, self.chain_id, Stream::Names.next().index(), None, false).await?;
+                            commit(early).await?;
+                        }
+                    }
                     Ok(Ok(stopped)) => drained = stopped,
                     Ok(Err(failed)) => {
                         error.get_or_insert(failed);
