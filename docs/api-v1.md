@@ -2679,8 +2679,9 @@ Rules:
   fails it when no later URL answers. Both fail it in band with
   `failure_reason=ccip_read_failed`, as do an `OffchainLookup` from any sender
   but the called contract and a callback still reverting with `OffchainLookup`
-  after four steps. Neither
-  result is persisted by the v2 serving path.
+  after four steps. A connect, DNS or TLS failure on a URL tried before the
+  list stopped takes precedence, and the request then fails whole with
+  `500 internal_error`. Neither result is persisted by the v2 serving path.
 - Every route has a whole-request deadline. `/healthz` and `/v1/status` retain
   that deadline as their final backstop. `/healthz` bypasses
   the process-wide concurrency limiter and load shedding, uses a reserved
