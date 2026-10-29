@@ -11,18 +11,13 @@
 //! never changes the selection. Each lookup sits in a `LATERAL (... OFFSET 0)` subquery, which
 //! the planner runs once per outer row and cannot turn into a join over every surface.
 //!
-//! The walk below reaches a registry other than the root only through a slot: an entry whose
-//! `SubregistryChanged` event names the registry. The slots of each registry that changed or
-//! holds a changed entry are found from the registry: `normalized_events_v2_key_probe_idx`, an
-//! index of Interpret's lookahead loader, files the event under the registry it names, and the
-//! event's resource leads to its entry. Every entry that ever pointed at the registry is found,
-//! and the walk decides which still do. The lookup must repeat the index's expression and
-//! predicates exactly, or it reads every event.
-//!
-//! A changed registry moves the names under its slots, so a slot's key counts as a changed
-//! entry key. A changed entry moves the names where the walk reads it: at a name's last label
-//! for the root registry, and at a label directly above one of the registry's slots for any
-//! other. A registry that no slot names is never reached, so its entries select nothing.
+//! A registry changed in the publication moves the names under the entries that point at it.
+//! Those entries are found from the registry: `normalized_events_v2_key_probe_idx`, an index of
+//! Interpret's lookahead loader, files a `SubregistryChanged` event under the registry it
+//! names, and the event's resource leads to its entry. The entry's key then joins the changed
+//! entry keys above. Every entry that ever pointed at the registry is found, and the walk
+//! decides which still do. The lookup must repeat the index's expression and predicates
+//! exactly, or it reads every event.
 //!
 //! Two cases read every observed ENS surface, because they can move every name: a
 //! classification change of a declared ENSv1 mirror resolver (the v1 fallback), and a prefix
@@ -107,46 +102,6 @@ const POINTER_STATE_KEYS: &str = "array_remove(ARRAY[
             lower(pointer.after_state ->> 'subregistry') || ':00000000'
         ]::text[], NULL)";
 
-/// The slots of the registry `registry`, an SQL expression of the outer row, as the lateral
-/// `slot`: each entry's key and the registry that holds it, `parent`.
-fn slot_lookup(registry: &str) -> String {
-    format!(
-        r#"CROSS JOIN LATERAL (
-            SELECT pointer.resource_id FROM normalized_events pointer
-            WHERE {POINTER_STATE_KEYS} @> ARRAY[{registry} || ':00000000']
-              AND pointer.canonicality_state IN ('canonical','safe','finalized')
-              AND pointer.source_family LIKE 'ens\_v2\_%'
-              AND pointer.chain_id=$1 AND pointer.event_kind='SubregistryChanged'
-              AND pointer.source_family IN ('ens_v2_root_l1','ens_v2_registry_l1')
-              AND pointer.consumer_visibility='activated'
-              AND pointer.after_state->>'subregistry'={registry}
-              AND pointer.resource_id IS NOT NULL
-            OFFSET 0
-        ) named
-        CROSS JOIN LATERAL (
-            SELECT entry.entry_key, entry.registry AS parent FROM project_ens_v2_entry_owner entry
-            WHERE entry.chain_id=$1 AND entry.resource_id=named.resource_id
-            UNION ALL
-            -- An entry row with no resource is tied to its pointer by the event that last
-            -- wrote the row. That event is one of the resource's, and the row's key is its
-            -- emitter and the entry key of the token it names (families/ens_v2_registry.rs).
-            -- The canonical test on that event lets the lookup read the resource history
-            -- index. It drops no entry: the entry rows are undone with the journal before a
-            -- replay, so at a publication no entry row cites an orphaned event.
-            SELECT entry.entry_key, entry.registry FROM normalized_events origin
-            CROSS JOIN LATERAL (VALUES (origin.after_state->>'token_id'),
-                                       (origin.after_state->>'new_token_id')) token(id)
-            JOIN project_ens_v2_entry_owner entry ON entry.chain_id=$1
-              AND entry.registry=lower(origin.raw_fact_ref->>'emitting_address')
-              AND entry.entry_key=left(lower(token.id),58)||'00000000'
-            WHERE origin.resource_id=named.resource_id
-              AND origin.canonicality_state IN ('canonical','safe','finalized')
-              AND entry.resource_id IS NULL AND entry.event_identity=origin.event_identity
-            OFFSET 0
-        ) slot"#
-    )
-}
-
 pub(super) fn statement(normal_work: &str) -> String {
     // The `.eth` names among the surfaces `child`, and the test that `child` is `prefix` or a
     // name under it. Every arm of `affected` that reads surfaces applies the first, and the two
@@ -184,8 +139,6 @@ pub(super) fn statement(normal_work: &str) -> String {
               OR (pointer.namespace=journal.before_image->>'namespace'
                 AND pointer.namehash=journal.before_image->>'namehash')))"
     );
-    let (slots_of_changed, slots_of_above) =
-        (slot_lookup("changed.registry"), slot_lookup("chain.above"));
     format!(
         r#"/* project:families.resolution_paths.prepare */
     INSERT INTO pg_temp.bigname_resolution_path_work (logical_name_id)
@@ -473,76 +426,60 @@ pub(super) fn statement(normal_work: &str) -> String {
         SELECT DISTINCT surface.labelhashes FROM normal name JOIN name_surfaces surface
           ON surface.logical_name_id=name.logical_name_id AND surface.chain_id=$1 AND surface.namespace='ens'
         WHERE surface.block_number>$4 AND surface.block_number<=$2
-    ), slots AS MATERIALIZED (
-        -- Each registry that changed or holds a changed entry, with its slots. Every test on a
-        -- slot's event is one the walk below applies to the pointer it follows, or the index's
-        -- own predicate, which those imply. So no entry the walk would follow to the registry
-        -- is missed. An entry that pointed at it earlier, or points at it only above the
-        -- publication, is found too, and the walk passes it by. A block bound here would only
-        -- add a second index to the lookup.
-        SELECT DISTINCT changed.registry, slot.entry_key, slot.parent
-        FROM (SELECT registry FROM changed_registries UNION SELECT registry FROM changed_entries) changed
-        {slots_of_changed}
-        WHERE changed.registry IS NOT NULL
-    ), chains(entry_key, above, extra) AS (
-        -- When a changed entry has the key of a slot of its registry, the probe's two keys are
-        -- one. A route to that slot holds, above it, the first slot of another key, or only
-        -- slots of this key up to the root. From the slot's registry the search follows the
-        -- slots of the entry's key up until one has another key, `extra`. It carries on past
-        -- the root, which can be mounted too. Each registry is read once, so a cycle ends it.
-        SELECT DISTINCT changed.entry_key, slot.parent, NULL::text
-        FROM changed_entries changed JOIN slots slot ON slot.registry=changed.registry
-          AND slot.entry_key=changed.entry_key
-        UNION
-        SELECT chain.entry_key, CASE WHEN slot.entry_key=chain.entry_key THEN slot.parent END,
-               NULLIF(slot.entry_key, chain.entry_key)
-        FROM chains chain {slots_of_above}
-        WHERE chain.extra IS NULL
+    ), mounts AS MATERIALIZED (
+        -- Each changed registry with the keys of the entries whose `SubregistryChanged` event
+        -- names it. Every test on that event is one the walk below applies to the pointer it
+        -- follows, or the index's own predicate, which those imply. So no entry the walk would
+        -- follow to a changed registry is missed. An entry that pointed at one earlier, or
+        -- points at one only above the publication, is found too, and the walk passes it by.
+        -- A block bound here would only add a second index to the lookup.
+        SELECT DISTINCT changed.registry, slot.entry_key
+        FROM (SELECT DISTINCT registry FROM changed_registries WHERE registry IS NOT NULL) changed
+        CROSS JOIN LATERAL (
+            SELECT pointer.resource_id FROM normalized_events pointer
+            WHERE {POINTER_STATE_KEYS} @> ARRAY[changed.registry || ':00000000']
+              AND pointer.canonicality_state IN ('canonical','safe','finalized')
+              AND pointer.source_family LIKE 'ens\_v2\_%'
+              AND pointer.chain_id=$1 AND pointer.event_kind='SubregistryChanged'
+              AND pointer.source_family IN ('ens_v2_root_l1','ens_v2_registry_l1')
+              AND pointer.consumer_visibility='activated'
+              AND pointer.after_state->>'subregistry'=changed.registry
+              AND pointer.resource_id IS NOT NULL
+            OFFSET 0
+        ) named
+        CROSS JOIN LATERAL (
+            SELECT entry.entry_key FROM project_ens_v2_entry_owner entry
+            WHERE entry.chain_id=$1 AND entry.resource_id=named.resource_id
+            UNION ALL
+            -- An entry row with no resource is tied to its pointer by the event that last
+            -- wrote the row. That event is one of the resource's, and the row's key is its
+            -- emitter and the entry key of the token it names (families/ens_v2_registry.rs).
+            -- The canonical test on that event lets the lookup read the resource history
+            -- index. It drops no entry: the entry rows are undone with the journal before a
+            -- replay, so at a publication no entry row cites an orphaned event.
+            SELECT entry.entry_key FROM normalized_events origin
+            CROSS JOIN LATERAL (VALUES (origin.after_state->>'token_id'),
+                                       (origin.after_state->>'new_token_id')) token(id)
+            JOIN project_ens_v2_entry_owner entry ON entry.chain_id=$1
+              AND entry.registry=lower(origin.raw_fact_ref->>'emitting_address')
+              AND entry.entry_key=left(lower(token.id),58)||'00000000'
+            WHERE origin.resource_id=named.resource_id
+              AND origin.canonicality_state IN ('canonical','safe','finalized')
+              AND entry.resource_id IS NULL AND entry.event_identity=origin.event_identity
+            OFFSET 0
+        ) slot
     ), candidates AS MATERIALIZED (
-        -- A candidate holds the key of a slot of a changed registry anywhere, or a changed
-        -- entry's label where the walk reads the entry (see the module docs). The index finds
-        -- the surfaces with the keys' hashes and the label comparison decides.
+        -- A candidate holds a label of a changed entry's key, or of the key of an entry that
+        -- points at a changed registry. The index finds the surfaces with the key's hash and
+        -- the label comparison decides.
         SELECT probe.labelhashes
-        FROM (SELECT DISTINCT entry_key FROM slots
-              WHERE registry IN (SELECT registry FROM changed_registries)) changed
+        FROM (SELECT entry_key FROM changed_entries UNION SELECT entry_key FROM mounts) changed
         CROSS JOIN LATERAL (
             SELECT surface.labelhashes FROM name_surfaces surface
             WHERE entry_key_hashes(surface.labelhashes) @> ARRAY[hashtextextended(changed.entry_key,0)]
               AND surface.chain_id=$1 AND surface.namespace='ens' AND cardinality(surface.labelhashes)>0
               AND EXISTS (SELECT 1 FROM unnest(surface.labelhashes) label
                 WHERE changed.entry_key=left(lower(label),58)||'00000000')
-            OFFSET 0
-        ) probe
-        UNION ALL
-        SELECT probe.labelhashes
-        FROM (SELECT DISTINCT entry_key FROM changed_entries WHERE registry=$5::text) changed
-        CROSS JOIN LATERAL (
-            SELECT surface.labelhashes FROM name_surfaces surface
-            WHERE entry_key_hashes(surface.labelhashes) @> ARRAY[hashtextextended(changed.entry_key,0)]
-              AND surface.chain_id=$1 AND surface.namespace='ens' AND cardinality(surface.labelhashes)>0
-              AND changed.entry_key
-                =left(lower(surface.labelhashes[cardinality(surface.labelhashes)]),58)||'00000000'
-            OFFSET 0
-        ) probe
-        UNION ALL
-        -- A label directly above a slot holds both keys, and the index intersects them.
-        SELECT probe.labelhashes
-        FROM (
-            SELECT changed.entry_key, slot.entry_key AS slot_key, NULL::text AS extra
-            FROM changed_entries changed JOIN slots slot ON slot.registry=changed.registry
-              AND slot.entry_key<>changed.entry_key
-            UNION
-            SELECT entry_key, entry_key, extra FROM chains WHERE extra IS NOT NULL OR above=$5::text
-        ) changed
-        CROSS JOIN LATERAL (
-            SELECT surface.labelhashes FROM name_surfaces surface
-            WHERE entry_key_hashes(surface.labelhashes) @> array_remove(ARRAY[
-                    hashtextextended(changed.entry_key,0), hashtextextended(changed.slot_key,0),
-                    hashtextextended(changed.extra,0)], NULL)
-              AND surface.chain_id=$1 AND surface.namespace='ens' AND cardinality(surface.labelhashes)>1
-              AND EXISTS (SELECT 1 FROM generate_series(1,cardinality(surface.labelhashes)-1) place
-                WHERE changed.entry_key=left(lower(surface.labelhashes[place]),58)||'00000000'
-                  AND changed.slot_key=left(lower(surface.labelhashes[place+1]),58)||'00000000')
             OFFSET 0
         ) probe
     ), wanted AS MATERIALIZED (
