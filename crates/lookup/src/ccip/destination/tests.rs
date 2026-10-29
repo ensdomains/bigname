@@ -206,6 +206,33 @@ fn ipv4_compatible() {
     assert_eq!(classify(ip("::1"), &policy), Some(Class::Loopback));
 }
 
+/// The local-use prefix is refused whatever its low bits hold, including a private IPv4 address at
+/// the well-known prefix's offset.
+#[test]
+fn nat64_local_use() {
+    assert_class(
+        &built_in(),
+        &[
+            "64:ff9b:1::",
+            "64:ff9b:1::a00:1",
+            "64:ff9b:1::cb00:7101",
+            "64:ff9b:1:ffff:ffff:ffff:ffff:ffff",
+        ],
+        &["64:ff9b:0:ffff:ffff:ffff:ffff:ffff", "64:ff9b:2::"],
+        Class::Nat64LocalUse,
+    );
+}
+
+#[test]
+fn teredo() {
+    assert_class(
+        &built_in(),
+        &["2001::", "2001::1", "2001:0:ffff:ffff:ffff:ffff:ffff:ffff"],
+        &["2000:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "2001:1::"],
+        Class::Teredo,
+    );
+}
+
 /// A translated or tunnelled address is admitted when the IPv4 address it carries is.
 #[test]
 fn embedded_ipv4_prefixes_follow_the_embedded_address() {
@@ -218,7 +245,6 @@ fn embedded_ipv4_prefixes_follow_the_embedded_address() {
             "2002:cb00:7101::1",
             "64:ff9a:ffff:ffff:ffff:ffff:ffff:ffff",
             "64:ff9b::1:0:0",
-            "64:ff9b:1::a00:1",
             "2001:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
             "2003::",
         ],
@@ -226,8 +252,8 @@ fn embedded_ipv4_prefixes_follow_the_embedded_address() {
     );
 }
 
-/// Documentation, benchmarking, IETF-assignment, site-local, discard and Teredo ranges are not
-/// built in. An operator who wants them refused lists them.
+/// Documentation, benchmarking, IETF-assignment, site-local and discard ranges are not built in.
+/// An operator who wants them refused lists them.
 #[test]
 fn excluded_ranges_are_admitted_by_the_built_in_table() {
     assert_class(
@@ -242,7 +268,6 @@ fn excluded_ranges_are_admitted_by_the_built_in_table() {
             "192.0.0.1",
             "fec0::1",
             "100::1",
-            "2001::1",
         ],
         Class::Loopback,
     );
@@ -318,7 +343,9 @@ fn class_labels_are_distinct_snake_case() {
     let labels = Class::ALL.map(Class::as_str);
     for label in labels {
         assert!(
-            label.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+            label
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
             "{label}"
         );
     }
@@ -354,6 +381,8 @@ fn all_lists_every_class_once() {
         Multicast,
         Reserved,
         Ipv4Compatible,
+        Nat64LocalUse,
+        Teredo,
         Operator,
     );
     assert_eq!(Class::ALL, every);

@@ -31,6 +31,12 @@ pub enum GatewayRefusalClass {
     Multicast,
     Reserved,
     Ipv4Compatible,
+    /// RFC 8215 NAT64 local-use. Where the IPv4 address sits depends on the prefix length a
+    /// deployment chose, so it is refused without decoding one.
+    Nat64LocalUse,
+    /// RFC 4380 Teredo. The IPv4 address it carries is obfuscated, so it is refused without
+    /// decoding one.
+    Teredo,
     /// A range from the operator's `BIGNAME_API_CCIP_GATEWAY_DENY_CIDRS` list.
     Operator,
 }
@@ -38,7 +44,7 @@ pub enum GatewayRefusalClass {
 use GatewayRefusalClass as Class;
 
 impl GatewayRefusalClass {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 12] = [
         Self::Loopback,
         Self::Private,
         Self::LinkLocal,
@@ -48,6 +54,8 @@ impl GatewayRefusalClass {
         Self::Multicast,
         Self::Reserved,
         Self::Ipv4Compatible,
+        Self::Nat64LocalUse,
+        Self::Teredo,
         Self::Operator,
     ];
 
@@ -62,6 +70,8 @@ impl GatewayRefusalClass {
             Self::Multicast => "multicast",
             Self::Reserved => "reserved",
             Self::Ipv4Compatible => "ipv4_compatible",
+            Self::Nat64LocalUse => "nat64_local_use",
+            Self::Teredo => "teredo",
             Self::Operator => "operator",
         }
     }
@@ -99,6 +109,8 @@ const V6_REFUSED: &[(Ipv6Net, Class)] = &[
     (v6([0xfc00, 0, 0, 0, 0, 0, 0, 0], 7), Class::UniqueLocal),
     (v6([0xfe80, 0, 0, 0, 0, 0, 0, 0], 10), Class::LinkLocal),
     (v6([0xff00, 0, 0, 0, 0, 0, 0, 0], 8), Class::Multicast),
+    (v6([0x64, 0xff9b, 1, 0, 0, 0, 0, 0], 48), Class::Nat64LocalUse),
+    (v6([0x2001, 0, 0, 0, 0, 0, 0, 0], 32), Class::Teredo),
 ];
 
 /// IPv6 forms that carry an IPv4 address a dual-stack host or a translator would reach.

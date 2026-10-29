@@ -174,6 +174,8 @@ reaches the network:
   - multicast: `224.0.0.0/4` and `ff00::/8`
   - reserved: `240.0.0.0/4`
   - IPv4-compatible: `::/96`
+  - NAT64 local-use: `64:ff9b:1::/48`
+  - Teredo: `2001::/32`
   - IPv4-mapped (`::ffff:0:0/96`), NAT64 (`64:ff9b::/96`) and 6to4
     (`2002::/16`) addresses, judged by the IPv4 address they carry
 
