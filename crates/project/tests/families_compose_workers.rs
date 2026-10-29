@@ -475,12 +475,12 @@ async fn the_build_waits_for_the_last_worker() -> Result<()> {
     Ok(())
 }
 
-// T10. Two names serve one resource, and the first's chunk is held at its commit while the
-// second's commits, so the two chunk transactions overlap. No names chunk writes the inventory:
-// when the names stream ends no inventory row exists. The inventories stream composes the
-// resource in each of its chunks that holds a name serving it, twice here at one name to a
-// chunk, from the same base rows, and leaves the rows block by block has, with no unique
-// violation or deadlock.
+// T10. Two names serve one resource (`x.left.eth` and `x.right.eth`, `families_support/compose.rs`,
+// `shared_entry`), and the first's chunk is held at its commit while the second's commits, so the
+// two chunk transactions overlap. No names chunk writes the inventory: when the names stream ends
+// no inventory row exists. The inventories stream composes the resource in each of its chunks that
+// holds a name serving it, twice here at one name to a chunk, from the same base rows, and leaves
+// the rows block by block has, with no unique violation or deadlock.
 #[tokio::test]
 async fn two_names_on_one_resource_leave_its_inventory_to_the_inventories_stream() -> Result<()> {
     let fixture = seeded_with("families_workers_inventory", 4).await?;
