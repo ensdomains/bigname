@@ -1611,8 +1611,8 @@ const SURFACE_KEYS: [&str; 2] = [
     "name_surfaces_chain_id_logical_name_id_key",
 ];
 
-/// `FEW_AFFECTED_NAMES` in `selection.rs`: the most affected names whose surfaces the last step
-/// reads by key. The rows at it and one over it fail if the two differ.
+/// `FEW_AFFECTED_NAMES` of the fix's `selection.rs`, which the base's `selection.rs` this red
+/// variant keeps does not have.
 const FEW_AFFECTED_NAMES: i64 = 10_000;
 
 /// Push a failure unless the last step read `name_surfaces`, and read it only by key.
@@ -1703,10 +1703,11 @@ async fn touch_names(connection: &mut PgConnection, block: i64, count: i64) -> R
 // loop. Each row also selects what the frozen statement before it selects, and as many names
 // as the row says.
 //
-// Red, by trace. One and at the limit fail on the plain join the last step had before, as P1
-// did by run. Over the limit and most names fail on a last step that probes by key whatever the
-// count, which reads `name_surfaces` once per name. At the limit fails when the count's bound
-// excludes the limit itself, and over the limit when it admits one more.
+// Red, by trace. One and at the limit fail on the plain join the last step had before only
+// when the planner's estimates make it scan `name_surfaces`. The one run that shows it is P1's
+// fixture under a custom plan. Over the limit and most names fail on a last step that probes by
+// key whatever the count, which reads `name_surfaces` once per name. At the limit fails when
+// the count's bound excludes the limit itself, and over the limit when it admits one more.
 #[tokio::test]
 async fn the_last_step_reads_few_names_by_key_and_many_in_one_pass() -> Result<()> {
     let (database, pool) = database().await?;
