@@ -63,7 +63,8 @@ pub(crate) struct ServedName {
     pub(crate) registry: RegistryRead,
     /// Whether a verified read runs Universal Resolver discovery
     /// (`name_records::verified_discovery`). The lookup engine reloads the composed row, not
-    /// `row` as the registry read left it, so this is decided on the composed row.
+    /// `row` as the registry read left it, so this is decided before the registry read, on the
+    /// registration `serve_legacy_lease` serves.
     pub(crate) lookup_discovery: bool,
 }
 
@@ -71,8 +72,9 @@ pub(crate) struct ServedName {
 /// path is walked: when it reaches a token whose canonical name is another, that name's row is
 /// served under the requested path, if it is still the token's own row. A path that reaches
 /// nothing serves what it served before, the row or `404 not_found`. Every read runs on
-/// `conn`'s one snapshot. An ENSv1 name serves the resolver its registry record holds
-/// (`serve_ens_v1_registry_resolver`).
+/// `conn`'s one snapshot. A requested name's own row serves the ENSv1 lease its registrar events
+/// prove when its registration does not carry one (`serve_legacy_lease`). An ENSv1 name serves
+/// the resolver its registry record holds (`serve_ens_v1_registry_resolver`).
 pub(crate) async fn load_served_name_for_selected_snapshot(
     conn: &mut PgConnection,
     namespace: &str,
@@ -81,6 +83,18 @@ pub(crate) async fn load_served_name_for_selected_snapshot(
 ) -> ApiResult<ServedName> {
     let (mut row, alias) =
         load_composed_served_name(&mut *conn, namespace, name, selected_snapshot).await?;
+    // A registration that does not carry its ENSv1 lease serves the lease its registrar events
+    // prove, and discovery and the registry read are decided on that registration. A failed
+    // read serves the composed registration.
+    if alias.is_none()
+        && let Err(error) = serve_legacy_lease(&mut *conn, &mut row, selected_snapshot).await
+    {
+        error!(
+            service = "api",
+            error = %error,
+            "legacy lease read failed; serving the composed registration of {namespace}/{name}"
+        );
+    }
     let lookup_discovery = crate::v2::name_records::verified_discovery(&row, alias.as_ref());
     let registry = serve_ens_v1_registry_resolver(&mut *conn, &mut row)
         .await

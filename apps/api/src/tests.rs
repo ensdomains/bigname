@@ -657,3 +657,5 @@ mod v2_ens_v1_resolver;
 mod v2_ens_v1_registry_read;
 #[path = "tests/v2_ens_v1_registry_read_mainnet.rs"]
 mod v2_ens_v1_registry_read_mainnet;
+#[path = "tests/v2_legacy_lease_heal.rs"]
+mod v2_legacy_lease_heal;
