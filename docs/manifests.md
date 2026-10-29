@@ -2131,7 +2131,14 @@ earlier in the block. So every pass but the last admits a distinct entry, and a 
 at most one pass more than the distinct entries its logs admit. A discarded pass
 leaves only its admissions behind: every entry it retired is put back, so the
 next pass starts from the block's starting admissions plus every entry admitted
-in the block, and a retirement takes effect only at its log in the last pass. Each admission
+in the block, and a retirement takes effect only at its log in the last pass.
+In a rerun's earlier logs, a restored entry and the entry that replaced it can
+both be live for one address. Selection reads them as one, because their
+instance, manifest and role match. That rests on two facts. An observation
+admitted again within a block names the same contract and implementation: an
+`Upgraded` observation includes the implementation, and a factory cannot
+deploy one proxy address twice. And no implementation is declared under two
+authority manifests. Each admission
 is made by a log that is selected without an earlier admission from its block:
 a `RegistryCreated` or `ResolverCreated` announcement, an `Upgraded` naming a
 declared implementation, or a declared factory's `ProxyDeployed`. With the
