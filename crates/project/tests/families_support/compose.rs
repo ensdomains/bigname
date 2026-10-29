@@ -125,28 +125,31 @@ pub async fn seeded_with(prefix: &str, connections: u32) -> Result<Fixture> {
             )
             .await?;
     }
-    // Two names bound to one resource serve their records from one inventory.
+    // Two names bound to one resource serve their records from one inventory. Each is registered,
+    // as a name serves no resource without its own registration, so both lookup names serve it.
     let shared = uuid(903);
     let (first, second) = (format!("ens:{}", node(901)), format!("ens:{}", node(902)));
     fixture
         .binding(&uuid(904), &first, &shared, "ens_v1", 140, 0, None)
         .await?;
     fixture
-        .binding(&uuid(905), &second, &shared, "ens_v1", 140, 0, None)
+        .binding(&uuid(905), &second, &shared, "ens_v1", 140, 1, None)
         .await?;
-    fixture
-        .write(
-            140,
-            1,
-            "RegistrationGranted",
-            "ens_v1_registrar_l1",
-            Some(&first),
-            Some(&shared),
-            json!({"authority_kind": "registrar", "status": "registered", "registrant": ALICE,
-                   "expiry": 2_000_000_000u64}),
-            R1,
-        )
-        .await?;
+    for (log, name) in [(1, &first), (3, &second)] {
+        fixture
+            .write(
+                140,
+                log,
+                "RegistrationGranted",
+                "ens_v1_registrar_l1",
+                Some(name),
+                Some(&shared),
+                json!({"authority_kind": "registrar", "status": "registered",
+                       "registrant": ALICE, "expiry": 2_000_000_000u64}),
+                R1,
+            )
+            .await?;
+    }
     fixture
         .write(
             140,

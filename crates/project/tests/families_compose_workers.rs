@@ -11,7 +11,7 @@ mod families_support;
 
 use std::time::Duration;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use bigname_project::families::{FamilyMode, FamilyOptions, FamilyOutcome, RebuildRanges};
 use families_support::{
     CHAIN, CONTENT_HASH, Fixture,
@@ -125,8 +125,9 @@ async fn a_pass_with_three_workers_equals_one_worker_and_block_by_block() -> Res
          GROUP BY record_serving_resource_id HAVING count(*) > 1
          ORDER BY 1 LIMIT 1",
     )
-    .fetch_one(&fixture.pool)
-    .await?;
+    .fetch_optional(&fixture.pool)
+    .await?
+    .context("block by block, no resource serves two lookup names")?;
     let one = fixture
         .apply_with(TARGET, FamilyMode::Rebuild, &options(1))
         .await?;
@@ -490,8 +491,9 @@ async fn two_names_on_one_resource_leave_its_inventory_to_the_inventories_stream
          FROM project_lookup_name WHERE record_serving_resource_id IS NOT NULL
          GROUP BY 1 HAVING count(*) > 1 ORDER BY 2 LIMIT 1",
     )
-    .fetch_one(&fixture.pool)
-    .await?;
+    .fetch_optional(&fixture.pool)
+    .await?
+    .context("block by block, no resource serves two lookup names")?;
     log_names_end_inventories(&fixture).await?;
     let side = side(&fixture).await?;
     let predicate = format!("NEW.logical_name_id = '{first}'");
