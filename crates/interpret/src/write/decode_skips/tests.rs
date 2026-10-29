@@ -1,7 +1,7 @@
 use alloy_sol_types::SolEvent;
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, BatchOutput, DiscoveryRuleInput, ManifestInput,
-    RawBlockInput, RawLogInput, interpret_schema_v2_batch,
+    RawBlockInput, RawLogInput, interpret_schema_v2_batch, seam,
 };
 use bigname_domain::normalization::ENS_NORMALIZER_VERSION;
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
@@ -232,7 +232,7 @@ fn inconsistent_adapter_output() -> TestResult<BatchOutput> {
                         "name": "TransferBatch",
                         "fragment": "event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)",
                         "emitter_roles": ["registry"],
-                        "normalized_events": ["TokenControlTransferred"]
+                        "normalized_events": [seam::TOKEN_CONTROL_TRANSFERRED_EVENT_KIND]
                     }]
                 }
             })
@@ -240,7 +240,7 @@ fn inconsistent_adapter_output() -> TestResult<BatchOutput> {
         }],
         discovery_rules: vec![DiscoveryRuleInput {
             manifest_id: 1,
-            edge_kind: "registry_announcement".to_owned(),
+            edge_kind: seam::REGISTRY_ANNOUNCEMENT_EDGE_KIND.to_owned(),
             from_role: Some("registry".to_owned()),
             admission: "reachable_from_root".to_owned(),
         }],
@@ -249,7 +249,7 @@ fn inconsistent_adapter_output() -> TestResult<BatchOutput> {
             contract_instance_id: instance,
             source_manifest_id: Some(1),
             role: Some("registry".to_owned()),
-            discovery_edge_kind: Some("registry_announcement".to_owned()),
+            discovery_edge_kind: Some(seam::REGISTRY_ANNOUNCEMENT_EDGE_KIND.to_owned()),
             discovery_from_contract_instance_id: Some(instance),
             discovery_observation_key: Some("registry-announcement:self".to_owned()),
             active_from_block: Some(0),
