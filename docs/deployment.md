@@ -5393,12 +5393,14 @@ What changes:
   `inconsistent`, logs one warning and counts in
   `phase_runner_interpret_inconsistent_log_skips_total`
   ([pipeline monitoring](runbooks/pipeline-monitoring.md#interpret-inconsistent-log-skips)).
-- Served data can change only in a block that announces a registry: that registry's logs in the
-  block now run in Ethereum order as if it had been admitted at the block's start. A
-  manifest-declared emitter still stops on the same log.
-- Every block that admits a new entry is interpreted twice, so Interpret does that block's
-  work twice. Such a block creates a registry or a resolver. Every other block is interpreted
-  once.
+- Served data can change only where a chain holds such a log, or in a block that admits a
+  registry or a resolver (`RegistryCreated`, `ResolverCreated`, `ProxyDeployed` or `Upgraded`):
+  the admitted contract's logs in the block now run in Ethereum order as if it had been
+  admitted at the block's start. A manifest-declared emitter still stops on the same log.
+- Every block that admits a catalog entry not already live is interpreted twice, so Interpret
+  does that block's work twice. That includes a later block that announces an admitted
+  contract again, such as a proxy's `Upgraded` naming a declared implementation once more.
+  Every other block is interpreted once.
 
 Every chain needs a full-history Interpret redo, then the stamped Project redo it installs,
 at a planned [re-derivation boundary](glossary.md#re-derivation-boundary) under matching

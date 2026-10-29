@@ -154,7 +154,8 @@ fn interpret_once(
         // entry, discard it and interpret the whole block again in log order with the larger
         // catalog, until a pass admits nothing new. Only an entry the catalog neither holds nor
         // admitted earlier in the block counts as new, so every pass but the last adds a
-        // distinct entry.
+        // distinct entry. A discarded pass leaves only its admissions: the entries it retired are
+        // put back, so a log before the one that retires its emitter is still read.
         let (mut block_state, mut block_output, unselected_in_block, self_targets) = loop {
             #[cfg(test)]
             {
@@ -166,7 +167,7 @@ fn interpret_once(
                 );
                 note_block_pass(block.block_number, passes);
             }
-            let generation = catalog.admission_generation();
+            let generation = catalog.begin_block_pass();
             migration_observations.truncate(first_migration_observation);
             let mut block_output = BatchOutput::default();
             let mut block_state = committed_state.clone();
@@ -191,7 +192,7 @@ fn interpret_once(
                     unselected_in_block.push(raw);
                 }
             }
-            if catalog.admission_generation() == generation {
+            if catalog.end_block_pass(generation) {
                 break (block_state, block_output, unselected_in_block, self_targets);
             }
         };

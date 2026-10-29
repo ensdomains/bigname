@@ -301,9 +301,12 @@ impl Catalog {
         self.admissions.admit(admission);
     }
 
-    /// Grows only when an admission adds an entry the catalog did not hold.
-    pub(super) fn admission_generation(&self) -> u64 {
-        self.admissions.generation()
+    pub(super) fn begin_block_pass(&mut self) -> u64 {
+        self.admissions.begin_pass()
+    }
+
+    pub(super) fn end_block_pass(&mut self, generation: u64) -> bool {
+        self.admissions.end_pass(generation)
     }
 
     pub(super) fn retire(&mut self, edge_kind: &str, from: Uuid, observation_key: &str) {
