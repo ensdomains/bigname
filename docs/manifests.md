@@ -2128,12 +2128,15 @@ log index). It does so by interpreting the block again:
 
 A pass counts as admitting only an entry the catalog neither holds nor admitted
 earlier in the block. So every pass but the last admits a distinct entry, and a block takes
-at most one pass more than the distinct entries its logs admit. Each admission
+at most one pass more than the distinct entries its logs admit. A discarded pass
+leaves only its admissions behind: every entry it retired is put back, so the
+next pass starts from the block's starting admissions plus every entry admitted
+in the block, and a retirement takes effect only at its log in the last pass. Each admission
 is made by a log that is selected without an earlier admission from its block:
 a `RegistryCreated` or `ResolverCreated` announcement, an `Upgraded` naming a
 declared implementation, or a declared factory's `ProxyDeployed`. With the
 current adapters the first pass finds them all, so every block that admits a
-new entry is interpreted twice and every other block once.
+catalog entry not already live is interpreted twice and every other block once.
 
 An emitter announced in block `B` therefore has every log in `B` interpreted
 in Ethereum order, as if it had been admitted at the block's start, and a later
