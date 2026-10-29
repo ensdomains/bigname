@@ -1835,17 +1835,16 @@ async fn check_last_step(
 // "By key" is every read of `name_surfaces` through its primary or unique key. "One pass" is
 // every read of it in one loop, joined to `affected` by a hash or merge join, never a nested
 // loop that reads it again. Each readable surface still meets `chain_lineage` by a lookup of its
-// own. Each row also selects what the frozen statement before it selects, and as many names as
-// the row says.
+// own, and every read of `chain_lineage` in the last step must go through its primary key or the
+// unique key that leads with it. That guards the lookup against an index that bounds only the
+// chain. Each row also selects what the frozen statement before it selects, and as many names
+// as the row says.
 //
 // Red, by trace. The rows up to the bound fail on the plain join the last step had before only
 // when the planner's estimates make it scan `name_surfaces`. The one run that shows it is P1's
 // fixture under a custom plan. One over and most names fail on a last step that probes by key
 // whatever the count, which reads `name_surfaces` once per name. At the bound fails when the
 // count's bound excludes the bound itself, and one over when it admits one more.
-// By trace, a lookup of `chain_lineage` that also holds the canonical test can read every
-// readable block of the chain through an index on the state, for each surface, without
-// statistics. The lineage check of every row then fails.
 #[tokio::test]
 async fn the_last_step_reads_few_names_by_key_and_many_in_one_pass() -> Result<()> {
     let (database, pool) = database().await?;
