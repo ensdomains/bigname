@@ -1284,7 +1284,7 @@ same batch: discovery is forward-only from the admitting observation, so the
 earlier log stays uninterpreted. Such a row carries the source family the
 emitter interprets under, the log's `topic0` as its selection signature,
 `match_all = false`, and a `decode_context` naming the admitting block. A log
-from the admitting block itself is interpreted by the same-block second pass
+from the admitting block itself is interpreted right after the admitting log
 ([manifests.md](manifests.md#resolver-admission-by-implementation-announcement))
 and produces no row.
 
