@@ -2118,36 +2118,33 @@ it, and it stays `unsupported` with `resolver_implementation_unknown`, or with
 
 Same-block admission: when a discovery observation admits an address at block
 `B`, Interpret also interprets that address's earlier logs in block `B` (lower
-log index). A log is held only until its emitter is admitted, and once the
-catalog selects it, it runs in log order before the block's next live log. A
-log whose emitter is never admitted in the block, or whose selection is
-refused, stays held to the end of the block.
+log index). It does so by interpreting the block again:
 
-| Step | What Interpret does |
+| Pass | What Interpret does |
 | --- | --- |
-| 1 | Interprets the block's next log. A log whose emitter is not admitted yet is held. |
-| 2 | If that log recorded a discovery edge, interprets the held logs the catalog now selects, from the lowest log index up. |
-| 3 | Whenever a held log interpreted in step 2 records a discovery edge, restarts step 2 from the lowest held log index. |
-| 4 | Returns to step 1 for the next log of the block. |
-| 5 | At the end of the block, runs step 2 once more, with the same restarts, and leaves the rest uninterpreted, as before. |
+| First | Interprets the block's logs in log order with the admissions it holds. A log whose emitter is not admitted yet stays uninterpreted. |
+| Next | If the previous pass admitted an entry the catalog did not hold, discards that pass and interprets the whole block again from its first log, in log order, with every admission so far. |
+| Last | The first pass that admits no new entry. Its output is the block's output. |
 
-A discovery edge is only recorded by a log that is interpreted, and an
-interpreted held log is no longer held. So each restart follows a consumed held
-log, and the restarts are at most the number of held logs.
+Admissions only grow within a block, and admitting an entry the catalog
+already holds adds nothing. So every pass but the last adds an entry, and a
+block takes at most one pass more than the entries it admits. Each admission
+is made by a log that is selected without an earlier admission from its block:
+a `RegistryCreated` or `ResolverCreated` announcement, an `Upgraded` naming a
+declared implementation, or a declared factory's `ProxyDeployed`. With the
+current adapters the first pass finds them all, so a block that admits an
+emitter takes two passes.
 
-Held logs of two emitters admitted in reverse log order run in admission
-order. No consistency check reads another emitter's state, so a skip decision
-is the same either way.
-
-A later log of the same address therefore reads the state the held logs leave,
-as in chain order, and a consistency check on it sees them. Interpret then
-restores chain order for the block's normalized events so stream-chained
-before-states follow log order. The result is a pure function of the block's
-raw logs. A log whose emitter is admitted only in a later block of the same
-batch stays uninterpreted — no lookback — and is recorded as an operator
-diagnostic in `interpret_decode_skips` ([storage.md](storage.md#table-ownership)).
-An earlier same-block log skipped as malformed or inconsistent is recorded
-once, as that skip.
+An emitter announced in block `B` therefore has every log in `B` interpreted
+in Ethereum order, as if it had been admitted at the block's start, and a later
+log of any emitter reads the state those logs leave. The result is a pure
+function of the block's raw logs. A log whose emitter is never admitted in the
+block, or whose selection is refused, stays uninterpreted. A log whose emitter
+is admitted only in a later block of the same batch stays uninterpreted — no
+lookback — and is recorded as an operator diagnostic in
+`interpret_decode_skips` ([storage.md](storage.md#table-ownership)). An
+earlier same-block log skipped as malformed or inconsistent is recorded once,
+as that skip.
 
 The project support rule for `ens_v2_resolver_l1` is unchanged in shape: an
 exact `public_resolver_v2` declaration is supported directly; otherwise the
