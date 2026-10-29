@@ -537,7 +537,7 @@ refusal_probe_seconds=0
 timing_started=$SECONDS
 unread_index_migration="$ROOT/migrations/20261012130000_drop_unread_indexes.sql"
 unnamed_lease_index_migration="$ROOT/migrations/20261016120000_project_lifecycle_event_drop_unnamed_lease_index.sql"
-search_prefix_index_migration="$ROOT/migrations/20261030120000_search_prefix_bucket_indexes.sql"
+search_prefix_index_migration="$ROOT/migrations/20261029120000_search_prefix_bucket_indexes.sql"
 # label_hashes and its GIN index as the identity baseline defined them before
 # 20261012130000_drop_unread_indexes.sql. The baseline no longer does, so a proof that
 # starts from the earlier shape builds both from this text.
@@ -4216,7 +4216,7 @@ DROP INDEX $path_index_name;
 CREATE INDEX $path_index_name ON discovery_edges (chain_id);
 SQL
 done
-# The prefix bucket indexes of 20261030120000_search_prefix_bucket_indexes.sql, checked in
+# The prefix bucket indexes of 20261029120000_search_prefix_bucket_indexes.sql, checked in
 # a schema of the current fresh baseline. The schema-migration must build what the fresh
 # baseline builds from the shape without them, and a rerun must leave that unchanged.
 # Indexes built concurrently with the statements docs/deployment.md gives, as an operator

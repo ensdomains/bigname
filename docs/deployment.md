@@ -5054,14 +5054,14 @@ class whose postings exceed 1,024 for every term of the prefix.
 - It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
   watch plan are unchanged, so stamp no Ingest redo.
 
-Schema-migration `20261030120000_search_prefix_bucket_indexes.sql` installs three read-only
+Schema-migration `20261029120000_search_prefix_bucket_indexes.sql` installs three read-only
 btree indexes on `name_search_documents`. An index that already exists under its name, with
 the reviewed definition, is adopted without a build and without a lock on the table. A
 missing index is built with an ordinary `CREATE INDEX`, which holds a SHARE lock on
 `name_search_documents` until the schema-migration commits and blocks Interpret's writes to
 it. Apply the schema-migration with the phase runner, redo processes and API stopped, with
 the same `lock_timeout`, `statement_timeout` and retry procedure as the other index
-schema-migrations and `--target-version 20261030120000`.
+schema-migrations and `--target-version 20261029120000`.
 
 On a large initialized database, prebuild the indexes concurrently first, outside a
 transaction. The phase runner and API can keep running while they build, and the new API

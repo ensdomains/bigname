@@ -488,7 +488,7 @@ async fn old_path(
 }
 
 /// Rows this session has read from `name_search_documents` and `name_surfaces` and not yet
-/// reported to the statistics collector. From PostgreSQL 15 the `pg_stat_xact_*` views read
+/// reported to shared statistics. From PostgreSQL 15 the `pg_stat_xact_*` views read
 /// those pending counts, which still hold earlier transactions' reads until the session reports
 /// them, at most once a second and only between transactions. A difference taken inside one
 /// transaction is exact.
