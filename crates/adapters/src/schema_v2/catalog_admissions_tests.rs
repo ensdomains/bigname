@@ -87,6 +87,59 @@ fn indexed_admissions_match_flat_history_through_replacement_and_retirement() {
     }
 }
 
+/// Runs blocks the way `interpret_once` does: a pass that admits a new entry is discarded and the
+/// block runs again. After a discard every entry is back under its own sequence number, so every
+/// lookup reads the block's starting entries in their order and then the discarded pass's
+/// admissions in theirs. A reader of the first entry by sequence (`source_for_contract_instance`,
+/// a match-all candidate's instance) reads the same entry in every pass.
+#[test]
+fn a_discarded_pass_puts_its_retirements_back_in_sequence_order() {
+    let mut rows = (0..200).map(admission).collect::<Vec<_>>();
+    let mut index = Admissions::new(rows.clone());
+    let mut discards = 0;
+    for block in 0..20_usize {
+        let logs = (200 + block * 10..210 + block * 10)
+            .map(|n| {
+                let mut row = admission(n);
+                row.active_from_block = Some(1_000 + block as i64);
+                (n, row)
+            })
+            .collect::<Vec<_>>();
+        let mut passes = 0;
+        loop {
+            passes += 1;
+            let generation = index.begin_pass();
+            let start = rows.clone();
+            let mut admitted = Vec::new();
+            for (n, row) in &logs {
+                let n = *n;
+                if let Some((edge, from, key)) = retirement_key(row) {
+                    flat_retire(&mut rows, &edge, from, &key);
+                }
+                rows.push(row.clone());
+                admitted.push(row.clone());
+                index.admit(row.clone());
+                if n.is_multiple_of(3) {
+                    let edge = format!("edge-{}", n % 2);
+                    let from = Uuid::from_u128((n % 3) as u128);
+                    let key = format!("observation-{}", n % 17);
+                    flat_retire(&mut rows, &edge, from, &key);
+                    index.retire(&edge, from, &key);
+                }
+            }
+            compare(&index, &rows);
+            if index.end_pass(generation) {
+                break;
+            }
+            discards += 1;
+            rows = start.into_iter().chain(admitted).collect();
+            compare(&index, &rows);
+        }
+        assert_eq!(passes, 2, "block {block}");
+    }
+    assert_eq!(discards, 20);
+}
+
 #[test]
 fn retirement_releases_all_secondary_index_entries() {
     let mut index = Admissions::default();
