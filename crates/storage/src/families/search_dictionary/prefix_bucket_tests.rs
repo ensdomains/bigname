@@ -337,8 +337,9 @@ async fn check_cursor_walk(connection: &mut PgConnection, buckets: usize) -> Res
 
 /// Each bucket statement `load` prepared can read its bucket index in page order, with the
 /// class, the bucket and the cursor as the index condition, under a `Limit` and without a sort,
-/// for both dense classes, the first page and a later one. Sorts are off, so this shows the
-/// path exists, not that the planner prefers it at real costs.
+/// for both dense classes, the first page and a later one, and for two seeds whose buckets
+/// differ from the first character. Sorts are off, so this shows the path exists, not that the
+/// planner prefers it at real costs.
 async fn check_plans(connection: &mut PgConnection, buckets: usize) -> Result<()> {
     raw_sql("SET enable_sort = off")
         .execute(&mut *connection)
@@ -366,23 +367,34 @@ async fn check_plans(connection: &mut PgConnection, buckets: usize) -> Result<()
             failures.push(format!("prefix{k}: bound {types:?}"));
             continue;
         }
-        let bucket: String = "alic".chars().take(k).collect();
-        let mut prefixes = vec![bucket.clone()];
-        if k == buckets {
-            prefixes.push("alic".to_owned());
-        }
-        for prefix in prefixes {
-            for class in [0, 1] {
-                for after in ["NULL, NULL, NULL", "'alic00500.eth', 'ens', '0x'"] {
-                    let values = format!(
-                        "'{{ens}}', '{bucket}', '{}%', {after}, 51, true, {class}",
-                        escape_like(&prefix)
-                    );
-                    for mode in PLAN_MODES {
-                        let plan = explain_execute(connection, mode, &statement, &values).await?;
-                        let label = format!("prefix{k} {prefix}% class {class} {after} ({mode})");
-                        if let Some(failure) = plan_failure(&plan, k, prefix.len() > k) {
-                            failures.push(format!("{label}: {failure}\n{}", plan.join("\n")));
+        // Two seeds in different buckets, so a plan that flips on the bucket's value is seen and
+        // named. Each cursor sits inside its seed's ens names of both classes: group 1 for
+        // `alic`, group 10 for `zb01`.
+        for (seed, cursor) in [("alic", "alic00500.eth"), ("zb01", "zb01500.eth")] {
+            let bucket: String = seed.chars().take(k).collect();
+            let mut prefixes = vec![bucket.clone()];
+            if k == buckets {
+                prefixes.push(seed.to_owned());
+            }
+            for prefix in prefixes {
+                for class in [0, 1] {
+                    for after in [
+                        "NULL, NULL, NULL".to_owned(),
+                        format!("'{cursor}', 'ens', '0x'"),
+                    ] {
+                        let values = format!(
+                            "'{{ens}}', '{bucket}', '{}%', {after}, 51, true, {class}",
+                            escape_like(&prefix)
+                        );
+                        for mode in PLAN_MODES {
+                            let plan =
+                                explain_execute(connection, mode, &statement, &values).await?;
+                            let label = format!(
+                                "prefix{k} seed {seed} {prefix}% class {class} {after} ({mode})"
+                            );
+                            if let Some(failure) = plan_failure(&plan, k, prefix.len() > k) {
+                                failures.push(format!("{label}: {failure}\n{}", plan.join("\n")));
+                            }
                         }
                     }
                 }
