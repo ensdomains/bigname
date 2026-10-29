@@ -8,9 +8,51 @@ use anyhow::Result;
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/RootRegistry.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
 const ROOT: &str = "0xb458d6a3a77919449d03e7a6903c26827c1ec43f";
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ETHRegistry.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
-const ETH: &str = "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4";
+pub const ETH: &str = "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4";
+/// The deployment label of the reviewed Sepolia ETHRegistry (`lifecycle/policy.rs`,
+/// `DEPLOYMENTS`).
+const REVIEWED: &str = "ens_v2_sepolia_20261001";
 
 pub async fn root_eth_entry(fixture: &Fixture) -> Result<()> {
+    labelled_root_eth_entry(fixture, "fixture").await?;
+    Ok(())
+}
+
+/// `root_eth_entry` as the reviewed Sepolia deployment: its manifests carry the reviewed
+/// deployment label, and ETHRegistry has the contract instance and the address row, under the
+/// registry manifest, that manifest sync writes for it. The registrar grace policy
+/// (`lifecycle/policy.rs`, `registries`) reads exactly that join. Returns the instance id the
+/// registry's ENSv2 events name it by.
+pub async fn reviewed_root_eth_entry(fixture: &Fixture) -> Result<String> {
+    let manifest = labelled_root_eth_entry(fixture, REVIEWED).await?;
+    let instance = uuid(0x4401);
+    sqlx::query(
+        "INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+         VALUES ($1::uuid, $2, 'contract')",
+    )
+    .bind(&instance)
+    .bind(CHAIN)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address,
+             active_from_block_number, active_from_block_hash, source_manifest_id)
+         VALUES ($1::uuid, $2, $3, 0, $4, $5)",
+    )
+    .bind(&instance)
+    .bind(CHAIN)
+    .bind(ETH)
+    .bind(hash(0))
+    .bind(manifest)
+    .execute(&fixture.pool)
+    .await?;
+    Ok(instance)
+}
+
+/// The root-to-ETHRegistry path with its manifests under deployment label `label`. Returns the
+/// registry manifest's id.
+async fn labelled_root_eth_entry(fixture: &Fixture, label: &str) -> Result<i64> {
+    let mut registry_manifest = None;
     for (family, role, address) in [
         ("ens_v2_root_l1", "root_registry", ROOT),
         ("ens_v2_registry_l1", "registry", ETH),
@@ -26,14 +68,18 @@ pub async fn root_eth_entry(fixture: &Fixture) -> Result<()> {
             "INSERT INTO manifest_versions (manifest_version, namespace, source_family,
                  chain_id, deployment_label, rollout_status, normalizer_version, file_path,
                  manifest_payload)
-             VALUES (1,'ens',$1,$2,'fixture','active','fixture',$3,$4) RETURNING manifest_id",
+             VALUES (1,'ens',$1,$2,$5,'active','fixture',$3,$4) RETURNING manifest_id",
         )
         .bind(family)
         .bind(CHAIN)
         .bind(format!("fixture/{family}.toml"))
         .bind(&payload)
+        .bind(label)
         .fetch_one(&fixture.pool)
         .await?;
+        if role == "registry" {
+            registry_manifest = Some(id);
+        }
         sqlx::query(
             "INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
                  manifest_version, source_manifest_id, chain_id, block_number, block_hash,
@@ -103,7 +149,7 @@ pub async fn root_eth_entry(fixture: &Fixture) -> Result<()> {
             )
             .await?;
     }
-    Ok(())
+    registry_manifest.ok_or_else(|| anyhow::anyhow!("the path declares no registry manifest"))
 }
 
 pub async fn assert_deployed_path(fixture: &Fixture) -> Result<()> {
