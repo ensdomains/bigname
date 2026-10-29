@@ -103,13 +103,10 @@ impl ProjectPhase {
         standing: &FamilyOutcome,
         error: &ProjectError,
     ) -> RunnerError {
-        let unstorable = is_unstorable_value(error);
-        let retry =
-            self.families.retry_family_failures && !unstorable && !is_sweep_cap_refusal(error);
+        let retry = self.families.retry_family_failures && !is_sweep_cap_refusal(error);
         let kind = match error.kind() {
             ProjectErrorKind::Configuration => ErrorKind::Configuration,
             ProjectErrorKind::DataIntegrity if !retry => ErrorKind::DataIntegrity,
-            ProjectErrorKind::Transient if unstorable => ErrorKind::DataIntegrity,
             ProjectErrorKind::Transient | ProjectErrorKind::DataIntegrity => ErrorKind::Transient,
         };
         let marker = standing.marker.as_ref().map_or_else(
@@ -149,38 +146,6 @@ fn is_sweep_cap_refusal(error: &ProjectError) -> bool {
     error.kind() == ProjectErrorKind::DataIntegrity
         && message.contains("admission differs from the family marker's")
         && message.contains("redo the full range of phase project alone")
-}
-
-/// Whether `error` is PostgreSQL refusing to store a value the block writes. The transaction
-/// rolls back with that value still first in line, so every retry would meet it again at the same
-/// head, and the supervised runner stops the chain on it once instead. The refusals are SQLSTATE
-/// class 22 (data exception) and class 54 (program limit exceeded):
-///
-/// - a NUL in a string written to a `jsonb` value, 22P05, raised by `json_errsave_error` in
-///   PostgreSQL's `src/backend/utils/adt/jsonfuncs.c`;
-/// - a NUL or other invalid byte in a `text` value, 22021, raised by `report_invalid_encoding` in
-///   `src/backend/utils/mb/mbutils.c`;
-/// - a key longer than a btree index row may be, 54000, raised by `_bt_check_third_page` in
-///   `src/backend/access/nbtree/nbtutils.c`;
-/// - a key longer than any index row may be, 54000, raised by `index_form_tuple` in
-///   `src/backend/access/common/indextuple.c`.
-///
-/// Temporary: `ProjectError` does not carry the SQLSTATE, so this matches PostgreSQL's English
-/// messages, which assumes the server's `lc_messages` is English. Under another language nothing
-/// matches and the error is retried as before. The SQLSTATE carried on `ProjectError` replaces
-/// this match in the next Project change that rotates the projection content hash.
-/// `tests/families_runner.rs` and `tests/production_live/hydration.rs` reach real refusals, so a
-/// change of this wording fails there.
-fn is_unstorable_value(error: &ProjectError) -> bool {
-    let message = error.to_string();
-    let Some((_, refusal)) = message.rsplit_once("error returned from database: ") else {
-        return false;
-    };
-    refusal.starts_with("unsupported Unicode escape sequence")
-        || refusal.starts_with("invalid byte sequence for encoding ")
-        || (refusal.starts_with("index row size ") && refusal.contains(" exceeds btree version "))
-        || (refusal.starts_with("index row requires ")
-            && refusal.contains(" bytes, maximum size is "))
 }
 
 fn project_marker(marker: &BlockMarker) -> Marker {
