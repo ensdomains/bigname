@@ -52,12 +52,15 @@ fn a_worker_fence_passes_on_the_record_it_planned_from() {
     assert!(require_composing("chain", Some(&planned.clone()), &planned).is_ok());
 }
 
+/// A record field's name and an edit that changes only that field.
+type Change = (&'static str, fn(&mut Record));
+
 // The coordinator moves `compose_chunks` and `updated_at` under live workers, and neither is a
 // field of the record, so the fence excludes none. Every field refuses when it alone differs.
 #[test]
 fn a_worker_fence_refuses_a_record_that_differs_in_any_field() {
     let planned = composing();
-    let changes: [(&str, fn(&mut Record)); 15] = [
+    let changes: [Change; 15] = [
         ("attempt", |record| record.attempt += 1),
         ("reason", |record| record.reason = "orphaned".to_owned()),
         ("trusted_base", |record| {
