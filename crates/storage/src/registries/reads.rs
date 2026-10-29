@@ -36,6 +36,21 @@ fn pointer_event_predicates(alias: &str) -> String {
     )
 }
 
+/// Join the row `ne` to its block's lineage row as `rb`, for the block time and canonicality the
+/// read takes. The lookup is correlated and ends in `LIMIT 1`, so it cannot be pulled up into a
+/// plain join: it can only run as one index probe per row. As a plain join the planner may hash
+/// or walk the whole lineage table. `(chain_id, block_hash)` is the lineage primary key, so
+/// `LIMIT 1` drops no row. `LEFT JOIN` keeps a row with no lineage row and `JOIN` drops it, as the
+/// plain joins did.
+fn lineage_probe(join: &str) -> String {
+    format!(
+        "{join} LATERAL (SELECT rb.block_timestamp, rb.canonicality_state \
+         FROM bigname_phase.chain_lineage rb \
+         WHERE rb.chain_id = ne.chain_id AND rb.block_hash = ne.block_hash \
+         LIMIT 1) rb ON TRUE"
+    )
+}
+
 fn lineage_readable(alias: &str) -> String {
     format!(" AND ({alias}.block_hash IS NULL OR rb.canonicality_state IN {READABLE_STATES}) ")
 }
@@ -66,13 +81,42 @@ pub async fn load_registry_contract(
 ) -> Result<Option<RegistryContractRow>> {
     let mut conn = db.into().acquire().await?;
     let address = address.to_ascii_lowercase();
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(&registry_contract_sql())
+        .bind(chain_id)
+        .bind(&address)
+        .bind(as_of_block)
+        .fetch_all(&mut *conn)
+        .await
+        .with_context(|| format!("failed to load registry contract {chain_id}:{address}"))?;
+
+    let mut creations = rows
+        .into_iter()
+        .map(decode_registry_creation)
+        .collect::<Result<Vec<_>>>()?;
+    creations.sort_by_key(|creation| match creation.basis {
+        RegistryCreationBasis::Announcement => 0,
+        RegistryCreationBasis::SubregistryPointer => 1,
+        RegistryCreationBasis::Declared => 2,
+    });
+    Ok(creations
+        .into_iter()
+        .next()
+        .map(|created| RegistryContractRow {
+            chain_id: chain_id.to_owned(),
+            address,
+            created,
+        }))
+}
+
+/// The statement `load_registry_contract` runs, with the chain, the address and the served block
+/// bound as `$1`, `$2` and `$3`.
+fn registry_contract_sql() -> String {
+    format!(
         r#"
         WITH announcement AS (
             SELECT ne.block_number, ne.block_hash, ne.transaction_hash, rb.block_timestamp
             FROM bigname_phase.normalized_events ne
-            JOIN bigname_phase.chain_lineage rb
-              ON rb.chain_id = ne.chain_id AND rb.block_hash = ne.block_hash
+            {event_lineage}
             WHERE ne.chain_id = $1
               AND lower(ne.raw_fact_ref ->> 'emitting_address') = $2
               AND ne.event_kind = 'RegistryCreated'
@@ -86,8 +130,7 @@ pub async fn load_registry_contract(
         ), pointer AS (
             SELECT ne.block_number, ne.block_hash, ne.transaction_hash, rb.block_timestamp
             FROM bigname_phase.normalized_events ne
-            JOIN bigname_phase.chain_lineage rb
-              ON rb.chain_id = ne.chain_id AND rb.block_hash = ne.block_hash
+            {event_lineage}
             WHERE ne.chain_id = $1
               {pointer_predicates}
               AND ARRAY[lower(ne.after_state ->> 'subregistry'),
@@ -183,31 +226,8 @@ pub async fn load_registry_contract(
         FROM declared
         "#,
         pointer_predicates = pointer_event_predicates("ne"),
-    ))
-    .bind(chain_id)
-    .bind(&address)
-    .bind(as_of_block)
-    .fetch_all(&mut *conn)
-    .await
-    .with_context(|| format!("failed to load registry contract {chain_id}:{address}"))?;
-
-    let mut creations = rows
-        .into_iter()
-        .map(decode_registry_creation)
-        .collect::<Result<Vec<_>>>()?;
-    creations.sort_by_key(|creation| match creation.basis {
-        RegistryCreationBasis::Announcement => 0,
-        RegistryCreationBasis::SubregistryPointer => 1,
-        RegistryCreationBasis::Declared => 2,
-    });
-    Ok(creations
-        .into_iter()
-        .next()
-        .map(|created| RegistryContractRow {
-            chain_id: chain_id.to_owned(),
-            address,
-            created,
-        }))
+        event_lineage = lineage_probe("JOIN"),
+    )
 }
 
 /// Loads the current ENSv2 subregistry pointer for each requested name. Names without any
@@ -222,7 +242,29 @@ pub async fn load_subregistry_pointers_for_names(
         return Ok(BTreeMap::new());
     }
     let mut conn = db.into().acquire().await?;
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(&subregistry_pointers_sql())
+        .bind(logical_name_ids)
+        .bind(as_of_block)
+        .fetch_all(&mut *conn)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load subregistry pointers for {} names",
+                logical_name_ids.len()
+            )
+        })?;
+    rows.into_iter()
+        .map(|row| {
+            let pointer = decode_subregistry_pointer(row)?;
+            Ok((pointer.logical_name_id.clone(), pointer))
+        })
+        .collect()
+}
+
+/// The statement `load_subregistry_pointers_for_names` runs, with the names and the served
+/// block bound as `$1` and `$2`.
+fn subregistry_pointers_sql() -> String {
+    format!(
         r#"
         WITH pointer AS (
             SELECT DISTINCT ON (ne.logical_name_id)
@@ -231,8 +273,7 @@ pub async fn load_subregistry_pointers_for_names(
                    lower(ne.raw_fact_ref ->> 'emitting_address') AS registry,
                    ne.block_number, ne.block_hash, ne.transaction_hash, rb.block_timestamp
             FROM bigname_phase.normalized_events ne
-            LEFT JOIN bigname_phase.chain_lineage rb
-              ON rb.chain_id = ne.chain_id AND rb.block_hash = ne.block_hash
+            {event_lineage}
             WHERE ne.logical_name_id = ANY($1::text[])
               {pointer_predicates}
               {lineage_readable}
@@ -249,23 +290,8 @@ pub async fn load_subregistry_pointers_for_names(
         pointer_predicates = pointer_event_predicates("ne"),
         lineage_readable = lineage_readable("ne"),
         pointer_select = pointer_select(),
-    ))
-    .bind(logical_name_ids)
-    .bind(as_of_block)
-    .fetch_all(&mut *conn)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to load subregistry pointers for {} names",
-            logical_name_ids.len()
-        )
-    })?;
-    rows.into_iter()
-        .map(|row| {
-            let pointer = decode_subregistry_pointer(row)?;
-            Ok((pointer.logical_name_id.clone(), pointer))
-        })
-        .collect()
+        event_lineage = lineage_probe("LEFT JOIN"),
+    )
 }
 
 /// Loads the name that a registry serves: the earliest-pointing name whose current pointer
@@ -418,10 +444,10 @@ fn current_pointers_to_registry<'a>(
             FROM candidate
             JOIN bigname_phase.normalized_events ne
               ON ne.logical_name_id = candidate.logical_name_id
-            LEFT JOIN bigname_phase.chain_lineage rb
-              ON rb.chain_id = ne.chain_id AND rb.block_hash = ne.block_hash
-            WHERE ne.chain_id = "#,
+            "#,
     );
+    builder.push(lineage_probe("LEFT JOIN"));
+    builder.push(" WHERE ne.chain_id = ");
     builder.push_bind(chain_id);
     builder.push(pointer_event_predicates("ne"));
     builder.push(lineage_readable("ne"));
@@ -485,6 +511,10 @@ fn decode_subregistry_pointer(row: PgRow) -> Result<SubregistryPointer> {
         block_timestamp: crate::sql_row::get(&row, "block_timestamp")?,
     })
 }
+
+#[cfg(test)]
+#[path = "reads_plan_tests.rs"]
+mod plan_tests;
 
 #[cfg(test)]
 mod tests {

@@ -10,6 +10,7 @@ use super::{
     duplicates::push_product_history_duplicate_filter_for_alias,
     filters::push_string_filter,
     keyset::push_history_cursor_after_for_alias,
+    lineage::lineage_probe,
     source::{self, push_history_lineage_join},
 };
 
@@ -223,11 +224,8 @@ fn push_resolver_candidate_select<'a>(
     }
     builder.push("SELECT candidate.*\n FROM bigname_phase.normalized_events candidate ");
     if page_bound.is_some() {
-        builder.push(
-            "LEFT JOIN bigname_phase.chain_lineage candidate_lineage \
-             ON candidate_lineage.chain_id = candidate.chain_id \
-             AND candidate_lineage.block_hash = candidate.block_hash ",
-        );
+        builder.push(lineage_probe("candidate_lineage", "candidate"));
+        builder.push(" ");
     }
     if page_bound.is_some_and(|bound| bound.has_cursor) {
         builder.push("CROSS JOIN history_cursor_row cursor_row ");
