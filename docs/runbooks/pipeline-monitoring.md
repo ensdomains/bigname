@@ -464,7 +464,7 @@ PostgreSQL's message:
 
 A runner exits nonzero once every chain it runs has stopped, so a runner with
 one chain exits on this stop. Its restart policy starts it again, and it replays
-the same block and stops again. That loop also pages
+the same block and stops again. That loop can also page
 `BignamePhaseRunnerContainerRestarting`, and `BignamePhaseRunnerDown` if the
 runner stays down between starts. Stop that runner's container until a build
 that handles the value is deployed. On a runner with several chains the others
