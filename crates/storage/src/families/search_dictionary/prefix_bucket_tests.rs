@@ -112,7 +112,8 @@ fn cases() -> Vec<Case> {
         prefix_case("prefix z, ens only", "z"),
         // Characters of two UTF-8 bytes: the bucket counts characters. The 100 `é` names of
         // each class share the first byte of `ñ` (C3) and sort before it, in byte order and
-        // under glibc, so a bucket of bytes would return them on the first `ñ` page.
+        // under glibc, so a bucket of bytes would read them on the first `ñ` page. The
+        // `LIKE` drops them from the rows, and the fetch bound catches the read.
         prefix_case("prefix ñ, two-byte character", "ñ"),
         prefix_case("prefix ñüé, two-byte characters", "ñüé"),
         prefix_case("prefix ñüé0, two-byte characters past the bucket", "ñüé0"),
@@ -178,6 +179,7 @@ async fn check_cases(connection: &mut PgConnection, buckets: usize) -> Result<()
             let statement = format!("/* storage:families.name.search_candidates.prefix{k} */%");
 
             let mut transaction = connection.begin().await?;
+            let read_before = rows_fetched(&mut transaction).await?;
             let before = (
                 executions(&mut transaction, &statement).await?,
                 executions(&mut transaction, BUCKET_STATEMENTS).await?,
@@ -198,7 +200,7 @@ async fn check_cases(connection: &mut PgConnection, buckets: usize) -> Result<()
             )
             .await
             .with_context(|| label.clone())?;
-            let fetched = rows_fetched(&mut transaction).await?;
+            let fetched = rows_fetched(&mut transaction).await? - read_before;
             let executed = (
                 executions(&mut transaction, &statement).await? - before.0,
                 executions(&mut transaction, BUCKET_STATEMENTS).await? - before.1,
@@ -281,6 +283,7 @@ async fn check_cursor_walk(connection: &mut PgConnection, buckets: usize) -> Res
         loop {
             let after = walked.last().map(key);
             let mut transaction = connection.begin().await?;
+            let read_before = rows_fetched(&mut transaction).await?;
             let batch = load(
                 &mut transaction,
                 &filter(&case),
@@ -291,7 +294,7 @@ async fn check_cursor_walk(connection: &mut PgConnection, buckets: usize) -> Res
                 false,
             )
             .await?;
-            let fetched = rows_fetched(&mut transaction).await?;
+            let fetched = rows_fetched(&mut transaction).await? - read_before;
             transaction.rollback().await?;
             let mut bound = 2;
             for class in [0, 1] {
@@ -484,7 +487,11 @@ async fn old_path(
         .await?)
 }
 
-/// Rows read from `name_search_documents` and `name_surfaces` in this transaction.
+/// Rows this session has read from `name_search_documents` and `name_surfaces` and not yet
+/// reported to the statistics collector. From PostgreSQL 15 the `pg_stat_xact_*` views read
+/// those pending counts, which still hold earlier transactions' reads until the session reports
+/// them, at most once a second and only between transactions. A difference taken inside one
+/// transaction is exact.
 async fn rows_fetched(connection: &mut PgConnection) -> Result<i64> {
     Ok(sqlx::query_scalar(
         "SELECT coalesce(sum(coalesce(seq_tup_read, 0) + coalesce(idx_tup_fetch, 0)), 0)::bigint
