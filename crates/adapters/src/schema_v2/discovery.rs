@@ -228,7 +228,7 @@ pub(super) fn materialize(
                 // operator diagnostic row.
                 if target == selected.contract_instance_id {
                     if edge_kind != "subregistry" {
-                        self_targets.push(SelfTarget {
+                        let self_target = SelfTarget {
                             chain_id: raw.chain_id.clone(),
                             block_number: raw.block_number,
                             transaction_hash: raw.transaction_hash.clone(),
@@ -236,7 +236,9 @@ pub(super) fn materialize(
                             emitting_address: raw.emitting_address.clone(),
                             event: selected.event.name.clone(),
                             edge_kind: edge_kind.clone(),
-                        });
+                        };
+                        self_target.warn();
+                        self_targets.push(self_target);
                     }
                     continue;
                 }

@@ -156,7 +156,7 @@ fn interpret_once(
         // admitted earlier in the block counts as new, so every pass but the last adds a
         // distinct entry. A discarded pass leaves only its admissions: the entries it retired are
         // put back, so a log before the one that retires its emitter is still read.
-        let (mut block_state, mut block_output, unselected_in_block, self_targets) = loop {
+        let (mut block_state, mut block_output, unselected_in_block, _self_targets) = loop {
             #[cfg(test)]
             {
                 passes += 1;
@@ -196,9 +196,6 @@ fn interpret_once(
                 break (block_state, block_output, unselected_in_block, self_targets);
             }
         };
-        for self_target in &self_targets {
-            self_target.warn();
-        }
         crate::schema_v2::protocol::reconcile_block(
             catalog,
             block,
