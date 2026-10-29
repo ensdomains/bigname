@@ -246,6 +246,19 @@ async fn seed_lease(
     Ok(())
 }
 
+/// A lease granted, then renewed 150 times with an `ExpiryChanged` beside each renewal: more
+/// eligible events than the fill's events window holds.
+fn long_lease() -> Vec<(&'static str, i64, Option<i64>)> {
+    let mut events = vec![("RegistrationGranted", GRANTED, Some(FIRST_EXPIRY))];
+    for renewal in 0..150 {
+        let block = RENEWED + renewal / 50;
+        let expiry = Some(FIRST_EXPIRY + 1 + renewal);
+        events.push(("RegistrationRenewed", block, expiry));
+        events.push(("ExpiryChanged", block, expiry));
+    }
+    events
+}
+
 /// A lease granted, then renewed with an `ExpiryChanged` beside the renewal.
 fn renewed_lease() -> Vec<(&'static str, i64, Option<i64>)> {
     vec![
@@ -826,19 +839,73 @@ async fn a_lease_with_more_events_than_the_history_window_starts_at_its_first_ev
     let database = new_database().await?;
     let logical = seed_registry_only(&database, "migrated.eth", 0x7b20, false).await?;
     let lease = Uuid::from_u128(0x7b2f);
-    let mut events = vec![("RegistrationGranted", GRANTED, Some(FIRST_EXPIRY))];
-    for renewal in 0..150 {
-        let block = RENEWED + renewal / 50;
-        let expiry = Some(FIRST_EXPIRY + 1 + renewal);
-        events.push(("RegistrationRenewed", block, expiry));
-        events.push(("ExpiryChanged", block, expiry));
-    }
-    seed_lease(&database, &logical, lease, &events).await?;
+    seed_lease(&database, &logical, lease, &long_lease()).await?;
     publish(&database).await?;
     assert_composed_unleased(&database, &logical).await?;
 
     let data = detail(&database, "migrated.eth").await?;
     assert_eq!(data["registration_id"], json!(lease.to_string()), "{data}");
     assert_eq!(data["registered_at"], json!(seconds(GRANTED)), "{data}");
+    database.cleanup().await
+}
+
+/// The first-event statement on the long lease reads the lease's own index backward from its
+/// first block and stops at one row, with no sort. As the registrar lease index test does, the
+/// table first holds enough other rows of the name for the planner to weigh the index scans
+/// against a sequential scan on real statistics.
+#[tokio::test]
+async fn the_first_lease_event_is_one_backward_read_of_the_lease_index() -> Result<()> {
+    let database = new_database().await?;
+    let registry = Uuid::from_u128(0x7b30);
+    let logical = seed_registry_only(&database, "migrated.eth", 0x7b30, false).await?;
+    let lease = Uuid::from_u128(0x7b3f);
+    seed_lease(&database, &logical, lease, &long_lease()).await?;
+    publish(&database).await?;
+    let noise: Vec<NormalizedEvent> = (0..4000)
+        .map(|log| {
+            event(
+                Some(logical.as_str()),
+                registry,
+                "AuthorityTransferred",
+                REGISTRY,
+                HANDOFF + log % 10,
+                1_000 + log,
+                json!({"source_event": "Transfer", "owner": OWNER}),
+            )
+        })
+        .collect();
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &noise).await?;
+    sqlx::raw_sql("ANALYZE bigname_phase.normalized_events")
+        .execute(&database.pool)
+        .await?;
+
+    let plan: Value = sqlx::query_scalar(&format!(
+        "EXPLAIN (ANALYZE, FORMAT JSON) {}",
+        crate::v2::support::FIRST_LEASE_EVENT_SQL
+    ))
+    .bind(lease)
+    .bind(HEAD)
+    .bind(&logical)
+    .bind(CHAIN)
+    .fetch_one(&database.pool)
+    .await?;
+    let nodes = plan_nodes(&plan);
+    let scans: Vec<_> = nodes
+        .iter()
+        .filter(|node| node["Index Name"] == json!("normalized_events_resource_history_idx"))
+        .collect();
+    assert_eq!(scans.len(), 1, "{plan:#}");
+    assert_eq!(scans[0]["Scan Direction"], json!("Backward"), "{plan:#}");
+    assert_eq!(scans[0]["Actual Rows"], json!(1), "{plan:#}");
+    assert!(
+        nodes.iter().all(|node| {
+            !matches!(
+                node["Node Type"].as_str(),
+                Some("Sort" | "Incremental Sort" | "Seq Scan")
+            )
+        }),
+        "{plan:#}"
+    );
+    assert_eq!(plan[0]["Plan"]["Actual Rows"], json!(1), "{plan:#}");
     database.cleanup().await
 }

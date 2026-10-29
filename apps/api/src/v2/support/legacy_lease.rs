@@ -472,19 +472,10 @@ async fn load_lease_events(
         .collect())
 }
 
-/// The block of `lease`'s earliest activated registrar lifecycle event of the name at or before
-/// `bound`, by `normalized_events_resource_history_idx` read backward from the lease's first
-/// block. The events window is bounded, so the start of a long-renewed lease is read here.
-async fn load_first_lease_block(
-    conn: &mut PgConnection,
-    chain_id: &str,
-    logical_name_id: &str,
-    lease: &str,
-    bound: i64,
-) -> Result<Option<i64>> {
-    let lease: sqlx::types::Uuid = lease.parse()?;
-    let block = sqlx::query_scalar(
-        "/* api:v2.support.legacy_lease.first_event */
+/// The block of a lease's earliest activated registrar lifecycle event of the name at or before
+/// the bound, by `normalized_events_resource_history_idx` read backward from the lease's first
+/// block. Binds the lease, the bound, the name's logical id and its chain, in that order.
+pub(crate) const FIRST_LEASE_EVENT_SQL: &str = "/* api:v2.support.legacy_lease.first_event */
          SELECT block_number
          FROM bigname_phase.normalized_events
          WHERE resource_id = $1
@@ -497,14 +488,25 @@ async fn load_first_lease_block(
            AND event_kind IN ('RegistrationGranted', 'RegistrationRenewed',
                               'RegistrationReleased', 'ExpiryChanged')
          ORDER BY block_number ASC NULLS FIRST
-         LIMIT 1",
-    )
-    .bind(lease)
-    .bind(bound)
-    .bind(logical_name_id)
-    .bind(chain_id)
-    .fetch_optional(conn)
-    .await?;
+         LIMIT 1";
+
+/// The block of `lease`'s first event ([`FIRST_LEASE_EVENT_SQL`]). The events window is bounded,
+/// so the start of a long-renewed lease is read here.
+async fn load_first_lease_block(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    logical_name_id: &str,
+    lease: &str,
+    bound: i64,
+) -> Result<Option<i64>> {
+    let lease: sqlx::types::Uuid = lease.parse()?;
+    let block = sqlx::query_scalar(FIRST_LEASE_EVENT_SQL)
+        .bind(lease)
+        .bind(bound)
+        .bind(logical_name_id)
+        .bind(chain_id)
+        .fetch_optional(conn)
+        .await?;
     Ok(block)
 }
 
