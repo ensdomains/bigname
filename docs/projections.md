@@ -2477,6 +2477,25 @@ The supervised runner retries with backoff, including family data-integrity
 failures; a one-shot redo returns the failure and leaves repair unfinished for
 an explicit rerun. The failure is not converted into a successful publication.
 
+A block whose write PostgreSQL refuses for the value itself is not retried.
+The transaction rolls back with that value still first in line, so a retry
+would meet it again at the same head. Two shapes reach this:
+
+- a string with a NUL byte, such as a text record or reverse name read from
+  the resolver over RPC (SQLSTATE class 22, data exception)
+- a record key longer than a btree index row may be (SQLSTATE class 54,
+  program limit exceeded).
+
+The runner marks that chain's Project row `failed`, with PostgreSQL's message
+in `last_error`, and that chain's supervisor stops with a data-integrity error.
+A one-shot redo stops with the same error. Other chains keep running, and
+nothing is dropped: the family marker stays on the block before, and the API
+keeps serving that chain's last publication. A restart replays the same block
+and stops again, so the chain resumes only on a build that stores or
+explicitly skips that value. The runner recognises these failures by
+PostgreSQL's English message text, so it assumes the server's `lc_messages` is
+English, the default. Under another language the failure is retried as before.
+
 Verified lookup captures topology, inventory, participating publications and
 real manifest provenance in one snapshot. After RPC, the guarded ledger writer
 locks and checks that captured state and overlapping Interpret/Project redo

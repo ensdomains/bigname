@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use alloy_primitives::{hex, keccak256};
 use anyhow::{Result, ensure};
 use phase_runner::{
     INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH,
@@ -434,6 +435,69 @@ async fn the_sweep_cap_refusal_is_not_retried_under_supervision() -> Result<()> 
         "under the default cap the sweep publishes: {outcome:?}"
     );
     ensure!(marker(&scratch).await? == Some(HEAD));
+    scratch.cleanup().await
+}
+
+// A record key longer than a btree index row may be. PostgreSQL refuses the block's write and the
+// transaction rolls back, so every retry would meet the same key at the same head. The runner
+// reports a data-integrity error that is not retried, retry policy or not, and the family marker
+// stays where it was. The key is hex, which PostgreSQL cannot compress below the limit. The
+// refusal is PostgreSQL's own, so a change of its wording fails here.
+#[tokio::test]
+async fn a_record_key_over_the_index_row_limit_is_not_retried() -> Result<()> {
+    let scratch = ready("families_long_key").await?;
+    let published = head_marker(&scratch, 10).await?;
+    let supervised = ProjectPhase::new(scratch.pool().clone());
+    supervised.run_batch(context(&published, None)).await?;
+    ensure!(marker(&scratch).await? == Some(10));
+    let key: String = (0_u64..63)
+        .map(|seed| hex::encode(keccak256(seed.to_be_bytes())))
+        .collect();
+    let after = serde_json::json!({
+        "node": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "resolver": "0x00000000000000000000000000000000000000c1",
+        "record_family": "text",
+        "record_key": format!("text:{key}"),
+        "selector_key": key,
+        "source_event": "TextChanged",
+    });
+    sqlx::query(
+        "INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+             manifest_version, chain_id, block_number, block_hash, derivation_kind,
+             canonicality_state, after_state)
+         VALUES ('fixture:long-key', 'ens', 'RecordChanged', 'ens_v1_resolver_l1', 1, $1, 11,
+             $1 || '-block-11', 'ens_v1_unwrapped_authority', 'canonical', $2)",
+    )
+    .bind(CHAIN)
+    .bind(&after)
+    .execute(scratch.pool())
+    .await?;
+    let head = head_marker(&scratch, HEAD).await?;
+    for retry_family_failures in [true, false] {
+        let project =
+            ProjectPhase::new(scratch.pool().clone()).with_family_settings(FamilySettings {
+                retry_family_failures,
+                ..FamilySettings::default()
+            });
+        let error = match project.run_batch(context(&head, Some(&published))).await {
+            Ok(outcome) => anyhow::bail!("the oversized key published: {outcome:?}"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        ensure!(
+            error.kind() == phase_runner::error::ErrorKind::DataIntegrity
+                && !error.is_retryable()
+                && message.contains("error returned from database: index row size ")
+                && message.contains(" exceeds btree version 4 maximum "),
+            "retry {retry_family_failures}: {:?} retryable {}: {message}",
+            error.kind(),
+            error.is_retryable()
+        );
+        ensure!(
+            marker(&scratch).await? == Some(10),
+            "the refused block published nothing"
+        );
+    }
     scratch.cleanup().await
 }
 

@@ -450,6 +450,23 @@ journal is a data-integrity error to investigate, not an instruction to edit
 markers or silently discard it. Follow the recovery runbook for operator redo
 or rebuild.
 
+A block whose value PostgreSQL cannot store stops that chain once instead of
+retrying ([projections](../projections.md#publication-and-resumption)). It
+pages through `BignamePhaseFailed`. The runner logs
+`chain supervisor stopped after a terminal error`, and
+`chain_phase_state.last_error` on the chain's `project` row ends with
+PostgreSQL's message:
+
+- `unsupported Unicode escape sequence` or
+  `invalid byte sequence for encoding "UTF8": 0x00` for a NUL byte
+- `index row size … exceeds btree version 4 maximum …` or
+  `index row requires … bytes, maximum size is …` for an oversized record key.
+
+Other chains keep running and the API serves the stopped chain's last
+publication. Restarting the runner replays the same block and stops again. Do
+not edit markers or delete the event. Report the message and block, and
+restart once a build that handles that value is deployed.
+
 ## Alerts
 
 | Alert | Threshold | Plain-language meaning |
