@@ -5338,8 +5338,9 @@ What changes:
   `inconsistent`, logs one warning and counts in
   `phase_runner_interpret_inconsistent_log_skips_total`
   ([pipeline monitoring](runbooks/pipeline-monitoring.md#interpret-inconsistent-log-skips)).
-- Stored rows change only where a chain already holds such a log, since a chain that had one
-  could not interpret past it. A manifest-declared emitter still stops on the same log.
+- Served data can change only where a chain holds such a log, or for out-of-order same-block
+  admissions, where an emitter's logs before its admission now run before its later logs. A
+  manifest-declared emitter still stops on the same log.
 
 Every chain needs a full-history Interpret redo, then the stamped Project redo it installs,
 at a planned [re-derivation boundary](glossary.md#re-derivation-boundary) under matching

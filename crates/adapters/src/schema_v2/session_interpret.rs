@@ -253,9 +253,10 @@ fn recover_admitted(
     // admission it makes cannot let a later deferred log run before an earlier one. Each restart
     // follows a consumed log. No current adapter admits a different emitter from a deferred log:
     // discovery.rs:57 and :109 admit the emitter itself, :355 the emitter or the proxy of a
-    // declared migration factory, and :249 is unreachable from a valid manifest. So a restart
-    // finds nothing more today; `a_log_of_an_emitter_admitted_in_a_later_block_stays_held`
-    // exercises it.
+    // declared migration factory, and :249 is unreachable from a valid manifest. So no current
+    // adapter can make a restart change the result.
+    // `a_log_of_an_emitter_admitted_in_a_later_block_stays_held` executes it with `position`
+    // already 0.
     while let Some(&index) = deferred.get(position) {
         let edges = output.discovery_edges.len();
         if !interpret_raw(

@@ -1266,7 +1266,8 @@ log inconsistent. Each is named in the row's `decode_context`, which reads
   Every later role change on that resource from that emitter is skipped too.
 - `token_regenerated_without_predecessor`: a `TokenRegenerated` whose
   `oldTokenId` names a token the emitter holds no earlier state for, or one
-  since released. Earlier state is a registration, reservation or
+  since released, regenerated away, or displaced by a re-registration of its
+  label. Earlier state is a registration, reservation or
   `TokenResource` link of the token, a `SubregistryUpdated` or
   `ResolverUpdated` for it, or an earlier `TokenRegenerated` to it.
 
