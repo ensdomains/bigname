@@ -381,23 +381,132 @@ fn debut_registered_to(owner: Address) -> anyhow::Result<BatchInput> {
     Ok(input)
 }
 
+/// `value` with every string equal to `holder` replaced by the zero address.
+fn holder_as_zero(value: &Value, holder: &str) -> Value {
+    match value {
+        Value::String(text) if text.eq_ignore_ascii_case(holder) => {
+            Value::String(ZERO_ADDRESS.to_owned())
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| holder_as_zero(item, holder))
+                .collect(),
+        ),
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(key, item)| (key.clone(), holder_as_zero(item, holder)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// The name's events in its migration block, whole but for their identities, interpreter state
+/// keys and log indexes, with `holder` read as the zero address. A before state chained from an
+/// earlier event is left out, because it is the state of the history event under the same key,
+/// and the two histories are a registration and a renewal.
+fn migration_events(output: &BatchOutput, block: i64, logical: &str, holder: &str) -> Vec<Value> {
+    name_events(output, block, logical)
+        .into_iter()
+        .map(|event| {
+            let mut raw_fact_ref = event.raw_fact_ref.clone();
+            if let Some(fields) = raw_fact_ref.as_object_mut() {
+                for key in ["interpreter_state_key", "state_scope", "log_index"] {
+                    fields.remove(key);
+                }
+            }
+            holder_as_zero(
+                &json!({
+                    "namespace": event.namespace,
+                    "logical_name_id": event.logical_name_id,
+                    "resource_id": event.resource_id.map(|id| id.to_string()),
+                    "event_kind": event.event_kind,
+                    "source_family": event.source_family,
+                    "manifest_version": event.manifest_version,
+                    "source_manifest_id": event.source_manifest_id,
+                    "chain_id": event.chain_id,
+                    "block_number": event.block_number,
+                    "block_hash": event.block_hash,
+                    "transaction_hash": event.transaction_hash,
+                    "transaction_index": event.transaction_index,
+                    "raw_fact_ref": raw_fact_ref,
+                    "derivation_kind": event.derivation_kind,
+                    "canonicality_state": event.canonicality_state,
+                    "before_state": event
+                        .before_state_explicit
+                        .then(|| event.before_state.clone()),
+                    "after_state": event.after_state,
+                    "migration_correlation_ids": event.migration_correlation_ids,
+                    "consumer_visibility": event.consumer_visibility,
+                }),
+                holder,
+            )
+        })
+        .collect()
+}
+
+type Opened = (String, Uuid, i64, Option<i64>, Option<i64>);
+type Closed = (String, i64, i64, i64);
+
+/// Every ENSv1 or ENSv2 binding the run opens and closes for the name, as (arm, resource, block,
+/// transaction, log) and (arm, block, transaction, log).
+fn name_bindings(output: &BatchOutput, logical: &str) -> (Vec<Opened>, Vec<Closed>) {
+    let mut opened = output
+        .surface_bindings
+        .iter()
+        .filter(|binding| binding.logical_name_id == logical)
+        .map(|binding| {
+            (
+                binding.authority_arm.clone(),
+                binding.resource_id,
+                binding.block_number,
+                binding.provenance["transaction_index"].as_i64(),
+                binding.provenance["log_index"].as_i64(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut closed = output
+        .binding_closures
+        .iter()
+        .filter(|closure| closure.logical_name_id == logical)
+        .map(|closure| {
+            (
+                closure.authority_arm.clone(),
+                closure.block_number,
+                closure.transaction_index,
+                closure.log_index,
+            )
+        })
+        .collect::<Vec<_>>();
+    opened.sort();
+    closed.sort();
+    (opened, closed)
+}
+
 /// Mainnet block 26,289,806: debut.eth's lease never moved on the BaseRegistrar before the
 /// migration, and no holder was ever recorded for it. Its migration block must read exactly as
-/// the same migration of a lease whose registration names the holder. The rows compared are each
-/// event's family and kind and whether it sits on the lease. States are left out because the
-/// two leases' grants record different holders.
+/// the same migration of a lease whose registration names the holder, except where one records
+/// the holder and the other the zero address. Both runs open and close the same bindings.
 #[test]
 fn a_lease_with_no_known_holder_migrates_like_one_with_a_holder() -> anyhow::Result<()> {
     let input = real::input(&["debut"])?;
     let block = migration_block(&input);
     let debut = eth_name("debut");
+    let holder = format!("{:#x}", debut_holder()?);
     let (output, warnings) = interpret_with_warnings(input)?;
     assert_no_known_holder(&output, &debut);
     let known = interpret_test_batch(debut_registered_to(debut_holder()?)?)?;
     assert_eq!(
-        name_rows(&output, block, &debut),
-        name_rows(&known, block, &debut),
+        migration_events(&output, block, &debut, &holder),
+        migration_events(&known, block, &debut, &holder),
         "the migration of a lease with no known holder reads unlike one with a holder"
+    );
+    assert_eq!(
+        name_bindings(&output, &debut),
+        name_bindings(&known, &debut),
+        "the two migrations leave different bindings"
     );
     assert_reconciled(&output, &warnings, block, &debut);
     assert!(warnings.all().is_empty(), "{:?}", warnings.all());
@@ -512,6 +621,7 @@ fn debut_with_registry_records() -> anyhow::Result<BatchInput> {
 fn a_lease_with_no_known_holder_and_a_resolver_reconciles() -> anyhow::Result<()> {
     let input = debut_with_registry_records()?;
     let block = migration_block(&input);
+    let chain = input.chain_id.clone();
     let debut = eth_name("debut");
     let (output, warnings) = interpret_with_warnings(input)?;
     assert_no_known_holder(&output, &debut);
@@ -522,6 +632,27 @@ fn a_lease_with_no_known_holder_and_a_resolver_reconciles() -> anyhow::Result<()
                 && event.block_number == Some(block - 2)
         }),
         "the constructed history sets a resolver"
+    );
+    // The registry's `NewOwner` carries only the labelhash, so no binding opens until the
+    // controller renewal names the label. That renewal opens the binding on the registry-only
+    // resource and leaves the lease unbound, so the proof's predecessor is the registry-only one.
+    let node = debut.strip_prefix("ens:").expect("namehash");
+    let registry_only: Opened = (
+        "ens_v1".to_owned(),
+        super::super::common::stable_uuid(&format!("resource:registry-only:{chain}:{node}")),
+        block - 1,
+        Some(0),
+        Some(1),
+    );
+    let (opened, _) = name_bindings(&output, &debut);
+    let before = opened
+        .iter()
+        .filter(|(arm, _, opened_at, _, _)| arm == "ens_v1" && *opened_at < block)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        before,
+        vec![&registry_only],
+        "the renewal opens the registry-only binding and nothing else before the migration"
     );
     assert_reconciled(&output, &warnings, block, &debut);
     assert!(warnings.all().is_empty(), "{:?}", warnings.all());
@@ -680,16 +811,15 @@ fn seven_holderless_leases_in_one_transaction_each_reconcile() -> anyhow::Result
     Ok(())
 }
 
-/// Each name's rows in its migration block, by family, kind and whether they sit on its lease.
-fn name_rows(output: &BatchOutput, block: i64, logical: &str) -> Vec<(String, String, bool)> {
-    let lease = lease(output, logical);
+/// The name's events in its migration block: those naming it and those on its resources.
+fn name_events<'a>(output: &'a BatchOutput, block: i64, logical: &str) -> Vec<&'a NormalizedEvent> {
     let resources = output
         .normalized_events
         .iter()
         .filter(|event| event.logical_name_id.as_deref() == Some(logical))
         .filter_map(|event| event.resource_id)
         .collect::<BTreeSet<_>>();
-    let mut rows = output
+    output
         .normalized_events
         .iter()
         .filter(|event| {
@@ -699,6 +829,14 @@ fn name_rows(output: &BatchOutput, block: i64, logical: &str) -> Vec<(String, St
                         .resource_id
                         .is_some_and(|resource| resources.contains(&resource)))
         })
+        .collect()
+}
+
+/// Each name's rows in its migration block, by family, kind and whether they sit on its lease.
+fn name_rows(output: &BatchOutput, block: i64, logical: &str) -> Vec<(String, String, bool)> {
+    let lease = lease(output, logical);
+    let mut rows = name_events(output, block, logical)
+        .into_iter()
         .map(|event| {
             (
                 event.source_family.clone(),
