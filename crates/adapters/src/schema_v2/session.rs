@@ -437,8 +437,7 @@ fn interpret_raw(
             Ok(interpreted) => interpreted,
             Err(error)
                 if !selected.manifest_declared_emitter
-                    && (crate::evm_abi::is_malformed_event_log(&error)
-                        || crate::evm_abi::inconsistent_event_log_site(&error).is_some()) =>
+                    && crate::evm_abi::is_malformed_event_log(&error) =>
             {
                 let inconsistency_site = crate::evm_abi::inconsistent_event_log_site(&error);
                 let decode_context = inconsistency_site.map_or_else(
