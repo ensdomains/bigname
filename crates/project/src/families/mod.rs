@@ -504,5 +504,8 @@ mod guard_tests;
 #[path = "undo_tests.rs"]
 mod undo_tests;
 #[cfg(test)]
+#[path = "work_destination_tests.rs"]
+mod work_destination_tests;
+#[cfg(test)]
 #[path = "work_tests.rs"]
 mod work_tests;
