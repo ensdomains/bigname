@@ -2,6 +2,7 @@
 //! ENSv1→ENSv2 migration of a `.eth` lease with no known holder. The migration receipts are
 //! captured from Ethereum mainnet. Each name's earlier history is one constructed
 //! legacy-controller renewal, as `zero-owner-migration.json` records under `provenance`.
+//! [`registered`] gives the same names a known holder instead, for comparison.
 
 use std::collections::BTreeMap;
 
@@ -29,6 +30,7 @@ const FAMILIES: &[&str] = &[
 const LEGACY_CONTROLLER: &str = "0x283af0b28c62c092c9727f1ee09c02ca627eb7f5";
 
 sol! {
+    event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 cost, uint256 expires);
     event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires);
 }
 
@@ -60,6 +62,16 @@ fn block(number: i64, hash: String, timestamp: i64) -> anyhow::Result<RawBlockIn
 /// addresses and start blocks. The block before each receipt's block is constructed: it holds one
 /// legacy-controller `NameRenewed` per name the receipt migrates, in the fixture's name order.
 pub fn input(receipts: &[&str]) -> anyhow::Result<BatchInput> {
+    build(receipts, false)
+}
+
+/// As [`input`], but each name's constructed history is a legacy-controller `NameRegistered` to
+/// the holder that migrates it, at the same position, so its lease has a known holder.
+pub fn registered(receipts: &[&str]) -> anyhow::Result<BatchInput> {
+    build(receipts, true)
+}
+
+fn build(receipts: &[&str], registered: bool) -> anyhow::Result<BatchInput> {
     let fixture = fixture()?;
     let repository = bigname_manifests::load_repository(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests/mainnet"),
@@ -173,13 +185,25 @@ pub fn input(receipts: &[&str]) -> anyhow::Result<BatchInput> {
             .enumerate()
         {
             let label = name["label"].as_str().context("label")?;
-            let renewal = NameRenewed {
-                name: label.to_owned(),
-                label: keccak256(label.as_bytes()),
-                cost: U256::ZERO,
-                expires: U256::from(name["v2_expiry"].as_u64().context("expiry")?),
-            }
-            .encode_log_data();
+            let expires = U256::from(name["v2_expiry"].as_u64().context("expiry")?);
+            let history_log = if registered {
+                NameRegistered {
+                    name: label.to_owned(),
+                    label: keccak256(label.as_bytes()),
+                    owner: name["holder"].as_str().context("holder")?.parse()?,
+                    cost: U256::ZERO,
+                    expires,
+                }
+                .encode_log_data()
+            } else {
+                NameRenewed {
+                    name: label.to_owned(),
+                    label: keccak256(label.as_bytes()),
+                    cost: U256::ZERO,
+                    expires,
+                }
+                .encode_log_data()
+            };
             raw_logs.push(RawLogInput {
                 chain_id: CHAIN.to_owned(),
                 block_hash: history_block.block_hash.clone(),
@@ -190,12 +214,12 @@ pub fn input(receipts: &[&str]) -> anyhow::Result<BatchInput> {
                 transaction_index: 0,
                 log_index: i64::try_from(log_index)?,
                 emitting_address: LEGACY_CONTROLLER.to_owned(),
-                topics: renewal
+                topics: history_log
                     .topics()
                     .iter()
                     .map(|topic| format!("{topic:#x}"))
                     .collect(),
-                data: renewal.data.to_vec(),
+                data: history_log.data.to_vec(),
             });
         }
         blocks.insert(history, history_block);
