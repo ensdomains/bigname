@@ -5108,6 +5108,61 @@ and no schema.
   Project redo:
   `SELECT gin_clean_pending_list('bigname_phase.normalized_events_v2_key_probe_idx');`
 
+## Changed entries in the resolution path selection
+
+The build that makes a changed ENSv2 entry read only the names where the walk
+from the root registry can read it (see
+[owned key families](projections.md#owned-key-families) and
+[table ownership](storage.md#table-ownership)) changes one Project statement
+and no schema.
+
+- `project:families.resolution_paths.prepare` read every `name_surfaces` row
+  that held a changed entry's label, wherever the label sat and whether or not
+  anything pointed at the entry's registry. For a registry other than the root
+  it now reads only the names that hold both the entry's label and the label of
+  an entry that points at the registry, and keeps those that hold them
+  adjacent. A registry that nothing points at reads no name. A root registry
+  entry still reads every name that holds its label and keeps those whose last
+  label has its key, or that hold it directly above a slot of the root. The
+  names it selects are the same.
+- Its last step, which reads the surfaces of the names it selects, now counts
+  them first. Up to 5% of the rows of `name_surfaces` it reads each surface by
+  its primary or unique key, so a high row estimate cannot turn a few names
+  into a read of every surface. Beyond that it reads every row of
+  `name_surfaces` once and joins the result to the names by a hash or merge
+  join, never a probe per name. Either way it looks up each surface's block in
+  `chain_lineage` by the block's key, once per surface. Each lookup holds only
+  its key, so the access paths hold on tables with no statistics too. A
+  rebuild range journals all its blocks under its last one, so a range that
+  covers most registrations takes that arm.
+- The bound is 5% of the planner's row count of `name_surfaces`
+  (`pg_class.reltuples`), across every chain the database holds. The full join
+  reads that whole table, so its cost follows that count. Until the table is
+  first analyzed the statement counts its rows instead, a million at most.
+- The bound follows the statistics. With autovacuum off for `name_surfaces`,
+  or ANALYZE behind a bulk load, the row count lags and large selections take
+  the one-pass arm. A TRUNCATE resets the count, and the bound falls back to
+  the capped count until the next ANALYZE.
+- Stored rows do not change. API responses do not change.
+- It adds no schema-migration, index, table, manifest or setting.
+- The statement now reads `normalized_events_v2_key_probe_idx` for the registry
+  of each changed entry too. That index is in the
+  [walk index set](storage.md#walk-index-set), so
+  `ops/walk-index-set/drop.sql` does not drop it.
+- The statement is in `crates/project/src`, an input of the
+  [projection content hash](glossary.md#projection-content-hash) only. That hash
+  rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, at a
+  planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+  matching runner and API binaries. The change rides the next release that
+  redoes Project and shares that release's Project redo. The
+  manifest-authority fingerprint and the compiled watch plan are unchanged, so
+  stamp no Ingest redo.
+- The lookup by registry reads a GIN index. Flush its pending list before a
+  Project redo:
+  `SELECT gin_clean_pending_list('bigname_phase.normalized_events_v2_key_probe_idx');`
+
 ## Resolvers that both protocols name stay ENSv1
 
 The build that ranks a resolver's ENSv2 candidates after its ENSv1 evidence, and lets an ENSv2
