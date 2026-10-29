@@ -15,6 +15,8 @@
 //! `FEW_AFFECTED_NAMES`, 5% of the surfaces, it reads each surface by primary key in such a
 //! subquery. Beyond that it full-joins the names to the surfaces, which the planner can only
 //! hash or merge, so it reads `name_surfaces` in one pass. Only the arm the count picks runs.
+//! Either way each surface's block is then looked up in `chain_lineage` by key, in a lateral
+//! subquery, so the access paths hold on tables with no statistics too.
 //!
 //! The walk below reaches a registry other than the root only through a slot: an entry whose
 //! `SubregistryChanged` event names the registry. The slots of each registry that changed or
@@ -208,6 +210,22 @@ pub(super) fn statement(normal_work: &str) -> String {
               OR (pointer.namespace=journal.before_image->>'namespace'
                 AND pointer.namehash=journal.before_image->>'namehash')))"
     );
+    // The last step's test that a surface's block is canonical, one lookup of `chain_lineage`
+    // by its key for each surface. The lateral keeps the surface on the outside, so the
+    // planner cannot read the surfaces again for each block, as it can for a join when the
+    // tables have no statistics.
+    let canonical_block = "CROSS JOIN LATERAL (
+            SELECT 1 FROM chain_lineage lineage
+            WHERE lineage.chain_id=surface.chain_id AND lineage.block_hash=surface.block_hash
+              AND lineage.canonicality_state IN ('canonical','safe','finalized')
+            OFFSET 0
+        ) canonical";
+    // A surface the last step returns: an active `.eth`-namespace surface of the block or
+    // earlier, with a raw name that is not empty, in a canonical state.
+    let readable_surface = "surface.namespace='ens' AND cardinality(surface.labelhashes)>=1
+          AND surface.block_number<=$2 AND surface.visibility_state='active'
+          AND surface.raw_name IS DISTINCT FROM ''
+          AND surface.canonicality_state IN ('canonical','safe','finalized')";
     let (slots_of_changed, slots_of_above) =
         (slot_lookup("changed.registry"), slot_lookup("chain.above"));
     format!(
@@ -673,36 +691,33 @@ pub(super) fn statement(normal_work: &str) -> String {
     -- picks one of two arms. The other arm's filter is false before it runs, so it reads
     -- nothing. Up to `few` names, 5% of the surfaces, each one's surface is read by its
     -- primary key. The planner's row estimate for `affected` follows every step above it, so a
-    -- join here could read every surface for a few names.
-    SELECT readable.logical_name_id FROM affected
+    -- join here could read every surface for a few names. The lookup holds only the key, so no
+    -- other index of `name_surfaces` can serve it: without statistics, the default estimates
+    -- of the other filters make an index on them look as narrow as the key. Those filters
+    -- apply to the row the lookup returns.
+    SELECT surface.logical_name_id FROM affected
     CROSS JOIN LATERAL (
-        SELECT surface.logical_name_id FROM name_surfaces surface
-        JOIN chain_lineage lineage ON lineage.chain_id=surface.chain_id AND lineage.block_hash=surface.block_hash
+        SELECT surface.logical_name_id, surface.chain_id, surface.block_hash,
+               surface.namespace, surface.labelhashes, surface.block_number,
+               surface.visibility_state, surface.raw_name, surface.canonicality_state
+        FROM name_surfaces surface
         WHERE surface.logical_name_id=affected.logical_name_id AND surface.chain_id=$1
-          AND surface.namespace='ens' AND cardinality(surface.labelhashes)>=1
-          AND surface.block_number<=$2 AND surface.visibility_state='active' AND surface.raw_name IS DISTINCT FROM ''
-          AND surface.canonicality_state IN ('canonical','safe','finalized')
-          AND lineage.canonicality_state IN ('canonical','safe','finalized')
         OFFSET 0
-    ) readable
-    WHERE (SELECT names BETWEEN 1 AND few FROM affected_count)
+    ) surface
+    {canonical_block}
+    WHERE (SELECT names BETWEEN 1 AND few FROM affected_count) AND {readable_surface}
     UNION ALL
     -- Beyond that, the names are joined to the surfaces. A full join cannot run as a nested
     -- loop, so the planner hashes or merges the two sides and reads `affected` and
-    -- `name_surfaces` once each, whatever its estimate for `affected`. Each readable surface
-    -- still meets `chain_lineage`, which the planner may probe by key once per surface. The
-    -- last filter keeps the names that have a readable surface, and the COALESCE keeps the
-    -- planner from making the full join an inner one. A name appears once in `affected` and
-    -- every join is by key, so neither arm repeats a name.
+    -- `name_surfaces` once each, whatever its estimate for `affected`. The last filter keeps
+    -- the names that have a readable surface, and the COALESCE keeps the planner from making
+    -- the full join an inner one. A name appears once in `affected` and every join is by key,
+    -- so neither arm repeats a name.
     SELECT readable.logical_name_id FROM affected
     FULL JOIN (
         SELECT surface.logical_name_id FROM name_surfaces surface
-        JOIN chain_lineage lineage ON lineage.chain_id=surface.chain_id AND lineage.block_hash=surface.block_hash
-        WHERE surface.chain_id=$1
-          AND surface.namespace='ens' AND cardinality(surface.labelhashes)>=1
-          AND surface.block_number<=$2 AND surface.visibility_state='active' AND surface.raw_name IS DISTINCT FROM ''
-          AND surface.canonicality_state IN ('canonical','safe','finalized')
-          AND lineage.canonicality_state IN ('canonical','safe','finalized')
+        {canonical_block}
+        WHERE surface.chain_id=$1 AND {readable_surface}
     ) readable ON readable.logical_name_id=affected.logical_name_id
     WHERE (SELECT names > few FROM affected_count)
       AND COALESCE(readable.logical_name_id=affected.logical_name_id, false)

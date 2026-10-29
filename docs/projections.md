@@ -2477,10 +2477,12 @@ entries that point at a changed registry through indexes that already exist
   lookup for each ancestor.
 - It reads the surfaces of the affected names last, and counts the names
   first. Up to 5% of the rows of `name_surfaces` it reads each surface by
-  primary key. Beyond that it full-joins the names to the readable surfaces,
-  which the planner can only hash or merge. It then reads `affected` once and
-  every row of `name_surfaces` once. Each readable surface still meets
-  `chain_lineage`, which the planner may probe by key once per surface.
+  primary key, in a lookup that holds only the key. Beyond that it full-joins
+  the names to the readable surfaces, which the planner can only hash or
+  merge. It then reads `affected` once and every row of `name_surfaces` once.
+  Either way it looks up each surface's block in `chain_lineage` by key, in a
+  lateral subquery that keeps the surface outside. These access paths hold on
+  tables with no statistics too.
 - The bound is 5% of the planner's row count of `name_surfaces`, across every
   chain the database holds. The full join reads that whole table, so its cost
   follows that count. A table never analyzed has no row count, and then the
