@@ -2118,10 +2118,24 @@ it, and it stays `unsupported` with `resolver_implementation_unknown`, or with
 
 Same-block admission: when a discovery observation admits an address at block
 `B`, Interpret also interprets that address's earlier logs in block `B` (lower
-log index). It reads them right after the admitting log, before any later log
-of the block. A later log of the same address therefore reads the state they
-leave, as in chain order, and a consistency check on it sees them. Interpret
-then restores chain order for the block's normalized events so stream-chained
+log index). A log is held only until its emitter is admitted, and once the
+catalog selects it, it runs in log order before the block's next live log:
+
+| Step | What Interpret does |
+| --- | --- |
+| 1 | Interprets the block's next log. A log whose emitter is not admitted yet is held. |
+| 2 | If that log recorded a discovery edge, interprets every held log the catalog now selects, in log order. |
+| 3 | Repeats step 2 while the logs it interpreted recorded discovery edges. |
+| 4 | Returns to step 1 for the next log of the block. |
+| 5 | At the end of the block, tries the held logs once more and leaves the rest uninterpreted, as before. |
+
+A discovery edge is only recorded by a log that is interpreted, and an
+interpreted held log is no longer held. So each repeat of step 2 consumes at
+least one held log, and the repeats are bounded by the block's log count.
+
+A later log of the same address therefore reads the state the held logs leave,
+as in chain order, and a consistency check on it sees them. Interpret then
+restores chain order for the block's normalized events so stream-chained
 before-states follow log order. The result is a pure function of the block's
 raw logs. A log whose emitter is admitted only in a later block of the same
 batch stays uninterpreted — no lookback — and is recorded as an operator
