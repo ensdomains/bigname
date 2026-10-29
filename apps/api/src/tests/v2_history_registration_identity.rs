@@ -445,6 +445,11 @@ async fn registration_history_keeps_an_earlier_successor_lease_under_a_registry_
             && line.contains("surface.namehash")),
         "registrar node probe must constrain both chain and exact node:\n{grant_plan}"
     );
+    assert!(
+        !grant_plan.contains("BitmapAnd")
+            && !grant_plan.contains("normalized_events_projection_idx"),
+        "registrar node probe must not be ANDed with the event-kind index:\n{grant_plan}"
+    );
     println!("registrar grants by name with 4096 unrelated grants:\n{grant_plan}");
 
     // The retained registry authority serves successive leases without receiving a new

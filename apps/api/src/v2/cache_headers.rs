@@ -8,8 +8,10 @@
 //! body carries `meta.as_of_token`, and only when the request is an indexed read: a `source` of
 //! `verified` or `auto` executes against a provider and is never cached, and the primary-name route
 //! qualifies only when the caller asked for `source=indexed` explicitly, because its default answer
-//! set includes the verified source. `POST /v1/lookup`, collections, and error responses never
-//! reach this layer.
+//! set includes the verified source. A response whose body reports `meta.source=verified` carried
+//! a chain read, as the records route's default read does when it answers a `value_not_retained`
+//! key through verified execution, and is never cached either. `POST /v1/lookup`, collections,
+//! and error responses never reach this layer.
 
 use std::borrow::Cow;
 
@@ -48,7 +50,7 @@ pub(crate) async fn indexed_read_cache_headers(request: Request, next: Next) -> 
             return V2Error::internal_error("failed to read indexed response body").into_response();
         }
     };
-    if as_of_token(&bytes).is_none() {
+    if as_of_token(&bytes).is_none() || reports_verified_source(&bytes) {
         return Response::from_parts(parts, Body::from(bytes));
     }
     let token = alloy_primitives::keccak256(&bytes).to_string();
@@ -118,6 +120,20 @@ fn as_of_token(body: &[u8]) -> Option<String> {
             .bytes()
             .all(|byte| byte.is_ascii_graphic() && byte != b'"'))
     .then(|| token.to_owned())
+}
+
+/// Whether the body reports `meta.source=verified`: some answer in it came from the chain.
+fn reports_verified_source(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|payload| {
+            payload
+                .get("meta")?
+                .get("source")?
+                .as_str()
+                .map(|source| source == "verified")
+        })
+        .unwrap_or(false)
 }
 
 /// RFC 9110 `If-None-Match`: a list of entity tags or `*`; weak comparison, so `W/"t"` and `"t"`
@@ -311,6 +327,48 @@ mod tests {
         );
         let response = send("/v1/names/alice.eth?source=indexed", None).await;
         assert!(response.headers().contains_key(header::ETAG));
+    }
+
+    /// The records route's default read names no `source`, so its URI is cacheable, but a
+    /// response that answered a key through verified execution reports `meta.source=verified`
+    /// and carries neither header.
+    #[tokio::test]
+    async fn a_response_with_a_verified_answer_is_not_cached() {
+        for (source, cached) in [("verified", false), ("indexed", true)] {
+            let response = Router::new()
+                .route(
+                    "/v1/names/{name}/records",
+                    get(move || async move {
+                        Json(json!({"data": {}, "meta": {"as_of_token": "abc", "source": source}}))
+                    }),
+                )
+                .route_layer(middleware::from_fn(indexed_read_cache_headers))
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/names/alice.eth/records")
+                        .header(header::IF_NONE_MATCH, "*")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .expect("request must complete");
+            let expected = if cached {
+                StatusCode::NOT_MODIFIED
+            } else {
+                StatusCode::OK
+            };
+            assert_eq!(response.status(), expected, "{source}");
+            assert_eq!(
+                response.headers().contains_key(header::ETAG),
+                cached,
+                "{source}"
+            );
+            assert_eq!(
+                response.headers().contains_key(header::CACHE_CONTROL),
+                cached,
+                "{source}"
+            );
+        }
     }
 
     #[test]
