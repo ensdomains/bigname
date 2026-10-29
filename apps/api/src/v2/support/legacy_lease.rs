@@ -9,10 +9,12 @@
 //!   authority kind, with no lease resource and no lease expiry. The latest lease among the
 //!   name's activated registrar events at or below the snapshot becomes the registration's
 //!   resource and identity. Its newest expiry is the lease expiry, and also the registration's
-//!   expiry and grace end when those are null. The registration time is the block time of the
-//!   name's first current-registry record, else of the lease's earliest event. A lease whose
-//!   latest event is a release is served released at that event's block. Events of an older
-//!   lease are left out.
+//!   expiry and grace end when those are null. A registration the fill supplies the expiry of
+//!   takes the lease's status at the snapshot's block time, unless it is unregistered. The
+//!   registration time is the block time of the name's first current-registry record, else of
+//!   the lease's earliest event, read on its own. A lease whose latest event is a release is
+//!   served released at that event's block, unless the registration's stored term, such as an
+//!   ENSv2 reservation's, is still live at the snapshot. Events of an older lease are left out.
 //! - A registrar-selected registration whose lease is known but has no registration time. It is
 //!   dated at the block of the lease's earliest activated grant at or below the snapshot, and the
 //!   lease becomes its identity.
@@ -21,7 +23,7 @@
 //! registration carries the lease, which the shape check then no longer matches. Every other
 //! route serves the stored registration.
 //!
-//! The API owns these three statements. They are route-specific reads of Interpret's events and
+//! The API owns these four statements. They are route-specific reads of Interpret's events and
 //! the chain lineage, transitional until the stored registration carries the lease.
 use serde_json::{Map, Value};
 use sqlx::{PgConnection, Row};
@@ -113,21 +115,39 @@ pub(crate) fn date_registration(
     true
 }
 
-/// Writes the lease `events` (newest first) prove into `registration`: the latest event's lease is
-/// the registration's resource and identity, its newest expiry the lease expiry (and the
-/// registration's expiry and grace end when those are null), the handoff block's time (else the
-/// lease's first event's) the registration time, and a lease whose latest event is a release is
-/// released at that event's block. Events of an older lease are left out. Returns whether anything
-/// was written.
+/// The blocks the fill dates a lease at.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct LeaseDates {
+    /// The block of the name's first current-registry record.
+    pub(crate) handoff_block: Option<i64>,
+    /// The block of the latest lease's earliest eligible event at or below the snapshot, read on
+    /// its own and not through the events window.
+    pub(crate) first_block: Option<i64>,
+    /// The snapshot's block on the name's chain.
+    pub(crate) snapshot_block: Option<i64>,
+}
+
+/// Writes the lease `events` (newest first) prove into `registration`. The latest event's lease is
+/// the registration's resource and identity, and its newest expiry the lease expiry. When the
+/// registration's expiry is null the lease supplies it, its grace end and, unless the registration
+/// is unregistered, its status at the snapshot's block time. The handoff block's time, else the
+/// lease's first event's, is the registration time. A lease whose latest event is a release is
+/// released at that event's block, unless a stored term outlives it at the snapshot. Events of an
+/// older lease are left out. Returns whether anything was written.
 pub(crate) fn heal_registration(
     registration: &mut Map<String, Value>,
     events: &[LeaseEvent],
-    handoff_block: Option<i64>,
+    dates: LeaseDates,
     block_times: &BTreeMap<i64, i64>,
 ) -> bool {
     let Some(latest) = events.first() else {
         return false;
     };
+    let clock = dates
+        .snapshot_block
+        .and_then(|block| block_times.get(&block))
+        .copied();
+    let stored_term_outlives = stored_term_outlives(registration, clock);
     let lease: Vec<&LeaseEvent> = events
         .iter()
         .filter(|event| event.resource_id == latest.resource_id)
@@ -157,13 +177,21 @@ pub(crate) fn heal_registration(
                 "grace_ends_at".into(),
                 Value::String((i128::from(expiry) + i128::from(GRACE_SECONDS)).to_string()),
             );
+            // As the stored schedule does, an unallocated registration stays unregistered.
+            if let Some(clock) = clock
+                && registration.get("status").and_then(Value::as_str) != Some("unregistered")
+            {
+                registration.insert(
+                    "lifecycle_status".into(),
+                    Value::String(lease_lifecycle_status(expiry, clock).into()),
+                );
+            }
         }
     }
-    let start = handoff_block.or_else(|| lease.iter().map(|event| event.block_number).min());
-    if let Some(registered_at) = seconds(start) {
+    if let Some(registered_at) = seconds(dates.handoff_block.or(dates.first_block)) {
         registration.insert("registered_at".into(), registered_at);
     }
-    if latest.kind == "RegistrationReleased" {
+    if latest.kind == "RegistrationReleased" && !stored_term_outlives {
         registration.insert("status".into(), Value::String("released".into()));
         registration.insert("lifecycle_status".into(), Value::String("released".into()));
         registration.insert(
@@ -172,6 +200,42 @@ pub(crate) fn heal_registration(
         );
     }
     true
+}
+
+/// Whether the registration's stored term, an expiry the lease did not supply such as an ENSv2
+/// reservation's, is still live at `clock`: its grace end, else its expiry, is at or after it. With
+/// no known clock a stored term is taken to outlive the lease.
+fn stored_term_outlives(registration: &Map<String, Value>, clock: Option<i64>) -> bool {
+    let term = |field: &str| registration.get(field).and_then(unix_seconds);
+    let Some(expiry) = term("expiry") else {
+        return false;
+    };
+    let end = term("grace_ends_at").unwrap_or(expiry);
+    clock.is_none_or(|clock| i128::from(clock) <= end)
+}
+
+fn unix_seconds(value: &Value) -> Option<i128> {
+    match value {
+        Value::String(seconds) => seconds.parse().ok(),
+        Value::Number(seconds) => seconds.as_i64().map(i128::from),
+        _ => None,
+    }
+}
+
+/// The status of an ENSv1 `.eth` lease expiring at `expiry`, at `clock`. It mirrors the stored
+/// lifecycle's schedule for such a lease (`schedule` in
+/// `crates/storage/src/families/control/lifecycle/canonical.rs`, with the ENSv1 grace and an
+/// inclusive grace end): active before the expiry, expired from it through the grace end, released
+/// after.
+pub(crate) fn lease_lifecycle_status(expiry: i64, clock: i64) -> &'static str {
+    let now = i128::from(clock);
+    if now < i128::from(expiry) {
+        "active"
+    } else if now <= i128::from(expiry) + i128::from(GRACE_SECONDS) {
+        "expired"
+    } else {
+        "released"
+    }
 }
 
 /// [`fill_lease`] in a savepoint of `conn`'s read transaction. A row that is of neither
@@ -282,10 +346,31 @@ async fn fill_lease(
             if events.is_empty() {
                 return Ok(false);
             }
-            let handoff =
+            let handoff_block =
                 bigname_storage::name_current_registry_handoff_block_number(&row.provenance);
+            let first_block = match handoff_block {
+                Some(_) => None,
+                None => {
+                    let lease = &events[0].resource_id;
+                    load_first_lease_block(
+                        &mut *conn,
+                        &chain_id,
+                        &row.logical_name_id,
+                        lease,
+                        bound,
+                    )
+                    .await?
+                }
+            };
+            let dates = LeaseDates {
+                handoff_block,
+                first_block,
+                snapshot_block: Some(bound),
+            };
             let mut blocks: Vec<i64> = events.iter().map(|event| event.block_number).collect();
-            blocks.extend(handoff);
+            blocks.extend(handoff_block);
+            blocks.extend(first_block);
+            blocks.push(bound);
             let times = load_block_times(&mut *conn, &chain_id, &blocks).await?;
             let Some(registration) = row
                 .declared_summary
@@ -294,7 +379,7 @@ async fn fill_lease(
             else {
                 return Ok(false);
             };
-            Ok(heal_registration(registration, &events, handoff, &times))
+            Ok(heal_registration(registration, &events, dates, &times))
         }
         LegacyLeaseShape::UndatedLease(lease) => {
             let Some(grant_block) = load_grant_block(&mut *conn, &lease, bound).await? else {
@@ -385,6 +470,42 @@ async fn load_lease_events(
                 .and_then(|expiry| expiry.parse::<i64>().ok()),
         })
         .collect())
+}
+
+/// The block of `lease`'s earliest activated registrar lifecycle event of the name at or before
+/// `bound`, by `normalized_events_resource_history_idx` read backward from the lease's first
+/// block. The events window is bounded, so the start of a long-renewed lease is read here.
+async fn load_first_lease_block(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    logical_name_id: &str,
+    lease: &str,
+    bound: i64,
+) -> Result<Option<i64>> {
+    let lease: sqlx::types::Uuid = lease.parse()?;
+    let block = sqlx::query_scalar(
+        "/* api:v2.support.legacy_lease.first_event */
+         SELECT block_number
+         FROM bigname_phase.normalized_events
+         WHERE resource_id = $1
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND block_number <= $2
+           AND logical_name_id = $3
+           AND chain_id = $4
+           AND source_family = 'ens_v1_registrar_l1'
+           AND consumer_visibility = 'activated'
+           AND event_kind IN ('RegistrationGranted', 'RegistrationRenewed',
+                              'RegistrationReleased', 'ExpiryChanged')
+         ORDER BY block_number ASC NULLS FIRST
+         LIMIT 1",
+    )
+    .bind(lease)
+    .bind(bound)
+    .bind(logical_name_id)
+    .bind(chain_id)
+    .fetch_optional(conn)
+    .await?;
+    Ok(block)
 }
 
 /// The readable block times of `blocks` on `chain_id`, as Unix seconds.

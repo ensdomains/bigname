@@ -19,6 +19,8 @@ const UNPUBLISHED: i64 = 135;
 const FIRST_EXPIRY: i64 = 1_800_000_000;
 const RENEWED_EXPIRY: i64 = 1_850_000_000;
 const LATER_EXPIRY: i64 = 1_900_000_000;
+/// A lease expiry between the grant's block and the publication's, so the lease is in grace there.
+const LAPSED_EXPIRY: i64 = 1_700_000_125;
 const GRACE_SECONDS: i64 = 90 * 24 * 60 * 60;
 const REGISTRAR: &str = "ens_v1_registrar_l1";
 const REGISTRY: &str = "ens_v1_registry_l1";
@@ -780,5 +782,63 @@ async fn a_savepoint_is_taken_only_for_a_read_and_a_failed_one_is_an_error() -> 
     assert_eq!(shaped.declared_summary, row.declared_summary);
     sqlx::query("SELECT 1").execute(&mut *reads).await?;
     drop(reads);
+    database.cleanup().await
+}
+
+/// A filled lease expiry that has passed at the snapshot, with its grace still running, serves
+/// `expired` with the lease's expiry and grace end.
+#[tokio::test]
+async fn a_filled_lease_expiry_in_grace_at_the_snapshot_serves_expired() -> Result<()> {
+    let database = new_database().await?;
+    let logical = seed_registry_only(&database, "migrated.eth", 0x7b10, true).await?;
+    let lease = Uuid::from_u128(0x7b1f);
+    seed_lease(
+        &database,
+        &logical,
+        lease,
+        &[("RegistrationGranted", GRANTED, Some(LAPSED_EXPIRY))],
+    )
+    .await?;
+    publish(&database).await?;
+    assert_composed_unleased(&database, &logical).await?;
+
+    let data = detail(&database, "migrated.eth").await?;
+    assert_eq!(data["registration_id"], json!(lease.to_string()), "{data}");
+    assert_eq!(data["status"], json!("expired"), "{data}");
+    assert_eq!(
+        data["expires_at"],
+        json!(LAPSED_EXPIRY.to_string()),
+        "{data}"
+    );
+    assert_eq!(
+        data["grace_ends_at"],
+        json!((LAPSED_EXPIRY + GRACE_SECONDS).to_string()),
+        "{data}"
+    );
+    database.cleanup().await
+}
+
+/// The registration time is the selected lease's first event, read on its own, however many
+/// renewals follow it within the snapshot.
+#[tokio::test]
+async fn a_lease_with_more_events_than_the_history_window_starts_at_its_first_event() -> Result<()>
+{
+    let database = new_database().await?;
+    let logical = seed_registry_only(&database, "migrated.eth", 0x7b20, false).await?;
+    let lease = Uuid::from_u128(0x7b2f);
+    let mut events = vec![("RegistrationGranted", GRANTED, Some(FIRST_EXPIRY))];
+    for renewal in 0..150 {
+        let block = RENEWED + renewal / 50;
+        let expiry = Some(FIRST_EXPIRY + 1 + renewal);
+        events.push(("RegistrationRenewed", block, expiry));
+        events.push(("ExpiryChanged", block, expiry));
+    }
+    seed_lease(&database, &logical, lease, &events).await?;
+    publish(&database).await?;
+    assert_composed_unleased(&database, &logical).await?;
+
+    let data = detail(&database, "migrated.eth").await?;
+    assert_eq!(data["registration_id"], json!(lease.to_string()), "{data}");
+    assert_eq!(data["registered_at"], json!(seconds(GRANTED)), "{data}");
     database.cleanup().await
 }

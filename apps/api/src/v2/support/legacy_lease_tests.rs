@@ -15,6 +15,9 @@ const GRANT_BLOCK: i64 = 130;
 const GRANT_SECONDS: i64 = 1_700_000_130;
 const RELEASE_BLOCK: i64 = 160;
 const RELEASE_SECONDS: i64 = 1_700_000_160;
+const SNAPSHOT_BLOCK: i64 = 170;
+/// The time of the snapshot's block, which the fill dates a filled expiry's status at.
+const SNAPSHOT_SECONDS: i64 = 1_700_000_170;
 
 fn event(kind: &str, block_number: i64, resource_id: &str, expiry: Option<i64>) -> LeaseEvent {
     LeaseEvent {
@@ -77,12 +80,22 @@ fn times() -> BTreeMap<i64, i64> {
         (HANDOFF_BLOCK, HANDOFF_SECONDS),
         (GRANT_BLOCK, GRANT_SECONDS),
         (RELEASE_BLOCK, RELEASE_SECONDS),
+        (SNAPSHOT_BLOCK, SNAPSHOT_SECONDS),
     ])
+}
+
+/// The dates of a name with a first current-registry record, at the snapshot.
+fn handoff_dates() -> LeaseDates {
+    LeaseDates {
+        handoff_block: Some(HANDOFF_BLOCK),
+        first_block: None,
+        snapshot_block: Some(SNAPSHOT_BLOCK),
+    }
 }
 
 fn heal(summary: &mut Value, events: &[LeaseEvent]) -> bool {
     let registration = summary["registration"].as_object_mut().unwrap();
-    heal_registration(registration, events, Some(HANDOFF_BLOCK), &times())
+    heal_registration(registration, events, handoff_dates(), &times())
 }
 
 fn shape(name: &str, provenance: &Value, summary: &Value) -> Option<LegacyLeaseShape> {
@@ -173,10 +186,15 @@ fn a_renewed_lease_serves_its_identity_expiry_and_handoff_registration_time() {
 fn without_a_handoff_block_the_lease_starts_at_its_first_event() {
     let mut summary = registry_only_summary();
     let registration = summary["registration"].as_object_mut().unwrap();
+    let dates = LeaseDates {
+        handoff_block: None,
+        first_block: Some(GRANT_BLOCK),
+        snapshot_block: Some(SNAPSHOT_BLOCK),
+    };
     assert!(heal_registration(
         registration,
         &renewed_lease(),
-        None,
+        dates,
         &times()
     ));
     assert_eq!(
@@ -227,6 +245,8 @@ fn a_lapsed_lease_is_released_with_its_final_expiry() {
 #[test]
 fn a_release_without_an_expiry_writes_no_lease_expiry() {
     let mut summary = registry_only_summary();
+    summary["registration"]["expiry"] = Value::Null;
+    summary["registration"]["grace_ends_at"] = Value::Null;
     let events = vec![
         event("RegistrationReleased", RELEASE_BLOCK, LEASE, None),
         event("RegistrationGranted", 130, LEASE, None),
@@ -235,7 +255,7 @@ fn a_release_without_an_expiry_writes_no_lease_expiry() {
     let registration = &summary["registration"];
     assert_eq!(registration["status"], json!("released"));
     assert_eq!(registration["ens_v1_expiry"], Value::Null);
-    assert_eq!(registration["expiry"], json!("1900000000"));
+    assert_eq!(registration["expiry"], Value::Null);
     assert_eq!(registration["resource_id"], json!(LEASE));
 }
 
@@ -285,7 +305,7 @@ fn an_unknown_block_time_leaves_registered_at_null_and_still_serves_the_lease() 
     assert!(heal_registration(
         registration,
         &renewed_lease(),
-        Some(HANDOFF_BLOCK),
+        handoff_dates(),
         &BTreeMap::new()
     ));
     assert_eq!(registration["registered_at"], Value::Null);
@@ -307,8 +327,13 @@ fn an_older_lease_does_not_date_or_release_the_latest_one() {
         event("RegistrationGranted", 125, OLDER_LEASE, Some(1_600_000_000)),
     ];
     let times = BTreeMap::from([(125, 1_700_000_125), (150, 1_700_000_150)]);
+    let dates = LeaseDates {
+        handoff_block: None,
+        first_block: Some(150),
+        snapshot_block: Some(SNAPSHOT_BLOCK),
+    };
     let registration = summary["registration"].as_object_mut().unwrap();
-    assert!(heal_registration(registration, &events, None, &times));
+    assert!(heal_registration(registration, &events, dates, &times));
     assert_eq!(registration["resource_id"], json!(LEASE));
     assert_eq!(registration["ens_v1_expiry"], json!("1850000000"));
     assert_eq!(registration["status"], json!("active"));
@@ -336,9 +361,10 @@ fn an_ownerless_registration_without_an_authority_kind_is_the_unleased_shape() {
     assert_eq!(registration["ens_v1_expiry"], json!("1850000000"));
     assert_eq!(registration["expiry"], json!("1850000000"));
     assert_eq!(registration["grace_ends_at"], json!("1857776000"));
-    // The heal writes a status only on a release, and an ownerless row has no public
-    // authority, so it serves no `ens_v1` object.
+    // An unregistered row keeps its status when the heal supplies its expiry, and an ownerless
+    // row has no public authority, so it serves no `ens_v1` object.
     assert_eq!(registration["status"], json!("unregistered"));
+    assert_eq!(registration["lifecycle_status"], json!("unregistered"));
     assert_eq!(
         registration_fields("ens", &summary, false).status,
         RegistrationStatus::Unregistered
@@ -442,4 +468,183 @@ fn no_registrar_events_leave_the_registration_as_composed() {
     let before = summary.clone();
     assert!(!heal(&mut summary, &[]));
     assert_eq!(summary, before);
+}
+
+/// A stored term that outlives the released lease, as an ENSv2 reservation extended past the
+/// lease's grace does, keeps the composed status and its own dates. The lease is still the
+/// registration's identity.
+#[test]
+fn a_released_lease_under_a_stored_term_that_outlives_it_keeps_the_composed_status() {
+    let mut summary = registry_only_summary();
+    let events = vec![
+        event(
+            "RegistrationReleased",
+            RELEASE_BLOCK,
+            LEASE,
+            Some(1_690_000_000),
+        ),
+        event("RegistrationGranted", 130, LEASE, Some(1_690_000_000)),
+    ];
+    assert!(heal(&mut summary, &events));
+    let registration = &summary["registration"];
+    assert_eq!(registration["status"], json!("active"));
+    assert_eq!(registration["lifecycle_status"], json!("active"));
+    assert_eq!(registration["released_at"], Value::Null);
+    assert_eq!(registration["expiry"], json!("1900000000"));
+    assert_eq!(registration["grace_ends_at"], json!("1907776000"));
+    assert_eq!(registration["ens_v1_expiry"], json!("1690000000"));
+    assert_eq!(registration["resource_id"], json!(LEASE));
+    assert_eq!(
+        registration_fields("ens", &summary, true).status,
+        RegistrationStatus::Active
+    );
+}
+
+/// A stored term that ended before the snapshot does not hold the released lease open.
+#[test]
+fn a_released_lease_under_a_stored_term_that_ended_is_released() {
+    let mut summary = registry_only_summary();
+    summary["registration"]["expiry"] = json!("1600000000");
+    summary["registration"]["grace_ends_at"] = json!("1607776000");
+    let events = vec![
+        event(
+            "RegistrationReleased",
+            RELEASE_BLOCK,
+            LEASE,
+            Some(1_690_000_000),
+        ),
+        event("RegistrationGranted", 130, LEASE, Some(1_690_000_000)),
+    ];
+    assert!(heal(&mut summary, &events));
+    let registration = &summary["registration"];
+    assert_eq!(registration["status"], json!("released"));
+    assert_eq!(registration["lifecycle_status"], json!("released"));
+    assert_eq!(
+        registration["released_at"],
+        json!(RELEASE_SECONDS.to_string())
+    );
+    assert_eq!(registration["expiry"], json!("1600000000"));
+}
+
+/// When the fill supplies the expiry, the status is the lease's at the snapshot's block time: in
+/// grace once the expiry has passed.
+#[test]
+fn a_filled_expiry_in_grace_at_the_snapshot_serves_expired() {
+    let mut summary = registry_only_summary();
+    summary["registration"]["expiry"] = Value::Null;
+    summary["registration"]["grace_ends_at"] = Value::Null;
+    let expiry = SNAPSHOT_SECONDS - 1;
+    let events = vec![event("RegistrationGranted", 130, LEASE, Some(expiry))];
+    assert!(heal(&mut summary, &events));
+    let registration = &summary["registration"];
+    assert_eq!(registration["expiry"], json!(expiry.to_string()));
+    assert_eq!(registration["lifecycle_status"], json!("expired"));
+    assert_eq!(registration["released_at"], Value::Null);
+    assert_eq!(
+        registration_fields("ens", &summary, true).status,
+        RegistrationStatus::Expired
+    );
+}
+
+#[test]
+fn a_lease_status_is_active_before_its_expiry_expired_through_its_grace_end_and_released_after() {
+    let expiry = 1_700_000_000;
+    let grace_end = expiry + GRACE_SECONDS;
+    for (clock, status) in [
+        (expiry - 1, "active"),
+        (expiry, "expired"),
+        (grace_end, "expired"),
+        (grace_end + 1, "released"),
+    ] {
+        assert_eq!(lease_lifecycle_status(expiry, clock), status, "{clock}");
+    }
+    assert_eq!(lease_lifecycle_status(i64::MAX, i64::MAX - 1), "active");
+    assert_eq!(lease_lifecycle_status(i64::MAX, i64::MAX), "expired");
+}
+
+#[test]
+fn a_filled_expiry_without_a_snapshot_time_keeps_the_composed_status() {
+    let mut summary = registry_only_summary();
+    summary["registration"]["expiry"] = Value::Null;
+    summary["registration"]["grace_ends_at"] = Value::Null;
+    let events = vec![event(
+        "RegistrationGranted",
+        130,
+        LEASE,
+        Some(SNAPSHOT_SECONDS - 1),
+    )];
+    let registration = summary["registration"].as_object_mut().unwrap();
+    let times = BTreeMap::from([(HANDOFF_BLOCK, HANDOFF_SECONDS)]);
+    assert!(heal_registration(
+        registration,
+        &events,
+        handoff_dates(),
+        &times
+    ));
+    assert_eq!(registration["lifecycle_status"], json!("active"));
+}
+
+#[test]
+fn an_unregistered_registration_keeps_its_status_when_the_fill_supplies_the_expiry() {
+    let mut summary = registry_only_summary();
+    summary["registration"]["expiry"] = Value::Null;
+    summary["registration"]["grace_ends_at"] = Value::Null;
+    summary["registration"]["status"] = json!("unregistered");
+    summary["registration"]["lifecycle_status"] = json!("unregistered");
+    let events = vec![event(
+        "RegistrationGranted",
+        130,
+        LEASE,
+        Some(SNAPSHOT_SECONDS - 1),
+    )];
+    assert!(heal(&mut summary, &events));
+    assert_eq!(
+        summary["registration"]["lifecycle_status"],
+        json!("unregistered")
+    );
+}
+
+/// With no known snapshot time, a stored term is taken to outlive the released lease.
+#[test]
+fn a_released_lease_under_a_stored_term_without_a_snapshot_time_keeps_the_composed_status() {
+    let mut summary = registry_only_summary();
+    let events = vec![
+        event(
+            "RegistrationReleased",
+            RELEASE_BLOCK,
+            LEASE,
+            Some(1_690_000_000),
+        ),
+        event("RegistrationGranted", 130, LEASE, Some(1_690_000_000)),
+    ];
+    let registration = summary["registration"].as_object_mut().unwrap();
+    let times = BTreeMap::from([(HANDOFF_BLOCK, HANDOFF_SECONDS)]);
+    assert!(heal_registration(
+        registration,
+        &events,
+        handoff_dates(),
+        &times
+    ));
+    assert_eq!(registration["status"], json!("active"));
+    assert_eq!(registration["released_at"], Value::Null);
+}
+
+/// The registration time is the lease's first event as read on its own, not the oldest event of
+/// the window the fill was given.
+#[test]
+fn without_a_handoff_block_the_lease_starts_at_its_first_event_read_on_its_own() {
+    let mut summary = registry_only_summary();
+    let window = &renewed_lease()[..2];
+    let dates = LeaseDates {
+        handoff_block: None,
+        first_block: Some(GRANT_BLOCK),
+        snapshot_block: Some(SNAPSHOT_BLOCK),
+    };
+    let times = BTreeMap::from([(GRANT_BLOCK, GRANT_SECONDS), (150, 1_700_000_150)]);
+    let registration = summary["registration"].as_object_mut().unwrap();
+    assert!(heal_registration(registration, window, dates, &times));
+    assert_eq!(
+        registration["registered_at"],
+        json!(GRANT_SECONDS.to_string())
+    );
 }
