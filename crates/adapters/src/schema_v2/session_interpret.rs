@@ -229,6 +229,8 @@ fn interpret_once(
     }
     record_pre_admission_skips(catalog, &unselected, &mut output);
     crate::schema_v2::identity::compact_reserved_label_preimages(&mut output)?;
+    #[cfg(test)]
+    MIGRATION_OBSERVATIONS.set(migration_observations.len());
     crate::schema_v2::migration::correlate(catalog, migration_observations, &mut output)?;
     Ok(output)
 }
@@ -289,4 +291,15 @@ pub(in crate::schema_v2) fn block_passes() -> std::collections::BTreeMap<i64, us
 #[cfg(test)]
 pub(in crate::schema_v2) fn reset_block_passes() {
     BLOCK_PASSES.with_borrow_mut(std::collections::BTreeMap::clear);
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static MIGRATION_OBSERVATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The migration observations the latest interpretation on this thread passed to correlation.
+#[cfg(test)]
+pub(in crate::schema_v2) fn migration_observation_count() -> usize {
+    MIGRATION_OBSERVATIONS.get()
 }

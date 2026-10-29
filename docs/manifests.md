@@ -2132,8 +2132,8 @@ at most one pass more than the distinct entries its logs admit. Each admission
 is made by a log that is selected without an earlier admission from its block:
 a `RegistryCreated` or `ResolverCreated` announcement, an `Upgraded` naming a
 declared implementation, or a declared factory's `ProxyDeployed`. With the
-current adapters the first pass finds them all, so a block that admits an
-emitter takes two passes.
+current adapters the first pass finds them all, so every block that admits a
+new entry is interpreted twice and every other block once.
 
 An emitter announced in block `B` therefore has every log in `B` interpreted
 in Ethereum order, as if it had been admitted at the block's start, and a later
