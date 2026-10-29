@@ -2675,8 +2675,9 @@ Rules:
   connect-phase timeouts, DNS failures, TLS failures, connection resets, and
   other transport failures within a request's own timeouts return
   whole-request `500 internal_error`. A gateway answer that is refused,
-  redirected or undecodable, or an `OffchainLookup` from any sender but the
-  called contract, fails that record in band with
+  redirected or undecodable, an `OffchainLookup` from any sender but the
+  called contract, or a callback still reverting with `OffchainLookup` after
+  four steps, fails that record in band with
   `failure_reason=ccip_read_failed`. Neither
   result is persisted by the v2 serving path.
 - Every route has a whole-request deadline. `/healthz` and `/v1/status` retain

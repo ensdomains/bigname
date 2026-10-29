@@ -350,6 +350,34 @@ async fn ens_four_nested_offchain_lookups_resolve() -> AnyResult<()> {
 }
 
 #[tokio::test]
+async fn ens_fifth_nested_offchain_lookup_fails_in_band_as_ccip_read_failed() -> AnyResult<()> {
+    let (gateway_url, gateway_hits, gateway) = answering_gateway().await?;
+    let lookups = (0..5)
+        .map(|_| ens_offchain_lookup(vec![gateway_url.clone()]))
+        .collect::<AnyResult<Vec<_>>>()?;
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(ccip_chain_responses(lookups, None)).await?;
+    let fixture = ens_fixture(true).await?;
+
+    let response = run_lookup(&fixture, &rpc_url).await?;
+    let record = &response.records[0];
+    assert!(record.ccip_read);
+    assert_eq!(record.status, LookupRecordStatus::ExecutionFailed);
+    assert_eq!(
+        record.failure_reason.as_deref(),
+        Some("ccip_read_failed"),
+        "a callback still asking for a gateway after four steps is a malformed read: {record:?}"
+    );
+    assert_eq!(gateway_hits.load(Ordering::SeqCst), 4);
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(requests.len(), 5, "initial call and four callbacks");
+    assert_callbacks_reach_the_universal_resolver(&requests);
+    gateway.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn ens_gateway_url_list_stops_after_four_unreachable_urls() -> AnyResult<()> {
     let (fifth_url, fifth_hits, fifth) = answering_gateway().await?;
     let mut urls = Vec::with_capacity(5);
