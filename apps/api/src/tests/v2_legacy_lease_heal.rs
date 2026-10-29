@@ -246,6 +246,19 @@ async fn seed_lease(
     Ok(())
 }
 
+/// A lease granted, then renewed 150 times with an `ExpiryChanged` beside each renewal: more
+/// eligible events than the fill's events window holds.
+fn long_lease() -> Vec<(&'static str, i64, Option<i64>)> {
+    let mut events = vec![("RegistrationGranted", GRANTED, Some(FIRST_EXPIRY))];
+    for renewal in 0..150 {
+        let block = RENEWED + renewal / 50;
+        let expiry = Some(FIRST_EXPIRY + 1 + renewal);
+        events.push(("RegistrationRenewed", block, expiry));
+        events.push(("ExpiryChanged", block, expiry));
+    }
+    events
+}
+
 /// A lease granted, then renewed with an `ExpiryChanged` beside the renewal.
 fn renewed_lease() -> Vec<(&'static str, i64, Option<i64>)> {
     vec![
@@ -826,14 +839,7 @@ async fn a_lease_with_more_events_than_the_history_window_starts_at_its_first_ev
     let database = new_database().await?;
     let logical = seed_registry_only(&database, "migrated.eth", 0x7b20, false).await?;
     let lease = Uuid::from_u128(0x7b2f);
-    let mut events = vec![("RegistrationGranted", GRANTED, Some(FIRST_EXPIRY))];
-    for renewal in 0..150 {
-        let block = RENEWED + renewal / 50;
-        let expiry = Some(FIRST_EXPIRY + 1 + renewal);
-        events.push(("RegistrationRenewed", block, expiry));
-        events.push(("ExpiryChanged", block, expiry));
-    }
-    seed_lease(&database, &logical, lease, &events).await?;
+    seed_lease(&database, &logical, lease, &long_lease()).await?;
     publish(&database).await?;
     assert_composed_unleased(&database, &logical).await?;
 
