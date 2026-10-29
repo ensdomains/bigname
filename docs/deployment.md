@@ -5374,6 +5374,42 @@ Ingest writes one more btree entry for each block it stores. Project writes one 
 each resource pointer and registry pointer it stores. Interpret writes one more for each
 readable, active name surface whose raw name is at most 2000 bytes.
 
+## Inconsistent logs from undeclared emitters are skipped
+
+The build that skips a well-formed ENSv2 registry log that contradicts itself or its emitter's
+earlier logs, when no manifest declares the emitter
+([table ownership](storage.md#table-ownership)), changes the ENSv2 registry adapter, the skip
+decision and the interpretation of a block that announces a registry in `crates/adapters/src`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain. The
+[projection content hash](glossary.md#projection-content-hash) moves with it.
+
+What changes:
+
+- Interpret no longer stops a chain on such a log. Before, one `LabelRegistered` whose label
+  did not hash to its `labelHash` from any contract that had emitted `RegistryCreated()`
+  failed the Interpret phase until an operator intervened. Now the log is skipped and the
+  chain keeps up.
+- The skipped log writes one `interpret_decode_skips` row whose `decode_context` starts with
+  `inconsistent`, logs one warning and counts in
+  `phase_runner_interpret_inconsistent_log_skips_total`
+  ([pipeline monitoring](runbooks/pipeline-monitoring.md#interpret-inconsistent-log-skips)).
+- Served data can change only where a chain holds such a log, or in a block that admits a
+  registry or a resolver (`RegistryCreated`, `ResolverCreated`, `ProxyDeployed` or `Upgraded`):
+  the admitted contract's logs in the block now run in Ethereum order as if it had been
+  admitted at the block's start. A manifest-declared emitter still stops on the same log.
+- Every block that admits a catalog entry not already live is interpreted twice, so Interpret
+  does that block's work twice. That includes a later block that announces an admitted
+  contract again, such as a proxy's `Upgraded` naming a declared implementation once more.
+  Every other block is interpreted once.
+
+Every chain needs a full-history Interpret redo, then the stamped Project redo it installs,
+at a planned [re-derivation boundary](glossary.md#re-derivation-boundary) under matching
+runner and API binaries. The change shares the release's one Interpret and Project redo
+pair with its other hash-rotating changes. Do not mark old rows ready under the new hash.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
+and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
 ## ENSv1→ENSv2 migration of a lease with no known holder
 
 The build that reconciles the unwrapped ENSv1→ENSv2 migration of a `.eth` lease bigname first

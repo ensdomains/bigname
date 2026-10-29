@@ -87,6 +87,121 @@ fn indexed_admissions_match_flat_history_through_replacement_and_retirement() {
     }
 }
 
+/// Runs blocks the way `interpret_once` does: a pass that admits a new entry is discarded and the
+/// block runs again. After a discard every entry is back under its own sequence number, so every
+/// lookup reads the block's starting entries in their order and then the discarded pass's
+/// admissions in theirs. A reader of the first entry by sequence (`source_for_contract_instance`,
+/// a match-all candidate's instance) reads the same entry in every pass.
+#[test]
+fn a_discarded_pass_puts_its_retirements_back_in_sequence_order() {
+    let mut rows = (0..200).map(admission).collect::<Vec<_>>();
+    let mut index = Admissions::new(rows.clone());
+    let mut discards = 0;
+    for block in 0..20_usize {
+        let logs = (200 + block * 10..210 + block * 10)
+            .map(|n| {
+                let mut row = admission(n);
+                row.active_from_block = Some(1_000 + block as i64);
+                (n, row)
+            })
+            .collect::<Vec<_>>();
+        let mut passes = 0;
+        loop {
+            passes += 1;
+            let generation = index.begin_pass();
+            let start = rows.clone();
+            let mut admitted = Vec::new();
+            for (n, row) in &logs {
+                let n = *n;
+                if let Some((edge, from, key)) = retirement_key(row) {
+                    flat_retire(&mut rows, &edge, from, &key);
+                }
+                rows.push(row.clone());
+                admitted.push(row.clone());
+                index.admit(row.clone());
+                if n.is_multiple_of(3) {
+                    let edge = format!("edge-{}", n % 2);
+                    let from = Uuid::from_u128((n % 3) as u128);
+                    let key = format!("observation-{}", n % 17);
+                    flat_retire(&mut rows, &edge, from, &key);
+                    index.retire(&edge, from, &key);
+                }
+            }
+            compare(&index, &rows);
+            if index.end_pass(generation) {
+                break;
+            }
+            discards += 1;
+            rows = start.into_iter().chain(admitted).collect();
+            compare(&index, &rows);
+        }
+        assert_eq!(passes, 2, "block {block}");
+    }
+    assert_eq!(discards, 20);
+}
+
+fn keyed(address: u128, instance: u128, manifest: i64, key: &str) -> AddressAdmissionInput {
+    AddressAdmissionInput {
+        address: format!("0x{address:040x}"),
+        contract_instance_id: Uuid::from_u128(instance),
+        source_manifest_id: Some(manifest),
+        role: Some(format!("role-{address}")),
+        discovery_edge_kind: Some("resolver".to_owned()),
+        discovery_from_contract_instance_id: Some(Uuid::from_u128(99)),
+        discovery_observation_key: Some(key.to_owned()),
+        active_from_block: Some(5),
+        active_to_block: None,
+    }
+}
+
+/// A discard puts each retired entry back under its original id in `entries` and in all four
+/// indexes, after which the catalog equals its start plus the pass's admission. The admission
+/// shares the first entry's instance under another manifest, so the first entry by sequence for
+/// that instance, which `source_for_contract_instance` reads, is the restored one.
+#[test]
+fn a_discard_restores_retired_entries_under_their_original_ids() {
+    let start = [
+        keyed(1, 1, 1, "k1"),
+        keyed(2, 2, 1, "k2"),
+        keyed(3, 3, 1, "k3"),
+    ];
+    let mut index = Admissions::new(start.to_vec());
+    let admitted = keyed(4, 1, 2, "k1");
+    let mut expected = index.clone();
+    expected.push(admitted.clone());
+
+    let generation = index.begin_pass();
+    index.admit(admitted.clone());
+    index.retire("resolver", Uuid::from_u128(99), "k3");
+    assert_eq!(
+        index.entries.len(),
+        2,
+        "the pass retired the k1 and k3 entries"
+    );
+    assert!(!index.end_pass(generation), "the pass admitted a new entry");
+
+    assert_eq!(index.entries, expected.entries);
+    assert_eq!(
+        index.entries.keys().copied().collect::<Vec<_>>(),
+        [0, 1, 2, 3]
+    );
+    assert_eq!(index.by_address, expected.by_address);
+    assert_eq!(index.by_instance, expected.by_instance);
+    assert_eq!(index.by_role, expected.by_role);
+    assert_eq!(index.by_observation, expected.by_observation);
+    assert_eq!(
+        index.iter().collect::<Vec<_>>(),
+        [&start[0], &start[1], &start[2], &admitted]
+    );
+    assert_eq!(
+        index
+            .for_instance(Uuid::from_u128(1))
+            .map(|entry| entry.source_manifest_id)
+            .collect::<Vec<_>>(),
+        [Some(1), Some(2)]
+    );
+}
+
 #[test]
 fn retirement_releases_all_secondary_index_entries() {
     let mut index = Admissions::default();

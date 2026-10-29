@@ -19,7 +19,7 @@ use crate::{
         state::{State, V2NameTransition, V2RawNameState, V2TokenState, v2_expiry_is_live},
     },
 };
-use alloy_primitives::{Address, U256, hex, keccak256};
+use alloy_primitives::{Address, U256, hex};
 use alloy_sol_types::sol;
 use anyhow::{Context, bail};
 use serde_json::{Value, json};
@@ -322,9 +322,7 @@ fn label_event(
             json!({"source_event":"LabelReserved","expiry":e.expiry,"sender":address_hex(e.sender)}),
         )
     };
-    if keccak256(&label) != label_hash {
-        bail!("{} label does not hash to labelHash", selected.event.name);
-    }
+    crate::evm_abi::ensure_label_hash(&label, label_hash, &selected.event.name)?;
     let decoded_label = decoded_label(&label);
     let surface_label = admitted_label(&label);
     let kind = if registered {

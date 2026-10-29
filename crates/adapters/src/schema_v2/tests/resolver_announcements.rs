@@ -6,10 +6,13 @@ use super::*;
 const ROOT_MANIFEST: i64 = 1;
 const RESOLVER_MANIFEST: i64 = 2;
 const MIGRATION_MANIFEST: i64 = 3;
+const SECOND_RESOLVER_MANIFEST: i64 = 4;
 const RESOLVER: &str = "0x00000000000000000000000000000000000000aa";
 const FACTORY: &str = "0x00000000000000000000000000000000000000fa";
 const IMPLEMENTATION: &str = "0x0000000000000000000000000000000000000077";
 const OTHER_IMPLEMENTATION: &str = "0x0000000000000000000000000000000000000099";
+const RETIRED: &str = "0x00000000000000000000000000000000000000bb";
+const SECOND_IMPLEMENTATION: &str = "0x0000000000000000000000000000000000000088";
 const ACCOUNT: &str = "0x0000000000000000000000000000000000000055";
 
 sol! {
@@ -482,6 +485,154 @@ fn proxy_deployed_naming_a_declared_implementation_admits_the_proxy() -> anyhow:
     assert_eq!(
         edge.observation_key,
         format!("resolver-announcement:proxydeployed:{RESOLVER}")
+    );
+    Ok(())
+}
+
+/// The factory log admits the proxy, so its block is interpreted twice, and it is also a migration
+/// observation. Correlation receives the observation once, from the block's last pass. The
+/// correlation paths absorb a repeated observation, so the count is read where it is passed.
+#[test]
+fn a_migration_observation_in_a_block_interpreted_twice_is_counted_once() -> anyhow::Result<()> {
+    crate::schema_v2::session::reset_block_passes();
+    let deployed = raw_at(
+        ProxyDeployed {
+            sender: ACCOUNT.parse()?,
+            proxyAddress: RESOLVER.parse()?,
+            salt: U256::from(7),
+            implementation: IMPLEMENTATION.parse()?,
+        }
+        .encode_log_data(),
+        1,
+        0,
+        FACTORY,
+    );
+    interpret_with_factory(vec![deployed, text_changed(1, 1)])?;
+    assert_eq!(crate::schema_v2::session::migration_observation_count(), 1);
+    assert_eq!(
+        crate::schema_v2::session::block_passes(),
+        std::collections::BTreeMap::from([(1, 2)])
+    );
+    Ok(())
+}
+
+/// A discarded pass puts back the entries it retired. The constructed catalog holds `RETIRED`
+/// under the observation the factory's `ProxyDeployed` replaces when it admits `RESOLVER`, so that
+/// log retires `RETIRED` in each of the block's two passes. `RETIRED`'s earlier log in the block is
+/// still read, and `RETIRED` stays retired after the block. The shape is constructed because no
+/// current adapter retires another address's entry: every admission's key names its own address.
+#[test]
+fn an_emitter_retired_later_in_a_rerun_block_keeps_its_earlier_log() -> anyhow::Result<()> {
+    crate::schema_v2::session::reset_block_passes();
+    let mut early = text_changed(1, 0);
+    early.emitting_address = RETIRED.to_owned();
+    let deployed = raw_at(
+        ProxyDeployed {
+            sender: ACCOUNT.parse()?,
+            proxyAddress: RESOLVER.parse()?,
+            salt: U256::from(7),
+            implementation: IMPLEMENTATION.parse()?,
+        }
+        .encode_log_data(),
+        1,
+        1,
+        FACTORY,
+    );
+    let mut late = text_changed(2, 0);
+    late.emitting_address = RETIRED.to_owned();
+    let mut input = factory_batch(vec![early, deployed, late]);
+    input.admissions.push(AddressAdmissionInput {
+        address: RETIRED.to_owned(),
+        contract_instance_id: Uuid::from_u128(0xbb),
+        source_manifest_id: Some(RESOLVER_MANIFEST),
+        role: None,
+        discovery_edge_kind: Some("resolver".to_owned()),
+        discovery_from_contract_instance_id: Some(factory_admission().contract_instance_id),
+        discovery_observation_key: Some(format!("resolver-announcement:proxydeployed:{RESOLVER}")),
+        active_from_block: Some(0),
+        active_to_block: None,
+    });
+    let output = interpret_test_batch(input)?;
+
+    assert_eq!(
+        event_kinds(&output),
+        [
+            (1, 0, "RecordChanged".to_owned()),
+            (1, 1, "Upgraded".to_owned()),
+        ]
+    );
+    assert!(output.decode_skips.is_empty());
+    assert_eq!(
+        crate::schema_v2::session::block_passes(),
+        std::collections::BTreeMap::from([(1, 2), (2, 1)])
+    );
+    Ok(())
+}
+
+/// Declares `SECOND_IMPLEMENTATION` under a resolver manifest of its own that reads no records.
+fn second_resolver_manifest() -> ManifestInput {
+    let mut manifest = manifest(
+        SECOND_RESOLVER_MANIFEST,
+        "ens_v2_resolver_l1",
+        "Upgraded",
+        "event Upgraded(address indexed implementation)",
+        &[],
+        &["Upgraded"],
+    );
+    let mut payload: serde_json::Value = serde_json::from_str(&manifest.payload_json).unwrap();
+    payload["resolver_implementations"] =
+        json!([{"role": "permissioned_resolver", "address": SECOND_IMPLEMENTATION}]);
+    manifest.payload_json = payload.to_string();
+    manifest
+}
+
+fn proxy_deployed(implementation: &str, block: i64, log_index: i64) -> RawLogInput {
+    raw_at(
+        ProxyDeployed {
+            sender: ACCOUNT.parse().unwrap(),
+            proxyAddress: RESOLVER.parse().unwrap(),
+            salt: U256::from(7),
+            implementation: implementation.parse().unwrap(),
+        }
+        .encode_log_data(),
+        block,
+        log_index,
+        FACTORY,
+    )
+}
+
+/// An entry the discarded pass both admits and retires is live from the start of the next pass
+/// and retired at its own log there. The factory announces `RESOLVER` twice in one block, which a
+/// chain cannot do, under the same observation: first with `IMPLEMENTATION`, whose manifest reads
+/// `TextChanged`, then with `SECOND_IMPLEMENTATION`, whose manifest does not. The second
+/// announcement retires the first one's entry. The record logs before it are read, including the
+/// one before the first announcement, and the one after it is not.
+#[test]
+fn an_entry_retired_in_a_discarded_pass_is_live_until_its_retiring_log() -> anyhow::Result<()> {
+    crate::schema_v2::session::reset_block_passes();
+    let mut input = factory_batch(vec![
+        text_changed(1, 0),
+        proxy_deployed(IMPLEMENTATION, 1, 1),
+        text_changed(1, 2),
+        proxy_deployed(SECOND_IMPLEMENTATION, 1, 3),
+        text_changed(1, 4),
+    ]);
+    input.manifests.push(second_resolver_manifest());
+    let output = interpret_test_batch(input)?;
+
+    assert_eq!(
+        event_kinds(&output),
+        [
+            (1, 0, "RecordChanged".to_owned()),
+            (1, 1, "Upgraded".to_owned()),
+            (1, 2, "RecordChanged".to_owned()),
+            (1, 3, "Upgraded".to_owned()),
+        ]
+    );
+    assert!(output.decode_skips.is_empty());
+    assert_eq!(
+        crate::schema_v2::session::block_passes(),
+        std::collections::BTreeMap::from([(1, 2)])
     );
     Ok(())
 }

@@ -139,56 +139,65 @@ fn interpret_once(
     committed_state.begin_batch();
     let mut unselected = Vec::new();
     for block in blocks {
-        let mut block_output = BatchOutput::default();
         let mut block_raw_logs = Vec::new();
-        let mut deferred = Vec::new();
-        let first_migration_observation = migration_observations.len();
-        let mut block_state = committed_state.clone();
-        crate::schema_v2::settle_block_boundary(
-            catalog,
-            block,
-            &mut block_state,
-            &mut block_output,
-        )?;
         while raw_logs.peek().is_some_and(|raw| {
             raw.block_number == block.block_number && raw.block_hash == block.block_hash
         }) {
             block_raw_logs.push(raw_logs.next().expect("peeked raw log"));
-            let raw = block_raw_logs.last().expect("collected raw log");
-            if !interpret_raw(
-                catalog,
-                raw,
-                &mut block_state,
-                &mut block_output,
-                &mut migration_observations,
-                &transactions,
-            )? {
-                deferred.push(block_raw_logs.len() - 1);
-            }
         }
+        let first_migration_observation = migration_observations.len();
+        #[cfg(test)]
+        let mut passes = 0_usize;
         // A discovery observation admits its target from its own block, which includes the
         // target's earlier logs in that block (an ERC-1967 proxy announces its implementation
-        // during construction, before any registry can point at it). Interpret those logs
-        // once the block's admissions are settled, then restore chain order so stream-chained
-        // before-states follow log order rather than interpretation order.
-        let first_recovered_event = block_output.normalized_events.len();
-        for index in deferred {
-            let raw = &block_raw_logs[index];
-            if !interpret_raw(
+        // during construction, before any registry can point at it). When a pass admits a new
+        // entry, discard it and interpret the whole block again in log order with the larger
+        // catalog, until a pass admits nothing new. Only an entry the catalog neither holds nor
+        // admitted earlier in the block counts as new, so every pass but the last adds a
+        // distinct entry. A discarded pass leaves only its admissions: the entries it retired are
+        // put back, so a log before the one that retires its emitter is still read.
+        let (mut block_state, mut block_output, unselected_in_block, self_targets) = loop {
+            #[cfg(test)]
+            {
+                passes += 1;
+                assert!(
+                    passes <= block_raw_logs.len() + 1,
+                    "block {} took more passes than it has logs",
+                    block.block_number
+                );
+                note_block_pass(block.block_number, passes);
+            }
+            let generation = catalog.begin_block_pass();
+            migration_observations.truncate(first_migration_observation);
+            let mut block_output = BatchOutput::default();
+            let mut block_state = committed_state.clone();
+            let mut self_targets = Vec::new();
+            crate::schema_v2::settle_block_boundary(
                 catalog,
-                raw,
+                block,
                 &mut block_state,
                 &mut block_output,
-                &mut migration_observations,
-                &transactions,
-            )? {
-                unselected.push(raw.clone());
+            )?;
+            let mut unselected_in_block = Vec::new();
+            for raw in &block_raw_logs {
+                if !interpret_raw(
+                    catalog,
+                    raw,
+                    &mut block_state,
+                    &mut block_output,
+                    &mut migration_observations,
+                    &transactions,
+                    &mut self_targets,
+                )? {
+                    unselected_in_block.push(raw);
+                }
             }
-        }
-        if block_output.normalized_events.len() > first_recovered_event {
-            block_output
-                .normalized_events
-                .sort_by_key(|event| (event.transaction_index, event.log_index));
+            if catalog.end_block_pass(generation) {
+                break (block_state, block_output, unselected_in_block, self_targets);
+            }
+        };
+        for self_target in &self_targets {
+            self_target.warn();
         }
         crate::schema_v2::protocol::reconcile_block(
             catalog,
@@ -201,6 +210,7 @@ fn interpret_once(
         )?;
         committed_state = block_state;
         append_output(&mut output, block_output);
+        unselected.extend(unselected_in_block.into_iter().cloned());
     }
     if let Some(raw) = raw_logs.next() {
         bail!(
@@ -220,6 +230,8 @@ fn interpret_once(
     }
     record_pre_admission_skips(catalog, &unselected, &mut output);
     crate::schema_v2::identity::compact_reserved_label_preimages(&mut output)?;
+    #[cfg(test)]
+    MIGRATION_OBSERVATIONS.set(migration_observations.len());
     crate::schema_v2::migration::correlate(catalog, migration_observations, &mut output)?;
     Ok(output)
 }
@@ -253,6 +265,42 @@ fn record_pre_admission_skips(
                  interpretation is forward-only from the admitting observation and performs no \
                  lookback"
             ),
+            inconsistency_site: None,
         });
     }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static BLOCK_PASSES: std::cell::RefCell<std::collections::BTreeMap<i64, usize>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+#[cfg(test)]
+fn note_block_pass(block_number: i64, passes: usize) {
+    BLOCK_PASSES.with_borrow_mut(|blocks| {
+        blocks.insert(block_number, passes);
+    });
+}
+
+/// The passes the latest interpretation of each block took on this thread.
+#[cfg(test)]
+pub(in crate::schema_v2) fn block_passes() -> std::collections::BTreeMap<i64, usize> {
+    BLOCK_PASSES.with_borrow(Clone::clone)
+}
+
+#[cfg(test)]
+pub(in crate::schema_v2) fn reset_block_passes() {
+    BLOCK_PASSES.with_borrow_mut(std::collections::BTreeMap::clear);
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static MIGRATION_OBSERVATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The migration observations the latest interpretation on this thread passed to correlation.
+#[cfg(test)]
+pub(in crate::schema_v2) fn migration_observation_count() -> usize {
+    MIGRATION_OBSERVATIONS.get()
 }

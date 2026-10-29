@@ -298,14 +298,15 @@ impl Catalog {
     }
 
     pub(super) fn admit(&mut self, admission: AddressAdmissionInput) {
-        if let (Some(edge_kind), Some(from), Some(observation_key)) = (
-            admission.discovery_edge_kind.as_deref(),
-            admission.discovery_from_contract_instance_id,
-            admission.discovery_observation_key.as_deref(),
-        ) {
-            self.retire(edge_kind, from, observation_key);
-        }
-        self.admissions.push(admission);
+        self.admissions.admit(admission);
+    }
+
+    pub(super) fn begin_block_pass(&mut self) -> u64 {
+        self.admissions.begin_pass()
+    }
+
+    pub(super) fn end_block_pass(&mut self, generation: u64) -> bool {
+        self.admissions.end_pass(generation)
     }
 
     pub(super) fn retire(&mut self, edge_kind: &str, from: Uuid, observation_key: &str) {

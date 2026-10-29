@@ -13,6 +13,33 @@ use super::{
 
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
+/// A discovery pointer that targets its own emitter. Interpret logs it once the block's last pass
+/// is known, so a discarded pass logs nothing.
+pub(super) struct SelfTarget {
+    chain_id: String,
+    block_number: i64,
+    transaction_hash: String,
+    log_index: i64,
+    emitting_address: String,
+    event: String,
+    edge_kind: String,
+}
+
+impl SelfTarget {
+    pub(super) fn warn(&self) {
+        tracing::warn!(
+            chain_id = %self.chain_id,
+            block_number = self.block_number,
+            transaction_hash = %self.transaction_hash,
+            log_index = self.log_index,
+            emitting_address = %self.emitting_address,
+            event = %self.event,
+            edge_kind = %self.edge_kind,
+            "discovery pointer targets its own emitter; previous edge closed, no edge opened"
+        );
+    }
+}
+
 pub(super) fn materialize(
     catalog: &mut Catalog,
     selected: &Selected,
@@ -20,6 +47,7 @@ pub(super) fn materialize(
     discoveries: Vec<DiscoveryDraft>,
     state: &mut State,
     output: &mut BatchOutput,
+    self_targets: &mut Vec<SelfTarget>,
 ) -> anyhow::Result<()> {
     for discovery in discoveries {
         match discovery {
@@ -200,16 +228,15 @@ pub(super) fn materialize(
                 // operator diagnostic row.
                 if target == selected.contract_instance_id {
                     if edge_kind != "subregistry" {
-                        tracing::warn!(
-                            chain_id = %raw.chain_id,
-                            block_number = raw.block_number,
-                            transaction_hash = %raw.transaction_hash,
-                            log_index = raw.log_index,
-                            emitting_address = %raw.emitting_address,
-                            event = %selected.event.name,
-                            edge_kind = %edge_kind,
-                            "discovery pointer targets its own emitter; previous edge closed, no edge opened"
-                        );
+                        self_targets.push(SelfTarget {
+                            chain_id: raw.chain_id.clone(),
+                            block_number: raw.block_number,
+                            transaction_hash: raw.transaction_hash.clone(),
+                            log_index: raw.log_index,
+                            emitting_address: raw.emitting_address.clone(),
+                            event: selected.event.name.clone(),
+                            edge_kind: edge_kind.clone(),
+                        });
                     }
                     continue;
                 }

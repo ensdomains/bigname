@@ -194,6 +194,33 @@ diagnose them on their own. Lowering the in-flight limit or batch size can
 help rate limits and load-related timeouts; it does nothing for a genuine
 reorg.
 
+## Interpret inconsistent-log skips
+
+`phase_runner_interpret_inconsistent_log_skips_total{chain,site}` counts the
+event logs committed Interpret batches skipped because the log, from an
+emitter no manifest declares, contradicts itself or the emitter's own earlier
+logs. `site` names the failed check, as listed under
+[table ownership](../storage.md#table-ownership): `label_hash_mismatch`,
+`transfer_batch_length_mismatch`, `token_resource_conflict`,
+`token_resource_ambiguous` or `token_regenerated_without_predecessor`. A
+retried batch or a redo counts its skips again, so compare the rate with the
+phase's mode. The counter has no dashboard panel or paging rule yet.
+
+Each skip also writes one `interpret_decode_skips` row and logs one warning,
+`skipped an inconsistent event log from an emitter no manifest declares`, with
+the chain, block, transaction, log index, emitter, source family and site.
+Interpret keeps going, and the skipped log changes no name. A rising rate from
+one emitter means that contract keeps emitting such logs. Read the rows by
+emitter with:
+
+```sql
+SELECT emitting_address, split_part(decode_context, ':', 1) AS check_name, count(*)
+FROM interpret_decode_skips
+WHERE decode_context LIKE 'inconsistent %'
+GROUP BY emitting_address, check_name
+ORDER BY count(*) DESC;
+```
+
 ## Served lag
 
 Two gauges measure how far the newest data the API could serve trails the

@@ -1406,7 +1406,11 @@ catalog. A malformed event log from an address declared in an active
 of event selection scope. A malformed event log from an undeclared address is
 skipped and recorded as an operator diagnostic whether that address was
 admitted through discovery or the event was selected across every emitting
-address. All other interpretation error classes keep their fatal posture. This
+address. A well-formed ENSv2 registry log from an undeclared address that
+contradicts itself or that address's own earlier logs is skipped and recorded
+the same way, one log at a time. The same log from a declared address is
+fatal. [Table ownership](storage.md#table-ownership) lists the five checks.
+All other interpretation error classes keep their fatal posture. This
 decision uses only the catalog's declaration record for the emitting address,
 never an address or role claimed by the log itself. Missing or extra topics are
 malformed ABI input under this rule. ENSv2 `setSubregistry` stores the registry pointer and
@@ -2114,12 +2118,42 @@ it, and it stays `unsupported` with `resolver_implementation_unknown`, or with
 
 Same-block admission: when a discovery observation admits an address at block
 `B`, Interpret also interprets that address's earlier logs in block `B` (lower
-log index) in a second pass after the block's remaining logs, then restores
-chain order for the block's normalized events so stream-chained before-states
-follow log order. The result is a pure function of the block's raw logs. A log
-whose emitter is admitted only in a later block of the same batch stays
-uninterpreted — no lookback — and is recorded as an operator diagnostic in
-`interpret_decode_skips` ([storage.md](storage.md#table-ownership)).
+log index). It does so by interpreting the block again:
+
+| Pass | What Interpret does |
+| --- | --- |
+| First | Interprets the block's logs in log order with the admissions it holds. A log whose emitter is not admitted yet stays uninterpreted. |
+| Next | If the previous pass admitted a new entry, discards that pass and interprets the whole block again from its first log, in log order, with every admission so far. |
+| Last | The first pass that admits no new entry. Its output is the block's output. |
+
+A pass counts as admitting only an entry the catalog neither holds nor admitted
+earlier in the block. So every pass but the last admits a distinct entry, and a block takes
+at most one pass more than the distinct entries its logs admit. A discarded pass
+leaves only its admissions behind: every entry it retired is put back, so the
+next pass starts from the block's starting admissions plus every entry admitted
+in the block, and a retirement takes effect only at its log in the last pass.
+In a rerun's earlier logs, more than one entry can be live for one address: a
+restored entry and the entry that replaced it, or, after repeated discards,
+equal copies of one entry. Selection reads them as one when they share
+instance, manifest and role. If they ever differ and both read a log,
+selection stops the batch instead of dropping the log. Each deployment today
+declares one authority manifest. Each admission
+is made by a log that is selected without an earlier admission from its block:
+a `RegistryCreated` or `ResolverCreated` announcement, an `Upgraded` naming a
+declared implementation, or a declared factory's `ProxyDeployed`. With the
+current adapters the first pass finds them all, so every block that admits a
+catalog entry not already live is interpreted twice and every other block once.
+
+An emitter announced in block `B` therefore has every log in `B` interpreted
+in Ethereum order, as if it had been admitted at the block's start, and a later
+log of any emitter reads the state those logs leave. The result is a pure
+function of the block's raw logs. A log whose emitter is never admitted in the
+block, or whose selection is refused, stays uninterpreted. A log whose emitter
+is admitted only in a later block of the same batch stays uninterpreted — no
+lookback — and is recorded as an operator diagnostic in
+`interpret_decode_skips` ([storage.md](storage.md#table-ownership)). An
+earlier same-block log skipped as malformed or inconsistent is recorded once,
+as that skip.
 
 The project support rule for `ens_v2_resolver_l1` is unchanged in shape: an
 exact `public_resolver_v2` declaration is supported directly; otherwise the

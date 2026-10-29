@@ -663,6 +663,37 @@ fn ingest_rpc_counters_follow_the_engine_totals() -> Result<()> {
 }
 
 #[test]
+fn interpret_inconsistent_log_skips_add_up_across_committed_batches() -> Result<()> {
+    let metrics = PipelineMetrics::new(
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+    )?;
+    let feed = RunnerMetricsFeed::default();
+    feed.interpret_inconsistent_log_skips(
+        "ethereum-sepolia",
+        &BTreeMap::from([("label_hash_mismatch", 2), ("token_resource_conflict", 1)]),
+    );
+    metrics.apply_feed(&feed);
+    feed.interpret_inconsistent_log_skips(
+        "ethereum-sepolia",
+        &BTreeMap::from([("label_hash_mismatch", 1)]),
+    );
+    feed.interpret_inconsistent_log_skips("ethereum-sepolia", &BTreeMap::new());
+    metrics.apply_feed(&feed);
+
+    let scrape = metrics.registry.encode()?;
+    for line in [
+        "# TYPE phase_runner_interpret_inconsistent_log_skips_total counter",
+        "phase_runner_interpret_inconsistent_log_skips_total{chain=\"ethereum-sepolia\",site=\"label_hash_mismatch\"} 3\n",
+        "phase_runner_interpret_inconsistent_log_skips_total{chain=\"ethereum-sepolia\",site=\"token_resource_conflict\"} 1\n",
+    ] {
+        assert!(scrape.contains(line), "missing {line}");
+    }
+    Ok(())
+}
+
+#[test]
 fn universal_resolver_gauges_warn_once_per_unadmitted_implementation() -> Result<()> {
     use super::universal_resolver::ChainState;
     use bigname_storage::ResolutionState;

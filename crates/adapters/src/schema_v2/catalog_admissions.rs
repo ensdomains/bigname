@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use uuid::Uuid;
 
@@ -20,6 +20,12 @@ pub(super) struct Admissions {
     by_role: HashMap<String, BTreeSet<usize>>,
     by_observation: HashMap<RetirementKey, BTreeSet<usize>>,
     next_id: usize,
+    generation: u64,
+    /// The block of the latest discovery admission, and the entries admitted in it.
+    admitted_block: Option<i64>,
+    admitted: HashSet<AddressAdmissionInput>,
+    /// The entries the current block pass retired, by sequence number.
+    pass_retirements: Vec<(usize, AddressAdmissionInput)>,
 }
 
 impl Admissions {
@@ -62,12 +68,57 @@ impl Admissions {
         ids.into_iter().flatten().map(|id| &self.entries[id])
     }
 
+    /// Admits a discovered address, replacing the live entries of its discovery observation.
+    /// Counts a new generation only for an entry that is neither live nor admitted before in its
+    /// block, so re-admitting an entry never counts and each counts at most once per block.
+    pub(super) fn admit(&mut self, admission: AddressAdmissionInput) {
+        if self.admitted_block != admission.active_from_block {
+            self.admitted_block = admission.active_from_block;
+            self.admitted.clear();
+        }
+        let live = self
+            .for_address(&admission.address)
+            .any(|entry| *entry == admission);
+        if !live && self.admitted.insert(admission.clone()) {
+            self.generation += 1;
+        }
+        if let Some((edge_kind, from, observation_key)) = retirement_key(&admission) {
+            self.retire(&edge_kind, from, &observation_key);
+        }
+        self.push(admission);
+    }
+
+    /// Starts a pass over a block and returns the generation it starts from.
+    pub(super) fn begin_pass(&mut self) -> u64 {
+        self.pass_retirements.clear();
+        self.generation
+    }
+
+    /// Ends a pass over a block and says whether it is the block's last: the first pass that
+    /// admits no new entry. A pass that did admit one is discarded. Every entry it retired is put
+    /// back under its own sequence number and its admissions stay, so the next pass starts from
+    /// the block's starting admissions plus every entry admitted in the block, and a retirement
+    /// takes effect only at its log in the last pass.
+    pub(super) fn end_pass(&mut self, generation: u64) -> bool {
+        if self.generation == generation {
+            return true;
+        }
+        for (id, admission) in std::mem::take(&mut self.pass_retirements) {
+            self.insert(id, admission);
+        }
+        false
+    }
+
     pub(super) fn push(&mut self, admission: AddressAdmissionInput) {
         let id = self.next_id;
         self.next_id = self
             .next_id
             .checked_add(1)
             .expect("admission sequence overflow");
+        self.insert(id, admission);
+    }
+
+    fn insert(&mut self, id: usize, admission: AddressAdmissionInput) {
         self.by_address
             .entry(admission.address.to_ascii_lowercase())
             .or_default()
@@ -101,6 +152,7 @@ impl Admissions {
             if let Some(role) = &admission.role {
                 remove_id(&mut self.by_role, role, id);
             }
+            self.pass_retirements.push((id, admission));
         }
     }
 }
