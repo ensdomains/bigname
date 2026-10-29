@@ -2477,6 +2477,37 @@ The supervised runner retries with backoff, including family data-integrity
 failures; a one-shot redo returns the failure and leaves repair unfinished for
 an explicit rerun. The failure is not converted into a successful publication.
 
+A block whose write PostgreSQL refuses for the value itself is not retried.
+The transaction rolls back with that value still first in line, so a retry
+would meet it again at the same head. Two shapes reach this:
+
+- a string with a NUL byte, such as a text record or reverse name read from
+  the resolver over RPC (SQLSTATE class 22, data exception)
+- a record key longer than an index row may be (SQLSTATE class 54, program
+  limit exceeded).
+
+The runner marks that chain's Project row `failed`, with PostgreSQL's message
+in `last_error`, and that chain's supervisor stops with a data-integrity error.
+A one-shot redo stops with the same error. Nothing is dropped. The family
+marker stays before the block, or before the range in a bounded rebuild, and
+the chain's last publication is kept. The API serves it only while it is within
+the [publication lag tolerance](glossary.md#publication-lag-tolerance) of the
+chain's stored head, one block by default. The stop itself leaves that head
+where it is, but a stop during catch-up already has it further ahead. A restart
+moves it too, because the runner runs Ingest to the source's head before Project
+meets the block again. That chain's reads then answer `409 stale` until it
+recovers.
+
+A runner exits nonzero once every chain it runs has stopped. A runner with one
+chain therefore exits on this stop. Under a restart policy it starts again,
+replays the same block and stops again, in a loop. Stop that runner until a
+build that stores or explicitly skips the value is deployed. On a runner with
+several chains the others keep running.
+
+The runner recognises these failures by PostgreSQL's English message text, so
+it assumes the server's `lc_messages` is English. Under another language the
+failure is retried as before.
+
 Verified lookup captures topology, inventory, participating publications and
 real manifest provenance in one snapshot. After RPC, the guarded ledger writer
 locks and checks that captured state and overlapping Interpret/Project redo
