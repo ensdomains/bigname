@@ -2127,7 +2127,7 @@ log index). It does so by interpreting the block again:
 | Last | The first pass that admits no new entry. Its output is the block's output. |
 
 A pass counts as admitting only an entry the catalog neither holds nor admitted
-before. So every pass but the last admits a distinct entry, and a block takes
+earlier in the block. So every pass but the last admits a distinct entry, and a block takes
 at most one pass more than the distinct entries its logs admit. Each admission
 is made by a log that is selected without an earlier admission from its block:
 a `RegistryCreated` or `ResolverCreated` announcement, an `Upgraded` naming a

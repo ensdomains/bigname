@@ -21,6 +21,8 @@ pub(super) struct Admissions {
     by_observation: HashMap<RetirementKey, BTreeSet<usize>>,
     next_id: usize,
     generation: u64,
+    /// The block of the latest discovery admission, and the entries admitted in it.
+    admitted_block: Option<i64>,
     admitted: HashSet<AddressAdmissionInput>,
 }
 
@@ -65,9 +67,13 @@ impl Admissions {
     }
 
     /// Admits a discovered address, replacing the live entries of its discovery observation.
-    /// Counts a new generation only for an entry that is neither live nor admitted before, so
-    /// re-admitting an entry never counts and each distinct entry counts at most once.
+    /// Counts a new generation only for an entry that is neither live nor admitted before in its
+    /// block, so re-admitting an entry never counts and each counts at most once per block.
     pub(super) fn admit(&mut self, admission: AddressAdmissionInput) {
+        if self.admitted_block != admission.active_from_block {
+            self.admitted_block = admission.active_from_block;
+            self.admitted.clear();
+        }
         let live = self
             .for_address(&admission.address)
             .any(|entry| *entry == admission);
