@@ -51,3 +51,17 @@ fn a_retained_pointer_serves_no_stored_released_registration() {
         assert!(!row_serves_resolver(&row), "{row:#?}");
     }
 }
+
+/// An ENSv2 TLD served through its root-registry pointer keeps serving with a released summary.
+#[test]
+fn a_root_registry_pointer_serves_a_released_registration() {
+    let mut row = ownerless_row(json!({"authority_kind": null, "released_at": "1700000160"}));
+    row.canonical_display_name = "eth".into();
+    row.normalized_name = "eth".into();
+    row.provenance = json!({
+        "authority_selection": {"authority_arm": "ens_v2"},
+        "read_reachability": {"basis": "root_registry_resolver_pointer"}
+    });
+    assert!(row_has_current_registration(&row));
+    assert!(row_serves_resolver(&row));
+}

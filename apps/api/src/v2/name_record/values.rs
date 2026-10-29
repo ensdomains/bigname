@@ -15,11 +15,17 @@ pub(in crate::v2) fn row_has_current_registration(row: &NameCurrentRow) -> bool 
     ) || row_has_event_linked_registry_serving(row)
 }
 
-/// Whether an event-linked registry pointer serves the row. It serves a registration that is not
-/// released, so a released lease, stored or filled at read time, ends it.
+/// Whether an event-linked registry pointer serves the row. A retained registry resolver pointer
+/// serves a registration that is not released, so a released lease, stored or filled at read
+/// time, ends it. An ENSv2 TLD's root-registry pointer serves as before.
 fn row_has_event_linked_registry_serving(row: &NameCurrentRow) -> bool {
     bigname_storage::name_current_has_event_linked_registry_serving(row)
-        && !bigname_storage::public_name_fields::registration_released(&row.declared_summary)
+        && !(row
+            .provenance
+            .pointer("/read_reachability/basis")
+            .and_then(Value::as_str)
+            == Some("retained_registry_resolver_pointer")
+            && bigname_storage::public_name_fields::registration_released(&row.declared_summary))
 }
 
 pub(in crate::v2) fn identity_row_has_current_registration(
