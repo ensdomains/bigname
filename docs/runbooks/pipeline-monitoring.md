@@ -450,6 +450,33 @@ journal is a data-integrity error to investigate, not an instruction to edit
 markers or silently discard it. Follow the recovery runbook for operator redo
 or rebuild.
 
+A block whose value PostgreSQL cannot store stops that chain once instead of
+retrying ([projections](../projections.md#publication-and-resumption)). It
+pages through `BignamePhaseFailed`. The runner logs
+`chain supervisor stopped after a terminal error`, and
+`chain_phase_state.last_error` on the chain's `project` row ends with
+PostgreSQL's message:
+
+- `unsupported Unicode escape sequence` or
+  `invalid byte sequence for encoding "UTF8": 0x00` for a NUL byte
+- `index row size … exceeds btree version 4 maximum …` or
+  `index row requires … bytes, maximum size is …` for an oversized record key.
+
+A runner exits nonzero once every chain it runs has stopped, so a runner with
+one chain exits on this stop. Its restart policy starts it again, and it replays
+the same block and stops again. That loop can also page
+`BignamePhaseRunnerContainerRestarting`, and `BignamePhaseRunnerDown` if the
+runner stays down between starts. Stop that runner's container until a build
+that handles the value is deployed. On a runner with several chains the others
+keep running. The stopped chain's last publication is kept, and the API serves
+it only while it is within the
+[publication lag tolerance](../glossary.md#publication-lag-tolerance) of the
+stored head. Each restart in that loop runs Ingest to the source's head before
+Project meets the block again, so on a one-chain runner reads soon answer
+`409 stale`. A stop during catch-up does the same on any runner. The chain
+recovers once a build that handles the value catches it up.
+Do not edit markers or delete the event. Report the message and block.
+
 ## Alerts
 
 | Alert | Threshold | Plain-language meaning |

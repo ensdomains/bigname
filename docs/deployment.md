@@ -1645,6 +1645,28 @@ with the reserved readiness connection, one API process can open at most
 collection request holds one request-pool connection while its read snapshot is
 open.
 
+Before either pool hands out an idle connection, the API asks the server in one
+statement whether the session is still inside a transaction. That statement
+takes the place of the empty ping the database driver sends otherwise. A request
+dropped while its `BEGIN` was in flight, as when its client disconnects, can
+return its connection with that transaction still open. The API rolls such a
+transaction back, logs a warning that it did, and then hands the connection out.
+A connection the server has already ended is closed and replaced. After a
+server restart this happens once per pooled connection and logs at info. A
+request's shared read snapshot that still meets such a transaction when it pins
+its isolation level rolls it back, logs the same warning and starts again once,
+rather than failing with `500`.
+
+Each API connection also sets `idle_in_transaction_session_timeout` to
+`BIGNAME_API_REQUEST_TIMEOUT_MS` plus 5 seconds. A request never holds a
+transaction past its deadline, so the server only ends a session whose
+transaction was left open and that no request has taken again. The API logs a
+warning with SQLSTATE `25P03` when it then replaces that connection. A
+transaction left open holds its locks and, after a snapshot pin, its snapshot.
+On a hot standby either can hold up WAL replay that conflicts with it, until the
+standby cancels the session. The request timeout may be at most 2147478647 ms,
+so that this setting stays within PostgreSQL's limit.
+
 ### Database connection budget
 
 `BIGNAME_DATABASE_MAX_CONNECTIONS` is an API-only setting. The phase runner does

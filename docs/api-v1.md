@@ -2676,17 +2676,27 @@ Rules:
   other transport failures within a request's own timeouts return
   whole-request `500 internal_error`. A gateway that answers `4xx` fails the
   record at once. A redirect, another non-`2xx` status or an undecodable body
-  fails it when no later URL answers. Both fail it in band with
-  `failure_reason=ccip_read_failed`, as do an `OffchainLookup` from any sender
-  but the called contract and a callback still reverting with `OffchainLookup`
-  after four steps. A gateway URL whose host is a literal address, or resolves
-  to any address, in a refused destination range fails the record in band with
+  fails it when no later URL answers. On a direct gateway fetch both fail it in
+  band with `failure_reason=ccip_read_failed`. A connect, DNS or TLS failure or
+  a connection reset on any URL tried takes precedence over those, and the
+  request then fails whole with `500 internal_error`, unless a later URL
+  answers. When the Universal Resolver batches its gateway queries locally
+  (`x-batch-gateway:true`), each inner request follows its own URL list the same
+  way. A status or decode failure of an inner request goes back to the contract
+  as a failed batch entry, and the callback's revert answers
+  `failure_reason=resolver_call_reverted` in band instead. A connect, DNS or TLS
+  failure or a connection reset that an inner request ends on is not a batch
+  entry. It fails the whole request with `500 internal_error`, even when the
+  other inner requests answered. An `OffchainLookup` from any sender but the
+  called contract and a callback still reverting with `OffchainLookup` after
+  four steps fail the record in band with `failure_reason=ccip_read_failed` on
+  either path. A gateway URL whose host is a literal address, or resolves to any
+  address, in a refused destination range fails the record in band with
   `failure_reason=gateway_destination_refused`. No connection is opened, no
   later URL is tried, and in an `x-batch-gateway:true` query one refused inner
   request fails the whole record. A refusal is never a whole-request `500`. The
   refused ranges are listed in `docs/execution.md` § CCIP-Read gateway
-  transport. Neither
-  result is persisted by the v2 serving path.
+  transport. Neither result is persisted by the v2 serving path.
 - Every route has a whole-request deadline. `/healthz` and `/v1/status` retain
   that deadline as their final backstop. `/healthz` bypasses
   the process-wide concurrency limiter and load shedding, uses a reserved

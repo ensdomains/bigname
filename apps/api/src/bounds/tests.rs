@@ -677,6 +677,19 @@ fn stop_grace_requires_request_deadline_and_margin() {
     }
     config.stop_grace_ms = Some(65_000);
     assert!(config.validate().is_ok());
-    config.request_timeout_ms = u64::MAX;
-    assert!(config.validate().is_err());
+    config.request_timeout_ms = 61_000;
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("STOP_GRACE_MS"));
+}
+
+#[test]
+fn request_deadline_keeps_the_idle_in_transaction_timeout_within_postgres_limits() {
+    let mut config = ApiBoundsConfig {
+        request_timeout_ms: bigname_storage::MAX_REQUEST_DEADLINE_MS,
+        ..Default::default()
+    };
+    assert!(config.validate().is_ok());
+    config.request_timeout_ms += 1;
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("REQUEST_TIMEOUT_MS"));
 }

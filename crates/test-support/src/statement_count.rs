@@ -4,7 +4,7 @@
 //! between the pool and the server. The relay copies the bytes both ways and reads the
 //! messages the pool sends. It counts each `Query` message and each `Execute` message, which is
 //! each time the server is asked to run a statement. A statement prepared once and run again
-//! counts on every run.
+//! counts on every run. It also counts `Sync` messages, each a round trip.
 //!
 //! The relay speaks plain TCP, so the test server must accept a connection without TLS, as the
 //! test harness's server does.
@@ -30,7 +30,13 @@ use tokio::{
 const PROTOCOL_3: u32 = 196_608;
 const CANCEL_REQUEST: u32 = 80_877_102;
 
-type Sent = Arc<Mutex<Vec<String>>>;
+type Sent = Arc<Mutex<Log>>;
+
+#[derive(Default)]
+struct Log {
+    statements: Vec<String>,
+    syncs: usize,
+}
 
 /// A pool whose statements are counted on their way to the server.
 ///
@@ -50,6 +56,17 @@ pub struct StatementCounter {
 impl StatementCounter {
     /// Open a counted pool on the database of `pool`, with its options and size.
     pub async fn connect(pool: &PgPool) -> Result<Self> {
+        let pool_options =
+            PgPoolOptions::new().max_connections(pool.options().get_max_connections());
+        Self::connect_with_pool_options(pool, pool_options).await
+    }
+
+    /// Open a counted pool on the database of `pool`, built from `pool_options`, so a test can
+    /// count what a pool's own hooks send.
+    pub async fn connect_with_pool_options(
+        pool: &PgPool,
+        pool_options: PgPoolOptions,
+    ) -> Result<Self> {
         let options = pool.connect_options();
         ensure!(
             options.get_socket().is_none() && !options.get_host().starts_with('/'),
@@ -62,8 +79,7 @@ impl StatementCounter {
         let port = listener.local_addr()?.port();
         let sent = Sent::default();
         let relay = tokio::spawn(accept(listener, upstream, Arc::clone(&sent)));
-        let pool = PgPoolOptions::new()
-            .max_connections(pool.options().get_max_connections())
+        let pool = pool_options
             .connect_with(
                 options
                     .as_ref()
@@ -83,10 +99,11 @@ impl StatementCounter {
 
     /// Run `request` and return its output with the statements sent while it ran.
     pub async fn count<T>(&self, request: impl Future<Output = T>) -> (T, StatementCounts) {
-        self.sent.lock().expect("statement log poisoned").clear();
+        *self.sent.lock().expect("statement log poisoned") = Log::default();
         let output = request.await;
-        let statements = std::mem::take(&mut *self.sent.lock().expect("statement log poisoned"));
-        (output, StatementCounts { statements })
+        let Log { statements, syncs } =
+            std::mem::take(&mut *self.sent.lock().expect("statement log poisoned"));
+        (output, StatementCounts { statements, syncs })
     }
 
     /// Close the pool and stop the relay.
@@ -105,6 +122,7 @@ impl Drop for StatementCounter {
 #[derive(Clone, Debug, Default)]
 pub struct StatementCounts {
     statements: Vec<String>,
+    syncs: usize,
 }
 
 impl StatementCounts {
@@ -144,6 +162,13 @@ impl StatementCounts {
     /// The text of every statement sent, for a failure message.
     pub fn statements(&self) -> &[String] {
         &self.statements
+    }
+
+    /// The `Sync` messages sent. Each asks the server for a `ReadyForQuery`, so each is a round
+    /// trip. sqlx's empty ping is one alone, and every prepared statement run ends with one. A
+    /// simple query sends none.
+    pub fn syncs(&self) -> usize {
+        self.syncs
     }
 }
 
@@ -201,7 +226,7 @@ async fn session(client: TcpStream, upstream: (String, u16), sent: Sent) -> io::
 async fn forward(
     client: &mut OwnedReadHalf,
     server: &mut OwnedWriteHalf,
-    sent: &Mutex<Vec<String>>,
+    sent: &Mutex<Log>,
 ) -> io::Result<()> {
     // Until the session starts, a message has no type byte: a length, a code and a body.
     loop {
@@ -245,6 +270,7 @@ async fn forward(
                 let statement = prepared.get(c_string(rest).0).cloned().unwrap_or_default();
                 portals.insert(portal.to_vec(), statement);
             }
+            b'S' => sent.lock().expect("statement log poisoned").syncs += 1,
             b'E' => record(
                 sent,
                 portals.get(c_string(body).0).cloned().unwrap_or_default(),
@@ -278,8 +304,11 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-fn record(sent: &Mutex<Vec<String>>, statement: String) {
-    sent.lock().expect("statement log poisoned").push(statement);
+fn record(sent: &Mutex<Log>, statement: String) {
+    sent.lock()
+        .expect("statement log poisoned")
+        .statements
+        .push(statement);
 }
 
 #[cfg(test)]

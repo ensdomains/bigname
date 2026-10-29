@@ -68,6 +68,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         &args.database,
         "bigname-api",
         args.bounds.db_statement_timeout(),
+        args.bounds.request_timeout(),
     )
     .await?;
     startup_preflight::ensure_verified_lookup_ddl_available(&pool).await?;
@@ -75,6 +76,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         &args.database,
         "bigname-api-health",
         HEALTH_DATABASE_CHECK_TIMEOUT,
+        args.bounds.request_timeout(),
     )
     .await?;
     let expected_status_chain_ids = load_expected_status_chain_ids_at_startup(&pool).await?;
