@@ -4,8 +4,6 @@
 //! manifest-declared emitter still stops the batch on the same log. Every other adapter error
 //! stops the batch for both.
 
-use anyhow::Context as _;
-
 use super::*;
 
 const MANIFEST: i64 = 4130;
