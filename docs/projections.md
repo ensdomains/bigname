@@ -2673,7 +2673,22 @@ input content hash it completed with. A rebuild is `composing` while its
 composition pass runs, with the pass's stream, cursor and chunk count. Each transition
 commits with the work it describes: the reset commits with the rebuild's
 intent, the last undo with the move to replaying, each pass chunk with its
-cursor, and the final replayed or rebuilt block with the completion. A redo
+cursor, and the final replayed or rebuilt block with the completion. The names
+stream is the exception. Its chunks run on one or more workers
+(`--project-families-compose-workers`), and each marks the listed names it
+composed in its own transaction, so the stream keeps no cursor. Each worker
+takes the family marker in share mode, so the chunks overlap, and a reset or a
+block waits for every chunk in flight. The pass's coordinator counts each
+committed chunk in a short transaction of its own, and moves to the next stream
+only once every worker has returned and no listed name is left uncomposed. A
+names chunk leaves each lookup name's serving resource unset. The lookup
+inventories stream, after the record id stream, composes each served
+resource's inventory and sets the serving resource of the names whose chunk it
+is. So no names chunk writes a key another chunk writes, and the families are
+the same whatever the worker count. Nothing reads the lookup names in that
+window: a rebuild's reset leaves the family marker pending until its completing
+block, and every lookup, reverse and family name read answers the publication
+unavailable until then. A redo
 whose undo would reach at or below `composed_block` rebuilds. A run that stops between blocks is resumed by the next. Each
 start of a Project redo moves the Project row to a new redo attempt, so a
 rebuild records the attempt it began under. When the runner reruns an
@@ -2683,7 +2698,8 @@ authority invalidation marker in between), keeping its saved progress, a rebuild
 carried over to the new attempt and resumes from the family marker, provided
 its input revision is unchanged and the families were written under this
 binary's content hash. One carried over during its composition pass continues
-the pass from the record's cursor, and one carried over after it keeps
+the pass from the record's stream and cursor, in the names stream from the
+listed names not yet composed, and one carried over after it keeps
 `composed_block`. Otherwise, including a rerun over another range, a
 skipped attempt, an invalidation or a moved input revision, the redo rebuilds
 from the start. A

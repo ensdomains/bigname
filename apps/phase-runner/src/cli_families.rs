@@ -44,6 +44,30 @@ pub(super) struct ProjectFamiliesArgs {
                 such as 256MB, the server's setting when unset"
     )]
     project_families_compose_work_mem: Option<String>,
+    #[arg(
+        long,
+        env = "BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_WORKERS",
+        default_value_t = bigname_project::families::COMPOSE_WORKERS,
+        value_parser = clap::value_parser!(u16).range(1..),
+        help = "workers composing a rebuild's composition pass names stream side by side, each \
+                on a database connection of its own"
+    )]
+    project_families_compose_workers: u16,
+}
+
+/// The connections `run` gives its pool: two a chain and at least four, plus one for each
+/// composition pass worker of each chain, since every chain's rebuild may compose at once.
+pub fn run_connections(chains: usize, workers: u16) -> u32 {
+    let chains = u32::try_from(chains).unwrap_or(u32::MAX);
+    chains
+        .saturating_mul(2)
+        .max(4)
+        .saturating_add(u32::from(workers).saturating_mul(chains))
+}
+
+/// The connections `redo` gives its pool: four, plus one for each composition pass worker.
+pub fn redo_connections(workers: u16) -> u32 {
+    4 + u32::from(workers)
 }
 
 fn block_spans(value: &str) -> Result<u16, String> {
@@ -74,6 +98,7 @@ impl From<ProjectFamiliesArgs> for FamilySettings {
             compose_block_spans: args.project_families_compose_block_spans,
             compose_key_partitions: args.project_families_compose_key_partitions,
             compose_work_mem: args.project_families_compose_work_mem,
+            compose_workers: args.project_families_compose_workers,
             ..Self::default()
         }
     }
