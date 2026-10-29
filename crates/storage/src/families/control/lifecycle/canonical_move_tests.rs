@@ -91,7 +91,7 @@ fn fold<'a>(events: &'a [LifecycleEvent], name: &str) -> Instance<'a> {
             key: Some(KEY.to_owned()),
         })
         .collect();
-    v2_instance(&tagged).expect("the key has an instance for the name")
+    v2_instance(&tagged, |_| false).expect("the key has an instance for the name")
 }
 
 #[test]

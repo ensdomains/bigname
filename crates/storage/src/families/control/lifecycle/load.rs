@@ -247,9 +247,25 @@ pub async fn load_name_facts_on(
             .collect();
 
     let wrappers = load_wrapper_rows(&mut *conn, chain_id, &resource_list).await?;
+    let node_keys: Vec<(String, String)> = names
+        .iter()
+        .map(|name| {
+            (
+                namespace_of(&name.logical_name_id).to_owned(),
+                name.namehash.to_ascii_lowercase(),
+            )
+        })
+        .collect();
+    let nodes = load_registry_nodes_on(&mut *conn, chain_id, &node_keys).await?;
+    // First current-registry record blocks date a lease no grant opened (`registration_start`).
     let blocks: Vec<i64> = events
         .iter()
         .map(|event| event.position.block_number)
+        .chain(
+            nodes
+                .values()
+                .filter_map(|node| node.first_current_record_block),
+        )
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
@@ -308,16 +324,6 @@ pub async fn load_name_facts_on(
             .into_iter()
             .map(|(name, starts, migration)| (name, (starts, migration)))
             .collect();
-    let node_keys: Vec<(String, String)> = names
-        .iter()
-        .map(|name| {
-            (
-                namespace_of(&name.logical_name_id).to_owned(),
-                name.namehash.to_ascii_lowercase(),
-            )
-        })
-        .collect();
-    let nodes = load_registry_nodes_on(&mut *conn, chain_id, &node_keys).await?;
     let ens_v2_root: Option<Arc<str>> =
         admission.map(|admission| admission.root_registry.as_str().into());
 
