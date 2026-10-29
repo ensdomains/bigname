@@ -191,3 +191,7 @@ fn eth_2ld_labelhash_token_id(
         .ok()
         .map(|value| value.to_string())
 }
+
+#[cfg(test)]
+#[path = "values_tests.rs"]
+mod tests;
