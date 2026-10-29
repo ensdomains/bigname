@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use alloy_primitives::{hex, keccak256};
 use anyhow::{Result, ensure};
 use phase_runner::{
     INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH,
@@ -434,6 +435,113 @@ async fn the_sweep_cap_refusal_is_not_retried_under_supervision() -> Result<()> 
         "under the default cap the sweep publishes: {outcome:?}"
     );
     ensure!(marker(&scratch).await? == Some(HEAD));
+    scratch.cleanup().await
+}
+
+// A record key of about 4,000 bytes, longer than a btree index row may be. PostgreSQL refuses
+// the block's write and the transaction rolls back, so every retry would meet the same key at the
+// same head. The refusal is PostgreSQL's own, so a change of its wording fails here.
+#[tokio::test]
+async fn a_record_key_over_the_btree_row_limit_is_not_retried() -> Result<()> {
+    let message = refused_record_key("families_long_key", 63).await?;
+    ensure!(
+        message.contains("error returned from database: index row size ")
+            && message.contains(" exceeds btree version 4 maximum "),
+        "{message}"
+    );
+    Ok(())
+}
+
+// A record key of about 9,000 bytes, longer than any index row may be, which PostgreSQL refuses
+// before the btree limit is checked.
+#[tokio::test]
+async fn a_record_key_over_the_index_row_limit_is_not_retried() -> Result<()> {
+    let message = refused_record_key("families_longer_key", 141).await?;
+    ensure!(
+        message.contains("error returned from database: index row requires ")
+            && message.contains(" bytes, maximum size is 8191"),
+        "{message}"
+    );
+    Ok(())
+}
+
+/// Publish through block 10, then file a text record at block 11 whose key is `hashes` keccak
+/// hashes in hex, which PostgreSQL cannot compress below either limit. Running Project to the
+/// head must fail with a data-integrity error that is not retried, retry policy or not, and leave
+/// the family marker on block 10. Returns the error's message.
+async fn refused_record_key(prefix: &str, hashes: u64) -> Result<String> {
+    let scratch = ready(prefix).await?;
+    let published = head_marker(&scratch, 10).await?;
+    let supervised = ProjectPhase::new(scratch.pool().clone());
+    supervised.run_batch(context(&published, None)).await?;
+    ensure!(marker(&scratch).await? == Some(10));
+    let key: String = (0..hashes)
+        .map(|seed| hex::encode(keccak256(seed.to_be_bytes())))
+        .collect();
+    let after = serde_json::json!({
+        "node": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "resolver": "0x00000000000000000000000000000000000000c1",
+        "record_family": "text",
+        "record_key": format!("text:{key}"),
+        "selector_key": key,
+        "source_event": "TextChanged",
+    });
+    sqlx::query(
+        "INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+             manifest_version, chain_id, block_number, block_hash, derivation_kind,
+             canonicality_state, after_state)
+         VALUES ('fixture:long-key', 'ens', 'RecordChanged', 'ens_v1_resolver_l1', 1, $1, 11,
+             $1 || '-block-11', 'ens_v1_unwrapped_authority', 'canonical', $2)",
+    )
+    .bind(CHAIN)
+    .bind(&after)
+    .execute(scratch.pool())
+    .await?;
+    let head = head_marker(&scratch, HEAD).await?;
+    let mut message = String::new();
+    for retry_family_failures in [true, false] {
+        let project =
+            ProjectPhase::new(scratch.pool().clone()).with_family_settings(FamilySettings {
+                retry_family_failures,
+                ..FamilySettings::default()
+            });
+        let error = match project.run_batch(context(&head, Some(&published))).await {
+            Ok(outcome) => anyhow::bail!("the oversized key published: {outcome:?}"),
+            Err(error) => error,
+        };
+        message = error.to_string();
+        ensure!(
+            error.kind() == phase_runner::error::ErrorKind::DataIntegrity && !error.is_retryable(),
+            "retry {retry_family_failures}: {:?} retryable {}: {message}",
+            error.kind(),
+            error.is_retryable()
+        );
+        ensure!(
+            marker(&scratch).await? == Some(10),
+            "the refused block published nothing"
+        );
+    }
+    scratch.cleanup().await?;
+    Ok(message)
+}
+
+// The runner also matches PostgreSQL's refusal of a NUL in a text value. No Project write binds a
+// string as text, so this binds one directly to pin the wording a real server uses.
+#[tokio::test]
+async fn postgresql_words_a_nul_in_text_as_the_runner_matches() -> Result<()> {
+    const NUL_IN_TEXT: &str =
+        "error returned from database: invalid byte sequence for encoding \"UTF8\": 0x00";
+    let scratch = ScratchDatabase::create("families_nul_text").await?;
+    let Err(error) = sqlx::query("SELECT $1::text")
+        .bind("a\0b")
+        .execute(scratch.pool())
+        .await
+    else {
+        anyhow::bail!("PostgreSQL accepted a NUL in text");
+    };
+    let error = bigname_project::ProjectError::database("failed to write rows", error);
+    let message = error.to_string();
+    ensure!(message.ends_with(NUL_IN_TEXT), "{message}");
     scratch.cleanup().await
 }
 
