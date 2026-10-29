@@ -14,9 +14,8 @@
 //! root's `eth` entry points at (`eth.eth`). The probe then holds that key alone.
 //! `an_eth_keyed_entry_of_the_eth_registry_reads_every_eth_surface` pins the `eth.eth` case.
 //!
-//! Past `FEW_AFFECTED_NAMES` affected names the last step reads every surface once instead of
-//! probing each name. Only `the_last_step_reads_few_names_by_key_and_many_in_one_pass` selects
-//! that many.
+//! Past `FEW_AFFECTED_NAMES`, 5% of the surfaces, the last step reads every surface once
+//! instead of probing each name. Only the two tests of the last step select that many.
 //!
 //! The measure is taken from `EXPLAIN (ANALYZE, FORMAT JSON)`: over every scan of
 //! `name_surfaces` and every join above one, the rows returned plus the rows a filter, an index
@@ -1613,7 +1612,11 @@ const SURFACE_KEYS: [&str; 2] = [
 
 /// `FEW_AFFECTED_NAMES` of the fix's `selection.rs`, which the base's `selection.rs` this red
 /// variant keeps does not have.
-const FEW_AFFECTED_NAMES: i64 = 10_000;
+const FEW_AFFECTED_NAMES: &str = "(SELECT floor(0.05::float8 * CASE
+            WHEN surfaces.reltuples > 0 THEN surfaces.reltuples::float8
+            ELSE (SELECT count(*) FROM (SELECT 1 FROM name_surfaces LIMIT 1000000) counted)::float8
+        END)::bigint
+        FROM pg_class surfaces WHERE surfaces.oid='name_surfaces'::regclass)";
 
 /// Push a failure unless the last step read `name_surfaces`, and read it only by key.
 fn last_step_reads_by_key(mode: &str, scans: &[(&str, &Value)], failures: &mut Vec<String>) {
@@ -1685,120 +1688,210 @@ async fn touch_names(connection: &mut PgConnection, block: i64, count: i64) -> R
     Ok(())
 }
 
-// The last step reads the surfaces of the affected names, and their count picks how. The rows
-// are the count's cardinality classes, each under a custom and a generic plan:
+/// The bound of the last step's probe arm on this database, as the statement computes it.
+async fn few_affected_names(connection: &mut PgConnection) -> Result<i64> {
+    let few: i64 = sqlx::query_scalar(&format!("SELECT {FEW_AFFECTED_NAMES}"))
+        .fetch_one(&mut *connection)
+        .await
+        .context("compute the bound of the last step")?;
+    Ok(few)
+}
+
+/// The planner's row count of `name_surfaces`: 0 or -1 when it was never analyzed.
+async fn surfaces_by_statistics(connection: &mut PgConnection) -> Result<f32> {
+    let tuples: f32 =
+        sqlx::query_scalar("SELECT reltuples FROM pg_class WHERE oid = 'name_surfaces'::regclass")
+            .fetch_one(&mut *connection)
+            .await?;
+    Ok(tuples)
+}
+
+/// Run each `(row, block, count)` publication under both plan modes and push a failure for each
+/// last step that does not read `name_surfaces` as its count says: by key up to `few` names, in
+/// one pass beyond. Each publication must select what the frozen statement before it selects,
+/// and `count` names.
+async fn check_last_step(
+    connection: &mut PgConnection,
+    rows: &[(&str, i64, i64)],
+    few: i64,
+    failures: &mut Vec<String>,
+) -> Result<()> {
+    for &(row, block, count) in rows {
+        for mode in PLAN_MODES {
+            set_mode(connection, mode).await?;
+            let run = run(connection, "path_work", block).await?;
+            let before = run_before(connection, block).await?;
+            ensure!(
+                run.selected == before && i64::try_from(run.selected.len())? == count,
+                "{row}, {mode}: the statement selects {} names, the one before it {}, not \
+                 {count}",
+                run.selected.len(),
+                before.len()
+            );
+            let scans = run.scans();
+            if count <= few {
+                last_step_reads_by_key(&format!("{row}, {mode}"), &scans, failures);
+                continue;
+            }
+            let last: Vec<&Value> = scans
+                .iter()
+                .filter(|(under, _)| under.is_empty())
+                .map(|(_, node)| *node)
+                .collect();
+            if last.is_empty() {
+                failures.push(format!(
+                    "{row}, {mode}: the last step never read {SURFACES}"
+                ));
+            }
+            for node in last {
+                let loops = node["Actual Loops"].as_i64().unwrap_or(0);
+                if loops != 1 {
+                    failures.push(format!(
+                        "{row}, {mode}: the last step reads {SURFACES} by {} in {loops} loops, \
+                         not one",
+                        node["Node Type"]
+                    ));
+                }
+            }
+            match last_join(&run.plan["Plan"]) {
+                Some(join)
+                    if matches!(join["Node Type"].as_str(), Some("Hash Join" | "Merge Join")) => {}
+                Some(join) => failures.push(format!(
+                    "{row}, {mode}: the last step joins affected to {SURFACES} by {}",
+                    join["Node Type"]
+                )),
+                None => failures.push(format!(
+                    "{row}, {mode}: no join of affected and {SURFACES} ran"
+                )),
+            }
+        }
+    }
+    Ok(())
+}
+
+// The last step reads the surfaces of the affected names, and their count against `few`, 5% of
+// the surfaces, picks how. The rows are the count's cardinality classes, each under a custom
+// and a generic plan, after ANALYZE, where `few` is 5% of the planner's row count:
 //
-// | Row            | Publication                          | Affected      | Last step |
-// |----------------|--------------------------------------|---------------|-----------|
-// | one            | one touched name                     | 1             | by key    |
-// | skewed         | P1's changed user registry entries   | a few         | by key    |
-// | at the limit   | `FEW_AFFECTED_NAMES` touched names   | the limit     | by key    |
-// | over the limit | one more touched name                | the limit + 1 | one pass  |
-// | most names     | the `.eth` registry upgraded         | every surface | one pass  |
+// | Row          | Publication                          | Affected      | Last step |
+// |--------------|--------------------------------------|---------------|-----------|
+// | one          | one touched name                     | 1             | by key    |
+// | skewed       | P1's changed user registry entries   | a few         | by key    |
+// | one under    | `few - 1` touched names              | few - 1       | by key    |
+// | at the bound | `few` touched names                  | few           | by key    |
+// | one over     | `few + 1` touched names              | few + 1       | one pass  |
+// | most names   | the `.eth` registry upgraded         | every surface | one pass  |
 //
-// The skewed row is `the_changed_entry_probes_read_their_indexes` (P1).
+// The skewed row is `the_changed_entry_probes_read_their_indexes` (P1). A table never analyzed
+// takes the bound from a count instead (`a_never_analyzed_table_bounds_the_last_step_by_a_count`).
 //
 // "By key" is every read of `name_surfaces` through its primary or unique key. "One pass" is
 // every read of it in one loop, joined to `affected` by a hash or merge join, never a nested
-// loop. Each row also selects what the frozen statement before it selects, and as many names
+// loop that reads it again. Each readable surface may still meet `chain_lineage` by a probe of
+// its own. Each row also selects what the frozen statement before it selects, and as many names
 // as the row says.
 //
-// Red, by trace. One and at the limit fail on the plain join the last step had before only
+// Red, by trace. The rows up to the bound fail on the plain join the last step had before only
 // when the planner's estimates make it scan `name_surfaces`. The one run that shows it is P1's
-// fixture under a custom plan. Over the limit and most names fail on a last step that probes by
-// key whatever the count, which reads `name_surfaces` once per name. At the limit fails when
-// the count's bound excludes the limit itself, and over the limit when it admits one more.
+// fixture under a custom plan. One over and most names fail on a last step that probes by key
+// whatever the count, which reads `name_surfaces` once per name. At the bound fails when the
+// count's bound excludes the bound itself, and one over when it admits one more.
 #[tokio::test]
 async fn the_last_step_reads_few_names_by_key_and_many_in_one_pass() -> Result<()> {
     let (database, pool) = database().await?;
     let result = async {
         let mut connection = pool.acquire().await?;
-        let tree = Tree::of(SMALL);
-        install(&mut connection, tree).await?;
+        install(&mut connection, Tree::of(SMALL)).await?;
+        raw_sql("ANALYZE name_surfaces")
+            .execute(&mut *connection)
+            .await?;
+        let few = few_affected_names(&mut connection).await?;
+        let tuples = surfaces_by_statistics(&mut connection).await?;
+        ensure!(
+            few == SMALL / 20,
+            "the bound is {few} over {tuples} surfaces by statistics, not 5% of {SMALL}"
+        );
         // Each publication changes only its own block, so none sees another's change.
         let rows = [
-            ("one", 6, 1, true),
-            ("at the limit", 7, FEW_AFFECTED_NAMES, true),
-            ("over the limit", 8, FEW_AFFECTED_NAMES + 1, true),
-            ("most names", 9, SMALL, false),
+            ("one", 5, 1),
+            ("one under", 6, few - 1),
+            ("at the bound", 7, few),
+            ("one over", 8, few + 1),
         ];
-        for (_, block, count, touched) in rows {
-            if touched {
-                touch_names(&mut connection, block, count).await?;
-            } else {
-                raw_sql(&format!(
-                    "INSERT INTO normalized_events (event_identity, namespace, event_kind,
-                         source_family, manifest_version, chain_id, block_number, block_hash,
-                         derivation_kind, canonicality_state, after_state)
-                     VALUES ('upgraded:{block}', 'ens', 'Upgraded', 'ens_v2_registry_l1', 1,
-                             '{CHAIN}', {block}, '{hash}', 'ens_v2_registry_resource_surface',
-                             'canonical', jsonb_build_object('proxy_address', '{ETH}'))",
-                    hash = hash(block),
-                ))
-                .execute(&mut *connection)
-                .await
-                .context("upgrade the .eth registry")?;
-            }
+        for (_, block, count) in rows {
+            touch_names(&mut connection, block, count).await?;
         }
+        raw_sql(&format!(
+            "INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+                 manifest_version, chain_id, block_number, block_hash, derivation_kind,
+                 canonicality_state, after_state)
+             VALUES ('upgraded:9', 'ens', 'Upgraded', 'ens_v2_registry_l1', 1, '{CHAIN}', 9,
+                     '{hash}', 'ens_v2_registry_resource_surface', 'canonical',
+                     jsonb_build_object('proxy_address', '{ETH}'))",
+            hash = hash(9),
+        ))
+        .execute(&mut *connection)
+        .await
+        .context("upgrade the .eth registry")?;
         raw_sql("ANALYZE").execute(&mut *connection).await?;
+        ensure!(
+            few_affected_names(&mut connection).await? == few,
+            "the second ANALYZE moved the bound"
+        );
         prepare_statements(&mut connection).await?;
         let mut failures = Vec::new();
-        for (row, block, count, _) in rows {
-            for mode in PLAN_MODES {
-                set_mode(&mut connection, mode).await?;
-                let run = run(&mut connection, "path_work", block).await?;
-                let before = run_before(&mut connection, block).await?;
-                ensure!(
-                    run.selected == before && i64::try_from(run.selected.len())? == count,
-                    "{row}, {mode}: the statement selects {} names, the one before it {}, not \
-                     {count}",
-                    run.selected.len(),
-                    before.len()
-                );
-                let scans = run.scans();
-                if count <= FEW_AFFECTED_NAMES {
-                    last_step_reads_by_key(&format!("{row}, {mode}"), &scans, &mut failures);
-                    continue;
-                }
-                let last: Vec<&Value> = scans
-                    .iter()
-                    .filter(|(under, _)| under.is_empty())
-                    .map(|(_, node)| *node)
-                    .collect();
-                if last.is_empty() {
-                    failures.push(format!(
-                        "{row}, {mode}: the last step never read {SURFACES}"
-                    ));
-                }
-                for node in last {
-                    let loops = node["Actual Loops"].as_i64().unwrap_or(0);
-                    if loops != 1 {
-                        failures.push(format!(
-                            "{row}, {mode}: the last step reads {SURFACES} by {} in {loops} \
-                             loops, not one",
-                            node["Node Type"]
-                        ));
-                    }
-                }
-                match last_join(&run.plan["Plan"]) {
-                    Some(join)
-                        if matches!(
-                            join["Node Type"].as_str(),
-                            Some("Hash Join" | "Merge Join")
-                        ) => {}
-                    Some(join) => failures.push(format!(
-                        "{row}, {mode}: the last step joins affected to {SURFACES} by {}",
-                        join["Node Type"]
-                    )),
-                    None => failures.push(format!(
-                        "{row}, {mode}: no join of affected and {SURFACES} ran"
-                    )),
-                }
-            }
-        }
+        let rows = [rows[0], rows[1], rows[2], rows[3], ("most names", 9, SMALL)];
+        check_last_step(&mut connection, &rows, few, &mut failures).await?;
         ensure!(
             failures.is_empty(),
             "the last step's reads of the affected names' surfaces:\n{}",
+            failures.join("\n")
+        );
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+// A table that was never analyzed has no row count, and the bound is 5% of a count of the
+// surfaces. The rows at the bound and one over it read `name_surfaces` by key and in one pass,
+// under both plan modes. Autovacuum is off for the table, so no ANALYZE runs under the test.
+// Red, by trace: a bound that reads only the row count is 0 here, and the row at the bound
+// then takes the one pass.
+#[tokio::test]
+async fn a_never_analyzed_table_bounds_the_last_step_by_a_count() -> Result<()> {
+    let (database, pool) = database().await?;
+    let result = async {
+        let mut connection = pool.acquire().await?;
+        raw_sql("ALTER TABLE name_surfaces SET (autovacuum_enabled = false)")
+            .execute(&mut *connection)
+            .await?;
+        install(&mut connection, Tree::of(SMALL)).await?;
+        let tuples = surfaces_by_statistics(&mut connection).await?;
+        ensure!(
+            tuples <= 0.0,
+            "name_surfaces has {tuples} rows by statistics, so the count is not under test"
+        );
+        let few = few_affected_names(&mut connection).await?;
+        ensure!(
+            few == SMALL / 20,
+            "the bound is {few}, not 5% of the {SMALL} surfaces counted"
+        );
+        let rows = [("at the bound", 7, few), ("one over", 8, few + 1)];
+        for (_, block, count) in rows {
+            touch_names(&mut connection, block, count).await?;
+        }
+        prepare_statements(&mut connection).await?;
+        let mut failures = Vec::new();
+        check_last_step(&mut connection, &rows, few, &mut failures).await?;
+        ensure!(
+            surfaces_by_statistics(&mut connection).await? <= 0.0,
+            "name_surfaces was analyzed during the test"
+        );
+        ensure!(
+            failures.is_empty(),
+            "the last step's reads of the affected names' surfaces, never analyzed:\n{}",
             failures.join("\n")
         );
         Ok(())
