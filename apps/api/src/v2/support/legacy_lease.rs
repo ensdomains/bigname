@@ -31,7 +31,6 @@ use sqlx::{PgConnection, Row};
 use super::*;
 
 /// The `.eth` registrar grace period the lifecycle keys `grace_ends_at` on.
-/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
 const GRACE_SECONDS: i64 = 90 * 24 * 60 * 60;
 
 /// A registrar lifecycle event of the name.
@@ -429,10 +428,7 @@ async fn load_grant_block(conn: &mut PgConnection, lease: &str, bound: i64) -> R
 }
 
 /// The name's activated registrar lifecycle events at or before `bound`, newest first, by
-/// `normalized_events_name_history_idx`. A wrapped name's renewal `ExpiryChanged`, which the
-/// registrar family carries on the wrapper's resource, is left out, as the stored lifecycle's
-/// expiry reader leaves it out (`expiry_event` in
-/// `crates/storage/src/families/control/lifecycle/laterals.rs`).
+/// `normalized_events_name_history_idx`.
 async fn load_lease_events(
     conn: &mut PgConnection,
     chain_id: &str,
@@ -455,9 +451,6 @@ async fn load_lease_events(
            AND block_number <= $3
            AND event_kind IN ('RegistrationGranted', 'RegistrationRenewed',
                               'RegistrationReleased', 'ExpiryChanged')
-           AND NOT (event_kind = 'ExpiryChanged'
-                    AND (after_state ->> 'source_event') IS NOT DISTINCT FROM 'NameRenewed'
-                    AND (after_state ->> 'authority_kind') IS NOT DISTINCT FROM 'wrapper')
          ORDER BY block_number DESC, transaction_index DESC NULLS LAST,
                   log_index DESC NULLS LAST, normalized_event_id DESC
          LIMIT 256",
@@ -482,8 +475,7 @@ async fn load_lease_events(
 
 /// The block of a lease's earliest activated registrar lifecycle event of the name at or before
 /// the bound, by `normalized_events_resource_history_idx` read backward from the lease's first
-/// block, leaving out a wrapped name's renewal `ExpiryChanged` as the events read does. Binds the
-/// lease, the bound, the name's logical id and its chain, in that order.
+/// block. Binds the lease, the bound, the name's logical id and its chain, in that order.
 pub(crate) const FIRST_LEASE_EVENT_SQL: &str = "/* api:v2.support.legacy_lease.first_event */
          SELECT block_number
          FROM bigname_phase.normalized_events
@@ -496,9 +488,6 @@ pub(crate) const FIRST_LEASE_EVENT_SQL: &str = "/* api:v2.support.legacy_lease.f
            AND consumer_visibility = 'activated'
            AND event_kind IN ('RegistrationGranted', 'RegistrationRenewed',
                               'RegistrationReleased', 'ExpiryChanged')
-           AND NOT (event_kind = 'ExpiryChanged'
-                    AND (after_state ->> 'source_event') IS NOT DISTINCT FROM 'NameRenewed'
-                    AND (after_state ->> 'authority_kind') IS NOT DISTINCT FROM 'wrapper')
          ORDER BY block_number ASC NULLS FIRST
          LIMIT 1";
 
