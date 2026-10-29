@@ -84,27 +84,39 @@ fn runner_error(retry_family_failures: bool, error: &ProjectError) -> RunnerErro
         )
 }
 
-// A value PostgreSQL refuses to store stops the chain once, as a data-integrity error, whether or
-// not family failures are retried.
-#[tokio::test]
-async fn a_value_postgresql_cannot_store_is_not_retried() {
-    for (code, message) in [
-        ("22P05", NUL_IN_JSONB),
-        ("22021", NUL_IN_TEXT),
-        ("54000", KEY_OVER_BTREE_ROW),
-        ("54000", KEY_OVER_INDEX_ROW),
-    ] {
-        let error = write_failure(code, message);
-        for retry_family_failures in [true, false] {
-            let runner = runner_error(retry_family_failures, &error);
-            assert_eq!(
-                (runner.kind(), runner.is_retryable()),
-                (ErrorKind::DataIntegrity, false),
-                "{code} under retry {retry_family_failures}: {runner}"
-            );
-            assert!(runner.to_string().ends_with(message), "{runner}");
-        }
+/// A value PostgreSQL refuses to store stops the chain once, as a data-integrity error, whether
+/// or not family failures are retried.
+fn assert_not_retried(code: &'static str, message: &'static str) {
+    let error = write_failure(code, message);
+    for retry_family_failures in [true, false] {
+        let runner = runner_error(retry_family_failures, &error);
+        assert_eq!(
+            (runner.kind(), runner.is_retryable()),
+            (ErrorKind::DataIntegrity, false),
+            "{code} under retry {retry_family_failures}: {runner}"
+        );
+        assert!(runner.to_string().ends_with(message), "{runner}");
     }
+}
+
+#[tokio::test]
+async fn a_nul_in_a_jsonb_value_is_not_retried() {
+    assert_not_retried("22P05", NUL_IN_JSONB);
+}
+
+#[tokio::test]
+async fn a_nul_in_a_text_value_is_not_retried() {
+    assert_not_retried("22021", NUL_IN_TEXT);
+}
+
+#[tokio::test]
+async fn a_key_over_the_btree_row_limit_is_not_retried() {
+    assert_not_retried("54000", KEY_OVER_BTREE_ROW);
+}
+
+#[tokio::test]
+async fn a_key_over_the_index_row_limit_is_not_retried() {
+    assert_not_retried("54000", KEY_OVER_INDEX_ROW);
 }
 
 // Wording the match does not know keeps today's classification: retried under supervision, and

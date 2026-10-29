@@ -162,15 +162,15 @@ fn is_sweep_cap_refusal(error: &ProjectError) -> bool {
 ///   `src/backend/utils/mb/mbutils.c`;
 /// - a key longer than a btree index row may be, 54000, raised by `_bt_check_third_page` in
 ///   `src/backend/access/nbtree/nbtutils.c`;
-/// - a key longer than any index row may be, 54000, raised by `index_form_tuple` in
+/// - a key longer than any index row may be, 54000, raised by `index_form_tuple_context` in
 ///   `src/backend/access/common/indextuple.c`.
 ///
 /// Temporary: `ProjectError` does not carry the SQLSTATE, so this matches PostgreSQL's English
 /// messages, which assumes the server's `lc_messages` is English. Under another language nothing
 /// matches and the error is retried as before. The SQLSTATE carried on `ProjectError` replaces
 /// this match in the next Project change that rotates the projection content hash.
-/// `tests/families_runner.rs` and `tests/production_live/hydration.rs` reach real refusals, so a
-/// change of this wording fails there.
+/// `tests/families_runner.rs` and `tests/production_live/hydration.rs` meet each message from a
+/// real server, so a change of this wording fails there.
 fn is_unstorable_value(error: &ProjectError) -> bool {
     let message = error.to_string();
     let Some((_, refusal)) = message.rsplit_once("error returned from database: ") else {
