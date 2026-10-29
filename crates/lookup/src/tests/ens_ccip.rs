@@ -2,7 +2,8 @@
 //! records and the ENS/60 forward leg. The Universal Resolver re-raises a resolver's
 //! `OffchainLookup` as its own
 //! (upstream: .refs/ens_v1/contracts/ccipRead/CCIPReader.sol:L72-L94 @ ens_v1@91c966f),
-//! so the lookups here name it as the sender unless a test says otherwise.
+//! so the lookups here name it as the sender unless a test says otherwise. The four-step limit
+//! is shared by every verified route, so its row also runs on the Basenames and ENS/60 legs.
 use super::*;
 
 use crate::LookupRecordStatus;
@@ -28,13 +29,36 @@ async fn ens_fixture(null_exact_resolver: bool) -> AnyResult<Fixture> {
     Ok(fixture)
 }
 
-async fn answering_gateway() -> AnyResult<(String, Arc<AtomicUsize>, JoinHandle<AnyResult<()>>)> {
+async fn answering_gateway() -> AnyResult<StatusGateway> {
     spawn_status_gateway(
         "200 OK",
         String::new(),
         json!({ "data": "0xcafe" }).to_string(),
     )
     .await
+}
+
+/// The ENS fixture with a declared registry, so the primary-name reverse leg reads the registry
+/// and then the reverse resolver before the forward call.
+async fn primary_name_fixture() -> AnyResult<Fixture> {
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    seed_manifest(
+        fixture.pool(),
+        ENS_NAMESPACE,
+        "ens_v1_registry_l1",
+        "registry",
+        ENS_REGISTRY,
+        "00000000-0000-0000-0000-000000000104",
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE manifest_versions
+         SET manifest_payload = '{}'::jsonb
+         WHERE source_family = 'ens_v1_registry_l1'",
+    )
+    .execute(fixture.pool())
+    .await?;
+    Ok(fixture)
 }
 
 fn live_answer() -> AnyResult<RpcResponse> {
@@ -378,6 +402,90 @@ async fn ens_fifth_nested_offchain_lookup_fails_in_band_as_ccip_read_failed() ->
 }
 
 #[tokio::test]
+async fn basenames_fifth_nested_offchain_lookup_fails_in_band_as_ccip_read_failed() -> AnyResult<()>
+{
+    let (gateway_url, gateway_hits, gateway) = answering_gateway().await?;
+    let sender = Address::from_str(BASE_L1_RESOLVER)?;
+    let lookups = (0..5)
+        .map(|_| {
+            encode_offchain_lookup_for_test(
+                sender,
+                vec![gateway_url.clone()],
+                vec![0x12, 0x34],
+                CALLBACK,
+                vec![0xab],
+            )
+        })
+        .collect();
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(ccip_chain_responses(lookups, None)).await?;
+    let fixture = setup_fixture(FixtureKind::Basenames, INDEXED_VALUE).await?;
+
+    let response = run_lookup(&fixture, &rpc_url).await?;
+    let record = &response.records[0];
+    assert!(record.ccip_read);
+    assert_eq!(record.status, LookupRecordStatus::ExecutionFailed);
+    assert_eq!(
+        record.failure_reason.as_deref(),
+        Some("ccip_read_failed"),
+        "{record:?}"
+    );
+    assert_eq!(gateway_hits.load(Ordering::SeqCst), 4);
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(requests.len(), 5, "initial call and four callbacks");
+    assert_hash_pinned(&requests, ETHEREUM_HASH);
+    for callback in &requests[1..] {
+        assert_eq!(callback["params"][0]["to"], BASE_L1_RESOLVER);
+    }
+    gateway.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn ens_primary_name_fifth_nested_offchain_lookup_fails_as_ccip_read_failed() -> AnyResult<()>
+{
+    let target = "0x8e8db5ccef88cca9d624701db544989c996e3216";
+    let reverse_resolver = "0xa2c122be93b0074270ebee7f6b7292c7deb45047";
+    let (gateway_url, gateway_hits, gateway) = answering_gateway().await?;
+    let lookups = (0..5)
+        .map(|_| ens_offchain_lookup(vec![gateway_url.clone()]))
+        .collect::<AnyResult<Vec<_>>>()?;
+    let mut responses = vec![
+        RpcResponse::Result(Value::String(hex_string(
+            &Address::from_str(reverse_resolver)?.abi_encode(),
+        ))),
+        RpcResponse::Result(Value::String(hex_string(&"alice.eth".abi_encode()))),
+    ];
+    responses.extend(ccip_chain_responses(lookups, None));
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(responses).await?;
+    let fixture = primary_name_fixture().await?;
+
+    let result = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup_ens_primary_name(ETHEREUM, target)
+        .await?;
+    assert_eq!(
+        result.status,
+        EnsPrimaryNameStatus::ExecutionFailed,
+        "{result:?}"
+    );
+    assert_eq!(result.failure_reason.as_deref(), Some("ccip_read_failed"));
+    assert!(result.ccip_read);
+    assert_eq!(gateway_hits.load(Ordering::SeqCst), 4);
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(
+        requests.len(),
+        7,
+        "registry, reverse resolver, forward call, four callbacks"
+    );
+    assert_callbacks_reach_the_universal_resolver(&requests[2..]);
+    gateway.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn ens_gateway_url_list_stops_after_four_unreachable_urls() -> AnyResult<()> {
     let (fifth_url, fifth_hits, fifth) = answering_gateway().await?;
     let mut urls = Vec::with_capacity(5);
@@ -506,23 +614,7 @@ async fn ens_primary_name_forward_leg_follows_a_gateway() -> AnyResult<()> {
         Some(RpcResponse::Result(encoded_address_result(target)?)),
     ));
     let (rpc_url, rpc_handle) = spawn_mock_rpc(responses).await?;
-    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    seed_manifest(
-        fixture.pool(),
-        ENS_NAMESPACE,
-        "ens_v1_registry_l1",
-        "registry",
-        ENS_REGISTRY,
-        "00000000-0000-0000-0000-000000000104",
-    )
-    .await?;
-    sqlx::query(
-        "UPDATE manifest_versions
-         SET manifest_payload = '{}'::jsonb
-         WHERE source_family = 'ens_v1_registry_l1'",
-    )
-    .execute(fixture.pool())
-    .await?;
+    let fixture = primary_name_fixture().await?;
 
     let result = lookup_engine(fixture.pool(), &rpc_url)?
         .lookup_ens_primary_name(ETHEREUM, target)

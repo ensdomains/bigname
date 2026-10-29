@@ -4577,6 +4577,9 @@ async fn spawn_batch_gateway(
     Ok((url, handle))
 }
 
+/// A status gateway's URL, its count of requests read, and its task.
+type StatusGateway = (String, Arc<AtomicUsize>, JoinHandle<AnyResult<()>>);
+
 /// A gateway that answers every request, one connection each, with the HTTP `status` line (for
 /// example `"404 Not Found"`), the extra header lines in `headers`, and `body`. The counter holds
 /// how many requests it has read; the task runs until it is aborted.
@@ -4584,7 +4587,7 @@ async fn spawn_status_gateway(
     status: &'static str,
     headers: String,
     body: String,
-) -> AnyResult<(String, Arc<AtomicUsize>, JoinHandle<AnyResult<()>>)> {
+) -> AnyResult<StatusGateway> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
     let hits = Arc::new(AtomicUsize::new(0));

@@ -2674,11 +2674,12 @@ Rules:
   response, while provider or gateway
   connect-phase timeouts, DNS failures, TLS failures, connection resets, and
   other transport failures within a request's own timeouts return
-  whole-request `500 internal_error`. A gateway answer that is refused,
-  redirected or undecodable, an `OffchainLookup` from any sender but the
-  called contract, or a callback still reverting with `OffchainLookup` after
-  four steps, fails that record in band with
-  `failure_reason=ccip_read_failed`. Neither
+  whole-request `500 internal_error`. A gateway that answers `4xx` fails the
+  record at once. A redirect, another non-`2xx` status or an undecodable body
+  fails it when no later URL answers. Both fail it in band with
+  `failure_reason=ccip_read_failed`, as do an `OffchainLookup` from any sender
+  but the called contract and a callback still reverting with `OffchainLookup`
+  after four steps. Neither
   result is persisted by the v2 serving path.
 - Every route has a whole-request deadline. `/healthz` and `/v1/status` retain
   that deadline as their final backstop. `/healthz` bypasses

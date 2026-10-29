@@ -169,8 +169,8 @@ reaches the network:
   and a timed-out or unreachable URL falls through to the next; a resolution
   follows at most four steps, each followed by one JSON-RPC callback bounded by
   `BIGNAME_API_RPC_TIMEOUT_MS`. A fourth callback that still reverts with
-  `OffchainLookup` fails the record in band as `ccip_read_failed`. The `x-batch-gateway:true` form is followed
-  for at most 8 inner requests, runs at most 4 of them at a time in request
+  `OffchainLookup` fails the record in band as `ccip_read_failed`. The
+  `x-batch-gateway:true` form is followed for at most 8 inner requests, runs at most 4 of them at a time in request
   order, and lets their decoded responses total at most the same 1 MiB; a
   longer batch fails the record in band before any request is launched, and a
   batch whose responses pass that total fails it during the fan-out. A batch
