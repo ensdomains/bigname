@@ -158,6 +158,30 @@ reaches the network:
 
 - **Scheme.** Only `http` and `https` are attempted. Anything else fails the
   gateway before a request is sent.
+- **Destination.** A gateway is never fetched from a refused address. The
+  client judges the addresses it is about to connect to: the host itself when
+  the URL names an IP address, including hex, octal and shorthand IPv4 forms,
+  and every address a hostname resolves to otherwise. One refused address
+  refuses the whole name. A name that resolves differently on each query is
+  judged on each resolution, and the connection goes only to the addresses
+  just judged. The built-in refused ranges are:
+  - loopback: `127.0.0.0/8` and `::1/128`
+  - private: `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16`
+  - link-local: `169.254.0.0/16` and `fe80::/10`
+  - shared address space: `100.64.0.0/10`
+  - unique local: `fc00::/7`
+  - unspecified: `0.0.0.0/8` and `::/128`
+  - multicast: `224.0.0.0/4` and `ff00::/8`
+  - reserved: `240.0.0.0/4`
+  - IPv4-compatible: `::/96`
+  - IPv4-mapped (`::ffff:0:0/96`), NAT64 (`64:ff9b::/96`) and 6to4
+    (`2002::/16`) addresses, judged by the IPv4 address they carry
+
+  `BIGNAME_API_CCIP_GATEWAY_DENY_CIDRS` adds ranges on top of these. It is
+  empty by default. A refusal fails the record in band as
+  `gateway_destination_refused`. No later URL is tried, and one refused inner
+  request fails a whole `x-batch-gateway:true` query. The client ignores proxy
+  environment variables, so no proxy connects on its behalf.
 - **Redirects.** Not followed. A `3xx` is reported as an unsuccessful gateway
   status, so a URL that satisfied any origin check cannot bounce the request to
   a different host.
@@ -196,9 +220,8 @@ reaches the network:
   one record is therefore 6 s of gateway time in total plus up to four
   callbacks at the RPC timeout.
 
-**What is deliberately not enforced in process: destination host or IP.** The
-gateway may resolve to any address the container can route to, including link
-local and cluster internal ranges. Who chooses that destination differs by path.
+**Who chooses the gateway URL.** The destination rule above bounds where a
+gateway URL can point, not who points it. That differs by path.
 
 For Basenames the URL set is a single gateway URL read from the L1 resolver's
 contract-level `url` storage
@@ -256,14 +279,15 @@ controller, or the owner of an `Ownable` contract at that address
 — chooses only which name the forward leg looks up; in practice that is enough,
 because it can point the claim at a name whose resolver it also controls.
 bigname applies no allowlist to the resolver address or the gateway host before
-following; the only pre-fetch check is that the `OffchainLookup.sender` equals
-the Universal Resolver. Egress restriction for that case belongs to network
-policy around the API container, not to this client, and no such policy is
-described in the deployment docs today. ENS verified record reads make the same
-Universal Resolver `resolve(name, data)` call with the same following, so the
-same parties choose their gateway URLs and the same `sender` check is the only
-pre-fetch check. Treat it as a prerequisite before `/v2`
-is admitted at the public edge, and see
+following. The pre-fetch checks are that the `OffchainLookup.sender` equals the
+Universal Resolver, and the destination rule above, which keeps the fetch off
+loopback, private, link-local and the other refused ranges. Network policy
+around the API container remains the second layer for any other egress
+restriction, and no such policy is described in the deployment docs today. ENS
+verified record reads make the same Universal Resolver `resolve(name, data)`
+call with the same following, so the same parties choose their gateway URLs
+and the same checks apply. Treat that network layer as a prerequisite before
+`/v2` is admitted at the public edge, and see
 [`production.md`](production.md) for the current edge posture.
 
 ## Primary-name lookup

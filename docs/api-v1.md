@@ -2679,7 +2679,13 @@ Rules:
   fails it when no later URL answers. Both fail it in band with
   `failure_reason=ccip_read_failed`, as do an `OffchainLookup` from any sender
   but the called contract and a callback still reverting with `OffchainLookup`
-  after four steps. Neither
+  after four steps. A gateway URL whose host is a literal address, or resolves
+  to any address, in a refused destination range fails the record in band with
+  `failure_reason=gateway_destination_refused`. No connection is opened, no
+  later URL is tried, and in an `x-batch-gateway:true` query one refused inner
+  request fails the whole record. A refusal is never a whole-request `500`. The
+  refused ranges are listed in `docs/execution.md` § CCIP-Read gateway
+  transport. Neither
   result is persisted by the v2 serving path.
 - Every route has a whole-request deadline. `/healthz` and `/v1/status` retain
   that deadline as their final backstop. `/healthz` bypasses
