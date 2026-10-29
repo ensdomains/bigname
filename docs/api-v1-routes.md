@@ -1520,9 +1520,11 @@ its value map:
   effective resolver; either inconsistency fails the request closed. Ordinary
   selector-local failed or unsupported results remain mixed per key. This route
   has no indexed comparison: success and
-  live `not_found` write and clear no divergence rows, while CCIP-required
-  answers remain `unsupported` with `offchain_lookup_required` and likewise
-  write nothing. ENS verified record resolution continues not to follow CCIP-Read.
+  live `not_found` write and clear no divergence rows. An `OffchainLookup`
+  revert is followed through the CCIP-Read gateway transport
+  (`docs/execution.md` § CCIP-Read gateway transport), on this route and on
+  exact-resolver ENS reads alike. Its answer is served and never written,
+  compared or cleared.
   Basenames and other chains and namespaces do not enter this route. Outside this
   null-exact-resolver class, exact indexed `ok` answers and authoritative
   ENSIP-19 derived answers satisfy auto without a provider request. Within this

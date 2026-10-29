@@ -1363,8 +1363,10 @@ Public verified support is narrower than the topology model. Every ENS class is 
   `(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L63-L88 @ ens_v1@91c966f)`.
 
 Other ENS classes (projected ancestor-selected,
-linked-subregistry ancestor-selected, transport-assisted, CCIP-participating)
-return selector-local `unsupported`.
+linked-subregistry ancestor-selected, transport-assisted)
+return selector-local `unsupported`. An `OffchainLookup` revert on a supported
+ENS class is followed through the CCIP-Read gateway transport
+(`docs/execution.md` § CCIP-Read gateway transport).
 
 Basenames supports the exact-surface transport-assisted direct path through active `basenames_execution` v2 at the L1 Resolver. Other Basenames verified [path classes](glossary.md) return selector-local `unsupported`.[^bn-readme-l69][^bn-readme-l70][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
 
