@@ -167,7 +167,6 @@ fn interpret_once(
                 note_block_pass(block.block_number, passes);
             }
             let generation = catalog.admission_generation();
-            migration_observations.truncate(first_migration_observation);
             let mut block_output = BatchOutput::default();
             let mut block_state = committed_state.clone();
             let mut self_targets = Vec::new();
