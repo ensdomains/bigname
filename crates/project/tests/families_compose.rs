@@ -1084,6 +1084,13 @@ async fn a_redo_resumes_or_restarts_a_rebuild_in_its_pass() -> Result<()> {
                 after.3.is_null() && after.0 == "rebuilding",
                 "{case}: the pass fields were cleared: {after:?}"
             );
+            // The reset clears the pass's work list, and a budget of one block cannot begin a
+            // new pass, so a list a stopped pass left is gone.
+            let listed = count(&fixture, "SELECT count(*) FROM project_compose_name_work").await?;
+            ensure!(
+                listed == 0,
+                "{case}: the reset left {listed} work list rows"
+            );
         }
         while fixture.marker().await?.0 != Some(30)
             || fixture.repair_record().await?.unwrap_or_default()["state"] != json!("complete")

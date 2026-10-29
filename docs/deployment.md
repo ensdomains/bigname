@@ -5057,9 +5057,9 @@ rows are the same, row for row, whatever the worker count.
   least four, plus one connection per worker per chain. `redo` takes its chains one after
   another, so its pool is four connections plus one per worker. A pass with more workers
   than its pool can serve beside its coordinator is refused at its start, naming both
-  numbers. The workers
-  multiply the names stream's database load: each runs the same statements under the server's
-  `work_mem`, so size the count to the database's CPU and memory, not the runner's.
+  numbers. The workers multiply the names stream's database load: each runs the same
+  statements under the server's `work_mem`, so size the count to the database's CPU and
+  memory, not the runner's.
 - The schema-migration `20261027130000_project_compose_stream_comments.sql` changes three
   column comments only: the repair record's `compose_stream` and `compose_cursor`, and the
   lookup name's `record_serving_resource_id`. It changes no column, index or row, and the

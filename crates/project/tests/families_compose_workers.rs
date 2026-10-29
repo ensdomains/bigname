@@ -571,9 +571,9 @@ async fn a_pool_smaller_than_the_workers_is_refused() -> Result<()> {
 // T2 and T5, T7. The first run applies the ranges only, then runs of budget four with three,
 // one, two, three, ... workers in turn, each a normal run as the runner continues one. Every run
 // returns with no chunk open, the ids composed in the names stream are its committed chunks
-// times five, less a short last chunk once one composed the list's last id, a run in the names
-// stream composes no block, every id moves to composed exactly once whatever the worker count,
-// and the families equal block by block.
+// times five while 15 ids are left, and between one and five a chunk after that, a run in the
+// names stream composes no block, every id moves to composed exactly once whatever the worker
+// count, and the families equal block by block.
 #[tokio::test]
 async fn the_worker_count_may_change_between_runs() -> Result<()> {
     let fixture = seeded_with("families_workers_counts", 4).await?;
@@ -627,24 +627,20 @@ async fn the_worker_count_may_change_between_runs() -> Result<()> {
         let (at, chunks) = stream(&side).await?;
         if at == Some(0) {
             // Every chunk the record counts so far is a names chunk that committed its claim of
-            // five ids with them. Only the claim that reaches the list's last id can be short,
-            // and it can commit while an earlier claim finds no budget and rolls back.
+            // at most five ids with them. A claim gets fewer only when fewer than five ids are
+            // left beside the at most two other open claims of three workers, and the ids left
+            // only shrink, so while 15 remain every chunk so far was full. Nearer the end, claims
+            // racing for the last ids can each come up short.
             let marked = composed(&side).await?;
-            let tail: bool = sqlx::query_scalar(
-                "SELECT composed FROM project_compose_name_work WHERE chain_id = $1
-                 ORDER BY serial DESC LIMIT 1",
-            )
-            .bind(CHAIN)
-            .fetch_one(&side)
-            .await?;
+            let left = uncomposed(&side).await?;
             ensure!(
-                if tail {
-                    (chunks * 5 - 4..=chunks * 5).contains(&marked)
-                } else {
+                if left >= 15 {
                     marked == chunks * 5
+                } else {
+                    (chunks..=chunks * 5).contains(&marked)
                 },
-                "run {runs}: {marked} ids composed by {chunks} committed chunks of five, the \
-                 last id composed {tail}"
+                "run {runs}: {marked} ids composed by {chunks} committed chunks of five, {left} \
+                 left"
             );
         }
         if in_names && at == Some(0) {

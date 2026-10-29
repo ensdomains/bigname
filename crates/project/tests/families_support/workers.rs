@@ -16,8 +16,9 @@ use tokio::task::JoinHandle;
 
 use super::{CHAIN, Fixture};
 
-/// A pool of the test's own, beside the fixture's pool the pass uses: one connection for a
-/// hold and two for the test's reads.
+/// A pool of the test's own, beside the fixture's pool the pass uses, for the test's reads. A
+/// hold takes a connection from it and detaches it, so the hold's session counts against
+/// neither pool.
 pub async fn side(fixture: &Fixture) -> Result<PgPool> {
     Ok(PgPoolOptions::new()
         .max_connections(3)
