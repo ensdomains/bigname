@@ -737,7 +737,9 @@ async fn a_range_rebuild_resumes_after_a_stop_and_equals_the_follow() -> Result<
     pointers(&fixture, 10..=29).await?;
     follow(&fixture, 10, 30).await?;
     let incremental = fixture.exact().await?;
-    let options = in_ranges(30).with_max_blocks_per_run(5);
+    let options = in_ranges(30)
+        .with_max_blocks_per_run(5)
+        .with_compose_builder_partitions(1, 1);
     let mut mode = FamilyMode::Rebuild;
     let mut runs = 0;
     loop {
@@ -753,7 +755,10 @@ async fn a_range_rebuild_resumes_after_a_stop_and_equals_the_follow() -> Result<
         }
         ensure!(runs < 10, "the rebuild did not finish");
     }
-    assert_eq!(runs, 5, "21 work blocks at five a run");
+    assert_eq!(
+        runs, 7,
+        "20 work blocks, the composition pass's ten steps and the target, at five a run"
+    );
     assert_eq!(marker_state(&fixture).await?, "live");
     let rebuilt = fixture.exact().await?;
     for ((table, was), (_, now)) in incremental.iter().zip(&rebuilt) {
@@ -764,14 +769,18 @@ async fn a_range_rebuild_resumes_after_a_stop_and_equals_the_follow() -> Result<
 
 // Ranges double from one block only right after the reset: a run that resumes a rebuild starts
 // with a range as large as its budget. With a budget of eight, the first run commits [10],
-// [11, 12], [13 to 16] and [17]; the second commits [18 to 25] as one range.
+// [11, 12], [13 to 16] and [17]; the second commits [18 to 25] as one range. The third commits
+// [26 to 29] and the first four of the composition pass's ten steps, and the fourth the other
+// six and the target.
 #[tokio::test]
 async fn a_resumed_range_rebuild_starts_with_a_range_of_its_whole_budget() -> Result<()> {
     let fixture = Fixture::new("families_range_resume_size", 40).await?;
     pointers(&fixture, 10..=29).await?;
     follow(&fixture, 10, 30).await?;
     let incremental = fixture.exact().await?;
-    let options = in_ranges(30).with_max_blocks_per_run(8);
+    let options = in_ranges(30)
+        .with_max_blocks_per_run(8)
+        .with_compose_builder_partitions(1, 1);
     let first = fixture
         .apply_with(30, FamilyMode::Rebuild, &options)
         .await?;
@@ -789,9 +798,15 @@ async fn a_resumed_range_rebuild_starts_with_a_range_of_its_whole_budget() -> Re
     assert_eq!(fixture.marker().await?.0, Some(25));
     let third = fixture.apply_with(30, FamilyMode::Normal, &options).await?;
     assert_eq!(
-        (third.blocks, third.ranges),
-        (5, 1),
-        "[26 to 29], the composition pass at 29, then the target on its own"
+        (third.blocks, third.ranges, third.compose_chunks),
+        (4, 1, 4),
+        "[26 to 29], then the first four steps of the composition pass at 29"
+    );
+    let fourth = fixture.apply_with(30, FamilyMode::Normal, &options).await?;
+    assert_eq!(
+        (fourth.blocks, fourth.ranges, fourth.compose_chunks),
+        (1, 0, 6),
+        "the rest of the composition pass, then the target on its own"
     );
     assert_eq!(fixture.journalled_blocks().await?, vec![29, 30]);
     assert_eq!(marker_state(&fixture).await?, "live");
@@ -988,11 +1003,15 @@ async fn an_ensv2_path_fixture_rebuilds_equal_in_ranges_and_block_by_block() -> 
         ensure!(outcome.ranges > 0, "the rebuild applied no range");
     }
     // Every event cap under every budget, each rebuild run after run as the runner continues one.
+    // Each partition of the pass's catalogue build is a run under a budget of one, so the build
+    // runs as one span and one key partition, 1 + 1 + 5 + 1 = 8 runs. The default 64 spans and 16
+    // partitions would take 1 + 64 + 5 * 16 + 1 = 146 of the 200 runs a rebuild may take.
     for events in [1, 2, families::MAX_RANGE_EVENTS, u64::MAX] {
         for budget in [1, families::MAX_BLOCKS_PER_RUN, u64::MAX] {
             let options = in_ranges(12)
                 .with_range_caps(families::MAX_RANGE_BLOCKS, events)
-                .with_max_blocks_per_run(budget);
+                .with_max_blocks_per_run(budget)
+                .with_compose_builder_partitions(1, 1);
             let ranges = rebuild_in_runs_equal(&fixture, 12, &options).await?;
             ensure!(ranges > 0, "events {events}, budget {budget}: no range");
         }

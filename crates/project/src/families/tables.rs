@@ -105,8 +105,11 @@ pub(crate) const COMPOSED: [&str; 12] = [
     "project_address_record_id_index",
 ];
 
-/// The composition pass's name work list (families/compose.rs), cleared with the families.
-pub(crate) const COMPOSE_NAME_WORK: &str = "project_compose_name_work";
+/// The composition pass's work tables, cleared with the families: its name work list
+/// (families/compose.rs) and the catalogue build's keys and partial aggregates
+/// (history_catalogue/build).
+pub(crate) const COMPOSE_WORK: [&str; 2] =
+    ["project_compose_name_work", "project_compose_history_work"];
 
 /// The spec of a journalled table by name.
 pub(crate) fn spec(name: &str) -> &'static TableSpec {

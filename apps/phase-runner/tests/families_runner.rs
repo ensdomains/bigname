@@ -117,7 +117,7 @@ async fn a_one_shot_redo_replays_the_families_to_the_project_block() -> Result<(
         retry_family_failures: false,
         ..FamilySettings::default()
     };
-    redo(&scratch, settings).await?;
+    redo(&scratch, settings.clone()).await?;
     ensure!(
         project_state(&scratch).await? == ("completed".into(), Some(HEAD), false),
         "the redo completed at the head"
@@ -196,6 +196,54 @@ async fn a_project_redo_rerun_after_an_interpret_revision_change_rebuilds() -> R
     ensure!(
         state == "complete" && after.is_some() && after != reset,
         "a changed input revision resets: {reset:?} then {after:?}"
+    );
+    scratch.cleanup().await
+}
+
+// The runner hands its catalogue build settings to the family loop: a full-history redo that
+// rebuilds in ranges builds the address history catalogue under the block spans, key partitions
+// and `work_mem` it was given, as each build transaction sees them.
+#[tokio::test]
+async fn a_ranged_redo_builds_the_catalogue_under_the_runner_settings() -> Result<()> {
+    let scratch = ready("families_build_settings").await?;
+    sqlx::raw_sql(
+        "CREATE TABLE build_seen (cursor text NOT NULL, work_mem text NOT NULL);
+         CREATE FUNCTION build_seen() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             INSERT INTO build_seen VALUES (NEW.compose_cursor, current_setting('work_mem'));
+             RETURN NEW;
+         END $$;
+         CREATE TRIGGER build_seen AFTER UPDATE ON project_repair_record
+         FOR EACH ROW WHEN (OLD.compose_stream = 3 AND NEW.compose_cursor IS NOT NULL
+                            AND NEW.compose_chunks > OLD.compose_chunks)
+         EXECUTE FUNCTION build_seen();",
+    )
+    .execute(scratch.pool())
+    .await?;
+    let settings = FamilySettings {
+        retry_family_failures: false,
+        rebuild_ranges: bigname_project::families::RebuildRanges::Through(HEAD),
+        compose_block_spans: 3,
+        compose_key_partitions: 2,
+        compose_work_mem: Some("64MB".to_owned()),
+        ..FamilySettings::default()
+    };
+    redo(&scratch, settings).await?;
+    ensure!(marker(&scratch).await? == Some(HEAD));
+    let seen: Vec<(String, String)> = sqlx::query_as("SELECT cursor, work_mem FROM build_seen")
+        .fetch_all(scratch.pool())
+        .await?;
+    let split = |cursor: &str| {
+        serde_json::from_str::<serde_json::Value>(cursor)
+            .map(|cursor| (cursor["spans"].clone(), cursor["partitions"].clone()))
+            .unwrap_or_default()
+    };
+    ensure!(
+        seen.len() == 1 + 3 + 5 * 2 + 1
+            && seen.iter().all(|(cursor, work_mem)| {
+                split(cursor) == (serde_json::json!(3), serde_json::json!(2)) && work_mem == "64MB"
+            }),
+        "the build ran under the runner's settings: {seen:?}"
     );
     scratch.cleanup().await
 }
@@ -340,11 +388,17 @@ async fn a_one_shot_redo_under_a_range_event_cap_completes() -> Result<()> {
     scratch.cleanup().await
 }
 
+/// The catalogue build runs as one span and one key partition, 1 + 1 + 5 + 1 = 8 chunks. Each
+/// chunk counts against the budget, and the default 64 spans and 16 partitions would take
+/// 1 + 64 + 5 * 16 + 1 = 146, past the 30 batches `ranged_rebuild` allows under a budget of 5.
+/// The build's output does not depend on its split.
 fn budget_and_cap(budget: u64, cap: Option<u64>) -> FamilySettings {
     let defaults = FamilySettings::default();
     FamilySettings {
         max_blocks_per_run: budget,
         max_range_events: cap.unwrap_or(defaults.max_range_events),
+        compose_block_spans: 1,
+        compose_key_partitions: 1,
         ..defaults
     }
 }

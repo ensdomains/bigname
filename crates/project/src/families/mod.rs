@@ -104,6 +104,24 @@ pub const MAX_RANGE_EVENTS: u64 = 4096;
 /// set one summary composition already holds.
 pub const COMPOSE_CHUNK_KEYS: usize = 1000;
 
+/// The block spans the composition pass's catalogue build scans the interpreted events in, each
+/// one transaction. On mainnet's 120 M events 64 spans keep one span near two minutes if the
+/// whole scan is about two hours, an estimate, well under the runner's 900 s heartbeat alarm.
+pub const COMPOSE_BUILDER_BLOCK_SPANS: u16 = 64;
+
+/// The key partitions of the catalogue build's keyed steps, each one transaction, a power of two.
+/// 16 keep one anchor partition under ten minutes if the whole membership pass takes one to three
+/// hours on mainnet, an estimate.
+pub const COMPOSE_BUILDER_KEY_PARTITIONS: u16 = 16;
+
+/// The most key partitions of the catalogue build: partition numbers fit a `smallint`.
+pub const MAX_COMPOSE_BUILDER_KEY_PARTITIONS: u16 = 1 << 14;
+
+/// The most block spans of the catalogue build. A span's partials go to the work table under its
+/// number in the `smallint` column `part`, which holds numbers below `i16::MAX`, so the bound
+/// keeps every span its own part. It is far above any split a pass needs.
+pub const MAX_COMPOSE_BUILDER_BLOCK_SPANS: u16 = 1 << 14;
+
 /// Which work blocks a rebuild applies several to a transaction. A range folds its blocks one
 /// by one exactly as single blocks would, then journals, writes and advances the marker once, to
 /// its last block; undo takes the whole range back in one step.
@@ -225,11 +243,19 @@ pub struct FamilyOptions {
     /// Work blocks one rebuild range applies at most, and never more than the run's budget has
     /// left; zero counts as one.
     pub max_range_blocks: u64,
-    /// Events one rebuild range applies at most, unless its first block alone holds more; also
-    /// the events of one catalogue window of the composition pass.
+    /// Events one rebuild range applies at most, unless its first block alone holds more.
     pub max_range_events: u64,
     /// Keys one chunk of the composition pass composes; zero counts as one.
     pub compose_chunk_keys: usize,
+    /// Block spans of the composition pass's catalogue build, at least one. The build's output
+    /// does not depend on it. A build resumed with another count is refused.
+    pub compose_builder_block_spans: u16,
+    /// Key partitions of the catalogue build, a power of two. The output does not depend on it.
+    /// A build resumed with another count is refused.
+    pub compose_builder_key_partitions: u16,
+    /// `work_mem` of each catalogue build transaction, a Postgres memory value set for that
+    /// transaction alone. The server's setting applies when it is unset.
+    pub compose_builder_work_mem: Option<String>,
     /// The redo this run serves resumes an interrupted redo of the same range under the same
     /// projection content hash (the runner kept its saved progress). A rebuild the interrupted
     /// attempt left then resumes rather than starting again.
@@ -251,6 +277,9 @@ impl FamilyOptions {
             max_range_blocks: MAX_RANGE_BLOCKS,
             max_range_events: MAX_RANGE_EVENTS,
             compose_chunk_keys: COMPOSE_CHUNK_KEYS,
+            compose_builder_block_spans: COMPOSE_BUILDER_BLOCK_SPANS,
+            compose_builder_key_partitions: COMPOSE_BUILDER_KEY_PARTITIONS,
+            compose_builder_work_mem: None,
             resumes_interrupted_redo: false,
             max_admission_sweep_names: MAX_ADMISSION_SWEEP_NAMES,
         }
@@ -285,6 +314,22 @@ impl FamilyOptions {
 
     pub fn with_compose_chunk_keys(mut self, keys: usize) -> Self {
         self.compose_chunk_keys = keys.max(1);
+        self
+    }
+
+    /// Split the catalogue build into `spans` block spans, from one to
+    /// [`MAX_COMPOSE_BUILDER_BLOCK_SPANS`], and `keys` key partitions, rounded up to a power of
+    /// two and at most [`MAX_COMPOSE_BUILDER_KEY_PARTITIONS`].
+    pub fn with_compose_builder_partitions(mut self, spans: u16, keys: u16) -> Self {
+        self.compose_builder_block_spans = spans.clamp(1, MAX_COMPOSE_BUILDER_BLOCK_SPANS);
+        self.compose_builder_key_partitions = keys
+            .clamp(1, MAX_COMPOSE_BUILDER_KEY_PARTITIONS)
+            .next_power_of_two();
+        self
+    }
+
+    pub fn with_compose_builder_work_mem(mut self, work_mem: Option<String>) -> Self {
+        self.compose_builder_work_mem = work_mem;
         self
     }
 

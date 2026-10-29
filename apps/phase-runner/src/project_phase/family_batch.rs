@@ -100,6 +100,11 @@ impl ProjectPhase {
                 self.families.max_range_events,
             )
             .with_max_admission_sweep_names(self.families.max_admission_sweep_names)
+            .with_compose_builder_partitions(
+                self.families.compose_block_spans,
+                self.families.compose_key_partitions,
+            )
+            .with_compose_builder_work_mem(self.families.compose_work_mem.clone())
             .with_resumed_redo(
                 context
                     .redo_attempt

@@ -214,7 +214,9 @@ async fn undo_of_a_range_transaction_records_its_actual_predecessor() -> Result<
     // A rebuild range before the composition pass journals nothing, so only a range after it can
     // be undone. Rebuild the blocks through 20 in ranges and end the pass there, one block of
     // budget a run. The next run then rebuilds the rest in ranges after the pass, which compose
-    // and journal.
+    // and journal. Each partition of the pass's catalogue build is a run here, so the build runs
+    // as one span and one key partition, 1 + 1 + 5 + 1 = 8 runs. The default 64 spans and 16
+    // partitions would take 1 + 64 + 5 * 16 + 1 = 146 runs, past the 100 below.
     let mut composed: Option<i64> = None;
     for attempt in 0..100 {
         let token = bigname_project::families::input_token(scratch.pool(), chain).await?;
@@ -230,7 +232,8 @@ async fn undo_of_a_range_transaction_records_its_actual_predecessor() -> Result<
             &token,
             &FamilyOptions::new(PROJECTION_CONTENT_HASH)
                 .with_rebuild_ranges(RebuildRanges::Through(20))
-                .with_max_blocks_per_run(1),
+                .with_max_blocks_per_run(1)
+                .with_compose_builder_partitions(1, 1),
         )
         .await;
         if let Some(error) = error {
