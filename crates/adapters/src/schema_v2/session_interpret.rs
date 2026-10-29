@@ -152,8 +152,8 @@ fn interpret_once(
         // target's earlier logs in that block (an ERC-1967 proxy announces its implementation
         // during construction, before any registry can point at it). When a pass admits a new
         // entry, discard it and interpret the whole block again in log order with the larger
-        // catalog, until a pass admits nothing new. Admissions only grow within a block and
-        // re-admitting an entry adds nothing, so every pass but the last adds an entry.
+        // catalog, until a pass admits nothing new. Only an entry the catalog neither holds nor
+        // admitted before counts as new, so every pass but the last adds a distinct entry.
         let (mut block_state, mut block_output, unselected_in_block, self_targets) = loop {
             #[cfg(test)]
             {

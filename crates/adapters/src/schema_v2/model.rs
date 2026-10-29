@@ -22,7 +22,7 @@ pub struct DiscoveryRuleInput {
     pub admission: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct AddressAdmissionInput {
     pub address: String,
     pub contract_instance_id: Uuid,

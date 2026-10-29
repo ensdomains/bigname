@@ -2123,12 +2123,12 @@ log index). It does so by interpreting the block again:
 | Pass | What Interpret does |
 | --- | --- |
 | First | Interprets the block's logs in log order with the admissions it holds. A log whose emitter is not admitted yet stays uninterpreted. |
-| Next | If the previous pass admitted an entry the catalog did not hold, discards that pass and interprets the whole block again from its first log, in log order, with every admission so far. |
+| Next | If the previous pass admitted a new entry, discards that pass and interprets the whole block again from its first log, in log order, with every admission so far. |
 | Last | The first pass that admits no new entry. Its output is the block's output. |
 
-Admissions only grow within a block, and admitting an entry the catalog
-already holds adds nothing. So every pass but the last adds an entry, and a
-block takes at most one pass more than the entries it admits. Each admission
+A pass counts as admitting only an entry the catalog neither holds nor admitted
+before. So every pass but the last admits a distinct entry, and a block takes
+at most one pass more than the distinct entries its logs admit. Each admission
 is made by a log that is selected without an earlier admission from its block:
 a `RegistryCreated` or `ResolverCreated` announcement, an `Upgraded` naming a
 declared implementation, or a declared factory's `ProxyDeployed`. With the

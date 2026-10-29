@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use uuid::Uuid;
 
@@ -21,6 +21,7 @@ pub(super) struct Admissions {
     by_observation: HashMap<RetirementKey, BTreeSet<usize>>,
     next_id: usize,
     generation: u64,
+    admitted: HashSet<AddressAdmissionInput>,
 }
 
 impl Admissions {
@@ -64,18 +65,19 @@ impl Admissions {
     }
 
     /// Admits a discovered address, replacing the live entries of its discovery observation.
-    /// Counts a new generation only when no equal entry was live: re-admitting one is a no-op.
+    /// Counts a new generation only for an entry that is neither live nor admitted before, so
+    /// re-admitting an entry never counts and each distinct entry counts at most once.
     pub(super) fn admit(&mut self, admission: AddressAdmissionInput) {
-        let known = self
+        let live = self
             .for_address(&admission.address)
-            .any(|live| *live == admission);
+            .any(|entry| *entry == admission);
+        if !live && self.admitted.insert(admission.clone()) {
+            self.generation += 1;
+        }
         if let Some((edge_kind, from, observation_key)) = retirement_key(&admission) {
             self.retire(&edge_kind, from, &observation_key);
         }
         self.push(admission);
-        if !known {
-            self.generation += 1;
-        }
     }
 
     pub(super) fn generation(&self) -> u64 {
