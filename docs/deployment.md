@@ -5078,6 +5078,44 @@ mark old rows ready under the new hash.
 It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
 and the compiled watch plan are unchanged, so stamp no Ingest redo.
 
+## History reads probe each event's lineage row by key
+
+The build that makes history reads look up each event's `chain_lineage` row by key changes
+the history source (`crates/storage/src/history/source.rs`), the registration identity and
+its lookups (`registration_identity.rs`, `registry_registration.rs` and `filters.rs` beside
+it), the child-registration arm (`child_arm.rs`), the resolver page arms
+(`resolver_source.rs`) and the registry reads (`crates/storage/src/registries/reads.rs`).
+
+- The history source joins each event to its block's lineage row through a correlated
+  lookup that ends in `LIMIT 1`. PostgreSQL can only run it as one index probe per event.
+  Before, it was a plain join, and a registration-scoped events page or count on mainnet
+  could hash or walk the whole lineage table to join a few hundred events.
+- Each registration lookup, the precheck of a registration handle, the child-registration
+  arm, the resolver page arms and the registry reads reach their rows' lineage rows the same
+  way.
+- The two lookups that judge a surface binding at an event's time read that event's lineage
+  row themselves, instead of the joined row.
+- Stored rows and API responses are the same as before. Only the plans change.
+- Other request-path lineage reads keep their plain joins, for a follow-up that measures
+  each route first: the address evidence read (`address_evidence.rs`), the readable surface
+  (`push_readable_surface`: attribution, mirror and address walk), the anchor loads in
+  `wrapped_registrar.rs`, and the page decorations in `token_ids.rs`, `payment_values.rs`
+  and `registry_handoffs.rs`.
+- The fork walk of a non-canonical read in `lineage.rs` keeps its plain joins too. It is off
+  the request path, because no route makes a non-canonical read.
+- The address-pair lookup (`pair_lineage` in `address_pairs.rs`) stays as it is, because
+  outer parameters bind its key.
+- The history source is an input of the
+  [projection content hash](glossary.md#projection-content-hash) only, because Project's
+  history-catalogue membership reads through it. That hash rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not. Every chain
+  needs one full-range Project redo and no Interpret redo, at a planned
+  [re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and
+  API binaries. The change rides the next release that redoes Project and shares that
+  release's Project redo.
+- It adds no table, schema-migration, manifest or setting. The manifest-authority
+  fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
 ## A migrated `.eth` name serves its BaseRegistrar lease
 
 The build that composes a `.eth` name the January 2020 registrar migration moved on its

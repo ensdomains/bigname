@@ -1,16 +1,15 @@
-use super::super::lineage::same_fork_as;
+use super::super::lineage::{lineage_probe, same_fork_as};
 
 // A registry-only resource is retained across registrar leases. Its identity is established
 // by an activated authority row, independently of the name's current projection.
 pub(super) fn is_registry_only(resource: &str, event: &str, canonical_only: bool) -> String {
     let fork = same_fork_as("registry_epoch", &[event], canonical_only);
     let canonical = canonical_row("registry_epoch", "registry_epoch_lineage", canonical_only);
+    let registry_epoch_lineage = lineage_probe("registry_epoch_lineage", "registry_epoch");
     format!(
         r#"EXISTS (
             SELECT 1 FROM bigname_phase.normalized_events registry_epoch
-            LEFT JOIN bigname_phase.chain_lineage registry_epoch_lineage
-              ON registry_epoch_lineage.chain_id = registry_epoch.chain_id
-             AND registry_epoch_lineage.block_hash = registry_epoch.block_hash
+            {registry_epoch_lineage}
             WHERE registry_epoch.resource_id = {resource}
               AND registry_epoch.chain_id = {event}.chain_id
               AND registry_epoch.source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1')
@@ -40,14 +39,13 @@ pub(super) fn has_registry_control_observation_at_event(
         "registry_control_lineage",
         canonical_only,
     );
+    let registry_control_lineage = lineage_probe("registry_control_lineage", "registry_control");
     format!(
         r#"COALESCE((
             SELECT registry_control.event_kind <> 'SurfaceUnbound'
                AND registry_control.after_state ->> 'authority_kind' = 'registry_only'
             FROM bigname_phase.normalized_events registry_control
-            LEFT JOIN bigname_phase.chain_lineage registry_control_lineage
-              ON registry_control_lineage.chain_id = registry_control.chain_id
-             AND registry_control_lineage.block_hash = registry_control.block_hash
+            {registry_control_lineage}
             WHERE registry_control.resource_id = {resource}
               AND registry_control.chain_id = {event}.chain_id
               AND registry_control.namespace = {event}.namespace
@@ -82,6 +80,9 @@ pub(super) fn lease_at_event(event: &str, resource: &str, canonical_only: bool) 
         "registry_release_lineage",
         canonical_only,
     );
+    let registry_grant_lineage = lineage_probe("registry_grant_lineage", "registry_lease_grant");
+    let registry_release_lineage =
+        lineage_probe("registry_release_lineage", "registry_lease_release");
     let event_name = name_at_event(event, resource, canonical_only);
     format!(
         r#"(
@@ -89,9 +90,7 @@ pub(super) fn lease_at_event(event: &str, resource: &str, canonical_only: bool) 
                 SELECT registry_lease_grant.resource_id,
                        registry_lease_grant.block_number, registry_lease_grant.log_index
                 FROM bigname_phase.normalized_events registry_lease_grant
-                LEFT JOIN bigname_phase.chain_lineage registry_grant_lineage
-                  ON registry_grant_lineage.chain_id = registry_lease_grant.chain_id
-                 AND registry_grant_lineage.block_hash = registry_lease_grant.block_hash
+                {registry_grant_lineage}
                 WHERE registry_lease_grant.chain_id = {event}.chain_id
                   AND registry_lease_grant.namespace = {event}.namespace
                   AND registry_lease_grant.source_family LIKE 'ens\_v1\_%'
@@ -118,9 +117,7 @@ pub(super) fn lease_at_event(event: &str, resource: &str, canonical_only: bool) 
             ) registry_lease
             WHERE NOT EXISTS (
                 SELECT 1 FROM bigname_phase.normalized_events registry_lease_release
-                LEFT JOIN bigname_phase.chain_lineage registry_release_lineage
-                  ON registry_release_lineage.chain_id = registry_lease_release.chain_id
-                 AND registry_release_lineage.block_hash = registry_lease_release.block_hash
+                {registry_release_lineage}
                 WHERE registry_lease_release.resource_id = registry_lease.resource_id
                   AND registry_lease_release.chain_id = {event}.chain_id
                   AND registry_lease_release.event_kind = 'RegistrationReleased'
@@ -141,6 +138,7 @@ pub(super) fn lease_at_event(event: &str, resource: &str, canonical_only: bool) 
 fn name_at_event(event: &str, resource: &str, canonical_only: bool) -> String {
     let fork = same_fork_as("registry_name", &[event], canonical_only);
     let canonical = canonical_row("registry_name", "registry_name_lineage", canonical_only);
+    let registry_name_lineage = lineage_probe("registry_name_lineage", "registry_name");
     let observed_name = "COALESCE(registry_name.logical_name_id,
         registry_name.namespace || ':' || lower(COALESCE(
             registry_name.after_state ->> 'child_node',
@@ -156,9 +154,7 @@ fn name_at_event(event: &str, resource: &str, canonical_only: bool) -> String {
             )), (
                 SELECT {observed_name}
                 FROM bigname_phase.normalized_events registry_name
-                LEFT JOIN bigname_phase.chain_lineage registry_name_lineage
-                  ON registry_name_lineage.chain_id = registry_name.chain_id
-                 AND registry_name_lineage.block_hash = registry_name.block_hash
+                {registry_name_lineage}
                 WHERE registry_name.resource_id = {resource}
                   AND registry_name.chain_id = {event}.chain_id
                   AND registry_name.namespace = {event}.namespace

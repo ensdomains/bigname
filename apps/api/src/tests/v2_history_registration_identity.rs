@@ -1329,17 +1329,6 @@ async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Resul
             "the {label} resource became a second handle for the lease: {payload:?}"
         );
     }
-    let plan = bigname_storage::explain_registration_history_filter_for_test(
-        &database.pool,
-        registrar,
-        &logical,
-        "ethereum-mainnet",
-        "ens",
-        &namehash,
-    )
-    .await?;
-    assert_registration_history_plan_is_page_keyed(&plan);
-
     // Orphaned wrap evidence must not change what the canonical read serves.
     let orphan_grant = v2_history_event(
         "born-wrap-orphan-grant",
@@ -1384,6 +1373,44 @@ async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Resul
             .all(|row| row["registration_id"] == json!(registrar.to_string())),
         "orphaned wrap evidence changed canonical registration identity: {canonical_rows:?}"
     );
+    // Plan the read on served statistics, where SurfaceBound is a common event kind. With only
+    // this fixture's few SurfaceBound rows the planner may key the NameWrapper lookup by event
+    // kind, which reads those few rows.
+    sqlx::query(
+        "WITH tokens AS (
+             INSERT INTO bigname_phase.resources
+                 (resource_id, chain_id, block_hash, block_number, canonicality_state)
+             SELECT gen_random_uuid(), wrapper.chain_id, wrapper.block_hash,
+                    wrapper.block_number, 'canonical'
+             FROM bigname_phase.resources wrapper
+             CROSS JOIN generate_series(1, 2000)
+             WHERE wrapper.resource_id = $1
+             RETURNING resource_id, chain_id
+         )
+         INSERT INTO bigname_phase.normalized_events
+             (event_identity, namespace, resource_id, event_kind, source_family,
+              manifest_version, chain_id, derivation_kind, canonicality_state, after_state)
+         SELECT 'plan-wrapped-token:' || resource_id, 'ens', resource_id, 'SurfaceBound',
+                'ens_v1_wrapper_l1', 1, chain_id, 'ens_v1_unwrapped_authority', 'canonical',
+                jsonb_build_object('wrapped_registrar_resource_id', gen_random_uuid())
+         FROM tokens",
+    )
+    .bind(wrapper)
+    .execute(&database.pool)
+    .await?;
+    sqlx::query("ANALYZE bigname_phase.normalized_events, bigname_phase.resources")
+        .execute(&database.pool)
+        .await?;
+    let plan = bigname_storage::explain_registration_history_filter_for_test(
+        &database.pool,
+        registrar,
+        &logical,
+        "ethereum-mainnet",
+        "ens",
+        &namehash,
+    )
+    .await?;
+    assert_registration_history_plan_is_page_keyed(&plan);
     database.cleanup().await
 }
 
