@@ -617,6 +617,107 @@ fn a_check_after_the_announcement_without_a_predecessor_in_that_block_reads_none
     Ok(())
 }
 
+/// The registry announces itself before its registration, link and regeneration, in the order
+/// upstream emits them, here without the mint and role logs between
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L467-L471 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L540 @ ens_v2@a971bd64).
+/// No log is held, so every output vector is the one written before held logs ran early.
+#[test]
+fn an_announcement_first_block_holds_no_log_and_keeps_its_output() -> anyhow::Result<()> {
+    let old_token = versioned_token("alice", 1);
+    let output = interpret_test_batch(announced_between(
+        Vec::new(),
+        vec![
+            registered(old_token, "alice", "alice"),
+            linked(old_token, 99),
+            regenerated(old_token, versioned_token("alice", 2)),
+        ],
+    ))?;
+    let events = output
+        .normalized_events
+        .iter()
+        .map(|event| (event.log_index, event.event_kind.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events,
+        [
+            (Some(0), "RegistryCreated"),
+            (Some(1), "RegistrationGranted"),
+            (Some(2), "TokenResourceLinked"),
+            (Some(3), "TokenRegenerated"),
+        ]
+    );
+    let edges = output
+        .discovery_edges
+        .iter()
+        .map(|edge| (edge.edge_kind.as_str(), edge.discovery_source.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(edges, [("registry_announcement", "RegistryCreated")]);
+    assert!(output.decode_skips.is_empty(), "{:#?}", output.decode_skips);
+    Ok(())
+}
+
+/// A held pointer log of the announced registry records an edge when it runs, so the held logs
+/// are tried again. The log of an emitter admitted only in the next block stays held to the end
+/// of its block and is recorded once as preceding its admission.
+#[test]
+fn a_log_of_an_emitter_admitted_in_a_later_block_stays_held() -> anyhow::Result<()> {
+    const LATER: &str = "0x0000000000000000000000000000000000000062";
+    let pointer = v2_registry::SubregistryUpdated {
+        tokenId: U256::from(7),
+        subregistry: Address::repeat_byte(0x53),
+        sender: sender(),
+    }
+    .encode_log_data();
+    let output = interpret_test_batch(batch(
+        Vec::new(),
+        vec![
+            raw_at(pointer, 1, 0, CHILD),
+            raw_at(registered(U256::from(8), "bob", "bob"), 1, 1, LATER),
+            raw_at(RegistryCreated {}.encode_log_data(), 1, 2, CHILD),
+            raw_at(RegistryCreated {}.encode_log_data(), 2, 0, LATER),
+        ],
+    ))?;
+    let events = output
+        .normalized_events
+        .iter()
+        .map(|event| {
+            (
+                event.block_number,
+                event.log_index,
+                event.event_kind.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events,
+        [
+            (Some(1), Some(0), "SubregistryChanged"),
+            (Some(1), Some(2), "RegistryCreated"),
+            (Some(2), Some(0), "RegistryCreated"),
+        ]
+    );
+    assert_eq!(output.decode_skips.len(), 1, "{:#?}", output.decode_skips);
+    let skip = &output.decode_skips[0];
+    assert_eq!(
+        (
+            skip.block_number,
+            skip.log_index,
+            skip.emitting_address.as_str()
+        ),
+        (1, 1, LATER)
+    );
+    assert_eq!(skip.inconsistency_site, None);
+    assert!(
+        skip.decode_context
+            .starts_with("log precedes its emitter's discovery admission at block 2"),
+        "{}",
+        skip.decode_context
+    );
+    Ok(())
+}
+
 /// The token's link comes from an earlier batch, so the check reads restored state, on both
 /// loaders. The conflicting link is skipped, and the regeneration of the same token still applies.
 #[test]
