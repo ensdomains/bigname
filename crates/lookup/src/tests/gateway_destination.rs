@@ -116,7 +116,8 @@ async fn assert_not_refused(fixture: &Fixture, url: &str, judged: SocketAddr) ->
     let offchain_data = ens_offchain_lookup(vec![url.to_owned()])?;
     let (rpc_url, rpc_handle) =
         spawn_mock_rpc(ccip_chain_responses(vec![offchain_data], None)).await?;
-    let (response, refusals) = seam::capture_refusals(run_lookup(fixture, &rpc_url)).await;
+    let ((response, refusals), judged_admitted) =
+        seam::capture_judged_admitted(seam::capture_refusals(run_lookup(fixture, &rpc_url))).await;
     assert!(refusals.is_empty(), "{url}: {refusals:?}");
     match response {
         Ok(response) => {
@@ -134,9 +135,10 @@ async fn assert_not_refused(fixture: &Fixture, url: &str, judged: SocketAddr) ->
         }
         Err(error) => assert_eq!(error.kind(), ErrorKind::Transport, "{url}: {error}"),
     }
-    assert!(
-        seam::was_judged_admitted(judged),
-        "{url}: the filter never admitted {judged}"
+    assert_eq!(
+        judged_admitted,
+        vec![judged],
+        "{url}: the filter must judge the literal once"
     );
     assert_eq!(
         join_rpc(rpc_handle).await?.len(),

@@ -356,7 +356,8 @@ fn class_labels_are_distinct_snake_case() {
 }
 
 /// Lists every variant as an exhaustive `match` and as an array. A new variant fails to compile
-/// until it is listed here, and then fails here until `ALL` lists it too, in the same order.
+/// until it is listed here. Once listed, comparing the array with `ALL` fails to compile on the
+/// length mismatch until `ALL` lists it too, and fails the test if the order differs.
 macro_rules! every_class {
     ($($variant:ident),+ $(,)?) => {{
         const fn listed(class: Class) {
