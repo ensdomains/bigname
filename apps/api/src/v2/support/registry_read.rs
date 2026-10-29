@@ -92,7 +92,7 @@ fn decide(row: &NameCurrentRow) -> Decision {
     }
 }
 
-fn row_chain_id(row: &NameCurrentRow) -> Option<String> {
+pub(super) fn row_chain_id(row: &NameCurrentRow) -> Option<String> {
     ChainPositions::from_value(&row.chain_positions)
         .ok()?
         .as_map()
