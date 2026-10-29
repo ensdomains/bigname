@@ -724,11 +724,12 @@ async fn a_failed_fill_read_serves_the_composed_registration_and_keeps_the_snaps
     database.cleanup().await
 }
 
-/// The savepoint is taken only for a read. On a read transaction a failed statement has aborted,
-/// a row without its chain and a snapshot without the row's chain still return the composed
-/// registration, so neither issued a statement. A shaped row's savepoint fails there, and the
-/// fill returns that error. Its failure has ended the read transaction, as the plain statement
-/// after it runs, so the route answers 500 rather than serving on a snapshot it no longer holds.
+/// The savepoint is taken only for a read. On a read transaction that a failed statement has
+/// aborted, a row without its chain and a snapshot without the row's chain still return the
+/// composed registration, so neither issued a statement. A shaped row's savepoint fails there,
+/// and the fill returns that error. Its failure has ended the read transaction, as the plain
+/// statement after it runs, so the route answers 500 rather than serving on a snapshot it no
+/// longer holds.
 #[tokio::test]
 async fn a_savepoint_is_taken_only_for_a_read_and_a_failed_one_is_an_error() -> Result<()> {
     let database = new_database().await?;

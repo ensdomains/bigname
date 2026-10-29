@@ -2181,9 +2181,10 @@ coverage error. Finite dates use exact decimal Unix-second strings through the
 full uint64 expiry range, even when the next boundary exceeds the chain clock.
 
 Name detail, search, lists and lookup detail/feed use the same publication and
-lifecycle. Name detail and the records route also carry the read-time lease fill described
-under `registered_at`. Every other route does not, until the stored registration carries
-the lease. `GET /v1/names` can discover either expiry or grace deadlines directly.
+lifecycle. Name detail serves the read-time lease fill described under
+`registered_at`, and the records route gates its resolver and records on it. Every
+other route does not, until the stored registration carries the lease. `GET /v1/names`
+can discover either expiry or grace deadlines directly.
 Neither `expired` nor `released` implies current control or universal availability.
 ENSv2 grace does not restore owner, resolver records or permissions. A reservation
 has no invented owner. All public registration coordinates—ID, continuous start,
