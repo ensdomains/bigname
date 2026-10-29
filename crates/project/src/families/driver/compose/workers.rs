@@ -175,6 +175,7 @@ fn take(budget: &AtomicU64) -> bool {
 /// The pass's workers need a connection each and its coordinator one more. A smaller pool is
 /// refused before anything is claimed: it would leave the coordinator waiting behind its own
 /// workers. One worker runs on the coordinator's connection.
+#[allow(dead_code)] // The red stub removes its caller.
 pub(super) fn require_pool(chain_id: &str, pool: &PgPool, workers: u16) -> Result<()> {
     let connections = pool.options().get_max_connections();
     let needed = u32::from(workers) + 1;
