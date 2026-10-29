@@ -715,9 +715,12 @@ Family indexes serve these concrete readers:
   the same path. That bounds what a short prefix reads by the page, not by the names that
   sort before it. A prefix of four or more characters reads the three-character bucket and
   filters it by the prefix. A class with at most 1,024 postings for some term reads its
-  matching documents by id instead. A contains or exact search over a class with more than
-  1,024 postings for every term walks `name_surfaces_name_order_idx` (raw-backed) or
-  `name_search_documents_structural_order_idx` (structural) in name order, as before.
+  matching documents by id instead. A contains or exact search over a raw-backed or short
+  structural class with more than 1,024 postings for every term walks
+  `name_surfaces_name_order_idx` (raw-backed) or `name_search_documents_structural_order_idx`
+  (short structural) in name order, as before. The long structural class, names over 2000
+  bytes, reads every posting id of its first term in that state, in any match mode, and then
+  those documents by id.
 - The address-names walk (`storage:families.records.address_name_walk`) orders one address's
   candidate names, read from `project_address_name_index` by its primary key, by their sort
   key: the `name_surfaces` and `project_name_summary` primary keys, one probe per candidate,

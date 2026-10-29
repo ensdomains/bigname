@@ -700,7 +700,8 @@ CREATE INDEX IF NOT EXISTS name_search_documents_class_idx
 -- A prefix search of a dense class (storage:families.name.search_candidates.prefix1 to
 -- prefix3) reads the bucket of the first k characters of the prefix. Equality on the class and
 -- the bucket leaves the entries in page order, under the database collation, so the page limit
--- ends the scan. A LIKE prefix is never an index range under a collation other than C.
+-- ends the scan. No other index on this table gives a LIKE prefix a range under a collation
+-- other than C.
 CREATE INDEX IF NOT EXISTS name_search_documents_prefix1_idx
     ON name_search_documents (spelling_class, left(name, 1), name, namespace, namehash)
     WHERE spelling_class IN (0, 1);
