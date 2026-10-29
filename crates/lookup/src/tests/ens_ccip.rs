@@ -11,7 +11,7 @@ use crate::LookupRecordStatus;
 const CALLBACK: [u8; 4] = [0x01, 0x02, 0x03, 0x04];
 const EFFECTIVE: &str = "0x3000000000000000000000000000000000000003";
 
-fn ens_offchain_lookup(urls: Vec<String>) -> AnyResult<String> {
+pub(super) fn ens_offchain_lookup(urls: Vec<String>) -> AnyResult<String> {
     Ok(encode_offchain_lookup_for_test(
         Address::from_str(UNIVERSAL_RESOLVER)?,
         urls,
@@ -21,7 +21,7 @@ fn ens_offchain_lookup(urls: Vec<String>) -> AnyResult<String> {
     ))
 }
 
-async fn ens_fixture(null_exact_resolver: bool) -> AnyResult<Fixture> {
+pub(super) async fn ens_fixture(null_exact_resolver: bool) -> AnyResult<Fixture> {
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
     if null_exact_resolver {
         make_null_resolver_discovery(&fixture).await?;
@@ -29,7 +29,7 @@ async fn ens_fixture(null_exact_resolver: bool) -> AnyResult<Fixture> {
     Ok(fixture)
 }
 
-async fn answering_gateway() -> AnyResult<StatusGateway> {
+pub(super) async fn answering_gateway() -> AnyResult<StatusGateway> {
     spawn_status_gateway(
         "200 OK",
         String::new(),
@@ -40,7 +40,7 @@ async fn answering_gateway() -> AnyResult<StatusGateway> {
 
 /// The ENS fixture with a declared registry, so the primary-name reverse leg reads the registry
 /// and then the reverse resolver before the forward call.
-async fn primary_name_fixture() -> AnyResult<Fixture> {
+pub(super) async fn primary_name_fixture() -> AnyResult<Fixture> {
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
     seed_manifest(
         fixture.pool(),
@@ -61,7 +61,7 @@ async fn primary_name_fixture() -> AnyResult<Fixture> {
     Ok(fixture)
 }
 
-fn live_answer() -> AnyResult<RpcResponse> {
+pub(super) fn live_answer() -> AnyResult<RpcResponse> {
     Ok(RpcResponse::Result(encoded_text_result_with_resolver(
         LIVE_VALUE, EFFECTIVE,
     )?))

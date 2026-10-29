@@ -26,7 +26,7 @@ use crate::{
     RecordSelector,
     abi::{hex_string, namehash},
     admitted_verified_authority_arms,
-    ccip::{encode_batch_query_for_test, encode_offchain_lookup_for_test},
+    ccip::{encode_batch_query_for_test, encode_offchain_lookup_for_test, seam},
 };
 
 const ETHEREUM: &str = "ethereum-mainnet";
@@ -4531,8 +4531,7 @@ async fn spawn_mixed_ccip_rpc(
 }
 
 async fn spawn_gateway(response: Vec<u8>) -> AnyResult<(String, JoinHandle<AnyResult<()>>)> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let url = format!("http://{}", listener.local_addr()?);
+    let (listener, url) = bind_admitted_gateway().await?;
     let handle = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await?;
         read_http_json_body(&mut socket).await?;
@@ -4547,8 +4546,7 @@ async fn spawn_batch_gateway(
     response: Vec<u8>,
     delay: Duration,
 ) -> AnyResult<(String, JoinHandle<AnyResult<usize>>)> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let url = format!("http://{}", listener.local_addr()?);
+    let (listener, url) = bind_admitted_gateway().await?;
     let body = Arc::new(json!({ "data": hex_string(&response) }).to_string());
     let handle = tokio::spawn(async move {
         let active = Arc::new(AtomicUsize::new(0));
@@ -4588,8 +4586,7 @@ async fn spawn_status_gateway(
     headers: String,
     body: String,
 ) -> AnyResult<StatusGateway> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let url = format!("http://{}", listener.local_addr()?);
+    let (listener, url) = bind_admitted_gateway().await?;
     let hits = Arc::new(AtomicUsize::new(0));
     let served = Arc::clone(&hits);
     let handle = tokio::spawn(async move {
@@ -4607,10 +4604,20 @@ async fn spawn_status_gateway(
     Ok((url, hits, handle))
 }
 
-/// A loopback URL nothing listens on, so a connection to it is refused at once.
+/// A loopback URL nothing listens on, so a connection to it is refused at once. The gateway
+/// destination filter admits it, so the refusal comes from the kernel.
 async fn closed_port_url() -> AnyResult<String> {
+    let (_listener, url) = bind_admitted_gateway().await?;
+    Ok(url)
+}
+
+/// Binds a loopback listener for a fake gateway and admits its exact address through the gateway
+/// destination filter's test seam. Loopback stays refused for every other port.
+async fn bind_admitted_gateway() -> AnyResult<(TcpListener, String)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    Ok(format!("http://{}", listener.local_addr()?))
+    let address = listener.local_addr()?;
+    seam::admit(address);
+    Ok((listener, format!("http://{address}")))
 }
 
 /// Scripted provider answers for a CCIP-Read chain of any length: the initial call and each
@@ -4633,8 +4640,7 @@ fn offchain_revert(offchain_data: String) -> RpcResponse {
 }
 
 async fn spawn_untouchable_gateway() -> AnyResult<(String, JoinHandle<AnyResult<()>>)> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let url = format!("http://{}", listener.local_addr()?);
+    let (listener, url) = bind_admitted_gateway().await?;
     let handle = tokio::spawn(async move {
         listener.accept().await?;
         Ok(())
@@ -4643,8 +4649,7 @@ async fn spawn_untouchable_gateway() -> AnyResult<(String, JoinHandle<AnyResult<
 }
 
 async fn spawn_hanging_rpc() -> AnyResult<(String, JoinHandle<AnyResult<()>>)> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let url = format!("http://{}", listener.local_addr()?);
+    let (listener, url) = bind_admitted_gateway().await?;
     let handle = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await?;
         read_http_json_body(&mut socket).await?;
@@ -4734,4 +4739,5 @@ fn assert_hash_pinned(requests: &[Value], expected_hash: &str) {
 
 mod ens_ccip;
 mod family_marker;
+mod gateway_destination;
 mod textless;
