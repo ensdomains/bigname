@@ -350,8 +350,9 @@ fn the_compose_workers_flag_reaches_the_family_settings_and_sizes_the_pools() {
         "no workers is refused"
     );
     assert_eq!(run_connections(1, 1), 5);
-    assert_eq!(run_connections(3, 3), 9);
-    assert_eq!(run_connections(0, 1), 5);
+    assert_eq!(run_connections(2, 2), 8);
+    assert_eq!(run_connections(3, 3), 15);
+    assert_eq!(run_connections(0, 1), 4);
     assert_eq!(redo_connections(1), 5);
     assert_eq!(redo_connections(3), 7);
 }

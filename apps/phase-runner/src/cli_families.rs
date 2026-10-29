@@ -56,13 +56,13 @@ pub(super) struct ProjectFamiliesArgs {
 }
 
 /// The connections `run` gives its pool: two a chain and at least four, plus one for each
-/// composition pass worker.
+/// composition pass worker of each chain, since every chain's rebuild may compose at once.
 pub fn run_connections(chains: usize, workers: u16) -> u32 {
-    u32::try_from(chains)
-        .unwrap_or(u32::MAX)
+    let chains = u32::try_from(chains).unwrap_or(u32::MAX);
+    chains
         .saturating_mul(2)
         .max(4)
-        .saturating_add(u32::from(workers))
+        .saturating_add(u32::from(workers).saturating_mul(chains))
 }
 
 /// The connections `redo` gives its pool: four, plus one for each composition pass worker.

@@ -5052,9 +5052,12 @@ rows are the same, row for row, whatever the worker count.
 - `--project-families-compose-workers`
   (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_WORKERS`, default 1, at least 1) is the
   number of workers composing the names stream side by side. One is the serial pass. Each
-  worker holds a database connection for its chunk, so `run` and `redo` size their pools with
-  one connection per worker on top of their usual size. A pass with more workers than its pool
-  can serve beside its coordinator is refused at its start, naming both numbers. The workers
+  worker holds a database connection for its chunk. `run` runs every chain at once, and
+  their rebuilds may compose at the same time, so its pool is two connections a chain and at
+  least four, plus one connection per worker per chain. `redo` takes its chains one after
+  another, so its pool is four connections plus one per worker. A pass with more workers
+  than its pool can serve beside its coordinator is refused at its start, naming both
+  numbers. The workers
   multiply the names stream's database load: each runs the same statements under the server's
   `work_mem`, so size the count to the database's CPU and memory, not the runner's.
 - The schema-migration `20261027130000_project_compose_stream_comments.sql` changes three
