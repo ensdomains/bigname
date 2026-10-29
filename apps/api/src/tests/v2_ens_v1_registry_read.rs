@@ -804,9 +804,9 @@ async fn ra3_a_verified_read_of_a_registry_clear_is_not_stale() -> Result<()> {
 }
 
 /// Row A4: as A3, read with `source=auto`. Project composes the registry clear into the row, so
-/// the request-time fill sees no pointer on either side and stays out. The stored row does not
-/// tell a pointer written to zero from one never seen, so the index cannot answer `not_found`
-/// for the requested key and the read goes to the chain, which finds no resolver.
+/// the request-time fill sees no pointer on either side and stays out. The discovery gate reads
+/// only the null resolver address, so the index cannot answer `not_found` for the requested key
+/// and the read goes to the chain, which finds no resolver.
 #[tokio::test]
 async fn ra4_an_auto_read_of_a_registry_clear_asks_the_chain() -> Result<()> {
     let database = published(vec![pointer(lease_node(), ZERO)?], &[1]).await?;
@@ -819,8 +819,8 @@ async fn ra4_an_auto_read_of_a_registry_clear_asks_the_chain() -> Result<()> {
     database.cleanup().await?;
     assert_eq!(status, StatusCode::OK, "{body:#}");
     assert!(body["data"]["resolver"].is_null(), "{body:#}");
-    assert_ne!(
-        body["data"]["records"]["text:name"]["status"], "ok",
+    assert_eq!(
+        body["data"]["records"]["text:name"]["status"], "not_found",
         "{body:#}"
     );
     assert_eq!(body["meta"]["source"], "verified", "{body:#}");
