@@ -1033,3 +1033,65 @@ async fn a_wrapper_renewal_on_the_lease_does_not_start_it() -> Result<()> {
     assert_eq!(data["registered_at"], json!(seconds(GRANTED)), "{data}");
     database.cleanup().await
 }
+
+/// The ownerless fixture's name detail and indexed records read.
+async fn ownerless_reads(database: &TestDatabase) -> Result<(Value, Value)> {
+    let detail = v2_get_json(database, "/v1/names/alice.eth").await?;
+    let records = v2_get_json(
+        database,
+        "/v1/names/alice.eth/records?source=indexed&keys=text:description",
+    )
+    .await?;
+    Ok((detail["data"].clone(), records["data"].clone()))
+}
+
+/// An ownerless name served through its retained registry resolver pointer serves nothing once
+/// the lease the fill reads is released.
+#[tokio::test]
+async fn an_ownerless_name_with_a_released_filled_lease_serves_nothing() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_alice_state_inputs(&database, AliceInputState::Ownerless).await?;
+    append_alice_name_input(
+        &database,
+        "RegistrationReleased",
+        REGISTRAR,
+        json!({"authority_kind": "registrar", "expiry": 1_700_000_000}),
+    )
+    .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
+    let logical = bigname_storage::logical_name_id_for_name("ens", "alice.eth");
+    let stored = composed(&database, &logical).await?;
+    let registration = &stored.declared_summary["registration"];
+    assert!(registration["released_at"].is_null(), "{registration}");
+    assert!(registration["authority_kind"].is_null(), "{registration}");
+
+    let (detail, records) = ownerless_reads(&database).await?;
+    assert_eq!(detail["status"], json!("released"), "{detail}");
+    assert!(detail["resolver"].is_null(), "{detail}");
+    assert!(detail["records"].is_null(), "{detail}");
+    assert!(records["resolver"].is_null(), "{records}");
+    assert_ne!(
+        records["records"]["text:description"]["status"],
+        json!("ok"),
+        "{records}"
+    );
+    database.cleanup().await
+}
+
+/// The guard: an ownerless name with no release still serves through its retained pointer.
+#[tokio::test]
+async fn an_ownerless_name_without_a_release_serves_through_its_retained_pointer() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_alice_state_inputs(&database, AliceInputState::Ownerless).await?;
+
+    let (detail, records) = ownerless_reads(&database).await?;
+    let resolver = json!("0x0000000000000000000000000000000000000abc");
+    assert_eq!(detail["resolver"]["address"], resolver, "{detail}");
+    assert_eq!(records["resolver"]["address"], resolver, "{records}");
+    assert_eq!(
+        records["records"]["text:description"],
+        json!({"status": "ok", "value": "Alice profile"}),
+        "{records}"
+    );
+    database.cleanup().await
+}

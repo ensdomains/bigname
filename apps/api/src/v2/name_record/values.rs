@@ -12,7 +12,14 @@ pub(in crate::v2) fn row_has_current_registration(row: &NameCurrentRow) -> bool 
         &row.namespace,
         &row.declared_summary,
         has_name_binding(row),
-    ) || bigname_storage::name_current_has_event_linked_registry_serving(row)
+    ) || row_has_event_linked_registry_serving(row)
+}
+
+/// Whether an event-linked registry pointer serves the row. It serves a registration that is not
+/// released, so a released lease, stored or filled at read time, ends it.
+fn row_has_event_linked_registry_serving(row: &NameCurrentRow) -> bool {
+    bigname_storage::name_current_has_event_linked_registry_serving(row)
+        && !bigname_storage::public_name_fields::registration_released(&row.declared_summary)
 }
 
 pub(in crate::v2) fn identity_row_has_current_registration(
@@ -32,7 +39,7 @@ pub(in crate::v2) fn row_serves_resolver(row: &NameCurrentRow) -> bool {
     row_has_current_registration(row)
         && (string_field(row.coverage.get("unsupported_reason")).as_deref()
             != Some(PARTIAL_SERVE_UNSUPPORTED_REASON)
-            || bigname_storage::name_current_has_event_linked_registry_serving(row))
+            || row_has_event_linked_registry_serving(row))
 }
 
 pub(in crate::v2) fn identity_row_serves_resolver(
@@ -191,3 +198,7 @@ fn eth_2ld_labelhash_token_id(
         .ok()
         .map(|value| value.to_string())
 }
+
+#[cfg(test)]
+#[path = "values_tests.rs"]
+mod tests;
