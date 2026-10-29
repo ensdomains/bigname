@@ -236,8 +236,8 @@ fn interpret_once(
     Ok(output)
 }
 
-/// Interprets, in log order, the deferred logs of the block that the catalog now selects, and
-/// again while those logs record discovery edges. Returns whether they wrote normalized events.
+/// Interprets the deferred logs of the block that the catalog now selects, from the lowest log
+/// index up. Returns whether they wrote normalized events.
 fn recover_admitted(
     catalog: &mut Catalog,
     block_raw_logs: &[RawLogInput],
@@ -248,26 +248,33 @@ fn recover_admitted(
     transactions: &TransactionIndex,
 ) -> anyhow::Result<bool> {
     let first_event = output.normalized_events.len();
-    loop {
+    let mut position = 0;
+    // A deferred log that records an edge restarts the scan at the lowest deferred log, so an
+    // admission it makes cannot let a later deferred log run before an earlier one. Each restart
+    // follows a consumed log. No current adapter admits a different emitter from a deferred log:
+    // discovery.rs:57 and :109 admit the emitter itself, :355 the emitter or the proxy of a
+    // declared migration factory, and :249 is unreachable from a valid manifest. So a restart
+    // finds nothing more today; `a_log_of_an_emitter_admitted_in_a_later_block_stays_held`
+    // exercises it.
+    while let Some(&index) = deferred.get(position) {
         let edges = output.discovery_edges.len();
-        let mut still_deferred = Vec::new();
-        for index in std::mem::take(deferred) {
-            if !interpret_raw(
-                catalog,
-                &block_raw_logs[index],
-                state,
-                output,
-                migration_observations,
-                transactions,
-            )? {
-                still_deferred.push(index);
-            }
+        if !interpret_raw(
+            catalog,
+            &block_raw_logs[index],
+            state,
+            output,
+            migration_observations,
+            transactions,
+        )? {
+            position += 1;
+            continue;
         }
-        *deferred = still_deferred;
-        if deferred.is_empty() || output.discovery_edges.len() == edges {
-            return Ok(output.normalized_events.len() > first_event);
+        deferred.remove(position);
+        if output.discovery_edges.len() > edges {
+            position = 0;
         }
     }
+    Ok(output.normalized_events.len() > first_event)
 }
 
 /// Discovery is forward-only and performs no lookback: a log from an address admitted later in
