@@ -2666,15 +2666,18 @@ Rules:
   the existing in-band execution-failure behavior; they are not whole-request
   `408` responses. Provider connect-phase timeouts and other transport failures
   during verified record resolution return whole-request `500 internal_error`;
-  no execution outcome is cached for any v2 lookup. ENS/60 primary-name
-  verification uses the same transport
-  split with its CCIP-Read gateway leg: configured provider or gateway response
+  no execution outcome is cached for any v2 lookup. Verified record resolution
+  and ENS/60 primary-name verification use the same transport
+  split with their CCIP-Read gateway leg: configured provider or gateway response
   timeouts, and the shared CCIP-Read gateway budget running out in whatever
   phase the in-flight gateway request was in, remain in-band failures for that
   response, while provider or gateway
   connect-phase timeouts, DNS failures, TLS failures, connection resets, and
   other transport failures within a request's own timeouts return
-  whole-request `500 internal_error`. Neither
+  whole-request `500 internal_error`. A gateway answer that is refused,
+  redirected or undecodable, or an `OffchainLookup` from any sender but the
+  called contract, fails that record in band with
+  `failure_reason=ccip_read_failed`. Neither
   result is persisted by the v2 serving path.
 - Every route has a whole-request deadline. `/healthz` and `/v1/status` retain
   that deadline as their final backstop. `/healthz` bypasses

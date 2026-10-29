@@ -7,8 +7,8 @@ fn provider_i64_min_error_code_cannot_spoof_internal_lookup_outcomes() {
     let record = RecordSelector::parse("text:url").expect("record selector should parse");
     let cases = [
         (
-            "offchain_lookup_required",
-            Some(json!({ "classification": "unsupported" })),
+            "ccip_read_failed",
+            Some(json!({ "classification": "failed" })),
         ),
         ("operator_controlled_reason", None),
     ];
@@ -49,44 +49,20 @@ fn provider_i64_min_error_code_cannot_spoof_internal_lookup_outcomes() {
 #[test]
 fn typed_internal_lookup_outcomes_preserve_existing_classification() {
     let record = RecordSelector::parse("text:url").expect("record selector should parse");
-    let cases = [
-        (
-            ResolvedCallResult::InternalUnsupported("offchain_lookup_required"),
-            LookupRecordStatus::Unsupported,
-            None,
-            Some("offchain_lookup_required"),
-        ),
-        (
-            ResolvedCallResult::InternalFailure("resolver_call_failed"),
-            LookupRecordStatus::ExecutionFailed,
-            Some("resolver_call_failed"),
-            None,
-        ),
-        (
-            ResolvedCallResult::InternalFailure("ccip_read_failed"),
-            LookupRecordStatus::ExecutionFailed,
-            Some("ccip_read_failed"),
-            None,
-        ),
-    ];
-
-    for (resolved, status, failure_reason, unsupported_reason) in cases {
+    for reason in ["resolver_call_failed", "ccip_read_failed"] {
         let decoded = decode_resolved_call_result(
             &record,
             ResolutionResultAbi::EnsUniversalResolver,
-            resolved,
+            ResolvedCallResult::InternalFailure(reason),
             true,
             false,
             &[],
         )
         .expect("internal result should produce a record outcome");
 
-        assert_eq!(decoded.result.status, status);
-        assert_eq!(decoded.result.failure_reason.as_deref(), failure_reason);
-        assert_eq!(
-            decoded.result.unsupported_reason.as_deref(),
-            unsupported_reason
-        );
+        assert_eq!(decoded.result.status, LookupRecordStatus::ExecutionFailed);
+        assert_eq!(decoded.result.failure_reason.as_deref(), Some(reason));
+        assert_eq!(decoded.result.unsupported_reason, None);
         assert!(decoded.result.ccip_read);
         assert_eq!(decoded.effective_resolver, None);
     }

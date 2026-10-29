@@ -1385,6 +1385,7 @@ async fn null_exact_resolver_executes_without_record_boundary_or_ledger_comparis
 
     let response = run_lookup(&fixture, &rpc_url).await?;
     assert_eq!(response.records[0].value, Some(json!(LIVE_VALUE)));
+    assert!(!response.records[0].ccip_read);
     assert_eq!(response.records[0].ledger_action, LedgerAction::None);
     assert_eq!(
         response.resolver_address,
@@ -1394,6 +1395,7 @@ async fn null_exact_resolver_executes_without_record_boundary_or_ledger_comparis
 
     fixture.cleanup().await?;
     let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(requests.len(), 1);
     assert_hash_pinned(&requests, ETHEREUM_HASH);
     Ok(())
 }
@@ -1709,41 +1711,6 @@ async fn null_exact_resolver_returns_mixed_values_and_empty_record_misses() -> A
             .iter()
             .all(|record| record.ledger_action == LedgerAction::None)
     );
-    assert_eq!(ledger_count(fixture.pool()).await?, 0);
-
-    fixture.cleanup().await?;
-    join_rpc(rpc_handle).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn null_exact_resolver_offchain_lookup_stays_unsupported_and_unpersisted() -> AnyResult<()> {
-    let offchain_data = encode_offchain_lookup_for_test(
-        Address::from_str(UNIVERSAL_RESOLVER)?,
-        vec!["https://gateway.invalid/{data}".to_owned()],
-        vec![0x12, 0x34],
-        [0x01, 0x02, 0x03, 0x04],
-        vec![0xab],
-    );
-    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Error {
-        code: 3,
-        message: "execution reverted".to_owned(),
-        data: Value::String(offchain_data),
-    }])
-    .await?;
-    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    make_null_resolver_discovery(&fixture).await?;
-
-    let response = run_lookup(&fixture, &rpc_url).await?;
-    assert_eq!(
-        response.records[0].status,
-        crate::LookupRecordStatus::Unsupported
-    );
-    assert_eq!(
-        response.records[0].unsupported_reason.as_deref(),
-        Some("offchain_lookup_required")
-    );
-    assert_eq!(response.records[0].ledger_action, LedgerAction::SkippedCcip);
     assert_eq!(ledger_count(fixture.pool()).await?, 0);
 
     fixture.cleanup().await?;
@@ -2765,7 +2732,12 @@ async fn mixed_ccip_and_direct_batch_persists_only_the_direct_disagreement() -> 
         [0x01, 0x02, 0x03, 0x04],
         vec![0xab],
     );
-    let (rpc_url, rpc_handle) = spawn_mixed_ccip_rpc(offchain_data).await?;
+    let (rpc_url, rpc_handle) = spawn_mixed_ccip_rpc(
+        offchain_data,
+        encoded_basenames_text_result(LIVE_VALUE),
+        encoded_basenames_text_result("ipfs://ccip-avatar"),
+    )
+    .await?;
     let fixture = setup_fixture(FixtureKind::Basenames, INDEXED_VALUE).await?;
     let request = LookupRequest::new(&fixture.logical_name_id, ["avatar", "text:url"])?;
 
@@ -4524,8 +4496,12 @@ async fn spawn_peak_concurrency_rpc(
     Ok((url, handle))
 }
 
+/// Routes each call by its calldata: the `avatar` call reverts with `offchain_data`, the
+/// `text:url` call answers `direct`, and the CCIP-Read callback answers `callback`.
 async fn spawn_mixed_ccip_rpc(
     offchain_data: String,
+    direct: Value,
+    callback: Value,
 ) -> AnyResult<(String, JoinHandle<AnyResult<Vec<Value>>>)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
@@ -4542,9 +4518,9 @@ async fn spawn_mixed_ccip_rpc(
                     data: Value::String(offchain_data.clone()),
                 }
             } else if calldata.contains("75726c") {
-                RpcResponse::Result(encoded_basenames_text_result(LIVE_VALUE))
+                RpcResponse::Result(direct.clone())
             } else {
-                RpcResponse::Result(encoded_basenames_text_result("ipfs://ccip-avatar"))
+                RpcResponse::Result(callback.clone())
             };
             requests.push(request);
             write_rpc_response(&mut socket, response).await?;
@@ -4599,6 +4575,58 @@ async fn spawn_batch_gateway(
         Ok(peak.load(Ordering::SeqCst))
     });
     Ok((url, handle))
+}
+
+/// A gateway that answers every request, one connection each, with the HTTP `status` line (for
+/// example `"404 Not Found"`), the extra header lines in `headers`, and `body`. The counter holds
+/// how many requests it has read; the task runs until it is aborted.
+async fn spawn_status_gateway(
+    status: &'static str,
+    headers: String,
+    body: String,
+) -> AnyResult<(String, Arc<AtomicUsize>, JoinHandle<AnyResult<()>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let hits = Arc::new(AtomicUsize::new(0));
+    let served = Arc::clone(&hits);
+    let handle = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await?;
+            read_http_json_body(&mut socket).await?;
+            served.fetch_add(1, Ordering::SeqCst);
+            let response = format!(
+                "HTTP/1.1 {status}\r\n{headers}content-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await?;
+        }
+    });
+    Ok((url, hits, handle))
+}
+
+/// A loopback URL nothing listens on, so a connection to it is refused at once.
+async fn closed_port_url() -> AnyResult<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    Ok(format!("http://{}", listener.local_addr()?))
+}
+
+/// Scripted provider answers for a CCIP-Read chain of any length: the initial call and each
+/// callback revert with the next `OffchainLookup` in `lookups`, then `last`, when given, answers
+/// the final callback.
+fn ccip_chain_responses(lookups: Vec<String>, last: Option<RpcResponse>) -> Vec<RpcResponse> {
+    lookups
+        .into_iter()
+        .map(offchain_revert)
+        .chain(last)
+        .collect()
+}
+
+fn offchain_revert(offchain_data: String) -> RpcResponse {
+    RpcResponse::Error {
+        code: 3,
+        message: "execution reverted".to_owned(),
+        data: Value::String(offchain_data),
+    }
 }
 
 async fn spawn_untouchable_gateway() -> AnyResult<(String, JoinHandle<AnyResult<()>>)> {
@@ -4701,5 +4729,6 @@ fn assert_hash_pinned(requests: &[Value], expected_hash: &str) {
     }
 }
 
+mod ens_ccip;
 mod family_marker;
 mod textless;
