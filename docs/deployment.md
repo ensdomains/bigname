@@ -5064,18 +5064,22 @@ and no schema.
   label has its key, or that hold it directly above a slot of the root. The
   names it selects are the same.
 - Its last step, which reads the surfaces of the names it selects, now counts
-  them first. Up to 5% of the chain's surfaces it reads each surface by
+  them first. Up to 5% of the rows of `name_surfaces` it reads each surface by
   primary key, so a high row estimate cannot turn a few names into a read of
-  every surface. Beyond that it reads every `name_surfaces` row of the chain
-  once and joins the result to the names by a hash or merge join, never a
-  probe per name. Each readable surface still meets `chain_lineage`, which the
+  every surface. Beyond that it reads every row of `name_surfaces` once and
+  joins the result to the names by a hash or merge join, never a probe per
+  name. Each readable surface still meets `chain_lineage`, which the
   planner may probe by key once per surface. A rebuild range journals all its
   blocks under its last one, so a range that covers most registrations takes
   that arm.
-- The chain's surfaces are the planner's row count of `name_surfaces`
-  (`pg_class.reltuples`), which is the chain's because a deployment indexes
-  one chain. Until the table is first analyzed the statement counts its
-  surfaces instead, a million at most.
+- The bound is 5% of the planner's row count of `name_surfaces`
+  (`pg_class.reltuples`), across every chain the database holds. The full join
+  reads that whole table, so its cost follows that count. Until the table is
+  first analyzed the statement counts its rows instead, a million at most.
+- The bound follows the statistics. With autovacuum off for `name_surfaces`,
+  or ANALYZE behind a bulk load, the row count lags and large selections take
+  the one-pass arm. A TRUNCATE resets the count, and the bound falls back to
+  the capped count until the next ANALYZE.
 - Stored rows do not change. API responses do not change.
 - It adds no schema-migration, index, table, manifest or setting.
 - The statement now reads `normalized_events_v2_key_probe_idx` for the registry

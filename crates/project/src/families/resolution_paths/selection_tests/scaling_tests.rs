@@ -1857,8 +1857,8 @@ async fn the_last_step_reads_few_names_by_key_and_many_in_one_pass() -> Result<(
 // A table that was never analyzed has no row count, and the bound is 5% of a count of the
 // surfaces. The rows at the bound and one over it read `name_surfaces` by key and in one pass,
 // under both plan modes. Autovacuum is off for the table, so no ANALYZE runs under the test.
-// Red, by trace: a bound that reads only the row count is 0 here, and the row at the bound
-// then takes the one pass.
+// Red, by trace: on a fresh table `reltuples` is -1, so a bound read from the row count alone
+// is floor(5% of -1), also -1, and the row at the bound then takes the one pass.
 #[tokio::test]
 async fn a_never_analyzed_table_bounds_the_last_step_by_a_count() -> Result<()> {
     let (database, pool) = database().await?;

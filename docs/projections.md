@@ -2476,22 +2476,23 @@ entries that point at a changed registry through indexes that already exist
 - It reads the ENSv1→ENSv2 migration evidence of each ancestor by name, one
   lookup for each ancestor.
 - It reads the surfaces of the affected names last, and counts the names
-  first. Up to 5% of the chain's surfaces it reads each surface by primary
-  key. Beyond that it full-joins the names to the readable surfaces, which the
-  planner can only hash or merge. It then reads `affected` once and every
-  `name_surfaces` row of the chain once. Each readable surface still meets
+  first. Up to 5% of the rows of `name_surfaces` it reads each surface by
+  primary key. Beyond that it full-joins the names to the readable surfaces,
+  which the planner can only hash or merge. It then reads `affected` once and
+  every row of `name_surfaces` once. Each readable surface still meets
   `chain_lineage`, which the planner may probe by key once per surface.
-- The chain's surfaces are the planner's row count of `name_surfaces`, since a
-  deployment indexes one chain. A table never analyzed has no row count, and
-  then the statement counts its surfaces, a million at most. 5% is the
-  conservative end of the crossover measured between the two shapes.
+- The bound is 5% of the planner's row count of `name_surfaces`, across every
+  chain the database holds. The full join reads that whole table, so its cost
+  follows that count. A table never analyzed has no row count, and then the
+  statement counts its rows, a million at most. 5% is the conservative end of
+  the crossover measured between the two shapes.
 
 The surfaces it reads then follow the names the publication touches and the
 names under the entries that point at a changed registry, not the number of
-names on the chain. Past 5% of the chain's surfaces the last step reads every
-surface once instead of probing each name. A changed registry that no entry
-points at reads no surface. The indexes change how the statement finds its
-rows and not which names it selects.
+names on the chain. Past 5% of the rows of `name_surfaces` the last step reads
+every surface once instead of probing each name. A changed registry that no
+entry points at reads no surface. The indexes change how the statement finds
+its rows and not which names it selects.
 
 Two cases still read every observed ENS surface:
 
