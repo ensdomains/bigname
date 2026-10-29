@@ -37,6 +37,7 @@ use sqlx::{PgConnection, raw_sql};
 use super::{CHAIN, ETH, PLAN_MODES, ROOT, current, hash, oracle};
 use crate::families::derived::SUMMARY_WORK_LIST;
 use crate::families::guard_tests::{database, executed_scans, indexes_read, reads_through};
+use crate::families::resolution_paths::selection::FEW_AFFECTED_NAMES;
 
 const ETH_LABEL: &str = "0x4f5b812789fc606be1b3b16908db13fc7a9adf7ca72641f84d75b47069d3d7f0";
 const SURFACES: &str = "name_surfaces";
@@ -1611,10 +1612,6 @@ const SURFACE_KEYS: [&str; 2] = [
     "name_surfaces_chain_id_logical_name_id_key",
 ];
 
-/// `FEW_AFFECTED_NAMES` in `selection.rs`: the most affected names whose surfaces the last step
-/// reads by key. The rows at it and one over it fail if the two differ.
-const FEW_AFFECTED_NAMES: i64 = 10_000;
-
 /// Push a failure unless the last step read `name_surfaces`, and read it only by key.
 fn last_step_reads_by_key(mode: &str, scans: &[(&str, &Value)], failures: &mut Vec<String>) {
     let last: Vec<&Value> = scans
@@ -1703,10 +1700,11 @@ async fn touch_names(connection: &mut PgConnection, block: i64, count: i64) -> R
 // loop. Each row also selects what the frozen statement before it selects, and as many names
 // as the row says.
 //
-// Red, by trace. One and at the limit fail on the plain join the last step had before, as P1
-// did by run. Over the limit and most names fail on a last step that probes by key whatever the
-// count, which reads `name_surfaces` once per name. At the limit fails when the count's bound
-// excludes the limit itself, and over the limit when it admits one more.
+// Red, by trace. One and at the limit fail on the plain join the last step had before only
+// when the planner's estimates make it scan `name_surfaces`. The one run that shows it is P1's
+// fixture under a custom plan. Over the limit and most names fail on a last step that probes by
+// key whatever the count, which reads `name_surfaces` once per name. At the limit fails when
+// the count's bound excludes the limit itself, and over the limit when it admits one more.
 #[tokio::test]
 async fn the_last_step_reads_few_names_by_key_and_many_in_one_pass() -> Result<()> {
     let (database, pool) = database().await?;

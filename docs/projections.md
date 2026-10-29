@@ -2477,15 +2477,16 @@ entries that point at a changed registry through indexes that already exist
   lookup for each ancestor.
 - It reads the surfaces of the affected names last, and counts the names
   first. Up to 10,000 names it reads each surface by primary key. Beyond that
-  it full-joins the names to the surfaces, which the planner can only hash or
-  merge, so it reads each side once.
+  it full-joins the names to the readable surfaces, which the planner can only
+  hash or merge. It then reads `affected` once and every `name_surfaces` row of
+  the chain once, and joins each readable surface to `chain_lineage`.
 
 The surfaces it reads then follow the names the publication touches and the
 names under the entries that point at a changed registry, not the number of
 names on the chain. Past 10,000 affected names the last step reads every
 surface once instead of probing each name. A changed registry that no entry
-points at reads no surface. The indexes change how the statement finds its rows and not which
-names it selects.
+points at reads no surface. The indexes change how the statement finds its
+rows and not which names it selects.
 
 Two cases still read every observed ENS surface:
 

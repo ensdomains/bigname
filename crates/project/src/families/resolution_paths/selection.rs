@@ -115,7 +115,7 @@ const POINTER_STATE_KEYS: &str = "array_remove(ARRAY[
 
 /// The most affected names whose surfaces the statement reads one primary-key probe at a time.
 /// Beyond it, the statement reads the surfaces in one pass and joins them to the names.
-const FEW_AFFECTED_NAMES: i64 = 10_000;
+pub(super) const FEW_AFFECTED_NAMES: i64 = 10_000;
 
 /// The slots of the registry `registry`, an SQL expression of the outer row, as the lateral
 /// `slot`: each entry's key and the registry that holds it, `parent`.
