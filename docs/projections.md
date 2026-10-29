@@ -2367,7 +2367,8 @@ it as an ancestor before its block, and from its block the names under it are
 recomposed.
 
 The capture is one statement, `project:families.resolution_paths.prepare`. It
-looks names up in `name_surfaces` through two indexes Project owns there
+looks names up in `name_surfaces` through two indexes Project owns there, and
+entries that point at a changed registry through indexes that already exist
 ([storage](storage.md#table-ownership)).
 
 - It finds the ancestors of each name an item expands by name, by the hash of
@@ -2376,24 +2377,37 @@ looks names up in `name_surfaces` through two indexes Project owns there
   changed path, by the hash of the label's entry key. The entry key is the
   label hash with its low 32 bits cleared, as
   [ENSv2 registry entries](#ensv2-registry-entries) defines it.
+- A registry is changed in a publication when an event of its blocks creates,
+  upgrades or announces it, or when a name an item expands by name is, or sits
+  under, a name whose retained ENSv1→ENSv2 migration evidence holds the
+  registry's creation. The statement finds the entries with a
+  `SubregistryChanged` event that names the registry, and treats their keys as
+  changed entry keys. That set holds every entry that points at the registry
+  at the publication. It can also hold an entry that pointed at it earlier.
+  The walk from the root registry reads each entry's latest pointer and
+  decides, as it did before. An entry row that holds no resource is tied to its
+  pointer by the event that last wrote the row, and the lookup reads only
+  canonical events. That loses no entry: entry rows are undone with the journal
+  before a replay, so at a publication no entry row cites an orphaned event.
+- A change of the root registry itself has no entry to look up. The walk's
+  first row carries it.
+- It reads the ENSv1→ENSv2 migration evidence of each ancestor by name, one
+  lookup for each ancestor.
 
-The surfaces it reads then follow the names the publication touches, not the
-number of names on the chain. The indexes change how the statement finds its
-rows and not which names it selects.
+The surfaces it reads then follow the names the publication touches and the
+names under the entries that point at a changed registry, not the number of
+names on the chain. A changed registry that no entry points at reads no
+surface. The indexes change how the statement finds its rows and not which
+names it selects.
 
-Four cases still read every observed ENS surface:
+Two cases still read every observed ENS surface:
 
-- A registry is created, upgraded or announced in the publication.
-- A name an item expands by name is, or sits under, a name whose retained
-  ENSv1→ENSv2 migration evidence holds a created registry. The ENSv1→ENSv2
-  migration can be in any earlier block.
 - The classification of the
   [v1 fallback resolver](glossary.md#v1-fallback-resolver-ensv1resolver-exposed-as-v1_resolver)
   changes.
 - A changed path has no labels, which is the root registry itself.
 
-A path whose first label hash is null also reads them all. How often real
-publications take the second case has not been measured.
+A path whose first label hash is null also reads them all.
 
 A manifest sync has no block position: its existing phase-hash
 invalidation requires the normal full Interpret/Project redo.

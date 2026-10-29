@@ -5014,6 +5014,38 @@ Project statement, `project:families.resolution_paths.prepare`.
   manifest-authority fingerprint and the compiled watch plan are unchanged, so
   stamp no Ingest redo.
 
+## Changed registries in the resolution path selection
+
+The build that makes a publication with a changed ENSv2 registry read only the
+names under the entries that point at it (see
+[owned key families](projections.md#owned-key-families) and
+[table ownership](storage.md#table-ownership)) changes one Project statement
+and no schema.
+
+- `project:families.resolution_paths.prepare` read every `name_surfaces` row of
+  the namespace when a publication created, upgraded or announced a registry,
+  or touched a name at or under one whose ENSv1→ENSv2 migration evidence holds
+  a created registry. It now finds the entries that point at the registry
+  through indexes that already exist. The names it selects are the same.
+- Stored rows do not change. API responses do not change.
+- It adds no schema-migration, index, table, manifest or setting.
+- The statement now reads `normalized_events_v2_key_probe_idx`. That index is
+  in the [walk index set](storage.md#walk-index-set), so
+  `ops/walk-index-set/drop.sql` does not drop it.
+- The statement is in `crates/project/src`, an input of the
+  [projection content hash](glossary.md#projection-content-hash) only. That hash
+  rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, at a
+  planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+  matching runner and API binaries. The change rides the next release that
+  redoes Project and shares that release's Project redo. The
+  manifest-authority fingerprint and the compiled watch plan are unchanged, so
+  stamp no Ingest redo.
+- The lookup by registry reads a GIN index. Flush its pending list before a
+  Project redo:
+  `SELECT gin_clean_pending_list('bigname_phase.normalized_events_v2_key_probe_idx');`
+
 ## Read indexes for history windows, search prefixes and `resolves_to`
 
 The build that adds four read-only btree indexes changes no stored row and no response
