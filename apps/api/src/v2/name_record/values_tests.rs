@@ -65,3 +65,14 @@ fn a_root_registry_pointer_serves_a_released_registration() {
     assert!(row_has_current_registration(&row));
     assert!(row_serves_resolver(&row));
 }
+
+/// A Basenames registry name on the same retained basis serves no released registration.
+#[test]
+fn a_retained_pointer_serves_no_released_basenames_registration() {
+    let mut row = ownerless_row(json!({"authority_kind": null, "released_at": "1700000160"}));
+    row.namespace = bigname_storage::BASENAMES_NAMESPACE.into();
+    row.canonical_display_name = "ownerless.base.eth".into();
+    row.normalized_name = "ownerless.base.eth".into();
+    assert!(!row_has_current_registration(&row), "{row:#?}");
+    assert!(!row_serves_resolver(&row), "{row:#?}");
+}

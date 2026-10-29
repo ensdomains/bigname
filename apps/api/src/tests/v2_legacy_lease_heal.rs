@@ -1034,6 +1034,22 @@ async fn a_wrapper_renewal_on_the_lease_does_not_start_it() -> Result<()> {
     database.cleanup().await
 }
 
+/// The ownerless fixture with a named BaseRegistrar release of its lease, which the stored
+/// registration does not carry and the fill reads.
+async fn released_ownerless() -> Result<TestDatabase> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_alice_state_inputs(&database, AliceInputState::Ownerless).await?;
+    append_alice_name_input(
+        &database,
+        "RegistrationReleased",
+        REGISTRAR,
+        json!({"authority_kind": "registrar", "expiry": 1_700_000_000}),
+    )
+    .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
+    Ok(database)
+}
+
 /// The ownerless fixture's name detail and indexed records read.
 async fn ownerless_reads(database: &TestDatabase) -> Result<(Value, Value)> {
     let detail = v2_get_json(database, "/v1/names/alice.eth").await?;
@@ -1049,16 +1065,7 @@ async fn ownerless_reads(database: &TestDatabase) -> Result<(Value, Value)> {
 /// the lease the fill reads is released.
 #[tokio::test]
 async fn an_ownerless_name_with_a_released_filled_lease_serves_nothing() -> Result<()> {
-    let database = TestDatabase::new_with_schemas(false, true).await?;
-    seed_alice_state_inputs(&database, AliceInputState::Ownerless).await?;
-    append_alice_name_input(
-        &database,
-        "RegistrationReleased",
-        REGISTRAR,
-        json!({"authority_kind": "registrar", "expiry": 1_700_000_000}),
-    )
-    .await?;
-    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
+    let database = released_ownerless().await?;
     let logical = bigname_storage::logical_name_id_for_name("ens", "alice.eth");
     let stored = composed(&database, &logical).await?;
     let registration = &stored.declared_summary["registration"];
@@ -1092,6 +1099,44 @@ async fn an_ownerless_name_without_a_release_serves_through_its_retained_pointer
         records["records"]["text:description"],
         json!({"status": "ok", "value": "Alice profile"}),
         "{records}"
+    );
+    database.cleanup().await
+}
+
+/// The alias walk is decided on the stored composed row, before the fill reads the release. That
+/// row carries no release, so its retained registry pointer still counts as a current
+/// registration, and the walk is not taken, with or without the gate. The name is served under
+/// its own path, and the fill then reads its released lease.
+#[tokio::test]
+async fn a_released_ownerless_name_is_served_without_an_alias_walk() -> Result<()> {
+    let database = released_ownerless().await?;
+    let (status, body, walked) = crate::v2::support::ALIAS_WALK_STATEMENTS
+        .scope(std::cell::Cell::new(0), async {
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/names/alice.eth")
+                        .body(Body::empty())?,
+                )
+                .await?;
+            let status = response.status();
+            let body = read_json(response).await?;
+            Ok::<_, anyhow::Error>((
+                status,
+                body,
+                crate::v2::support::ALIAS_WALK_STATEMENTS.with(std::cell::Cell::get),
+            ))
+        })
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert_eq!(walked, 0, "{body:#}");
+    let data = &body["data"];
+    assert_eq!(data["name"], json!("alice.eth"), "{data}");
+    assert!(data.get("canonical_name").is_none(), "{data}");
+    assert_eq!(
+        data["registration_id"],
+        json!(Uuid::from_u128(0x2200).to_string()),
+        "{data}"
     );
     database.cleanup().await
 }
