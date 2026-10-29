@@ -1894,6 +1894,16 @@ or multiple eligible predecessors remain integrity errors in the writer.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
 
+A lease that bigname first learns of from a legacy-controller `NameRenewed`, with
+no registration observed, records the zero address as its holder until a
+BaseRegistrar transfer names one. For such a lease the proof does not compare the sender of the
+holder-to-controller transfer with the recorded holder, since the controller
+takes the token from whoever holds it. Every other clause above still applies,
+so a transfer of that lease to anyone but the controller is not reconciled.
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L121 @ ens_v2@a971bd64)
+Each unwrapped boundary that derives without the proof logs a warning naming
+the clause that refused it, with the chain, block, transaction and name.
+
 For the `.eth` second-level names covered by slice 2A, zero matching ENSv1
 predecessors and multiple matching ENSv1 predecessors are both integrity
 errors. The unlocked ERC-721 entry accepts transfers only from BaseRegistrar,

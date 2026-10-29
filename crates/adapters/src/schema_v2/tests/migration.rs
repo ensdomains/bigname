@@ -11,6 +11,7 @@ mod announced_resolver;
 mod child;
 mod expiry;
 mod intermediary;
+mod zero_owner;
 
 const MIGRATION_MANIFEST_ID: i64 = 100;
 const REGISTRY_MANIFEST_ID: i64 = 101;
