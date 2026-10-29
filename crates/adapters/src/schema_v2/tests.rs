@@ -9,6 +9,9 @@ use super::*;
 #[path = "tests/node_record_events.rs"]
 mod node_record_events;
 
+#[path = "tests/inconsistent_log_skips.rs"]
+mod inconsistent_log_skips;
+
 #[path = "tests/lookahead.rs"]
 mod lookahead;
 mod migration;

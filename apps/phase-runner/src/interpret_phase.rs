@@ -6,6 +6,7 @@ use sqlx::PgPool;
 use crate::{
     error::{ErrorKind, RunnerError, RunnerResult},
     heads::BlockMarker,
+    metrics::RunnerMetricsFeed,
     phase::{
         AfterProgress, AfterProgressFuture, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture,
         PhaseName, PhaseProgress, RunMode,
@@ -14,6 +15,7 @@ use crate::{
 
 pub struct InterpretPhase {
     engine: Engine,
+    metrics_feed: Option<RunnerMetricsFeed>,
 }
 
 impl InterpretPhase {
@@ -26,7 +28,16 @@ impl InterpretPhase {
                 .with_lookahead_statement_timeout_secs(
                     capacity.interpret_lookahead_statement_timeout_secs,
                 );
-        Self { engine }
+        Self {
+            engine,
+            metrics_feed: None,
+        }
+    }
+
+    /// Counts the inconsistent event logs each committed batch skipped in the runner's metrics.
+    pub fn with_metrics(mut self, feed: RunnerMetricsFeed) -> Self {
+        self.metrics_feed = Some(feed);
+        self
     }
 
     /// Size redo batches by their whole blocks' raw input. Other runs keep fixed batches.
@@ -41,12 +52,14 @@ impl InterpretPhase {
     pub fn new(pool: PgPool) -> Self {
         Self {
             engine: Engine::new(pool),
+            metrics_feed: None,
         }
     }
 
     pub fn with_state_cache_capacity(pool: PgPool, entries: usize) -> Self {
         Self {
             engine: Engine::with_state_cache_capacity(pool, entries),
+            metrics_feed: None,
         }
     }
 }
@@ -62,6 +75,12 @@ impl Phase for InterpretPhase {
                 return Ok(PhaseBatchOutcome::Complete(PhaseProgress::default()));
             };
             let outcome = self.engine.run_batch(request).await.map_err(runner_error)?;
+            if let Some(feed) = &self.metrics_feed {
+                feed.interpret_inconsistent_log_skips(
+                    &context.chain_id,
+                    &outcome.inconsistent_log_skips,
+                );
+            }
             let progress = PhaseProgress {
                 current: Some(runner_marker(outcome.current)?),
                 target: Some(runner_marker(outcome.target)?),

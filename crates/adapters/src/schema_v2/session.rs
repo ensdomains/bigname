@@ -429,15 +429,22 @@ fn interpret_raw(
         .flatten();
     // Some protocol paths advance time-derived state before reaching their event-specific
     // decoder. Interpret each log on a structurally shared candidate and commit it only after the
-    // whole protocol dispatch succeeds, so a non-fatal malformed log cannot change retained state.
+    // whole protocol dispatch succeeds, so a skipped malformed or inconsistent log cannot change
+    // retained state.
     let mut candidate_state = state.clone();
     let mut interpreted =
         match super::protocol::interpret(&selected, raw, &mut candidate_state, registrar_context) {
             Ok(interpreted) => interpreted,
             Err(error)
-                if crate::evm_abi::is_malformed_event_log(&error)
-                    && !selected.manifest_declared_emitter =>
+                if !selected.manifest_declared_emitter
+                    && (crate::evm_abi::is_malformed_event_log(&error)
+                        || crate::evm_abi::inconsistent_event_log_site(&error).is_some()) =>
             {
+                let inconsistency_site = crate::evm_abi::inconsistent_event_log_site(&error);
+                let decode_context = inconsistency_site.map_or_else(
+                    || error.to_string(),
+                    |site| format!("inconsistent {site}: {error:#}"),
+                );
                 output.decode_skips.push(super::DecodeSkip {
                     chain_id: raw.chain_id.clone(),
                     block_hash: raw.block_hash.clone(),
@@ -448,7 +455,8 @@ fn interpret_raw(
                     source_family: selected.source.source_family.clone(),
                     selection_topic0: selected.event.topic0.clone(),
                     match_all: selected.match_all,
-                    decode_context: error.to_string(),
+                    decode_context,
+                    inconsistency_site,
                 });
                 return Ok(true);
             }

@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use crate::progress_monitor::RunnerPhaseProgress;
 
 mod ingest_rpc;
+mod interpret_skips;
 mod project_writes;
 mod rpc_chain;
 mod served_lag;
@@ -92,6 +93,7 @@ struct PipelineMetrics {
     project_writes: ProjectWriteGauges,
     rpc_chains: rpc_chain::RpcChainGauges,
     ingest_rpc: ingest_rpc::IngestRpcCounters,
+    interpret_skips: interpret_skips::InconsistentLogSkipCounters,
     universal_resolver: universal_resolver::UniversalResolverGauges,
     refresh_success: IntGauge,
     last_refresh_timestamp_seconds: IntGauge,
@@ -228,6 +230,7 @@ impl PipelineMetrics {
         let project_writes = ProjectWriteGauges::new(&registry)?;
         let rpc_chains = rpc_chain::RpcChainGauges::new(&registry)?;
         let ingest_rpc = ingest_rpc::IngestRpcCounters::new(&registry)?;
+        let interpret_skips = interpret_skips::InconsistentLogSkipCounters::new(&registry)?;
         let universal_resolver = universal_resolver::UniversalResolverGauges::new(&registry)?;
         let refresh_success = registry.int_gauge(
             "phase_runner_metrics_refresh_success",
@@ -258,6 +261,7 @@ impl PipelineMetrics {
             project_writes,
             rpc_chains,
             ingest_rpc,
+            interpret_skips,
             universal_resolver,
             refresh_success,
             last_refresh_timestamp_seconds,
@@ -499,11 +503,7 @@ async fn refresh_loop(
             _ = ticks.tick() => metrics.refresh(&pool).await,
             () = feed.committed() => metrics.refresh_after_commit(&pool).await,
         };
-        metrics.project_writes.apply(feed.take_project_writes());
-        metrics.rpc_chains.apply(feed.rpc_chains());
-        metrics
-            .ingest_rpc
-            .apply(feed.ingest_rpc_counters().snapshot());
+        metrics.apply_feed(&feed);
         if let Err(error) = result {
             tracing::error!(error = %format!("{error:#}"), "phase metrics refresh failed");
         }

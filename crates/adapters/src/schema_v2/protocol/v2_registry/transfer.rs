@@ -1,5 +1,4 @@
 use alloy_primitives::{Address, U256};
-use anyhow::{Context, bail};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -13,7 +12,7 @@ use super::{
     },
 };
 use crate::{
-    evm_abi::{address_hex, decode_event_log, u256_word_hex},
+    evm_abi::{address_hex, decode_event_log, inconsistent_event_log, u256_word_hex},
     schema_v2::{
         catalog::Selected,
         common::{ens_v2_registry_resource_id, ens_v2_registry_token_lineage_id, stable_uuid},
@@ -45,7 +44,10 @@ pub(super) fn token_resource(
             .resource_id
             .is_some_and(|reserved_id| reserved_id != resource_id)
     {
-        bail!("TokenResource for reserved token {token_id} does not confirm its retained resource");
+        return Err(inconsistent_event_log(
+            "token_resource_conflict",
+            format!("TokenResource for token {token_id} does not confirm its retained resource"),
+        ));
     }
     let linked = state.link_v2_resource(
         &raw.emitting_address,
@@ -280,7 +282,10 @@ pub(super) fn transfer_batch(
         "TransferBatch log is malformed",
     )?;
     if event.ids.len() != event.values.len() {
-        bail!("TransferBatch ids and values differ in length");
+        return Err(inconsistent_event_log(
+            "transfer_batch_length_mismatch",
+            "TransferBatch ids and values differ in length",
+        ));
     }
     ensure_declared(selected, &["TokenControlTransferred"])?;
     let mut output = Interpreted::new();
@@ -379,7 +384,10 @@ pub(super) fn permission(
     ensure_declared(selected, &[kind])?;
     let (resource_id, token_lineage_id) = upstream_identity(raw, selected, event.resource);
     let upstream_resource = u256_word_hex(event.resource);
-    let linked = state.v2_token_by_upstream_resource(&raw.emitting_address, &upstream_resource)?;
+    // Two `TokenResource` logs can link two tokens of one emitter to one resource.
+    let linked = state
+        .v2_token_by_upstream_resource(&raw.emitting_address, &upstream_resource)
+        .map_err(|error| inconsistent_event_log("token_resource_ambiguous", error))?;
     let (before, after) = v2_states(
         selected,
         raw,
@@ -431,8 +439,11 @@ pub(super) fn token_regenerated(
     let new_token = u256_word_hex(event.newTokenId);
     let (linked, displaced) = state
         .regenerate_v2_token(&raw.emitting_address, &old_token, &new_token)
-        .with_context(|| {
-            format!("TokenRegenerated {old_token} has no retained TokenResource predecessor")
+        .ok_or_else(|| {
+            inconsistent_event_log(
+                "token_regenerated_without_predecessor",
+                format!("TokenRegenerated {old_token} has no retained TokenResource predecessor"),
+            )
         })?;
     let mut output = single_event(
         "TokenRegenerated",

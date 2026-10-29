@@ -253,6 +253,7 @@ fn record_pre_admission_skips(
                  interpretation is forward-only from the admitting observation and performs no \
                  lookback"
             ),
+            inconsistency_site: None,
         });
     }
 }

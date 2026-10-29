@@ -150,6 +150,9 @@ pub struct DecodeSkip {
     pub selection_topic0: String,
     pub match_all: bool,
     pub decode_context: String,
+    /// The failed check of a log skipped as internally inconsistent; `None` for a malformed or
+    /// pre-admission skip. Not stored: Interpret logs and counts it.
+    pub inconsistency_site: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

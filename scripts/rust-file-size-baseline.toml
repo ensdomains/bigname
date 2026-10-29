@@ -12,7 +12,7 @@ wiring_files = ["lib.rs", "main.rs"]
 
 [[files]]
 path = "crates/adapters/src/schema_v2/protocol/v2_registry.rs"
-loc = 663
+loc = 661
 justification = "ENSv2 registry dispatch keeps raw registration and reservation admission adjacent to retained topology refresh while expiry lifecycle helpers live in the bounded sibling module."
 
 [[files]]

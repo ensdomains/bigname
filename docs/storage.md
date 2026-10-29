@@ -478,7 +478,7 @@ field requires no schema migration or replay.
 | `ens_names` | operator rainbow load | Unverified rainbow-table candidates consumed by the import command. |
 | `normalized_events` | Interpret; manifest synchronization for `SourceManifestUpdated` only | Protocol events normalized transactionally with identity output, plus retained manifest-authority history. Manifest synchronization's rows must not be deleted or rebuilt as Interpret output: [discovery-rule widening checks](glossary.md#discovery-rule-widening-and-narrowing) reconstruct historical declaration floors from them. |
 | `discovery_watch_admissions` | Interpret | The last acknowledged [discovery-watch admission snapshot](glossary.md#discovery-watch-admission-snapshot) for each active manifest-authority fingerprint and lineage-orphaning epoch. This is replay coordination state, never fetched-fact evidence, redo authority, projection, or serving data. |
-| `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding, and for logs that preceded their emitter's same-batch discovery admission; never identity, normalized-event, projection, or serving data. |
+| `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding or because they contradict themselves or their emitter's earlier logs, and for logs that preceded their emitter's same-batch discovery admission; never identity, normalized-event, projection, or serving data. |
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or [discovery edges](glossary.md#discovery-graph--discovery-edge). The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `child_registration_events` | Project | Historical membership of each name's [direct child registration](glossary.md#direct-child-registration) events, rebuildable from canonical interpreted input; name history selects rows through it and reads the events themselves from `normalized_events`. |
 | `project_family_marker`, `project_family_undo`, `project_repair_record` and [owned key family tables](glossary.md#per-block-publication) | Project | Permanent current serving state, publication generation, undo journal and repair progress. Readers compose names, records, control, permissions, resolver collections, reverse claims and address relations from one family snapshot. Child lists and counts use `project_child_edge_candidate`, `project_parent_subregistry` and `project_name_summary`; the `GET /v1/names` expiry walk reads `project_name_summary.authority_arm` to skip names an `authority` filter cannot list. An unavailable marker or overlapping redo refuses composed reads. Family data is rebuildable from canonical interpreted input; hash-pinned hydration overlays follow the documented replay policy. |
@@ -1245,6 +1245,36 @@ the raw-log position with that content hash, and Interpret inserts with conflict
 ignore, so replaying or redoing the same log under one interpreter build does
 not duplicate the diagnostic. The rows remain append-only across canonicality
 changes and derived-state rebuilds; they are not replay input.
+
+The table also records a well-formed log from an undeclared emitter that
+decodes cleanly but contradicts itself or the emitter's own earlier logs.
+Any contract can emit the ENSv2 registry event signatures, and Interpret admits
+an emitter that announces itself with `RegistryCreated()` as a registry
+([manifests.md](manifests.md#discovery-admission)). Five checks make such a
+log inconsistent. Each is named in the row's `decode_context`, which reads
+`inconsistent <check>: <reason>`:
+
+- `label_hash_mismatch`: a `LabelRegistered` or `LabelReserved` whose `label`
+  does not hash to its `labelHash`.
+- `transfer_batch_length_mismatch`: a `TransferBatch` whose `ids` and `values`
+  differ in length.
+- `token_resource_conflict`: a `TokenResource` that links a token to a
+  different resource from the one the token is already linked to.
+- `token_resource_ambiguous`: an `EACRolesChanged` for a resource that two
+  earlier `TokenResource` logs linked to two different tokens of the emitter.
+  Every later role change on that resource from that emitter is skipped too.
+- `token_regenerated_without_predecessor`: a `TokenRegenerated` whose
+  `oldTokenId` the emitter never linked to a resource.
+
+The decision reads only the log and the state the emitter's earlier logs left,
+so a redo reproduces it. Interpret treats the log as absent: the batch's other
+logs, including earlier and later logs of the same transaction, are interpreted
+exactly as they would be without it. The same log from a manifest-declared
+emitter is fatal, and every other interpretation error stays fatal for every
+emitter. A committed batch also logs one warning for each such row and counts
+it in `phase_runner_interpret_inconsistent_log_skips_total`
+([pipeline monitoring](runbooks/pipeline-monitoring.md#interpret-inconsistent-log-skips)).
+The table's column comments still describe only malformed logs.
 
 The same table also records a well-formed log that Interpret could not select
 because its emitter was admitted by discovery only in a later block of the

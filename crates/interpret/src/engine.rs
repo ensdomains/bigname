@@ -1,4 +1,4 @@
-use std::{num::NonZeroU32, time::Instant};
+use std::{collections::BTreeMap, num::NonZeroU32, time::Instant};
 
 use bigname_adapters::StateCacheCapacity;
 use sqlx::PgPool;
@@ -37,6 +37,8 @@ pub struct BatchOutcome {
     pub target: Marker,
     pub complete: bool,
     pub estimated_write_bytes: u64,
+    /// Event logs the batch skipped as inconsistent, by the check that failed.
+    pub inconsistent_log_skips: BTreeMap<&'static str, u64>,
 }
 
 pub struct Engine {
@@ -131,6 +133,7 @@ impl Engine {
                 target,
                 complete: true,
                 estimated_write_bytes: 0,
+                inconsistent_log_skips: BTreeMap::new(),
             });
         }
         if matches!(request.mode, RunMode::RecomputeFlags) {
@@ -146,6 +149,7 @@ impl Engine {
                 target,
                 complete: true,
                 estimated_write_bytes,
+                inconsistent_log_skips: BTreeMap::new(),
             });
         }
         let markers = self
@@ -305,6 +309,8 @@ impl Engine {
             &output,
         )
         .await?;
+        let inconsistent_log_skips =
+            inconsistent_skips::report(&request.chain_id, &output.decode_skips);
         let ensv2_events = statistics::ensv2_events(
             (output.normalized_events.iter()).map(|event| event.source_family.as_str()),
         );
@@ -340,6 +346,7 @@ impl Engine {
             current,
             target,
             estimated_write_bytes,
+            inconsistent_log_skips,
         })
     }
 }
@@ -414,6 +421,8 @@ fn validate_loaded_lineage(
 
 #[path = "engine/adaptive.rs"]
 pub(crate) mod adaptive;
+#[path = "engine/inconsistent_skips.rs"]
+mod inconsistent_skips;
 #[path = "engine/loader_choice.rs"]
 mod loader_choice;
 #[path = "engine/planning.rs"]

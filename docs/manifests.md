@@ -1405,7 +1405,11 @@ catalog. A malformed event log from an address declared in an active
 of event selection scope. A malformed event log from an undeclared address is
 skipped and recorded as an operator diagnostic whether that address was
 admitted through discovery or the event was selected across every emitting
-address. All other interpretation error classes keep their fatal posture. This
+address. A well-formed ENSv2 registry log from an undeclared address that
+contradicts itself or that address's own earlier logs is skipped and recorded
+the same way, one log at a time. The same log from a declared address is
+fatal. [Table ownership](storage.md#table-ownership) lists the five checks.
+All other interpretation error classes keep their fatal posture. This
 decision uses only the catalog's declaration record for the emitting address,
 never an address or role claimed by the log itself. Missing or extra topics are
 malformed ABI input under this rule. ENSv2 `setSubregistry` stores the registry pointer and
@@ -2114,7 +2118,8 @@ chain order for the block's normalized events so stream-chained before-states
 follow log order. The result is a pure function of the block's raw logs. A log
 whose emitter is admitted only in a later block of the same batch stays
 uninterpreted — no lookback — and is recorded as an operator diagnostic in
-`interpret_decode_skips` ([storage.md](storage.md#table-ownership)).
+`interpret_decode_skips` ([storage.md](storage.md#table-ownership)). A log the
+second pass skips as malformed or inconsistent is recorded once, as that skip.
 
 The project support rule for `ens_v2_resolver_l1` is unchanged in shape: an
 exact `public_resolver_v2` declaration is supported directly; otherwise the

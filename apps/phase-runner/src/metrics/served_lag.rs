@@ -23,6 +23,7 @@ pub struct RunnerMetricsFeed {
     project_writes: super::project_writes::PendingProjectWrites,
     rpc_chains: super::rpc_chain::RpcChainStates,
     ingest_rpc: bigname_ingest::RpcCounters,
+    interpret_skips: super::interpret_skips::InconsistentLogSkipTotals,
     live_publication_lag_blocks: Arc<AtomicU32>,
 }
 
@@ -93,6 +94,19 @@ impl RunnerMetricsFeed {
         self.project_writes.take()
     }
 
+    /// Counts the inconsistent event logs one committed Interpret batch skipped, by failed check.
+    pub fn interpret_inconsistent_log_skips(
+        &self,
+        chain: &str,
+        skips: &BTreeMap<&'static str, u64>,
+    ) {
+        self.interpret_skips.record(chain, skips);
+    }
+
+    pub(super) fn interpret_skip_totals(&self) -> BTreeMap<(String, &'static str), u64> {
+        self.interpret_skips.snapshot()
+    }
+
     pub fn batch_committed(&self) {
         self.committed.notify_one();
     }
@@ -109,6 +123,16 @@ impl RunnerMetricsFeed {
             .iter()
             .cloned()
             .collect()
+    }
+}
+
+impl super::PipelineMetrics {
+    /// Moves what the phases recorded in the feed since the last refresh into the metrics.
+    pub(super) fn apply_feed(&self, feed: &RunnerMetricsFeed) {
+        self.project_writes.apply(feed.take_project_writes());
+        self.rpc_chains.apply(feed.rpc_chains());
+        self.ingest_rpc.apply(feed.ingest_rpc_counters().snapshot());
+        self.interpret_skips.apply(feed.interpret_skip_totals());
     }
 }
 

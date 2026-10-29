@@ -5256,3 +5256,33 @@ still running. Then run the schema-migrations again.
 Ingest writes one more btree entry for each block it stores. Project writes one more for
 each resource pointer and registry pointer it stores. Interpret writes one more for each
 readable, active name surface whose raw name is at most 2000 bytes.
+
+## Inconsistent logs from undeclared emitters are skipped
+
+The build that skips a well-formed ENSv2 registry log that contradicts itself or its emitter's
+earlier logs, when no manifest declares the emitter
+([table ownership](storage.md#table-ownership)), changes the ENSv2 registry adapter and the
+skip decision in `crates/adapters/src`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain. The
+[projection content hash](glossary.md#projection-content-hash) moves with it.
+
+What changes:
+
+- Interpret no longer stops a chain on such a log. Before, one `LabelRegistered` whose label
+  did not hash to its `labelHash` from any contract that had emitted `RegistryCreated()`
+  failed the Interpret phase until an operator intervened. Now the log is skipped and the
+  chain keeps up.
+- The skipped log writes one `interpret_decode_skips` row whose `decode_context` starts with
+  `inconsistent`, logs one warning and counts in
+  `phase_runner_interpret_inconsistent_log_skips_total`
+  ([pipeline monitoring](runbooks/pipeline-monitoring.md#interpret-inconsistent-log-skips)).
+- Stored rows change only where a chain already holds such a log, since a chain that had one
+  could not interpret past it. A manifest-declared emitter still stops on the same log.
+
+Every chain needs a full-history Interpret redo, then the stamped Project redo it installs,
+at a planned [re-derivation boundary](glossary.md#re-derivation-boundary) under matching
+runner and API binaries. The change shares the release's one Interpret and Project redo
+pair with its other hash-rotating changes. Do not mark old rows ready under the new hash.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
+and the compiled watch plan are unchanged, so stamp no Ingest redo.
