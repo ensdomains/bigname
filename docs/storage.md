@@ -1265,8 +1265,10 @@ log inconsistent. Each is named in the row's `decode_context`, which reads
   emitter's earlier logs linked to two different tokens.
   Every later role change on that resource from that emitter is skipped too.
 - `token_regenerated_without_predecessor`: a `TokenRegenerated` whose
-  `oldTokenId` names a token the emitter holds no state for: never registered,
-  reserved or linked, or since released.
+  `oldTokenId` names a token the emitter holds no earlier state for, or one
+  since released. Earlier state is a registration, reservation or
+  `TokenResource` link of the token, a `SubregistryUpdated` or
+  `ResolverUpdated` for it, or an earlier `TokenRegenerated` to it.
 
 The decision reads only the log and the state the emitter's earlier logs left,
 so a redo reproduces it. Interpret treats the log as absent: the batch's other
@@ -1286,7 +1288,8 @@ emitter interprets under, the log's `topic0` as its selection signature,
 `match_all = false`, and a `decode_context` naming the admitting block. A log
 from the admitting block itself is interpreted right after the admitting log
 ([manifests.md](manifests.md#resolver-admission-by-implementation-announcement))
-and produces no row.
+and produces no pre-admission row. It can still produce a malformed-log or
+inconsistent-log row.
 
 For a manifest-declared address, an omitted `start_block` is initially stored
 as `contract_instance_addresses.active_from_block_number = NULL`; interval
