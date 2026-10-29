@@ -813,7 +813,7 @@ Project's selection of the names under a changed ENSv2 path
 | Index | Serves |
 | --- | --- |
 | `name_surfaces_project_path_hash_idx` | `project:families.resolution_paths.prepare`, step `source_ancestors`: the ancestors of a touched name, one probe for each suffix of its label hash path |
-| `name_surfaces_project_entry_keys_idx` | `project:families.resolution_paths.prepare`, steps `candidates` and `affected`: the surfaces that hold the key of an entry that points at a changed registry, the surfaces that hold a changed ENSv2 entry's label and the key of an entry that points at its registry (both keys in one probe), and the names under a changed path, found by its first label |
+| `name_surfaces_project_entry_keys_idx` | `project:families.resolution_paths.prepare`, steps `candidates` and `affected`: the surfaces that hold the key of an entry that points at a changed registry, one key per probe. The surfaces that hold a changed root registry entry's label, one key per probe. The surfaces that hold a changed ENSv2 entry's label and the key of an entry that points at its registry, two or three key hashes in one probe (the third from step `chains`). The names under a changed path, found by its first label |
 
 The same statement finds the entries that point at a registry changed in the
 publication or holding a changed entry, and the ENSv1→ENSv2 migration evidence

@@ -5056,11 +5056,14 @@ and no schema.
 
 - `project:families.resolution_paths.prepare` read every `name_surfaces` row
   that held a changed entry's label, wherever the label sat and whether or not
-  anything pointed at the entry's registry. It now reads, for the root
-  registry, the names whose last label has the entry's key. For any other
-  registry it reads the names that hold the entry's label directly above the
-  label of an entry that points at the registry. A registry that nothing points
-  at reads no name. The names it selects are the same.
+  anything pointed at the entry's registry. For a registry other than the root
+  it now reads only the names that hold both the entry's label and the label of
+  an entry that points at the registry, and keeps those that hold them
+  adjacent. A registry that nothing points at reads no name. A root registry
+  entry still reads every name that holds its label and keeps those whose last
+  label has its key. The names it selects are the same.
+- Its row lookup of each selected name's own surface now runs by key for each
+  name, so a high row estimate cannot turn it into a read of every surface.
 - Stored rows do not change. API responses do not change.
 - It adds no schema-migration, index, table, manifest or setting.
 - The statement now reads `normalized_events_v2_key_probe_idx` for the registry

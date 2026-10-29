@@ -9,10 +9,10 @@
 //! - A change of the fallback resolver's classification.
 //! - A changed path of zero labels (the root registry itself).
 //!
-//! One more reads every surface that holds `eth`: a change of the `eth` entry of the registry
-//! the root's `eth` entry points at. The entry's key and the key above it are both `eth`, and no
-//! key of another label lies above that. `an_eth_keyed_entry_of_the_eth_registry_reads_every_eth_surface`
-//! pins it.
+//! One more reads every surface that holds a label: a change of an entry whose key equals the
+//! key of every slot on a route up to the root, such as the `eth` entry of the registry the
+//! root's `eth` entry points at (`eth.eth`). The probe then holds that key alone.
+//! `an_eth_keyed_entry_of_the_eth_registry_reads_every_eth_surface` pins the `eth.eth` case.
 //!
 //! The measure is taken from `EXPLAIN (ANALYZE, FORMAT JSON)`: over every scan of
 //! `name_surfaces` and every join above one, the rows returned plus the rows a filter, an index
@@ -1476,13 +1476,17 @@ fn index_conditions(node: &Value) -> Vec<&str> {
 // registries above an entry whose key is its slot's (`chains`). The entries come from their
 // resource index or primary key, and the events of an entry's resource from the resource history
 // index. Every probe of `name_surfaces` in `candidates` reads the entry key index, and one holds
-// a changed entry's key and its slot's together. No part of the statement scans every name
-// surface or every normalized event.
+// a changed entry's key and its slot's together. The last step reads each selected name's
+// surface by key. No part of the statement scans every name surface or every normalized event.
 #[tokio::test]
 async fn the_changed_entry_probes_read_their_indexes() -> Result<()> {
     const RESOURCE_HISTORY: &str = "normalized_events_resource_history_idx";
     const ENTRY_RESOURCE: &str = "project_ens_v2_entry_owner_resource_idx";
     const ENTRY_KEY: &str = "project_ens_v2_entry_owner_pkey";
+    const SURFACE_KEYS: [&str; 2] = [
+        "name_surfaces_pkey",
+        "name_surfaces_chain_id_logical_name_id_key",
+    ];
     let (database, pool) = database().await?;
     let result = async {
         let mut connection = pool.acquire().await?;
@@ -1567,6 +1571,25 @@ async fn the_changed_entry_probes_read_their_indexes() -> Result<()> {
                 failures.push(format!(
                     "{mode}: no candidates probe of {SURFACES} reads {KEY_INDEX} by two keys"
                 ));
+            }
+            // The last step reads each affected name's surface by key, whatever the row
+            // estimate of the steps above it.
+            let last: Vec<&Value> = scans
+                .iter()
+                .filter(|(under, node)| under.is_empty() && node["Relation Name"] == SURFACES)
+                .map(|(_, node)| *node)
+                .collect();
+            if last.is_empty() {
+                failures.push(format!("{mode}: the last step never read {SURFACES}"));
+            }
+            for node in last {
+                if !reads_through(node, &SURFACE_KEYS) {
+                    failures.push(format!(
+                        "{mode}: the last step reads {SURFACES} by {} over {:?}, not {SURFACE_KEYS:?}",
+                        node["Node Type"],
+                        indexes_read(node)
+                    ));
+                }
             }
             for (cte, node) in &scans {
                 if node["Node Type"] == "Seq Scan"
