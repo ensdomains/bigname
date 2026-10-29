@@ -152,12 +152,11 @@ pub(crate) fn heal_registration(
         registration.insert("ens_v1_expiry".into(), Value::String(expiry.to_string()));
         if registration.get("expiry").is_none_or(Value::is_null) {
             registration.insert("expiry".into(), Value::String(expiry.to_string()));
-            if let Some(grace_ends_at) = expiry.checked_add(GRACE_SECONDS) {
-                registration.insert(
-                    "grace_ends_at".into(),
-                    Value::String(grace_ends_at.to_string()),
-                );
-            }
+            // A saturated expiry serves a saturated grace end, as the served expiry saturates.
+            registration.insert(
+                "grace_ends_at".into(),
+                Value::String(expiry.saturating_add(GRACE_SECONDS).to_string()),
+            );
         }
     }
     let start = handoff_block.or_else(|| lease.iter().map(|event| event.block_number).min());

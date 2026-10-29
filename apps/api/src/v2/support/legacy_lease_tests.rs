@@ -240,7 +240,7 @@ fn a_release_without_an_expiry_writes_no_lease_expiry() {
 }
 
 #[test]
-fn a_lease_expiry_at_the_signed_maximum_fills_no_grace_end() {
+fn a_lease_expiry_at_the_signed_maximum_saturates_its_grace_end() {
     let mut summary = registry_only_summary();
     summary["registration"]["expiry"] = Value::Null;
     summary["registration"]["grace_ends_at"] = Value::Null;
@@ -249,7 +249,7 @@ fn a_lease_expiry_at_the_signed_maximum_fills_no_grace_end() {
     let registration = &summary["registration"];
     assert_eq!(registration["ens_v1_expiry"], json!(i64::MAX.to_string()));
     assert_eq!(registration["expiry"], json!(i64::MAX.to_string()));
-    assert_eq!(registration["grace_ends_at"], Value::Null);
+    assert_eq!(registration["grace_ends_at"], json!(i64::MAX.to_string()));
 }
 
 #[test]
