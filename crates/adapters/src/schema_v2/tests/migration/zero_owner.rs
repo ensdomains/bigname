@@ -403,10 +403,27 @@ fn holder_as_zero(value: &Value, holder: &str) -> Value {
     }
 }
 
+/// Where the name's events carry the state of its history block's lease event.
+const LEASE_EVIDENCE: &str = "/registrar_surface_evidence/lease/state";
+
+/// The lease evidence states the name's migration-block events carry.
+fn lease_evidence(output: &BatchOutput, block: i64, logical: &str) -> Vec<Value> {
+    name_events(output, block, logical)
+        .into_iter()
+        .filter_map(|event| event.after_state.pointer(LEASE_EVIDENCE).cloned())
+        .collect()
+}
+
 /// The name's events in its migration block, whole but for their identities, interpreter state
 /// keys and log indexes, with `holder` read as the zero address. A before state chained from an
 /// earlier event is left out, because it is the state of the history event under the same key,
 /// and the two histories are a registration and a renewal.
+///
+/// Two fields of the carried lease evidence are left out for the same reason. The evidence is
+/// the after state of the history block's own lease event, copied unchanged into later events of
+/// the name. One history is a renewal and the other a registration, so its `source_event`
+/// differs. Only the grant's draft records `authority_owner`, and a renewal's grant is followed
+/// in the same log by its `RegistrationRenewed`, which replaces the lease entry without one.
 fn migration_events(output: &BatchOutput, block: i64, logical: &str, holder: &str) -> Vec<Value> {
     name_events(output, block, logical)
         .into_iter()
@@ -416,6 +433,14 @@ fn migration_events(output: &BatchOutput, block: i64, logical: &str, holder: &st
                 for key in ["interpreter_state_key", "state_scope", "log_index"] {
                     fields.remove(key);
                 }
+            }
+            let mut after_state = event.after_state.clone();
+            if let Some(lease) = after_state
+                .pointer_mut(LEASE_EVIDENCE)
+                .and_then(Value::as_object_mut)
+            {
+                lease.remove("source_event");
+                lease.remove("authority_owner");
             }
             holder_as_zero(
                 &json!({
@@ -437,7 +462,7 @@ fn migration_events(output: &BatchOutput, block: i64, logical: &str, holder: &st
                     "before_state": event
                         .before_state_explicit
                         .then(|| event.before_state.clone()),
-                    "after_state": event.after_state,
+                    "after_state": after_state,
                     "migration_correlation_ids": event.migration_correlation_ids,
                     "consumer_visibility": event.consumer_visibility,
                 }),
@@ -510,6 +535,27 @@ fn a_lease_with_no_known_holder_migrates_like_one_with_a_holder() -> anyhow::Res
     let (output, warnings) = interpret_with_warnings(input)?;
     assert_no_known_holder(&output, &debut);
     let known = interpret_test_batch(real::registered(&["debut"])?)?;
+    // The two lease evidence fields the comparison leaves out hold exactly what the histories
+    // differ by: a renewal with no recorded holder, and a registration to the holder.
+    let unknown_leases = lease_evidence(&output, block, &debut);
+    assert!(
+        !unknown_leases.is_empty()
+            && unknown_leases.iter().all(|lease| {
+                lease["source_event"] == "NameRenewed" && lease.get("authority_owner").is_none()
+            }),
+        "{unknown_leases:?}"
+    );
+    let known_leases = lease_evidence(&known, block, &debut);
+    assert!(
+        !known_leases.is_empty()
+            && known_leases.iter().all(|lease| {
+                lease["source_event"] == "NameRegistered"
+                    && lease["authority_owner"]
+                        .as_str()
+                        .is_some_and(|owner| owner.eq_ignore_ascii_case(&holder))
+            }),
+        "{known_leases:?}"
+    );
     assert_eq!(
         migration_events(&output, block, &debut, &holder),
         migration_events(&known, block, &debut, &holder),
