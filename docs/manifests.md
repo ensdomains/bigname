@@ -2132,8 +2132,9 @@ at most one pass more than the distinct entries its logs admit. A discarded pass
 leaves only its admissions behind: every entry it retired is put back, so the
 next pass starts from the block's starting admissions plus every entry admitted
 in the block, and a retirement takes effect only at its log in the last pass.
-In a rerun's earlier logs, a restored entry and the entry that replaced it can
-both be live for one address. Selection reads them as one, because their
+In a rerun's earlier logs, more than one entry can be live for one address: a
+restored entry and the entry that replaced it, or, after repeated discards,
+equal copies of one entry. Selection reads them as one, because their
 instance, manifest and role match. That rests on two facts. An observation
 admitted again within a block names the same contract and implementation: an
 `Upgraded` observation includes the implementation, and a factory cannot
