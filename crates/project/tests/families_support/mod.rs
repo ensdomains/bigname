@@ -161,11 +161,18 @@ impl Fixture {
                 .clone()
                 .options([("search_path", "bigname_phase,public")]),
         );
-        let mut connection = pool.acquire().await?;
-        sqlx::query("SET search_path TO bigname_phase, public")
-            .execute(&mut *connection)
-            .await?;
-        drop(connection);
+        // Connections opened before the ALTER DATABASE committed keep the old search path, and a
+        // pool of several can hold more than one. Holding `connections` at once takes every
+        // connection the pool has, so each is set before any is returned.
+        let mut held = Vec::new();
+        for _ in 0..connections {
+            let mut connection = pool.acquire().await?;
+            sqlx::query("SET search_path TO bigname_phase, public")
+                .execute(&mut *connection)
+                .await?;
+            held.push(connection);
+        }
+        drop(held);
         let fixture = Self { database, pool };
         fixture.lineage(CHAIN, blocks).await?;
         Ok(fixture)
