@@ -189,7 +189,7 @@ async fn assert_bucket_lengths(
             ..prefix_filter()
         };
         let bucket = bucket_statement(database, prefix.chars().count()).await?;
-        assert_bounded_posting_collection(database, &filter, class, Some(&bucket)).await?;
+        assert_bounded_posting_collection(database, &filter, class, Some(bucket.as_str())).await?;
         assert_eq!(
             assert_search_lean_pages_match(database, &filter, 200).await?,
             expected,
@@ -276,7 +276,8 @@ async fn dense_prefix_fixture(raw_names: bool) -> Result<()> {
     assert_prefix_postings(&database, class, 1025).await?;
     // The old reader passes the 1,024 case and fails here by preparing ALL_TOKEN.
     let bucket = bucket_statement(&database, 1).await?;
-    assert_bounded_posting_collection(&database, &prefix_filter(), class, Some(&bucket)).await?;
+    assert_bounded_posting_collection(&database, &prefix_filter(), class, Some(bucket.as_str()))
+        .await?;
     let expected = assert_dense_http(&database).await?;
     assert_bucket_lengths(&database, class, &expected).await?;
     if !raw_names {
@@ -340,7 +341,7 @@ async fn assert_structural_edges(
     .await?;
     assert!(!supported);
     let bucket = bucket_statement(database, 1).await?;
-    assert_bounded_posting_collection(database, &prefix_filter(), 1, Some(&bucket)).await?;
+    assert_bounded_posting_collection(database, &prefix_filter(), 1, Some(bucket.as_str())).await?;
     let page = get(database, "/v1/search?q=a&namespace=ens&page_size=1").await?;
     assert_eq!(&page["data"][0], first, "eligibility must precede LIMIT");
     let shadow: String =
