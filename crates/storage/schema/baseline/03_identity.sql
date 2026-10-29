@@ -697,6 +697,19 @@ CREATE INDEX IF NOT EXISTS name_search_documents_structural_order_idx
     WHERE spelling_class = 1;
 CREATE INDEX IF NOT EXISTS name_search_documents_class_idx
     ON name_search_documents (namespace, spelling_class, search_id);
+-- A prefix search of a dense class (storage:families.name.search_candidates.prefix1 to
+-- prefix3) reads the bucket of the first k characters of the prefix. Equality on the class and
+-- the bucket leaves the entries in page order, under the database collation, so the page limit
+-- ends the scan. A LIKE prefix is never an index range under a collation other than C.
+CREATE INDEX IF NOT EXISTS name_search_documents_prefix1_idx
+    ON name_search_documents (spelling_class, left(name, 1), name, namespace, namehash)
+    WHERE spelling_class IN (0, 1);
+CREATE INDEX IF NOT EXISTS name_search_documents_prefix2_idx
+    ON name_search_documents (spelling_class, left(name, 2), name, namespace, namehash)
+    WHERE spelling_class IN (0, 1);
+CREATE INDEX IF NOT EXISTS name_search_documents_prefix3_idx
+    ON name_search_documents (spelling_class, left(name, 3), name, namespace, namehash)
+    WHERE spelling_class IN (0, 1);
 CREATE TABLE IF NOT EXISTS name_search_postings (
     namespace text NOT NULL,
     spelling_class smallint NOT NULL CHECK (spelling_class BETWEEN 0 AND 2),

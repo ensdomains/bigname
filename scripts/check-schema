@@ -529,14 +529,15 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=484
+expected_refusal_assertions=496
 predecessor_shape_proof_count=0
 # Includes registration_lifecycle applied after lookup_precomputation on the removal path.
-expected_predecessor_shape_proof_count=85
+expected_predecessor_shape_proof_count=86
 refusal_probe_seconds=0
 timing_started=$SECONDS
 unread_index_migration="$ROOT/migrations/20261012130000_drop_unread_indexes.sql"
 unnamed_lease_index_migration="$ROOT/migrations/20261016120000_project_lifecycle_event_drop_unnamed_lease_index.sql"
+search_prefix_index_migration="$ROOT/migrations/20261030120000_search_prefix_bucket_indexes.sql"
 # label_hashes and its GIN index as the identity baseline defined them before
 # 20261012130000_drop_unread_indexes.sql. The baseline no longer does, so a proof that
 # starts from the earlier shape builds both from this text.
@@ -823,6 +824,14 @@ check_served_projection_removal() {
                 emit_phase_migration "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" preceding-shape
             fi
             emit_phase_migration "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" baseline-first
+            # The prefix bucket indexes: absent from the search documents table that
+            # 20261005210000_durable_name_search.sql builds on the pre-7c shape, present in the
+            # baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$search_prefix_index_migration" preceding-shape
+            fi
+            emit_phase_migration "$search_prefix_index_migration" baseline-first
+            emit_phase_migration "$search_prefix_index_migration" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -978,7 +987,8 @@ for migration_file in \
     "$ROOT/migrations/20261015120000_project_address_controller_candidate_transfer_comments.sql" \
     "$unnamed_lease_index_migration" \
     "$ROOT/migrations/20261016130000_project_repair_record_composing.sql" \
-    "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql"
+    "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" \
+    "$search_prefix_index_migration"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -4206,6 +4216,183 @@ DROP INDEX $path_index_name;
 CREATE INDEX $path_index_name ON discovery_edges (chain_id);
 SQL
 done
+# The prefix bucket indexes of 20261030120000_search_prefix_bucket_indexes.sql, checked in
+# a schema of the current fresh baseline. The schema-migration must build what the fresh
+# baseline builds from the shape without them, and a rerun must leave that unchanged.
+# Indexes built concurrently with the statements docs/deployment.md gives, as an operator
+# builds them before the release, must have the reviewed definitions and be adopted without
+# a rebuild. Then each index in turn is put into every shape the schema-migration must
+# refuse, inside a transaction that rolls back: an invalid index, as an interrupted
+# concurrent build leaves, a table under the name, another definition, and an index of the
+# name on another table. The schema-migration checks before and after its builds with the
+# same messages, so these assertions do not show which pass refused. Its refusal of a
+# missing name has no assertion here, because the builds run just before that check.
+check_search_prefix_index_migration() {
+    local original_schema="$scratch_schema"
+    local scratch_schema="${original_schema}_fresh"
+    local sql_file index_name reviewed_definition wrong_definition
+    local recovery="drop it with DROP INDEX CONCURRENTLY, build it again as docs/deployment.md describes, then run the schema-migrations again"
+    local wrong_keys="(spelling_class, name)"
+    local -a search_prefix_indexes=(
+        name_search_documents_prefix1_idx
+        name_search_documents_prefix2_idx
+        name_search_documents_prefix3_idx
+    )
+    local index_count="${#search_prefix_indexes[@]}"
+    local index_list
+    index_list="$(printf "'%s', " "${search_prefix_indexes[@]}")"
+    index_list="${index_list%, }"
+    local search_prefix_matches_baseline="DO \$\$
+BEGIN
+    IF (
+        SELECT count(*)
+        FROM expected_search_prefix_indexes expected
+        JOIN pg_class index_class ON index_class.relname = expected.index_name
+            AND index_class.relnamespace = current_schema()::regnamespace
+        JOIN pg_index ON pg_index.indexrelid = index_class.oid
+        WHERE pg_index.indrelid = expected.table_oid
+          AND pg_index.indisvalid AND pg_index.indisready
+          AND pg_get_indexdef(pg_index.indexrelid) = expected.definition
+    ) <> $index_count THEN
+        RAISE EXCEPTION 'prefix bucket indexes differ from the baseline';
+    END IF;
+END \$\$;"
+    local search_prefix_kept_oids="DO \$\$
+BEGIN
+    IF (
+        SELECT count(*)
+        FROM search_prefix_index_oids kept
+        JOIN pg_class index_class ON index_class.oid = kept.indexrelid
+            AND index_class.relname = kept.index_name
+    ) <> $index_count THEN
+        RAISE EXCEPTION 'the schema-migration rebuilt a prefix bucket index it should adopt';
+    END IF;
+END \$\$;"
+    local search_prefix_record_oids="DROP TABLE IF EXISTS search_prefix_index_oids;
+CREATE TEMP TABLE search_prefix_index_oids AS
+SELECT index_class.relname AS index_name, index_class.oid AS indexrelid
+FROM expected_search_prefix_indexes expected
+JOIN pg_class index_class ON index_class.relname = expected.index_name
+    AND index_class.relnamespace = current_schema()::regnamespace;"
+    local search_prefix_drop
+    search_prefix_drop="DROP INDEX $(IFS=,; printf '%s' "${search_prefix_indexes[*]}");"
+    {
+        printf 'SET client_min_messages TO warning;\n'
+        printf 'CREATE SCHEMA "%s";\nSET search_path TO "%s";\n' "$scratch_schema" "$scratch_schema"
+        for sql_file in "$ROOT"/crates/storage/schema/baseline/*.sql; do
+            render_phase_migration "$sql_file"
+        done
+        cat <<SQL
+CREATE TEMP TABLE expected_search_prefix_indexes AS
+SELECT index_class.relname AS index_name, pg_index.indrelid AS table_oid,
+       pg_get_indexdef(pg_index.indexrelid) AS definition
+FROM pg_index
+JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
+WHERE index_class.relnamespace = current_schema()::regnamespace
+  AND index_class.relname IN ($index_list);
+DO \$\$
+BEGIN
+    IF (SELECT count(*) FROM expected_search_prefix_indexes) <> $index_count THEN
+        RAISE EXCEPTION 'fresh baseline does not define the prefix bucket indexes';
+    END IF;
+END \$\$;
+SQL
+        printf '%s\n' "$search_prefix_drop"
+        emit_phase_migration "$search_prefix_index_migration" preceding-shape
+        printf '%s\n' "$search_prefix_matches_baseline" "$search_prefix_record_oids"
+        emit_phase_migration "$search_prefix_index_migration" baseline-first
+        printf '%s\n' "$search_prefix_matches_baseline" "$search_prefix_kept_oids"
+        # The prebuild statements of docs/deployment.md, run outside a transaction.
+        printf '%s\n' "$search_prefix_drop"
+        sed "s/bigname_phase/$scratch_schema/g" <<'SQL'
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_search_documents_prefix1_idx
+    ON bigname_phase.name_search_documents
+    (spelling_class, left(name, 1), name, namespace, namehash)
+    WHERE spelling_class IN (0, 1);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_search_documents_prefix2_idx
+    ON bigname_phase.name_search_documents
+    (spelling_class, left(name, 2), name, namespace, namehash)
+    WHERE spelling_class IN (0, 1);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_search_documents_prefix3_idx
+    ON bigname_phase.name_search_documents
+    (spelling_class, left(name, 3), name, namespace, namehash)
+    WHERE spelling_class IN (0, 1);
+SQL
+        printf '%s\n' "$search_prefix_matches_baseline" "$search_prefix_record_oids"
+        emit_phase_migration "$search_prefix_index_migration" specialized
+        printf '%s\n' "$search_prefix_matches_baseline" "$search_prefix_kept_oids"
+        # The schema-migration reads definitions under search_path pg_catalog and with
+        # quote_all_identifiers off, and must leave both settings as it found them, in the
+        # session and inside one transaction.
+        emit_phase_migration "$search_prefix_index_migration" baseline-first
+        assert_search_path_sql "$scratch_schema"
+        printf 'SET search_path TO public;\n'
+        emit_phase_migration "$search_prefix_index_migration" baseline-first
+        assert_search_path_sql public
+        printf 'BEGIN;\nSET LOCAL search_path TO "%s", public;\n' "$scratch_schema"
+        render_phase_migration "$search_prefix_index_migration"
+        assert_search_path_sql "$scratch_schema, public"
+        printf 'COMMIT;\n'
+        assert_search_path_sql public
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        emit_quote_all_identifiers_probe "$search_prefix_index_migration" in-transaction
+        printf '%s\n' "$search_prefix_matches_baseline" "$search_prefix_kept_oids"
+    } | run_psql
+    for index_name in "${search_prefix_indexes[@]}"; do
+        reviewed_definition="$(
+            {
+                printf 'SET search_path TO "%s";\n' "$scratch_schema"
+                printf '%s\n' \
+                    '\pset tuples_only on' \
+                    '\pset format unaligned' \
+                    "SET search_path TO pg_catalog;" \
+                    "SELECT pg_get_indexdef('$scratch_schema.$index_name'::regclass);"
+            } | run_psql
+        )"
+        wrong_definition="$(
+            {
+                printf 'BEGIN;\nSET LOCAL search_path TO "%s";\n' "$scratch_schema"
+                printf '%s\n' \
+                    '\pset tuples_only on' \
+                    '\pset format unaligned' \
+                    "DROP INDEX $index_name;" \
+                    "CREATE INDEX $index_name ON name_search_documents $wrong_keys;" \
+                    "SET LOCAL search_path TO pg_catalog;" \
+                    "SELECT pg_get_indexdef('$scratch_schema.$index_name'::regclass);" \
+                    "ROLLBACK;"
+            } | run_psql
+        )"
+        assert_migration_refusal "invalid-$index_name" \
+            "$search_prefix_index_migration" \
+            "$scratch_schema.$index_name exists but is not a valid and ready index on $scratch_schema.name_search_documents; $recovery" <<SQL
+UPDATE pg_index SET indisvalid = false
+WHERE indexrelid = '$index_name'::regclass;
+SQL
+        assert_migration_refusal "table-named-$index_name" \
+            "$search_prefix_index_migration" \
+            "$scratch_schema.$index_name is a table, not an index, so the index was never built; remove or rename that relation, then run the schema-migrations again" <<SQL
+DROP INDEX $index_name;
+CREATE TABLE $index_name ();
+SQL
+        assert_migration_refusal "wrong-definition-$index_name" \
+            "$search_prefix_index_migration" \
+            "$scratch_schema.$index_name exists but does not have the reviewed definition; found \"$wrong_definition\", expected \"$reviewed_definition\"; $recovery" <<SQL
+DROP INDEX $index_name;
+CREATE INDEX $index_name ON name_search_documents $wrong_keys;
+SQL
+        assert_migration_refusal "other-table-$index_name" \
+            "$search_prefix_index_migration" \
+            "$scratch_schema.$index_name exists but is not a valid and ready index on $scratch_schema.name_search_documents; $recovery" <<SQL
+DROP INDEX $index_name;
+CREATE INDEX $index_name ON discovery_edges (chain_id);
+SQL
+    done
+    printf 'DROP SCHEMA "%s" CASCADE;\n' "$scratch_schema" | run_psql
+}
+check_search_prefix_index_migration
+assert_migration_context_count "$search_prefix_index_migration" empty-schema 1
+assert_migration_context_count "$search_prefix_index_migration" preceding-shape 2
+assert_migration_context_count "$search_prefix_index_migration" specialized 1
 # The live prebuild in ops/project-progressive/install.sql must build the
 # baseline definition of the suffix-hash index from the shape without it, pass
 # its own check, leave a caller's search_path and quote_all_identifiers as it

@@ -692,6 +692,17 @@ Family indexes serve these concrete readers:
   same way, so a database collation that orders names differently from their bytes would
   otherwise skip names between pages. Search orders, filters and continues in SQL alone, under
   the database collation throughout.
+- A prefix search over a class of [search documents](#durable-search-data) with more than
+  1,024 postings for every term of the prefix reads `name_search_documents` instead, one
+  statement per bucket length (`storage:families.name.search_candidates.prefix1` to
+  `prefix3`). Each walks `name_search_documents_prefix{k}_idx`, `(spelling_class,
+  left(name, k), name, namespace, namehash)` over the raw-backed and short structural
+  classes. Equality on the class and on the first `k` characters of the prefix leaves the
+  entries in page order under the database collation, so the keyset cursor is the start key
+  and the page limit stops the walk, in both plan modes. That bounds what a short prefix reads
+  by the page, not by the names that sort before it. A prefix of four or more characters reads
+  the three-character bucket and filters it by the prefix. Contains and exact searches, and
+  classes with at most 1,024 matches for some term, keep the statements above.
 - Each of those two walks runs its statement for the surfaces with raw bytes as the first arm
   of a `UNION ALL`. For search that statement's text is unchanged. The second arm walks the surfaces without raw bytes: it
   computes each one's [rendered name](glossary.md#rendered-name) before its `LIMIT`, applies
@@ -772,6 +783,16 @@ row:
 | Index | Serves |
 | --- | --- |
 | `name_surfaces_name_order_idx` | `storage:families.name.search_candidates`: readable surfaces in name order after the keyset cursor |
+
+Interpret and the verified label-preimage importer write `name_search_documents`. The
+API's prefix search adds three read-only indexes on it, installed by the identity baseline
+and `20261030120000_search_prefix_bucket_indexes.sql` and changing no row:
+
+| Index | Serves |
+| --- | --- |
+| `name_search_documents_prefix1_idx` | `storage:families.name.search_candidates.prefix1`: a dense class's one-character prefix bucket in name order after the keyset cursor |
+| `name_search_documents_prefix2_idx` | `storage:families.name.search_candidates.prefix2`: the same for a two-character prefix |
+| `name_search_documents_prefix3_idx` | `storage:families.name.search_candidates.prefix3`: the same for a prefix of three or more characters, filtered by the whole prefix |
 
 The same reader, `storage:families.records.reverse_candidates` and Project's raw-name sweep
 (`project:families.derived.summary_raw_name_sweep`) also read
