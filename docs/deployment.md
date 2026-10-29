@@ -5396,6 +5396,9 @@ What changes:
 - Served data can change only in a block that announces a registry: that registry's logs in the
   block now run in Ethereum order as if it had been admitted at the block's start. A
   manifest-declared emitter still stops on the same log.
+- Every block that admits a new entry is interpreted twice, so Interpret does that block's
+  work twice. Such a block creates a registry or a resolver. Every other block is interpreted
+  once.
 
 Every chain needs a full-history Interpret redo, then the stamped Project redo it installs,
 at a planned [re-derivation boundary](glossary.md#re-derivation-boundary) under matching
