@@ -1748,7 +1748,6 @@ dependencies = [
  "bigname-storage",
  "bigname-test-support",
  "futures-util",
- "ipnet",
  "reqwest",
  "serde",
  "serde_json",

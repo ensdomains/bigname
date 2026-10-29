@@ -53,10 +53,6 @@ async fn main() -> Result<()> {
 
 async fn serve(args: ServeArgs) -> Result<()> {
     args.bounds.validate()?;
-    let gateway_destination_policy = args.gateway_destination_policy()?;
-    let ccip_gateway_deny_ranges = gateway_destination_policy.len();
-    bigname_lookup::install_gateway_destination_policy(gateway_destination_policy)?;
-    bigname_lookup::install_gateway_refusal_observer(metrics::observe_gateway_destination_refusal);
     state::configure_publication_lag_tolerance_blocks(args.publication_lag_tolerance_blocks)?;
     let chain_rpc_urls = args.effective_lookup_chain_rpc_urls()?;
     startup_preflight::ensure_rpc_chains(
@@ -134,7 +130,6 @@ async fn serve(args: ServeArgs) -> Result<()> {
         verified_execution_max_in_flight = args.bounds.verified_execution_max_in_flight,
         rpc_connect_timeout_ms = args.rpc_connect_timeout_ms,
         rpc_timeout_ms = args.rpc_timeout_ms,
-        ccip_gateway_deny_ranges,
         phase_heartbeat_max_age_secs = args.phase_heartbeat_max_age_secs,
         publication_lag_tolerance_blocks = args.publication_lag_tolerance_blocks,
         verified_rate_limit_per_second = args.bounds.verified_rate_limit_per_second,

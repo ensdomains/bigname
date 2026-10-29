@@ -324,7 +324,6 @@ $ curl -s -X POST '__API__/v1/lookup' -H 'content-type: application/json' \\
       ['A completed RPC failure, a malformed answer, or a provider response timeout', 'The item reports <code>failed</code> with a <code>failure_reason</code>.'],
       ['A connect timeout, DNS or TLS failure, or a connection reset', 'The whole request fails with <code>500 internal_error</code>. A <code>source=auto</code> read does not return a partial blend.'],
       ['A CCIP-Read gateway timeout or exhausted budget', 'That answer reports <code>failed</code>.'],
-      ['A CCIP-Read gateway URL on a loopback, private, link-local or other refused address', 'That answer reports <code>failed</code> with <code>failure_reason</code> <code>gateway_destination_refused</code>. No connection is made.'],
       ['The whole-request deadline', 'The request fails with <code>408 request_timeout</code>.'],
     ]) + `<p>Nothing from a verified read is cached, so the next request executes afresh. Rate limits and in-flight ceilings apply only to requests that can trigger verified execution. A records read with <code>source=auto</code> and no <code>keys</code>, and a primary-name read with <code>source=indexed</code>, never do.</p>` },
   ],

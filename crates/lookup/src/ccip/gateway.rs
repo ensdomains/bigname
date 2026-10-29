@@ -7,10 +7,7 @@ use futures_util::{StreamExt, stream};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
-use super::{
-    OffchainLookup,
-    destination::{self, GatewayRefusalClass},
-};
+use super::OffchainLookup;
 use crate::abi::{hex_string, hex_to_bytes};
 
 const LOCAL_BATCH_GATEWAY_URL: &str = "x-batch-gateway:true";
@@ -43,9 +40,6 @@ static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
         // passed any origin check bounce the request to an unrelated host, so a
         // 3xx is surfaced as an ordinary unsuccessful gateway status instead.
         .redirect(reqwest::redirect::Policy::none())
-        // A proxy would dial the peer itself, out of the resolver's sight.
-        .no_proxy()
-        .dns_resolver(destination::FilteringResolver)
         .build()
         .expect("CCIP gateway HTTP client configuration must be valid")
 });
@@ -72,14 +66,9 @@ mod contracts {
 pub(crate) struct GatewayError {
     message: String,
     transport: Option<bool>,
-    refusal: Option<GatewayRefusalClass>,
 }
 
 impl GatewayError {
-    pub const fn refusal(&self) -> Option<GatewayRefusalClass> {
-        self.refusal
-    }
-
     pub const fn is_transport_failure(&self) -> bool {
         self.transport.is_some()
     }
@@ -100,7 +89,6 @@ impl std::error::Error for GatewayError {}
 pub(crate) async fn fetch(lookup: &OffchainLookup) -> std::result::Result<Vec<u8>, GatewayError> {
     fetch_inner(lookup).await.map_err(|error| GatewayError {
         transport: gateway_transport_classification(&error),
-        refusal: destination::refusal_class(&error),
         message: format!("failed to complete CCIP-Read gateway request: {error:#}"),
     })
 }
@@ -138,8 +126,6 @@ async fn fetch_batch(requests: Vec<BatchRequest>) -> Result<Vec<u8>> {
                 failures.push(false);
                 response
             }
-            // One refused inner request refuses the record, as the standard path does.
-            Err(error) if destination::refusal_class(&error).is_some() => return Err(error),
             Err(error) => match retain_transport_error(&mut transport_error, error) {
                 Ok(()) => continue,
                 Err(error) => {
@@ -213,8 +199,6 @@ async fn fetch_standard(sender: &str, urls: &[String], call_data: &[u8]) -> Resu
     {
         match fetch_one(template, sender, &data).await {
             Ok(response) => return Ok(response),
-            // A resolver that lists a refused destination gets no later URL tried.
-            Err(error) if destination::refusal_class(&error).is_some() => return Err(error),
             Err(error)
                 if error
                     .downcast_ref::<GatewayStatusError>()
@@ -249,8 +233,7 @@ async fn fetch_one(template: &str, sender: &str, data: &str) -> Result<Vec<u8>> 
     } else {
         url
     };
-    let parsed = ensure_fetchable_scheme(&url)?;
-    destination::check_literal_host(&parsed)?;
+    ensure_fetchable_scheme(&url)?;
     let response = if use_get {
         HTTP_CLIENT.get(&url).send().await
     } else {
@@ -278,7 +261,7 @@ async fn fetch_one(template: &str, sender: &str, data: &str) -> Result<Vec<u8>> 
 /// — so `lookup.urls` is contract-chosen input decoded from revert data.
 /// Restrict it to the two schemes a gateway is defined over before the client
 /// is handed the string.
-fn ensure_fetchable_scheme(url: &str) -> Result<reqwest::Url> {
+fn ensure_fetchable_scheme(url: &str) -> Result<()> {
     let parsed = reqwest::Url::parse(url)
         .with_context(|| format!("CCIP gateway URL is not a valid absolute URL: {url}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -287,7 +270,7 @@ fn ensure_fetchable_scheme(url: &str) -> Result<reqwest::Url> {
             parsed.scheme()
         );
     }
-    Ok(parsed)
+    Ok(())
 }
 
 async fn read_capped_body(mut response: reqwest::Response) -> Result<Vec<u8>> {
@@ -320,11 +303,6 @@ fn decode_body(body: &[u8]) -> Result<Vec<u8>> {
 }
 
 fn gateway_transport_classification(error: &anyhow::Error) -> Option<bool> {
-    // A refusal raised in the resolver reaches here as the source of a connect error, so it is
-    // matched first. Otherwise it would be served as a whole-request transport failure.
-    if destination::refusal_class(error).is_some() {
-        return None;
-    }
     error.chain().find_map(|cause| {
         let error = cause.downcast_ref::<reqwest::Error>()?;
         if error.is_timeout() {

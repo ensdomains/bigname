@@ -2380,26 +2380,6 @@ at the publication instead of `409 stale`, and its verified-only `meta.as_of`
 reports the publication's block rather than the head. The lookup RPC provider
 needs the same `eth_call`-by-hash depth as verified record lookups.
 
-### CCIP-Read gateway destination filter
-
-The build that refuses CCIP-Read gateway fetches to loopback, private,
-link-local and the other refused ranges
-([CCIP-Read gateway transport](execution.md#ccip-read-gateway-transport))
-changes only the lookup crate's gateway client and the API's startup
-configuration and metrics, none of them hashed sources, so neither the
-[interpreter content hash](glossary.md#interpreter-content-hash) nor the
-[projection content hash](glossary.md#projection-content-hash) rotates and no
-redo is needed. It adds no schema-migration and no manifest change, so an API
-image swap deploys it.
-
-It adds `BIGNAME_API_CCIP_GATEWAY_DENY_CIDRS`, an operator deny list that is
-empty by default ([API request bounds](production.md#api-request-bounds)). An
-API with an entry that is not a CIDR range refuses to start. A deployment whose
-resolvers point at a gateway on a private or local address now serves those
-records as `failed` with `failure_reason=gateway_destination_refused`. The
-gateway client no longer reads `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY`.
-Refusals are counted in `ccip_gateway_destination_refused_total{class}`.
-
 ### Lookahead loader on Base
 
 The build that extends the [lookahead loader](glossary.md#lookahead-loader) to

@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, time::Duration};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use bigname_storage::DatabaseConfig;
 use clap::{Args, Parser, Subcommand};
 
@@ -65,11 +65,6 @@ pub(crate) struct ServeArgs {
         default_value = "full"
     )]
     pub(crate) rpc_chain_check: RpcChainCheck,
-    /// Comma-separated IPv4 or IPv6 CIDR ranges a CCIP-Read gateway fetch may never connect to,
-    /// on top of the built-in refused ranges. Empty by default. An entry that is not a range
-    /// refuses startup.
-    #[arg(long, env = "BIGNAME_API_CCIP_GATEWAY_DENY_CIDRS")]
-    pub(crate) ccip_gateway_deny_cidrs: Option<String>,
     #[command(flatten)]
     pub(crate) bounds: ApiBoundsConfig,
     #[arg(
@@ -128,15 +123,6 @@ impl ServeArgs {
             Duration::from_millis(self.rpc_timeout_ms),
         )
     }
-
-    pub(crate) fn gateway_destination_policy(
-        &self,
-    ) -> Result<bigname_lookup::GatewayDestinationPolicy> {
-        bigname_lookup::GatewayDestinationPolicy::from_deny_list(
-            self.ccip_gateway_deny_cidrs.as_deref().unwrap_or_default(),
-        )
-        .context("BIGNAME_API_CCIP_GATEWAY_DENY_CIDRS is invalid")
-    }
 }
 
 fn validate_rpc_timeouts(connect_timeout_ms: u64, total_timeout_ms: u64) -> Result<()> {
@@ -158,49 +144,6 @@ fn validate_rpc_timeouts(connect_timeout_ms: u64, total_timeout_ms: u64) -> Resu
 #[cfg(test)]
 mod tests {
     use clap::Parser;
-
-    fn serve_args(arguments: &[&str]) -> super::ServeArgs {
-        let cli =
-            super::Cli::try_parse_from(["bigname-api", "serve"].iter().chain(arguments).copied())
-                .expect("serve arguments must parse");
-        let super::Command::Serve(args) = cli.command;
-        *args
-    }
-
-    #[test]
-    fn the_gateway_deny_list_is_empty_by_default() {
-        let policy = serve_args(&[])
-            .gateway_destination_policy()
-            .expect("an absent deny list is valid");
-        assert!(policy.is_empty());
-    }
-
-    #[test]
-    fn the_gateway_deny_list_accepts_trimmed_ranges_of_both_families() {
-        let policy = serve_args(&["--ccip-gateway-deny-cidrs= 198.51.100.0/24 , 2001:db8:1::/48 "])
-            .gateway_destination_policy()
-            .expect("two valid ranges parse");
-        assert_eq!(policy.len(), 2);
-    }
-
-    #[test]
-    fn a_malformed_gateway_deny_list_entry_refuses_startup_and_is_named() {
-        for (value, entry) in [
-            ("198.51.100.0/33", "198.51.100.0/33"),
-            ("198.51.100.0/24,nonsense", "nonsense"),
-        ] {
-            let flag = format!("--ccip-gateway-deny-cidrs={value}");
-            let error = serve_args(&[flag.as_str()])
-                .gateway_destination_policy()
-                .expect_err("a malformed entry must refuse startup");
-            let diagnostic = format!("{error:#}");
-            assert!(
-                diagnostic.contains("BIGNAME_API_CCIP_GATEWAY_DENY_CIDRS")
-                    && diagnostic.contains(&format!("`{entry}`")),
-                "{diagnostic}"
-            );
-        }
-    }
 
     #[test]
     fn a_negative_publication_lag_tolerance_is_refused() {

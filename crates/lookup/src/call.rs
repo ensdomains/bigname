@@ -137,14 +137,10 @@ async fn resolve_ccip_read(
             "CCIP-Read transport failed for {}: {error}",
             record.record_key
         ))),
-        Err(error) => {
-            let reason = if error.is_destination_refused() {
-                "gateway_destination_refused"
-            } else {
-                "ccip_read_failed"
-            };
-            Ok((ResolvedCallResult::InternalFailure(reason), true))
-        }
+        Err(_error) => Ok((
+            ResolvedCallResult::InternalFailure("ccip_read_failed"),
+            true,
+        )),
     }
 }
 
