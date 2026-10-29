@@ -1690,19 +1690,46 @@ async fn few_affected_names(connection: &mut PgConnection) -> Result<i64> {
     Ok(few)
 }
 
-/// The planner's row count of `name_surfaces`: 0 or -1 when it was never analyzed.
-async fn surfaces_by_statistics(connection: &mut PgConnection) -> Result<f32> {
+/// The planner's row count of `table`: 0 or -1 when it was never analyzed.
+async fn tuples_by_statistics(connection: &mut PgConnection, table: &str) -> Result<f32> {
     let tuples: f32 =
-        sqlx::query_scalar("SELECT reltuples FROM pg_class WHERE oid = 'name_surfaces'::regclass")
+        sqlx::query_scalar("SELECT reltuples FROM pg_class WHERE oid = $1::text::regclass")
+            .bind(table)
             .fetch_one(&mut *connection)
             .await?;
     Ok(tuples)
 }
 
+const LINEAGE: &str = "chain_lineage";
+/// The primary key of `chain_lineage` and the unique key that leads with it, the keys the last
+/// step looks a surface's block up by.
+const LINEAGE_KEYS: [&str; 2] = [
+    "chain_lineage_pkey",
+    "chain_lineage_chain_id_block_hash_block_number_key",
+];
+
+/// Blocks 13 to 10,012 above the 13 the database starts with. With 13 blocks the lineage is one
+/// page, and a sequential scan of it is the cheapest lookup there is. With these, a scan of the
+/// lineage costs more than a lookup by key, as it does on a chain.
+async fn grow_lineage(connection: &mut PgConnection) -> Result<()> {
+    raw_sql(&format!(
+        "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state)
+         SELECT '{CHAIN}', '0x' || lpad(to_hex(block), 64, '0'),
+                '0x' || lpad(to_hex(block - 1), 64, '0'), block,
+                to_timestamp(1800000000 + block * 12), 'canonical'
+         FROM generate_series(13, 10012) block"
+    ))
+    .execute(&mut *connection)
+    .await
+    .context("grow the lineage")?;
+    Ok(())
+}
+
 /// Run each `(row, block, count)` publication under both plan modes and push a failure for each
 /// last step that does not read `name_surfaces` as its count says: by key up to `few` names, in
-/// one pass beyond. Each publication must select what the frozen statement before it selects,
-/// and `count` names.
+/// one pass beyond. Either way it must read `chain_lineage` only by key. Each publication must
+/// select what the frozen statement before it selects, and `count` names.
 async fn check_last_step(
     connection: &mut PgConnection,
     rows: &[(&str, i64, i64)],
@@ -1721,6 +1748,26 @@ async fn check_last_step(
                 run.selected.len(),
                 before.len()
             );
+            let mut read = Vec::new();
+            executed_scans(&run.plan["Plan"], "", &mut read);
+            let lineage: Vec<&Value> = read
+                .iter()
+                .filter(|(under, node)| under.is_empty() && node["Relation Name"] == LINEAGE)
+                .map(|(_, node)| *node)
+                .collect();
+            if lineage.is_empty() {
+                failures.push(format!("{row}, {mode}: the last step never read {LINEAGE}"));
+            }
+            for node in lineage {
+                if !reads_through(node, &LINEAGE_KEYS) {
+                    failures.push(format!(
+                        "{row}, {mode}: the last step reads {LINEAGE} by {} over {:?}, not \
+                         {LINEAGE_KEYS:?}",
+                        node["Node Type"],
+                        indexes_read(node)
+                    ));
+                }
+            }
             let scans = run.scans();
             if count <= few {
                 last_step_reads_by_key(&format!("{row}, {mode}"), &scans, failures);
@@ -1789,17 +1836,21 @@ async fn check_last_step(
 // fixture under a custom plan. One over and most names fail on a last step that probes by key
 // whatever the count, which reads `name_surfaces` once per name. At the bound fails when the
 // count's bound excludes the bound itself, and one over when it admits one more.
+// By trace, a lookup of `chain_lineage` that also holds the canonical test can read every
+// readable block of the chain through an index on the state, for each surface, without
+// statistics. The lineage check of every row then fails.
 #[tokio::test]
 async fn the_last_step_reads_few_names_by_key_and_many_in_one_pass() -> Result<()> {
     let (database, pool) = database().await?;
     let result = async {
         let mut connection = pool.acquire().await?;
         install(&mut connection, Tree::of(SMALL)).await?;
+        grow_lineage(&mut connection).await?;
         raw_sql("ANALYZE name_surfaces")
             .execute(&mut *connection)
             .await?;
         let few = few_affected_names(&mut connection).await?;
-        let tuples = surfaces_by_statistics(&mut connection).await?;
+        let tuples = tuples_by_statistics(&mut connection, SURFACES).await?;
         ensure!(
             few == SMALL / 20,
             "the bound is {few} over {tuples} surfaces by statistics, not 5% of {SMALL}"
@@ -1849,26 +1900,33 @@ async fn the_last_step_reads_few_names_by_key_and_many_in_one_pass() -> Result<(
 
 // A table that was never analyzed has no row count, and the bound is 5% of a count of the
 // surfaces. The rows at the bound and one over it read `name_surfaces` by key and in one pass,
-// under both plan modes. Autovacuum is off for the table, so no ANALYZE runs under the test.
+// and `chain_lineage` by key, under both plan modes. Autovacuum is off for both tables, so no
+// ANALYZE runs under the test.
 // Red, by trace: on a fresh table `reltuples` is -1, so a bound read from the row count alone
 // is floor(5% of -1), also -1, and the row at the bound then takes the one pass. Red by run on
 // a last step that joined `chain_lineage` and filtered the key lookup in one subquery: with no
 // statistics the probe read `name_surfaces_visibility_idx` and the full join read
-// `name_surfaces` in 13 loops, by trace one for each of the fixture's 13 blocks.
+// `name_surfaces` in 13 loops, by trace one for each of the 13 blocks the fixture had then.
 #[tokio::test]
 async fn a_never_analyzed_table_bounds_the_last_step_by_a_count() -> Result<()> {
     let (database, pool) = database().await?;
     let result = async {
         let mut connection = pool.acquire().await?;
-        raw_sql("ALTER TABLE name_surfaces SET (autovacuum_enabled = false)")
-            .execute(&mut *connection)
-            .await?;
+        raw_sql(
+            "ALTER TABLE name_surfaces SET (autovacuum_enabled = false);
+             ALTER TABLE chain_lineage SET (autovacuum_enabled = false)",
+        )
+        .execute(&mut *connection)
+        .await?;
         install(&mut connection, Tree::of(SMALL)).await?;
-        let tuples = surfaces_by_statistics(&mut connection).await?;
-        ensure!(
-            tuples <= 0.0,
-            "name_surfaces has {tuples} rows by statistics, so the count is not under test"
-        );
+        grow_lineage(&mut connection).await?;
+        for table in [SURFACES, LINEAGE] {
+            let tuples = tuples_by_statistics(&mut connection, table).await?;
+            ensure!(
+                tuples <= 0.0,
+                "{table} has {tuples} rows by statistics, so the test has statistics"
+            );
+        }
         let few = few_affected_names(&mut connection).await?;
         ensure!(
             few == SMALL / 20,
@@ -1881,10 +1939,12 @@ async fn a_never_analyzed_table_bounds_the_last_step_by_a_count() -> Result<()> 
         prepare_statements(&mut connection).await?;
         let mut failures = Vec::new();
         check_last_step(&mut connection, &rows, few, &mut failures).await?;
-        ensure!(
-            surfaces_by_statistics(&mut connection).await? <= 0.0,
-            "name_surfaces was analyzed during the test"
-        );
+        for table in [SURFACES, LINEAGE] {
+            ensure!(
+                tuples_by_statistics(&mut connection, table).await? <= 0.0,
+                "{table} was analyzed during the test"
+            );
+        }
         ensure!(
             failures.is_empty(),
             "the last step's reads of the affected names' surfaces, never analyzed:\n{}",

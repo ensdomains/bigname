@@ -5065,12 +5065,14 @@ and no schema.
   names it selects are the same.
 - Its last step, which reads the surfaces of the names it selects, now counts
   them first. Up to 5% of the rows of `name_surfaces` it reads each surface by
-  primary key, so a high row estimate cannot turn a few names into a read of
-  every surface. Beyond that it reads every row of `name_surfaces` once and
-  joins the result to the names by a hash or merge join, never a probe per
-  name. Either way it looks up each surface's block in `chain_lineage` by
-  key, once per surface. A rebuild range journals all its blocks under its
-  last one, so a range that covers most registrations takes that arm.
+  its primary or unique key, so a high row estimate cannot turn a few names
+  into a read of every surface. Beyond that it reads every row of
+  `name_surfaces` once and joins the result to the names by a hash or merge
+  join, never a probe per name. Either way it looks up each surface's block in
+  `chain_lineage` by the block's key, once per surface. Each lookup holds only
+  its key, so the access paths hold on tables with no statistics too. A
+  rebuild range journals all its blocks under its last one, so a range that
+  covers most registrations takes that arm.
 - The bound is 5% of the planner's row count of `name_surfaces`
   (`pg_class.reltuples`), across every chain the database holds. The full join
   reads that whole table, so its cost follows that count. Until the table is

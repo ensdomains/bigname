@@ -12,11 +12,12 @@
 //! the planner runs once per outer row and cannot turn into a join over every surface.
 //!
 //! The last step reads the surfaces of the affected names. It counts them first. Up to
-//! `FEW_AFFECTED_NAMES`, 5% of the surfaces, it reads each surface by primary key in such a
-//! subquery. Beyond that it full-joins the names to the surfaces, which the planner can only
-//! hash or merge, so it reads `name_surfaces` in one pass. Only the arm the count picks runs.
-//! Either way each surface's block is then looked up in `chain_lineage` by key, in a lateral
-//! subquery, so the access paths hold on tables with no statistics too.
+//! `FEW_AFFECTED_NAMES`, 5% of the surfaces, it reads each surface by its primary or unique
+//! key in such a subquery. Beyond that it full-joins the names to the surfaces, which the
+//! planner can only hash or merge, so it reads `name_surfaces` in one pass. Only the arm the
+//! count picks runs. Either way each surface's block is then looked up in `chain_lineage` by
+//! its key, in a lateral subquery. Each lookup holds only its key, so the access paths hold on
+//! tables with no statistics too.
 //!
 //! The walk below reaches a registry other than the root only through a slot: an entry whose
 //! `SubregistryChanged` event names the registry. The slots of each registry that changed or
@@ -115,7 +116,7 @@ const POINTER_STATE_KEYS: &str = "array_remove(ARRAY[
             lower(pointer.after_state ->> 'subregistry') || ':00000000'
         ]::text[], NULL)";
 
-/// The most affected names whose surfaces the statement reads one primary-key probe at a time,
+/// The most affected names whose surfaces the statement reads one key probe at a time,
 /// as an SQL expression: 5% of the surfaces, the conservative end of the crossover measured
 /// between the two shapes. Beyond it, the statement reads the surfaces in one pass and joins
 /// them to the names.
@@ -210,22 +211,25 @@ pub(super) fn statement(normal_work: &str) -> String {
               OR (pointer.namespace=journal.before_image->>'namespace'
                 AND pointer.namehash=journal.before_image->>'namehash')))"
     );
-    // The last step's test that a surface's block is canonical, one lookup of `chain_lineage`
-    // by its key for each surface. The lateral keeps the surface on the outside, so the
-    // planner cannot read the surfaces again for each block, as it can for a join when the
-    // tables have no statistics.
+    // The last step's lookup of a surface's block in `chain_lineage`, one for each surface. The
+    // lateral keeps the surface on the outside, so the planner cannot read the surfaces again
+    // for each block, as it can for a join when the tables have no statistics. The lookup holds
+    // only the block's key. Other indexes of `chain_lineage` can serve `chain_id` with a
+    // filter, but only the keys estimate one row, without statistics too. With the canonical
+    // test inside, an index on the state could look as narrow as the key and read every
+    // readable block of the chain for each surface. The test applies to the row returned.
     let canonical_block = "CROSS JOIN LATERAL (
-            SELECT 1 FROM chain_lineage lineage
+            SELECT lineage.canonicality_state FROM chain_lineage lineage
             WHERE lineage.chain_id=surface.chain_id AND lineage.block_hash=surface.block_hash
-              AND lineage.canonicality_state IN ('canonical','safe','finalized')
             OFFSET 0
         ) canonical";
     // A surface the last step returns: an active `.eth`-namespace surface of the block or
-    // earlier, with a raw name that is not empty, in a canonical state.
+    // earlier, with a raw name that is not empty, in a canonical state, of a canonical block.
     let readable_surface = "surface.namespace='ens' AND cardinality(surface.labelhashes)>=1
           AND surface.block_number<=$2 AND surface.visibility_state='active'
           AND surface.raw_name IS DISTINCT FROM ''
-          AND surface.canonicality_state IN ('canonical','safe','finalized')";
+          AND surface.canonicality_state IN ('canonical','safe','finalized')
+          AND canonical.canonicality_state IN ('canonical','safe','finalized')";
     let (slots_of_changed, slots_of_above) =
         (slot_lookup("changed.registry"), slot_lookup("chain.above"));
     format!(
@@ -690,10 +694,11 @@ pub(super) fn statement(normal_work: &str) -> String {
     -- The statement counts the affected names before it reads their surfaces, and the count
     -- picks one of two arms. The other arm's filter is false before it runs, so it reads
     -- nothing. Up to `few` names, 5% of the surfaces, each one's surface is read by its
-    -- primary key. The planner's row estimate for `affected` follows every step above it, so a
-    -- join here could read every surface for a few names. The lookup holds only the key, so no
-    -- other index of `name_surfaces` can serve it: without statistics, the default estimates
-    -- of the other filters make an index on them look as narrow as the key. Those filters
+    -- primary or unique key. The planner's row estimate for `affected` follows every step above
+    -- it, so a join here could read every surface for a few names. The lookup holds only the
+    -- key. Other indexes of `name_surfaces` can serve `chain_id = $1` with a filter, but only
+    -- the keys estimate one row, without statistics too. With the other filters inside, their
+    -- default estimates could make an index on them look as narrow as the key. Those filters
     -- apply to the row the lookup returns.
     SELECT surface.logical_name_id FROM affected
     CROSS JOIN LATERAL (
