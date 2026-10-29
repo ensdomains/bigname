@@ -3003,7 +3003,20 @@ async fn seed_unknown_resolver_inputs(database: &TestDatabase, writes: &[Value])
         "ens_v1",
     )
     .await?;
-    // A dynamic resolver family is known, but no retained upgrade identifies its implementation.
+    // An ENSv1 name points at a resolver that an ENSv2 registry edge also reaches. No declaration
+    // and no retained upgrade identify it, so it is an undeclared ENSv1 resolver.
+    let v1_payload = json!({"contracts":[]});
+    let v1_manifest:i64=sqlx::query_scalar("INSERT INTO manifest_versions (manifest_version, namespace, source_family, chain_id, deployment_label, rollout_status, normalizer_version, file_path, manifest_payload) VALUES (1,'ens','ens_v1_resolver_l1',$1,'api-test','active','test','test/ens/undeclared-v1-resolver.toml',$2) RETURNING manifest_id")
+        .bind(CHAIN).bind(&v1_payload).fetch_one(&database.pool).await?;
+    seed_fixture_manifest_update(
+        &database.pool,
+        v1_manifest,
+        CHAIN,
+        "ens",
+        "ens_v1_resolver_l1",
+        &v1_payload,
+    )
+    .await?;
     let manifest_payload = json!({"contracts":[],"resolver_implementations":[]});
     let manifest:i64=sqlx::query_scalar("INSERT INTO manifest_versions (manifest_version, namespace, source_family, chain_id, deployment_label, rollout_status, normalizer_version, file_path, manifest_payload) VALUES (1,'ens','ens_v2_resolver_l1',$1,'api-test','active','test','test/ens/dynamic-resolver.toml',$2) RETURNING manifest_id")
         .bind(CHAIN).bind(&manifest_payload).fetch_one(&database.pool).await?;
@@ -3140,7 +3153,7 @@ async fn v2_get_name_records_withholds_values_from_unsupported_inventory() -> Re
     );
     let refused = json!({
         "status": "unsupported",
-        "unsupported_reason": "resolver_implementation_unknown"
+        "unsupported_reason": "resolver_not_declared"
     });
     assert_eq!(
         payload["data"]["records"],
@@ -3171,7 +3184,7 @@ async fn v2_get_name_records_default_set_refuses_unsupported_inventory() -> Resu
     // Retained entries are not answers: each default key carries the row's reason, no value.
     let refused = json!({
         "status": "unsupported",
-        "unsupported_reason": "resolver_implementation_unknown"
+        "unsupported_reason": "resolver_not_declared"
     });
     assert_eq!(
         payload["data"]["records"],

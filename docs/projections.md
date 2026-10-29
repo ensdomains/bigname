@@ -1558,7 +1558,10 @@ The resolver classification's `unsupported_reason` for an ENSv2 resolver (and th
 `coverage.unsupported_reason` copied onto its record inventory) uses a closed
 vocabulary: `resolver_not_declared` when an exact `public_resolver_v2`
 declaration is required and absent (also the ENSv1 and Basenames reason for an
-undeclared address); `resolver_implementation_unknown` when a discovered proxy
+undeclared address, which includes an address both protocols name that no
+declaration or ENSv2 `Upgraded` identifies, as
+[architecture.md § Discovery graph](architecture.md#discovery-graph) files it
+under ENSv1); `resolver_implementation_unknown` when a discovered proxy
 has no canonical `Upgraded` observation — neither an ERC-1967 `Upgraded` log
 nor a factory announcement — so its implementation is unknown;
 `resolver_implementation_not_declared` when the latest observation names an
@@ -1809,7 +1812,8 @@ rotating a proxy to an unflagged implementation removes the rule on the same
 scoped rebuild. Full and incremental rebuilds select the feature from the same
 current resolver classification.
 
-A pointer from `ens_v2_registry_l1` or `ens_v2_root_l1` whose target is a
+A pointer from `ens_v2_registry_l1`, `ens_v2_root_l1`, `ens_v1_registry_l1`,
+`ens_v1_registrar_l1`, or `ens_v1_wrapper_l1` whose target is a
 supported
 [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
 (`classification.role = ensv1_mirror_resolver`, declared under
@@ -1833,6 +1837,11 @@ receives `resolve(name, data)` and answers by its own logic.
 (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L66-L70 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L88-L96 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L108-L127 @ ens_v1@91c966f)
+An ENSv1 name that points at the mirror is walked the same way. Its own
+registry node names the mirror, so the mirror would call itself, and the walk
+selects the mirror and serves `unsupported` below, never an empty record set.
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/AbstractMirrorResolver.sol:L67-L69 @ ens_v2_mainnet_20261002@b1f97b91)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_mainnet_20261002@b1f97b91)
 
 The family inventory reader reproduces this from current pointer keys and
 classification at the selected publication. The registry's
@@ -2426,7 +2435,8 @@ it as an ancestor before its block, and from its block the names under it are
 recomposed.
 
 The capture is one statement, `project:families.resolution_paths.prepare`. It
-looks names up in `name_surfaces` through two indexes Project owns there
+looks names up in `name_surfaces` through two indexes Project owns there, and
+entries that point at a changed registry through indexes that already exist
 ([storage](storage.md#table-ownership)).
 
 - It finds the ancestors of each name an item expands by name, by the hash of
@@ -2435,24 +2445,37 @@ looks names up in `name_surfaces` through two indexes Project owns there
   changed path, by the hash of the label's entry key. The entry key is the
   label hash with its low 32 bits cleared, as
   [ENSv2 registry entries](#ensv2-registry-entries) defines it.
+- A registry is changed in a publication when an event of its blocks creates,
+  upgrades or announces it, or when a name an item expands by name is, or sits
+  under, a name whose retained ENSv1→ENSv2 migration evidence holds the
+  registry's creation. The statement finds the entries with a
+  `SubregistryChanged` event that names the registry, and treats their keys as
+  changed entry keys. That set holds every entry that points at the registry
+  at the publication. It can also hold an entry that pointed at it earlier.
+  The walk from the root registry reads each entry's latest pointer and
+  decides, as it did before. An entry row that holds no resource is tied to its
+  pointer by the event that last wrote the row, and the lookup reads only
+  canonical events. That loses no entry: entry rows are undone with the journal
+  before a replay, so at a publication no entry row cites an orphaned event.
+- A change of the root registry itself has no entry to look up. The walk's
+  first row carries it.
+- It reads the ENSv1→ENSv2 migration evidence of each ancestor by name, one
+  lookup for each ancestor.
 
-The surfaces it reads then follow the names the publication touches, not the
-number of names on the chain. The indexes change how the statement finds its
-rows and not which names it selects.
+The surfaces it reads then follow the names the publication touches and the
+names under the entries that point at a changed registry, not the number of
+names on the chain. A changed registry that no entry points at reads no
+surface. The indexes change how the statement finds its rows and not which
+names it selects.
 
-Four cases still read every observed ENS surface:
+Two cases still read every observed ENS surface:
 
-- A registry is created, upgraded or announced in the publication.
-- A name an item expands by name is, or sits under, a name whose retained
-  ENSv1→ENSv2 migration evidence holds a created registry. The ENSv1→ENSv2
-  migration can be in any earlier block.
 - The classification of the
   [v1 fallback resolver](glossary.md#v1-fallback-resolver-ensv1resolver-exposed-as-v1_resolver)
   changes.
 - A changed path has no labels, which is the root registry itself.
 
-A path whose first label hash is null also reads them all. How often real
-publications take the second case has not been measured.
+A path whose first label hash is null also reads them all.
 
 A manifest sync has no block position: its existing phase-hash
 invalidation requires the normal full Interpret/Project redo.

@@ -1,13 +1,11 @@
 //! How many name surfaces a selection reads.
 //!
-//! A publication that changes no ENSv2 registry reads the surfaces of the names it touched, of
-//! their ancestors and descendants, and of the names that hold a changed entry's label. That
-//! number must not grow with the number of surfaces on the chain. Four cases read every
-//! observed ENS surface by design and are not measured here:
+//! A publication reads the surfaces of the names it touched, of their ancestors and
+//! descendants, of the names that hold a changed entry's label, and of the names under the
+//! entries that point at a changed registry. That number must not grow with the number of
+//! surfaces on the chain. Two cases read every observed ENS surface by design and are not
+//! measured here:
 //!
-//! - A registry created, upgraded or announced in the publication.
-//! - A touched name that is, or sits under, a name whose retained ENSv1→ENSv2 migration
-//!   evidence holds a created registry, whatever block that ENSv1→ENSv2 migration was in.
 //! - A change of the fallback resolver's classification.
 //! - A changed path of zero labels (the root registry itself).
 //!
@@ -27,7 +25,8 @@ use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use sqlx::{PgConnection, raw_sql};
 
-use super::{CHAIN, ETH, PLAN_MODES, ROOT, current, hash};
+use super::{CHAIN, ETH, PLAN_MODES, ROOT, current, hash, oracle};
+use crate::families::derived::SUMMARY_WORK_LIST;
 use crate::families::guard_tests::{database, executed_scans, indexes_read, reads_through};
 
 const ETH_LABEL: &str = "0x4f5b812789fc606be1b3b16908db13fc7a9adf7ca72641f84d75b47069d3d7f0";
@@ -36,6 +35,11 @@ const SURFACES: &str = "name_surfaces";
 const ARMS: [&str; 3] = ["source_ancestors", "candidates", "affected"];
 const PATH_INDEX: &str = "name_surfaces_project_path_hash_idx";
 const KEY_INDEX: &str = "name_surfaces_project_entry_keys_idx";
+const STATE_KEY_INDEX: &str = "normalized_events_v2_key_probe_idx";
+const EVENTS: &str = "normalized_events";
+const ENTRIES: &str = "project_ens_v2_entry_owner";
+/// The owner and owner getter of a touched name's registry node state.
+const HOLDER: &str = "0x00000000000000000000000000000000000000aa";
 
 /// The tree's size: second, third and fourth level names.
 #[derive(Clone, Copy)]
@@ -248,7 +252,133 @@ async fn stimulate(connection: &mut PgConnection, tree: Tree, stimulus: Stimulus
     Ok(())
 }
 
-/// Prepare the current statement against a session work table.
+/// How a publication comes to hold a changed registry.
+#[derive(Clone, Copy)]
+enum Route {
+    /// A `RegistryCreated` event of the registry in the publication's block.
+    Created,
+    /// An `Upgraded` event of the registry in the block.
+    Upgraded,
+    /// A `ContractDiscovered` event of the registry in the block.
+    Announced,
+    /// The block touches a third-level name. Its unmounted parent has an ENSv1→ENSv2 migration
+    /// at block 2, whose evidence holds the registry's creation at block 1.
+    Evidence,
+}
+
+const ROUTES: [(Route, &str); 4] = [
+    (Route::Created, "created"),
+    (Route::Upgraded, "upgraded"),
+    (Route::Announced, "announced"),
+    (Route::Evidence, "migration evidence"),
+];
+
+/// The publication at `block` holds, by `route`, the registry the `nth` mounted second-level
+/// name points at. It changes nothing else.
+async fn change_registry(
+    connection: &mut PgConnection,
+    tree: Tree,
+    route: Route,
+    block: i64,
+    nth: i64,
+) -> Result<()> {
+    let mounted = tree.second * 3 / 4 + nth;
+    let registry = registry(&mounted.to_string());
+    let event = |identity: &str, kind: &str, family: &str, at: i64, name: &str, after: &str| {
+        format!(
+            "INSERT INTO normalized_events (event_identity, namespace, logical_name_id,
+                 event_kind, source_family, manifest_version, chain_id, block_number, block_hash,
+                 derivation_kind, canonicality_state, after_state)
+             VALUES ('{identity}', 'ens', {name}, '{kind}', '{family}', 1, '{CHAIN}', {at},
+                     '{hash}', 'ens_v2_registry_resource_surface', 'canonical', {after});",
+            hash = hash(at),
+        )
+    };
+    let carried = |field: &str| format!("jsonb_build_object('{field}', {registry})");
+    let statement = match route {
+        Route::Created => event(
+            &format!("created:{block}"),
+            "RegistryCreated",
+            "ens_v2_registry_l1",
+            block,
+            "NULL",
+            &carried("registry"),
+        ),
+        Route::Upgraded => event(
+            &format!("upgraded:{block}"),
+            "Upgraded",
+            "ens_v2_registry_l1",
+            block,
+            "NULL",
+            &carried("proxy_address"),
+        ),
+        Route::Announced => event(
+            &format!("announced:{block}"),
+            "ContractDiscovered",
+            "ens_v2_migration_l1",
+            block,
+            "NULL",
+            &carried("proxy_address"),
+        ),
+        Route::Evidence => {
+            // Second-level name `nth` is not mounted, and third-level name `nth` is under it.
+            ensure!(
+                nth < tree.second * 3 / 4,
+                "the tree is too small for the route"
+            );
+            let node =
+                |tag: &str| format!("'0x' || md5('{tag}' || {nth}) || md5({nth} || '{tag}')");
+            let name = |tag: &str| format!("'ens:' || {}", node(tag));
+            let creation = format!("evidence:{block}");
+            let evidence = format!(
+                "jsonb_build_object('evidence', jsonb_build_array(jsonb_build_object(
+                     'event_identity', '{creation}', 'event_kind', 'RegistryCreated')))"
+            );
+            [
+                event(
+                    &creation,
+                    "RegistryCreated",
+                    "ens_v2_registry_l1",
+                    1,
+                    "NULL",
+                    &carried("registry"),
+                ),
+                event(
+                    &format!("migration:{block}"),
+                    "MigrationApplied",
+                    "ens_v2_migration_l1",
+                    2,
+                    &name("n2"),
+                    &evidence,
+                ),
+                // The touch is a change that can move the names under the touched name, so the
+                // statement reads its ancestors' migration evidence: its registry node state
+                // gains a holder.
+                format!(
+                    "INSERT INTO project_registry_node_state (chain_id, namespace, node,
+                         block_number, event_identity, owner, owner_getter, owner_word_unmasked)
+                     VALUES ('{CHAIN}', 'ens', {touched}, {block}, 'node:{block}', '{HOLDER}',
+                             '{HOLDER}', false);
+                     INSERT INTO project_family_undo (chain_id, block_number, block_hash, family,
+                         key)
+                     VALUES ('{CHAIN}', {block}, '{hash}', 'project_registry_node_state',
+                             jsonb_build_array('{CHAIN}', 'ens', {touched})::text)",
+                    hash = hash(block),
+                    touched = node("n3"),
+                ),
+            ]
+            .concat()
+        }
+    };
+    raw_sql(&statement)
+        .execute(&mut *connection)
+        .await
+        .context("change a registry")?;
+    Ok(())
+}
+
+/// Prepare the current statement and the frozen one before it (`oracle.rs`) against a session
+/// work table.
 async fn prepare_statements(connection: &mut PgConnection) -> Result<()> {
     raw_sql(
         "CREATE TEMP TABLE bigname_resolution_path_work (logical_name_id text PRIMARY KEY);
@@ -256,13 +386,17 @@ async fn prepare_statements(connection: &mut PgConnection) -> Result<()> {
     )
     .execute(&mut *connection)
     .await?;
-    raw_sql(&format!(
-        "PREPARE path_work (text, bigint, bigint, bigint, text) AS {}",
-        current()
-    ))
-    .execute(&mut *connection)
-    .await
-    .context("prepare path_work")?;
+    for (name, statement) in [
+        ("path_work", current()),
+        ("path_work_before", oracle::statement(SUMMARY_WORK_LIST)),
+    ] {
+        raw_sql(&format!(
+            "PREPARE {name} (text, bigint, bigint, bigint, text) AS {statement}"
+        ))
+        .execute(&mut *connection)
+        .await
+        .with_context(|| format!("prepare {name}"))?;
+    }
     Ok(())
 }
 
@@ -345,11 +479,13 @@ async fn run(connection: &mut PgConnection, statement: &str, block: i64) -> Resu
         .execute(&mut *connection)
         .await?;
     // A GIN lookup reads the index's whole pending list, whose size follows recent inserts
-    // and vacuum timing. Every measured run starts with the list empty.
-    raw_sql(&format!("SELECT gin_clean_pending_list('{KEY_INDEX}')"))
-        .execute(&mut *connection)
-        .await
-        .context("flush the entry key index's pending list")?;
+    // and vacuum timing. Every measured run starts with both lists empty.
+    raw_sql(&format!(
+        "SELECT gin_clean_pending_list('{KEY_INDEX}'), gin_clean_pending_list('{STATE_KEY_INDEX}')"
+    ))
+    .execute(&mut *connection)
+    .await
+    .context("flush the pending lists of the two inverted indexes")?;
     let plan: Value = sqlx::query_scalar(&format!(
         "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE {statement} {}",
         arguments(block)
@@ -374,6 +510,11 @@ async fn set_mode(connection: &mut PgConnection, mode: &str) -> Result<()> {
         .execute(connection)
         .await?;
     Ok(())
+}
+
+/// The names the frozen statement before this one selects for the publication at `block`.
+async fn run_before(connection: &mut PgConnection, block: i64) -> Result<BTreeSet<String>> {
+    Ok(run(connection, "path_work_before", block).await?.selected)
 }
 
 /// Surfaces in the fixture, and surfaces added to it to grow the namespace.
@@ -824,14 +965,254 @@ async fn a_pointer_change_probes_each_deeper_name_once_by_its_own_pointer() -> R
     result
 }
 
+// A publication that holds a changed registry reads the surfaces of the names under the
+// entries that point at the registry, not every surface on the chain. Each way a registry comes
+// to be changed is one publication, measured over the fixture and again after as many more
+// surfaces that share no label with it.
+#[tokio::test]
+async fn a_changed_registry_visits_the_names_under_its_mounts() -> Result<()> {
+    let (database, pool) = database().await?;
+    let result = async {
+        let mut connection = pool.acquire().await?;
+        let tree = Tree::of(SMALL);
+        install(&mut connection, tree).await?;
+        let mut publications = Vec::new();
+        for (block, (route, name)) in (9..).zip(ROUTES) {
+            change_registry(&mut connection, tree, route, block, 100 + block).await?;
+            publications.push((name, block));
+        }
+        raw_sql("ANALYZE").execute(&mut *connection).await?;
+        prepare_statements(&mut connection).await?;
+        let mut small = Vec::new();
+        for &(_, block) in &publications {
+            for mode in PLAN_MODES {
+                set_mode(&mut connection, mode).await?;
+                small.push(run(&mut connection, "path_work", block).await?);
+            }
+        }
+        grow(&mut connection, GROWTH).await?;
+        raw_sql("ANALYZE").execute(&mut *connection).await?;
+        let mut failures = Vec::new();
+        let mut small = small.iter();
+        for &(name, block) in &publications {
+            for mode in PLAN_MODES {
+                let small = small.next().context("a run over the fixture")?;
+                set_mode(&mut connection, mode).await?;
+                let large = run(&mut connection, "path_work", block).await?;
+                let before = run(&mut connection, "path_work_before", block).await?;
+                ensure!(
+                    !large.selected.is_empty() && large.selected == before.selected,
+                    "{name}, {mode}: the statement selects {} names, the one before the probes {}",
+                    large.selected.len(),
+                    before.selected.len()
+                );
+                ensure!(
+                    large.selected == small.selected,
+                    "{name}, {mode}: the added surfaces changed the selection"
+                );
+                let (few, many) = (small.visited(), large.visited());
+                for arm in ARMS {
+                    let (few, many) = (
+                        few.get(arm).copied().unwrap_or(0),
+                        many.get(arm).copied().unwrap_or(0),
+                    );
+                    if many > few + 16 {
+                        failures.push(format!(
+                            "{name}, {mode}: {arm} visits {few} surfaces of {SMALL} and {many} of {}",
+                            SMALL + GROWTH
+                        ));
+                    }
+                }
+                let (few, many, selected) = (small.total(), large.total(), large.selected.len());
+                if many > few + 16 || many > 20 * i64::try_from(selected)? {
+                    failures.push(format!(
+                        "{name}, {mode}: the statement visits {few} surfaces of {SMALL} and {many} \
+                         of {} to select {selected} names",
+                        SMALL + GROWTH
+                    ));
+                }
+            }
+        }
+        ensure!(
+            failures.is_empty(),
+            "the reads of a selection that holds a changed registry grow with the namespace:\n{}",
+            failures.join("\n")
+        );
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+// The lookups that start from a changed registry reach their tables through indexes, under a
+// custom and a generic plan. The events that name the registry as a subregistry come from the
+// ENSv2 state key index, the entries from their resource index or primary key, the events of an
+// entry's resource from the resource history index, and the ENSv1→ENSv2 migration events of a
+// touched name's ancestors from the name history index. No part of the statement scans every
+// name surface or every normalized event. The publication holds a created registry and a
+// touched name whose parent's migration evidence holds another.
+#[tokio::test]
+async fn the_registry_route_probes_read_their_indexes() -> Result<()> {
+    const RESOURCE_HISTORY: &str = "normalized_events_resource_history_idx";
+    const NAME_HISTORY: &str = "normalized_events_name_history_idx";
+    const ENTRY_RESOURCE: &str = "project_ens_v2_entry_owner_resource_idx";
+    const ENTRY_KEY: &str = "project_ens_v2_entry_owner_pkey";
+    let (database, pool) = database().await?;
+    let result = async {
+        let mut connection = pool.acquire().await?;
+        let tree = Tree::of(SMALL);
+        install(&mut connection, tree).await?;
+        change_registry(&mut connection, tree, Route::Created, 10, 0).await?;
+        change_registry(&mut connection, tree, Route::Evidence, 10, 1).await?;
+        raw_sql("ANALYZE").execute(&mut *connection).await?;
+        prepare_statements(&mut connection).await?;
+        let mut failures = Vec::new();
+        for mode in PLAN_MODES {
+            set_mode(&mut connection, mode).await?;
+            let run = run(&mut connection, "path_work", 10).await?;
+            let before = run_before(&mut connection, 10).await?;
+            ensure!(
+                !run.selected.is_empty() && run.selected == before,
+                "{mode}: the statement selects {} names, the one before the probes {}",
+                run.selected.len(),
+                before.len()
+            );
+            let mut scans = Vec::new();
+            executed_scans(&run.plan["Plan"], "", &mut scans);
+            for (cte, table, alias, indexes) in [
+                ("mounts", EVENTS, "pointer", &[STATE_KEY_INDEX][..]),
+                ("mounts", ENTRIES, "entry", &[ENTRY_RESOURCE, ENTRY_KEY][..]),
+                ("mounts", EVENTS, "origin", &[RESOURCE_HISTORY][..]),
+                (
+                    "changed_registries",
+                    EVENTS,
+                    "migration",
+                    &[NAME_HISTORY][..],
+                ),
+            ] {
+                let probes: Vec<&Value> = scans
+                    .iter()
+                    .filter(|(under, node)| {
+                        *under == cte
+                            && node["Relation Name"] == table
+                            && node["Alias"]
+                                .as_str()
+                                .is_some_and(|name| name.split('_').next() == Some(alias))
+                    })
+                    .map(|(_, node)| *node)
+                    .collect();
+                if probes.is_empty() {
+                    failures.push(format!("{mode}: {cte} never read {table} {alias}"));
+                }
+                for node in &probes {
+                    if !reads_through(node, indexes) {
+                        failures.push(format!(
+                            "{mode}: {cte} reads {table} {alias} by {} over {:?}, not {indexes:?}",
+                            node["Node Type"],
+                            indexes_read(node)
+                        ));
+                    }
+                }
+                if table == ENTRIES
+                    && !probes
+                        .iter()
+                        .any(|node| reads_through(node, &[ENTRY_RESOURCE]))
+                {
+                    failures.push(format!(
+                        "{mode}: {cte} never read {table} {alias} through {ENTRY_RESOURCE}"
+                    ));
+                }
+            }
+            for (cte, node) in &scans {
+                if node["Node Type"] == "Seq Scan"
+                    && [SURFACES, EVENTS]
+                        .iter()
+                        .any(|table| node["Relation Name"] == *table)
+                {
+                    failures.push(format!(
+                        "{mode}: a sequential scan of {} {} under {cte:?}",
+                        node["Relation Name"], node["Alias"]
+                    ));
+                }
+            }
+        }
+        ensure!(
+            failures.is_empty(),
+            "the access paths of a selection that holds a changed registry:\n{}",
+            failures.join("\n")
+        );
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+// A changed registry that no entry points at moves no name, and neither does an `Upgraded`
+// event that carries no address. The publication holds one of each and nothing else. It selects
+// nothing and reads no name surface.
+#[tokio::test]
+async fn a_changed_registry_no_slot_names_reads_no_surface() -> Result<()> {
+    let (database, pool) = database().await?;
+    let result = async {
+        let mut connection = pool.acquire().await?;
+        install(&mut connection, Tree::of(SMALL)).await?;
+        raw_sql(&format!(
+            "INSERT INTO normalized_events (event_identity, namespace, event_kind,
+                 source_family, manifest_version, chain_id, block_number, block_hash,
+                 derivation_kind, canonicality_state, after_state)
+             SELECT identity, 'ens', kind, 'ens_v2_registry_l1', 1, '{CHAIN}', 10, '{hash}',
+                    'ens_v2_registry_resource_surface', 'canonical', after
+             FROM (VALUES
+                 ('unmounted', 'RegistryCreated',
+                  jsonb_build_object('registry', '0x' || repeat('d', 40))),
+                 ('addressless', 'Upgraded', '{{}}'::jsonb)
+             ) event (identity, kind, after);
+             ANALYZE",
+            hash = hash(10),
+        ))
+        .execute(&mut *connection)
+        .await?;
+        prepare_statements(&mut connection).await?;
+        let mut failures = Vec::new();
+        for mode in PLAN_MODES {
+            set_mode(&mut connection, mode).await?;
+            let run = run(&mut connection, "path_work", 10).await?;
+            let before = run_before(&mut connection, 10).await?;
+            ensure!(
+                run.selected.is_empty() && before.is_empty(),
+                "{mode}: selected {:?}, before the probes {before:?}",
+                run.selected
+            );
+            if run.total() != 0 {
+                failures.push(format!(
+                    "{mode}: the statement visits {:?} surfaces of {SMALL}",
+                    run.visited()
+                ));
+            }
+        }
+        ensure!(
+            failures.is_empty(),
+            "a changed registry that no entry points at reads name surfaces:\n{}",
+            failures.join("\n")
+        );
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
 // The statement's cost at scale, run by hand:
 //
 //     PREPARE_COST_SURFACES=100000 cargo test -p bigname-project --lib \
 //         prepare_cost_at_scale -- --ignored --nocapture
 //
-// It prints the execution time, shared buffers and visited surfaces of three publications
-// that each touch 130 names: one with no ENSv2 change, one that also changes 140 entries, and
-// one in which a registry is created instead.
+// It prints the execution time, shared buffers and visited surfaces of six publications. Three
+// each touch 130 names: one with no ENSv2 change, one that also changes 140 entries, and one in
+// which a registry is created instead. Three change nothing but a registry: one upgraded, one
+// announced, and one held by the ENSv1→ENSv2 migration evidence of a touched name's parent.
 #[tokio::test]
 #[ignore = "measurement; run by hand"]
 async fn prepare_cost_at_scale() -> Result<()> {
@@ -857,9 +1238,18 @@ async fn prepare_cost_at_scale() -> Result<()> {
             };
             stimulate(&mut connection, tree, stimulus).await?;
         }
+        let mut publications: Vec<(&str, i64)> = publications
+            .into_iter()
+            .map(|(label, block, ..)| (label, block))
+            .collect();
+        // Blocks below the three publications above, and names none of them touches.
+        for (block, (route, label)) in (6..).zip(ROUTES).skip(1) {
+            change_registry(&mut connection, tree, route, block, 100 + block).await?;
+            publications.push((label, block));
+        }
         raw_sql("ANALYZE").execute(&mut *connection).await?;
         prepare_statements(&mut connection).await?;
-        for (label, block, ..) in publications {
+        for (label, block) in publications {
             for mode in PLAN_MODES {
                 set_mode(&mut connection, mode).await?;
                 // The second run reads warm buffers.

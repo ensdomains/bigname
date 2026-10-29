@@ -1368,14 +1368,15 @@ its value map:
   `source=verified` is unaffected by
   indexed coverage. For retained non-API diagnostic comparisons, an unsupported
   inventory compares as `unsupported`, never as a retained entry value.
-  A name whose current ENSv2 resolver is a declared
+  A name whose current ENSv2 or ENSv1 resolver is a declared
   [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
   keeps that mirror as `data.resolver`, and its indexed `records` and
   `include=inventory` come from the ENSv1 resolver the mirror's registry walk
   selects at the name's own node, read for the queried node exactly as Project
   derived it ([`projections.md`](projections.md#resolver-and-records)); the
   response shape does not change. When no consulted node has a projected
-  resolver, or the walk's nearest resolver belongs to an ancestor, the
+  resolver, the walk's nearest resolver belongs to an ancestor, or an ENSv1
+  name's own registry resolver is the mirror itself, the
   inventory is unsupported with `mirrored_resolver_not_projected`: explicit
   indexed keys answer `unsupported` with that reason, a request without `keys`
   returns `records: {}` because the row names no keys, and `source=auto` with
