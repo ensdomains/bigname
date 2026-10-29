@@ -803,10 +803,12 @@ async fn ra3_a_verified_read_of_a_registry_clear_is_not_stale() -> Result<()> {
     Ok(())
 }
 
-/// Row A4: as A3, read with `source=auto`. The registry clear serves no resolver, so the indexed
-/// answer is `not_found` and the read never reaches the chain, with no `409 stale`.
+/// Row A4: as A3, read with `source=auto`. Project composes the registry clear into the row, so
+/// the request-time fill sees no pointer on either side and stays out. The stored row does not
+/// tell a pointer written to zero from one never seen, so the index cannot answer `not_found`
+/// for the requested key and the read goes to the chain, which finds no resolver.
 #[tokio::test]
-async fn ra4_an_auto_read_of_a_registry_clear_answers_from_the_index() -> Result<()> {
+async fn ra4_an_auto_read_of_a_registry_clear_asks_the_chain() -> Result<()> {
     let database = published(vec![pointer(lease_node(), ZERO)?], &[1]).await?;
     let (status, body, read_chain) = with_chain(
         &database,
@@ -817,12 +819,12 @@ async fn ra4_an_auto_read_of_a_registry_clear_answers_from_the_index() -> Result
     database.cleanup().await?;
     assert_eq!(status, StatusCode::OK, "{body:#}");
     assert!(body["data"]["resolver"].is_null(), "{body:#}");
-    assert_eq!(
-        body["data"]["records"]["text:name"]["status"], "not_found",
+    assert_ne!(
+        body["data"]["records"]["text:name"]["status"], "ok",
         "{body:#}"
     );
-    assert_eq!(body["meta"]["source"], "indexed", "{body:#}");
-    assert!(!read_chain);
+    assert_eq!(body["meta"]["source"], "verified", "{body:#}");
+    assert!(read_chain);
     Ok(())
 }
 
