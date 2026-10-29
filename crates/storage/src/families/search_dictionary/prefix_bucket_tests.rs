@@ -81,7 +81,8 @@ async fn dense_prefix_walks_read_only_their_bucket() -> Result<()> {
 
 fn cases() -> Vec<Case> {
     vec![
-        // 600 names sort before the `a` bucket in both classes. The 100 `ab` names lead it.
+        // The 600 digit-led names of each class sort before the `a` bucket, and in byte order
+        // the 1,100 `_xy` names do too. The 100 `ab` names lead it.
         prefix_case("prefix a", "a"),
         prefix_case("prefix al", "al"),
         prefix_case("prefix ali", "ali"),
@@ -109,8 +110,9 @@ fn cases() -> Vec<Case> {
         },
         // 300 basenames names lead the `z` bucket of an ens-only search.
         prefix_case("prefix z, ens only", "z"),
-        // Characters of two UTF-8 bytes: the bucket counts characters. The 100 `ó` names share
-        // the first byte of `ñ`.
+        // Characters of two UTF-8 bytes: the bucket counts characters. The 100 `é` names of
+        // each class share the first byte of `ñ` (C3) and sort before it, in byte order and
+        // under glibc, so a bucket of bytes would return them on the first `ñ` page.
         prefix_case("prefix ñ, two-byte character", "ñ"),
         prefix_case("prefix ñüé, two-byte characters", "ñüé"),
         prefix_case("prefix ñüé0, two-byte characters past the bucket", "ñüé0"),
@@ -624,7 +626,7 @@ async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
                      (10, 'zb', 1, 1100, 1, 'ens', ARRAY[0, 1], true),
                      (11, 'alic', 1, 40, 25, 'basenames', ARRAY[0, 1], true),
                      (12, 'ñüé', 1, 1100, 1, 'ens', ARRAY[0, 1], true),
-                     (13, 'óa', 1, 100, 1, 'ens', ARRAY[0, 1], true),
+                     (13, 'éa', 1, 100, 1, 'ens', ARRAY[0, 1], true),
                      (14, '_xy', 1, 1100, 1, 'ens', ARRAY[0, 1], true)
                  ) spec (ordinal, stem, low, high, stride, namespace, classes, supported),
                  generate_series(low, high) i,
