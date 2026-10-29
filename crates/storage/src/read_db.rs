@@ -59,15 +59,44 @@ impl<'a> ReadDb<'a> {
 /// transaction, whose snapshot is taken at its first statement.
 pub async fn begin_read_snapshot(pool: &PgPool) -> Result<Transaction<'static, Postgres>> {
     crate::families::name::seams::before_snapshot().await;
-    let mut transaction = pool
-        .begin()
-        .await
-        .context("failed to begin a read snapshot")?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        .execute(&mut *transaction)
-        .await
-        .context("failed to pin the read to one snapshot")?;
+    let mut transaction = begin(pool).await?;
+    let pinned = sqlx::query(PIN).execute(&mut *transaction).await;
+    if let Err(error) = pinned {
+        if !ran_after_a_statement(&error) {
+            return Err(error).context(PIN_FAILED);
+        }
+        // The connection came with a transaction an earlier request left open, and a statement
+        // had run in it (`crate::serving_pool`). The rollback ends that transaction. The read
+        // starts again once. The acquire check should have ended it first, so this warns.
+        transaction
+            .rollback()
+            .await
+            .context("failed to end a transaction left open on a pooled connection")?;
+        tracing::warn!("{}", crate::serving_pool::ROLLED_BACK_LEFT_OPEN);
+        transaction = begin(pool).await?;
+        sqlx::query(PIN)
+            .execute(&mut *transaction)
+            .await
+            .context(PIN_FAILED)?;
+    }
     Ok(transaction)
+}
+
+const PIN: &str = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY";
+const PIN_FAILED: &str = "failed to pin the read to one snapshot";
+
+async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres>> {
+    pool.begin()
+        .await
+        .context("failed to begin a read snapshot")
+}
+
+/// SQLSTATE 25001: `SET TRANSACTION ISOLATION LEVEL` after a statement of the same transaction.
+fn ran_after_a_statement(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|error| error.code())
+        .is_some_and(|code| code == "25001")
 }
 
 pub(crate) enum ReadConn<'a> {
