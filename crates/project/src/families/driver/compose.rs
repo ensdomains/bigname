@@ -58,7 +58,6 @@ impl Run<'_> {
         outcome: &mut FamilyOutcome,
     ) -> Result<Option<Record>> {
         let mut record = record.clone();
-        workers::require_pool(self.chain_id, self.pool, self.options.compose_workers)?;
         let Some(pass) = family.current.clone() else {
             // Nothing was applied in a range, so there is nothing to compose.
             let mut transaction = self.fenced(family, &record, revision).await?;
