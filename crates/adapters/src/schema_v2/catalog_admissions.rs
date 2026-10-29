@@ -20,6 +20,7 @@ pub(super) struct Admissions {
     by_role: HashMap<String, BTreeSet<usize>>,
     by_observation: HashMap<RetirementKey, BTreeSet<usize>>,
     next_id: usize,
+    generation: u64,
 }
 
 impl Admissions {
@@ -60,6 +61,25 @@ impl Admissions {
         ids: Option<&'a BTreeSet<usize>>,
     ) -> impl Iterator<Item = &'a AddressAdmissionInput> {
         ids.into_iter().flatten().map(|id| &self.entries[id])
+    }
+
+    /// Admits a discovered address, replacing the live entries of its discovery observation.
+    /// Counts a new generation only when no equal entry was live: re-admitting one is a no-op.
+    pub(super) fn admit(&mut self, admission: AddressAdmissionInput) {
+        let known = self
+            .for_address(&admission.address)
+            .any(|live| *live == admission);
+        if let Some((edge_kind, from, observation_key)) = retirement_key(&admission) {
+            self.retire(&edge_kind, from, &observation_key);
+        }
+        self.push(admission);
+        if !known {
+            self.generation += 1;
+        }
+    }
+
+    pub(super) fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub(super) fn push(&mut self, admission: AddressAdmissionInput) {

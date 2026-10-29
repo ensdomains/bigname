@@ -139,68 +139,63 @@ fn interpret_once(
     committed_state.begin_batch();
     let mut unselected = Vec::new();
     for block in blocks {
-        let mut block_output = BatchOutput::default();
         let mut block_raw_logs = Vec::new();
-        let mut deferred = Vec::new();
-        let mut recovered_events = false;
-        let first_migration_observation = migration_observations.len();
-        let mut block_state = committed_state.clone();
-        crate::schema_v2::settle_block_boundary(
-            catalog,
-            block,
-            &mut block_state,
-            &mut block_output,
-        )?;
-        // A discovery observation admits its target from its own block, which includes the
-        // target's earlier logs in that block (an ERC-1967 proxy announces its implementation
-        // during construction, before any registry can point at it). Interpret those logs as
-        // soon as a log records the admitting discovery edge, before any later log of the block,
-        // so a later log of the same emitter reads the state they leave.
         while raw_logs.peek().is_some_and(|raw| {
             raw.block_number == block.block_number && raw.block_hash == block.block_hash
         }) {
             block_raw_logs.push(raw_logs.next().expect("peeked raw log"));
-            let raw = block_raw_logs.last().expect("collected raw log");
-            let edges = block_output.discovery_edges.len();
-            if !interpret_raw(
+        }
+        let first_migration_observation = migration_observations.len();
+        #[cfg(test)]
+        let mut passes = 0_usize;
+        // A discovery observation admits its target from its own block, which includes the
+        // target's earlier logs in that block (an ERC-1967 proxy announces its implementation
+        // during construction, before any registry can point at it). When a pass admits a new
+        // entry, discard it and interpret the whole block again in log order with the larger
+        // catalog, until a pass admits nothing new. Admissions only grow within a block and
+        // re-admitting an entry adds nothing, so every pass but the last adds an entry.
+        let (mut block_state, mut block_output, unselected_in_block, self_targets) = loop {
+            #[cfg(test)]
+            {
+                passes += 1;
+                assert!(
+                    passes <= block_raw_logs.len() + 1,
+                    "block {} took more passes than it has logs",
+                    block.block_number
+                );
+                note_block_pass(block.block_number, passes);
+            }
+            let generation = catalog.admission_generation();
+            migration_observations.truncate(first_migration_observation);
+            let mut block_output = BatchOutput::default();
+            let mut block_state = committed_state.clone();
+            let mut self_targets = Vec::new();
+            crate::schema_v2::settle_block_boundary(
                 catalog,
-                raw,
+                block,
                 &mut block_state,
                 &mut block_output,
-                &mut migration_observations,
-                &transactions,
-            )? {
-                deferred.push(block_raw_logs.len() - 1);
-            } else if block_output.discovery_edges.len() > edges && !deferred.is_empty() {
-                recovered_events |= recover_admitted(
+            )?;
+            let mut unselected_in_block = Vec::new();
+            for raw in &block_raw_logs {
+                if !interpret_raw(
                     catalog,
-                    &block_raw_logs,
-                    &mut deferred,
+                    raw,
                     &mut block_state,
                     &mut block_output,
                     &mut migration_observations,
                     &transactions,
-                )?;
+                    &mut self_targets,
+                )? {
+                    unselected_in_block.push(raw);
+                }
             }
-        }
-        if !deferred.is_empty() {
-            recovered_events |= recover_admitted(
-                catalog,
-                &block_raw_logs,
-                &mut deferred,
-                &mut block_state,
-                &mut block_output,
-                &mut migration_observations,
-                &transactions,
-            )?;
-            unselected.extend(deferred.iter().map(|&index| block_raw_logs[index].clone()));
-        }
-        // Restore chain order so stream-chained before-states follow log order rather than
-        // interpretation order.
-        if recovered_events {
-            block_output
-                .normalized_events
-                .sort_by_key(|event| (event.transaction_index, event.log_index));
+            if catalog.admission_generation() == generation {
+                break (block_state, block_output, unselected_in_block, self_targets);
+            }
+        };
+        for self_target in &self_targets {
+            self_target.warn();
         }
         crate::schema_v2::protocol::reconcile_block(
             catalog,
@@ -213,6 +208,7 @@ fn interpret_once(
         )?;
         committed_state = block_state;
         append_output(&mut output, block_output);
+        unselected.extend(unselected_in_block.into_iter().cloned());
     }
     if let Some(raw) = raw_logs.next() {
         bail!(
@@ -234,48 +230,6 @@ fn interpret_once(
     crate::schema_v2::identity::compact_reserved_label_preimages(&mut output)?;
     crate::schema_v2::migration::correlate(catalog, migration_observations, &mut output)?;
     Ok(output)
-}
-
-/// Interprets the deferred logs of the block that the catalog now selects, from the lowest log
-/// index up. Returns whether they wrote normalized events.
-fn recover_admitted(
-    catalog: &mut Catalog,
-    block_raw_logs: &[RawLogInput],
-    deferred: &mut Vec<usize>,
-    state: &mut State,
-    output: &mut BatchOutput,
-    migration_observations: &mut Vec<crate::schema_v2::protocol::MigrationObservation>,
-    transactions: &TransactionIndex,
-) -> anyhow::Result<bool> {
-    let first_event = output.normalized_events.len();
-    let mut position = 0;
-    // A deferred log that records an edge restarts the scan at the lowest deferred log, so an
-    // admission it makes cannot let a later deferred log run before an earlier one. Each restart
-    // follows a consumed log. No current adapter admits a different emitter from a deferred log:
-    // discovery.rs:57 and :109 admit the emitter itself, :355 the emitter or the proxy of a
-    // declared migration factory, and :249 is unreachable from a valid manifest. So no current
-    // adapter can make a restart change the result.
-    // `a_log_of_an_emitter_admitted_in_a_later_block_stays_held` executes it with `position`
-    // already 0.
-    while let Some(&index) = deferred.get(position) {
-        let edges = output.discovery_edges.len();
-        if !interpret_raw(
-            catalog,
-            &block_raw_logs[index],
-            state,
-            output,
-            migration_observations,
-            transactions,
-        )? {
-            position += 1;
-            continue;
-        }
-        deferred.remove(position);
-        if output.discovery_edges.len() > edges {
-            position = 0;
-        }
-    }
-    Ok(output.normalized_events.len() > first_event)
 }
 
 /// Discovery is forward-only and performs no lookback: a log from an address admitted later in
@@ -310,4 +264,28 @@ fn record_pre_admission_skips(
             inconsistency_site: None,
         });
     }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static BLOCK_PASSES: std::cell::RefCell<std::collections::BTreeMap<i64, usize>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+#[cfg(test)]
+fn note_block_pass(block_number: i64, passes: usize) {
+    BLOCK_PASSES.with_borrow_mut(|blocks| {
+        blocks.insert(block_number, passes);
+    });
+}
+
+/// The passes the latest interpretation of each block took on this thread.
+#[cfg(test)]
+pub(in crate::schema_v2) fn block_passes() -> std::collections::BTreeMap<i64, usize> {
+    BLOCK_PASSES.with_borrow(Clone::clone)
+}
+
+#[cfg(test)]
+pub(in crate::schema_v2) fn reset_block_passes() {
+    BLOCK_PASSES.with_borrow_mut(std::collections::BTreeMap::clear);
 }

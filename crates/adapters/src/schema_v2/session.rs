@@ -1,6 +1,8 @@
 #[path = "session_interpret.rs"]
 mod interpret;
 use interpret::interpret_loaded;
+#[cfg(test)]
+pub(super) use interpret::{block_passes, reset_block_passes};
 #[path = "session_transaction.rs"]
 mod transaction;
 #[path = "session_wrapper.rs"]
@@ -413,6 +415,7 @@ fn interpret_raw(
     output: &mut BatchOutput,
     migration_observations: &mut Vec<super::protocol::MigrationObservation>,
     transactions: &TransactionIndex,
+    self_targets: &mut Vec<super::discovery::SelfTarget>,
 ) -> anyhow::Result<bool> {
     let Some(selected) = catalog.select(raw)? else {
         return Ok(false);
@@ -507,6 +510,7 @@ fn interpret_raw(
         interpreted.discovery,
         state,
         output,
+        self_targets,
     )?;
     if let Some(migration_source) = registrar_migration_source {
         migration_observations.extend(interpreted.migration_observations);

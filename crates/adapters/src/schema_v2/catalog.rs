@@ -298,14 +298,12 @@ impl Catalog {
     }
 
     pub(super) fn admit(&mut self, admission: AddressAdmissionInput) {
-        if let (Some(edge_kind), Some(from), Some(observation_key)) = (
-            admission.discovery_edge_kind.as_deref(),
-            admission.discovery_from_contract_instance_id,
-            admission.discovery_observation_key.as_deref(),
-        ) {
-            self.retire(edge_kind, from, observation_key);
-        }
-        self.admissions.push(admission);
+        self.admissions.admit(admission);
+    }
+
+    /// Grows only when an admission adds an entry the catalog did not hold.
+    pub(super) fn admission_generation(&self) -> u64 {
+        self.admissions.generation()
     }
 
     pub(super) fn retire(&mut self, edge_kind: &str, from: Uuid, observation_key: &str) {
