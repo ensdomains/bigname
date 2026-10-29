@@ -5050,3 +5050,104 @@ inputs of neither.
   `install.sql` rebuilds them.
 - It adds no table, manifest or setting. The manifest-authority
   fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## Prefix bucket indexes for search
+
+The build that bounds a short-prefix `GET /v1/search` by its page changes how a dense class
+reads its candidates. A dense class is a [search document](storage.md#durable-search-data)
+class whose postings exceed 1,024 for every term of the prefix.
+
+- Before, such a class walked the whole name order from its first entry, or from the
+  cursor, and filtered each entry by the prefix. A one- or two-character prefix read every
+  name that sorts before it on the first page.
+- It now reads the bucket of the first one, two or three characters of the prefix, from
+  the cursor, in page order, and stops at the page limit. A longer prefix reads the
+  three-character bucket and filters it. The statements are
+  `storage:families.name.search_candidates.prefix1` to `prefix3`
+  ([table ownership](storage.md#table-ownership)).
+- Contains and exact searches, and prefixes with a term of 1,024 postings or fewer, read
+  as before. Responses, their order and their cursors do not change.
+- Neither content hash rotates. `crates/storage/src/families/search_dictionary.rs` and
+  `search_dictionary/candidates.rs` are serving reads outside both hashes, and the baselines
+  and schema-migrations are inputs of neither. No redo is needed. The change ships as an
+  API image swap plus the schema-migration.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Schema-migration `20261029120000_search_prefix_bucket_indexes.sql` installs three read-only
+btree indexes on `name_search_documents`. An index that already exists under its name, with
+the reviewed definition, is adopted without a build and without a lock on the table. A
+missing index is built with an ordinary `CREATE INDEX`, which holds a SHARE lock on
+`name_search_documents` until the schema-migration commits and blocks Interpret's writes to
+it. Apply the schema-migration with the phase runner, redo processes and API stopped, with
+the same `lock_timeout`, `statement_timeout` and retry procedure as the other index
+schema-migrations and `--target-version 20261029120000`.
+
+On a large initialized database, prebuild the indexes concurrently first, outside a
+transaction. The phase runner and API can keep running while they build, and the new API
+image reads them as soon as it serves. The schema-migration then finds them by name and
+skips the builds:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_search_documents_prefix1_idx
+    ON bigname_phase.name_search_documents
+    (spelling_class, left(name, 1), name, namespace, namehash)
+    WHERE spelling_class IN (0, 1);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_search_documents_prefix2_idx
+    ON bigname_phase.name_search_documents
+    (spelling_class, left(name, 2), name, namespace, namehash)
+    WHERE spelling_class IN (0, 1);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_search_documents_prefix3_idx
+    ON bigname_phase.name_search_documents
+    (spelling_class, left(name, 3), name, namespace, namehash)
+    WHERE spelling_class IN (0, 1);
+```
+
+`IF NOT EXISTS` matches the index name only. An interrupted concurrent build leaves an
+invalid index. The schema-migration checks all three names before its own builds and again
+after them. It refuses a name that is not an index, is on another table, is not valid and
+ready, or has another definition, and its error names the index. Check the same things
+yourself after each concurrent build, so the schema-migration does not stop inside the
+maintenance window:
+
+```sql
+SET search_path = pg_catalog;
+SELECT c.relname, c.relkind, i.indrelid::regclass, i.indisvalid, i.indisready,
+       pg_get_indexdef(i.indexrelid)
+FROM pg_class AS c
+LEFT JOIN pg_index AS i ON i.indexrelid = c.oid
+WHERE c.relnamespace = 'bigname_phase'::regnamespace
+  AND c.relname IN (
+      'name_search_documents_prefix1_idx',
+      'name_search_documents_prefix2_idx',
+      'name_search_documents_prefix3_idx');
+RESET search_path;
+```
+
+It must return three rows. Each has `relkind` `i`, `indrelid`
+`bigname_phase.name_search_documents`, and `indisvalid` and `indisready` true. The
+definitions must be exactly these lines, which are the text the schema-migration compares:
+
+```text
+CREATE INDEX name_search_documents_prefix1_idx ON bigname_phase.name_search_documents USING btree (spelling_class, "left"(name, 1), name, namespace, namehash) WHERE (spelling_class = ANY (ARRAY[0, 1]))
+CREATE INDEX name_search_documents_prefix2_idx ON bigname_phase.name_search_documents USING btree (spelling_class, "left"(name, 2), name, namespace, namehash) WHERE (spelling_class = ANY (ARRAY[0, 1]))
+CREATE INDEX name_search_documents_prefix3_idx ON bigname_phase.name_search_documents USING btree (spelling_class, "left"(name, 3), name, namespace, namehash) WHERE (spelling_class = ANY (ARRAY[0, 1]))
+```
+
+A missing index has no row. The schema-migration then builds it under the SHARE lock, so
+build it concurrently first.
+
+The remedy depends on the refusal:
+
+- A name that is not an index: remove or rename that relation, then build the index.
+- An index of the name on another table, or one that is not valid and ready: drop it with
+  `DROP INDEX CONCURRENTLY bigname_phase.<index name>`, then build it again with the
+  statement above.
+- Another definition: the error prints the definition it found and the one it expects.
+  Drop the index the same way and build it again with the statement above.
+
+Before any drop, confirm in `pg_stat_progress_create_index` that no build of the index is
+still running. Then run the schema-migrations again.
+
+Interpret and the verified label-preimage importer write three more btree entries for each
+raw-backed or structural search document of at most 2000 bytes they insert or change.

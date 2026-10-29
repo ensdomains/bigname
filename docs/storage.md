@@ -704,6 +704,23 @@ Family indexes serve these concrete readers:
   can reach its rows through the same index when the statement names the namespace. With no
   such surface the cost is those probes. The cost of rendering before `LIMIT` with a large
   population of such surfaces has not been measured.
+- A prefix search over a class of [search documents](#durable-search-data) with more than
+  1,024 postings for every term of the prefix reads `name_search_documents`, one statement
+  per bucket length (`storage:families.name.search_candidates.prefix1` to `prefix3`). Each
+  walks `name_search_documents_prefix{k}_idx`, `(spelling_class, left(name, k), name,
+  namespace, namehash)` over the raw-backed and short structural classes. Equality on the
+  class and on the first `k` characters of the prefix leaves the entries in page order under
+  the database collation, so the keyset cursor is the start key and the page limit stops the
+  walk. Every index condition is a plain equality or the cursor, so a generic plan can take
+  the same path. That bounds what a short prefix reads by the page, not by the names that
+  sort before it. A prefix of four or more characters reads the three-character bucket and
+  filters it by the prefix. A class with at most 1,024 postings for some term reads its
+  matching documents by id instead. A contains or exact search over a raw-backed or short
+  structural class with more than 1,024 postings for every term walks
+  `name_surfaces_name_order_idx` (raw-backed) or `name_search_documents_structural_order_idx`
+  (short structural) in name order, as before. The long structural class, names over 2000
+  bytes, reads every posting id of its first term in that state, in any match mode, and then
+  those documents by id.
 - The address-names walk (`storage:families.records.address_name_walk`) orders one address's
   candidate names, read from `project_address_name_index` by its primary key, by their sort
   key: the `name_surfaces` and `project_name_summary` primary keys, one probe per candidate,
@@ -772,6 +789,16 @@ row:
 | Index | Serves |
 | --- | --- |
 | `name_surfaces_name_order_idx` | `storage:families.name.search_candidates`: readable surfaces in name order after the keyset cursor |
+
+Interpret and the verified label-preimage importer write `name_search_documents`. The
+API's prefix search adds three read-only indexes on it, installed by the identity baseline
+and `20261029120000_search_prefix_bucket_indexes.sql` and changing no row:
+
+| Index | Serves |
+| --- | --- |
+| `name_search_documents_prefix1_idx` | `storage:families.name.search_candidates.prefix1`: a dense class's one-character prefix bucket in name order after the keyset cursor |
+| `name_search_documents_prefix2_idx` | `storage:families.name.search_candidates.prefix2`: the same for a two-character prefix |
+| `name_search_documents_prefix3_idx` | `storage:families.name.search_candidates.prefix3`: the same for a prefix of three or more characters, filtered by the whole prefix |
 
 The same reader, `storage:families.records.reverse_candidates` and Project's raw-name sweep
 (`project:families.derived.summary_raw_name_sweep`) also read
