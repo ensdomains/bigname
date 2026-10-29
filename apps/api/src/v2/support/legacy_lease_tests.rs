@@ -240,6 +240,19 @@ fn a_release_without_an_expiry_writes_no_lease_expiry() {
 }
 
 #[test]
+fn a_lease_expiry_at_the_signed_maximum_fills_no_grace_end() {
+    let mut summary = registry_only_summary();
+    summary["registration"]["expiry"] = Value::Null;
+    summary["registration"]["grace_ends_at"] = Value::Null;
+    let events = vec![event("RegistrationGranted", 130, LEASE, Some(i64::MAX))];
+    assert!(heal(&mut summary, &events));
+    let registration = &summary["registration"];
+    assert_eq!(registration["ens_v1_expiry"], json!(i64::MAX.to_string()));
+    assert_eq!(registration["expiry"], json!(i64::MAX.to_string()));
+    assert_eq!(registration["grace_ends_at"], Value::Null);
+}
+
+#[test]
 fn a_lease_in_grace_keeps_the_composed_status() {
     let mut summary = registry_only_summary();
     summary["registration"]["expiry"] = json!("1690000000");

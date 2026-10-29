@@ -31,9 +31,23 @@ const SHARED_DETAIL_FIELDS: &[&str] = &[
     "network",
 ];
 
+/// The fields name detail fills from a lease the stored registration does not carry. Lookup
+/// serves the stored registration, so they are the read-time fill's limit on parity
+/// (`registered_at` in `docs/api-v1.md`).
+const LEASE_FILL_FIELDS: &[&str] =
+    &["registration_id", "registered_at", "expires_at", "grace_ends_at"];
+
 async fn assert_lookup_detail_matches_name_detail(
     database: &TestDatabase,
     name: &str,
+) -> Result<Value> {
+    assert_lookup_detail_matches_name_detail_except(database, name, &[]).await
+}
+
+async fn assert_lookup_detail_matches_name_detail_except(
+    database: &TestDatabase,
+    name: &str,
+    filled: &[&str],
 ) -> Result<Value> {
     let detail = v2_name_record_payload_for_database(database, &format!("/v1/names/{name}")).await?;
     let batch = v2_lookup_json(
@@ -44,6 +58,18 @@ async fn assert_lookup_detail_matches_name_detail(
     let result = &batch["data"][0];
     let record = &result["record"];
     for field in SHARED_DETAIL_FIELDS {
+        if filled.contains(field) {
+            assert!(
+                detail["data"].get(*field).is_some_and(|value| !value.is_null()),
+                "{name}: name detail fills `{field}`\ndetail: {}",
+                detail["data"]
+            );
+            assert!(
+                record.get(*field).is_none_or(Value::is_null),
+                "{name}: lookup serves the stored `{field}`\nlookup: {record}"
+            );
+            continue;
+        }
         assert_eq!(
             record.get(*field),
             detail["data"].get(*field),
@@ -147,10 +173,17 @@ async fn lookup_detail_status_matches_name_detail_with_a_historical_arm_and_no_b
 
 #[tokio::test]
 async fn lookup_detail_status_matches_name_detail_for_wrapped_and_ownerless_names() -> Result<()> {
-    for state in [AliceInputState::Wrapped, AliceInputState::Ownerless] {
+    // The ownerless registration holds no lease, so name detail serves the lease its registrar
+    // grant proves and lookup serves the stored registration. That divergence is the read-time
+    // fill's limit, until the stored registration carries the lease.
+    for (state, filled) in [
+        (AliceInputState::Wrapped, &[][..]),
+        (AliceInputState::Ownerless, LEASE_FILL_FIELDS),
+    ] {
         let database = TestDatabase::new_migrated().await?;
         seed_alice_state_inputs(&database, state).await?;
-        let detail = assert_lookup_detail_matches_name_detail(&database, "alice.eth").await?;
+        let detail =
+            assert_lookup_detail_matches_name_detail_except(&database, "alice.eth", filled).await?;
         assert_eq!(detail["read_status"], json!("ok"), "{detail}");
         database.cleanup().await?;
     }

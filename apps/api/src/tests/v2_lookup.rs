@@ -3133,8 +3133,10 @@ async fn v2_lookup_json(database: &TestDatabase, body: Value) -> Result<Value> {
 
 async fn v2_get_json(database: &TestDatabase, uri: &str) -> Result<Value> {
     let response = v2_get_response(database, uri).await?;
-    assert_eq!(response.status(), StatusCode::OK);
-    read_json(response).await
+    let status = response.status();
+    let payload = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response from {uri}: {payload:#}");
+    Ok(payload)
 }
 
 async fn v2_get_response(database: &TestDatabase, uri: &str) -> Result<Response<Body>> {
