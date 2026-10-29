@@ -5,13 +5,13 @@
 //! limit, so it reads only the bucket's entries up to its last returned candidate. A prefix
 //! longer than the last bucket walks that bucket and filters by its `LIKE`.
 //!
-//! The tests call `load` itself. In one transaction per call they count the rows it fetched
-//! from `name_search_documents` and `name_surfaces`, and they find the statements it executed
-//! in `pg_prepared_statements`. Each bucket statement it prepared is then explained under both
-//! plan modes. Sorts are off to stand in for a large table, as in `name_order_plan_tests.rs`.
-//! So the plan assertions prove that the ordered path exists, not that the planner picks it at
-//! real costs. The staging measurement covers that choice. The number of
-//! buckets is read from the bucket indexes the identity baseline installs.
+//! The tests call `load` itself. In one transaction per call they count the entries it read
+//! from the bucket indexes and the rows it read from `name_surfaces`, and they find the
+//! statements it executed in `pg_prepared_statements`. Each bucket statement it prepared is
+//! then explained under both plan modes. Sorts are off to stand in for a large table, as in
+//! `name_order_plan_tests.rs`. So the plan assertions prove that the ordered path exists, not
+//! that the planner picks it at real costs. The staging measurement covers that choice. The
+//! number of buckets is read from the bucket indexes the identity baseline installs.
 //!
 //! Expected rows, orders and walk lengths come from SQL over the fixture, never from the
 //! statement under test or a Rust ordering, because the database collation decides the order.
@@ -32,6 +32,11 @@ type Candidate = (String, String, String, String);
 type Key = (String, String, String);
 
 const BUCKET_STATEMENTS: &str = "/* storage:families.name.search_candidates.prefix%";
+/// The release line's walks of the raw-backed and short structural classes.
+const WALK_STATEMENTS: [&str; 2] = [
+    "/* storage:families.name.search_candidates */%",
+    "SELECT rendered.logical_name_id, rendered.name, rendered.namespace%",
+];
 
 /// One `load` call. `after` is the key of that row of the same search read without a limit.
 struct Case {
@@ -179,10 +184,11 @@ async fn check_cases(connection: &mut PgConnection, buckets: usize) -> Result<()
             let statement = format!("/* storage:families.name.search_candidates.prefix{k} */%");
 
             let mut transaction = connection.begin().await?;
-            let read_before = rows_fetched(&mut transaction).await?;
+            let read_before = walk_reads(&mut transaction).await?;
             let before = (
                 executions(&mut transaction, &statement).await?,
                 executions(&mut transaction, BUCKET_STATEMENTS).await?,
+                walks(&mut transaction).await?,
             );
             let found = load(
                 &mut transaction,
@@ -200,10 +206,11 @@ async fn check_cases(connection: &mut PgConnection, buckets: usize) -> Result<()
             )
             .await
             .with_context(|| label.clone())?;
-            let fetched = rows_fetched(&mut transaction).await? - read_before;
+            let fetched = walk_reads(&mut transaction).await? - read_before;
             let executed = (
                 executions(&mut transaction, &statement).await? - before.0,
                 executions(&mut transaction, BUCKET_STATEMENTS).await? - before.1,
+                walks(&mut transaction).await? - before.2,
             );
             transaction.rollback().await?;
 
@@ -227,15 +234,16 @@ async fn check_cases(connection: &mut PgConnection, buckets: usize) -> Result<()
                 }
                 continue;
             }
-            // Both dense classes run the bucket statement of length k.
-            if executed != (2, 2) {
+            // Both dense classes run the bucket statement of length k, and neither walk runs.
+            if executed != (2, 2, 0) {
                 failures.push(format!(
-                    "{label}: bucket statement prefix{k} ran {} times, any bucket statement {}",
-                    executed.0, executed.1
+                    "{label}: bucket statement prefix{k} ran {} times, any bucket statement {}, \
+                     the walks {}",
+                    executed.0, executed.1, executed.2
                 ));
             }
-            // Each walked entry fetches its document and at most its surface. The one long
-            // structural document is read by id.
+            // Each walked entry reads its bucket entry and at most its surface. The long
+            // structural class reads by id and only its surface counts.
             let mut walked = 0;
             for class in [0, 1] {
                 walked += walk_length(connection, &case, after.as_ref(), k, class).await?;
@@ -283,7 +291,8 @@ async fn check_cursor_walk(connection: &mut PgConnection, buckets: usize) -> Res
         loop {
             let after = walked.last().map(key);
             let mut transaction = connection.begin().await?;
-            let read_before = rows_fetched(&mut transaction).await?;
+            let read_before = walk_reads(&mut transaction).await?;
+            let walks_before = walks(&mut transaction).await?;
             let batch = load(
                 &mut transaction,
                 &filter(&case),
@@ -294,8 +303,13 @@ async fn check_cursor_walk(connection: &mut PgConnection, buckets: usize) -> Res
                 false,
             )
             .await?;
-            let fetched = rows_fetched(&mut transaction).await? - read_before;
+            let fetched = walk_reads(&mut transaction).await? - read_before;
+            let walked_old = walks(&mut transaction).await? - walks_before;
             transaction.rollback().await?;
+            ensure!(
+                walked_old == 0,
+                "{mode}: a batch after {after:?} ran a walk"
+            );
             let mut bound = 2;
             for class in [0, 1] {
                 bound += 2 * walk_length(connection, &case, after.as_ref(), k, class).await?;
@@ -487,20 +501,43 @@ async fn old_path(
         .await?)
 }
 
-/// Rows this session has read from `name_search_documents` and `name_surfaces` and not yet
-/// reported to shared statistics. From PostgreSQL 15 the `pg_stat_xact_*` views read
-/// those pending counts, which still hold earlier transactions' reads until the session reports
-/// them, at most once a second and only between transactions. A difference taken inside one
-/// transaction is exact.
-async fn rows_fetched(connection: &mut PgConnection) -> Result<i64> {
+/// What the dense walk has read in this session: entries of the bucket indexes, rows of
+/// `name_search_documents` read without an index, and rows of `name_surfaces`. Documents read
+/// through the table's other indexes are left out. In a bucketed call only the long structural
+/// class's by-id statement reads them, as the walks are checked not to run. Under sorts off
+/// that statement, given an empty constant id list in a custom plan, walks a name-ordered
+/// partial index from the cursor to its end: the empty `= ANY` is false, so it implies every
+/// partial predicate, and the ordered walk is then the only plan without a sort. At default
+/// settings its custom plan probes the primary key and reads nothing. Bucket entries are
+/// counted as the index returns them, so a bitmap scan counts too.
+///
+/// From PostgreSQL 15 these per-transaction counts are the session's pending counts, which
+/// still hold earlier transactions' reads until the session reports them, at most once a
+/// second and only between transactions. A difference taken inside one transaction is exact.
+async fn walk_reads(connection: &mut PgConnection) -> Result<i64> {
     Ok(sqlx::query_scalar(
-        "SELECT coalesce(sum(coalesce(seq_tup_read, 0) + coalesce(idx_tup_fetch, 0)), 0)::bigint
-         FROM pg_stat_xact_user_tables
-         WHERE schemaname = 'bigname_phase'
-           AND relname IN ('name_search_documents', 'name_surfaces')",
+        "SELECT ((SELECT coalesce(sum(pg_stat_get_xact_tuples_returned(entry.indexrelid)), 0)
+                 FROM pg_index entry JOIN pg_class relation ON relation.oid = entry.indexrelid
+                 WHERE entry.indrelid = 'bigname_phase.name_search_documents'::regclass
+                   AND relation.relname LIKE 'name\\_search\\_documents\\_prefix%')
+              + (SELECT coalesce(sum(coalesce(seq_tup_read, 0)), 0)
+                 FROM pg_stat_xact_user_tables
+                 WHERE schemaname = 'bigname_phase' AND relname = 'name_search_documents')
+              + (SELECT coalesce(sum(coalesce(seq_tup_read, 0) + coalesce(idx_tup_fetch, 0)), 0)
+                 FROM pg_stat_xact_user_tables
+                 WHERE schemaname = 'bigname_phase' AND relname = 'name_surfaces'))::bigint",
     )
     .fetch_one(connection)
     .await?)
+}
+
+/// Executions of the release line's walks.
+async fn walks(connection: &mut PgConnection) -> Result<i64> {
+    let mut total = 0;
+    for statement in WALK_STATEMENTS {
+        total += executions(&mut *connection, statement).await?;
+    }
+    Ok(total)
 }
 
 /// Executions of the prepared statements whose text matches.
