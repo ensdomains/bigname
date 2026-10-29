@@ -11,7 +11,11 @@ use crate::{
     rpc::{JsonRpcCallError, JsonRpcCallResult, JsonRpcHttpClient},
 };
 
+#[cfg(test)]
+mod destination;
 mod gateway;
+#[cfg(test)]
+pub(crate) use destination::{GatewayRefusalClass, seam};
 #[cfg(test)]
 pub(crate) use gateway::encode_batch_query_for_test;
 
