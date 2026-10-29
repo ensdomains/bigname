@@ -1,6 +1,7 @@
 //! A `.eth` second-level ENSv1 name whose stored registration does not carry its BaseRegistrar
-//! lease serves, on name detail and the records route, the lease its own registrar events prove.
-//! The fill runs at read time on the request's snapshot and persists nothing.
+//! lease serves on name detail the lease its own registrar events prove, and the records route
+//! gates its resolver and records on that filled registration. The fill runs at read time on the
+//! request's snapshot and persists nothing.
 //!
 //! Two composed shapes are filled ([`legacy_lease_shape`]):
 //!
@@ -17,8 +18,8 @@
 //!   lease becomes its identity.
 //!
 //! A name with no such events is served as composed. The fill stands until the stored
-//! registration carries the lease, which the shape check then no longer matches. Lookup, the
-//! list routes, search, address names and subnames serve the stored registration.
+//! registration carries the lease, which the shape check then no longer matches. Every other
+//! route serves the stored registration.
 //!
 //! The API owns these three statements. They are route-specific reads of Interpret's events and
 //! the chain lineage, transitional until the stored registration carries the lease.
@@ -173,11 +174,11 @@ pub(crate) fn heal_registration(
     true
 }
 
-/// [`serve_legacy_lease`] in a savepoint of `conn`'s read transaction. A row that is of neither
+/// [`fill_lease`] in a savepoint of `conn`'s read transaction. A row that is of neither
 /// shape, or whose chain the snapshot does not hold, takes no savepoint. A failed read is logged
 /// and rolled back to the savepoint, so the reads after it still run on the snapshot, and `row`
-/// stays as composed. An error is returned only when the savepoint itself fails, which leaves the
-/// read transaction unusable.
+/// stays as composed. An error is returned only when taking, releasing or rolling back the
+/// savepoint fails, which may leave the read transaction unusable.
 pub(crate) async fn serve_legacy_lease_in_savepoint(
     conn: &mut PgConnection,
     row: &mut NameCurrentRow,
@@ -203,7 +204,6 @@ pub(crate) async fn serve_legacy_lease_in_savepoint(
                     service = "api",
                     name = %row.normalized_name,
                     error = %read_error,
-                    rollback_error = %rollback_error,
                     "legacy lease read failed and its savepoint did not roll back"
                 );
                 return Err(rollback_error.into());
@@ -249,9 +249,8 @@ fn lease_read(row: &NameCurrentRow, selected_snapshot: &SelectedSnapshot) -> Opt
     })
 }
 
-/// Heals `row`'s registration on the snapshot's position on its chain: the unleased shape from the
-/// name's registrar events, the undated shape from its lease's grant. Returns whether the
-/// registration changed.
+/// [`fill_lease`] without a savepoint, for tests that call the fill directly.
+#[cfg(test)]
 pub(crate) async fn serve_legacy_lease(
     conn: &mut PgConnection,
     row: &mut NameCurrentRow,
@@ -263,6 +262,9 @@ pub(crate) async fn serve_legacy_lease(
     fill_lease(conn, row, read).await
 }
 
+/// Heals `row`'s registration on the snapshot's position on its chain: the unleased shape from the
+/// name's registrar events, the undated shape from its lease's grant. Returns whether the
+/// registration changed.
 async fn fill_lease(
     conn: &mut PgConnection,
     row: &mut NameCurrentRow,
