@@ -12,9 +12,9 @@
 //! the planner runs once per outer row and cannot turn into a join over every surface.
 //!
 //! The last step reads the surfaces of the affected names. It counts them first. Up to
-//! `FEW_AFFECTED_NAMES` it reads each surface by primary key in such a subquery. Beyond that
-//! it full-joins the names to the surfaces, which the planner can only hash or merge, so each
-//! side is read once. Only the arm the count picks runs.
+//! `FEW_AFFECTED_NAMES`, 5% of the surfaces, it reads each surface by primary key in such a
+//! subquery. Beyond that it full-joins the names to the surfaces, which the planner can only
+//! hash or merge, so it reads `name_surfaces` in one pass. Only the arm the count picks runs.
 //!
 //! The walk below reaches a registry other than the root only through a slot: an entry whose
 //! `SubregistryChanged` event names the registry. The slots of each registry that changed or
@@ -113,9 +113,22 @@ const POINTER_STATE_KEYS: &str = "array_remove(ARRAY[
             lower(pointer.after_state ->> 'subregistry') || ':00000000'
         ]::text[], NULL)";
 
-/// The most affected names whose surfaces the statement reads one primary-key probe at a time.
-/// Beyond it, the statement reads the surfaces in one pass and joins them to the names.
-pub(super) const FEW_AFFECTED_NAMES: i64 = 10_000;
+/// The most affected names whose surfaces the statement reads one primary-key probe at a time,
+/// as an SQL expression: 5% of the surfaces, the conservative end of the crossover measured
+/// between the two shapes. Beyond it, the statement reads the surfaces in one pass and joins
+/// them to the names.
+///
+/// The surfaces are the planner's row count of `name_surfaces`. A deployment indexes one chain,
+/// so that is the chain's. A table that was never analyzed has no row count, 0 or -1. Then the
+/// surfaces are counted, a million at most: such a table is new, the count is exact up to that
+/// size, and the cap bounds what the count reads. A larger table never analyzed gets a bound
+/// of 50,000 names, which sends selections between that and its crossover to the one pass
+/// sooner. The count runs only on that branch of the CASE.
+pub(super) const FEW_AFFECTED_NAMES: &str = "(SELECT floor(0.05::float8 * CASE
+            WHEN surfaces.reltuples > 0 THEN surfaces.reltuples::float8
+            ELSE (SELECT count(*) FROM (SELECT 1 FROM name_surfaces LIMIT 1000000) counted)::float8
+        END)::bigint
+        FROM pg_class surfaces WHERE surfaces.oid='name_surfaces'::regclass)";
 
 /// The slots of the registry `registry`, an SQL expression of the outer row, as the lateral
 /// `slot`: each entry's key and the registry that holds it, `parent`.
@@ -653,13 +666,13 @@ pub(super) fn statement(normal_work: &str) -> String {
         -- other names' resolution paths.
         SELECT logical_name_id FROM normal
     ), affected_count AS MATERIALIZED (
-        SELECT count(*) AS names FROM affected
+        SELECT count(*) AS names, {FEW_AFFECTED_NAMES} AS few FROM affected
     )
     -- The statement counts the affected names before it reads their surfaces, and the count
     -- picks one of two arms. The other arm's filter is false before it runs, so it reads
-    -- nothing. Up to {FEW_AFFECTED_NAMES} names, each one's surface is read by its primary key.
-    -- The planner's row estimate for `affected` follows every step above it, so a join here
-    -- could read every surface for a few names.
+    -- nothing. Up to `few` names, 5% of the surfaces, each one's surface is read by its
+    -- primary key. The planner's row estimate for `affected` follows every step above it, so a
+    -- join here could read every surface for a few names.
     SELECT readable.logical_name_id FROM affected
     CROSS JOIN LATERAL (
         SELECT surface.logical_name_id FROM name_surfaces surface
@@ -671,13 +684,15 @@ pub(super) fn statement(normal_work: &str) -> String {
           AND lineage.canonicality_state IN ('canonical','safe','finalized')
         OFFSET 0
     ) readable
-    WHERE (SELECT names FROM affected_count) BETWEEN 1 AND {FEW_AFFECTED_NAMES}
+    WHERE (SELECT names BETWEEN 1 AND few FROM affected_count)
     UNION ALL
     -- Beyond that, the names are joined to the surfaces. A full join cannot run as a nested
-    -- loop, so the planner hashes or merges the two sides and reads each once, whatever its
-    -- estimate for `affected`. The last filter keeps the names that have a readable surface,
-    -- and the COALESCE keeps the planner from making the full join an inner one. A name
-    -- appears once in `affected` and every join is by key, so neither arm repeats a name.
+    -- loop, so the planner hashes or merges the two sides and reads `affected` and
+    -- `name_surfaces` once each, whatever its estimate for `affected`. Each readable surface
+    -- still meets `chain_lineage`, which the planner may probe by key once per surface. The
+    -- last filter keeps the names that have a readable surface, and the COALESCE keeps the
+    -- planner from making the full join an inner one. A name appears once in `affected` and
+    -- every join is by key, so neither arm repeats a name.
     SELECT readable.logical_name_id FROM affected
     FULL JOIN (
         SELECT surface.logical_name_id FROM name_surfaces surface
@@ -688,7 +703,7 @@ pub(super) fn statement(normal_work: &str) -> String {
           AND surface.canonicality_state IN ('canonical','safe','finalized')
           AND lineage.canonicality_state IN ('canonical','safe','finalized')
     ) readable ON readable.logical_name_id=affected.logical_name_id
-    WHERE (SELECT names FROM affected_count) > {FEW_AFFECTED_NAMES}
+    WHERE (SELECT names > few FROM affected_count)
       AND COALESCE(readable.logical_name_id=affected.logical_name_id, false)
     ON CONFLICT DO NOTHING"#
     )
