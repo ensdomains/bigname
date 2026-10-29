@@ -447,11 +447,20 @@ fn migration_events(output: &BatchOutput, block: i64, logical: &str, holder: &st
         .collect()
 }
 
-type Opened = (String, Uuid, i64, Option<i64>, Option<i64>);
+type Opened = (
+    String,
+    Uuid,
+    String,
+    Uuid,
+    time::OffsetDateTime,
+    i64,
+    Option<i64>,
+    Option<i64>,
+);
 type Closed = (String, i64, i64, i64);
 
-/// Every ENSv1 or ENSv2 binding the run opens and closes for the name, as (arm, resource, block,
-/// transaction, log) and (arm, block, transaction, log).
+/// Every ENSv1 or ENSv2 binding the run opens and closes for the name, as (arm, resource, kind,
+/// binding id, active from, block, transaction, log) and (arm, block, transaction, log).
 fn name_bindings(output: &BatchOutput, logical: &str) -> (Vec<Opened>, Vec<Closed>) {
     let mut opened = output
         .surface_bindings
@@ -461,6 +470,9 @@ fn name_bindings(output: &BatchOutput, logical: &str) -> (Vec<Opened>, Vec<Close
             (
                 binding.authority_arm.clone(),
                 binding.resource_id,
+                binding.binding_kind.clone(),
+                binding.surface_binding_id,
+                binding.active_from,
                 binding.block_number,
                 binding.provenance["transaction_index"].as_i64(),
                 binding.provenance["log_index"].as_i64(),
@@ -497,7 +509,7 @@ fn a_lease_with_no_known_holder_migrates_like_one_with_a_holder() -> anyhow::Res
     let holder = format!("{:#x}", debut_holder()?);
     let (output, warnings) = interpret_with_warnings(input)?;
     assert_no_known_holder(&output, &debut);
-    let known = interpret_test_batch(debut_registered_to(debut_holder()?)?)?;
+    let known = interpret_test_batch(real::registered(&["debut"])?)?;
     assert_eq!(
         migration_events(&output, block, &debut, &holder),
         migration_events(&known, block, &debut, &holder),
@@ -637,21 +649,25 @@ fn a_lease_with_no_known_holder_and_a_resolver_reconciles() -> anyhow::Result<()
     // controller renewal names the label. That renewal opens the binding on the registry-only
     // resource and leaves the lease unbound, so the proof's predecessor is the registry-only one.
     let node = debut.strip_prefix("ens:").expect("namehash");
-    let registry_only: Opened = (
+    let registry_only = (
         "ens_v1".to_owned(),
         super::super::common::stable_uuid(&format!("resource:registry-only:{chain}:{node}")),
+        "declared_registry_path".to_owned(),
         block - 1,
-        Some(0),
-        Some(1),
+        Some(0_i64),
+        Some(1_i64),
     );
     let (opened, _) = name_bindings(&output, &debut);
     let before = opened
-        .iter()
-        .filter(|(arm, _, opened_at, _, _)| arm == "ens_v1" && *opened_at < block)
+        .into_iter()
+        .filter(|(arm, _, _, _, _, opened_at, _, _)| arm == "ens_v1" && *opened_at < block)
+        .map(|(arm, resource, kind, _, _, opened_at, transaction, log)| {
+            (arm, resource, kind, opened_at, transaction, log)
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         before,
-        vec![&registry_only],
+        vec![registry_only],
         "the renewal opens the registry-only binding and nothing else before the migration"
     );
     assert_reconciled(&output, &warnings, block, &debut);
@@ -663,7 +679,7 @@ fn a_lease_with_no_known_holder_and_a_resolver_reconciles() -> anyhow::Result<()
 /// shape that already reconciled.
 #[test]
 fn a_lease_with_a_known_holder_migrates_as_before() -> anyhow::Result<()> {
-    let input = debut_registered_to(debut_holder()?)?;
+    let input = real::registered(&["debut"])?;
     let block = migration_block(&input);
     let debut = eth_name("debut");
     let (output, warnings) = interpret_with_warnings(input)?;

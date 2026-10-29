@@ -2435,14 +2435,16 @@ mod zero_owner_migration_connected {
     use super::numeric_short_lease_fixture::range;
     use super::zero_owner_migration_fixture as fixture;
     use anyhow::Result;
-    use bigname_adapters::schema_v2::{self as adapter, StateCacheCapacity};
+    use bigname_adapters::schema_v2::{self as adapter, BatchInput, StateCacheCapacity};
+    use sqlx::types::Uuid;
+    use time::OffsetDateTime;
 
-    /// The migration block writes, and only the ENSv2 binding is left open. A refused proof would
-    /// stop the boundary with "leaves 1 ENSv1 bindings open at its predecessor cleanup", because
-    /// the cleanup transfer reopens the lease binding.
-    #[tokio::test]
-    async fn a_lease_with_no_known_holder_closes_at_its_migration() -> Result<()> {
-        let input = fixture::input(&["debut"])?;
+    /// A written binding: arm, resource, kind, active from and active to.
+    type Binding = (String, Uuid, String, OffsetDateTime, Option<OffsetDateTime>);
+
+    /// Writes `input`'s history block and then its migration block through the identity writer,
+    /// and returns every binding written for debut.eth.
+    async fn migrate(input: BatchInput) -> Result<Vec<Binding>> {
         let migration = input
             .blocks
             .iter()
@@ -2475,19 +2477,48 @@ mod zero_owner_migration_connected {
             .finish(Vec::new())?;
             assert_eq!(output.migration_authority_transitions.len(), 1);
             write(pool, &part, &output).await?;
-            let open: Vec<(String,)> = sqlx::query_as(
-                "SELECT authority_arm FROM surface_bindings
-                 WHERE logical_name_id = $1 AND active_to IS NULL
-                 ORDER BY authority_arm",
+            let bindings: Vec<Binding> = sqlx::query_as(
+                "SELECT authority_arm, resource_id, binding_kind, active_from, active_to
+                 FROM surface_bindings WHERE logical_name_id = $1
+                 ORDER BY authority_arm, active_from, resource_id",
             )
             .bind(&logical)
             .fetch_all(pool)
             .await?;
-            assert_eq!(open, [("ens_v2".to_owned(),)]);
-            Ok(())
+            Ok(bindings)
         }
         .await;
         database.cleanup().await?;
         result
+    }
+
+    fn open(bindings: &[Binding]) -> Vec<&str> {
+        bindings
+            .iter()
+            .filter(|(_, _, _, _, active_to)| active_to.is_none())
+            .map(|(arm, _, _, _, _)| arm.as_str())
+            .collect()
+    }
+
+    /// The migration block writes, and only the ENSv2 binding is left open. A refused proof would
+    /// stop the boundary with "leaves 1 ENSv1 bindings open at its predecessor cleanup", because
+    /// the cleanup transfer reopens the lease binding.
+    #[tokio::test]
+    async fn a_lease_with_no_known_holder_closes_at_its_migration() -> Result<()> {
+        let bindings = migrate(fixture::input(&["debut"])?).await?;
+        assert_eq!(open(&bindings), ["ens_v2"]);
+        Ok(())
+    }
+
+    /// The same migration of a lease whose registration names the holder. The writer closes the
+    /// predecessor at the same time and leaves the same bindings as for the lease with no known
+    /// holder.
+    #[tokio::test]
+    async fn a_lease_with_a_known_holder_closes_at_the_same_time() -> Result<()> {
+        let known = migrate(fixture::registered(&["debut"])?).await?;
+        assert_eq!(open(&known), ["ens_v2"]);
+        let unknown = migrate(fixture::input(&["debut"])?).await?;
+        assert_eq!(unknown, known);
+        Ok(())
     }
 }
