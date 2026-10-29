@@ -129,9 +129,9 @@ pub(crate) struct LeaseDates {
 
 /// Writes the lease `events` (newest first) prove into `registration`. The latest event's lease is
 /// the registration's resource and identity, and its newest expiry the lease expiry. When the
-/// registration's expiry is null the lease supplies it and its grace end, and an `active` one that
-/// is not an ENSv2 allocation takes the lease's status at the snapshot's block time. The handoff
-/// block's time, else the lease's first event's, is the registration time. A lease whose latest
+/// registration's expiry is null the lease supplies it and its grace end, and an `active` one takes
+/// the lease's status at the snapshot's block time. The handoff block's time, else the lease's
+/// first event's, is the registration time. A lease whose latest
 /// event is a release is released at that event's block, unless a stored term outlives it at the
 /// snapshot. Events of an older lease are left out. Returns whether anything was written.
 pub(crate) fn heal_registration(
@@ -178,11 +178,9 @@ pub(crate) fn heal_registration(
                 Value::String((i128::from(expiry) + i128::from(GRACE_SECONDS)).to_string()),
             );
             // The stored schedule serves `active` for an allocated, unreleased registration with
-            // no expiry, so only that status takes the lease's. An ENSv2 allocation keeps its own
-            // schedule.
+            // no expiry, so only that status takes the lease's.
             if let Some(clock) = clock
                 && registration.get("lifecycle_status").and_then(Value::as_str) == Some("active")
-                && registration.get("canonical_allocation") != Some(&Value::Bool(true))
             {
                 registration.insert(
                     "lifecycle_status".into(),
