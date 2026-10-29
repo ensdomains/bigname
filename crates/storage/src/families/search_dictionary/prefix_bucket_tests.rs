@@ -8,8 +8,9 @@
 //! The tests call `load` itself. In one transaction per call they count the rows it fetched
 //! from `name_search_documents` and `name_surfaces`, and they find the statements it executed
 //! in `pg_prepared_statements`. Each bucket statement it prepared is then explained under both
-//! plan modes. Sorts are off to stand in for a large table, as in `name_order_plan_tests.rs`:
-//! the plan assertions are about which access paths exist, not about costs. The number of
+//! plan modes. Sorts are off to stand in for a large table, as in `name_order_plan_tests.rs`.
+//! So the plan assertions prove that the ordered path exists, not that the planner picks it at
+//! real costs. The staging measurement covers that choice. The number of
 //! buckets is read from the bucket indexes the identity baseline installs.
 //!
 //! Expected rows, orders and walk lengths come from SQL over the fixture, never from the
@@ -18,7 +19,7 @@
 use anyhow::{Context, Result, ensure};
 use sqlx::{Connection, PgConnection, raw_sql};
 
-use super::load;
+use super::{DENSE_SHORT, MERGE, RAW_SHORT, load};
 use crate::{
     NameCurrentListFilter,
     families::{
@@ -108,6 +109,15 @@ fn cases() -> Vec<Case> {
         },
         // 300 basenames names lead the `z` bucket of an ens-only search.
         prefix_case("prefix z, ens only", "z"),
+        // Characters of two UTF-8 bytes: the bucket counts characters. The 100 `ó` names share
+        // the first byte of `ñ`.
+        prefix_case("prefix ñ, two-byte character", "ñ"),
+        prefix_case("prefix ñüé, two-byte characters", "ñüé"),
+        prefix_case("prefix ñüé0, two-byte characters past the bucket", "ñüé0"),
+        // A leading `_`, which `LIKE` reads as a wildcard unless escaped.
+        prefix_case("prefix _, a LIKE wildcard", "_"),
+        prefix_case("prefix _xy, a LIKE wildcard first", "_xy"),
+        prefix_case("prefix _xy0, a LIKE wildcard past the bucket", "_xy0"),
         // 300 unsupported names lead the `q` bucket.
         prefix_case("prefix q, supported first", "q"),
         Case {
@@ -200,6 +210,11 @@ async fn check_cases(connection: &mut PgConnection, buckets: usize) -> Result<()
                     "{label}: {} candidates differ from the {} expected",
                     found.len(),
                     expected.len()
+                ));
+            }
+            if bucketed && found != old_path(connection, &case, after.as_ref(), limit).await? {
+                failures.push(format!(
+                    "{label}: differs from the release line's statements"
                 ));
             }
             if !bucketed {
@@ -301,9 +316,10 @@ async fn check_cursor_walk(connection: &mut PgConnection, buckets: usize) -> Res
     Ok(())
 }
 
-/// Each bucket statement `load` prepared reads its bucket index in page order, with the class,
-/// the bucket and the cursor as the index condition, under a `Limit` and without a sort, for
-/// both dense classes, the first page and a later one.
+/// Each bucket statement `load` prepared can read its bucket index in page order, with the
+/// class, the bucket and the cursor as the index condition, under a `Limit` and without a sort,
+/// for both dense classes, the first page and a later one. Sorts are off, so this shows the
+/// path exists, not that the planner prefers it at real costs.
 async fn check_plans(connection: &mut PgConnection, buckets: usize) -> Result<()> {
     raw_sql("SET enable_sort = off")
         .execute(&mut *connection)
@@ -421,6 +437,51 @@ fn key(row: &Candidate) -> Key {
     (row.1.clone(), row.2.clone(), row.3.clone())
 }
 
+/// The candidates of a dense prefix from the release line's statements, which walk the whole
+/// name order: the raw-backed walk and the structural walk, merged in page order. The long
+/// structural name is not among them, and no case compared with them reaches it.
+async fn old_path(
+    connection: &mut PgConnection,
+    case: &Case,
+    after: Option<&Key>,
+    limit: i64,
+) -> Result<Vec<Candidate>> {
+    let namespaces: Vec<String> = case
+        .namespaces
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect();
+    let mut rows: Vec<Candidate> = Vec::new();
+    for statement in [RAW_SHORT, DENSE_SHORT] {
+        rows.extend(
+            sqlx::query_as::<_, Candidate>(statement)
+                .bind(namespaces.as_slice())
+                .bind(None::<&str>)
+                .bind(pattern(case))
+                .bind(after.map(|key| key.0.as_str()))
+                .bind(after.map(|key| key.1.as_str()))
+                .bind(after.map(|key| key.2.as_str()))
+                .bind(limit)
+                .bind(case.supported_before_limit)
+                .persistent(false)
+                .fetch_all(&mut *connection)
+                .await?,
+        );
+    }
+    let column = |pick: fn(&Candidate) -> &String| -> Vec<String> {
+        rows.iter().map(|row| pick(row).clone()).collect()
+    };
+    Ok(sqlx::query_as(MERGE)
+        .bind(column(|row| &row.0))
+        .bind(column(|row| &row.1))
+        .bind(column(|row| &row.2))
+        .bind(column(|row| &row.3))
+        .bind(limit)
+        .persistent(false)
+        .fetch_all(connection)
+        .await?)
+}
+
 /// Rows read from `name_search_documents` and `name_surfaces` in this transaction.
 async fn rows_fetched(connection: &mut PgConnection) -> Result<i64> {
     Ok(sqlx::query_scalar(
@@ -535,7 +596,8 @@ async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
     // 2 * i * stride + class in five digits. Group 1 rejects some names through an orphaned
     // block, a block past the marker or, raw-backed only, a shadowed surface. Group 2 repeats
     // group 1's first raw-backed name under another namehash. Group 11 repeats every 25th
-    // name of group 1 in basenames.
+    // name of group 1 in basenames. Groups 12 and 13 spell two-byte characters, and
+    // group 14 starts with a `LIKE` wildcard.
     raw_sql(
         r#"CREATE TEMP TABLE fixture AS
          SELECT n, name, namespace, class, supported, rejection,
@@ -560,7 +622,10 @@ async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
                      (8, 'qb', 1, 800, 1, 'ens', ARRAY[0, 1], true),
                      (9, 'za', 1, 300, 1, 'basenames', ARRAY[0, 1], true),
                      (10, 'zb', 1, 1100, 1, 'ens', ARRAY[0, 1], true),
-                     (11, 'alic', 1, 40, 25, 'basenames', ARRAY[0, 1], true)
+                     (11, 'alic', 1, 40, 25, 'basenames', ARRAY[0, 1], true),
+                     (12, 'ñüé', 1, 1100, 1, 'ens', ARRAY[0, 1], true),
+                     (13, 'óa', 1, 100, 1, 'ens', ARRAY[0, 1], true),
+                     (14, '_xy', 1, 1100, 1, 'ens', ARRAY[0, 1], true)
                  ) spec (ordinal, stem, low, high, stride, namespace, classes, supported),
                  generate_series(low, high) i,
                  unnest(classes) class
