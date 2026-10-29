@@ -3,8 +3,65 @@
 //! its attempt, state and cursor.
 use sqlx::{Postgres, Transaction, postgres::PgQueryResult};
 
-use super::fence_error;
+use super::{Record, State, fence_error};
 use crate::{ProjectError, Result};
+
+/// The fence of a composition pass worker, which reads the record without locking it: the record
+/// must be composing, and every field must be as the run planned it. While workers run, the
+/// coordinator writes only its acknowledgement of each committed chunk (`compose_step`
+/// with the names stream and no cursor), which moves `compose_chunks` and `updated_at`. Neither is
+/// a field of `Record`, so no field is excluded from the compare. Each field is named so that a
+/// field added later is a decision here.
+pub(crate) fn require_composing(
+    chain_id: &str,
+    read: Option<&Record>,
+    planned: &Record,
+) -> Result<()> {
+    let Some(read) = read else {
+        return Err(fence_error(chain_id, "composing", None));
+    };
+    let Record {
+        attempt,
+        reason,
+        trusted_base,
+        replay_target,
+        state,
+        prefix_revision,
+        invalidation_from,
+        pending_undo_target,
+        completed_sequence,
+        completed_marker,
+        completed_input_hash,
+        reset_sequence,
+        composed_block,
+        compose_stream,
+        compose_cursor,
+    } = planned;
+    let unchanged = *state == State::Composing
+        && read.attempt == *attempt
+        && read.reason == *reason
+        && read.trusted_base == *trusted_base
+        && read.replay_target == *replay_target
+        && read.state == *state
+        && read.prefix_revision == *prefix_revision
+        && read.invalidation_from == *invalidation_from
+        && read.pending_undo_target == *pending_undo_target
+        && read.completed_sequence == *completed_sequence
+        && read.completed_marker == *completed_marker
+        && read.completed_input_hash == *completed_input_hash
+        && read.reset_sequence == *reset_sequence
+        && read.composed_block == *composed_block
+        && read.compose_stream == *compose_stream
+        && read.compose_cursor == *compose_cursor;
+    if !unchanged {
+        return Err(fence_error(
+            chain_id,
+            "the composing one the worker planned from",
+            Some(read),
+        ));
+    }
+    Ok(())
+}
 
 /// Open the pass: a rebuild that has not composed moves to composing at its first stream.
 pub(crate) async fn begin_compose(
