@@ -648,3 +648,76 @@ fn without_a_handoff_block_the_lease_starts_at_its_first_event_read_on_its_own()
         json!(GRANT_SECONDS.to_string())
     );
 }
+
+/// A registration whose stored lifecycle is `unregistered` keeps it when the fill supplies a live
+/// lease's expiry, whatever its control status reads.
+#[test]
+fn a_stored_unregistered_lifecycle_keeps_its_status_when_the_fill_supplies_the_expiry() {
+    let mut summary = registry_only_summary();
+    for field in ["authority_kind", "status", "expiry", "grace_ends_at"] {
+        summary["registration"][field] = Value::Null;
+    }
+    summary["registration"]["lifecycle_status"] = json!("unregistered");
+    let events = vec![event(
+        "RegistrationGranted",
+        130,
+        LEASE,
+        Some(1_900_000_000),
+    )];
+    assert!(heal(&mut summary, &events));
+    let registration = &summary["registration"];
+    assert_eq!(registration["expiry"], json!("1900000000"));
+    assert_eq!(registration["lifecycle_status"], json!("unregistered"));
+    assert_eq!(
+        registration_fields("ens", &summary, true).status,
+        RegistrationStatus::Unregistered
+    );
+}
+
+/// An ENSv2 allocation keeps its own schedule when the fill supplies a lease expiry.
+#[test]
+fn an_ens_v2_allocation_keeps_its_status_when_the_fill_supplies_the_expiry() {
+    let mut summary = registry_only_summary();
+    summary["registration"]["expiry"] = Value::Null;
+    summary["registration"]["grace_ends_at"] = Value::Null;
+    summary["registration"]["canonical_allocation"] = json!(true);
+    let events = vec![event(
+        "RegistrationGranted",
+        130,
+        LEASE,
+        Some(SNAPSHOT_SECONDS - 1),
+    )];
+    assert!(heal(&mut summary, &events));
+    assert_eq!(summary["registration"]["lifecycle_status"], json!("active"));
+}
+
+#[test]
+fn a_stored_term_outlives_the_lease_through_its_grace_end_and_not_after() {
+    let registration = summary_registration(json!("1700000000"), json!("1707776000"));
+    assert!(stored_term_outlives(&registration, Some(1_707_776_000)));
+    assert!(!stored_term_outlives(&registration, Some(1_707_776_001)));
+}
+
+#[test]
+fn a_stored_term_without_a_grace_end_outlives_the_lease_through_its_expiry() {
+    let registration = summary_registration(json!("1700000000"), Value::Null);
+    assert!(stored_term_outlives(&registration, Some(1_700_000_000)));
+    assert!(!stored_term_outlives(&registration, Some(1_700_000_001)));
+}
+
+#[test]
+fn a_numeric_stored_term_is_read_as_seconds() {
+    let registration = summary_registration(json!(1_700_000_000_i64), json!(1_707_776_000_i64));
+    assert!(stored_term_outlives(&registration, Some(1_707_776_000)));
+    assert!(!stored_term_outlives(&registration, Some(1_707_776_001)));
+    let expiry_only = summary_registration(json!(1_700_000_000_i64), Value::Null);
+    assert!(stored_term_outlives(&expiry_only, Some(1_700_000_000)));
+    assert!(!stored_term_outlives(&expiry_only, Some(1_700_000_001)));
+}
+
+fn summary_registration(expiry: Value, grace_ends_at: Value) -> Map<String, Value> {
+    let mut summary = registry_only_summary();
+    summary["registration"]["expiry"] = expiry;
+    summary["registration"]["grace_ends_at"] = grace_ends_at;
+    summary["registration"].as_object().unwrap().clone()
+}

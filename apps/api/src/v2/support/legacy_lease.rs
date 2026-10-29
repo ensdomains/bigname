@@ -9,8 +9,8 @@
 //!   authority kind, with no lease resource and no lease expiry. The latest lease among the
 //!   name's activated registrar events at or below the snapshot becomes the registration's
 //!   resource and identity. Its newest expiry is the lease expiry, and also the registration's
-//!   expiry and grace end when those are null. A registration the fill supplies the expiry of
-//!   takes the lease's status at the snapshot's block time, unless it is unregistered. The
+//!   expiry and grace end when those are null. An `active` registration the fill supplies the
+//!   expiry of takes the lease's status at the snapshot's block time. The
 //!   registration time is the block time of the name's first current-registry record, else of
 //!   the lease's earliest event, read on its own. A lease whose latest event is a release is
 //!   served released at that event's block, unless the registration's stored term, such as an
@@ -129,8 +129,8 @@ pub(crate) struct LeaseDates {
 
 /// Writes the lease `events` (newest first) prove into `registration`. The latest event's lease is
 /// the registration's resource and identity, and its newest expiry the lease expiry. When the
-/// registration's expiry is null the lease supplies it, its grace end and, unless the registration
-/// is unregistered, its status at the snapshot's block time. The handoff block's time, else the
+/// registration's expiry is null the lease supplies it and its grace end, and an `active` one that
+/// is not an ENSv2 allocation takes the lease's status at the snapshot's block time. The handoff block's time, else the
 /// lease's first event's, is the registration time. A lease whose latest event is a release is
 /// released at that event's block, unless a stored term outlives it at the snapshot. Events of an
 /// older lease are left out. Returns whether anything was written.
@@ -177,9 +177,12 @@ pub(crate) fn heal_registration(
                 "grace_ends_at".into(),
                 Value::String((i128::from(expiry) + i128::from(GRACE_SECONDS)).to_string()),
             );
-            // As the stored schedule does, an unallocated registration stays unregistered.
+            // The stored schedule serves `active` for an allocated, unreleased registration with
+            // no expiry, so only that status takes the lease's. An ENSv2 allocation keeps its own
+            // schedule.
             if let Some(clock) = clock
-                && registration.get("status").and_then(Value::as_str) != Some("unregistered")
+                && registration.get("lifecycle_status").and_then(Value::as_str) == Some("active")
+                && registration.get("canonical_allocation") != Some(&Value::Bool(true))
             {
                 registration.insert(
                     "lifecycle_status".into(),
