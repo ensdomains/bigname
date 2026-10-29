@@ -179,6 +179,24 @@ impl Fixture {
         Ok(())
     }
 
+    /// The canonical block `block` of `CHAIN` after `lineage`'s last, at `timestamp` in Unix
+    /// seconds rather than 12 seconds after its parent: a clock past a deadline weeks away.
+    pub async fn block_at(&self, block: i64, timestamp: i64) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+                 block_timestamp, canonicality_state)
+             VALUES ($1, $2, $3, $4, to_timestamp($5::bigint), 'canonical')",
+        )
+        .bind(CHAIN)
+        .bind(hash(block))
+        .bind(hash(block - 1))
+        .bind(block)
+        .bind(timestamp)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// One family run of `chain` to `target` in normal mode.
     pub async fn apply_on(
         &self,
