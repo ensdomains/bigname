@@ -22,7 +22,8 @@
 //! A changed registry moves the names under its slots, so a slot's key counts as a changed
 //! entry key. A changed entry moves the names where the walk reads it: at a name's last label
 //! for the root registry, and at a label directly above one of the registry's slots for any
-//! other. A registry that no slot names is never reached, so its entries select nothing.
+//! registry a slot names, the root included. A registry other than the root that no slot names
+//! is never reached, so its entries select nothing.
 //!
 //! Two cases read every observed ENS surface, because they can move every name: a
 //! classification change of a declared ENSv1 mirror resolver (the v1 fallback), and a prefix
@@ -643,14 +644,21 @@ pub(super) fn statement(normal_work: &str) -> String {
         -- other names' resolution paths.
         SELECT logical_name_id FROM normal
     )
-    SELECT DISTINCT surface.logical_name_id FROM affected
-    JOIN name_surfaces surface ON surface.logical_name_id=affected.logical_name_id AND surface.chain_id=$1
-    JOIN chain_lineage lineage ON lineage.chain_id=surface.chain_id AND lineage.block_hash=surface.block_hash
+    -- Each affected name's surface by its primary key. The planner's row estimate for
+    -- `affected` follows the estimates of every step above it, and a join here could read
+    -- every surface when that estimate is high.
+    SELECT DISTINCT readable.logical_name_id FROM affected
+    CROSS JOIN LATERAL (
+        SELECT surface.logical_name_id FROM name_surfaces surface
+        JOIN chain_lineage lineage ON lineage.chain_id=surface.chain_id AND lineage.block_hash=surface.block_hash
+        WHERE surface.logical_name_id=affected.logical_name_id AND surface.chain_id=$1
+          AND surface.namespace='ens' AND cardinality(surface.labelhashes)>=1
+          AND surface.block_number<=$2 AND surface.visibility_state='active' AND surface.raw_name IS DISTINCT FROM ''
+          AND surface.canonicality_state IN ('canonical','safe','finalized')
+          AND lineage.canonicality_state IN ('canonical','safe','finalized')
+        OFFSET 0
+    ) readable
     WHERE EXISTS (SELECT 1 FROM affected)
-      AND surface.namespace='ens' AND cardinality(surface.labelhashes)>=1
-      AND surface.block_number<=$2 AND surface.visibility_state='active' AND surface.raw_name IS DISTINCT FROM ''
-      AND surface.canonicality_state IN ('canonical','safe','finalized')
-      AND lineage.canonicality_state IN ('canonical','safe','finalized')
     ON CONFLICT DO NOTHING"#
     )
 }

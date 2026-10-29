@@ -2461,10 +2461,11 @@ entries that point at a changed registry through indexes that already exist
   changed entry keys, and the statement finds the names that hold one, by the
   hash of the key.
 - A changed entry of the root registry moves only names whose last label has
-  its key. A changed entry of any other registry moves only names that hold its
-  label directly above the label of an entry that points at the registry. The
-  statement finds those names by the hashes of both keys, so the index returns
-  only the names that hold both. When the two keys are the same, it also looks
+  its key. The statement still finds them by that key's hash alone. A changed
+  entry of any other registry, or of the root where an entry points at the
+  root, moves only names that hold its label directly above the label of an
+  entry that points at the registry. The statement finds those names by the
+  hashes of both keys, so the index returns only the names that hold both. When the two keys are the same, it also looks
   up the entries that point at the registry holding that entry, and so on up,
   and adds the first key that differs, when there is one. A registry that no
   entry points at is never reached by the walk, so its entries read no name and
@@ -2487,9 +2488,10 @@ Two cases still read every observed ENS surface:
   changes.
 - A changed path has no labels, which is the root registry itself.
 
-One more reads every surface that holds `eth`: a change of the `eth` entry of
-the registry the root's `eth` entry points at. Its key and the key of the entry
-above it are both `eth`, and no entry of another key lies above that.
+One more reads every surface that holds a label: a change of an entry whose
+key equals the key of every entry above it on a route up to the root, such as
+the `eth` entry of the registry the root's `eth` entry points at (`eth.eth`).
+The lookup then holds that key alone.
 
 A path whose first label hash is null also reads them all.
 

@@ -9,7 +9,7 @@
 //! Each test compares `prepare` with the frozen statement and a literal set. Where the frozen
 //! statement keeps more candidates than the walk can use, the test also counts the surfaces the
 //! `candidates` step keeps.
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use sqlx::{Connection, raw_sql};
 
@@ -29,11 +29,12 @@ fn at(block: i64) -> Call<'static> {
     }
 }
 
-/// The rows the plan node named `name` returned, over all its loops.
+/// The rows the plan node named `name` returned, over all its loops. None when the plan has no
+/// such node or the node never ran.
 fn node_rows(node: &Value, name: &str) -> Option<i64> {
     if node["Subplan Name"] == name {
         let count = |field: &str| node[field].as_i64().unwrap_or(0);
-        return Some(count("Actual Rows") * count("Actual Loops"));
+        return (count("Actual Loops") >= 1).then(|| count("Actual Rows") * count("Actual Loops"));
     }
     node["Plans"]
         .as_array()
@@ -70,7 +71,8 @@ impl World {
             .execute(&mut *transaction)
             .await?;
         transaction.rollback().await?;
-        Ok(node_rows(&plan[0]["Plan"], "CTE candidates").unwrap_or(0))
+        node_rows(&plan[0]["Plan"], "CTE candidates")
+            .context("no CTE candidates node ran in the plan")
     }
 
     /// `assert_selects`, and the `candidates` step keeps `kept` surfaces under both plan modes.
@@ -161,9 +163,9 @@ async fn a_root_entry_matches_only_the_last_label() -> Result<()> {
     world.cleanup().await
 }
 
-// Anyone can create a registry and change its entries, and no entry need point at it. The walk
-// never reaches such a registry, so its entry selects nothing and keeps no candidate, though
-// `foo.eth` and `a.foo.eth` hold the entry's label.
+// The fixture changes an entry of a registry that no entry points at. The walk never reaches
+// such a registry, so its entry selects nothing and keeps no candidate, though `foo.eth` and
+// `a.foo.eth` hold the entry's label.
 #[tokio::test]
 async fn an_entry_of_a_registry_no_slot_names_selects_nothing() -> Result<()> {
     let mut world = World::new().await?;
@@ -382,11 +384,14 @@ async fn an_entry_two_mounts_below_a_2ld_is_found() -> Result<()> {
     world.cleanup().await
 }
 
-// Anyone can point an entry at any registry, the root and its own included. `loop.eth` points
-// at the root, `self.foo.eth` at its own registry, `up.foo.eth` at the `.eth` registry, and
-// `b.a.foo.eth` back at the registry of `foo.eth`. Each case changes one entry on the cycle:
+// The fixture points entries back up their own paths. `loop.eth` points at the root,
+// `self.foo.eth` at its own registry, `up.foo.eth` at the `.eth` registry, and `b.a.foo.eth` back
+// at the registry of `foo.eth`. Each case changes one entry on the cycle:
 //
 // - The root's `eth` entry: every `.eth` name.
+// - The root's `foo` entry: only `foo.loop.eth` and `a.foo.loop.eth`. The walk reads the root
+//   there through `loop`, a slot of the root, and no name ends in `foo`. `foo.eth.loop.eth`
+//   holds `foo` in the `.eth` registry, not in the root.
 // - The entry `self` of the registry at `foo.eth`: the names under `self.foo.eth` and
 //   `self.b.a.foo.eth`, two paths to the same entry.
 // - The entry `foo` of the `.eth` registry: the names under `foo.eth`, and `foo.eth.loop.eth`,
@@ -407,11 +412,19 @@ async fn an_entry_in_a_mounted_cycle_equals_the_oracle() -> Result<()> {
         "a.foo.eth",
         "b.a.foo.eth",
         "self.b.a.foo.eth",
+        "foo.loop.eth",
+        "a.foo.loop.eth",
         "bar.eth",
     ];
     let every: &[&str] = &names;
-    let cases: [(&str, String, &str, &[&str]); 3] = [
+    let cases: [(&str, String, &str, &[&str]); 4] = [
         ("the root's eth entry", ROOT.to_owned(), "eth", every),
+        (
+            "the root's entry below a slot of the root",
+            ROOT.to_owned(),
+            "foo",
+            &["foo.loop.eth", "a.foo.loop.eth"],
+        ),
         (
             "an entry that points at its own registry",
             registry(1),
