@@ -2532,7 +2532,9 @@ later run that resumes the rebuild starts by asking for its whole remaining
 budget. A request is capped at 1,024 work blocks and at what the run's budget
 has left, since each block counts against the budget: under the default budget
 of 256 blocks a run the budget is the binding cap, and 1,024 binds only when a
-run's budget is larger. A range also ends at 4,096 events, counted per block
+run's budget is larger. A range also ends at 4,096 events by default
+(`--project-families-max-range-events`, or
+`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_RANGE_EVENTS`), counted per block
 before duplicates are dropped: it ends before the block that would take it past
 the cap and always holds its first block, so a first block over the cap is a
 range of its own. A range opens with its first block as a single block does,
@@ -2585,7 +2587,8 @@ work block above the switch point, or the target), the rebuild runs the pass:
   earlier step's rows only once all of that step's partitions committed, and
   it never reads a composed row. The build starts only when every work list
   row is composed. The spans and partitions are run options, with the
-  `work_mem` of the build's transactions. The record's cursor names the last
+  `work_mem` of the build's transactions. The range event cap above does not
+  bound the build. The record's cursor names the last
   partition committed with the split and the Postgres server version, and a
   run with another split or another server version refuses to continue the
   build. The work table `project_compose_history_work` holds the keys and

@@ -14,6 +14,13 @@ pub(super) struct ProjectFamiliesArgs {
     project_families_max_blocks: u64,
     #[arg(
         long,
+        env = "BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_RANGE_EVENTS",
+        default_value_t = bigname_project::families::MAX_RANGE_EVENTS,
+        help = "most interpreted events one rebuild range applies"
+    )]
+    project_families_max_range_events: u64,
+    #[arg(
+        long,
         env = "BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_BLOCK_SPANS",
         default_value_t = bigname_project::families::COMPOSE_BUILDER_BLOCK_SPANS,
         value_parser = block_spans,
@@ -63,6 +70,7 @@ impl From<ProjectFamiliesArgs> for FamilySettings {
     fn from(args: ProjectFamiliesArgs) -> Self {
         Self {
             max_blocks_per_run: args.project_families_max_blocks.max(1),
+            max_range_events: args.project_families_max_range_events.max(1),
             compose_block_spans: args.project_families_compose_block_spans,
             compose_key_partitions: args.project_families_compose_key_partitions,
             compose_work_mem: args.project_families_compose_work_mem,

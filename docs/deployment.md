@@ -397,6 +397,11 @@ The implemented phases use:
 - `BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR`
 - `BIGNAME_PHASE_RUNNER_REDO_METRICS_BIND_ADDR`
 - `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS`
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_BLOCKS` — most owned key family blocks one Project batch applies or undoes, 256 by default
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_RANGE_EVENTS` — most interpreted events one [rebuild range](glossary.md#rebuild-range) applies, 4,096 by default
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_BLOCK_SPANS` — block spans of the [composition pass](glossary.md#composition-pass)'s history catalogue build, 64 by default; see [The composition pass builds the history catalogue once](#the-composition-pass-builds-the-history-catalogue-once)
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_KEY_PARTITIONS` — key partitions of that build, a power of two, 16 by default
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_WORK_MEM` — `work_mem` of each build transaction, the server's setting when unset
 
 An unset optional ceiling configures no limit; Docker inspection may show its bare
 variable name without `=`. An explicitly empty `KEY=` value is invalid.
@@ -447,6 +452,29 @@ values reduce process memory and cause more indexed reads from
 `normalized_events`; zero is valid and forces every required pre-batch value
 through that read path. The setting does not change stored output or the
 [interpreter content hash](glossary.md#interpreter-content-hash).
+
+`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_BLOCKS` bounds the work one Project
+batch commits for the [owned key families](glossary.md#owned-key-family): the
+blocks it applies or undoes, where each block of a
+[rebuild range](glossary.md#rebuild-range), each chunk of the
+[composition pass](glossary.md#composition-pass) and each partition of its
+history catalogue build counts as one. The runner
+records progress and writes its heartbeat between batches, so a long rebuild
+runs as a series of batches within this budget.
+`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_RANGE_EVENTS` bounds the interpreted
+events one rebuild range folds in its one transaction. The composition pass's
+history catalogue build does not read it: its block spans and key partitions
+split the build's transactions. A range keeps every row it
+loaded, with its pre-range and pre-block images, in memory until it commits. A
+resource-bearing event loads at least its resource pointer row, so the working
+set grows with this value. The default of 4,096 is about twice Sepolia's
+densest block and keeps a range's working set to tens of megabytes. A larger
+value grows the working set and the transaction one failure has to redo. A
+smaller one gives up more of the saving a range makes, about fifteen round trips
+for each block after its first. Live follow applies one block to a transaction
+and never reads the cap. Zero counts as one for both settings. Neither setting
+changes stored output or the
+[projection content hash](glossary.md#projection-content-hash).
 
 Interpret chooses how it restores prior adapter state for each chain and each
 batch; there is nothing to enable. When every active or deprecated manifest of
@@ -4936,6 +4964,36 @@ content hash, then check on Sepolia that `GET /v1/names/phantombug01.eth` serves
 `0x8948458626811dd0c23eb25cc74291247077cc51`, equal to its `ens_v1.resolver` (registry
 `NewResolver` at block 11982720), and that `GET /v1/names/phantombug01.eth/records?keys=addr:61`
 finds the record.
+
+## Resolver boundary walks in the rebuild work list
+
+The build that walks the resolver boundaries of a rebuild work list block by block changes one
+Project statement, `project:families.input.work_blocks`
+([table ownership](storage.md#table-ownership)).
+
+- Before, the two sources of contract addresses that start or stop in the requested range
+  asked, address by address, whether any
+  [resolver edge](glossary.md#discovery-graph--discovery-edge) pointed at the address. When a
+  few resolver contracts hold most resolver edges, as on mainnet, PostgreSQL could answer each
+  question with a sequential scan of every resolver edge of the chain. Each address now asks
+  for the lowest resolver edge destination at or above its own contract, one step of
+  `project_families_discovery_edges_resolver_destination_idx`, and is kept when that is its own
+  contract.
+- Before, each of the four resolver boundary sources listed the distinct boundaries of the
+  whole requested range and then took the lowest. PostgreSQL could read and sort every boundary
+  in the range before the limit. Each source now walks its boundary index upward one block at a
+  time and stops once it holds as many blocks as the limit asks for. The blocks it returns are
+  the same.
+- Stored rows do not change. API responses do not change.
+- The statement is in `crates/project/src`, an input of the
+  [projection content hash](glossary.md#projection-content-hash) only. That hash rotates for
+  every chain. The [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, at a planned
+  [re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+  binaries. The change rides the next re-derivation release and shares that release's Project
+  redo.
+- It adds no schema-migration, table, index, manifest or setting. The manifest-authority
+  fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.
 
 ## The composition pass builds the history catalogue once
 
