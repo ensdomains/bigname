@@ -15,6 +15,7 @@ use sqlx::{PgPool, raw_sql};
 pub mod compose;
 pub mod ens_v2_path;
 mod expiry_policy;
+pub mod workers;
 pub use expiry_policy::expected_registration_expiry;
 
 pub const CHAIN: &str = "ethereum-sepolia";
@@ -113,8 +114,15 @@ pub struct Fixture {
 impl Fixture {
     /// A phase schema with canonical blocks `0..=blocks`.
     pub async fn new(prefix: &str, blocks: i64) -> Result<Self> {
+        Self::with_connections(prefix, blocks, 1).await
+    }
+
+    /// The same, with a pool of `connections`: a composition pass on several workers needs one
+    /// more than its workers.
+    pub async fn with_connections(prefix: &str, blocks: i64, connections: u32) -> Result<Self> {
         let database =
-            TestDatabase::create(TestDatabaseConfig::new(prefix).pool_max_connections(1)).await?;
+            TestDatabase::create(TestDatabaseConfig::new(prefix).pool_max_connections(connections))
+                .await?;
         let pool = database.pool().clone();
         let name: String = sqlx::query_scalar("SELECT current_database()")
             .fetch_one(&pool)
@@ -153,11 +161,18 @@ impl Fixture {
                 .clone()
                 .options([("search_path", "bigname_phase,public")]),
         );
-        let mut connection = pool.acquire().await?;
-        sqlx::query("SET search_path TO bigname_phase, public")
-            .execute(&mut *connection)
-            .await?;
-        drop(connection);
+        // Connections opened before the ALTER DATABASE committed keep the old search path, and a
+        // pool of several can hold more than one. Holding `connections` at once takes every
+        // connection the pool has, so each is set before any is returned.
+        let mut held = Vec::new();
+        for _ in 0..connections {
+            let mut connection = pool.acquire().await?;
+            sqlx::query("SET search_path TO bigname_phase, public")
+                .execute(&mut *connection)
+                .await?;
+            held.push(connection);
+        }
+        drop(held);
         let fixture = Self { database, pool };
         fixture.lineage(CHAIN, blocks).await?;
         Ok(fixture)

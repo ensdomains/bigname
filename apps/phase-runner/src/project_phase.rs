@@ -41,6 +41,8 @@ pub struct FamilySettings {
     pub compose_key_partitions: u16,
     /// `work_mem` of each history catalogue build transaction, the server's setting when unset.
     pub compose_work_mem: Option<String>,
+    /// Workers composing a rebuild's composition pass names stream side by side.
+    pub compose_workers: u16,
 }
 
 impl Default for FamilySettings {
@@ -55,6 +57,7 @@ impl Default for FamilySettings {
             compose_block_spans: bigname_project::families::COMPOSE_BUILDER_BLOCK_SPANS,
             compose_key_partitions: bigname_project::families::COMPOSE_BUILDER_KEY_PARTITIONS,
             compose_work_mem: None,
+            compose_workers: bigname_project::families::COMPOSE_WORKERS,
         }
     }
 }

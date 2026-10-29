@@ -275,20 +275,7 @@ pub(crate) async fn run(
             .await
             .map_err(|error| ProjectError::database("failed to set the build's work_mem", error))?;
     }
-    let uncomposed: i64 = sqlx::query_scalar(
-        "/* project:families.compose.uncomposed */
-         SELECT count(*) FROM project_compose_name_work WHERE chain_id = $1 AND NOT composed",
-    )
-    .bind(chain)
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to count the uncomposed names", error))?;
-    if uncomposed != 0 {
-        return Err(ProjectError::data_integrity(format!(
-            "chain {chain}'s catalogue build found {uncomposed} names of the work list not \
-             composed"
-        )));
-    }
+    crate::families::compose::require_composed(transaction, chain, "catalogue build").await?;
     let (part, mask) = (i32::from(cursor.part), cursor.mask());
     match cursor.step {
         Step::Keys => spans::keys(transaction, chain, mask).await,

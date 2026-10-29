@@ -17,7 +17,7 @@ use families_support::{
     CHAIN, CONTENT_HASH, Fixture,
     compose::{
         MOVED_FROM, MOVED_TO, R1, TRANSFERRED, build_order, build_step, install_probe,
-        probe_chunks, probe_list, reset_probe, seeded,
+        probe_chunks, probe_list, reset_probe, seeded, seeded_with,
     },
     ens_v2_path, hash, uuid,
 };
@@ -148,7 +148,9 @@ async fn composed_for(fixture: &Fixture, id: &str) -> Result<i64> {
 // each cap are byte for byte the default cap's. The comparison covers what it is meant to: lookup
 // rows with no composed core and empty name sources of ids with no surface, one inventory served
 // by names in different chunks, resource anchors, catalogue sources by node and by record id, and
-// both record indexes.
+// both record indexes. The caps of 1 and 25 compose the names stream on three workers, so the
+// cap and the worker count cross: the families, the catalogue and the chunk count are the same
+// under each pairing.
 // Each id with no surface keeps the rows block by block leaves it: a registry child a NewOwner
 // created has a lookup row and a name source; the name of a registrar transfer in one block has a
 // lookup row only, and the one transferred in two blocks has both, since only a later block's
@@ -156,15 +158,16 @@ async fn composed_for(fixture: &Fixture, id: &str) -> Result<i64> {
 // from keeps both, though no row carries that node any more.
 #[tokio::test]
 async fn a_rebuild_in_ranges_composes_once_what_block_by_block_composes() -> Result<()> {
-    let fixture = seeded("families_compose_equal").await?;
+    let fixture = seeded_with("families_compose_equal", 4).await?;
     let expected = block_by_block(&fixture).await?;
     install_probe(&fixture).await?;
     let mut by_default = None;
-    for events in [families::MAX_RANGE_EVENTS, 1, 2, 25] {
+    for (events, workers) in [(families::MAX_RANGE_EVENTS, 1), (1, 3), (2, 1), (25, 3)] {
         reset_probe(&fixture).await?;
         let ranged = options(RebuildRanges::Through(TARGET))
             .with_compose_chunk_keys(1)
-            .with_range_caps(64, events);
+            .with_range_caps(64, events)
+            .with_compose_workers(workers);
         let outcome = fixture
             .apply_with(TARGET, FamilyMode::Rebuild, &ranged)
             .await?;
@@ -196,8 +199,8 @@ async fn a_rebuild_in_ranges_composes_once_what_block_by_block_composes() -> Res
             composed.as_i64().is_some_and(|block| block < TARGET),
             "cap {events}: the pass composed below the target: {composed}"
         );
-        // The pass's chunks: one a name, one a record pair, the catalogue build's 1 + 64 + 5 * 16
-        // + 1 partitions at the default split, and its end.
+        // The pass's chunks: one a name, one a record pair, one a name that serves an inventory,
+        // the catalogue build's 1 + 64 + 5 * 16 + 1 partitions at the default split, and its end.
         let chunks = probe_chunks(&fixture).await?;
         let of = |stream: i16| {
             chunks
@@ -206,17 +209,28 @@ async fn a_rebuild_in_ranges_composes_once_what_block_by_block_composes() -> Res
                 .count() as u64
         };
         let names = u64::try_from(probe_list(&fixture).await?)?;
+        let served = u64::try_from(
+            count(
+                &fixture,
+                "SELECT count(*) FROM project_lookup_name
+                 WHERE record_serving_resource_id IS NOT NULL",
+            )
+            .await?,
+        )?;
         ensure!(
             names > 100
                 && of(0) == names
+                && served > 0
+                && of(4) == served
                 && of(3) == 1 + 64 + 5 * 16 + 1
-                && outcome.compose_chunks == names + of(1) + of(2) + of(3) + 1
+                && outcome.compose_chunks == names + of(1) + of(2) + of(4) + of(3) + 1
                 && outcome.compose_chunks == chunks.len() as u64 + 1,
-            "cap {events}: {} chunks: {names} names, {} node pairs, {} record id pairs, {} build \
-             partitions",
+            "cap {events}: {} chunks: {names} names, {} node pairs, {} record id pairs, {} \
+             serving names, {} build partitions",
             outcome.compose_chunks,
             of(1),
             of(2),
+            of(4),
             of(3)
         );
         let journalled = fixture.journalled_blocks().await?;
@@ -346,13 +360,17 @@ struct Seen {
     stream: Value,
     cursor: Value,
     composed: Value,
+    /// The work list's ids marked composed.
+    marked: i64,
 }
 
 // A pass longer than one run. The first run's budget is the work blocks at or below the switch
 // point exactly: it applies them in ranges and stops before the pass, the record still rebuilding
 // with no pass recorded. Every later run has a budget of one block: it commits at most one chunk
-// of five keys, or the pass's end, or one single block. The pass continues from the cursor the
-// previous run left, a stream starts from its beginning once the one before it is done, and a run
+// of five keys, or the pass's end, or one single block. The names stream continues with the ids
+// no chunk composed, five a run, and the other streams from the cursor the previous run left, a
+// stream starts from its beginning once the one before it is done, the streams run in the order
+// names, nodes, record ids, inventories, catalogue build, and a run
 // that finds the catalogue build done only ends the pass, which counts as a step that spent the
 // budget. The build, three block spans and two key partitions here, commits its fifteen
 // partitions in order, one a run. The composed tables' statistics are refreshed after the pass's 1st, 2nd, 4th, ... chunk,
@@ -411,6 +429,11 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
             stream,
             cursor,
             composed,
+            marked: count(
+                &fixture,
+                "SELECT count(*) FROM project_compose_name_work WHERE composed",
+            )
+            .await?,
         });
         if seen.last().is_some_and(|last| last.marker == Some(TARGET)) {
             break;
@@ -443,23 +466,25 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
     }
     // The pass runs its streams in order, each from its beginning, until it ends.
     let passing: Vec<&Seen> = seen.iter().filter(|run| run.state == "composing").collect();
-    let streams: Vec<i64> = passing
+    let order = [0, 1, 2, 4, 3];
+    let streams: Vec<usize> = passing
         .iter()
         .filter_map(|run| run.stream.as_i64())
+        .filter_map(|stream| order.iter().position(|at| *at == stream))
         .collect();
     ensure!(
-        streams.windows(2).all(|pair| pair[0] <= pair[1]),
+        streams.len() == passing.len() && streams.windows(2).all(|pair| pair[0] <= pair[1]),
         "the streams run in order: {streams:?}"
     );
-    for stream in 0..=3 {
+    for stream in order {
         let cursors: Vec<&Value> = passing
             .iter()
             .filter(|run| run.stream.as_i64() == Some(stream))
             .map(|run| &run.cursor)
             .collect();
-        // The names stream and the catalogue build took several runs each. The two record streams
-        // hold one key each here, so each was entered and done in one run.
-        let runs = if stream == 0 || stream == 3 { 2 } else { 0 };
+        // The catalogue build took several runs. The names stream has no cursor. The two record
+        // streams hold one key each here, so each was entered and done in one run.
+        let runs = if stream == 3 { 2 } else { 0 };
         ensure!(
             !cursors.is_empty()
                 && cursors.iter().filter(|cursor| !cursor.is_null()).count() >= runs,
@@ -470,12 +495,17 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
             .filter_map(|cursor| cursor.as_str().map(str::to_owned))
             .collect();
         if stream == 0 {
-            // The names cursor is the work list serial the chunk ended at.
-            let serials: Vec<i64> = texts.iter().filter_map(|text| text.parse().ok()).collect();
+            // The names stream leaves no cursor, and each of its runs composes five more ids.
+            let marked: Vec<i64> = passing
+                .iter()
+                .filter(|run| run.stream.as_i64() == Some(0))
+                .map(|run| run.marked)
+                .collect();
             ensure!(
-                serials.len() == texts.len()
-                    && serials.windows(2).all(|pair| pair[1] == pair[0] + 5),
-                "the names cursor moves on five serials a chunk: {texts:?}"
+                texts.is_empty()
+                    && marked.len() > 2
+                    && marked.windows(2).all(|pair| pair[1] == pair[0] + 5),
+                "the names stream composes five ids a run: {texts:?} {marked:?}"
             );
         } else if stream == 3 {
             // The build's cursor names each partition it committed, in the build's order.
@@ -559,9 +589,14 @@ async fn a_later_run_of_the_pass_composes_the_list_its_beginning_wrote() -> Resu
     budgeted.max_range_events = 25;
     run(&fixture, true, &budgeted).await?;
     let (state, stream, cursor, _) = pass_state(&fixture).await?;
+    let marked = count(
+        &fixture,
+        "SELECT count(*) FROM project_compose_name_work WHERE composed",
+    )
+    .await?;
     ensure!(
-        (state.as_str(), &stream) == ("composing", &json!(0)) && cursor.is_string(),
-        "one chunk of names committed: {state} {stream} {cursor}"
+        (state.as_str(), &stream) == ("composing", &json!(0)) && cursor.is_null() && marked == 5,
+        "one chunk of names committed: {state} {stream} {cursor} {marked}"
     );
     // Read now, checked after the probe below.
     let listed: sqlx::Result<(i64, Option<i64>, Option<i64>, i64)> = sqlx::query_as(
@@ -660,8 +695,8 @@ async fn an_event_the_fold_never_applies_names_nothing_in_the_pass() -> Result<(
     fixture.cleanup().await
 }
 
-/// A trigger that fails the `nth` write of a composition chunk to the repair record, once: the
-/// sequence survives the rollback the failure causes.
+/// A trigger that fails the `nth` work list row a names chunk marks composed, once, inside the
+/// chunk's transaction: the sequence survives the rollback the failure causes.
 async fn fail_chunk(fixture: &Fixture, nth: i64) -> Result<()> {
     raw_sql(&format!(
         "CREATE SEQUENCE fail_chunk_once;
@@ -672,8 +707,8 @@ async fn fail_chunk(fixture: &Fixture, nth: i64) -> Result<()> {
              END IF;
              RETURN NEW;
          END $$;
-         CREATE TRIGGER fail_chunk BEFORE UPDATE ON project_repair_record
-         FOR EACH ROW WHEN (OLD.state = 'composing' AND NEW.state = 'composing')
+         CREATE TRIGGER fail_chunk BEFORE UPDATE ON project_compose_name_work
+         FOR EACH ROW WHEN (NEW.composed AND NOT OLD.composed)
          EXECUTE FUNCTION fail_chunk();"
     ))
     .execute(&fixture.pool)
@@ -683,7 +718,7 @@ async fn fail_chunk(fixture: &Fixture, nth: i64) -> Result<()> {
 
 async fn allow_chunks(fixture: &Fixture) -> Result<()> {
     raw_sql(
-        "DROP TRIGGER fail_chunk ON project_repair_record;
+        "DROP TRIGGER fail_chunk ON project_compose_name_work;
          DROP FUNCTION fail_chunk(); DROP SEQUENCE fail_chunk_once;",
     )
     .execute(&fixture.pool)
@@ -691,13 +726,22 @@ async fn allow_chunks(fixture: &Fixture) -> Result<()> {
     Ok(())
 }
 
+/// The work list's ids marked composed.
+async fn marked(fixture: &Fixture) -> Result<i64> {
+    count(
+        fixture,
+        "SELECT count(*) FROM project_compose_name_work WHERE composed",
+    )
+    .await
+}
+
 // A run that stops after the pass began and before its first chunk committed leaves the record
 // composing at the start of the names stream and no composed row, and the next run composes from
-// there. A chunk that fails to commit after two committed leaves the cursor and every row where
-// the second chunk left them, and the next run composes that chunk again. Both rebuilds equal the
-// block-by-block one.
+// there. A chunk that fails to commit after two committed leaves every row where the second
+// chunk left them, and the next run composes the ids that chunk had claimed. Both rebuilds equal
+// the block-by-block one.
 #[tokio::test]
-async fn a_chunk_that_fails_to_commit_is_composed_again_from_the_cursor() -> Result<()> {
+async fn a_chunk_that_fails_to_commit_is_composed_again() -> Result<()> {
     let fixture = seeded("families_compose_failure").await?;
     let expected = block_by_block(&fixture).await?;
     let ranged = options(RebuildRanges::Through(TARGET)).with_compose_chunk_keys(5);
@@ -717,7 +761,7 @@ async fn a_chunk_that_fails_to_commit_is_composed_again_from_the_cursor() -> Res
         pass_state(&fixture).await?
     );
     ensure!(
-        fixture.composed_rows().await? == 0,
+        fixture.composed_rows().await? == 0 && marked(&fixture).await? == 0,
         "the failed chunk composed nothing"
     );
     allow_chunks(&fixture).await?;
@@ -731,7 +775,9 @@ async fn a_chunk_that_fails_to_commit_is_composed_again_from_the_cursor() -> Res
     run(&fixture, true, &two).await?;
     let (state, stream, cursor, _) = pass_state(&fixture).await?;
     ensure!(
-        (state.as_str(), &stream) == ("composing", &json!(0)) && cursor.is_string(),
+        (state.as_str(), &stream) == ("composing", &json!(0))
+            && cursor.is_null()
+            && marked(&fixture).await? == 10,
         "two chunks of names committed: {state} {stream} {cursor}"
     );
     let committed = fixture.exact().await?;
@@ -744,8 +790,8 @@ async fn a_chunk_that_fails_to_commit_is_composed_again_from_the_cursor() -> Res
         "{error}"
     );
     ensure!(
-        pass_state(&fixture).await?.2 == cursor,
-        "the cursor is unchanged"
+        marked(&fixture).await? == 10,
+        "the failed chunk marked nothing"
     );
     ensure!(
         fixture.exact().await? == committed,
@@ -1000,10 +1046,11 @@ async fn a_redo_resumes_or_restarts_a_rebuild_in_its_pass() -> Result<()> {
             }
         }
         let before = pass_state(&fixture).await?;
+        let marked_before = marked(&fixture).await?;
         let marker = fixture.marker().await?.0;
         let stopped = match stop {
             Stop::Ranges => before.0 == "rebuilding" && before.3.is_null() && marker < Some(25),
-            Stop::Pass => before.0 == "composing" && before.2.is_string(),
+            Stop::Pass => before.0 == "composing" && before.1 == json!(0) && marked_before == 1,
             Stop::AfterPass => {
                 before.0 == "rebuilding" && before.3 == json!(25) && marker == Some(25)
             }
@@ -1027,9 +1074,7 @@ async fn a_redo_resumes_or_restarts_a_rebuild_in_its_pass() -> Result<()> {
                 Stop::Ranges => {
                     second.ranges == 1 && fixture.marker().await?.0 > marker && after.3.is_null()
                 }
-                Stop::Pass => {
-                    second.compose_chunks == 1 && (&after.1, &after.2) != (&before.1, &before.2)
-                }
+                Stop::Pass => second.compose_chunks == 1 && marked(&fixture).await? == 2,
                 Stop::AfterPass => after.3 == json!(25) && second.blocks == 1,
             };
             ensure!(continued, "{case}: {before:?} then {after:?}, {second:?}");
@@ -1038,6 +1083,13 @@ async fn a_redo_resumes_or_restarts_a_rebuild_in_its_pass() -> Result<()> {
             ensure!(
                 after.3.is_null() && after.0 == "rebuilding",
                 "{case}: the pass fields were cleared: {after:?}"
+            );
+            // The reset clears the pass's work list, and a budget of one block cannot begin a
+            // new pass, so a list a stopped pass left is gone.
+            let listed = count(&fixture, "SELECT count(*) FROM project_compose_name_work").await?;
+            ensure!(
+                listed == 0,
+                "{case}: the reset left {listed} work list rows"
             );
         }
         while fixture.marker().await?.0 != Some(30)
@@ -1137,17 +1189,17 @@ async fn a_manifest_sync_before_the_pass_rebuilds_under_the_new_set() -> Result<
     Ok(())
 }
 
-// The input revision moves between two chunks of the pass, two chunks of names or the catalogue
-// build's first two partitions: the next chunk's fence refuses it and the run stops with an
-// error, the committed chunks stay, and the next run rebuilds from the start under the new
-// revision.
+// The input revision moves between two chunks of the pass, two chunks of names on three workers
+// or the catalogue build's first two partitions: the next chunk's fence refuses it and the run
+// stops with an error, the committed chunks stay, and the next run rebuilds from the start under
+// the new revision. In the names stream the move lands with the record's count of the first
+// chunk, and a worker that read the revision before it commits under it.
 #[tokio::test]
 async fn a_revision_that_moves_between_two_chunks_stops_the_run() -> Result<()> {
     for (stream, moved_after) in [
         (
             0,
-            "NEW.compose_stream = 0 AND NEW.compose_cursor IS NOT NULL
-             AND OLD.compose_cursor IS NULL",
+            "NEW.compose_stream = 0 AND NEW.compose_chunks = 1 AND OLD.compose_chunks = 0",
         ),
         (
             3,
@@ -1155,7 +1207,7 @@ async fn a_revision_that_moves_between_two_chunks_stops_the_run() -> Result<()> 
              AND OLD.compose_cursor IS NULL",
         ),
     ] {
-        let fixture = Fixture::new("families_compose_revision", 30).await?;
+        let fixture = Fixture::with_connections("families_compose_revision", 30, 4).await?;
         for block in 11..=25 {
             fixture
                 .resolver_changed(block, 1, block.unsigned_abs() % 4, R1)
@@ -1177,15 +1229,21 @@ async fn a_revision_that_moves_between_two_chunks_stops_the_run() -> Result<()> 
         .await?;
         let ranged = options(RebuildRanges::Through(30))
             .with_compose_chunk_keys(1)
-            .with_compose_builder_partitions(2, 2);
+            .with_compose_builder_partitions(2, 2)
+            .with_compose_workers(3);
         let error = run_to(&fixture, 30, true, &ranged)
             .await
             .expect_err("the second chunk is refused");
         ensure!(error.to_string().contains("revision"), "{error}");
         let (state, at, cursor, _) = pass_state(&fixture).await?;
+        let committed = if stream == 0 {
+            cursor.is_null() && marked(&fixture).await? >= 1
+        } else {
+            cursor.is_string()
+        };
         ensure!(
-            state == "composing" && at == json!(stream) && cursor.is_string(),
-            "stream {stream}: one chunk committed before the move: {state} {at} {cursor}"
+            state == "composing" && at == json!(stream) && committed,
+            "stream {stream}: a chunk committed before the move: {state} {at} {cursor}"
         );
         if stream == 3 {
             let step = cursor

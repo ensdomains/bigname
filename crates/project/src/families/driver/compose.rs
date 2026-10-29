@@ -5,16 +5,20 @@
 //! marker's block, each in its own transaction and each one block of the run's budget, and a
 //! fenced transition ends the pass: the record returns to rebuilding with `composed_block` set,
 //! and one marker journal row under the pass block ends the undo journal there. The transition
-//! that begins the pass also writes its name work list, which the names stream then pages
-//! through, and the pass end drops it. The last stream builds the address history catalogue in
+//! that begins the pass also writes its name work list, which the names stream's workers then
+//! claim from (compose/workers.rs), and the pass end drops it. The other streams page their keys
+//! and commit their chunks in order. The last stream builds the address history catalogue in
 //! partitions, each a chunk (history_catalogue/build). The pass end spends one block of the
 //! budget too. Every generation
 //! after that composes and journals as a block always did. A run that stops anywhere in the pass
 //! leaves the record saying where, and the next run continues from it.
+mod workers;
+
 use std::time::Instant;
 
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
+use uuid::Uuid;
 
 use super::{Run, transitions::analyze_tables};
 use crate::{
@@ -33,9 +37,10 @@ use crate::{
 };
 
 /// What one chunk of the pass composes.
-enum Work<'a> {
-    Names(&'a [(i64, String, compose::Reach)]),
+enum Work {
     Pairs(Vec<(String, String)>),
+    /// Composed lookup names, each with the resource it serves.
+    Inventories(Vec<(String, Uuid)>),
     /// One partition of the catalogue build.
     Catalogue(build::Cursor),
 }
@@ -113,13 +118,18 @@ impl Run<'_> {
                 .saturating_mul(size);
             let within_budget = match stream {
                 Stream::Names => {
-                    let ids =
-                        compose::names(self.pool, self.chain_id, cursor.as_deref(), limit).await?;
-                    let last = ids.len() < limit;
+                    self.names(family, &mut record, revision, &composition, outcome)
+                        .await?
+                }
+                Stream::Nodes | Stream::RecordIds => {
+                    let pairs =
+                        compose::pairs(self.pool, self.chain_id, stream, cursor.as_deref(), limit)
+                            .await?;
+                    let last = pairs.len() < limit;
                     let mut chunks = Vec::new();
-                    for chunk in ids.chunks(size) {
-                        let at = chunk.last().map(|(serial, _, _)| serial.to_string());
-                        chunks.push((Work::Names(chunk), at));
+                    for chunk in pairs.chunks(size) {
+                        let at = chunk.last().map(compose::pair_cursor);
+                        chunks.push((Work::Pairs(chunk.to_vec()), at));
                     }
                     self.chunks(
                         family,
@@ -132,15 +142,15 @@ impl Run<'_> {
                     )
                     .await?
                 }
-                Stream::Nodes | Stream::RecordIds => {
-                    let pairs =
-                        compose::pairs(self.pool, self.chain_id, stream, cursor.as_deref(), limit)
+                Stream::Inventories => {
+                    let names =
+                        compose::inventories(self.pool, self.chain_id, cursor.as_deref(), limit)
                             .await?;
-                    let last = pairs.len() < limit;
+                    let last = names.len() < limit;
                     let mut chunks = Vec::new();
-                    for chunk in pairs.chunks(size) {
-                        let at = chunk.last().map(compose::pair_cursor);
-                        chunks.push((Work::Pairs(chunk.to_vec()), at));
+                    for chunk in names.chunks(size) {
+                        let at = chunk.last().map(|(name, _)| name.clone());
+                        chunks.push((Work::Inventories(chunk.to_vec()), at));
                     }
                     self.chunks(
                         family,
@@ -218,7 +228,7 @@ impl Run<'_> {
         record: &mut Record,
         revision: &Revision,
         composition: &Composition,
-        chunks: Vec<(Work<'_>, Option<String>)>,
+        chunks: Vec<(Work, Option<String>)>,
         last: bool,
         outcome: &mut FamilyOutcome,
     ) -> Result<bool> {
@@ -253,13 +263,13 @@ impl Run<'_> {
             let mut stats = block::BlockStats::default();
             let mut built = None;
             let cursor = match work {
-                Work::Names(ids) => {
-                    compose::names_chunk(
+                Work::Inventories(names) => {
+                    compose::inventories_chunk(
                         &mut transaction,
                         self.chain_id,
                         &header,
                         composition,
-                        ids,
+                        &names,
                         &mut stats,
                     )
                     .await?;
@@ -373,16 +383,24 @@ impl Run<'_> {
         transaction: &mut Transaction<'static, Postgres>,
         pass: &Marker,
     ) -> Result<input::BlockHeader> {
-        input::read_block(transaction, self.chain_id, pass.number)
-            .await?
-            .filter(|header| header.hash == pass.hash)
-            .ok_or_else(|| {
-                ProjectError::transient(format!(
-                    "the composition pass block {} of chain {} is not readable",
-                    pass.number, self.chain_id
-                ))
-            })
+        pass_block(transaction, self.chain_id, pass).await
     }
+}
+
+async fn pass_block(
+    transaction: &mut Transaction<'static, Postgres>,
+    chain_id: &str,
+    pass: &Marker,
+) -> Result<input::BlockHeader> {
+    input::read_block(transaction, chain_id, pass.number)
+        .await?
+        .filter(|header| header.hash == pass.hash)
+        .ok_or_else(|| {
+            ProjectError::transient(format!(
+                "the composition pass block {} of chain {chain_id} is not readable",
+                pass.number
+            ))
+        })
 }
 
 /// The record after the pass ended at `composed_block`.
