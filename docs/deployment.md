@@ -5068,10 +5068,9 @@ and no schema.
   primary key, so a high row estimate cannot turn a few names into a read of
   every surface. Beyond that it reads every row of `name_surfaces` once and
   joins the result to the names by a hash or merge join, never a probe per
-  name. Each readable surface still meets `chain_lineage`, which the
-  planner may probe by key once per surface. A rebuild range journals all its
-  blocks under its last one, so a range that covers most registrations takes
-  that arm.
+  name. Either way it looks up each surface's block in `chain_lineage` by
+  key, once per surface. A rebuild range journals all its blocks under its
+  last one, so a range that covers most registrations takes that arm.
 - The bound is 5% of the planner's row count of `name_surfaces`
   (`pg_class.reltuples`), across every chain the database holds. The full join
   reads that whole table, so its cost follows that count. Until the table is

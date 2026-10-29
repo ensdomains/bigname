@@ -1787,9 +1787,9 @@ async fn check_last_step(
 //
 // "By key" is every read of `name_surfaces` through its primary or unique key. "One pass" is
 // every read of it in one loop, joined to `affected` by a hash or merge join, never a nested
-// loop that reads it again. Each readable surface may still meet `chain_lineage` by a probe of
-// its own. Each row also selects what the frozen statement before it selects, and as many names
-// as the row says.
+// loop that reads it again. Each readable surface still meets `chain_lineage` by a lookup of its
+// own. Each row also selects what the frozen statement before it selects, and as many names as
+// the row says.
 //
 // Red, by trace. The rows up to the bound fail on the plain join the last step had before only
 // when the planner's estimates make it scan `name_surfaces`. The one run that shows it is P1's
@@ -1858,7 +1858,10 @@ async fn the_last_step_reads_few_names_by_key_and_many_in_one_pass() -> Result<(
 // surfaces. The rows at the bound and one over it read `name_surfaces` by key and in one pass,
 // under both plan modes. Autovacuum is off for the table, so no ANALYZE runs under the test.
 // Red, by trace: on a fresh table `reltuples` is -1, so a bound read from the row count alone
-// is floor(5% of -1), also -1, and the row at the bound then takes the one pass.
+// is floor(5% of -1), also -1, and the row at the bound then takes the one pass. Red by run on
+// a last step that joined `chain_lineage` and filtered the key lookup in one subquery: with no
+// statistics the probe read `name_surfaces_visibility_idx` and the full join read
+// `name_surfaces` in 13 loops, by trace one for each of the fixture's 13 blocks.
 #[tokio::test]
 async fn a_never_analyzed_table_bounds_the_last_step_by_a_count() -> Result<()> {
     let (database, pool) = database().await?;
