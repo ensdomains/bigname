@@ -131,6 +131,46 @@ async fn assert_bounded_posting_collection(
     Ok(())
 }
 
+/// A prefix with a term of at most 1,024 postings reads its candidates by posting id, through
+/// no bucket and no walk of every name in order, and answers as the full reader does.
+async fn assert_sparse_collection(
+    database: &TestDatabase,
+    filter: &NameCurrentListFilter,
+) -> Result<()> {
+    let mut connection =
+        PgConnection::connect_with(database.pool.connect_options().as_ref()).await?;
+    let mut snapshot = connection.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *snapshot)
+        .await?;
+    let page = load_page(&mut *snapshot, filter, None, 200).await?;
+    let statements: Vec<String> = sqlx::query_scalar(
+        "SELECT statement FROM pg_prepared_statements WHERE statement LIKE $1
+            OR statement LIKE $2 OR statement LIKE $3",
+    )
+    .bind("/* storage:families.name.search_candidates%")
+    .bind("SELECT rendered.logical_name_id, rendered.name, rendered.namespace%")
+    .bind("SELECT rendered.logical_name_id,rendered.name,rendered.namespace,rendered.namehash%")
+    .fetch_all(&mut *snapshot)
+    .await?;
+    let by_id = statements
+        .iter()
+        .filter(|statement| statement.contains("rendered.search_id=ANY($9::bigint[])"))
+        .count();
+    assert!(
+        by_id == 1 && statements.len() == 1,
+        "{filter:?}: candidates read through {statements:#?}"
+    );
+    let full =
+        bigname_storage::families::name::load_family_search_page(&mut *snapshot, filter, None, 200)
+            .await?;
+    assert_eq!(compact_search_dictionary(&page)?, search_dictionary(&full)?);
+    assert_eq!(page.next_cursor, full.next_cursor);
+    snapshot.commit().await?;
+    connection.close().await?;
+    Ok(())
+}
+
 async fn assert_dense_http(database: &TestDatabase) -> Result<Vec<Value>> {
     let expected = assert_search_lean_pages_match(database, &prefix_filter(), 200).await?;
     assert_eq!(
@@ -204,14 +244,29 @@ async fn assert_bucket_lengths(
         assert_eq!(page["page"]["has_more"], true, "{prefix}");
     }
     if class == 0 {
-        // The prefix is normalized before its bucket is chosen.
+        // The route normalizes `q` before storage chooses a bucket, so a mixed-case prefix
+        // reads the bucket of its normalized spelling.
+        let normalized = crate::name_filter::normalize_name_prefix("A.PA")
+            .map_err(|error| anyhow::anyhow!("{}", error.message()))?;
+        assert_eq!(normalized, "a.pa");
+        let filter = NameCurrentListFilter {
+            prefix: Some(normalized),
+            ..prefix_filter()
+        };
+        let bucket = bucket_statement(database, 4).await?;
+        assert_bounded_posting_collection(database, &filter, class, Some(bucket.as_str())).await?;
         let upper = get(database, "/v1/search?q=A.PA&namespace=ens&page_size=200").await?;
         let lower = get(database, "/v1/search?q=a.pa&namespace=ens&page_size=200").await?;
         assert_eq!(upper["data"], lower["data"]);
         assert_eq!(upper["page"], lower["page"]);
-        // `.px` has no posting, so the sparse path answers.
-        let sparse = get(database, "/v1/search?q=a.px&namespace=ens").await?;
-        assert_eq!(sparse["data"], json!([]));
+        // `.px` has no posting, so the class reads its posting ids, not a bucket.
+        let sparse = NameCurrentListFilter {
+            prefix: Some("a.px".into()),
+            ..prefix_filter()
+        };
+        assert_sparse_collection(database, &sparse).await?;
+        let page = get(database, "/v1/search?q=a.px&namespace=ens").await?;
+        assert_eq!(page["data"], json!([]));
     }
     let (status, body) = read_family_response(database, "/v1/search?q=a%5B&namespace=ens").await?;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
