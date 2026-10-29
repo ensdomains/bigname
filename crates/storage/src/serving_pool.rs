@@ -7,7 +7,8 @@
 //! as clean. The next reader's `BEGIN` then only warns, and once any statement has run in the
 //! leftover transaction, that reader's `SET TRANSACTION ISOLATION LEVEL` fails with SQLSTATE 25001.
 
-use sqlx::{PgConnection, Row, postgres::PgPoolOptions};
+use futures_util::future::BoxFuture;
+use sqlx::{Executor, PgConnection, Row, postgres::PgPoolOptions};
 
 /// True when an earlier statement opened the transaction the session is in. Sent as a simple
 /// query, which is one protocol message: PostgreSQL gives the first statement of a transaction the
@@ -21,22 +22,27 @@ pub(crate) fn serving_pool_options(max_connections: u32) -> PgPoolOptions {
         // of the empty ping sqlx would otherwise send first. A failed check closes the connection
         // and the acquire opens a new one.
         .test_before_acquire(false)
-        .before_acquire(|conn, _| Box::pin(end_transaction_left_open(conn)))
+        .before_acquire(|conn, _| end_transaction_left_open(conn))
 }
 
 /// Ends a transaction an earlier request left open, before the connection is handed out. sqlx
 /// exposes the server's transaction status only through its own count, which is what the leak
-/// leaves wrong, so the server is asked.
-async fn end_transaction_left_open(conn: &mut PgConnection) -> Result<bool, sqlx::Error> {
-    let left_open: bool = sqlx::raw_sql(IN_TRANSACTION_BLOCK)
-        .fetch_one(&mut *conn)
-        .await?
-        .try_get(0)?;
-    if left_open {
-        tracing::warn!("rolled back a transaction left open on a pooled read connection");
-        sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await?;
-    }
-    Ok(true)
+/// leaves wrong, so the server is asked. A `&str` statement goes out as a simple query.
+///
+/// The statements go through `Executor` directly. Its boxed futures are `Send` for any connection
+/// lifetime, as the hook's higher-ranked bound needs. The generic `async fn` wrappers, such as
+/// `raw_sql(..).fetch_one`, cannot be proved so.
+fn end_transaction_left_open(conn: &mut PgConnection) -> BoxFuture<'_, Result<bool, sqlx::Error>> {
+    Box::pin(async move {
+        let left_open: bool = Executor::fetch_one(&mut *conn, IN_TRANSACTION_BLOCK)
+            .await?
+            .try_get(0)?;
+        if left_open {
+            tracing::warn!("rolled back a transaction left open on a pooled read connection");
+            Executor::execute(&mut *conn, "ROLLBACK").await?;
+        }
+        Ok(true)
+    })
 }
 
 #[cfg(test)]

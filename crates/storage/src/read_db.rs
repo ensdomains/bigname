@@ -2,7 +2,11 @@
 use std::ops::{Deref, DerefMut};
 
 use anyhow::{Context, Result};
-use sqlx::{PgConnection, PgPool, Postgres, Transaction, pool::PoolConnection};
+use futures_util::future::BoxFuture;
+use sqlx::{
+    Executor, PgConnection, PgPool, Postgres, Transaction, pool::PoolConnection,
+    postgres::PgQueryResult,
+};
 
 /// A pool, where each reader takes its own connection and, for a multi-statement read, its own
 /// REPEATABLE READ snapshot; or a caller's connection already inside one read-only REPEATABLE
@@ -85,11 +89,13 @@ async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres>> {
         .context("failed to begin a read snapshot")
 }
 
-async fn pin(transaction: &mut Transaction<'static, Postgres>) -> sqlx::Result<()> {
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        .execute(&mut **transaction)
-        .await?;
-    Ok(())
+fn pin(
+    transaction: &mut Transaction<'static, Postgres>,
+) -> BoxFuture<'_, sqlx::Result<PgQueryResult>> {
+    Executor::execute(
+        &mut **transaction,
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"),
+    )
 }
 
 /// SQLSTATE 25001: `SET TRANSACTION ISOLATION LEVEL` after a statement of the same transaction.
