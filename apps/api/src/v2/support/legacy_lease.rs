@@ -17,7 +17,11 @@
 //!   lease becomes its identity.
 //!
 //! A name with no such events is served as composed. The fill stands until the stored
-//! registration carries the lease, which the shape check then no longer matches.
+//! registration carries the lease, which the shape check then no longer matches. Lookup, the
+//! list routes, search, address names and subnames serve the stored registration.
+//!
+//! The API owns these three statements. They are route-specific reads of Interpret's events and
+//! the chain lineage, transitional until the stored registration carries the lease.
 use serde_json::{Map, Value};
 use sqlx::{PgConnection, Row};
 
@@ -148,10 +152,12 @@ pub(crate) fn heal_registration(
         registration.insert("ens_v1_expiry".into(), Value::String(expiry.to_string()));
         if registration.get("expiry").is_none_or(Value::is_null) {
             registration.insert("expiry".into(), Value::String(expiry.to_string()));
-            registration.insert(
-                "grace_ends_at".into(),
-                Value::String((expiry + GRACE_SECONDS).to_string()),
-            );
+            if let Some(grace_ends_at) = expiry.checked_add(GRACE_SECONDS) {
+                registration.insert(
+                    "grace_ends_at".into(),
+                    Value::String(grace_ends_at.to_string()),
+                );
+            }
         }
     }
     let start = handoff_block.or_else(|| lease.iter().map(|event| event.block_number).min());
@@ -167,6 +173,38 @@ pub(crate) fn heal_registration(
         );
     }
     true
+}
+
+/// [`serve_legacy_lease`] in a savepoint of `conn`'s read transaction. A failed read rolls back to
+/// the savepoint, so the reads after it still run on the snapshot, and `row` stays as composed. A
+/// row of neither shape takes no savepoint.
+pub(crate) async fn serve_legacy_lease_in_savepoint(
+    conn: &mut PgConnection,
+    row: &mut NameCurrentRow,
+    selected_snapshot: &SelectedSnapshot,
+) -> Result<bool> {
+    if legacy_lease_shape(
+        &row.namespace,
+        &row.normalized_name,
+        &row.provenance,
+        &row.declared_summary,
+    )
+    .is_none()
+    {
+        return Ok(false);
+    }
+    let composed = row.declared_summary.clone();
+    let mut savepoint = sqlx::Connection::begin(&mut *conn).await?;
+    let read = serve_legacy_lease(&mut savepoint, row, selected_snapshot).await;
+    let ended = match read {
+        Ok(_) => savepoint.commit().await,
+        Err(_) => savepoint.rollback().await,
+    };
+    if read.is_err() || ended.is_err() {
+        row.declared_summary = composed;
+    }
+    ended?;
+    read
 }
 
 /// Heals `row`'s registration on the snapshot's position on its chain: the unleased shape from the
@@ -271,6 +309,8 @@ async fn load_lease_events(
     logical_name_id: &str,
     bound: i64,
 ) -> Result<Vec<LeaseEvent>> {
+    #[cfg(test)]
+    read_fault_test_hooks::run(&mut *conn, logical_name_id).await?;
     let rows = sqlx::query(
         "/* api:v2.support.legacy_lease.events */
          SELECT event_kind, block_number, resource_id::text AS resource_id,
@@ -334,6 +374,29 @@ async fn load_block_times(
             )
         })
         .collect())
+}
+
+/// Makes the events read of one name fail with a database error inside the read transaction, as
+/// a statement timeout would. The key is the name's logical id, which only the installing test
+/// uses.
+#[cfg(test)]
+pub(crate) mod read_fault_test_hooks {
+    use anyhow::Result;
+    use bigname_test_support::{ScopedTestHookGuard, ScopedTestHookRegistry};
+    use sqlx::PgConnection;
+
+    static HOOKS: ScopedTestHookRegistry<String, ()> = ScopedTestHookRegistry::new();
+
+    pub(crate) fn install(logical_name_id: &str) -> ScopedTestHookGuard<String, ()> {
+        HOOKS.install(logical_name_id.to_owned(), ())
+    }
+
+    pub(super) async fn run(conn: &mut PgConnection, logical_name_id: &str) -> Result<()> {
+        if HOOKS.get_cloned(&logical_name_id.to_owned()).is_some() {
+            sqlx::query("SELECT 1 / 0").execute(conn).await?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

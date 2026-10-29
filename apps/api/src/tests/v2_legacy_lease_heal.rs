@@ -338,7 +338,7 @@ async fn a_registry_only_lease_serves_its_identity_expiry_and_handoff_registrati
     assert_eq!(data["authority"], "ens_v1", "{data}");
     assert_eq!(data["owner"], OWNER, "{data}");
 
-    // Lookup reads the composed row and is not filled.
+    // Lookup reads the stored registration, whose identity is the bound registry record.
     let lookup = v2_lookup_json(
         &database,
         json!({"profile": "detail", "inputs": [{"id": "migrated", "name": "migrated.eth"}]}),
@@ -346,11 +346,12 @@ async fn a_registry_only_lease_serves_its_identity_expiry_and_handoff_registrati
     .await?;
     let record = &lookup["data"][0]["record"];
     assert_eq!(lookup["data"][0]["status"], "ok", "{lookup}");
-    assert_ne!(
+    assert_eq!(
         record["registration_id"],
-        json!(lease.to_string()),
+        json!(Uuid::from_u128(0x7a10).to_string()),
         "{lookup}"
     );
+    assert!(record["registered_at"].is_null(), "{lookup}");
     assert_eq!(record["ens_v1"]["expires_at"], Value::Null, "{lookup}");
     database.cleanup().await
 }
@@ -560,6 +561,35 @@ async fn registrar_events_above_the_snapshot_are_left_out() -> Result<()> {
     database.cleanup().await
 }
 
+/// A lease event Interpret wrote at candidate visibility is left out.
+#[tokio::test]
+async fn a_lease_event_at_candidate_visibility_is_left_out() -> Result<()> {
+    let database = new_database().await?;
+    let logical = seed_registry_only(&database, "migrated.eth", 0x7ae0, true).await?;
+    let lease = Uuid::from_u128(0x7aef);
+    seed_lease(&database, &logical, lease, &renewed_lease()).await?;
+    publish(&database).await?;
+    assert_composed_unleased(&database, &logical).await?;
+    sqlx::query(
+        "UPDATE normalized_events SET consumer_visibility = 'candidate',
+             migration_correlation_ids = ARRAY['legacy-lease-candidate']
+         WHERE resource_id = $1 AND block_number = $2",
+    )
+    .bind(lease)
+    .bind(RENEWED)
+    .execute(&database.pool)
+    .await?;
+
+    let data = detail(&database, "migrated.eth").await?;
+    assert_eq!(data["registration_id"], json!(lease.to_string()), "{data}");
+    assert_eq!(
+        data["ens_v1"]["expires_at"],
+        json!(FIRST_EXPIRY.to_string()),
+        "{data}"
+    );
+    database.cleanup().await
+}
+
 /// A registry-only name with no registrar events is served as composed. The filled name beside
 /// it shows the fill runs on the same snapshot.
 #[tokio::test]
@@ -619,5 +649,77 @@ async fn a_row_or_snapshot_without_the_rows_chain_is_left_as_composed() -> Resul
     assert!(!crate::v2::support::serve_legacy_lease(&mut conn, &mut unread, &elsewhere).await?);
     assert_eq!(unread, row);
     drop(conn);
+    database.cleanup().await
+}
+
+/// A failed fill read rolls back to its savepoint. The route serves the stored registration, and
+/// the registry read after the fill runs on the same read transaction. Without the savepoint
+/// the same failure leaves that transaction unusable.
+#[tokio::test]
+async fn a_failed_fill_read_serves_the_composed_registration_and_keeps_the_snapshot() -> Result<()>
+{
+    let database = new_database().await?;
+    let logical = seed_registry_only(&database, "faultyread.eth", 0x7ad0, true).await?;
+    let lease = Uuid::from_u128(0x7adf);
+    seed_lease(&database, &logical, lease, &renewed_lease()).await?;
+    publish(&database).await?;
+    let row = composed(&database, &logical).await?;
+    let snapshot = SelectedSnapshot {
+        chain_positions: ChainPositions::from_value(&row.chain_positions)?,
+        consistency: SnapshotConsistency::Head,
+    };
+    let _fault = crate::v2::support::read_fault_test_hooks::install(&logical);
+
+    let data = detail(&database, "faultyread.eth").await?;
+    assert_eq!(
+        data["registration_id"],
+        json!(Uuid::from_u128(0x7ad0).to_string()),
+        "{data}"
+    );
+    assert!(data["registered_at"].is_null(), "{data}");
+    assert!(data["ens_v1"]["expires_at"].is_null(), "{data}");
+
+    let mut reads = bigname_storage::begin_read_snapshot(&database.pool).await?;
+    let served = crate::v2::support::load_served_name_for_selected_snapshot(
+        &mut reads,
+        "ens",
+        "faultyread.eth",
+        &snapshot,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("{}", error.message))?;
+    assert_eq!(
+        served.row.declared_summary["registration"],
+        row.declared_summary["registration"]
+    );
+    bigname_storage::families::records::FamilyRecordInventory::load_ens_v1_registry_pointer(
+        &mut reads,
+        CHAIN,
+        "ens",
+        &row.namehash,
+    )
+    .await?;
+    reads.commit().await?;
+
+    let mut unprotected = bigname_storage::begin_read_snapshot(&database.pool).await?;
+    let mut filled = row.clone();
+    assert!(
+        crate::v2::support::serve_legacy_lease(&mut unprotected, &mut filled, &snapshot)
+            .await
+            .is_err()
+    );
+    let aborted = sqlx::query("SELECT 1")
+        .execute(&mut *unprotected)
+        .await
+        .expect_err("a failed statement aborts the read transaction");
+    assert_eq!(
+        aborted
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("25P02"),
+        "{aborted}"
+    );
+    unprotected.rollback().await?;
     database.cleanup().await
 }

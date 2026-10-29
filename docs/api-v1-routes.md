@@ -383,7 +383,10 @@ collection route carry neither header.
   `expires_at`, `expires_at_reason` and `grace_ends_at` with the `ens_v1`
   object, each with the value and presence it has on the `profile=detail`
   record for the same name, which are those of name detail and
-  `GET /v1/names`. Every other registration field (`owner`, `manager`,
+  `GET /v1/names`. A name that carries the read-time lease fill under
+  [`registered_at`](api-v1.md#naming-dictionary) is the exception: name detail and the
+  records route carry the fill, list and lookup do not, until the stored registration
+  carries the lease. Every other registration field (`owner`, `manager`,
   `registration_id`, `token_id`, `registered_at`,
   `created_at`, `lapsed_registration`, `authority`, `migrated_at`), the
   resolver fields and `records` are detail-only. ENSv2 token values follow

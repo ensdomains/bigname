@@ -63,8 +63,9 @@ pub(crate) struct ServedName {
     pub(crate) registry: RegistryRead,
     /// Whether a verified read runs Universal Resolver discovery
     /// (`name_records::verified_discovery`). The lookup engine reloads the composed row, not
-    /// `row` as the registry read left it, so this is decided before the registry read, on the
-    /// registration `serve_legacy_lease` serves.
+    /// `row` as the registry read left it, so this is decided before the registry read. It is
+    /// decided on the registration `serve_legacy_lease` serves, which changes it only for a
+    /// released lease, whose verified read does not execute.
     pub(crate) lookup_discovery: bool,
 }
 
@@ -85,9 +86,10 @@ pub(crate) async fn load_served_name_for_selected_snapshot(
         load_composed_served_name(&mut *conn, namespace, name, selected_snapshot).await?;
     // A registration that does not carry its ENSv1 lease serves the lease its registrar events
     // prove, and discovery and the registry read are decided on that registration. A failed
-    // read serves the composed registration.
+    // read rolls back to its savepoint and serves the composed registration.
     if alias.is_none()
-        && let Err(error) = serve_legacy_lease(&mut *conn, &mut row, selected_snapshot).await
+        && let Err(error) =
+            serve_legacy_lease_in_savepoint(&mut *conn, &mut row, selected_snapshot).await
     {
         error!(
             service = "api",
