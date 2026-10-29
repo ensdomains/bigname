@@ -118,10 +118,11 @@ const POINTER_STATE_KEYS: &str = "array_remove(ARRAY[
 /// between the two shapes. Beyond it, the statement reads the surfaces in one pass and joins
 /// them to the names.
 ///
-/// The surfaces are the planner's row count of `name_surfaces`. A deployment indexes one chain,
-/// so that is the chain's. A table that was never analyzed has no row count, 0 or -1. Then the
-/// surfaces are counted, a million at most: such a table is new, the count is exact up to that
-/// size, and the cap bounds what the count reads. A larger table never analyzed gets a bound
+/// The surfaces are the planner's row count of `name_surfaces`, across every chain the database
+/// holds. The full join reads that whole table, so its cost follows that count. A table that
+/// was never analyzed has no row count, 0 or -1. Then the rows are counted, a million at most:
+/// such a table is new, the count is exact up to that size, and the cap bounds what the count
+/// reads. A larger table never analyzed gets a bound
 /// of 50,000 names, which sends selections between that and its crossover to the one pass
 /// sooner. The count runs only on that branch of the CASE.
 pub(super) const FEW_AFFECTED_NAMES: &str = "(SELECT floor(0.05::float8 * CASE
