@@ -109,6 +109,43 @@ async fn ens_read_error(
     Ok((error, refusals))
 }
 
+/// Reads through `url` and checks that the filter judged the peer `judged` admitted and refused
+/// nothing. The peer is unroutable, but a middlebox may answer for it, so the read may fail in
+/// band for another reason or fail the request as a transport error. Either is accepted.
+async fn assert_not_refused(fixture: &Fixture, url: &str, judged: SocketAddr) -> AnyResult<()> {
+    let offchain_data = ens_offchain_lookup(vec![url.to_owned()])?;
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(ccip_chain_responses(vec![offchain_data], None)).await?;
+    let (response, refusals) = seam::capture_refusals(run_lookup(fixture, &rpc_url)).await;
+    assert!(refusals.is_empty(), "{url}: {refusals:?}");
+    match response {
+        Ok(response) => {
+            let record = &response.records[0];
+            assert_eq!(
+                record.status,
+                LookupRecordStatus::ExecutionFailed,
+                "{url}: {record:?}"
+            );
+            assert_ne!(
+                record.failure_reason.as_deref(),
+                Some(REFUSED),
+                "{url}: {record:?}"
+            );
+        }
+        Err(error) => assert_eq!(error.kind(), ErrorKind::Transport, "{url}: {error}"),
+    }
+    assert!(
+        seam::was_judged_admitted(judged),
+        "{url}: the filter never admitted {judged}"
+    );
+    assert_eq!(
+        join_rpc(rpc_handle).await?.len(),
+        1,
+        "{url}: no callback may run"
+    );
+    Ok(())
+}
+
 #[track_caller]
 fn assert_refused(record: &LookupRecordResult, refusals: &[Class], class: Class, case: &str) {
     assert_eq!(
@@ -432,14 +469,18 @@ async fn hostname_with_one_refused_record_among_public_ones_is_refused_whole() -
     Ok(())
 }
 
-// Row 15. The first resolution answers a public address and the second a loopback one. The
-// connector dials only the answer the filter judged, so the second URL is refused.
+// Row 15. The first resolution answers an admitted gateway that fails with a 500, so the read
+// falls through to the second URL, whose resolution answers an unadmitted loopback address. The
+// connector dials only the answer the filter judged: the first gateway once, the rebound address
+// never.
 #[tokio::test]
 async fn hostname_that_rebinds_between_urls_is_judged_on_each_resolution() -> AnyResult<()> {
+    let (first_url, first_hits, first) =
+        spawn_status_gateway("500 Internal Server Error", String::new(), String::new()).await?;
     let (address, hits, gateway) = spawn_unadmitted_gateway("127.0.0.1:0").await?;
     let host = script_host(
         "rebinding",
-        vec![vec![peer("203.0.113.1:0")], vec![address]],
+        vec![vec![gateway_peer(&first_url)?], vec![address]],
     );
     let fixture = ens_fixture(true).await?;
 
@@ -447,12 +488,18 @@ async fn hostname_that_rebinds_between_urls_is_judged_on_each_resolution() -> An
     let (record, refusals) = ens_read(&fixture, urls, None).await?;
     assert_refused(&record, &refusals, Class::Loopback, &host);
     assert_eq!(
+        first_hits.load(Ordering::SeqCst),
+        1,
+        "the first answer was not dialled"
+    );
+    assert_eq!(
         hits.load(Ordering::SeqCst),
         0,
         "the rebound address was dialled"
     );
 
     fixture.cleanup().await?;
+    first.abort();
     gateway.abort();
     Ok(())
 }
@@ -478,13 +525,11 @@ async fn hostname_resolving_to_an_admitted_address_is_served() -> AnyResult<()> 
     Ok(())
 }
 
-// Row 17. Documentation ranges are not built in, so the read dials and fails as before.
+// Row 17. Documentation ranges are not built in, so the filter admits the literal.
 #[tokio::test]
 async fn documentation_range_literal_is_not_refused_by_the_built_in_table() -> AnyResult<()> {
     let fixture = ens_fixture(true).await?;
-    let (error, refusals) = ens_read_error(&fixture, vec!["http://192.0.2.1/".to_owned()]).await?;
-    assert_eq!(error.kind(), ErrorKind::Transport, "{error}");
-    assert!(refusals.is_empty(), "{refusals:?}");
+    assert_not_refused(&fixture, "http://192.0.2.1/", peer("192.0.2.1:80")).await?;
     fixture.cleanup().await
 }
 
@@ -502,10 +547,11 @@ async fn operator_listed_literals_are_refused() -> AnyResult<()> {
 #[tokio::test]
 async fn operator_list_refuses_nothing_outside_its_ranges() -> AnyResult<()> {
     let fixture = ens_fixture(true).await?;
-    for url in ["http://203.0.113.7/", "http://[2001:db8:2::7]/"] {
-        let (error, refusals) = ens_read_error(&fixture, vec![url.to_owned()]).await?;
-        assert_eq!(error.kind(), ErrorKind::Transport, "{url}: {error}");
-        assert!(refusals.is_empty(), "{url}: {refusals:?}");
+    for (url, judged) in [
+        ("http://203.0.113.7/", "203.0.113.7:80"),
+        ("http://[2001:db8:2::7]/", "[2001:db8:2::7]:80"),
+    ] {
+        assert_not_refused(&fixture, url, peer(judged)).await?;
     }
     fixture.cleanup().await
 }
