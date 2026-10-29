@@ -113,7 +113,9 @@ pub(crate) async fn follow_ccip_read(
     };
     let mut expected_sender = expected_sender.to_owned();
     let mut gateway_budget = CCIP_READ_BUDGET;
-    for redirect_index in 0..MAX_CCIP_REDIRECTS {
+    let mut steps = 0;
+    loop {
+        steps += 1;
         if !lookup.sender.eq_ignore_ascii_case(&expected_sender) {
             return Err(CcipReadError::malformed(format!(
                 "CCIP-Read OffchainLookup sender {} does not match called contract {}",
@@ -167,10 +169,14 @@ pub(crate) async fn follow_ccip_read(
                 )
             })?;
         if let Err(error) = &callback_result.result
-            && redirect_index + 1 < MAX_CCIP_REDIRECTS
             && let Some(next) =
                 offchain_lookup_from_rpc_error(error).map_err(CcipReadError::malformed)?
         {
+            if steps == MAX_CCIP_REDIRECTS {
+                return Err(CcipReadError::malformed(format!(
+                    "CCIP-Read callback still reverted with OffchainLookup after {MAX_CCIP_REDIRECTS} steps"
+                )));
+            }
             expected_sender = callback_sender;
             lookup = next;
             continue;
@@ -179,9 +185,6 @@ pub(crate) async fn follow_ccip_read(
             result: callback_result,
         }));
     }
-    Err(CcipReadError::malformed(
-        "CCIP-Read exceeded maximum redirect depth",
-    ))
 }
 
 pub(crate) fn rpc_error_contains_offchain_lookup(error: &JsonRpcCallError) -> Result<bool> {
