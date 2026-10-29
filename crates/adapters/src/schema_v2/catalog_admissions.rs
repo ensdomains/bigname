@@ -103,9 +103,6 @@ impl Admissions {
         if self.generation == generation {
             return true;
         }
-        for (id, admission) in std::mem::take(&mut self.pass_retirements) {
-            self.insert(id, admission);
-        }
         false
     }
 
