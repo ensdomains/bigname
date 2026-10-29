@@ -74,54 +74,6 @@ WHERE rendered.search_id=ANY($9::bigint[])
  OFFSET 0)
 ORDER BY rendered.name,rendered.namespace,rendered.namehash LIMIT $7;"#;
 
-/// The dense classes' prefix walk on one bucket index: equality on the class and on the first
-/// `k` characters of the prefix leaves the entries in page order, so `LIMIT` ends the scan.
-macro_rules! prefix_bucket {
-    ($k:literal) => {
-        concat!(
-            r"/* storage:families.name.search_candidates.prefix",
-            $k,
-            r" */
-SELECT rendered.logical_name_id, rendered.name, rendered.namespace, rendered.namehash
-FROM bigname_phase.name_search_documents rendered
-WHERE rendered.spelling_class = $9 AND rendered.spelling_class IN (0, 1)
-  AND left(rendered.name, ",
-            $k,
-            r") = $2
-  AND rendered.name LIKE $3 ESCAPE '\'
-  AND rendered.namespace = ANY($1)
-  AND (rendered.name, rendered.namespace, rendered.namehash)
-      > (COALESCE($4, ''), COALESCE($5, ''), COALESCE($6, ''))
-  AND (NOT $8::bool OR NOT EXISTS (
-        SELECT 1 FROM bigname_phase.project_name_summary fields
-        WHERE fields.logical_name_id = rendered.logical_name_id
-          AND fields.chain_id = rendered.chain_id AND NOT fields.search_supported))
-  AND EXISTS (
-        SELECT 1 FROM bigname_phase.name_surfaces surface
-        JOIN bigname_phase.chain_lineage lineage
-          ON lineage.chain_id = surface.chain_id AND lineage.block_hash = surface.block_hash
-        JOIN bigname_phase.project_family_marker marker ON marker.chain_id = surface.chain_id
-        WHERE surface.logical_name_id = rendered.logical_name_id
-          AND surface.namespace = rendered.namespace AND surface.namehash = rendered.namehash
-          AND surface.visibility_state = 'active'
-          AND surface.block_number <= marker.current_block_number
-          AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
-          AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-          AND ((rendered.spelling_class = 0 AND surface.raw_name <> ''
-                AND octet_length(surface.raw_name) <= 2000)
-            OR (rendered.spelling_class = 1 AND surface.raw_name IS NULL
-                AND hash_array_extended(surface.raw_labels, 0) IS NULL))
-        OFFSET 0)
-ORDER BY rendered.name, rendered.namespace, rendered.namehash
-LIMIT $7"
-        )
-    };
-}
-
-/// One statement per `name_search_documents_prefix{k}_idx` of the identity baseline. A prefix
-/// longer than the last bucket walks that bucket and filters by its `LIKE`.
-const PREFIX: [&str; 3] = [prefix_bucket!(1), prefix_bucket!(2), prefix_bucket!(3)];
-
 const PROBE: &str = r#"SELECT search_id FROM bigname_phase.name_search_postings
 WHERE namespace=$1 AND spelling_class=$2 AND token_kind=$3 AND token_length=$4 AND token_bytes=$5
 ORDER BY search_id LIMIT $6;"#;
@@ -148,14 +100,6 @@ fn terms(filter: &NameCurrentListFilter) -> Vec<(i16, String)> {
         return Vec::new();
     };
     crate::identity_search::tokens::required(&query, mode == "prefix")
-}
-
-/// The bucket statement and the bucket of a prefix search.
-fn bucket(filter: &NameCurrentListFilter) -> Option<(&'static str, String)> {
-    let prefix = filter.prefix.as_deref().filter(|_| filter.name.is_none())?;
-    let k = prefix.chars().count().min(PREFIX.len());
-    let statement = *PREFIX.get(k.checked_sub(1)?)?;
-    Some((statement, prefix.chars().take(k).collect()))
 }
 
 pub(super) async fn load(
@@ -229,36 +173,23 @@ pub(super) async fn load(
         }
     }
     let limit = i64::try_from(limit).context("search batch exceeds i64")?;
-    let bucket = bucket(filter);
     let mut candidates = Vec::new();
     for class in 0_i16..=2 {
-        let bucketed = bucket.as_ref().filter(|_| dense.contains(&class));
-        let statement = match bucketed {
-            Some((statement, _)) => *statement,
-            None if dense.contains(&class) => {
-                if class == 0 {
-                    RAW_SHORT
-                } else {
-                    DENSE_SHORT
-                }
-            }
-            None => FINITE,
+        let statement = if dense.contains(&class) {
+            if class == 0 { RAW_SHORT } else { DENSE_SHORT }
+        } else {
+            FINITE
         };
-        let mut query = sqlx::query_as::<_, Candidate>(statement);
-        query = match bucketed {
-            Some((_, bucket)) => query.bind(scope.as_slice()).bind(bucket.as_str()),
-            None => query.bind(namespaces.clone()).bind(filter.name.as_deref()),
-        };
-        query = query
+        let mut query = sqlx::query_as::<_, Candidate>(statement)
+            .bind(namespaces.clone())
+            .bind(filter.name.as_deref())
             .bind(like.as_deref())
             .bind(after.map(|(name, ..)| name.as_str()))
             .bind(after.map(|(_, namespace, _)| namespace.as_str()))
             .bind(after.map(|(.., namehash)| namehash.as_str()))
             .bind(limit)
             .bind(supported_before_limit);
-        if bucketed.is_some() {
-            query = query.bind(class);
-        } else if !dense.contains(&class) {
+        if !dense.contains(&class) {
             let ids = &mut selected[class as usize];
             ids.sort_unstable();
             ids.dedup();
