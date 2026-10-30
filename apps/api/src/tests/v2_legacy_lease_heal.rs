@@ -1367,7 +1367,24 @@ async fn lookup_fills_each_input_class_in_one_batch() -> Result<()> {
     let record = |index: usize| &feed["data"][index]["record"];
     assert_filled_lease(record(1), false);
     assert_filled_lease(record(3), true);
-    assert_eq!(record(4)["status"], "active", "{feed:#}");
+    // The undated fill writes only `registered_at` and the registration identity, and feed
+    // carries neither, so row C's feed record matches its detail record's feed fields. The
+    // savepoint count shows the fill read it.
+    let undated = record(4);
+    assert!(
+        undated.get("registered_at").is_none_or(Value::is_null),
+        "{feed:#}"
+    );
+    assert!(
+        undated.get("registration_id").is_none_or(Value::is_null),
+        "{feed:#}"
+    );
+    for field in ["status", "expires_at", "grace_ends_at", "ens_v1"] {
+        assert_eq!(
+            undated[field], detail["data"][4]["record"][field],
+            "{field}: {feed:#}"
+        );
+    }
     assert_stored(record(0), "plain.eth");
     assert_stored(record(2), "sub.migrated.eth");
 
@@ -1535,5 +1552,120 @@ async fn the_name_listing_dates_an_undated_lease_and_leaves_a_dated_one() -> Res
         }
     }
     assert_eq!(walked, full);
+    database.cleanup().await
+}
+
+/// An ENSv2 reservation of the name expiring at `LATER_EXPIRY`, as `v2_ens_v1_object.rs` seeds
+/// one on a chain whose root registry is admitted: a stored term the lease does not supply.
+async fn seed_reservation(database: &TestDatabase, logical: &str, seed: u128) -> Result<()> {
+    let mut reservation = history_event(
+        &format!("legacy-lease-reservation-{seed:x}"),
+        Some(logical),
+        None,
+        Some(CHAIN),
+        Some(RENEWED),
+        Some(hash(RENEWED).as_str()),
+        Some(format!("0xtx{RENEWED}").as_str()),
+        Some(5),
+        CanonicalityState::Canonical,
+    );
+    reservation.event_kind = "RegistrationReserved".into();
+    reservation.source_family = "ens_v2_registry_l1".into();
+    reservation.before_state = json!({});
+    reservation.after_state = json!({"source_event": "LabelReserved", "status": "reserved",
+        "expiry": LATER_EXPIRY, "token_id": "4294967297", "current_token_id": "4294967297",
+        "registry_contract_instance_id": Uuid::from_u128(seed + 0xa).to_string()});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[reservation]).await?;
+    Ok(())
+}
+
+/// `GET /v1/names` lists a registry-only row only by a stored deadline, here an ENSv2
+/// reservation's. The fill supplies the released lease's expiry and registration time, and the
+/// live stored term keeps the stored expiry and status: the row serves them as the reserved row
+/// with no registrar events beside it does, not released.
+#[tokio::test]
+async fn the_name_listing_keeps_a_live_stored_term_over_a_released_filled_lease() -> Result<()> {
+    let database = new_database().await?;
+    let reserved = seed_registry_only(&database, "reserved.eth", 0x7d10, true).await?;
+    let mut released = renewed_lease();
+    released.push(("RegistrationReleased", RELEASED, Some(RENEWED_EXPIRY)));
+    seed_lease(&database, &reserved, Uuid::from_u128(0x7d1f), &released).await?;
+    let unleased = seed_registry_only(&database, "unleased.eth", 0x7d20, true).await?;
+    admit_ens_v2_root_registry(&database, CHAIN).await?;
+    seed_reservation(&database, &reserved, 0x7d10).await?;
+    seed_reservation(&database, &unleased, 0x7d20).await?;
+    publish(&database).await?;
+    for logical in [&reserved, &unleased] {
+        assert_composed_unleased(&database, logical).await?;
+        let row = composed(&database, logical).await?;
+        assert!(
+            !row.declared_summary["registration"]["expiry"].is_null(),
+            "{logical}: {}",
+            row.declared_summary
+        );
+    }
+
+    let uri = "/v1/names?namespace=ens&expires_after=2020-01-01T00:00:00Z&page_size=200";
+    let (page, savepoints) = with_savepoints(v2_get_json(&database, uri)).await?;
+    assert_eq!(savepoints, 2, "{page:#}");
+    let filled = listed_row(&page, "reserved.eth");
+    let stored = listed_row(&page, "unleased.eth");
+    assert_eq!(
+        filled["ens_v1"]["expires_at"],
+        json!(RENEWED_EXPIRY.to_string()),
+        "{page:#}"
+    );
+    assert_eq!(filled["registered_at"], json!(seconds(HANDOFF)), "{page:#}");
+    assert!(stored["ens_v1"]["expires_at"].is_null(), "{page:#}");
+    assert_eq!(
+        filled["expires_at"],
+        json!(LATER_EXPIRY.to_string()),
+        "{page:#}"
+    );
+    assert_ne!(filled["status"], "released", "{page:#}");
+    for field in ["status", "expires_at", "grace_ends_at"] {
+        assert_eq!(filled[field], stored[field], "{field}: {page:#}");
+    }
+    database.cleanup().await
+}
+
+/// A failed savepoint fails a collection page. On a read snapshot that a failed statement has
+/// aborted, a page with no shaped row still returns, as it issues no statement. A page with a
+/// shaped row returns the internal error that address names and `GET /v1/names` answer with,
+/// and its row stays as composed.
+#[tokio::test]
+async fn a_failed_savepoint_fails_a_collection_page() -> Result<()> {
+    let database = new_database().await?;
+    let classes = seed_input_classes(&database).await?;
+    let state = database.app_state();
+    let mut snapshot = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+        &state,
+        None,
+        Some("ens"),
+    )
+    .await
+    .expect("the publication is served");
+    sqlx::query("SELECT 1 / 0")
+        .execute(snapshot.conn().await.expect("the snapshot serves the capture"))
+        .await
+        .expect_err("a failed statement aborts the read snapshot");
+
+    let mut plain = composed(&database, &classes.plain.0).await?;
+    let stored = plain.clone();
+    snapshot
+        .serve_legacy_leases(vec![&mut plain])
+        .await
+        .expect("a page of no shaped row issues no statement");
+    assert_eq!(plain, stored);
+
+    let mut migrated = composed(&database, &classes.migrated.0).await?;
+    let unfilled = migrated.clone();
+    let error = snapshot
+        .serve_legacy_leases(vec![&mut migrated])
+        .await
+        .expect_err("the shaped row's savepoint fails on the aborted snapshot");
+    assert_eq!(error.code(), crate::v2::ErrorCode::InternalError);
+    assert_eq!(migrated, unfilled);
+    drop(snapshot);
     database.cleanup().await
 }

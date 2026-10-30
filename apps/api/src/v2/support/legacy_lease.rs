@@ -245,7 +245,9 @@ pub(crate) fn lease_lifecycle_status(expiry: i64, clock: i64) -> &'static str {
 /// shape, or whose chain the snapshot does not hold, takes no savepoint. A failed read is logged
 /// and rolled back to the savepoint, so the reads after it still run on the snapshot, and `row`
 /// stays as composed. An error is returned only when taking, releasing or rolling back the
-/// savepoint fails, which may leave the read transaction unusable.
+/// savepoint fails, which may leave the read transaction unusable. On a pool connection outside
+/// any transaction, as lookup takes for each row with no served head, the savepoint is a
+/// top-level `BEGIN` and `COMMIT` of its own, and a failed `BEGIN` is that error.
 pub(crate) async fn serve_legacy_lease_in_savepoint<R: LeaseRow>(
     conn: &mut PgConnection,
     row: &mut R,

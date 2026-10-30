@@ -385,7 +385,8 @@ collection route carry neither header.
   record for the same name, which are those of name detail and
   `GET /v1/names`. A name that carries the read-time lease fill under
   [`registered_at`](api-v1.md#naming-dictionary) serves it on name detail, on both profiles
-  of a name input here, on the default address-names relations and on `GET /v1/names`, so
+  of a name input here, on `GET /v1/addresses/{address}/names` for every relation other
+  than `resolves_to` and `former_owner`, and on `GET /v1/names`, so
   those values agree for it too. The records route carries the fill through its gating, so a
   released lease serves no resolver or records there. An address input's records serve the
   stored registration until it carries the lease. Every other registration field (`owner`, `manager`,
@@ -3659,7 +3660,10 @@ introduces it rebuilds Project from full history before serving the option; see
   with no such timestamp is the smallest value: it sorts before every dated row ascending and
   after every dated row descending. Equal timestamps, and equal
   names, break ties by name identity and then by the grouped resource, in both
-  orders.
+  orders. The `expires_at` and `registered_at` sorts and their cursors key on the
+  stored registration. A name served with the read-time lease fill described under
+  [`registered_at`](api-v1.md#naming-dictionary) can therefore appear out of order
+  until the stored registration carries its lease.
   `relation` accepts a comma-separated set of v2 vocabulary values
   `owner`, `manager`, and `role_holder`; `any` normalizes to all
   three values. Rows match when any listed relation matches. `owner` matches
