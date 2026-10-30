@@ -6,7 +6,8 @@ use bigname_storage::{
 use tracing::error;
 
 use crate::v2::{
-    Status, V2Error, V2Result, load_subregistry_refs, registries::snapshot_block_for_chain,
+    Status, V2Error, V2Result, load_subregistry_refs,
+    registries::snapshot_block_for_chain,
     support::{lease_row_shape, serve_legacy_lease_in_savepoint},
 };
 
