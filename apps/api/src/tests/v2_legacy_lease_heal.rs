@@ -1646,7 +1646,12 @@ async fn a_failed_savepoint_fails_a_collection_page() -> Result<()> {
     .await
     .expect("the publication is served");
     sqlx::query("SELECT 1 / 0")
-        .execute(snapshot.conn().await.expect("the snapshot serves the capture"))
+        .execute(
+            snapshot
+                .conn()
+                .await
+                .expect("the snapshot serves the capture"),
+        )
         .await
         .expect_err("a failed statement aborts the read snapshot");
 
