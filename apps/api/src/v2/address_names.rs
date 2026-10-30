@@ -292,7 +292,7 @@ pub(crate) async fn get_address_names(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let name_rows = bigname_storage::load_name_current_by_logical_name_ids(
+    let mut name_rows = bigname_storage::load_name_current_by_logical_name_ids(
         snapshot.conn().await?,
         &logical_name_ids,
     )
@@ -305,6 +305,7 @@ pub(crate) async fn get_address_names(
             ))
         },
     ))?;
+    snapshot.serve_legacy_leases(name_rows.values_mut()).await?;
     let migrated_logical_name_ids = name_rows
         .values()
         .filter(|row| Authority::from_provenance(&row.provenance) == Some(Authority::EnsV2))

@@ -174,7 +174,7 @@ async fn get_names_page(
         parent: parent.clone(),
     };
     // The rows are composed from the owned key families.
-    let storage_page = {
+    let mut storage_page = {
         let chains: Vec<String> = snapshot.block_bounds().into_keys().collect();
         bigname_storage::families::name::load_family_expiring_page(
             snapshot.conn().await?,
@@ -190,6 +190,11 @@ async fn get_names_page(
         crate::v2::SnapshotReadResource::Name,
         |_| V2Error::internal_error(format!("failed to load names for {namespace}")),
     ))?;
+    // A listed row's deadline is stored, and the fill supplies an expiry and grace end only where
+    // they are null, so it moves no row's window or cursor position.
+    snapshot
+        .serve_legacy_leases(storage_page.rows.iter_mut().map(|row| &mut row.row))
+        .await?;
 
     let next_cursor = storage_page
         .next_cursor

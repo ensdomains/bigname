@@ -1,5 +1,6 @@
 //! A `.eth` second-level ENSv1 name whose stored registration does not carry its BaseRegistrar
-//! lease, read through name detail and the records route (`v2::support::legacy_lease`). Each
+//! lease, read through name detail, the records route, lookup, address names and the name
+//! listing (`v2::support::legacy_lease`). Each
 //! case composes the registration from constructed retained inputs through Project's family
 //! reducers, checks that composition, then reads the public routes at the publication.
 use super::*;
@@ -355,7 +356,7 @@ async fn a_registry_only_lease_serves_its_identity_expiry_and_handoff_registrati
     assert_eq!(data["authority"], "ens_v1", "{data}");
     assert_eq!(data["owner"], OWNER, "{data}");
 
-    // Lookup reads the stored registration, whose identity is the bound registry record.
+    // Lookup serves the same fill.
     let lookup = v2_lookup_json(
         &database,
         json!({"profile": "detail", "inputs": [{"id": "migrated", "name": "migrated.eth"}]}),
@@ -365,11 +366,15 @@ async fn a_registry_only_lease_serves_its_identity_expiry_and_handoff_registrati
     assert_eq!(lookup["data"][0]["status"], "ok", "{lookup}");
     assert_eq!(
         record["registration_id"],
-        json!(Uuid::from_u128(0x7a10).to_string()),
+        json!(lease.to_string()),
         "{lookup}"
     );
-    assert!(record["registered_at"].is_null(), "{lookup}");
-    assert_eq!(record["ens_v1"]["expires_at"], Value::Null, "{lookup}");
+    assert_eq!(record["registered_at"], json!(seconds(HANDOFF)), "{lookup}");
+    assert_eq!(
+        record["ens_v1"]["expires_at"],
+        json!(RENEWED_EXPIRY.to_string()),
+        "{lookup}"
+    );
     database.cleanup().await
 }
 
@@ -1138,5 +1143,397 @@ async fn a_released_ownerless_name_is_served_without_an_alias_walk() -> Result<(
         json!(Uuid::from_u128(0x2200).to_string()),
         "{data}"
     );
+    database.cleanup().await
+}
+
+/// One name of each input class, published together, with E `sub.migrated.eth`: a subname with
+/// its own registrar events, of no shape.
+struct InputClasses {
+    /// A: a renewed lease the stored registry-only registration does not carry.
+    migrated: (String, Uuid),
+    /// B: that shape with a release as the lease's latest event.
+    lapsed: (String, Uuid),
+    /// C: a registrar lease with no registration time.
+    undated: (String, Uuid),
+    /// D: a dated registrar lease, of no shape.
+    plain: (String, Uuid),
+}
+
+const MIGRATED_SEED: u128 = 0x7c10;
+
+async fn seed_input_classes(database: &TestDatabase) -> Result<InputClasses> {
+    let migrated = seed_registry_only(database, "migrated.eth", MIGRATED_SEED, true).await?;
+    let migrated_lease = Uuid::from_u128(0x7c1f);
+    seed_lease(database, &migrated, migrated_lease, &renewed_lease()).await?;
+
+    let lapsed = seed_registry_only(database, "lapsed.eth", 0x7c20, true).await?;
+    let lapsed_lease = Uuid::from_u128(0x7c2f);
+    let mut released = renewed_lease();
+    released.push(("RegistrationReleased", RELEASED, Some(RENEWED_EXPIRY)));
+    seed_lease(database, &lapsed, lapsed_lease, &released).await?;
+
+    let undated = seed_undated_registrar(database, "undated.eth", 0x7c30, Some(GRANTED)).await?;
+
+    let plain = seed_undated_registrar(database, "plain.eth", 0x7c40, None).await?;
+    let grant = event(
+        Some(&plain.0),
+        plain.1,
+        "RegistrationGranted",
+        REGISTRAR,
+        GRANTED,
+        0,
+        json!({"authority_kind": "registrar", "registrant": OWNER, "expiry": FIRST_EXPIRY}),
+    );
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[grant]).await?;
+
+    let sub = seed_registry_only(database, "sub.migrated.eth", 0x7c50, true).await?;
+    seed_lease(database, &sub, Uuid::from_u128(0x7c5f), &renewed_lease()).await?;
+    publish(database).await?;
+
+    assert_composed_unleased(database, &migrated).await?;
+    assert_composed_unleased(database, &lapsed).await?;
+    for (logical, shaped) in [(&undated.0, true), (&plain.0, false), (&sub, false)] {
+        let row = composed(database, logical).await?;
+        assert_eq!(
+            crate::v2::support::lease_row_shape(&row).is_some(),
+            shaped,
+            "{logical}: {}",
+            row.declared_summary
+        );
+    }
+    Ok(InputClasses {
+        migrated: (migrated, migrated_lease),
+        lapsed: (lapsed, lapsed_lease),
+        undated,
+        plain,
+    })
+}
+
+/// `read` with the lease savepoints it took. The fill issues every statement inside one, so no
+/// savepoint means no statement.
+async fn with_savepoints<T>(
+    read: impl std::future::Future<Output = Result<T>>,
+) -> Result<(T, usize)> {
+    crate::v2::support::LEASE_SAVEPOINTS
+        .scope(std::cell::Cell::new(0), async {
+            let value = read.await?;
+            let count = crate::v2::support::LEASE_SAVEPOINTS.with(std::cell::Cell::get);
+            Ok((value, count))
+        })
+        .await
+}
+
+async fn lookup_records(database: &TestDatabase, profile: &str, names: &[&str]) -> Result<Value> {
+    let inputs: Vec<Value> = names
+        .iter()
+        .map(|name| json!({"id": name, "name": name}))
+        .collect();
+    v2_lookup_json(database, json!({"profile": profile, "inputs": inputs})).await
+}
+
+/// The manager's address-names read.
+fn owned_names_uri(page_size: u32, cursor: Option<&str>) -> String {
+    let mut uri = format!(
+        "/v1/addresses/{OWNER}/names?namespace=ens&relation=any&authority=ens_v1,ens_v0\
+         &sort=name&order=asc&page_size={page_size}"
+    );
+    if let Some(cursor) = cursor {
+        uri.push_str(&format!("&cursor={cursor}"));
+    }
+    uri
+}
+
+fn listed_row<'a>(payload: &'a Value, name: &str) -> &'a Value {
+    payload["data"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["name"] == name))
+        .unwrap_or_else(|| panic!("{name} is listed: {payload:#}"))
+}
+
+fn listed_names(payload: &Value) -> Vec<String> {
+    payload["data"]
+        .as_array()
+        .expect("data is an array")
+        .iter()
+        .map(|row| row["name"].as_str().expect("a row has a name").to_owned())
+        .collect()
+}
+
+/// Rows A and B as every filling route serves them: the lease's expiry, its handoff
+/// registration time and the status at the snapshot.
+fn assert_filled_lease(row: &Value, released: bool) {
+    assert_eq!(
+        row["ens_v1"]["expires_at"],
+        json!(RENEWED_EXPIRY.to_string()),
+        "{row}"
+    );
+    assert_eq!(
+        row["expires_at"],
+        json!(RENEWED_EXPIRY.to_string()),
+        "{row}"
+    );
+    assert_eq!(
+        row["grace_ends_at"],
+        json!((RENEWED_EXPIRY + GRACE_SECONDS).to_string()),
+        "{row}"
+    );
+    let status = if released { "released" } else { "active" };
+    assert_eq!(row["status"], status, "{row}");
+}
+
+/// Rows D and E as stored: the dated lease keeps its grant time, and the subname has no lease.
+fn assert_stored(row: &Value, name: &str) {
+    if name == "plain.eth" {
+        assert_eq!(
+            row["ens_v1"]["expires_at"],
+            json!(RENEWED_EXPIRY.to_string()),
+            "{row}"
+        );
+        assert_eq!(row["status"], "active", "{row}");
+    } else {
+        assert!(row["ens_v1"]["expires_at"].is_null(), "{row}");
+        assert!(row.get("registered_at").is_none_or(Value::is_null), "{row}");
+    }
+}
+
+/// Lookup `profile=detail` and `profile=feed` serve rows A to C filled and rows D and E as
+/// stored, in input order, with one savepoint per filled row and none for the others.
+#[tokio::test]
+async fn lookup_fills_each_input_class_in_one_batch() -> Result<()> {
+    let database = new_database().await?;
+    let classes = seed_input_classes(&database).await?;
+    let names = [
+        "plain.eth",
+        "migrated.eth",
+        "sub.migrated.eth",
+        "lapsed.eth",
+        "undated.eth",
+    ];
+
+    let (detail, savepoints) = with_savepoints(lookup_records(&database, "detail", &names)).await?;
+    assert_eq!(savepoints, 3, "{detail:#}");
+    for (index, name) in names.iter().enumerate() {
+        assert_eq!(detail["data"][index]["record"]["name"], *name, "{detail:#}");
+        assert_eq!(detail["data"][index]["status"], "ok", "{detail:#}");
+    }
+    let record = |index: usize| &detail["data"][index]["record"];
+    assert_eq!(
+        record(1)["registration_id"],
+        json!(classes.migrated.1.to_string()),
+        "{detail:#}"
+    );
+    assert_eq!(
+        record(1)["registered_at"],
+        json!(seconds(HANDOFF)),
+        "{detail:#}"
+    );
+    assert_filled_lease(record(1), false);
+    assert_eq!(
+        record(3)["registration_id"],
+        json!(classes.lapsed.1.to_string()),
+        "{detail:#}"
+    );
+    assert_eq!(
+        record(3)["registered_at"],
+        json!(seconds(HANDOFF)),
+        "{detail:#}"
+    );
+    assert_filled_lease(record(3), true);
+    assert_eq!(
+        record(4)["registration_id"],
+        json!(classes.undated.1.to_string()),
+        "{detail:#}"
+    );
+    assert_eq!(
+        record(4)["registered_at"],
+        json!(seconds(GRANTED)),
+        "{detail:#}"
+    );
+    assert_eq!(
+        record(0)["registration_id"],
+        json!(classes.plain.1.to_string()),
+        "{detail:#}"
+    );
+    assert_eq!(
+        record(0)["registered_at"],
+        json!(seconds(GRANTED)),
+        "{detail:#}"
+    );
+    assert_stored(record(0), "plain.eth");
+    assert_stored(record(2), "sub.migrated.eth");
+
+    let (feed, savepoints) = with_savepoints(lookup_records(&database, "feed", &names)).await?;
+    assert_eq!(savepoints, 3, "{feed:#}");
+    let record = |index: usize| &feed["data"][index]["record"];
+    assert_filled_lease(record(1), false);
+    assert_filled_lease(record(3), true);
+    assert_eq!(record(4)["status"], "active", "{feed:#}");
+    assert_stored(record(0), "plain.eth");
+    assert_stored(record(2), "sub.migrated.eth");
+
+    // A batch of only unshaped rows takes no savepoint.
+    let unshaped = lookup_records(&database, "detail", &["plain.eth", "sub.migrated.eth"]);
+    let (_, savepoints) = with_savepoints(unshaped).await?;
+    assert_eq!(savepoints, 0);
+    database.cleanup().await
+}
+
+/// A failed fill read serves that lookup row as composed and fills the others.
+#[tokio::test]
+async fn lookup_serves_a_failed_fill_read_as_composed_beside_a_filled_row() -> Result<()> {
+    let database = new_database().await?;
+    let classes = seed_input_classes(&database).await?;
+    let _fault = crate::v2::support::read_fault_test_hooks::install(&classes.migrated.0);
+
+    for profile in ["detail", "feed"] {
+        let lookup = lookup_records(&database, profile, &["migrated.eth", "lapsed.eth"]).await?;
+        let composed = &lookup["data"][0]["record"];
+        assert_eq!(lookup["data"][0]["status"], "ok", "{lookup:#}");
+        assert!(composed["ens_v1"]["expires_at"].is_null(), "{lookup:#}");
+        assert!(composed["expires_at"].is_null(), "{lookup:#}");
+        if profile == "detail" {
+            assert_eq!(
+                composed["registration_id"],
+                json!(Uuid::from_u128(MIGRATED_SEED).to_string()),
+                "{lookup:#}"
+            );
+        }
+        assert_filled_lease(&lookup["data"][1]["record"], true);
+    }
+    database.cleanup().await
+}
+
+/// The manager's address-names read serves rows A to C filled and rows D and E as stored. Walked
+/// one row a page, the page order is the full page's, and only a filled row takes a savepoint.
+#[tokio::test]
+async fn address_names_fill_each_input_class_on_the_managers_read() -> Result<()> {
+    let database = new_database().await?;
+    seed_input_classes(&database).await?;
+
+    let (page, savepoints) =
+        with_savepoints(v2_get_json(&database, &owned_names_uri(200, None))).await?;
+    assert_eq!(savepoints, 3, "{page:#}");
+    let migrated = listed_row(&page, "migrated.eth");
+    assert_filled_lease(migrated, false);
+    assert_eq!(
+        migrated["registered_at"],
+        json!(seconds(HANDOFF)),
+        "{page:#}"
+    );
+    let lapsed = listed_row(&page, "lapsed.eth");
+    assert_filled_lease(lapsed, true);
+    assert_eq!(lapsed["registered_at"], json!(seconds(HANDOFF)), "{page:#}");
+    let undated = listed_row(&page, "undated.eth");
+    assert_eq!(
+        undated["registered_at"],
+        json!(seconds(GRANTED)),
+        "{page:#}"
+    );
+    let plain = listed_row(&page, "plain.eth");
+    assert_eq!(plain["registered_at"], json!(seconds(GRANTED)), "{page:#}");
+    assert_stored(plain, "plain.eth");
+    assert_stored(listed_row(&page, "sub.migrated.eth"), "sub.migrated.eth");
+
+    let full = listed_names(&page);
+    let mut walked = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let uri = owned_names_uri(1, cursor.as_deref());
+        let (step, savepoints) = with_savepoints(v2_get_json(&database, &uri)).await?;
+        let names = listed_names(&step);
+        assert_eq!(names.len(), 1, "{step:#}");
+        let shaped = matches!(
+            names[0].as_str(),
+            "migrated.eth" | "lapsed.eth" | "undated.eth"
+        );
+        assert_eq!(savepoints, usize::from(shaped), "{step:#}");
+        assert_eq!(&step["data"][0], listed_row(&page, &names[0]), "{step:#}");
+        walked.extend(names);
+        match step["page"]["next_cursor"].as_str() {
+            Some(next) => cursor = Some(next.to_owned()),
+            None => break,
+        }
+    }
+    assert_eq!(walked, full);
+    database.cleanup().await
+}
+
+/// A failed fill read serves that address-names row as composed and fills the others.
+#[tokio::test]
+async fn address_names_serve_a_failed_fill_read_as_composed_beside_a_filled_row() -> Result<()> {
+    let database = new_database().await?;
+    let classes = seed_input_classes(&database).await?;
+    let _fault = crate::v2::support::read_fault_test_hooks::install(&classes.migrated.0);
+
+    let page = v2_get_json(&database, &owned_names_uri(200, None)).await?;
+    let composed = listed_row(&page, "migrated.eth");
+    assert!(composed["ens_v1"]["expires_at"].is_null(), "{page:#}");
+    assert!(composed["expires_at"].is_null(), "{page:#}");
+    assert!(
+        composed.get("registered_at").is_none_or(Value::is_null),
+        "{page:#}"
+    );
+    assert_filled_lease(listed_row(&page, "lapsed.eth"), true);
+    database.cleanup().await
+}
+
+/// `GET /v1/names` lists by stored deadlines, so a filled row is one whose stored registration
+/// has an expiry: C, dated at its grant, beside D as stored. Walked one row a page, the order is
+/// the full page's, and only the filled row takes a savepoint.
+#[tokio::test]
+async fn the_name_listing_dates_an_undated_lease_and_leaves_a_dated_one() -> Result<()> {
+    let database = new_database().await?;
+    seed_input_classes(&database).await?;
+    let uri = |page_size: u32, cursor: Option<&str>| {
+        let mut uri = format!(
+            "/v1/names?namespace=ens&expires_after=2020-01-01T00:00:00Z&page_size={page_size}"
+        );
+        if let Some(cursor) = cursor {
+            uri.push_str(&format!("&cursor={cursor}"));
+        }
+        uri
+    };
+
+    let (page, savepoints) = with_savepoints(v2_get_json(&database, &uri(200, None))).await?;
+    let full = listed_names(&page);
+    assert!(full.contains(&"undated.eth".to_owned()), "{page:#}");
+    assert!(full.contains(&"plain.eth".to_owned()), "{page:#}");
+    assert!(!full.contains(&"migrated.eth".to_owned()), "{page:#}");
+    assert_eq!(savepoints, 1, "{page:#}");
+    let undated = listed_row(&page, "undated.eth");
+    assert_eq!(
+        undated["registered_at"],
+        json!(seconds(GRANTED)),
+        "{page:#}"
+    );
+    assert_eq!(
+        undated["expires_at"],
+        json!(RENEWED_EXPIRY.to_string()),
+        "{page:#}"
+    );
+    let plain = listed_row(&page, "plain.eth");
+    assert_eq!(plain["registered_at"], json!(seconds(GRANTED)), "{page:#}");
+    assert_stored(plain, "plain.eth");
+
+    let mut walked = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let step_uri = uri(1, cursor.as_deref());
+        let (step, savepoints) = with_savepoints(v2_get_json(&database, &step_uri)).await?;
+        let names = listed_names(&step);
+        assert_eq!(names.len(), 1, "{step:#}");
+        assert_eq!(
+            savepoints,
+            usize::from(names[0] == "undated.eth"),
+            "{step:#}"
+        );
+        assert_eq!(&step["data"][0], listed_row(&page, &names[0]), "{step:#}");
+        walked.extend(names);
+        match step["page"]["next_cursor"].as_str() {
+            Some(next) => cursor = Some(next.to_owned()),
+            None => break,
+        }
+    }
+    assert_eq!(walked, full);
     database.cleanup().await
 }

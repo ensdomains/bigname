@@ -20,8 +20,9 @@
 //!   lease becomes its identity.
 //!
 //! A name with no such events is served as composed. The fill stands until the stored
-//! registration carries the lease, which the shape check then no longer matches. Every other
-//! route serves the stored registration.
+//! registration carries the lease, which the shape check then no longer matches. Lookup, address
+//! names and the name listing fill their rows the same way ([`LeaseRow`]). Every other route
+//! serves the stored registration.
 //!
 //! The API owns these four statements. They are route-specific reads of Interpret's events and
 //! the chain lineage, transitional until the stored registration carries the lease.
@@ -245,30 +246,50 @@ pub(crate) fn lease_lifecycle_status(expiry: i64, clock: i64) -> &'static str {
 /// and rolled back to the savepoint, so the reads after it still run on the snapshot, and `row`
 /// stays as composed. An error is returned only when taking, releasing or rolling back the
 /// savepoint fails, which may leave the read transaction unusable.
-pub(crate) async fn serve_legacy_lease_in_savepoint(
+pub(crate) async fn serve_legacy_lease_in_savepoint<R: LeaseRow>(
     conn: &mut PgConnection,
-    row: &mut NameCurrentRow,
+    row: &mut R,
     selected_snapshot: &SelectedSnapshot,
 ) -> Result<bool> {
-    let Some(read) = lease_read(row, selected_snapshot) else {
+    let read = lease_read(row, |chain_id| snapshot_bound(selected_snapshot, chain_id));
+    serve_read_in_savepoint(conn, row, read).await
+}
+
+fn snapshot_bound(selected_snapshot: &SelectedSnapshot, chain_id: &str) -> Option<i64> {
+    selected_snapshot
+        .chain_positions
+        .as_map()
+        .values()
+        .find(|position| position.chain_id == chain_id)
+        .map(|position| position.block_number)
+}
+
+pub(super) async fn serve_read_in_savepoint<R: LeaseRow>(
+    conn: &mut PgConnection,
+    row: &mut R,
+    read: Option<LeaseRead>,
+) -> Result<bool> {
+    let Some(read) = read else {
         return Ok(false);
     };
-    let composed = row.declared_summary.clone();
+    #[cfg(test)]
+    let _ = LEASE_SAVEPOINTS.try_with(|count| count.set(count.get() + 1));
+    let composed = row.declared_summary().clone();
     let mut savepoint = sqlx::Connection::begin(&mut *conn).await?;
-    match fill_lease(&mut savepoint, row, read).await {
+    match fill_lease(&mut savepoint, &mut *row, read).await {
         Ok(filled) => {
             if let Err(error) = savepoint.commit().await {
-                row.declared_summary = composed;
+                *row.declared_summary_mut() = composed;
                 return Err(error.into());
             }
             Ok(filled)
         }
         Err(read_error) => {
-            row.declared_summary = composed;
+            *row.declared_summary_mut() = composed;
             if let Err(rollback_error) = savepoint.rollback().await {
                 error!(
                     service = "api",
-                    name = %row.normalized_name,
+                    name = %row.normalized_name(),
                     error = %read_error,
                     "legacy lease read failed and its savepoint did not roll back"
                 );
@@ -276,7 +297,7 @@ pub(crate) async fn serve_legacy_lease_in_savepoint(
             }
             error!(
                 service = "api",
-                name = %row.normalized_name,
+                name = %row.normalized_name(),
                 error = %read_error,
                 "legacy lease read failed, serving the composed registration"
             );
@@ -286,28 +307,26 @@ pub(crate) async fn serve_legacy_lease_in_savepoint(
 }
 
 /// What the fill of a row reads: its shape, its chain and the snapshot's block on that chain.
-struct LeaseRead {
+pub(super) struct LeaseRead {
     shape: LegacyLeaseShape,
     chain_id: String,
     bound: i64,
 }
 
 /// The fill's read of `row`, or `None` for a row of neither shape or a chain the snapshot does
-/// not hold.
-fn lease_read(row: &NameCurrentRow, selected_snapshot: &SelectedSnapshot) -> Option<LeaseRead> {
-    let shape = legacy_lease_shape(
-        &row.namespace,
-        &row.normalized_name,
-        &row.provenance,
-        &row.declared_summary,
-    )?;
-    let chain_id = row_chain_id(row)?;
-    let bound = selected_snapshot
-        .chain_positions
+/// not hold. `bound` is the snapshot's block on a chain id.
+pub(super) fn lease_read<R: LeaseRow>(
+    row: &R,
+    bound: impl Fn(&str) -> Option<i64>,
+) -> Option<LeaseRead> {
+    let shape = lease_row_shape(row)?;
+    let chain_id = bigname_storage::ChainPositions::from_value(row.chain_positions())
+        .ok()?
         .as_map()
         .values()
-        .find(|position| position.chain_id == chain_id)
-        .map(|position| position.block_number)?;
+        .map(|position| position.chain_id.clone())
+        .next()?;
+    let bound = bound(&chain_id)?;
     Some(LeaseRead {
         shape,
         chain_id,
@@ -317,12 +336,12 @@ fn lease_read(row: &NameCurrentRow, selected_snapshot: &SelectedSnapshot) -> Opt
 
 /// [`fill_lease`] without a savepoint, for tests that call the fill directly.
 #[cfg(test)]
-pub(crate) async fn serve_legacy_lease(
+pub(crate) async fn serve_legacy_lease<R: LeaseRow>(
     conn: &mut PgConnection,
-    row: &mut NameCurrentRow,
+    row: &mut R,
     selected_snapshot: &SelectedSnapshot,
 ) -> Result<bool> {
-    let Some(read) = lease_read(row, selected_snapshot) else {
+    let Some(read) = lease_read(row, |chain_id| snapshot_bound(selected_snapshot, chain_id)) else {
         return Ok(false);
     };
     fill_lease(conn, row, read).await
@@ -331,9 +350,9 @@ pub(crate) async fn serve_legacy_lease(
 /// Heals `row`'s registration on the snapshot's position on its chain: the unleased shape from the
 /// name's registrar events, the undated shape from its lease's grant. Returns whether the
 /// registration changed.
-async fn fill_lease(
+async fn fill_lease<R: LeaseRow>(
     conn: &mut PgConnection,
-    row: &mut NameCurrentRow,
+    row: &mut R,
     read: LeaseRead,
 ) -> Result<bool> {
     let LeaseRead {
@@ -344,12 +363,12 @@ async fn fill_lease(
     match shape {
         LegacyLeaseShape::Unleased => {
             let events =
-                load_lease_events(&mut *conn, &chain_id, &row.logical_name_id, bound).await?;
+                load_lease_events(&mut *conn, &chain_id, row.logical_name_id(), bound).await?;
             if events.is_empty() {
                 return Ok(false);
             }
             let handoff_block =
-                bigname_storage::name_current_registry_handoff_block_number(&row.provenance);
+                bigname_storage::name_current_registry_handoff_block_number(row.provenance());
             let first_block = match handoff_block {
                 Some(_) => None,
                 None => {
@@ -357,7 +376,7 @@ async fn fill_lease(
                     load_first_lease_block(
                         &mut *conn,
                         &chain_id,
-                        &row.logical_name_id,
+                        row.logical_name_id(),
                         lease,
                         bound,
                     )
@@ -375,7 +394,7 @@ async fn fill_lease(
             blocks.push(bound);
             let times = load_block_times(&mut *conn, &chain_id, &blocks).await?;
             let Some(registration) = row
-                .declared_summary
+                .declared_summary_mut()
                 .get_mut("registration")
                 .and_then(Value::as_object_mut)
             else {
@@ -389,7 +408,7 @@ async fn fill_lease(
             };
             let times = load_block_times(&mut *conn, &chain_id, &[grant_block]).await?;
             let Some(registration) = row
-                .declared_summary
+                .declared_summary_mut()
                 .get_mut("registration")
                 .and_then(Value::as_object_mut)
             else {
