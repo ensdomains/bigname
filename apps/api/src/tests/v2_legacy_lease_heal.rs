@@ -1243,6 +1243,18 @@ fn owned_names_uri(page_size: u32, cursor: Option<&str>) -> String {
     uri
 }
 
+/// The same read on `relation=manager` alone.
+fn managed_names_uri(page_size: u32, cursor: Option<&str>) -> String {
+    let mut uri = format!(
+        "/v1/addresses/{OWNER}/names?namespace=ens&relation=manager&authority=ens_v1,ens_v0\
+         &sort=name&order=asc&page_size={page_size}"
+    );
+    if let Some(cursor) = cursor {
+        uri.push_str(&format!("&cursor={cursor}"));
+    }
+    uri
+}
+
 fn listed_row<'a>(payload: &'a Value, name: &str) -> &'a Value {
     payload["data"]
         .as_array()
@@ -1672,5 +1684,47 @@ async fn a_failed_savepoint_fails_a_collection_page() -> Result<()> {
     assert_eq!(error.code(), crate::v2::ErrorCode::InternalError);
     assert_eq!(migrated, unfilled);
     drop(snapshot);
+    database.cleanup().await
+}
+
+/// A `relation=manager` list over row B, a registry-only name whose lease's latest event is a
+/// release. Membership, `relations`, `page.total_count` and the cursor come from the stored row
+/// before the fill, so the row keeps its `manager` label and its count while it serves
+/// `released` with no `manager`. Walked one row a page, every stored entry is listed once.
+#[tokio::test]
+async fn a_released_filled_name_keeps_its_stored_manager_listing() -> Result<()> {
+    let database = new_database().await?;
+    seed_input_classes(&database).await?;
+
+    let uri = managed_names_uri(200, None);
+    let page = v2_get_json(&database, &uri).await?;
+    let row = listed_row(&page, "lapsed.eth");
+    assert_filled_lease(row, true);
+    assert_eq!(row["relations"], json!(["manager"]), "{page:#}");
+    assert!(row.get("manager").is_none_or(Value::is_null), "{page:#}");
+    let full = listed_names(&page);
+    let mut unique = full.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), full.len(), "{page:#}");
+    let total = &page["page"]["total_count"];
+    assert_eq!(total, &json!(full.len()), "{page:#}");
+
+    let mut walked = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let uri = managed_names_uri(1, cursor.as_deref());
+        let step = v2_get_json(&database, &uri).await?;
+        let names = listed_names(&step);
+        assert_eq!(names.len(), 1, "{step:#}");
+        assert_eq!(&step["data"][0], listed_row(&page, &names[0]), "{step:#}");
+        assert_eq!(&step["page"]["total_count"], total, "{step:#}");
+        walked.extend(names);
+        match step["page"]["next_cursor"].as_str() {
+            Some(next) => cursor = Some(next.to_owned()),
+            None => break,
+        }
+    }
+    assert_eq!(walked, full);
     database.cleanup().await
 }

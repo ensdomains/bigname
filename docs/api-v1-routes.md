@@ -3663,7 +3663,10 @@ introduces it rebuilds Project from full history before serving the option; see
   orders. The `expires_at` and `registered_at` sorts and their cursors key on the
   stored registration. A name served with the read-time lease fill described under
   [`registered_at`](api-v1.md#naming-dictionary) can therefore appear out of order
-  until the stored registration carries its lease.
+  until the stored registration carries its lease. A name that the fill serves as
+  released keeps the `relations` of its stored row and serves no `manager`, and
+  `page.total_count` still counts it. This holds until the stored registration
+  carries the release.
   `relation` accepts a comma-separated set of v2 vocabulary values
   `owner`, `manager`, and `role_holder`; `any` normalizes to all
   three values. Rows match when any listed relation matches. `owner` matches
