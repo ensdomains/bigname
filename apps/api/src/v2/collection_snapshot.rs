@@ -1,9 +1,11 @@
 use crate::AppState;
+use bigname_storage::NameCurrentRow;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction, types::time::OffsetDateTime};
+use tracing::error;
 
 use super::support::{
-    PublicNamespaceSet, derive_public_namespace_set, ensure_public_namespace, request_scope_meta,
-    revalidate_collection_manifests,
+    PublicNamespaceSet, derive_public_namespace_set, ensure_public_namespace, lease_row_shape,
+    request_scope_meta, revalidate_collection_manifests, serve_legacy_leases_at_bounds,
 };
 use super::{CursorPayload, Meta, V2Error, V2Result, api_error_to_v2};
 
@@ -227,6 +229,38 @@ impl CollectionSnapshot {
             .map_err(super::name_rows_error(resource, |_| {
                 super::V2Error::internal_error("failed to read the family publication")
             }))
+    }
+
+    /// Fills each of a page's `rows` whose stored registration does not carry its ENSv1 lease, as
+    /// name detail fills its row, on [`Self::conn`] at [`Self::block_bounds`]. A page with no such
+    /// row issues no statement. A failed read serves its row as composed, and a failed savepoint
+    /// fails the page.
+    pub(crate) async fn serve_legacy_leases(
+        &mut self,
+        rows: Vec<&mut NameCurrentRow>,
+    ) -> V2Result<()> {
+        // Plain loops, not iterator adaptors: a closure over `&mut` rows held across the await
+        // below makes the route handler's future fail axum's `Handler` bound.
+        let mut shaped = Vec::new();
+        for row in rows {
+            if lease_row_shape(&*row).is_some() {
+                shaped.push(row);
+            }
+        }
+        if shaped.is_empty() {
+            return Ok(());
+        }
+        let bounds = self.block_bounds();
+        serve_legacy_leases_at_bounds(self.conn().await?, shaped, &bounds)
+            .await
+            .map_err(|load_error| {
+                error!(
+                    service = "api",
+                    error = %load_error,
+                    "legacy lease savepoint or rollback failed for a collection page"
+                );
+                V2Error::internal_error("failed to read the ENSv1 lease of a listed name")
+            })
     }
 
     /// The `meta` of the captured publication, which every read on [`Self::conn`] sees.

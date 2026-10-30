@@ -1,10 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use bigname_storage::{ReadDb, SelectedSnapshot};
+use bigname_storage::{
+    ChainPositions, IdentityNameRecordRow, ReadDb, SelectedSnapshot, SnapshotConsistency,
+};
 use tracing::error;
 
 use crate::v2::{
-    Status, V2Error, V2Result, load_subregistry_refs, registries::snapshot_block_for_chain,
+    Status, V2Error, V2Result, load_subregistry_refs,
+    registries::snapshot_block_for_chain,
+    support::{lease_row_shape, serve_legacy_lease_in_savepoint},
 };
 
 use super::{
@@ -33,8 +37,9 @@ pub(super) async fn render_name_lookup_results(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let records =
+    let mut records =
         load_name_records(db.reborrow(), profile, &logical_name_ids, selected_snapshot).await?;
+    serve_legacy_leases(db, &mut records, selected_snapshot).await?;
     let mut names_by_block = BTreeMap::<i64, Vec<String>>::new();
     if let Some(selected) = selected_snapshot {
         for (logical_name_id, record) in &records {
@@ -139,4 +144,57 @@ async fn load_name_records(
         .into_iter()
         .map(|record| (record.row.logical_name_id.clone(), record))
         .collect())
+}
+
+/// Fills each loaded row whose stored registration does not carry its ENSv1 lease, as name detail
+/// fills its row (`serve_legacy_lease_in_savepoint`), before either profile reads it. A row of no
+/// shape issues no statement. With a served head the fill reads on the batch's snapshot at its
+/// selection. Without one no publication bounds the read, so a row is read on its own connection
+/// at the chain position it carries.
+async fn serve_legacy_leases(
+    db: &mut ReadDb<'_>,
+    records: &mut BTreeMap<String, IdentityNameRecordRow>,
+    selected_snapshot: Option<&SelectedSnapshot>,
+) -> V2Result<()> {
+    for record in records.values_mut() {
+        let row = &mut record.row;
+        if lease_row_shape(row).is_none() {
+            continue;
+        }
+        let own;
+        let snapshot = match selected_snapshot {
+            Some(selected) => selected,
+            None => {
+                let Ok(chain_positions) = ChainPositions::from_value(&row.chain_positions) else {
+                    continue;
+                };
+                own = SelectedSnapshot {
+                    chain_positions,
+                    consistency: SnapshotConsistency::Head,
+                };
+                &own
+            }
+        };
+        let served = match db {
+            ReadDb::Snapshot(conn) => {
+                serve_legacy_lease_in_savepoint(conn, &mut *row, snapshot).await
+            }
+            ReadDb::Pool(pool) => match pool.acquire().await {
+                Ok(mut conn) => {
+                    serve_legacy_lease_in_savepoint(&mut conn, &mut *row, snapshot).await
+                }
+                Err(error) => Err(error.into()),
+            },
+        };
+        served.map_err(|error| {
+            error!(
+                service = "api",
+                name = %row.normalized_name,
+                error = %error,
+                "legacy lease savepoint or rollback failed for a lookup name"
+            );
+            V2Error::internal_error("failed to read the ENSv1 lease of a lookup name")
+        })?;
+    }
+    Ok(())
 }

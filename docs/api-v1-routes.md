@@ -384,10 +384,12 @@ collection route carry neither header.
   object, each with the value and presence it has on the `profile=detail`
   record for the same name, which are those of name detail and
   `GET /v1/names`. A name that carries the read-time lease fill under
-  [`registered_at`](api-v1.md#naming-dictionary) is the exception: name detail serves the
-  fill, and the records route carries it through its gating, so a released lease serves no
-  resolver or records there. Every other route serves the stored registration until it
-  carries the lease. Every other registration field (`owner`, `manager`,
+  [`registered_at`](api-v1.md#naming-dictionary) serves it on name detail, on both profiles
+  of a name input here, on `GET /v1/addresses/{address}/names` for every relation other
+  than `resolves_to` and `former_owner`, and on `GET /v1/names`, so
+  those values agree for it too. The records route carries the fill through its gating, so a
+  released lease serves no resolver or records there. An address input's records serve the
+  stored registration until it carries the lease. Every other registration field (`owner`, `manager`,
   `registration_id`, `token_id`, `registered_at`,
   `created_at`, `lapsed_registration`, `authority`, `migrated_at`), the
   resolver fields and `records` are detail-only. ENSv2 token values follow
@@ -3658,7 +3660,13 @@ introduces it rebuilds Project from full history before serving the option; see
   with no such timestamp is the smallest value: it sorts before every dated row ascending and
   after every dated row descending. Equal timestamps, and equal
   names, break ties by name identity and then by the grouped resource, in both
-  orders.
+  orders. The `expires_at` and `registered_at` sorts and their cursors key on the
+  stored registration. A name served with the read-time lease fill described under
+  [`registered_at`](api-v1.md#naming-dictionary) can therefore appear out of order
+  until the stored registration carries its lease. A name that the fill serves as
+  released keeps the `relations` of its stored row and serves no `manager`, and
+  `page.total_count` still counts it. This holds until the stored registration
+  carries the release.
   `relation` accepts a comma-separated set of v2 vocabulary values
   `owner`, `manager`, and `role_holder`; `any` normalizes to all
   three values. Rows match when any listed relation matches. `owner` matches
