@@ -177,11 +177,11 @@ async fn serve_legacy_leases(
         };
         let served = match db {
             ReadDb::Snapshot(conn) => {
-                serve_legacy_lease_in_savepoint(&mut **conn, &mut *row, snapshot).await
+                serve_legacy_lease_in_savepoint(conn, &mut *row, snapshot).await
             }
             ReadDb::Pool(pool) => match pool.acquire().await {
                 Ok(mut conn) => {
-                    serve_legacy_lease_in_savepoint(&mut *conn, &mut *row, snapshot).await
+                    serve_legacy_lease_in_savepoint(&mut conn, &mut *row, snapshot).await
                 }
                 Err(error) => Err(error.into()),
             },
