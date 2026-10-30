@@ -192,9 +192,11 @@ async fn get_names_page(
     ))?;
     // A listed row's deadline is stored, and the fill supplies an expiry and grace end only where
     // they are null, so it moves no row's window or cursor position.
-    snapshot
-        .serve_legacy_leases(storage_page.rows.iter_mut().map(|row| &mut row.row))
-        .await?;
+    let mut page_rows = Vec::with_capacity(storage_page.rows.len());
+    for row in &mut storage_page.rows {
+        page_rows.push(&mut row.row);
+    }
+    snapshot.serve_legacy_leases(page_rows).await?;
 
     let next_cursor = storage_page
         .next_cursor

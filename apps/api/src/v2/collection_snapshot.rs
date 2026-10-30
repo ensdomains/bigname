@@ -235,19 +235,23 @@ impl CollectionSnapshot {
     /// name detail fills its row, on [`Self::conn`] at [`Self::block_bounds`]. A page with no such
     /// row issues no statement. A failed read serves its row as composed, and a failed savepoint
     /// fails the page.
-    pub(crate) async fn serve_legacy_leases<'a>(
+    pub(crate) async fn serve_legacy_leases(
         &mut self,
-        rows: impl IntoIterator<Item = &'a mut NameCurrentRow>,
+        rows: Vec<&mut NameCurrentRow>,
     ) -> V2Result<()> {
-        let mut rows = rows
-            .into_iter()
-            .filter(|row| lease_row_shape(&**row).is_some())
-            .peekable();
-        if rows.peek().is_none() {
+        // Plain loops, not iterator adaptors: a closure over `&mut` rows held across the await
+        // below makes the route handler's future fail axum's `Handler` bound.
+        let mut shaped = Vec::new();
+        for row in rows {
+            if lease_row_shape(&*row).is_some() {
+                shaped.push(row);
+            }
+        }
+        if shaped.is_empty() {
             return Ok(());
         }
         let bounds = self.block_bounds();
-        serve_legacy_leases_at_bounds(self.conn().await?, rows, &bounds)
+        serve_legacy_leases_at_bounds(self.conn().await?, shaped, &bounds)
             .await
             .map_err(|load_error| {
                 error!(

@@ -305,7 +305,9 @@ pub(crate) async fn get_address_names(
             ))
         },
     ))?;
-    snapshot.serve_legacy_leases(name_rows.values_mut()).await?;
+    snapshot
+        .serve_legacy_leases(name_rows.values_mut().collect())
+        .await?;
     let migrated_logical_name_ids = name_rows
         .values()
         .filter(|row| Authority::from_provenance(&row.provenance) == Some(Authority::EnsV2))
