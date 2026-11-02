@@ -122,12 +122,14 @@ impl Start<'_> {
 }
 
 /// The start of the registration `grant` dates. For the grant the ENSv1→ENSv2 migration wrote,
-/// that is the lease's start (`migrated_lease`). A lease whose only grant is the one the adapter
-/// derives at its first renewal (source event `NameRenewed`) has no observed registration, so it
-/// starts at the name's first current-registry record, under any ENSv1 authority and after the
-/// migration alike. That record is taken as the 2020 registrar migration's registration. The
-/// BaseRegistrar's `_register` mints, writes the registry record when `updateRegistry` is set, and
-/// emits `NameRegistered` in one call, and only the `eth` node's owner or its operator can write
+/// that is the lease's start (`migrated_lease`). The 2020 registrar migration's own numeric
+/// `NameRegistered` is a grant that dates itself, in the transaction of the name's first
+/// current-registry record. A lease whose only grant is the one the adapter derives at its first
+/// renewal (source event `NameRenewed`) has no observed registration, so it starts at the name's
+/// first current-registry record, under any ENSv1 authority and after the migration alike. That
+/// record is taken as the 2020 registrar migration's registration. The BaseRegistrar's
+/// `_register` mints, writes the registry record when `updateRegistry` is set, and emits
+/// `NameRegistered` in one call, and only the `eth` node's owner or its operator can write
 /// a `.eth` second-level record. The sampled migration transactions show the record written in
 /// that call (`docs/upstream.md`, migrated `.eth` names). The record dates the lease even when
 /// the derived grant is older, as the implied lease, which admits nothing before the record, does.
