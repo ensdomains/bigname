@@ -226,8 +226,9 @@ async fn n1_an_unmounted_registry_adds_no_resolver_edge_or_supported_classificat
 }
 
 /// C1: an unmounted registry pointing at a popular ENSv1 resolver leaves the fields the routes
-/// serve from that resolver's classification row as they are in a corpus without the registry,
-/// and the name it serves keeps its resolver. The registry's pointer still adds an ENSv2
+/// serve from that resolver's classification row as they are in a corpus without the registry.
+/// The corpus's ENSv1 name serves no resolver on this profile, so the row is the comparison.
+/// The registry's pointer still adds an ENSv2
 /// observation to the row, beside the resolver's ENSv1 evidence, and moves the row's position.
 /// The ENSv1 evidence demotes that ENSv2 candidate, so the served classification is unchanged.
 #[tokio::test]
@@ -250,17 +251,6 @@ async fn c1_an_unmounted_registry_leaves_a_v1_resolver_classification_alone() ->
     let without = TestDatabase::new_migrated().await?;
     publish(&without, corpus(vec![])?).await?;
 
-    let name = format!(
-        "/v1/names/{}?namespace=ens",
-        super::v2_mainnet_admission::NAME
-    );
-    let served_resolver = ok(&without, &name).await?["data"]["resolver"].clone();
-    assert_eq!(
-        served_resolver["address"],
-        json!(PUBLIC_RESOLVER),
-        "{served_resolver:#}"
-    );
-    assert_eq!(ok(&with, &name).await?["data"]["resolver"], served_resolver);
     assert_eq!(resolver_edges(&with, REGISTRY).await?, Vec::new());
     let served = |row: Option<Value>| -> Result<Value> {
         let row = row.context("the ENSv1 resolver is classified")?;
@@ -281,10 +271,9 @@ async fn c1_an_unmounted_registry_leaves_a_v1_resolver_classification_alone() ->
             && observed.get("ens_v2_resolver_l1").is_some(),
         "the row carries the ENSv1 evidence and the spam ENSv2 observation: {observed:#}"
     );
-    assert_eq!(
-        served(spammed)?,
-        served(classification(&without, PUBLIC_RESOLVER).await?)?
-    );
+    let expected = served(classification(&without, PUBLIC_RESOLVER).await?)?;
+    assert_eq!(expected[1], json!("supported"), "{expected:#}");
+    assert_eq!(served(spammed)?, expected);
     with.cleanup().await?;
     without.cleanup().await
 }
