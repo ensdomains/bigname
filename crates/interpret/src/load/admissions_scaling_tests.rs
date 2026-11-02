@@ -113,6 +113,8 @@ async fn measure(announced: i64, excluded: i64) -> Result<Measured> {
     .fetch_all(&mut *connection)
     .await?
     .join("\n");
+    drop(connection);
+    db.cleanup().await?;
     Ok(Measured {
         announced,
         excluded,

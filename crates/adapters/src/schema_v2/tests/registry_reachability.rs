@@ -771,15 +771,18 @@ fn u6_a_parent_claim_to_an_unreachable_parent_closes_at_its_log() -> anyhow::Res
     Ok(())
 }
 
-/// U4 with a regenerated token: the survivor carries its predecessor's key, so losing and
-/// regaining reachability closes and reopens that one key, once each.
+/// U4 with a regenerated token: a regeneration to a token id that differs beyond the version
+/// bits leaves the survivor carrying its predecessor's key. Losing reachability closes that key
+/// and the survivor's own, and regaining it reopens only the carried key, which is the one the
+/// survivor's edge was left under.
 #[test]
 fn u7_a_regenerated_token_reopens_its_carried_key_once() -> anyhow::Result<()> {
+    let survivor = versioned_token("a-regenerated", 1);
     let mut logs = mounted_child();
     logs.push(raw_at(
         v2_registry::TokenRegenerated {
             oldTokenId: versioned_token("a", 1),
-            newTokenId: versioned_token("a", 2),
+            newTokenId: survivor,
         }
         .encode_log_data(),
         6,
@@ -797,12 +800,21 @@ fn u7_a_regenerated_token_reopens_its_carried_key_once() -> anyhow::Result<()> {
         reopened,
         vec![(instance(RESOLVER_X), key(CHILD, "a"), 8, 0, 0)]
     );
+    let closed = resolver_closures(&output, CHILD)
+        .into_iter()
+        .filter(|closure| closure.1 == 7)
+        .map(|closure| closure.0)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut survivor_key = survivor.to_be_bytes::<32>();
+    survivor_key[28..].fill(0);
     assert_eq!(
-        resolver_closures(&output, CHILD)
-            .into_iter()
-            .filter(|closure| closure.1 == 7)
-            .collect::<Vec<_>>(),
-        vec![(key(CHILD, "a"), 7, 0, 0)]
+        closed,
+        [
+            key(CHILD, "a"),
+            format!("resolver:{CHILD}:{:#x}", U256::from_be_bytes(survivor_key)),
+        ]
+        .into_iter()
+        .collect()
     );
     Ok(())
 }

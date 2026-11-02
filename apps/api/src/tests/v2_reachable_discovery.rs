@@ -253,15 +253,26 @@ async fn m1_a_registry_mounted_later_serves_its_entry_and_opens_its_edge_at_the_
 {
     let database = TestDatabase::new_migrated().await?;
     let mut blocks = unmounted_registry()?;
+    // The routes serve only a resolver they know, so `b` points at the declared public
+    // resolver. `a`'s fresh resolver shows the edge and the classification.
+    blocks.push((
+        REGISTERED + 150,
+        vec![
+            register(REGISTRY, "b", FOREVER)?,
+            set_resolver(REGISTRY, "b", PUBLIC_RESOLVER)?,
+        ],
+    ));
     blocks.push((REGISTERED + 180, vec![mount(ETH_REGISTRY, "n", REGISTRY)?]));
     blocks.push((REGISTERED + DAY, vec![]));
     let count = blocks.len();
     publish(&database, blocks).await?;
 
     let detail = ok(&database, "/v1/names/a.n.eth?namespace=ens").await?;
+    assert_eq!(detail["data"]["status"], json!("active"), "{detail:#}");
+    let detail = ok(&database, "/v1/names/b.n.eth?namespace=ens").await?;
     assert_eq!(
         detail["data"]["resolver"]["address"],
-        json!(RESOLVER_X),
+        json!(PUBLIC_RESOLVER),
         "{detail:#}"
     );
     let registry = ok(&database, &format!("/v1/registries/1/{REGISTRY}")).await?;
@@ -271,10 +282,18 @@ async fn m1_a_registry_mounted_later_serves_its_entry_and_opens_its_edge_at_the_
         "{registry:#}"
     );
 
-    let mounted = block(3, count);
+    let mounted = block(4, count);
     assert_eq!(
         resolver_edges(&database, REGISTRY).await?,
-        vec![(RESOLVER_X.to_owned(), mounted, None, key(REGISTRY, "a"))]
+        vec![
+            (RESOLVER_X.to_owned(), mounted, None, key(REGISTRY, "a")),
+            (
+                PUBLIC_RESOLVER.to_owned(),
+                mounted,
+                None,
+                key(REGISTRY, "b")
+            ),
+        ]
     );
     let row = classification(&database, RESOLVER_X)
         .await?
@@ -291,7 +310,7 @@ async fn m3_a_resolver_changed_before_the_mount_serves_only_the_current_one() ->
     let mut blocks = unmounted_registry()?;
     blocks.push((
         REGISTERED + 150,
-        vec![set_resolver(REGISTRY, "a", RESOLVER_Y)?],
+        vec![set_resolver(REGISTRY, "a", PUBLIC_RESOLVER)?],
     ));
     blocks.push((REGISTERED + 180, vec![mount(ETH_REGISTRY, "n", REGISTRY)?]));
     blocks.push((REGISTERED + DAY, vec![]));
@@ -301,13 +320,13 @@ async fn m3_a_resolver_changed_before_the_mount_serves_only_the_current_one() ->
     let detail = ok(&database, "/v1/names/a.n.eth?namespace=ens").await?;
     assert_eq!(
         detail["data"]["resolver"]["address"],
-        json!(RESOLVER_Y),
+        json!(PUBLIC_RESOLVER),
         "{detail:#}"
     );
     assert_eq!(
         resolver_edges(&database, REGISTRY).await?,
         vec![(
-            RESOLVER_Y.to_owned(),
+            PUBLIC_RESOLVER.to_owned(),
             block(4, count),
             None,
             key(REGISTRY, "a")
@@ -333,7 +352,7 @@ async fn m5_a_pointer_before_the_mount_in_one_transaction_opens_at_the_mount() -
         (
             REGISTERED + 120,
             vec![
-                set_resolver(REGISTRY, "a", RESOLVER_X)?,
+                set_resolver(REGISTRY, "a", PUBLIC_RESOLVER)?,
                 mount(ETH_REGISTRY, "n", REGISTRY)?,
             ],
         ),
@@ -345,7 +364,7 @@ async fn m5_a_pointer_before_the_mount_in_one_transaction_opens_at_the_mount() -
     let detail = ok(&database, "/v1/names/a.n.eth?namespace=ens").await?;
     assert_eq!(
         detail["data"]["resolver"]["address"],
-        json!(RESOLVER_X),
+        json!(PUBLIC_RESOLVER),
         "{detail:#}"
     );
     let log: Option<i64> = sqlx::query_scalar(
@@ -360,7 +379,7 @@ async fn m5_a_pointer_before_the_mount_in_one_transaction_opens_at_the_mount() -
     assert_eq!(
         resolver_edges(&database, REGISTRY).await?,
         vec![(
-            RESOLVER_X.to_owned(),
+            PUBLIC_RESOLVER.to_owned(),
             block(2, count),
             None,
             key(REGISTRY, "a")
@@ -424,7 +443,7 @@ async fn t1_mounting_an_ancestor_serves_and_opens_both_registries() -> Result<()
             REGISTERED + 60,
             vec![
                 register(LOWER_REGISTRY, "c", FOREVER)?,
-                set_resolver(LOWER_REGISTRY, "c", RESOLVER_X)?,
+                set_resolver(LOWER_REGISTRY, "c", PUBLIC_RESOLVER)?,
                 register(REGISTRY, "b", FOREVER)?,
                 mount(REGISTRY, "b", LOWER_REGISTRY)?,
                 set_resolver(REGISTRY, "b", RESOLVER_Y)?,
@@ -443,7 +462,7 @@ async fn t1_mounting_an_ancestor_serves_and_opens_both_registries() -> Result<()
     let detail = ok(&database, "/v1/names/c.b.n.eth?namespace=ens").await?;
     assert_eq!(
         detail["data"]["resolver"]["address"],
-        json!(RESOLVER_X),
+        json!(PUBLIC_RESOLVER),
         "{detail:#}"
     );
     let mounted = block(3, count);
@@ -454,7 +473,7 @@ async fn t1_mounting_an_ancestor_serves_and_opens_both_registries() -> Result<()
     assert_eq!(
         resolver_edges(&database, LOWER_REGISTRY).await?,
         vec![(
-            RESOLVER_X.to_owned(),
+            PUBLIC_RESOLVER.to_owned(),
             mounted,
             None,
             key(LOWER_REGISTRY, "c")
@@ -761,11 +780,7 @@ async fn o2_a_reorganized_mount_orphans_its_edge_and_reopens_at_the_new_mount() 
     .await?;
     assert_eq!(orphaned, 1, "the orphaned mount's edge is orphaned with it");
     let detail = ok(&database, "/v1/names/a.n.eth?namespace=ens").await?;
-    assert_eq!(
-        detail["data"]["resolver"]["address"],
-        json!(RESOLVER_X),
-        "{detail:#}"
-    );
+    assert_eq!(detail["data"]["status"], json!("active"), "{detail:#}");
     let row = classification(&database, RESOLVER_X)
         .await?
         .context("the mounted registry's resolver is classified")?;
@@ -866,7 +881,7 @@ async fn m1_a_registry_that_announced_itself_as_a_resolver_first_opens_under_the
                 ),
                 announce(REGISTRY),
                 register(REGISTRY, "a", FOREVER)?,
-                set_resolver(REGISTRY, "a", RESOLVER_X)?,
+                set_resolver(REGISTRY, "a", PUBLIC_RESOLVER)?,
             ],
         ),
         (
@@ -884,7 +899,12 @@ async fn m1_a_registry_that_announced_itself_as_a_resolver_first_opens_under_the
     let mounted = block(1, count);
     assert_eq!(
         resolver_edges(&database, REGISTRY).await?,
-        vec![(RESOLVER_X.to_owned(), mounted, None, key(REGISTRY, "a"))]
+        vec![(
+            PUBLIC_RESOLVER.to_owned(),
+            mounted,
+            None,
+            key(REGISTRY, "a")
+        )]
     );
     let (family, basis): (String, String) = sqlx::query_as(
         "SELECT manifest.source_family, edge.admission_basis
@@ -907,7 +927,7 @@ async fn m1_a_registry_that_announced_itself_as_a_resolver_first_opens_under_the
     let detail = ok(&database, "/v1/names/a.n.eth?namespace=ens").await?;
     assert_eq!(
         detail["data"]["resolver"]["address"],
-        json!(RESOLVER_X),
+        json!(PUBLIC_RESOLVER),
         "{detail:#}"
     );
     database.cleanup().await
