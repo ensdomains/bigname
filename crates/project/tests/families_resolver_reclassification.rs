@@ -598,7 +598,8 @@ async fn reader_world(fixture: &Fixture) -> Result<()> {
 // no resolver of their own. It selects no second-level name: their composition never reads an
 // ancestor's pointer (storage `families/name/batch.rs`, the path walk runs only below a `.eth`
 // second-level name). It does not select `a.foo.eth`, which reads its own `OWN`. `b.foo.eth`
-// and `z.bar.eth` read `RESOLVER` through `eth` and are selected. After every block the
+// and `z.bar.eth` read `RESOLVER` through `eth` and are selected. `x.a.foo.eth` reads `OWN`
+// through `a.foo.eth`, but the rule checks only a name's own node, so it is selected too. After every block the
 // families equal a rebuild at that block, so the names left out did not change.
 #[tokio::test]
 async fn a_resolver_change_at_eth_recomposes_the_deeper_names_and_rebuilds_equal() -> Result<()> {

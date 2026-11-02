@@ -63,9 +63,9 @@
 //! path a narrow prefix. Under a narrow prefix only the names that read the prefix's pointer
 //! recompose: names of three or more labels with no resolver of their own. A path that any
 //! other change also names, of this name or another, keeps its whole subtree.
-//! A name whose registry pointer, or ENSv1 resource pointer, names a resolver in
-//! `changed_resolvers` reads it as its own pointer. It is a narrow name too, and recomposes
-//! itself. A name whose other resource pointer names one keeps its whole subtree.
+//! A name whose registry pointer, or ENSv1 resource pointer, names a changed resolver is a
+//! narrow name too, and recomposes itself. The mirror walk reads only the registry pointer. A
+//! name whose resource pointer of another family, or of none, names one keeps its subtree.
 //!
 //! One ENSv1 `ResolverChanged` of a name with a resource writes both the node's registry
 //! pointer and the resource's pointer (`families/resolver.rs`). A resource pointer change

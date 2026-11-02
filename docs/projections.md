@@ -2346,11 +2346,12 @@ says which names it expands.
   expands nothing. A name whose registry pointer, or ENSv1 resource pointer,
   names that resolver reads it as its own pointer, so it expands as an ENSv1
   registry pointer change does, above: the name, and the names under it of three
-  or more labels with no resolver of their own. A name whose other resource
-  pointer names it expands with every name under it, and so does a name that
-  also expands for another reason in the publication. When an ENSv2
-  event set such a resource pointer, the name at that event's entry and the
-  names mounted below it expand too. An ENSv2 resource pointer cleared when its
+  or more labels with no resolver of their own. A name whose resource pointer
+  of another family, or of none, names it expands with every name under it, and
+  so does a name that also expands for another reason in the publication. When
+  an ENSv2 event set a resource pointer that names the resolver, the name at
+  that event's entry and the names mounted below it expand too. An ENSv2
+  resource pointer cleared when its
   canonical name was retired can still have that resolver as its last nonzero
   resolver. It expands the name at the entry of its resource's latest physical
   pointer event, and the names mounted below it, when that event still sets the

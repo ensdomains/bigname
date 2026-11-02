@@ -839,7 +839,7 @@ impl World {
     ) -> Result<()> {
         ensure!(
             !dropped.is_empty() && dropped.iter().all(|name| !expected.contains(name)),
-            "a narrowing row drops at least one name it does not expect: {dropped:?}"
+            "a narrowing row must drop at least one name, and none it expects: {dropped:?}"
         );
         self.compare(call, expected, dropped).await
     }
