@@ -3680,9 +3680,9 @@ introduces it rebuilds Project from full history before serving the option; see
   and is not listed for the holder. Both hold until the stored registration carries the lease.
   The `authority` filter matches the stored row's authority, so an ownerless name that the
   fill serves its arm's `authority` for is not matched by that value. A `.eth` second-level
-  name whose BaseRegistrar rows are not attributed to it, such as one whose label is unknown,
-  is outside the fill and serves its stored registration, so a lapsed lease of such a name is
-  still served `active`. These limits end at the reconcile release, whose Project redo stores
+  name whose BaseRegistrar rows are not attributed to it, typically one whose label is
+  unknown, is outside the fill and keeps its stored registration and status, so a lapsed lease
+  of such a name can still be served `active`. These limits end at the reconcile release, whose Project redo stores
   the lease.
   `relation` accepts a comma-separated set of v2 vocabulary values
   `owner`, `manager`, and `role_holder`; `any` normalizes to all
