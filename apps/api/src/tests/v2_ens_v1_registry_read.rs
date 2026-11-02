@@ -156,16 +156,16 @@ fn next_records(node: B256) -> Result<Logs> {
 /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L217-L229 @ ens_v2_sepolia_20261001@07e55a05)
 /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L249-L266 @ ens_v2_sepolia_20261001@07e55a05)
 fn premigrated() -> Result<Logs> {
+    premigrated_with(logs(vec![
+        pointer(lease_node(), FIRST),
+        first_records(lease_node()),
+    ])?)
+}
+
+/// `premigrated` with `v1` as the lease's ENSv1 resolver pointer and records.
+fn premigrated_with(v1: Logs) -> Result<Logs> {
     let token = U256::from_be_bytes(keccak256(label().as_bytes()).0) >> 32 << 32;
-    let mut out = registered_with(
-        None,
-        OWNER,
-        LEASE,
-        logs(vec![
-            pointer(lease_node(), FIRST),
-            first_records(lease_node()),
-        ])?,
-    )?;
+    let mut out = registered_with(None, OWNER, LEASE, v1)?;
     out.push((
         NEW_REGISTRY,
         ResolverUpdated {
@@ -195,16 +195,16 @@ fn block_hash(block: i64) -> String {
     format!("{CHAIN}-block-{block}")
 }
 
-/// One Engine batch per block, `premigrated` first and an empty block at `HEAD` last. Returns
-/// the base block.
-async fn interpret(database: &TestDatabase, after: Vec<Logs>) -> Result<i64> {
+/// One Engine batch per block, `base` first and an empty block at `HEAD` last. Returns the base
+/// block.
+async fn interpret(database: &TestDatabase, base: Logs, after: Vec<Logs>) -> Result<i64> {
     let pool = &database.pool;
     bigname_manifests::sync_schema_v2_repository(
         pool,
         &bigname_manifests::load_repository(checked_in_profile())?,
     )
     .await?;
-    let mut blocks = vec![premigrated()?];
+    let mut blocks = vec![base];
     blocks.extend(after);
     blocks.push(Vec::new());
     let first = HEAD + 1 - blocks.len() as i64;
@@ -364,8 +364,17 @@ async fn project(pool: &PgPool, target: i64, mode: FamilyMode) -> Result<()> {
 /// is the first block after the base) moved onto the registry-only resource, and the families
 /// rebuilt at `HEAD`.
 async fn published(after: Vec<Logs>, misattributed: &[i64]) -> Result<TestDatabase> {
+    published_from(premigrated()?, after, misattributed).await
+}
+
+/// `published` with `base` in place of `premigrated` as the first block.
+async fn published_from(
+    base: Logs,
+    after: Vec<Logs>,
+    misattributed: &[i64],
+) -> Result<TestDatabase> {
     let database = TestDatabase::new_migrated().await?;
-    let base = interpret(&database, after).await?;
+    let base = interpret(&database, base, after).await?;
     for offset in misattributed {
         misattribute(&database.pool, base + offset).await?;
     }
@@ -803,8 +812,10 @@ async fn ra3_a_verified_read_of_a_registry_clear_is_not_stale() -> Result<()> {
     Ok(())
 }
 
-/// Row A4: as A3, read with `source=auto`. The registry clear serves no resolver, so the indexed
-/// answer is `not_found` and the read never reaches the chain, with no `409 stale`.
+/// Row A4: as A3, read with `source=auto`. The registry clear serves no resolver. The row the
+/// request serves is a registry clear, whether Project composed the clear into it or the
+/// request-time registry read cleared the lease's older pointer, so the indexed answer is
+/// `not_found` and the read never reaches the chain, with no `409 stale`.
 #[tokio::test]
 async fn ra4_an_auto_read_of_a_registry_clear_answers_from_the_index() -> Result<()> {
     let database = published(vec![pointer(lease_node(), ZERO)?], &[1]).await?;
@@ -966,6 +977,123 @@ async fn ra8_verified_name_detail_of_a_cleared_lease_serving_an_undeclared_resol
         body["data"]["failure_reason"], "verified_answer_stale_for_snapshot",
         "{body:#}"
     );
+    Ok(())
+}
+
+/// Row A9: the lease's pointer cleared on the lease itself, as Interpret links it. The composed
+/// row serves no resolver, with the clear as its latest pointer write and a null registry
+/// pointer. A `source=auto` read answers `not_found` from the index and never reaches the chain.
+#[tokio::test]
+async fn ra9_an_auto_read_of_a_cleared_lease_pointer_answers_from_the_index() -> Result<()> {
+    let database = published(vec![pointer(lease_node(), ZERO)?], &[]).await?;
+    let (status, body, read_chain) = with_chain(
+        &database,
+        &format!("/v1/names/{NAME}/records?namespace=ens&source=auto&keys=text:name,addr:60"),
+        resolution_resolver_not_found_error(&dns_encoded(NAME)),
+    )
+    .await?;
+    database.cleanup().await?;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert!(body["data"]["resolver"].is_null(), "{body:#}");
+    for key in ["text:name", "addr:60"] {
+        assert_eq!(
+            body["data"]["records"][key],
+            json!({"status": "not_found"}),
+            "{key}: {body:#}"
+        );
+    }
+    assert_eq!(body["meta"]["source"], "indexed", "{body:#}");
+    assert!(!read_chain);
+    Ok(())
+}
+
+/// Row A10, pin: as A9, read with `source=verified`. The read asks the chain, here the Universal
+/// Resolver's `ResolverNotFound`, and answers no value.
+#[tokio::test]
+async fn ra10_a_verified_read_of_a_cleared_lease_pointer_asks_the_chain() -> Result<()> {
+    let database = published(vec![pointer(lease_node(), ZERO)?], &[]).await?;
+    let (status, body, read_chain) = with_chain(
+        &database,
+        &format!("/v1/names/{NAME}/records?namespace=ens&source=verified&keys=text:name"),
+        resolution_resolver_not_found_error(&dns_encoded(NAME)),
+    )
+    .await?;
+    database.cleanup().await?;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert!(body["data"]["resolver"].is_null(), "{body:#}");
+    assert_ne!(
+        body["data"]["records"]["text:name"]["status"], "ok",
+        "{body:#}"
+    );
+    assert_eq!(body["meta"]["source"], "verified", "{body:#}");
+    assert!(read_chain);
+    Ok(())
+}
+
+/// Row A11, pin: the lease registered with no ENSv1 resolver pointer ever written. The row serves
+/// no resolver and records no pointer write, so it is not a registry clear, and a `source=auto`
+/// read still runs Universal Resolver discovery on the chain.
+#[tokio::test]
+async fn ra11_an_auto_read_of_a_name_with_no_observed_pointer_asks_the_chain() -> Result<()> {
+    let database = published_from(premigrated_with(Vec::new())?, Vec::new(), &[]).await?;
+    let detail = ok(&database, &format!("/v1/names/{NAME}?namespace=ens")).await?;
+    let (status, body, read_chain) = with_chain(
+        &database,
+        &format!("/v1/names/{NAME}/records?namespace=ens&source=auto&keys=text:name"),
+        resolution_resolver_not_found_error(&dns_encoded(NAME)),
+    )
+    .await?;
+    database.cleanup().await?;
+    assert_eq!(detail["data"]["authority"], "ens_v1", "{detail:#}");
+    assert!(detail["data"]["resolver"].is_null(), "{detail:#}");
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert_eq!(body["meta"]["source"], "verified", "{body:#}");
+    assert!(read_chain);
+    Ok(())
+}
+
+/// Row A13, pin: the lease's pointer cleared and then set to `NEXT` again on the lease. The row
+/// serves `NEXT`, and a `source=auto` read answers from its indexed records.
+#[tokio::test]
+async fn ra13_a_pointer_set_again_after_a_clear_serves_from_the_index() -> Result<()> {
+    let database = published(cleared_then(NEXT, next_records(lease_node()))?, &[]).await?;
+    let (status, body, read_chain) = with_chain(
+        &database,
+        &format!("/v1/names/{NAME}/records?namespace=ens&source=auto&keys=text:name"),
+        resolution_universal_resolver_text_response("Test"),
+    )
+    .await?;
+    database.cleanup().await?;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert_eq!(body["data"]["resolver"], resolver(NEXT), "{body:#}");
+    assert_eq!(
+        body["data"]["records"]["text:name"],
+        json!({"status": "ok", "value": "Test"}),
+        "{body:#}"
+    );
+    assert_eq!(body["meta"]["source"], "indexed", "{body:#}");
+    assert!(!read_chain);
+    Ok(())
+}
+
+/// Row A14, pin: as A9, read with `source=indexed`, which never asks the chain.
+#[tokio::test]
+async fn ra14_an_indexed_read_of_a_cleared_lease_pointer_is_unchanged() -> Result<()> {
+    let database = published(vec![pointer(lease_node(), ZERO)?], &[]).await?;
+    let (status, body) = get(
+        &database,
+        &format!("/v1/names/{NAME}/records?namespace=ens&source=indexed&keys=text:name"),
+    )
+    .await?;
+    database.cleanup().await?;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert!(body["data"]["resolver"].is_null(), "{body:#}");
+    assert_eq!(
+        body["data"]["records"]["text:name"],
+        json!({"status": "unsupported", "unsupported_reason": "inventory_not_available"}),
+        "{body:#}"
+    );
+    assert_eq!(body["meta"]["source"], "indexed", "{body:#}");
     Ok(())
 }
 

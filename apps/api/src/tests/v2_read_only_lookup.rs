@@ -262,13 +262,7 @@ async fn read_only_api_auto_fallback_uses_universal_resolver_discovery() -> Resu
         "0x0000000000000000000000000000000000000def",
     )
     .await?;
-    append_name_resolver_input(
-        &database,
-        "ens",
-        "alice.eth",
-        "0x0000000000000000000000000000000000000000",
-    )
-    .await?;
+    drop_name_resolver_inputs(&database, "alice.eth").await?;
     let (pool, role) = read_only_pool(&database).await?;
     let (url, handle) =
         spawn_primary_name_mock_rpc(vec![resolution_universal_resolver_text_response(

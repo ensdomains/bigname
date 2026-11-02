@@ -1273,7 +1273,9 @@ its value map:
   declares serves that address with its `resolver_not_declared` inventory.
   `source=verified` and the verified keys of `source=auto` read the chain as
   for any other name. Whether that read runs Universal Resolver discovery
-  still follows the stored resolver.
+  still follows the stored resolver. A registry clear is the exception for
+  `source=auto`, which answers its keys `not_found` from the index (see
+  [ENSv1 registry clear](#ensv1-registry-clear-on-an-auto-read) below).
 - Records this route withholds, for a released name, a lapsed reservation or
   a name whose resolution is withheld, can still be read by resolver:
   [`GET /v1/resolvers/{chain_id}/{address}/records`](#get-v1resolverschain_idaddressrecords)
@@ -1545,11 +1547,28 @@ its value map:
   (`docs/execution.md` § CCIP-Read gateway transport), on this route and on
   exact-resolver ENS reads alike. Its answer is served and never written,
   compared or cleared.
+  <a id="ensv1-registry-clear-on-an-auto-read"></a>`source=auto` does not run
+  this discovery for an ENSv1 registry clear: a `.eth` name whose `authority`
+  is `ens_v1` or `ens_v0`, whose latest observed ENSv1 resolver pointer write
+  set the pointer to the zero address, so `ens_v1.resolver` is null, and whose
+  resolution is not withheld. It answers every requested key of such a name
+  `not_found` from the index, with `meta.source=indexed`, `resolver: null`
+  and no provider call, because the registry holds no resolver for the node.
+  It does not run the ancestor walk
+  ([known divergence](upstream.md#ensv1-registry-clear-answers-from-the-index)).
+  A name with no observed pointer write is not a clear and keeps discovery.
+  A name outside `.eth`, such as a DNS name, keeps discovery too, because its
+  TLD's ENSIP-10 resolver can answer it from DNS. So does a request that names
+  an [alias path](api-v1.md#alias-paths), because the chain reads the path
+  requested.
+  `source=verified` runs discovery for a clear as for any other null-resolver
+  name.
   Basenames and other chains and namespaces do not enter this route. Outside this
   null-exact-resolver class, exact indexed `ok` answers and authoritative
   ENSIP-19 derived answers satisfy auto without a provider request. Within this
-  class, all requested keys execute through verified lookup because retained
-  exact inventory predates the resolver-clear boundary. If no admitted
+  class, except an ENSv1 registry clear, all requested keys execute through
+  verified lookup because retained exact inventory predates the resolver-clear
+  boundary. If no admitted
   Universal Resolver entrypoint is available at execution time, the requested
   keys are explicitly `unsupported`; auto never turns that inability to execute
   into an indexed null-resolver `not_found`. For
