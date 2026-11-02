@@ -9,6 +9,7 @@
 #[path = "families_support/mod.rs"]
 mod support;
 
+use alloy_primitives::{hex, keccak256};
 use anyhow::{Context, Result, ensure};
 use bigname_project::families::FamilyMode;
 use bigname_storage::{
@@ -18,7 +19,7 @@ use bigname_storage::{
 use serde_json::{Value, json};
 use support::{
     CHAIN, Event, Fixture,
-    ens_v2_path::{declared_path, surface},
+    ens_v2_path::{declared_path, surface, unknown_surface},
     uuid,
 };
 
@@ -328,6 +329,11 @@ async fn served(fixture: &Fixture, name: &str) -> Result<Value> {
         "lifecycle_status": field("lifecycle_status"),
         "lapsed_owner": registration.pointer("/lapsed_registration/owner").cloned().unwrap_or(Value::Null),
         "registrant": field("registrant"),
+        "control_status": row
+            .declared_summary
+            .pointer("/control/status")
+            .cloned()
+            .unwrap_or(Value::Null),
         "owner": row.declared_summary.pointer("/control/owner").cloned().unwrap_or(Value::Null),
         "registry_owner": row
             .declared_summary
@@ -2088,6 +2094,17 @@ async fn legacy_moved(
     closed_at: Option<i64>,
 ) -> Result<(String, String, String)> {
     let name = surface(fixture, label).await?;
+    legacy_moved_on(fixture, name, n, expiry, closed_at).await
+}
+
+/// [`legacy_moved`] on the surface `name` already has.
+async fn legacy_moved_on(
+    fixture: &Fixture,
+    name: String,
+    n: u32,
+    expiry: i64,
+    closed_at: Option<i64>,
+) -> Result<(String, String, String)> {
     let (lease, registry) = (uuid(0x1000 + n), uuid(0x3000 + n));
     let log = i64::from(n) * 10;
     registry_only_bound(
@@ -2300,7 +2317,40 @@ async fn a_released_status_serves_no_owner_or_manager() -> Result<()> {
         legacy_moved(&fixture, "released-legacy.eth", 1, lapsed, None).await?;
     release(&fixture, &settled, &settled_lease, 4, json!(lapsed), HOLDER).await?;
     let (unsettled, _, _) = legacy_moved(&fixture, "unsettled.eth", 2, lapsed, None).await?;
+    // Red on base: the same lapse on a name whose labels were never learned, checked first so
+    // its own failure shows.
+    let unknown = unknown_surface(&fixture, "unlearned.eth").await?;
+    let (unknown, _, _) = legacy_moved_on(&fixture, unknown, 3, lapsed, None).await?;
     fixture.apply(5, FamilyMode::Normal).await?;
+    let rendered = load_family_name(&fixture.pool, &unknown)
+        .await?
+        .context("the unlearned name has a composed row")?
+        .normalized_name;
+    let labelhash = |label: &str| hex::encode(keccak256(label.as_bytes()));
+    ensure!(
+        rendered == format!("[{}].[{}]", labelhash("unlearned"), labelhash("eth")),
+        "the unlearned name is served as {rendered}"
+    );
+    let row = served(&fixture, &unknown).await?;
+    let mut unlearned = Vec::new();
+    for (key, expected) in [
+        ("status", json!("released")),
+        ("owner", Value::Null),
+        ("summary_owner", Value::Null),
+        ("manager", Value::Null),
+        ("registrant", json!(HOLDER)),
+    ] {
+        if row[key] != expected {
+            unlearned.push(format!("8c-unlearned {key}: {} != {expected}", row[key]));
+        }
+    }
+    for address in [HOLDER, OWNER] {
+        let listed = relations(&fixture, address, &unknown).await?;
+        if !listed.is_empty() {
+            unlearned.push(format!("8c-unlearned listed for {address}: {listed:?}"));
+        }
+    }
+    ensure!(unlearned.is_empty(), "{unlearned:#?}");
     check(
         &served(&fixture, &settled).await?,
         json!({"status": "released", "expires_at": lapsed, "lapsed_owner": HOLDER,
@@ -2445,6 +2495,22 @@ async fn a_zero_registry_owner_serves_the_lease_holder() -> Result<()> {
     owner_write(&fixture, &unleased, &unleased_registry, 3, 40, ZERO, false).await?;
 
     fixture.apply(5, FamilyMode::Normal).await?;
+    // Red on base: each row's control status, checked first so every row's failure shows.
+    let mut control = Vec::new();
+    for (row, name, expected) in [
+        ("11a", &names[0].0, "active"),
+        ("11b", &names[1].0, "expired"),
+        ("11c", &released, "released"),
+    ] {
+        let value = served(&fixture, name).await?;
+        if value["control_status"] != json!(expected) {
+            control.push(format!(
+                "{row} control_status: {} != \"{expected}\"",
+                value["control_status"]
+            ));
+        }
+    }
+    ensure!(control.is_empty(), "{control:#?}");
     for ((name, lease, expiry), status) in names.iter().zip(["active", "expired"]) {
         check(
             &served(&fixture, name).await?,
