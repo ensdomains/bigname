@@ -406,7 +406,9 @@ below states, `active`, `expired` or `released` by the ENSv1 schedule. Its
 registrant and its `control.owner` are the token holder the lease's registrar
 rows record, the latest token transfer from the first current-registry record
 on included, and null when they record none. Its authority kind, registry owner
-and `manager` stay absent: the zero registry owner names nobody. The token holder
+and `manager` stay absent: the zero registry owner names nobody. Its control status
+is the lease's lifecycle status, `active`, `expired` or `released`. Without a lease the
+profile stays `unregistered`. The token holder
 is its only address relation, `owner`. With no selected binding, that relation's
 row stands on the lease's resource and carries no surface binding. On a read
 at a published block, address history anchors on that row only where the name
