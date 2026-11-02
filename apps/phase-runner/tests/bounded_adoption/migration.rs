@@ -186,6 +186,14 @@ impl Fixture {
         self.edit(MIGRATION_FILE, |manifest| declare(manifest, role, declared))
     }
 
+    /// `role` declared at `address` from `start` beside the role's existing declarations.
+    fn declare_beside(&self, role: &str, address: &str, start: i64) -> Result<()> {
+        self.append(
+            MIGRATION_FILE,
+            &format!("\n{}", declaration(role, address, start)),
+        )
+    }
+
     /// Blocks `head + 1..=to` canonical as `seed_chain` makes them, and every phase completed
     /// through `to` with those blocks not derived yet, as a chain that followed the head leaves
     /// them before its next full pair.
@@ -605,6 +613,88 @@ async fn a_second_addition_between_the_halves_redoes_from_the_first() -> Result<
     ranges
 }
 
+// Row 7c. A second UserRegistry implementation declared beside the one the published pair read.
+// The role is repeatable, so the change adds one address and bounds to its own start S2. The
+// origin naming the first implementation stays and the one naming the second appears.
+#[tokio::test]
+async fn a_second_implementation_beside_a_declared_one_bounds_to_its_own_start() -> Result<()> {
+    let (first, second) = (START + 20, START + 40);
+    let fixture = Fixture::with("migration_repeat_addition", 59, |profile| {
+        migration_baseline(
+            profile,
+            &[(
+                "user_registry_implementation",
+                Some((USER_IMPLEMENTATION, first)),
+            )],
+        )
+    })
+    .await?;
+    fixture
+        .log(first + 5, 0, FACTORY, &proxy_deployed(USER_IMPLEMENTATION)?)
+        .await?;
+    fixture
+        .log(second + 5, 0, FACTORY, &proxy_deployed(REDEPLOYED)?)
+        .await?;
+    fixture.initial_pair().await?;
+    ensure!(
+        origins(fixture.pool()).await? == vec![first + 5],
+        "only the declared implementation's origin"
+    );
+    fixture.declare_beside("user_registry_implementation", REDEPLOYED, second)?;
+    let token = fixture.sync_migration().await?;
+    fixture.assert_bounded_refusal(&token, second).await?;
+    fixture
+        .discharge(&token, None)
+        .await?
+        .assert_ranges(second, second)?;
+    ensure!(
+        fixture.audits().await? == vec![(second, fixture.head)],
+        "{:?}",
+        fixture.audits().await?
+    );
+    ensure!(origins(fixture.pool()).await? == vec![first + 5, second + 5]);
+    fixture.assert_hashes().await?;
+    fixture.assert_equals_full_pair().await
+}
+
+// Row 7d. A second UserRegistry implementation declared beside the first while the first one's
+// bounded redo is still open: its Interpret half completed and Project has not published it. The
+// open Project redo lowers the next Interpret start to S1, below the second addition's S2.
+#[tokio::test]
+async fn a_second_implementation_beside_an_open_bounded_redo_redoes_from_the_first() -> Result<()> {
+    let (first, second) = (START + 20, START + 40);
+    let fixture = Fixture::with("migration_repeat_between_halves", 59, |profile| {
+        migration_baseline(profile, &[("user_registry_implementation", None)])
+    })
+    .await?;
+    fixture
+        .log(first + 5, 0, FACTORY, &proxy_deployed(USER_IMPLEMENTATION)?)
+        .await?;
+    fixture
+        .log(second + 5, 0, FACTORY, &proxy_deployed(REDEPLOYED)?)
+        .await?;
+    fixture.initial_pair().await?;
+    fixture.declare_migration(
+        "user_registry_implementation",
+        Some((USER_IMPLEMENTATION, first)),
+    )?;
+    let token = fixture.sync_migration().await?;
+    fixture
+        .discharge(&token, Some(PhaseName::Project))
+        .await
+        .err()
+        .context("the Project half stops")?;
+    fixture.declare_beside("user_registry_implementation", REDEPLOYED, second)?;
+    let token = fixture.sync_migration().await?;
+    let run = fixture.discharge(&token, None).await?;
+    fixture.assert_hashes().await?;
+    // The tables first, so a redo that starts too late shows the rows it kept.
+    let ranges = run.assert_ranges(first, first);
+    ensure!(origins(fixture.pool()).await? == vec![first + 5, second + 5]);
+    fixture.assert_equals_full_pair().await?;
+    ranges
+}
+
 // Row 10. A qualifying migration addition at S1 and a resolver declared at S2 above it in one
 // sync bound together from S1.
 #[tokio::test]
@@ -918,7 +1008,7 @@ async fn controller_moved(
 }
 
 // The factory-sender guard. The controller lookup reads a factory `ProxyDeployed` naming the
-// declared controller as its indexed `sender`, whatever the block
+// controller declared at the log's block as its indexed `sender`
 // (`crates/adapters/src/schema_v2/migration/registry.rs`). A factory log naming the new controller
 // below its declared start, and below the bound, shows the start is not its deployment block: the
 // redo keeps the full range and names the factory log's block. The full range then runs, and the

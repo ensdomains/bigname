@@ -1,0 +1,268 @@
+//! Row 14: the departure probe's cardinality axes. The probe reads one proxy's canonical
+//! `Upgraded` rows through `normalized_events_registry_departure_idx`, either side of the
+//! origin's implementation, so it visits no same-code upgrade and stops at the first departure.
+//! Partial set {empty over a populated table, one proxy, many proxies}, upgrades per proxy
+//! {0, 1, many same-code, many departures, no implementation}, plan mode {custom, generic},
+//! before and after ANALYZE. An empty partial set over a populated table is mainnet's state
+//! with no registry `Upgraded` row. A truly empty table is read for its answer only, since a
+//! scan of no rows is right there whatever the plan.
+use anyhow::{Result, ensure};
+use serde_json::Value;
+use sqlx::{PgConnection, raw_sql};
+
+use super::super::DEPARTURES;
+use crate::families::id_index_plan_tests::{PLAN_MODES, Probe, missing_probes, with_database};
+
+const CHAIN: &str = "ethereum-mainnet";
+const INDEX: &str = "normalized_events_registry_departure_idx";
+const CODE: &str = "0x00000000000000000000000000000000000000c1";
+const OTHER: &str = "0x00000000000000000000000000000000000000c2";
+const UPGRADES: i64 = 1_000;
+
+/// `normalized_events` holds the upgrades of `proxies` under `family`. Under the registry
+/// family they form the partial set. Under another family they fill the table and leave the
+/// partial set empty. Proxies 1 to 20 each carry a thousand
+/// same-code upgrades, so "many" proxies and "many" same-code rows hold together. Proxy 21 has
+/// none, proxy 22 one departure among a thousand same-code upgrades, proxy 23 a thousand
+/// departures, and proxy 24 one upgrade with no implementation.
+async fn install(connection: &mut PgConnection, proxies: &[i64], family: &str) -> Result<()> {
+    let listed = format!(
+        "ARRAY[{}]::bigint[]",
+        proxies
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    raw_sql(&format!(
+        "INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp,
+             canonicality_state)
+         SELECT '{CHAIN}', 'block-' || n, n, to_timestamp(n), 'canonical'
+         FROM generate_series(1, {UPGRADES}) n;
+
+         INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+             manifest_version, chain_id, block_number, block_hash, derivation_kind,
+             canonicality_state, after_state)
+         SELECT 'upgrade:' || proxy || ':' || n, 'ens', 'Upgraded', '{family}', 1,
+                '{CHAIN}', n, 'block-' || n, 'proxy_upgrade', 'canonical',
+                jsonb_build_object('proxy_address', '0x' || lpad(to_hex(proxy), 40, '0'),
+                    'implementation', CASE
+                        WHEN proxy = 23 OR (proxy = 22 AND n = 500) THEN '{OTHER}'
+                        ELSE '{CODE}' END)
+         FROM generate_series(1, 23) proxy CROSS JOIN generate_series(1, {UPGRADES}) n
+         WHERE proxy <> 21 AND proxy = ANY ({listed});
+
+         INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+             manifest_version, chain_id, block_number, block_hash, derivation_kind,
+             canonicality_state, after_state)
+         SELECT 'upgrade:24', 'ens', 'Upgraded', '{family}', 1, '{CHAIN}', 7,
+             'block-7', 'proxy_upgrade', 'canonical',
+             jsonb_build_object('proxy_address', '0x' || lpad(to_hex(24), 40, '0'))
+         WHERE 24 = ANY ({listed});
+
+         PREPARE departure (text, text, bigint, bigint, text) AS {DEPARTURES}"
+    ))
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
+fn nodes(plan: &Value) -> Vec<&Value> {
+    let mut out = Vec::new();
+    let mut pending = vec![&plan[0]["Plan"]];
+    while let Some(node) = pending.pop() {
+        out.push(node);
+        if let Some(children) = node["Plans"].as_array() {
+            pending.extend(children);
+        }
+    }
+    out
+}
+
+/// The `normalized_events` rows the plan's scans returned or filtered out, over every loop.
+fn visited(plan: &Value) -> i64 {
+    nodes(plan)
+        .into_iter()
+        .filter(|node| node["Relation Name"] == "normalized_events")
+        .map(|node| {
+            let loops = node["Actual Loops"].as_i64().unwrap_or(1);
+            let rows = node["Actual Rows"].as_i64().unwrap_or_default();
+            let removed = node["Rows Removed by Filter"].as_i64().unwrap_or_default();
+            (rows + removed) * loops
+        })
+        .sum()
+}
+
+struct Measured {
+    departed: bool,
+    visited: i64,
+    text: Vec<String>,
+}
+
+async fn measure(connection: &mut PgConnection, mode: &str, proxy: i64) -> Result<Measured> {
+    let values = format!("'{CHAIN}', '0x{proxy:040x}', 1, {UPGRADES}, '{CODE}'");
+    raw_sql(&format!("SET plan_cache_mode = {mode}"))
+        .execute(&mut *connection)
+        .await?;
+    let text = sqlx::query_scalar::<_, String>(&format!(
+        "EXPLAIN (COSTS OFF) EXECUTE departure ({values})"
+    ))
+    .fetch_all(&mut *connection)
+    .await?;
+    let plan = sqlx::query_scalar::<_, sqlx::types::Json<Value>>(&format!(
+        "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE departure ({values})"
+    ))
+    .fetch_one(&mut *connection)
+    .await?
+    .0;
+    let departed = sqlx::query_scalar(&format!("EXECUTE departure ({values})"))
+        .fetch_one(&mut *connection)
+        .await?;
+    Ok(Measured {
+        departed,
+        visited: visited(&plan),
+        text,
+    })
+}
+
+/// (proxy, departed, the rows the probe may visit)
+type Cell = (i64, bool, i64);
+
+const MANY: [Cell; 5] = [
+    (1, false, 0),
+    (21, false, 0),
+    (22, true, 1),
+    (23, true, 1),
+    (24, true, 1),
+];
+
+const REGISTRY: &str = "ens_v2_registry_l1";
+
+/// Every proxy that has upgrades in the many-proxies shape.
+const ALL: [i64; 23] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 23, 24,
+];
+
+/// One shape: its name, the proxies with upgrades, their family, the cells read, and whether
+/// the plan is held to the index.
+struct Shape {
+    name: &'static str,
+    proxies: &'static [i64],
+    family: &'static str,
+    cells: &'static [Cell],
+    plan: bool,
+}
+
+const SHAPES: [Shape; 4] = [
+    Shape {
+        name: "empty table",
+        proxies: &[],
+        family: REGISTRY,
+        cells: &[(1, false, 0)],
+        plan: false,
+    },
+    Shape {
+        name: "empty partial set over a populated table",
+        proxies: &ALL,
+        family: "ens_v2_resolver_l1",
+        cells: &[
+            (1, false, 0),
+            (22, false, 0),
+            (23, false, 0),
+            (24, false, 0),
+        ],
+        plan: true,
+    },
+    Shape {
+        name: "one proxy",
+        proxies: &[1],
+        family: REGISTRY,
+        cells: &[(1, false, 0), (21, false, 0)],
+        plan: true,
+    },
+    Shape {
+        name: "many proxies",
+        proxies: &ALL,
+        family: REGISTRY,
+        cells: &MANY,
+        plan: true,
+    },
+];
+
+async fn check(connection: &mut PgConnection, stats: &str, shape: &Shape) -> Result<Vec<String>> {
+    let probes = [Probe {
+        index: INDEX,
+        conditions: &["chain_id = ", "proxy_address", "implementation"],
+    }];
+    let mut failures = Vec::new();
+    for mode in PLAN_MODES {
+        for &(proxy, departed, bound) in shape.cells {
+            let label = format!("{stats} {mode} proxy {proxy}");
+            let measured = measure(connection, mode, proxy).await?;
+            if measured.departed != departed {
+                failures.push(format!("{label}: departed {}", measured.departed));
+            }
+            if measured.visited > bound {
+                failures.push(format!(
+                    "{label}: visited {} rows, bound {bound}\n{}",
+                    measured.visited,
+                    measured.text.join("\n")
+                ));
+            }
+            if !shape.plan {
+                continue;
+            }
+            failures.extend(missing_probes(&label, &measured.text, &probes));
+            // Every arm reads the index.
+            let scans = measured
+                .text
+                .iter()
+                .filter(|line| line.contains(&format!("using {INDEX} on")))
+                .count();
+            if scans != 3 {
+                failures.push(format!(
+                    "{label}: {scans} scans of {INDEX}\n{}",
+                    measured.text.join("\n")
+                ));
+            }
+        }
+    }
+    Ok(failures)
+}
+
+#[tokio::test]
+async fn the_departure_probe_visits_no_same_code_upgrade() -> Result<()> {
+    for (index, shape) in SHAPES.iter().enumerate() {
+        with_database(
+            &format!("registry_support_departure_plan_{index}"),
+            async |connection| {
+                install(connection, shape.proxies, shape.family).await?;
+                let name = shape.name;
+                let mut failures =
+                    check(connection, &format!("{name}, before ANALYZE"), shape).await?;
+                raw_sql("ANALYZE normalized_events")
+                    .execute(&mut *connection)
+                    .await?;
+                failures.extend(check(connection, &format!("{name}, after ANALYZE"), shape).await?);
+                ensure!(failures.is_empty(), "{}", failures.join("\n\n"));
+                if shape.family == REGISTRY && shape.proxies.len() > 1 {
+                    // Without the index the arms read the proxy's upgrades through another
+                    // index and visit every same-code upgrade, so the bound above can fail.
+                    raw_sql(&format!("DROP INDEX {INDEX}"))
+                        .execute(&mut *connection)
+                        .await?;
+                    let control = measure(connection, "force_generic_plan", 1).await?;
+                    ensure!(
+                        control.visited >= UPGRADES,
+                        "the control visited {}\n{}",
+                        control.visited,
+                        control.text.join("\n")
+                    );
+                }
+                Ok(())
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}

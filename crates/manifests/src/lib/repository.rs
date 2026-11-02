@@ -12,12 +12,11 @@ use bigname_domain::{
 
 use crate::attribution::validate_block_derived_preimage_attribution;
 use crate::model::parse_authored_manifest;
-use crate::{
-    ENSV1_MIRROR_RESOLVER_ROLE, LoadedManifest, ManifestAbi, ManifestLoadStatus,
-    ManifestLoadSummary,
-};
+use crate::{LoadedManifest, ManifestAbi, ManifestLoadStatus, ManifestLoadSummary};
 use crate::{ManifestRepository, SourceManifest, event_allows_empty_emitter_roles};
 
+#[path = "repository/contract_roles.rs"]
+mod contract_roles;
 #[path = "repository/metadata.rs"]
 mod metadata;
 #[path = "repository/mirror.rs"]
@@ -25,6 +24,7 @@ mod mirror;
 #[path = "repository/read_features.rs"]
 mod read_features;
 
+use contract_roles::validate_contract_roles;
 use metadata::{
     validate_event_start_block, validate_start_block_fits_i64, validate_verified_authority_arms,
 };
@@ -410,21 +410,8 @@ fn validate_manifest_metadata(
 
     validate_read_features(manifest, path)?;
 
-    let mut contract_roles = BTreeSet::new();
+    validate_contract_roles(manifest, version_tag, path)?;
     for contract in &manifest.contracts {
-        // The ENSv1 mirror role names an instance kind, not a singleton: a family may declare
-        // several mirror instances, which repository/mirror.rs holds to distinct addresses.
-        if contract.role != ENSV1_MIRROR_RESOLVER_ROLE
-            && !contract_roles.insert(contract.role.as_str())
-        {
-            bail!(
-                "source family {} manifest version {} in {} duplicates contract role {}",
-                manifest.source_family,
-                version_tag,
-                path.display(),
-                contract.role
-            );
-        }
         validate_start_block_fits_i64(contract.start_block, "contract", &contract.role, path)?;
     }
 

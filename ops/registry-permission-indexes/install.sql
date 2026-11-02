@@ -1,5 +1,5 @@
 -- Run with psql -X -v ON_ERROR_STOP=1 outside a transaction, before
--- 20261005200000 and 20261019120000. Final names are new; no old index needs replacing.
+-- 20261005200000, 20261019120000 and 20261027150000. Final names are new; no old index needs replacing.
 SET lock_timeout = '0';
 SET statement_timeout = '6h';
 
@@ -21,6 +21,7 @@ BEGIN
             ('normalized_events_user_registry_departure_idx', 'normalized_events', $def$CREATE INDEX normalized_events_user_registry_departure_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'proxy_address'::text)), block_number) WHERE ((source_family = 'ens_v2_registry_l1'::text) AND (event_kind = 'Upgraded'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (lower((after_state ->> 'implementation'::text)) IS DISTINCT FROM '0x9bd8a88719068d09ecee662f36c0e3856708366a'::text))$def$),
             ('normalized_events_mainnet_wrapper_departure_idx', 'normalized_events', $def$CREATE INDEX normalized_events_mainnet_wrapper_departure_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'proxy_address'::text)), block_number) WHERE ((source_family = 'ens_v2_registry_l1'::text) AND (event_kind = 'Upgraded'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (lower((after_state ->> 'implementation'::text)) IS DISTINCT FROM '0xcf3edb3f5501de63b57254d910b6782ee370039b'::text))$def$),
             ('normalized_events_mainnet_user_registry_departure_idx', 'normalized_events', $def$CREATE INDEX normalized_events_mainnet_user_registry_departure_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'proxy_address'::text)), block_number) WHERE ((source_family = 'ens_v2_registry_l1'::text) AND (event_kind = 'Upgraded'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (lower((after_state ->> 'implementation'::text)) IS DISTINCT FROM '0x75ff9adbcfce2469b097ac68f6ae650eae1351bb'::text))$def$),
+            ('normalized_events_registry_departure_idx', 'normalized_events', $def$CREATE INDEX normalized_events_registry_departure_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'proxy_address'::text)), lower((after_state ->> 'implementation'::text)), block_number) WHERE ((source_family = 'ens_v2_registry_l1'::text) AND (event_kind = 'Upgraded'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('project_grant_registry_parent_idx', 'project_grant', $def$CREATE INDEX project_grant_registry_parent_idx ON bigname_phase.project_grant USING btree (chain_id, subject, ((scope_detail ->> 'registry_address'::text))) WHERE (scope = 'root'::text)$def$)
         ) definitions(index_name, table_name, expected_definition)
     LOOP
@@ -62,6 +63,7 @@ WHERE indexrelid IN (
     to_regclass('bigname_phase.normalized_events_user_registry_departure_idx'),
     to_regclass('bigname_phase.normalized_events_mainnet_wrapper_departure_idx'),
     to_regclass('bigname_phase.normalized_events_mainnet_user_registry_departure_idx'),
+    to_regclass('bigname_phase.normalized_events_registry_departure_idx'),
     to_regclass('bigname_phase.project_grant_registry_parent_idx')
 )
 ORDER BY indexrelid::regclass::text;

@@ -65,6 +65,8 @@ BEGIN
              $def$CREATE INDEX normalized_events_mainnet_wrapper_departure_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'proxy_address'::text)), block_number) WHERE ((source_family = 'ens_v2_registry_l1'::text) AND (event_kind = 'Upgraded'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (lower((after_state ->> 'implementation'::text)) IS DISTINCT FROM '0xcf3edb3f5501de63b57254d910b6782ee370039b'::text))$def$),
             ('normalized_events_mainnet_user_registry_departure_idx',
              $def$CREATE INDEX normalized_events_mainnet_user_registry_departure_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'proxy_address'::text)), block_number) WHERE ((source_family = 'ens_v2_registry_l1'::text) AND (event_kind = 'Upgraded'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (lower((after_state ->> 'implementation'::text)) IS DISTINCT FROM '0x75ff9adbcfce2469b097ac68f6ae650eae1351bb'::text))$def$),
+            ('normalized_events_registry_departure_idx',
+             $def$CREATE INDEX normalized_events_registry_departure_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'proxy_address'::text)), lower((after_state ->> 'implementation'::text)), block_number) WHERE ((source_family = 'ens_v2_registry_l1'::text) AND (event_kind = 'Upgraded'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_resolver_upgrade_history_idx',
              $def$CREATE INDEX normalized_events_resolver_upgrade_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'proxy_address'::text)), block_number DESC, normalized_event_id DESC) WHERE ((event_kind = 'Upgraded'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_pointer_after_resolver_history_idx',
@@ -311,6 +313,12 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_mainnet_user_registry_
       AND canonicality_state IN ('canonical', 'safe', 'finalized')
       AND lower(after_state ->> 'implementation') IS DISTINCT FROM '0x75ff9adbcfce2469b097ac68f6ae650eae1351bb';
 
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_registry_departure_idx
+    ON bigname_phase.normalized_events (chain_id, lower(after_state ->> 'proxy_address'),
+        lower(after_state ->> 'implementation'), block_number)
+    WHERE source_family = 'ens_v2_registry_l1' AND event_kind = 'Upgraded'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
 CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_resolver_upgrade_history_idx
     ON bigname_phase.normalized_events (
         chain_id,
@@ -493,6 +501,7 @@ WHERE indexrelid IN (
     to_regclass('bigname_phase.normalized_events_user_registry_departure_idx'),
     to_regclass('bigname_phase.normalized_events_mainnet_wrapper_departure_idx'),
     to_regclass('bigname_phase.normalized_events_mainnet_user_registry_departure_idx'),
+    to_regclass('bigname_phase.normalized_events_registry_departure_idx'),
     to_regclass('bigname_phase.normalized_events_pointer_after_resolver_history_idx'),
     to_regclass('bigname_phase.normalized_events_pointer_before_resolver_history_idx'),
     to_regclass('bigname_phase.normalized_events_project_name_node_idx'),

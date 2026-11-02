@@ -7,9 +7,12 @@
 //! Project reader of `crates/storage/src/families/control/permissions/registry_support.rs`
 //! (`load`). A redo from the lowest start on either side of such a change therefore recomposes
 //! every row the change can alter. The controller lookups read a controller as the indexed
-//! `sender` of a factory or registry log, which no first-effect arm can find, so they rest on the
-//! declared start being the deployment block. `start_refusal` refuses the bound where a log shows
-//! otherwise: a log the address emitted, or a factory or registry log naming it as `sender`.
+//! `sender` of a factory or registry log, which no first-effect arm can find. They compare it only
+//! with the controller whose declared range holds the log's block (`Controllers::at` in
+//! `crates/adapters/src/schema_v2/migration/support.rs`), so a manifest change cannot alter a row
+//! below the lowest start on either side. A log below a declared start shows the declaration
+//! misreads the chain, and `start_refusal` then keeps the full range: a log the address emitted,
+//! or a factory or registry log naming it as `sender`.
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
@@ -37,10 +40,10 @@ const FACTORY_EVENT: &str = "ProxyDeployed";
 
 /// The roles a registry `LabelRegistered` names as its indexed `sender`. The migration adapter
 /// compares the `sender` of a same-transaction `RegistrationGranted`, built from that log, with
-/// both controllers by address alone (`crates/adapters/src/schema_v2/migration.rs`,
-/// `correlate_authority_transitions`), and its launch gate is the Graveyard's start, below a
-/// redeployed controller's. The emitters are the registry family's own, read from its current
-/// manifest.
+/// the controllers whose declared ranges hold the transaction's block
+/// (`crates/adapters/src/schema_v2/migration.rs`, `correlate_authority_transitions`), and its
+/// launch gate is the Graveyard's start, below a redeployed controller's. The emitters are the
+/// registry family's own, read from its current manifest.
 const REGISTRY_SENDER_ROLES: [&str; 2] = [
     "unlocked_migration_controller",
     "locked_migration_controller",
@@ -297,26 +300,13 @@ fn other_watches(side: &Side<'_>, addresses: &BTreeSet<&str>) -> BTreeSet<String
 /// `current`, the set the redo adopts. A registry change refuses the bound before this, by the
 /// whole-redo rule.
 ///
-/// The registry probe also covers `crates/adapters/src/schema_v2/migration/unwrapped_reconcile.rs`,
-/// which reads both controllers and the Graveyard with no block. The line references here are
-/// v0.14.x's. It reads them at :73-75. It cannot act on a transaction without a
-/// `LabelRegistered`: it returns early without a v1 registrar `Transfer` (:80-93), and everything
-/// it proves comes from the probe's authority transitions (:95-128, :183-195).
-/// `correlate_authority_transitions` (`migration.rs`:318-420) builds the same-transaction
-/// `RegistrationGranted` rows from `LabelRegistered` (:331-350), pushes a transition only inside
-/// its loop over them (:353), and compares the addresses only there: the Graveyard with the
-/// `Transfer`'s `to` (:373-375), the controllers with the registration's `sender` (:379, :385,
-/// :395). The unlocked controller reaches `prove` at `unwrapped_reconcile.rs`:202, as its
-/// `controller` (:221). So for registrations by the declared registry these sites no longer rest
-/// on the test that each declared start is the deployment receipt's block. A registry admitted
-/// through a `registry_announcement` edge also yields a `RegistrationGranted`
-/// (`catalog.rs`:466-470, `protocol/v2_registry.rs`:94, :390), and the correlation does not filter
-/// by emitter, but the probe reads only the declared registry.
-///
-/// TYR-385 is to bring block-aware controller comparisons (`Controllers::at(catalog, block)`) to
-/// main as the structural fix, so that the bounded pair equals the full pair by construction
-/// there. This guard is defence for this release line. It forward-merges harmlessly, because it
-/// can only refuse a bound, never pass a wrong one.
+/// The adapters read each controller only inside its declared range: `Controllers::at` in
+/// `crates/adapters/src/schema_v2/migration/support.rs`, taken per transaction block by
+/// `migration.rs` for `correlate_registry_creation` and `correlate_authority_transitions`, and
+/// per block by `unwrapped_reconcile.rs`. So the bounded pair equals the full pair by
+/// construction. The guard is defence: where a log shows a declared start is not the deployment
+/// block, it refuses the bound rather than redo on a manifest that misreads the chain. It can only
+/// refuse a bound, never pass a wrong one.
 pub(crate) async fn start_refusal(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,

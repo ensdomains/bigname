@@ -99,6 +99,26 @@ async fn connected_ens_v1_v2_migration_paths_emit_expected_facts() -> Result<()>
         stable_instances.get(&association.0).map(String::as_str),
         Some(expected_migration_registry.as_str())
     );
+    // Row 18: the migration manifest declares the local WrapperRegistry implementation, so the
+    // factory origin is kept and the registry has the WrapperRegistry model. Its parent entry's
+    // owner holds its root roles through the parent.
+    let wrapper_root = bigname_storage::load_registry_root_resource(
+        &mut *run.db.pool.acquire().await?,
+        "ethereum-sepolia",
+        &format!("{:#x}", locked.wrapper_registry),
+        i64::MAX,
+    )
+    .await?
+    .context("the migration-created WrapperRegistry has an active contract instance")?;
+    let owner_rows =
+        families::subject_permissions(&run.db.pool, &format!("{:#x}", locked.target_owner)).await?;
+    assert!(
+        owner_rows
+            .iter()
+            .any(|row| row.resource_id == wrapper_root.resource_id
+                && row.grant_relation == Some(bigname_storage::PermissionGrantRelation::Holder)),
+        "the parent entry's owner must hold the WrapperRegistry's root roles: {owner_rows:?}"
+    );
     println!(
         "connected migration: name_wrapper={:#x} base_registrar={:#x} unlocked_controller={:#x} locked_controller={:#x} graveyard={:#x} wrapper_implementation={:#x} unlocked_owner={:#x} unlocked_expiry={} locked_owner={:#x} locked_expiry={} wrapper_proxy={:#x}",
         harness.ens_v1.name_wrapper.address,
