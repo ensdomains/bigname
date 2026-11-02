@@ -26,6 +26,7 @@ use adaptive::AdaptiveInterpretArgs;
 #[path = "cli_families.rs"]
 mod families;
 use families::ProjectFamiliesArgs;
+pub use families::{redo_connections, run_connections};
 #[path = "cli_redo.rs"]
 mod redo_resolution;
 use redo_resolution::resolve_redo;

@@ -105,6 +105,7 @@ impl ProjectPhase {
                 self.families.compose_key_partitions,
             )
             .with_compose_builder_work_mem(self.families.compose_work_mem.clone())
+            .with_compose_workers(self.families.compose_workers)
             .with_resumed_redo(
                 context
                     .redo_attempt

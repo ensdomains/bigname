@@ -1263,12 +1263,12 @@ async fn pass_cursor(fixture: &Fixture) -> Result<(Value, Value)> {
     ))
 }
 
-/// Run budgets of one block, the first a rebuild, until `until` holds for the record's stream
-/// and cursor.
+/// Run budgets of one block, the first a rebuild, until `until` holds for the record's stream,
+/// cursor and committed chunk count.
 async fn run_until(
     fixture: &Fixture,
     options: &FamilyOptions,
-    until: impl Fn(&Value, &Value) -> bool,
+    until: impl Fn(&Value, &Value, &Value) -> bool,
 ) -> Result<()> {
     let one = options.clone().with_max_blocks_per_run(1);
     for run in 0..500 {
@@ -1279,7 +1279,8 @@ async fn run_until(
         };
         fixture.apply_with(TARGET, mode, &one).await?;
         let (stream, cursor) = pass_cursor(fixture).await?;
-        if until(&stream, &cursor) {
+        let chunks = fixture.repair_record().await?.unwrap_or_default()["compose_chunks"].clone();
+        if until(&stream, &cursor, &chunks) {
             return Ok(());
         }
     }
@@ -1374,7 +1375,7 @@ async fn a_build_partition_that_fails_is_built_again_from_the_cursor() -> Result
 async fn the_build_refuses_an_uncomposed_name() -> Result<()> {
     let fixture = mixed("families_builder_gate").await?;
     let options = ranged((3, 2), 5);
-    run_until(&fixture, &options, |stream, cursor| {
+    run_until(&fixture, &options, |stream, cursor, _| {
         *stream == json!(3) && cursor.is_null()
     })
     .await?;
@@ -1439,8 +1440,8 @@ async fn the_build_refuses_a_split_past_its_bounds_at_its_start() -> Result<()> 
 async fn a_names_chunk_marks_its_rows_and_persists_their_relations() -> Result<()> {
     let fixture = mixed("families_builder_marks").await?;
     let options = ranged((3, 2), 2);
-    run_until(&fixture, &options, |stream, cursor| {
-        *stream == json!(0) && cursor.is_string()
+    run_until(&fixture, &options, |stream, _, chunks| {
+        *stream == json!(0) && *chunks == json!(1)
     })
     .await?;
     let (rows, composed): (i64, Vec<i64>) = sqlx::query_as(
@@ -1499,7 +1500,7 @@ async fn a_names_chunk_marks_its_rows_and_persists_their_relations() -> Result<(
 #[tokio::test]
 async fn a_build_refuses_another_split_or_server_version() -> Result<()> {
     let fixture = mixed("families_builder_resplit").await?;
-    run_until(&fixture, &ranged((3, 2), 5), |stream, cursor| {
+    run_until(&fixture, &ranged((3, 2), 5), |stream, cursor, _| {
         *stream == json!(3)
             && cursor
                 .as_str()

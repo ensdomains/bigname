@@ -2,7 +2,8 @@
 //! `rebuild_performance/seed.sql` for 60 names with the ENSv2 path history of `ens_v2_path.rs`,
 //! and on top ENSv1 registry children a NewOwner creates with no name surface, record values by
 //! node and by record id, unnamed registrar transfers of a name with no surface in two blocks, two
-//! names bound to one resource, and an unnamed resource pointer whose node moves. Also a probe
+//! ENSv1 names bound to one resource, two ENSv2 names mounted on one registry that serve one
+//! entry resource, and an unnamed resource pointer whose node moves. Also a probe
 //! that records what each committed chunk of a pass left.
 use anyhow::Result;
 use serde_json::json;
@@ -61,7 +62,12 @@ pub fn node(n: u64) -> String {
 
 /// The history described at the top, on canonical blocks 0 to 300.
 pub async fn seeded(prefix: &str) -> Result<Fixture> {
-    let fixture = Fixture::new(prefix, 0).await?;
+    seeded_with(prefix, 1).await
+}
+
+/// The same history on a pool of `connections`.
+pub async fn seeded_with(prefix: &str, connections: u32) -> Result<Fixture> {
+    let fixture = Fixture::with_connections(prefix, 0, connections).await?;
     for script in [SEED, REGISTRY_CHILDREN] {
         raw_sql(
             &script
@@ -120,7 +126,10 @@ pub async fn seeded(prefix: &str) -> Result<Fixture> {
             )
             .await?;
     }
-    // Two names bound to one resource serve their records from one inventory.
+    // Two ENSv1 names bound to one resource. Their surfaces sit below a `.eth` name with no live
+    // ENSv2 entry, so on this cut-over chain neither serves the resource
+    // (crates/storage/src/families/name/resolvability.rs). `shared_entry` gives the history a
+    // resource two names serve.
     let shared = uuid(903);
     let (first, second) = (format!("ens:{}", node(901)), format!("ens:{}", node(902)));
     fixture
@@ -154,6 +163,7 @@ pub async fn seeded(prefix: &str) -> Result<Fixture> {
             R1,
         )
         .await?;
+    shared_entry(&fixture).await?;
     // An ENSv2 registry's pointer, so no ENSv1 registry node pointer keeps the node it left.
     let pointer = uuid(902);
     for (block, at) in [(165, MOVED_FROM), (185, MOVED_TO)] {
@@ -171,6 +181,56 @@ pub async fn seeded(prefix: &str) -> Result<Fixture> {
             .await?;
     }
     Ok(fixture)
+}
+
+/// The registry `SHARED_PARENT` and `SHARED_SIBLING` both mount in the `.eth` registry.
+pub const SHARED_REGISTRY: &str = "0x00000000000000000000000000000000000000f7";
+pub const SHARED_PARENT: &str = "left";
+pub const SHARED_SIBLING: &str = "right";
+
+/// One ENSv2 registry mounted at two `.eth` entries, as in `families_lookup_publication.rs`
+/// (`a_mirror_pointer_name_above_the_publication_is_not_walked`): at block 146 `left` and
+/// `right` are registered in the `.eth` registry, both name `SHARED_REGISTRY` as their
+/// subregistry, the registry is created with `left` as its parent, and its `x` is registered.
+/// `x.left.eth` and `x.right.eth` are both bound on the ENSv2 arm to the one entry resource of
+/// `x`, so both lookup names serve it from one inventory. An ENSv2-arm name is not walked and
+/// no resolvability reason reaches it, so its serving resource is its binding's.
+async fn shared_entry(fixture: &Fixture) -> Result<()> {
+    const BLOCK: i64 = 146;
+    const FAR: u64 = 1_900_000_000;
+    let eth: String = sqlx::query_scalar(
+        "SELECT after_state ->> 'subregistry' FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'SubregistryChanged'
+           AND source_family = 'ens_v2_root_l1'",
+    )
+    .bind(CHAIN)
+    .fetch_one(&fixture.pool)
+    .await?;
+    for (log, label) in [(700, SHARED_PARENT), (702, SHARED_SIBLING)] {
+        ens_v2_path::register(fixture, BLOCK, log, &eth, label, FAR).await?;
+    }
+    for (log, label) in [(704, SHARED_PARENT), (705, SHARED_SIBLING)] {
+        ens_v2_path::point(
+            fixture,
+            BLOCK,
+            log,
+            &eth,
+            label,
+            ens_v2_path::Pointer::Subregistry(SHARED_REGISTRY),
+        )
+        .await?;
+    }
+    ens_v2_path::created(fixture, BLOCK, 706, SHARED_REGISTRY).await?;
+    ens_v2_path::parent(fixture, BLOCK, 707, SHARED_REGISTRY, &eth, SHARED_PARENT).await?;
+    ens_v2_path::register(fixture, BLOCK, 708, SHARED_REGISTRY, "x", FAR).await?;
+    let resource = ens_v2_path::entry_resource(SHARED_REGISTRY, "x");
+    for (n, parent) in [(910, SHARED_PARENT), (911, SHARED_SIBLING)] {
+        let name = ens_v2_path::surface(fixture, &format!("x.{parent}.eth")).await?;
+        fixture
+            .binding(&uuid(n), &name, &resource, "ens_v2", BLOCK, 0, None)
+            .await?;
+    }
+    Ok(())
 }
 
 /// Install the probe: every chunk of a pass that commits logs, inside its own transaction, the
