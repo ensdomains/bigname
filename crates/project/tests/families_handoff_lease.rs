@@ -9,6 +9,7 @@
 #[path = "families_support/mod.rs"]
 mod support;
 
+use alloy_primitives::{hex, keccak256};
 use anyhow::{Context, Result, ensure};
 use bigname_project::families::FamilyMode;
 use bigname_storage::{
@@ -24,7 +25,7 @@ use bigname_storage::{
 use serde_json::{Value, json};
 use support::{
     CHAIN, Event, Fixture,
-    ens_v2_path::{declared_path, surface},
+    ens_v2_path::{declared_path, surface, unknown_surface},
     uuid,
 };
 
@@ -2159,6 +2160,17 @@ async fn legacy_moved(
     closed_at: Option<i64>,
 ) -> Result<(String, String, String)> {
     let name = surface(fixture, label).await?;
+    legacy_moved_on(fixture, name, n, expiry, closed_at).await
+}
+
+/// [`legacy_moved`] on the surface `name` already has.
+async fn legacy_moved_on(
+    fixture: &Fixture,
+    name: String,
+    n: u32,
+    expiry: i64,
+    closed_at: Option<i64>,
+) -> Result<(String, String, String)> {
     let (lease, registry) = (uuid(0x1000 + n), uuid(0x3000 + n));
     let log = i64::from(n) * 10;
     registry_only_bound(
@@ -2362,7 +2374,8 @@ async fn a_heavily_renewed_legacy_lease_still_finds_its_holder() -> Result<()> {
 /// release Interpret wrote, a name in both the lapsed and the legacy class, keeps its holder
 /// only as the lapsed registration's owner. A lease past its expiry and grace with no release
 /// row yet is `released` by the ENSv1 schedule and serves no owner either, while its registrant
-/// stays on the registration. Neither name is listed for the holder.
+/// stays on the registration. The same lapse on a name whose labels were never learned, served
+/// by its label hashes, is released alike. No name is listed for the holder or by batch lookup.
 #[tokio::test]
 async fn a_released_status_serves_no_owner_or_manager() -> Result<()> {
     let fixture = Fixture::new("families_handoff_lease_released_owner", 6).await?;
@@ -2371,6 +2384,9 @@ async fn a_released_status_serves_no_owner_or_manager() -> Result<()> {
         legacy_moved(&fixture, "released-legacy.eth", 1, lapsed, None).await?;
     release(&fixture, &settled, &settled_lease, 4, json!(lapsed), HOLDER).await?;
     let (unsettled, _, _) = legacy_moved(&fixture, "unsettled.eth", 2, lapsed, None).await?;
+    // The same lapse on a name whose labels were never learned.
+    let unknown = unknown_surface(&fixture, "unlearned.eth").await?;
+    let (unknown, _, _) = legacy_moved_on(&fixture, unknown, 3, lapsed, None).await?;
     fixture.apply(5, FamilyMode::Normal).await?;
     check(
         &served(&fixture, &settled).await?,
@@ -2385,13 +2401,33 @@ async fn a_released_status_serves_no_owner_or_manager() -> Result<()> {
                "manager": Value::Null}),
     )
     .context("released by its schedule")?;
-    for name in [&settled, &unsettled] {
+    let rendered = load_family_name(&fixture.pool, &unknown)
+        .await?
+        .context("the unlearned name has a composed row")?
+        .normalized_name;
+    let labelhash = |label: &str| hex::encode(keccak256(label.as_bytes()));
+    ensure!(
+        rendered == format!("[{}].[{}]", labelhash("unlearned"), labelhash("eth")),
+        "the unlearned name is served as {rendered}"
+    );
+    check(
+        &served(&fixture, &unknown).await?,
+        json!({"status": "released", "lifecycle_status": "released", "expires_at": lapsed,
+               "registrant": HOLDER, "owner": Value::Null, "summary_owner": Value::Null,
+               "manager": Value::Null}),
+    )
+    .context("an unlearned name released by its schedule")?;
+    for name in [&settled, &unsettled, &unknown] {
         for address in [HOLDER, OWNER] {
             ensure!(
                 relations(&fixture, address, name).await?.is_empty(),
                 "{address} is listed for {name}"
             );
         }
+        ensure!(
+            lookup_relations(&fixture, name).await?.is_empty(),
+            "batch lookup lists {name}"
+        );
     }
     fixture.assert_rebuild_equal(5).await?;
     fixture.cleanup().await
