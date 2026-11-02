@@ -16,14 +16,16 @@
 //! canonicality. Only its last step keeps the readable surfaces at or below the block.
 //!
 //! `registry_pointer_tests.rs` holds the rows on which names a registry pointer change expands,
-//! `registry_route_tests.rs` the rows of the selections that start from a changed registry
-//! or from ENSv1→ENSv2 migration evidence, and `entry_slot_tests.rs` the rows of the names a
-//! changed entry selects by the registry that holds it. `scaling_tests.rs` holds the tests on
-//! how many surfaces a selection reads.
+//! `resolver_reader_tests.rs` the rows on which names a resolver's classification change
+//! expands through the names that point at it, `registry_route_tests.rs` the rows of the
+//! selections that start from a changed registry or from ENSv1→ENSv2 migration evidence, and
+//! `entry_slot_tests.rs` the rows of the names a changed entry selects by the registry that
+//! holds it. `scaling_tests.rs` holds the tests on how many surfaces a selection reads.
 mod entry_slot_tests;
 mod oracle;
 mod registry_pointer_tests;
 mod registry_route_tests;
+mod resolver_reader_tests;
 mod scaling_tests;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -654,17 +656,23 @@ impl World {
 
     /// A classification change of `resolver` in the publication at block 5.
     async fn reclassify(&self, resolver: &str) -> Result<()> {
+        self.reclassify_at(5, resolver).await
+    }
+
+    /// A classification change of `resolver` in the publication at `block`: support starts.
+    async fn reclassify_at(&self, block: i64, resolver: &str) -> Result<()> {
         sqlx::query(
             "INSERT INTO project_resolver_classification (chain_id, resolver_address, block_number,
                  event_identity, support_status)
-             VALUES ($1, $2, 5, 'classified', 'supported')",
+             VALUES ($1, $2, $3, 'classified', 'supported')",
         )
         .bind(CHAIN)
         .bind(resolver)
+        .bind(block)
         .execute(&self.pool)
         .await?;
         self.journal(
-            5,
+            block,
             "project_resolver_classification",
             json!([CHAIN, resolver]),
             Some(json!({"support_status": "unsupported"})),
@@ -817,15 +825,42 @@ impl World {
 
     /// `prepare` and the frozen statement before it both select exactly `expected` for `call`.
     async fn assert_selects(&self, call: Call<'_>, expected: &[&str]) -> Result<()> {
+        self.compare(call, expected, &[]).await
+    }
+
+    /// `prepare` selects exactly `expected` for `call`, and the frozen statement before it
+    /// selects exactly `expected` and `dropped`: the names the current statement no longer
+    /// selects. `dropped` holds a name, so a row cannot pass without narrowing.
+    async fn assert_narrows(
+        &self,
+        call: Call<'_>,
+        expected: &[&str],
+        dropped: &[&str],
+    ) -> Result<()> {
+        ensure!(
+            !dropped.is_empty() && dropped.iter().all(|name| !expected.contains(name)),
+            "a narrowing row must drop at least one name, and none it expects: {dropped:?}"
+        );
+        self.compare(call, expected, dropped).await
+    }
+
+    /// The frozen statement selects `expected` and `dropped`, and `prepare` selects `expected`
+    /// under both plan modes.
+    async fn compare(&self, call: Call<'_>, expected: &[&str], dropped: &[&str]) -> Result<()> {
+        let frozen: BTreeSet<String> = expected
+            .iter()
+            .chain(dropped)
+            .map(|name| (*name).to_owned())
+            .collect();
         let expected: BTreeSet<String> = expected.iter().map(|name| (*name).to_owned()).collect();
         ensure!(
-            expected.iter().all(|name| self
+            frozen.iter().all(|name| self
                 .names
                 .values()
                 .filter(|spelled| *spelled == name)
                 .count()
                 == 1),
-            "an expected name has no surface or two: {expected:?}"
+            "an expected name has no surface or two: {frozen:?}"
         );
         let spelled = |names: BTreeSet<String>| -> BTreeSet<String> {
             names
@@ -835,8 +870,8 @@ impl World {
         };
         let before = spelled(self.before(call).await?);
         ensure!(
-            before == expected,
-            "the statement before the mount lookup selects {before:?}, not {expected:?}"
+            before == frozen,
+            "the statement before the mount lookup selects {before:?}, not {frozen:?}"
         );
         for mode in PLAN_MODES {
             let selected = spelled(self.selected(call, mode).await?);
