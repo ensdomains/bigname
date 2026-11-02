@@ -7,7 +7,9 @@
 //! resolver the registry holds for the node at read time
 //! (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137-L141 @ ens_v1@91c966f), and
 //! F4 keeps the node's latest ENSv1 `ResolverChanged` whichever resource the event carries. A
-//! clear in F4 clears the served pointer too.
+//! clear in F4 clears the served pointer too. A resource an ENSv1 binding candidate selects that
+//! has no serving pointer of its own serves through a stand-in built from its node's F4 row, as
+//! the composed resolver does (`name/serving.rs`, `resolver_block`).
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
@@ -202,6 +204,108 @@ pub(crate) async fn serving_pointers<'a>(
         );
     }
     Ok(out)
+}
+
+/// One resource with no serving pointer that an ENSv1 binding candidate selects: the candidate's
+/// `(namespace, node)`, which the inventory records as an input, and the stand-in serving pointer
+/// read from that node's F4 row when it names a resolver.
+pub(crate) struct RegistryStandIn {
+    pub(crate) resource_id: Uuid,
+    pub(crate) node: (String, String),
+    pub(crate) pointer: Option<ServingPointer>,
+}
+
+/// The [`RegistryStandIn`] of each of `resources` that an `ens_v1` binding candidate selects. The
+/// candidate's name is its node, so the F4 row is read on its primary key. A resource that
+/// several names select (none does on the ENSv1 arm, whose resources each belong to one node)
+/// takes the first name by id.
+pub(crate) async fn registry_stand_ins(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    resources: &[Uuid],
+) -> Result<Vec<RegistryStandIn>> {
+    if resources.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        "/* storage:families.records.registry_stand_ins */
+         SELECT DISTINCT ON (candidate.resource_id)
+                candidate.resource_id, candidate.logical_name_id, candidate.namespace,
+                lower(split_part(candidate.logical_name_id, ':', 2)) AS node,
+                registry.resolver_address, registry.source_family, registry.block_number,
+                registry.transaction_index, registry.log_index, registry.event_identity,
+                registry.normalized_event_id
+         FROM bigname_phase.project_binding_candidate candidate
+         LEFT JOIN bigname_phase.project_registry_pointer registry
+           ON registry.chain_id = candidate.chain_id
+          AND registry.namespace = candidate.namespace
+          AND registry.node = lower(split_part(candidate.logical_name_id, ':', 2))
+         WHERE candidate.chain_id = $1 AND candidate.resource_id = ANY($2::uuid[])
+           AND candidate.authority_arm = 'ens_v1'
+         ORDER BY candidate.resource_id, candidate.logical_name_id",
+    )
+    .bind(chain_id)
+    .bind(resources)
+    .fetch_all(&mut *conn)
+    .await
+    .context("failed to load the registry pointers of ENSv1 resources without a pointer")?;
+    let mut found = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let resolver: Option<String> = row.try_get("resolver_address")?;
+        let family: Option<String> = row.try_get("source_family")?;
+        let registry = match (resolver, family) {
+            (Some(resolver), Some(family))
+                if !is_cleared(Some(&resolver))
+                    && V1_POINTER_FAMILIES.contains(&family.as_str()) =>
+            {
+                Some((
+                    resolver,
+                    family,
+                    FamilyPosition::from_row(row)?,
+                    row.try_get::<Option<i64>, _>("normalized_event_id")?,
+                ))
+            }
+            _ => None,
+        };
+        found.push((
+            row.try_get::<Uuid, _>("resource_id")?,
+            row.try_get::<String, _>("logical_name_id")?,
+            row.try_get::<String, _>("namespace")?,
+            row.try_get::<String, _>("node")?,
+            registry,
+        ));
+    }
+    let unnumbered: Vec<String> = found
+        .iter()
+        .filter_map(|found| found.4.as_ref())
+        .filter(|registry| registry.3.is_none())
+        .map(|registry| registry.2.event_identity.clone())
+        .collect();
+    let probed = probe_events(conn, &unnumbered).await?;
+    Ok(found
+        .into_iter()
+        .map(|(resource_id, logical_name_id, namespace, node, registry)| {
+            let pointer = registry.map(|(resolver_address, source_family, position, event_id)| {
+                ServingPointer {
+                    resource_id,
+                    logical_name_id,
+                    namespace: namespace.clone(),
+                    source_family,
+                    namehash: node.clone(),
+                    resolver_address,
+                    pointer_event_id: event_id.or(probed
+                        .get(&position.event_identity)
+                        .map(|event| event.normalized_event_id)),
+                    block_number: position.block_number,
+                }
+            });
+            RegistryStandIn {
+                resource_id,
+                node: (namespace, node),
+                pointer,
+            }
+        })
+        .collect())
 }
 
 /// Whether the resource's records are served, and the reason when not: the resolver must be

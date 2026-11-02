@@ -11,7 +11,8 @@
 //! lookup by key. The F5 named pointer (`project_named_resource_pointer`) also retains each
 //! name's latest admitted pointer on a resource, so another name's later write on the same
 //! resource does not displace it. A name's admitted ENSv1 pointer is read through the node's F4
-//! row when the two name different resolvers, as its record inventory is (`records/serving.rs`),
+//! row when the two name different resolvers, and an `ens_v1` name with no admitted pointer on its
+//! selected resource reads the F4 row itself, as its record inventory does (`records/serving.rs`),
 //! so the served resolver is the one the registry holds.
 use serde_json::Value;
 
@@ -210,15 +211,27 @@ pub fn resolver_block<'a>(
         }
         _ => pointer,
     };
-    let mut candidates: Vec<(&PointerRow, bool)> = resource_pointer
-        .filter(admitted)
+    let own = resource_pointer.filter(admitted);
+    let resourceless = node_pointer
+        .filter(|pointer| pointer.resource_id.is_none())
+        .filter(admitted);
+    // An `ens_v1` name whose selected resource has no admitted pointer of its own reads the
+    // node's registry pointer, whatever resource or name Interpret attached the registry's
+    // `NewResolver` to: the write can land on another candidate's resource, such as a legacy
+    // name's lease beside its selected registry-only resource, or carry no name.
+    let fallback = node_pointer.filter(|pointer| {
+        own.is_none()
+            && resourceless.is_none()
+            && scope.admits
+            && scope.resource.is_some()
+            && scope.arm == Some("ens_v1")
+            && V1_POINTER_FAMILIES.contains(&pointer.source_family.as_str())
+    });
+    let mut candidates: Vec<(&PointerRow, bool)> = own
         .map(registry_read)
         .into_iter()
-        .chain(
-            node_pointer
-                .filter(|pointer| pointer.resource_id.is_none())
-                .filter(admitted),
-        )
+        .chain(resourceless)
+        .chain(fallback)
         .map(|pointer| (pointer, false))
         .collect();
     if let Some(serving) = serving {

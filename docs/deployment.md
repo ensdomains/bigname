@@ -5441,3 +5441,35 @@ hash-rotating changes. Do not mark old rows ready under the new hash.
 
 It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
 and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## An ENSv1 name with no pointer on its selected resource serves its registry resolver
+
+The build that serves the node's ENSv1 registry pointer as `resolver`, and that resolver's
+records, for an `ens_v1` name whose selected resource carries no pointer of its own
+([projections](projections.md#an-ensv1-name-serves-the-resolver-its-registry-record-holds)),
+changes the composed resolver and the record inventory Project stores
+(`crates/storage/src/families/name/serving.rs`,
+`crates/storage/src/families/records/serving.rs`,
+`crates/storage/src/families/records/inventory_selection.rs`). It rotates the
+[projection content hash](glossary.md#projection-content-hash) for every chain. The
+[interpreter content hash](glossary.md#interpreter-content-hash) does not rotate.
+
+What changes for names:
+
+- A name such as a legacy `.eth` name whose registry `NewResolver` sits on another resource of
+  its node, or carries no name, serves the registry's resolver and its records on name detail,
+  lookup, the records route and the name lists. Before, it served a null `resolver` with no
+  reason while `ens_v1.resolver` named one.
+- `relation=resolves_to` lists such a name under an address its registry resolver holds for
+  the node.
+- Such a name whose registry pointer is a clear serves a null `resolver` with the clear as its
+  latest event. Before, it served no latest event.
+
+These rows arrive through re-derivation. Every chain needs one full-range Project redo and no
+Interpret redo, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary)
+under matching runner and API binaries. The change rides the next release that redoes
+Project and shares that release's Project redo. Do not mark old rows ready under the new
+hash.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
+and the compiled watch plan are unchanged, so stamp no Ingest redo.

@@ -1595,12 +1595,29 @@ When a name's pointer on its selected resource is an ENSv1 pointer, the served
 whenever the two name different resolvers. Only a name whose selected authority
 arm is `ens_v1` (`authority` `ens_v1` or `ens_v0`) selects a resource with an
 ENSv1 pointer. A cleared registry pointer clears both. `ens_v1.resolver` and
-`resolver` then agree whenever both are present. The inventory records the node
-as one of its inputs, so a later registry pointer write recomposes it. The
+`resolver` then agree whenever both are present.
+
+The same holds when the selected resource carries no pointer of its own. The
+registry's `NewResolver` can land on another resource of the node, such as a
+legacy `.eth` name's BaseRegistrar lease while the name selects its
+[registry-only resource](glossary.md#registry-only-resource), or the reverse.
+It can also carry no name, when Interpret did not yet know the name. A name
+whose selected authority arm is `ens_v1`, that selects a resource and admits its
+pointers, then serves the node's registry pointer as its `resolver`. Its record
+inventory serves that resolver's records for the node through a stand-in pointer
+built from the registry pointer, as the resolver-anchored records route does. Every withholding still applies. A cleared
+registry pointer composes a null `resolver` whose latest event is the clear. A
+node with no registry pointer composes a null `resolver` with no latest event. A
+name that selects no resource, such as the ownerless registry profile, is
+unchanged.
+
+The inventory records the node as one of its inputs, so a later registry pointer
+write recomposes it. The
 inverse address read (`relation=resolves_to`) also finds such a name through the
 node's registry pointer: an address the registry pointer's resolver holds for the
 node, in a node record, in a record written under the name at another node, or in
-a linked record, reaches the node's ENSv1 resource pointers. A record written
+a linked record, reaches the node's ENSv1 resource pointers and the resources the
+node's `ens_v1` binding candidates select. A record written
 under no name, such as one written before Interpret surfaced the name, and a
 linked record, which has no name, reach them in each
 namespace the request spans, which is every servable namespace when the request
