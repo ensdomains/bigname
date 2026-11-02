@@ -50,6 +50,12 @@ fn registry_manifest() -> ManifestInput {
                 ALL,
             ),
             (
+                "LabelUnregistered",
+                "event LabelUnregistered(uint256 indexed tokenId, address indexed sender)",
+                &["registry"],
+                ALL,
+            ),
+            (
                 "ExpiryUpdated",
                 "event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender)",
                 &["registry"],
