@@ -76,6 +76,7 @@ impl State {
             v2_subregistry_tokens_by_observation: Default::default(),
             v2_resolver_tokens_by_observation: Default::default(),
             v2_resolver_aliases_by_observation: Default::default(),
+            v2_resolver_link_writes: Default::default(),
             v2_expiries: Default::default(),
             v2_dirty_tokens: OrdSet::new(),
             v2_dirty_registries: OrdSet::new(),

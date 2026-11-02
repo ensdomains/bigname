@@ -68,10 +68,15 @@ pub(super) fn push_resolver_edge(
 
 /// The resolver edges of every registry whose reachability changed since the last call. A
 /// registry that became reachable opens one edge per key a token with a resolver holds: its own,
-/// or the earlier token ids it was regenerated from. When two tokens hold one key, the greater
-/// token id's resolver wins, so a key has one target. A registry that stopped being reachable
+/// or the earlier token ids it was regenerated from. A registry that stopped being reachable
 /// closes every such key at once, shared or not, because all of its tokens lose reachability
 /// together.
+///
+/// Token ids that differ only in their version bits write one link, so a key's edge follows the
+/// link's latest `ResolverUpdated`, not each token's own resolver: a key whose latest write
+/// cleared it stays closed, and one whose latest write named a resolver reopens to it. A key no
+/// `ResolverUpdated` wrote, such as one a regenerated token carries from a write before this
+/// state, reopens to the resolver of the greatest token id holding it, so a key has one target.
 pub(in crate::schema_v2) fn reachability_drafts(
     state: &mut State,
 ) -> anyhow::Result<Vec<DiscoveryDraft>> {
@@ -82,21 +87,32 @@ pub(in crate::schema_v2) fn reachability_drafts(
     };
     let mut drafts = Vec::new();
     for (registry, reachable) in state.take_v2_reachability_changes() {
-        let mut targets = BTreeMap::new();
+        // Per key: a token id writing its link, and each holder's resolver by token id.
+        let mut holders = BTreeMap::<String, (String, Vec<String>)>::new();
         for (token_id, resolver, aliases) in state.v2_registry_resolver_tokens(&registry) {
-            let mut tokens = aliases
-                .iter()
-                .map(|alias| parse(alias))
-                .collect::<anyhow::Result<Vec<_>>>()?;
-            if !reachable || tokens.is_empty() {
-                tokens.push(parse(&token_id)?);
+            let mut links = aliases.into_iter().collect::<Vec<_>>();
+            if !reachable || links.is_empty() {
+                links.push(token_id);
             }
-            for token in tokens {
-                targets.insert(observation_key(&registry, token, true), resolver.clone());
+            for link in links {
+                let key = observation_key(&registry, parse(&link)?, true);
+                holders
+                    .entry(key)
+                    .or_insert_with(|| (link, Vec::new()))
+                    .1
+                    .push(resolver.clone());
             }
         }
-        drafts.extend(targets.into_iter().map(|(observation_key, to_address)| {
-            if reachable {
+        for (observation_key, (link, holders)) in holders {
+            let to_address = match state.v2_resolver_link_write(&registry, &link) {
+                Some((_, None)) => continue,
+                Some((_, Some(resolver))) => resolver.clone(),
+                None => match holders.last() {
+                    Some(resolver) => resolver.clone(),
+                    None => continue,
+                },
+            };
+            drafts.push(if reachable {
                 DiscoveryDraft::RegistryResolverEdge {
                     registry: registry.clone(),
                     observation_key,
@@ -107,8 +123,8 @@ pub(in crate::schema_v2) fn reachability_drafts(
                     registry: registry.clone(),
                     observation_key,
                 }
-            }
-        }));
+            });
+        }
     }
     Ok(drafts)
 }

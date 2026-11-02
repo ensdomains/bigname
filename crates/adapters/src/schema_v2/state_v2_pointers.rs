@@ -231,6 +231,58 @@ impl State {
             .and_then(|token| token.subregistry.clone())
     }
 
+    /// A `ResolverUpdated` for `token_id`: its resolver, and the latest write of the resolver
+    /// link it shares with every token id that differs from it only in the version bits.
+    pub(in crate::schema_v2) fn write_v2_resolver_link(
+        &mut self,
+        emitter: &str,
+        token_id: &str,
+        resolver: Option<String>,
+    ) -> BTreeSet<String> {
+        self.v2_resolver_link_writes.insert(
+            (
+                emitter.to_ascii_lowercase(),
+                resolver_observation_id(token_id),
+            ),
+            (token_id.to_ascii_lowercase(), resolver.clone()),
+        );
+        self.set_v2_resolver(emitter, token_id, resolver)
+    }
+
+    /// A restored `ResolverChanged`. Only a `ResolverUpdated` log's own event writes the link: a
+    /// name transition's restatement of a token's resolver carries no `sender`.
+    pub(in crate::schema_v2) fn restore_v2_resolver_change(
+        &mut self,
+        emitter: &str,
+        token_id: &str,
+        after_state: &Value,
+    ) {
+        let resolver = after_state
+            .get("resolver")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if after_state.get("source_event").and_then(Value::as_str) == Some("ResolverUpdated")
+            && after_state.get("sender").is_some()
+        {
+            self.write_v2_resolver_link(emitter, token_id, resolver);
+        } else {
+            self.set_v2_resolver(emitter, token_id, resolver);
+        }
+    }
+
+    /// The latest `ResolverUpdated` on `token_id`'s resolver link: the token id it named and
+    /// the resolver it wrote, none for a clear.
+    pub(in crate::schema_v2) fn v2_resolver_link_write(
+        &self,
+        emitter: &str,
+        token_id: &str,
+    ) -> Option<&(String, Option<String>)> {
+        self.v2_resolver_link_writes.get(&(
+            emitter.to_ascii_lowercase(),
+            resolver_observation_id(token_id),
+        ))
+    }
+
     pub(in crate::schema_v2) fn set_v2_resolver(
         &mut self,
         emitter: &str,

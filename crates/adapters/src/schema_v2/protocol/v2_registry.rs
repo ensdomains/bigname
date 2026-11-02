@@ -209,7 +209,7 @@ fn registry(
                 e.tokenId,
                 json!({"source_event":"ResolverUpdated","resolver":nullable_address(e.resolver),"sender":address_hex(e.sender)}),
             )?;
-            let aliases = state.set_v2_resolver(
+            let aliases = state.write_v2_resolver_link(
                 &raw.emitting_address,
                 &u256_word_hex(e.tokenId),
                 (e.resolver != Address::ZERO).then(|| address_hex(e.resolver)),

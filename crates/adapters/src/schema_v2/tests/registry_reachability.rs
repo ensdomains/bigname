@@ -818,3 +818,167 @@ fn u7_a_regenerated_token_reopens_its_carried_key_once() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+fn set_versioned_resolver(
+    registry: &str,
+    label: &str,
+    version: u32,
+    resolver: &str,
+    block: i64,
+    log: i64,
+) -> RawLogInput {
+    raw_at(
+        v2_registry::ResolverUpdated {
+            tokenId: versioned_token(label, version),
+            resolver: resolver.parse().expect("address"),
+            sender: SENDER.parse().expect("address"),
+        }
+        .encode_log_data(),
+        block,
+        log,
+        registry,
+    )
+}
+
+/// `mounted_child`, then a `ResolverUpdated` for another version of `a`'s token id clears the
+/// link they share at block 6. Version 1 still holds `RESOLVER_X`.
+fn cleared_through_another_version() -> Vec<RawLogInput> {
+    let mut logs = mounted_child();
+    logs.push(set_versioned_resolver(CHILD, "a", 2, ZERO_ADDRESS, 6, 0));
+    logs
+}
+
+/// K1: two token versions write one link, nonzero and then zero. The clear closes the link, and
+/// unmounting and mounting again leaves it closed: a mount reopens a link from its latest write.
+#[test]
+fn k1_a_link_cleared_through_another_version_stays_closed_after_a_remount() -> anyhow::Result<()> {
+    let mut logs = cleared_through_another_version();
+    logs.push(mount(PARENT, "n", ZERO_ADDRESS, 7, 0));
+    logs.push(mount(PARENT, "n", CHILD, 8, 0));
+    let output = interpret_test_batch(batch(logs))?;
+    assert!(resolver_closures(&output, CHILD).contains(&(key(CHILD, "a"), 6, 0, 0)));
+    assert_eq!(
+        resolver_edges(&output, CHILD)
+            .into_iter()
+            .filter(|edge| edge.2 >= 6)
+            .collect::<Vec<_>>(),
+        Vec::new()
+    );
+    Ok(())
+}
+
+/// K2: after that clear, a nonzero write through the first version reopens the link at its log
+/// as usual, and a remount reopens it with that resolver.
+#[test]
+fn k2_a_later_write_through_the_other_version_reopens_the_link() -> anyhow::Result<()> {
+    let mut logs = cleared_through_another_version();
+    logs.push(set_versioned_resolver(CHILD, "a", 1, RESOLVER_Y, 7, 0));
+    logs.push(mount(PARENT, "n", ZERO_ADDRESS, 8, 0));
+    logs.push(mount(PARENT, "n", CHILD, 9, 0));
+    let output = interpret_test_batch(batch(logs))?;
+    assert_eq!(
+        resolver_edges(&output, CHILD)
+            .into_iter()
+            .filter(|edge| edge.2 >= 6)
+            .collect::<Vec<_>>(),
+        vec![
+            (instance(RESOLVER_Y), key(CHILD, "a"), 7, 0, 0),
+            (instance(RESOLVER_Y), key(CHILD, "a"), 9, 0, 0),
+        ]
+    );
+    Ok(())
+}
+
+/// K3: the same collision with the versions swapped, the greater token id writing the nonzero
+/// value first and the lesser one clearing it, also stays closed after a remount.
+#[test]
+fn k3_a_link_cleared_through_a_lesser_version_stays_closed_after_a_remount() -> anyhow::Result<()> {
+    let mut logs = mounted_child();
+    logs.push(set_versioned_resolver(CHILD, "a", 2, RESOLVER_Y, 6, 0));
+    logs.push(set_versioned_resolver(CHILD, "a", 1, ZERO_ADDRESS, 7, 0));
+    logs.push(mount(PARENT, "n", ZERO_ADDRESS, 8, 0));
+    logs.push(mount(PARENT, "n", CHILD, 9, 0));
+    let output = interpret_test_batch(batch(logs))?;
+    assert_eq!(
+        resolver_edges(&output, CHILD)
+            .into_iter()
+            .filter(|edge| edge.2 >= 6)
+            .collect::<Vec<_>>(),
+        vec![(instance(RESOLVER_Y), key(CHILD, "a"), 6, 0, 0)]
+    );
+    Ok(())
+}
+
+/// K4: two versions write one link nonzero, the greater token id first. A remount reopens the
+/// link to the latest write, the lesser version's resolver.
+#[test]
+fn k4_a_remount_reopens_a_shared_link_to_its_latest_write() -> anyhow::Result<()> {
+    let mut logs = mounted_child();
+    logs.push(set_versioned_resolver(CHILD, "a", 2, RESOLVER_X, 6, 0));
+    logs.push(set_versioned_resolver(CHILD, "a", 1, RESOLVER_Y, 7, 0));
+    logs.push(mount(PARENT, "n", ZERO_ADDRESS, 8, 0));
+    logs.push(mount(PARENT, "n", CHILD, 9, 0));
+    let output = interpret_test_batch(batch(logs))?;
+    assert_eq!(
+        resolver_edges(&output, CHILD)
+            .into_iter()
+            .filter(|edge| edge.2 == 9)
+            .collect::<Vec<_>>(),
+        vec![(instance(RESOLVER_Y), key(CHILD, "a"), 9, 0, 0)]
+    );
+    Ok(())
+}
+
+/// `first` in one batch through `last_block`, then an unmount and a remount in the next: once
+/// continued in the session, once restored from the first batch's events and once restored from
+/// them folded as the loader keeps them. None reopens a resolver edge at the remount, and all
+/// three agree.
+fn assert_a_cleared_link_stays_closed_across_batches(
+    first_logs: Vec<RawLogInput>,
+    last_block: i64,
+) -> anyhow::Result<()> {
+    let first_input = batch(first_logs);
+    let first = interpret_test_batch(first_input.clone())?;
+    let mut second_input = batch(vec![
+        mount(PARENT, "n", ZERO_ADDRESS, last_block + 1, 0),
+        mount(PARENT, "n", CHILD, last_block + 2, 0),
+    ]);
+    second_input.admissions.push(announced(CHILD, 1));
+    let mut restored_input = second_input.clone();
+    restored_input.prior_events = first.normalized_events.iter().map(prior_event).collect();
+    let restored = interpret_test_batch(restored_input)?;
+    let mut folded_input = second_input.clone();
+    folded_input.prior_events = crate::schema_v2::seam::fold_prior_events(
+        Vec::new(),
+        &first.normalized_events,
+        &(1..=last_block).map(test_block).collect::<Vec<_>>(),
+    )?;
+    let folded = interpret_test_batch(folded_input)?;
+    let (_, session) = interpret_test_batch_incremental(first_input, None)?;
+    let (incremental, _) = interpret_test_batch_incremental(second_input, Some(session))?;
+    assert_eq!(resolver_edges(&restored, CHILD), Vec::new());
+    for output in [&folded, &incremental] {
+        assert_eq!(output.discovery_edges, restored.discovery_edges);
+        assert_eq!(
+            output.discovery_edge_closures,
+            restored.discovery_edge_closures
+        );
+    }
+    Ok(())
+}
+
+/// K1r: K1's clear in one batch and the remount in the next.
+#[test]
+fn k1r_a_link_cleared_in_an_earlier_batch_stays_closed_after_a_remount() -> anyhow::Result<()> {
+    assert_a_cleared_link_stays_closed_across_batches(cleared_through_another_version(), 6)
+}
+
+/// K3r: K3's swapped clear in one batch and the remount in the next.
+#[test]
+fn k3r_a_link_cleared_through_a_lesser_version_in_an_earlier_batch_stays_closed()
+-> anyhow::Result<()> {
+    let mut logs = mounted_child();
+    logs.push(set_versioned_resolver(CHILD, "a", 2, RESOLVER_Y, 6, 0));
+    logs.push(set_versioned_resolver(CHILD, "a", 1, ZERO_ADDRESS, 7, 0));
+    assert_a_cleared_link_stays_closed_across_batches(logs, 7)
+}
