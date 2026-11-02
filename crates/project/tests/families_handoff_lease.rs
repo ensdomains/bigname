@@ -1,8 +1,9 @@
 //! The registration of an ENSv1 `.eth` second-level name whose selected authority records no
 //! lease (TYR-405). The January 2020 registrar migration moved such names onto the
 //! BaseRegistrar with no controller `NameRegistered`. On the Mainnet profile the migration's own
-//! numeric `NameRegistered` grants their lease (TYR-449). These fixtures write the rows a lease
-//! first seen at a renewal has: a grant the adapter derives there. The name is selected
+//! numeric `NameRegistered` grants their lease and binds them to it (TYR-449). These fixtures
+//! write the rows a lease first seen at a renewal has: a grant the adapter derives there. The
+//! name is selected
 //! through a registry-only binding that stands for no lease. Each test is one input class of
 //! the implied lease
 //! (`docs/projections.md`, registry-only bindings), plus the cut-over registrar lease that an

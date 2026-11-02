@@ -42,10 +42,12 @@ const LEASE_KINDS: [&str; 4] = [
 
 /// The registrar lease of an ENSv1 `.eth` second-level name whose selected registry-only
 /// binding records none, or that is in the ownerless-registry profile.
-/// Such a lease has registrar rows the selected binding does not carry: on the Mainnet profile
-/// the 2020 registrar migration's own numeric `NameRegistered` grants it, and a lease first
-/// seen at a renewal gets a grant the adapter derives there. The lease is the resource of the
-/// name's latest own registrar lifecycle event at or after the registry handoff block.
+/// Such a lease has registrar rows the selected binding does not carry, such as a lease first
+/// seen at a renewal, with a grant the adapter derives there. On the Mainnet profile the 2020
+/// registrar migration's own numeric `NameRegistered` grants a migrated name's lease and binds
+/// the name to it, so that lease is not implied while the binding stands. The lease is the
+/// resource of the name's latest own registrar lifecycle event at or after the registry handoff
+/// block.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ImpliedLease<'a> {
     pub(crate) resource: &'a str,
