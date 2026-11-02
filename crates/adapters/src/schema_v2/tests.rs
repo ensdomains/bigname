@@ -17457,12 +17457,12 @@ fn non_malformed_error_from_undeclared_match_all_selection_is_fatal() -> anyhow:
 
 #[test]
 fn detached_resolver_loses_address_scoped_admission_in_the_same_batch() -> anyhow::Result<()> {
-    let _dropped = allow_unmatched(&[(
-        "0x0000000000000000000000000000000000000050",
-        "the old resolver's record log follows its detachment in the same batch, and the test proves it is not read",
-    )]);
     const OLD_RESOLVER: &str = "0x0000000000000000000000000000000000000050";
     const NEW_RESOLVER: &str = "0x0000000000000000000000000000000000000051";
+    let _dropped = allow_unmatched(&[(
+        OLD_RESOLVER,
+        "the old resolver's record log follows its detachment in the same batch, and the test proves it is not read",
+    )]);
     let registry_id = Uuid::from_u128(50);
     let old_resolver_id = Uuid::from_u128(51);
     let mut registry_admission = admission(50, "registry");

@@ -107,6 +107,8 @@ async fn prepare(chain: &[Value], time_step: i64, prefix_only: bool) -> TestResu
 /// declared topics from contracts the profile does not admit.
 fn allow_captured_receipts() -> AllowGuard {
     const CAPTURED: &str = "captured on-chain receipt; production drops this topic identically";
+    const UNADMITTED: &str = "captured on-chain receipt from a contract the fixture profile does \
+                              not admit; production drops its logs identically";
     allow_unmatched(&[
         ("OwnershipTransferred(address,address)", CAPTURED),
         ("ReverseClaimed(address,bytes32)", CAPTURED),
@@ -127,10 +129,10 @@ fn allow_captured_receipts() -> AllowGuard {
             "0x4acabfe38b19342d926f219b03cae7c02831d64c4449ccd3d6726b8ef1f99630",
             CAPTURED,
         ),
-        ("0x4a679253410272dd5232b3ff7cf5dbb88f295319", CAPTURED),
-        ("0xa82ff9afd8f496c3d6ac40e2a0f282e47488cfc9", CAPTURED),
-        ("0xc3e53f4d16ae77db1c982e75a937b9f60fe63690", CAPTURED),
-        ("0x67d269191c92caf3cd7723f116c85e6e9bf55933", CAPTURED),
+        ("0x4a679253410272dd5232b3ff7cf5dbb88f295319", UNADMITTED),
+        ("0xa82ff9afd8f496c3d6ac40e2a0f282e47488cfc9", UNADMITTED),
+        ("0xc3e53f4d16ae77db1c982e75a937b9f60fe63690", UNADMITTED),
+        ("0x67d269191c92caf3cd7723f116c85e6e9bf55933", UNADMITTED),
     ])
 }
 

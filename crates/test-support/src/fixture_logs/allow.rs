@@ -125,7 +125,9 @@ static DATABASE_SCOPES: ScopedTestHookRegistry<String, Arc<Allowances>> =
 /// is an event signature (`"URIUpdated(string,address,address)"`), a topic0 (`"0x…"`, 32 bytes) or
 /// an emitter address (`"0x…"`, 20 bytes). When the guard drops, every entry must have accepted
 /// at least one unmatched log, or the test fails. A worker thread the test spawns does not see
-/// the scope.
+/// the scope. A test that returns an `Err` before the named log is interpreted fails on the
+/// unused entry, and that message replaces the error: read the test's `?` sites first when an
+/// allowance reports itself unused.
 pub fn allow_unmatched(entries: &[(&str, &str)]) -> AllowGuard {
     let allowances = Arc::new(Allowances::new(entries));
     THREAD_SCOPES.with_borrow_mut(|scopes| scopes.push(Arc::clone(&allowances)));

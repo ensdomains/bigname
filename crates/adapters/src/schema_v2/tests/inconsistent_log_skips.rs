@@ -1024,7 +1024,8 @@ fn a_resolver_pointer_to_its_own_registry_in_an_announcing_block_warns_once() ->
             ),
         ],
     );
-    tracing::subscriber::with_default(warnings.clone(), || {
+    let checked = input.clone();
+    let prepared = tracing::subscriber::with_default(warnings.clone(), || {
         crate::schema_v2::prepare_schema_v2_batch_incremental(
             input,
             None,
@@ -1032,6 +1033,8 @@ fn a_resolver_pointer_to_its_own_registry_in_an_announcing_block_warns_once() ->
         )
     })?;
     assert_eq!(warnings.count(), 1);
+    let (output, _) = prepared.finish(Vec::new())?;
+    super::check_fixture_logs(&checked, &output);
     Ok(())
 }
 
