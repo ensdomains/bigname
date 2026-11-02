@@ -63,6 +63,7 @@ LANGUAGE sql IMMUTABLE AS $$
         'normalized_events_user_registry_departure_idx',
         'normalized_events_mainnet_wrapper_departure_idx',
         'normalized_events_mainnet_user_registry_departure_idx',
+        'normalized_events_registry_departure_idx',
         'normalized_events_pointer_after_resolver_history_idx',
         'normalized_events_pointer_before_resolver_history_idx',
         'normalized_events_project_name_node_idx',
@@ -134,6 +135,7 @@ DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_wrapper_depart
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_user_registry_departure_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_mainnet_wrapper_departure_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_mainnet_user_registry_departure_idx;
+DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_registry_departure_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_pointer_after_resolver_history_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_pointer_before_resolver_history_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_project_name_node_idx;

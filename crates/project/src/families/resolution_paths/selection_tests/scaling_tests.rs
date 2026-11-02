@@ -793,15 +793,19 @@ async fn a_self_only_parent_change_visits_the_same_surfaces_when_the_namespace_g
 
 /// The node of the fixture's `eth` surface.
 const ETH_NODE: &str = "0x00000000000000000000000000000000000000000000000000000000000e7e7e";
+/// The resolver `eth`'s registry pointer names, and no other name's.
+const ETH_RESOLVER: &str = "0x00000000000000000000000000000000000000c7";
 const POINTER_INDEX: &str = "project_registry_pointer_pkey";
 
-// Row L. A pointer-only change at `eth`, at its most skewed, and at a second-level name, its
-// least, selects the node and exactly the names of three or more labels under it that have no
-// resolver of their own. A third of the third-level names and a fifth of the fourth-level
-// names have one, and a third and a fifth have a pointer row that clears. Half the
-// second-level names have a resolver, which plays no part. In both plan modes, before and
-// after ANALYZE, the statement reads `project_registry_pointer` under `affected` only through
-// its primary key, at most once per name of three or more labels under the node.
+// Row L, with row B21 of the resolver readers. A pointer-only change at `eth`, at its most
+// skewed, and at a second-level name, its least, selects the node and exactly the names of
+// three or more labels under it that have no resolver of their own. So does a classification
+// change of the resolver `eth` points at, which `eth` reads as its own pointer. A third of the
+// third-level names and a fifth of the fourth-level names have one, and a third and a fifth
+// have a pointer row that clears. Half the second-level names have a resolver, which plays no
+// part. In both plan modes, before and after ANALYZE, the statement reads
+// `project_registry_pointer` under `affected` only through its primary key, at most once per
+// name of three or more labels under the node.
 #[tokio::test]
 async fn a_pointer_change_probes_each_deeper_name_once_by_its_own_pointer() -> Result<()> {
     let (database, pool) = database().await?;
@@ -840,7 +844,7 @@ async fn a_pointer_change_probes_each_deeper_name_once_by_its_own_pointer() -> R
                              ELSE '' END
                  FROM generate_series(0, {fourth} - 1) n WHERE n % 5 < 2
                  UNION ALL
-                 SELECT '{ETH_NODE}', '0x00000000000000000000000000000000000000c1'
+                 SELECT '{ETH_NODE}', '{ETH_RESOLVER}'
                  UNION ALL
                  SELECT {s1}, '0x00000000000000000000000000000000000000c1'
              ) pointer (node, resolver);
@@ -852,10 +856,18 @@ async fn a_pointer_change_probes_each_deeper_name_once_by_its_own_pointer() -> R
                      '{{\"resolver_address\": \"0x00000000000000000000000000000000000000c0\"}}'::jsonb),
                     ('{CHAIN}', 11, '{eleven}', 'project_registry_pointer',
                      jsonb_build_array('{CHAIN}', 'ens', {s1})::text,
-                     '{{\"resolver_address\": \"0x00000000000000000000000000000000000000c0\"}}'::jsonb)",
+                     '{{\"resolver_address\": \"0x00000000000000000000000000000000000000c0\"}}'::jsonb),
+                    ('{CHAIN}', 12, '{twelve}', 'project_resolver_classification',
+                     jsonb_build_array('{CHAIN}', '{ETH_RESOLVER}')::text,
+                     '{{\"support_status\": \"unsupported\"}}'::jsonb);
+
+             INSERT INTO project_resolver_classification (chain_id, resolver_address,
+                 block_number, event_identity, support_status)
+             VALUES ('{CHAIN}', '{ETH_RESOLVER}', 12, 'classified', 'supported')",
             zero = hash(0),
             ten = hash(10),
             eleven = hash(11),
+            twelve = hash(12),
         ))
         .execute(&mut *connection)
         .await
@@ -875,6 +887,14 @@ async fn a_pointer_change_probes_each_deeper_name_once_by_its_own_pointer() -> R
             (
                 "eth",
                 10,
+                format!("'ens:{ETH_NODE}'"),
+                "true".to_owned(),
+                "true".to_owned(),
+                third + fourth,
+            ),
+            (
+                "a resolver change at eth",
+                12,
                 format!("'ens:{ETH_NODE}'"),
                 "true".to_owned(),
                 "true".to_owned(),

@@ -9,8 +9,14 @@ use crate::{ResolverReadFeature, SourceManifest, load_repository, normalize_addr
 
 const DEPLOYMENTS: &str = ".refs/ens_v2_mainnet_20261002/contracts/deployments";
 const EPOCH: &str = "ens_v2_mainnet_20261002";
-/// The folders holding the contracts that the 2026-10-13 and 2026-10-18 redeploys replaced.
-const REPLACED: [&str; 2] = ["mainnet-root-20261013", "mainnet-redeploy-20261018"];
+/// The folders holding the contracts that the 2026-10-13, 2026-10-18, 2026-10-23 and 2026-10-26
+/// redeploys replaced.
+const REPLACED: [&str; 4] = [
+    "mainnet-root-20261013",
+    "mainnet-redeploy-20261018",
+    "mainnet-redeploy-20261023",
+    "mainnet-redeploy-20261026",
+];
 
 fn workspace() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -91,7 +97,11 @@ fn official_mainnet_addresses_receipts_and_abi_match_the_pinned_deployment() -> 
             "unlocked_migration_controller",
             "UnlockedMigrationController",
         ),
-        ("locked_migration_controller", "LockedMigrationController"),
+        // The declared address is the EIP173 proxy, from the proxy's own receipt.
+        (
+            "locked_migration_controller",
+            "LockedMigrationController_Proxy",
+        ),
         ("graveyard", "Graveyard"),
         ("batch_registrar", "BatchRegistrar"),
         ("ens_v1_renewal_bridge", "ETHRenewerV1"),
@@ -205,7 +215,8 @@ fn official_mainnet_keeps_canonical_v1_dependencies_and_both_execution_arms() ->
     );
     for (name, index) in [
         ("UnlockedMigrationController", 0),
-        ("LockedMigrationController", 0),
+        // The proxy's own constructor takes the implementation, so read the implementation's.
+        ("LockedMigrationController_Implementation", 0),
         ("ETHRenewerV1", 6),
     ] {
         assert_eq!(argument(&artifact(name)?, index)?, wrapper, "{name}");
@@ -263,7 +274,7 @@ fn official_mainnet_keeps_canonical_v1_dependencies_and_both_execution_arms() ->
         "PublicResolverV2",
         "PermissionedResolverImpl",
         "UnlockedMigrationController",
-        "LockedMigrationController",
+        "LockedMigrationController_Proxy",
         "Graveyard",
         "BatchRegistrar",
         "ETHRenewerV1",
@@ -324,7 +335,7 @@ fn official_mainnet_declares_no_replaced_contract() -> Result<()> {
             }
         }
     }
-    assert_eq!(replaced.len(), 25);
+    assert_eq!(replaced.len(), 32);
     let repository = load_repository(workspace().join("manifests/mainnet"))?;
     for loaded in repository.manifests() {
         let manifest = &loaded.manifest;

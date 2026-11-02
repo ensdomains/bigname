@@ -470,6 +470,196 @@ async fn each_kind_of_classification_change_rebuilds_equal() -> Result<()> {
     Ok(())
 }
 
+/// The resolver of `a.foo.eth`'s own node in the reader world. No manifest declares it.
+const OWN: &str = "0x00000000000000000000000000000000000000c9";
+/// The names of the reader world.
+const READER_NAMES: [&str; 8] = [
+    "eth",
+    "foo.eth",
+    "bar.eth",
+    "qux.eth",
+    "a.foo.eth",
+    "x.a.foo.eth",
+    "b.foo.eth",
+    "z.bar.eth",
+];
+
+/// `name` has an ENSv1 registry owner from block 2, at log `log`, on its own resource `n`.
+async fn v1_owned(fixture: &Fixture, name: &str, n: u32, log: i64) -> Result<()> {
+    let id = ens_v2_path::surface(fixture, name).await?;
+    let resource = uuid(0x4000 + n);
+    fixture
+        .binding(&uuid(400 + n), &id, &resource, "ens_v1", 2, log, None)
+        .await?;
+    fixture
+        .write(
+            2,
+            log,
+            "AuthorityTransferred",
+            "ens_v1_registry_l1",
+            Some(&id),
+            Some(&resource),
+            json!({"authority_kind": "registry", "owner": ens_v2_path::OWNER,
+                   "registry_owner": ens_v2_path::OWNER, "node": id.trim_start_matches("ens:")}),
+            V1_REGISTRY,
+        )
+        .await?;
+    Ok(())
+}
+
+/// The ENSv1 registry node of `name` has `resolver` from block 2, at log `log`.
+async fn node_resolver(fixture: &Fixture, name: &str, resolver: &str, log: i64) -> Result<()> {
+    let id = ens_v2_path::logical_name_id(name);
+    let node = id.trim_start_matches("ens:");
+    for (offset, kind, after) in [
+        (
+            0,
+            "ResolverChanged",
+            json!({"node": node, "resolver": resolver}),
+        ),
+        (
+            1,
+            "AuthorityTransferred",
+            json!({"authority_kind": "registry", "owner": ens_v2_path::OWNER,
+                   "registry_owner": ens_v2_path::OWNER, "node": node}),
+        ),
+    ] {
+        fixture
+            .write(
+                2,
+                log + offset,
+                kind,
+                "ens_v1_registry_l1",
+                None,
+                None,
+                after,
+                V1_REGISTRY,
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+/// The reader world, published through block 3. Every name of three or more labels whose
+/// ENSv1 mirror walk finds no nearer resolver reads `eth`'s:
+///
+/// - 0: the root registry is admitted with its `eth` entry. An ENSv2 resolver manifest declares
+///   `MIRROR`. No ENSv1 resolver manifest is active, so `RESOLVER` has no admission.
+/// - 1: `foo` and `bar` are registered in the `.eth` registry, and their entries' resolver is
+///   `MIRROR`.
+/// - 2: the node of `eth` has `RESOLVER` and the node of `a.foo.eth` has `OWN`. `qux.eth`,
+///   `a.foo.eth`, `x.a.foo.eth`, `b.foo.eth` and `z.bar.eth` have an ENSv1 registry owner.
+///   `b.foo.eth` and `z.bar.eth` have no resolver at any node below `eth`, so their paths read
+///   `RESOLVER`. `x.a.foo.eth` reads `OWN`.
+/// - 3: a block that names nothing.
+async fn reader_world(fixture: &Fixture) -> Result<()> {
+    let eth = ens_v2_path::admit(fixture).await?;
+    manifest(
+        fixture,
+        None,
+        "ens_v2_resolver_l1",
+        0,
+        json!({"correlation_addresses": {"ens_v1_registry": V1_REGISTRY},
+               "contracts": [{"role": "ensv1_mirror_resolver", "address": MIRROR,
+                              "proxy_kind": "none", "read_features": ["addr", "text"]}]}),
+        "active",
+    )
+    .await?;
+    for name in READER_NAMES {
+        ens_v2_path::surface(fixture, name).await?;
+    }
+    for (log, label) in [(1, "foo"), (5, "bar")] {
+        ens_v2_path::register(fixture, 1, log, &eth, label, 1_900_000_000).await?;
+        ens_v2_path::point(fixture, 1, log + 2, &eth, label, Pointer::Resolver(MIRROR)).await?;
+    }
+    node_resolver(fixture, "eth", RESOLVER, 1).await?;
+    node_resolver(fixture, "a.foo.eth", OWN, 3).await?;
+    for (n, name) in [
+        "qux.eth",
+        "a.foo.eth",
+        "x.a.foo.eth",
+        "b.foo.eth",
+        "z.bar.eth",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let n = u32::try_from(n)?;
+        v1_owned(fixture, name, n, 10 + i64::from(n)).await?;
+    }
+    ens_v2_path::filler(fixture, 3).await?;
+    fixture.apply(3, FamilyMode::Normal).await?;
+    Ok(())
+}
+
+// Rows B1 and B2 of TYR-443, as a family run. `eth`'s ENSv1 registry node has `RESOLVER`,
+// whose classification changes at blocks 6 (support starts), 8 (its read features change) and
+// 9 (support ends). Each publication selects `eth` and the names of three or more labels with
+// no resolver of their own. It selects no second-level name: their composition never reads an
+// ancestor's pointer (storage `families/name/batch.rs`, the path walk runs only below a `.eth`
+// second-level name). It does not select `a.foo.eth`, which reads its own `OWN`. `b.foo.eth`
+// and `z.bar.eth` read `RESOLVER` through `eth` and are selected. `x.a.foo.eth` reads `OWN`
+// through `a.foo.eth`, but the rule checks only a name's own node, so it is selected too. After every block the
+// families equal a rebuild at that block, so the names left out did not change.
+#[tokio::test]
+async fn a_resolver_change_at_eth_recomposes_the_deeper_names_and_rebuilds_equal() -> Result<()> {
+    const READERS: [&str; 4] = ["eth", "x.a.foo.eth", "b.foo.eth", "z.bar.eth"];
+    const LEFT_OUT: [&str; 4] = ["foo.eth", "bar.eth", "qux.eth", "a.foo.eth"];
+    let family = "ens_v1_resolver_l1";
+    let unprojected = json!("ens_v2_path_not_projected");
+    let fixture = Fixture::new("families_resolver_reclassification_readers", 12).await?;
+    reader_world(&fixture).await?;
+    let walkers = ["b.foo.eth", "z.bar.eth"].map(ens_v2_path::logical_name_id);
+    for walker in &walkers {
+        ensure!(path_reason(&fixture, walker).await? == unprojected);
+    }
+    fixture.assert_rebuild_equal(3).await?;
+
+    let declaring = manifest(
+        &fixture,
+        None,
+        family,
+        6,
+        v1_resolvers(RESOLVER, &["addr", "text"]),
+        "active",
+    )
+    .await?;
+    for (block, payload, supported) in [
+        (6, None, true),
+        (8, Some(v1_resolvers(RESOLVER, &["addr"])), true),
+        (9, Some(v1_resolvers(OTHER, &[])), false),
+    ] {
+        if let Some(payload) = payload {
+            manifest(&fixture, Some(declaring), family, block, payload, "active").await?;
+        }
+        let selected = fixture.selected_paths(block, &READER_NAMES).await?;
+        let status = if supported {
+            "supported"
+        } else {
+            "unsupported"
+        };
+        let row = classification(&fixture).await?;
+        ensure!(
+            row["support_status"] == status,
+            "at {block} the resolver's row is {row}"
+        );
+        for walker in &walkers {
+            let reason = path_reason(&fixture, walker).await?;
+            ensure!(
+                (reason == unprojected) != supported,
+                "at {block} {walker} reads the resolver through eth as {reason}"
+            );
+        }
+        ensure!(
+            READERS.iter().all(|name| selected.contains(*name))
+                && LEFT_OUT.iter().all(|name| !selected.contains(*name)),
+            "at {block} the resolver change at eth selected {selected:?}"
+        );
+        fixture.assert_rebuild_equal(block).await?;
+    }
+    fixture.cleanup().await
+}
+
 /// An ENSv2 resolver manifest payload declaring `PUBLIC_V2` as a public resolver.
 fn v2_public_resolver() -> Value {
     json!({"contracts": [{"role": "public_resolver_v2", "address": PUBLIC_V2,

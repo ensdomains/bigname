@@ -1,13 +1,13 @@
 # Official mainnet deployment coverage
 
 `manifests/mainnet` selects the official 2026-10-02 mainnet ENSv2 deployment at namechain
-`b1f97b91f4b28e28d8a61fa13f09da70fdca6c6a`, as the pinned `deployments/mainnet` folder lists it
-(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/.deployment.json:L4 @ ens_v2_mainnet_20261002@b1f97b91).
-Upstream redeployed part of the set on 2026-10-13 and on 2026-10-18. No mainnet manifest names
+`4f47cbcc11462fb413196e6b5c0f8090247a6c08`, as the pinned `deployments/mainnet` folder lists it
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/.deployment.json:L4 @ ens_v2_mainnet_20261002@4f47cbcc).
+Upstream redeployed part of the set on 2026-10-13, 2026-10-18, 2026-10-23 and 2026-10-26. No mainnet manifest names
 the contracts those redeploys replaced, and none of them names a name
 ([replaced contracts](#replaced-contracts)).
 
-The following inventory accounts for every one of the 42 contract artifacts in the pinned
+The following inventory accounts for every one of the 43 contract artifacts in the pinned
 folder. A helper's presence does not grant indexed ownership, records, or permissions. Existing
 capability flags and unsupported responses retain their documented scope. This change does not
 add DNS, payment-token, smart-account, or pricing APIs. Start blocks are the artifacts' receipt
@@ -35,14 +35,15 @@ blocks unless the row says otherwise.
 | `HCAOwnerAndSessionValidator` | `0xa818428ed2f3f949bdc71b8a15bdd7b5d27ce938` | Smart-account validation dependency. No indexed session permissions. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/HCAOwnerAndSessionValidator.json:L2 @ ens_v2_mainnet_20261002@b1f97b91) |
 | `HCAUpgradeSet` | `0x85e115f5b43c72e2ba4419a9a95e325db18431c2` | Smart-account upgrade policy. No indexed session or upgrade-policy inventory. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/HCAUpgradeSet.json:L2 @ ens_v2_mainnet_20261002@b1f97b91) |
 | `LabelStore` | `0x31e5e081fe38d15b3e8214ba5cb08dc4708b70ba` | Label storage helper. Standalone `Label` announcements are not indexed as name registrations, because the registry `LabelRegistered` carries the label. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/LabelStore.json:L2 @ ens_v2_mainnet_20261002@b1f97b91) |
-| `LockedMigrationController` | `0xc46bf3b6c7ebcffd4ecfc3b012a1726a2463694d` | ens_v2_migration_l1 / locked_migration_controller, from block `26216326`. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/LockedMigrationController.json:L2 @ ens_v2_mainnet_20261002@b1f97b91) |
+| `LockedMigrationController` | `0x3cea18620883a69ed349b23328a3b6302598e51a` | ens_v2_migration_l1 / locked_migration_controller, from block `26277141`, the receipt block of the proxy this merged artifact names. The controller's logs carry the proxy's address, so the proxy is the declared address ([controller upgrades](#controller-upgrades)). (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/LockedMigrationController.json:L2 @ ens_v2_mainnet_20261002@4f47cbcc) |
+| `LockedMigrationController_Implementation` | `0xa292b411677b1fc136b5aad6245e93f470c1440c` | Implementation behind `LockedMigrationController`. Not declared. Its logic runs behind the proxy, so the controller's logs carry the proxy's address. Its constructor binds the canonical NameWrapper. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/LockedMigrationController_Implementation.json:L2 @ ens_v2_mainnet_20261002@4f47cbcc) |
+| `LockedMigrationController_Proxy` | `0x3cea18620883a69ed349b23328a3b6302598e51a` | The same address as `LockedMigrationController`, an `EIP173Proxy` from block `26277141`. Its owner is the ENS DAO timelock `0xFe89cc7aBB2C4183683ab71653C4cdc9B02D44b7`. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/LockedMigrationController_Proxy.json:L2 @ ens_v2_mainnet_20261002@4f47cbcc) (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/LockedMigrationController_Proxy.json:L193 @ ens_v2_mainnet_20261002@4f47cbcc) |
 | `ManagedUniversalResolverProxy` | `0xcffd2ae680cd110d28739a70922636b5937b022b` | ens_execution / universal_resolver_managed: intermediate execution proxy, `Upgraded` admitted from its creation block `26105675` for monitoring. It has no independent indexed authority. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ManagedUniversalResolverProxy.json:L2 @ ens_v2_mainnet_20261002@b1f97b91) |
-| `MigrationHelper` | `0x0b92006fa187b4c98d0a7dfc9d3b918b6d243485` | ens_v2_migration_l1 / migration_helper, from block `26216328`. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/MigrationHelper.json:L2 @ ens_v2_mainnet_20261002@b1f97b91) |
+| `MigrationHelper` | `0x6c8452afc6043b5af32eb345a8135108906f07ee` | ens_v2_migration_l1 / migration_helper, from block `26277143`. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/MigrationHelper.json:L2 @ ens_v2_mainnet_20261002@4f47cbcc) |
 | `PermissionedResolverImpl` | `0x565b0f456a04ac9b48758190e90030623cff57c5` | resolver implementation admission metadata. Its `Upgraded` announcement watch starts at its creation block `26105631`. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PermissionedResolverImpl.json:L2 @ ens_v2_mainnet_20261002@b1f97b91) |
 | `PublicResolverSet` | `0xffceda021cbdf20f1a66ebbef32e49d208cabf62` | Migration resolver allowlist. No independently served allowlist inventory. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PublicResolverSet.json:L2 @ ens_v2_mainnet_20261002@b1f97b91) |
 | `PublicResolverV2` | `0x66f9f566ff2f26309c1bd9134388478a801da3e1` | ens_v2_resolver_l1 / public_resolver_v2, from block `26216323`. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/PublicResolverV2.json:L2 @ ens_v2_mainnet_20261002@b1f97b91) |
 | `RegistryUpgradeSet` | `0x573a73c0b3c0c90bb8bd728519434af19fb88935` | Registry upgrade allowlist. Actual instance `Upgraded` observations govern indexing. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/RegistryUpgradeSet.json:L2 @ ens_v2_mainnet_20261002@b1f97b91) |
-| `ReservedNameResolverUpdater` | `0xccc9c6ef74b8837d998a6e1e659992a178dbe53b` | Batch helper for root resolver updates. Its naming effects are RootRegistry `ResolverUpdated` logs, and it emits only `OwnershipTransferred`. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ReservedNameResolverUpdater.json:L2 @ ens_v2_mainnet_20261002@b1f97b91) |
 | `ReverseRegistrarAdapter` | `0x349151735790269a9c14668b58d7c83b5ecb9607` | Delegates reverse writes. Intake belongs to the canonical ReverseRegistrar `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb` under ens_v1_reverse_l1, which DAO proposal call 3 makes it a controller of. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ReverseRegistrarAdapter.json:L2 @ ens_v2_mainnet_20261002@b1f97b91) |
 | `RootBatchRegistrar` | `0xe467ae049ddd65a21fb85b5f1de5f7997a8eb164` | Batch submission helper. Its naming effects come from RootRegistry logs, and it emits only `OwnershipTransferred`. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/RootBatchRegistrar.json:L2 @ ens_v2_mainnet_20261002@b1f97b91) |
 | `RootRegistry` | `0x2553c09be6447beffdb86fa622ad41fb8f77a91e` | ens_v2_root_l1 / root_registry, from block `26183742`. Its admission is the mainnet [Universal Resolver cutover](glossary.md#universal-resolver-cutover). (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/RootRegistry.json:L2 @ ens_v2_mainnet_20261002@b1f97b91) |
@@ -54,16 +55,20 @@ blocks unless the row says otherwise.
 | `UniversalResolverV2` | `0x06fdd07f007adac667177b46ab2eb9a75132cfd5` | Execution implementation behind the declared entrypoint. It is listed in `ens_execution`'s `universal_resolver_implementations`, so the monitoring reports the proxies against it. It does not decide the [Universal Resolver cutover](glossary.md#universal-resolver-cutover). (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UniversalResolverV2.json:L2 @ ens_v2_mainnet_20261002@b1f97b91) |
 | `UnlockedMigrationController` | `0xab821ca676cf2e0790fa273526a165cfa86aeb64` | ens_v2_migration_l1 / unlocked_migration_controller, from block `26105642`. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UnlockedMigrationController.json:L2 @ ens_v2_mainnet_20261002@b1f97b91) |
 | `UpgradableUniversalResolverProxy` | `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` | ens_execution / universal_resolver, `Upgraded` admitted from block `26105292`, the first block of the deployment, not its creation block ([resolver and discovery coverage](#resolver-and-discovery-coverage)). (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UpgradableUniversalResolverProxy.json:L2 @ ens_v2_mainnet_20261002@b1f97b91) |
-| `UserRegistryImpl` | `0x75ff9adbcfce2469b097ac68f6ae650eae1351bb` | ens_v2_migration_l1 / user_registry_implementation, from block `26105644`. Instances enter through `RegistryCreated`, not direct implementation ownership. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UserRegistryImpl.json:L2 @ ens_v2_mainnet_20261002@b1f97b91) |
+| `UserRegistryImpl` | `0xfaa23592aca10a6d8875b18ea86954e8eb6d8d72` | ens_v2_migration_l1 / user_registry_implementation, from block `26277137`. Instances enter through `RegistryCreated`, not direct implementation ownership ([registry implementation declarations](manifests.md#registry-implementation-declarations)). (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UserRegistryImpl.json:L2 @ ens_v2_mainnet_20261002@4f47cbcc) |
 | `VerifiableFactory` | `0x77510ba162dfea3d8989e3f0928a691b345730d2` | ens_v2_migration_l1 / verifiable_factory, from block `26105299`. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/VerifiableFactory.json:L2 @ ens_v2_mainnet_20261002@b1f97b91) |
-| `WrapperRegistryImpl` | `0xcf3edb3f5501de63b57254d910b6782ee370039b` | ens_v2_migration_l1 / wrapper_registry_implementation, from block `26216324`. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/WrapperRegistryImpl.json:L2 @ ens_v2_mainnet_20261002@b1f97b91) |
+| `WrapperRegistryImpl` | `0xe86a4ef4d7a210aaa1d6a9594fc7add7cd2cf888` | ens_v2_migration_l1 / wrapper_registry_implementation, from block `26277138`. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/WrapperRegistryImpl.json:L2 @ ens_v2_mainnet_20261002@4f47cbcc) |
 
 ## Replaced contracts
 
-The pin keeps the contracts the 2026-10-13 root redeploy and the 2026-10-18 redeploy replaced in
-`deployments/mainnet-root-20261013/` (15 artifacts) and `deployments/mainnet-redeploy-20261018/`
-(10 artifacts). Their 25 addresses are disjoint from the current set, and no manifest declares
-them. Interpret admits an address only through a declaration or a discovery edge from an active
+The pin keeps the contracts each redeploy replaced in
+`deployments/mainnet-root-20261013/` (15 artifacts), `deployments/mainnet-redeploy-20261018/`
+(10 artifacts), `deployments/mainnet-redeploy-20261023/` (3 artifacts) and
+`deployments/mainnet-redeploy-20261026/` (4 artifacts). Their 32 addresses are disjoint from the
+current set, and no manifest declares them. The last two folders hold earlier locked migration
+controllers, migration helpers and registry implementations. A registry created through one of
+those implementations keeps no factory origin, so it has no WrapperRegistry or UserRegistry
+model ([registry implementation declarations](manifests.md#registry-implementation-declarations)). Interpret admits an address only through a declaration or a discovery edge from an active
 manifest, so the only path that reaches one is a registry's `RegistryCreated` self-announcement.
 The replaced RootRegistry `0x51bbc58b3dae7d45b14fba8cf31b7c8f7904a750` was created at block
 `26105295` and announced itself there. The registry family's watch entries, `RegistryCreated`
@@ -89,6 +94,18 @@ RootRegistry's `eth` entry points at the ETHRegistry from block `26183992` (tran
 `SubregistryUpdated`). Name reads serve only the current publication at the head, so the window
 before that block is never served.
 
+## Controller upgrades
+
+The locked migration controller is an `EIP173Proxy`. Its owner, the ENS DAO timelock, can point
+it at new logic with `upgradeTo`, and the address stays the same. The manifest declares only the
+proxy address, and Interpret recognises the controller by that address as a log's `sender`. So an
+upgrade leaves the declaration in force and bigname does not observe it. The migration family
+admits no event of the proxy, and nothing compares the controller's code with the pinned
+implementation. A behaviour change made this way shows only through the logs the new logic emits.
+Treat a controller upgrade like a redeploy: read the new implementation, and change the manifest
+when its logs differ.
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/LockedMigrationController_Proxy.json:L193 @ ens_v2_mainnet_20261002@4f47cbcc)
+
 ## Historical intake and the upgrade
 
 The migration controllers and the renewal bridge bind the canonical mainnet ENSv1 NameWrapper
@@ -96,7 +113,7 @@ The migration controllers and the renewal bridge bind the canonical mainnet ENSv
 registry `0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e`. The ENSv1 registry, registrar, wrapper,
 reverse and resolver families are unchanged.
 (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UnlockedMigrationController.json:L624 @ ens_v2_mainnet_20261002@b1f97b91)
-(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/LockedMigrationController.json:L744 @ ens_v2_mainnet_20261002@b1f97b91)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/LockedMigrationController_Implementation.json:L744 @ ens_v2_mainnet_20261002@4f47cbcc)
 (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRenewerV1.json:L949 @ ens_v2_mainnet_20261002@b1f97b91)
 (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ENSV1Resolver.json:L749 @ ens_v2_mainnet_20261002@b1f97b91)
 

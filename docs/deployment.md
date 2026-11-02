@@ -5476,6 +5476,83 @@ hash-rotating changes. Do not mark old rows ready under the new hash.
 It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
 and the compiled watch plan are unchanged, so stamp no Ingest redo.
 
+## A resolver's classification change recomposes only the names that read it
+
+The build that narrows which names a resolver's classification change recomposes
+(see [owned key families](projections.md#owned-key-families)) changes one
+Project statement, `project:families.resolution_paths.prepare`.
+
+- A name whose ENSv1 registry pointer names the changed resolver reads it as its
+  own pointer. It recomposes itself and the `.eth` names under it that read
+  that pointer: names of three or more labels with no resolver of their own.
+  Before, it recomposed every name under it, so a change of the resolver `eth`
+  points at recomposed every `.eth` name.
+- The same holds for an ENSv1 resource pointer at the resolver, which one ENSv1
+  `ResolverChanged` writes beside the registry pointer.
+- A name whose ENSv2 resource pointer names the resolver, or that also has
+  another change in the publication, still recomposes every name under it.
+- Which names Project recomposes in each batch changes, not what they serve.
+  Stored rows and API responses are the same as before.
+- The statement is in `crates/project/src`, an input of the
+  [projection content hash](glossary.md#projection-content-hash) only. That hash
+  rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, at a
+  planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+  matching runner and API binaries. The change rides the next release that
+  redoes Project and shares that release's Project redo.
+- It adds no table, schema-migration, manifest or setting. The
+  manifest-authority fingerprint and the compiled watch plan are unchanged, so
+  stamp no Ingest redo.
+
+## Registry implementations read from the migration manifest
+
+The build that reads the supported ENSv2 registry implementations from the active migration
+manifest ([registry implementation declarations](manifests.md#registry-implementation-declarations))
+removes the per-epoch implementation tables from `crates/adapters/src` and from the storage
+families' registry support. The two implementation roles become repeatable, so a manifest
+can declare several pairs, each from its own start block. The migration controllers are
+read by the range that holds each transaction's block. The build moves the
+`ens_v2_mainnet_20261002` pin to namechain `4f47cbcc`, which records the 2026-10-23 and
+2026-10-26 mainnet redeploys, and the mainnet migration manifest declares the
+2026-10-26 set ([mainnet deployment](mainnet-deployment.md)).
+
+- Both hashes rotate for every chain. The manifest crate and the adapter files are inputs
+  of the [interpreter content hash](glossary.md#interpreter-content-hash), and the manifest
+  crate and storage registry support are inputs of the
+  [projection content hash](glossary.md#projection-content-hash). Every chain needs a
+  full-history Interpret redo, then the Project redo it installs, at a planned
+  [re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and
+  API binaries. The change rides the next full re-derivation release and shares its
+  Interpret and Project redo pair.
+- The mainnet migration manifest declares new addresses for the locked migration
+  controller, the migration helper and both registry implementations. The earlier ones leave
+  the manifest and are treated as never declared. Manifest synchronization records a
+  [manifest-authority marker](glossary.md#manifest-authority-marker) on mainnet and stamps
+  a required Ingest redo from block `26277137`, the earliest new declaration's start
+  ([watch-plan widening](manifests.md#mandatory-historical-fetch-after-watch-plan-widening)).
+  Complete that Ingest redo, then the full-history Interpret redo with
+  `--attest-watch-set-coverage`, then the Project redo it installs, before the matching
+  API serves. Sepolia changes no manifest and gets no marker and no Ingest redo.
+- Schema-migration `20261027150000_registry_permission_departure_index.sql` installs one
+  read-only normalized-event index, `normalized_events_registry_departure_idx`, the
+  upgrade-disqualifier probe for every declared implementation. A populated
+  `normalized_events` requires it. Before applying the migration on an initialized
+  database, run
+  [`ops/registry-permission-indexes/install.sql`](../ops/registry-permission-indexes/install.sql)
+  outside a transaction, following its
+  [prebuild, headroom and recovery instructions](../ops/registry-permission-indexes/README.md).
+  The schema-migration validates the index, refuses a populated table without it or with
+  another definition, then adopts it without a rebuild. Empty schemas build it directly.
+  `ops/walk-index-set/drop.sql` drops it with the other Project and API indexes, and its
+  `install.sql` rebuilds it. The four earlier per-implementation departure indexes stay
+  in place and are no longer read.
+- It adds no table or setting.
+
+After the redo, check on mainnet that a registry the factory created through the declared
+WrapperRegistry implementation lists its parent owner's grants on
+[`GET /v1/permissions`](api-v1-routes.md#get-v1permissions).
+
 ## Numeric BaseRegistrar lifecycle on Mainnet
 
 The build that interprets the BaseRegistrar's own numeric `NameRegistered` and `NameRenewed` on

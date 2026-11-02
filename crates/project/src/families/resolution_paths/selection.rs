@@ -63,6 +63,9 @@
 //! path a narrow prefix. Under a narrow prefix only the names that read the prefix's pointer
 //! recompose: names of three or more labels with no resolver of their own. A path that any
 //! other change also names, of this name or another, keeps its whole subtree.
+//! A name whose registry pointer, or ENSv1 resource pointer, names a changed resolver is a
+//! narrow name too, and recomposes itself. The mirror walk reads only the registry pointer. A
+//! name whose resource pointer of another family, or of none, names one keeps its subtree.
 //!
 //! One ENSv1 `ResolverChanged` of a name with a resource writes both the node's registry
 //! pointer and the resource's pointer (`families/resolver.rs`). A resource pointer change
@@ -211,6 +214,28 @@ pub(super) fn statement(normal_work: &str) -> String {
               OR (pointer.namespace=journal.before_image->>'namespace'
                 AND pointer.namehash=journal.before_image->>'namehash')))"
     );
+    // The wrapper rows the publication wrote, and the test for a changed eligibility input.
+    let wrapper_rows = "FROM journal LEFT JOIN project_wrapper_state wrapper
+          ON journal.family='project_wrapper_state' AND wrapper.chain_id=$1
+         AND wrapper.resource_id=(journal.key->>1)::uuid
+        WHERE journal.family='project_wrapper_state'";
+    let wrapper_moved = "(journal.before_image IS NULL
+           OR wrapper.resource_id IS NULL
+           OR wrapper.logical_name_id IS DISTINCT FROM journal.before_image->>'logical_name_id'
+           OR COALESCE(wrapper.wrapper_state_position IS NOT NULL
+                AND jsonb_typeof(wrapper.wrapper_state_position)='object', false)
+              IS DISTINCT FROM COALESCE(jsonb_typeof(journal.before_image->'wrapper_state_position')='object', false)
+           OR COALESCE(CASE WHEN (journal.before_image->>'fuses') ~ '^-?[0-9]+$'
+                             AND (journal.before_image->>'fuses')::numeric BETWEEN -9223372036854775808 AND 9223372036854775807
+                            THEN ((journal.before_image->>'fuses')::bigint & 65536) <> 0 END, false)
+              IS DISTINCT FROM COALESCE(wrapper.fuses IS NOT NULL AND (wrapper.fuses & 65536) <> 0, false)
+           OR (CASE WHEN (journal.before_image->>'expiry_seconds') ~ '^[0-9]+$'
+                     AND (journal.before_image->>'expiry_seconds')::numeric <= 18446744073709551615
+                    THEN (journal.before_image->>'expiry_seconds')::numeric END)
+              IS DISTINCT FROM
+              (CASE WHEN wrapper.expiry_seconds::text ~ '^[0-9]+$'
+                     AND wrapper.expiry_seconds <= 18446744073709551615
+                    THEN wrapper.expiry_seconds END))";
     // The last step's lookup of a surface's block in `chain_lineage`, one for each surface. The
     // lateral keeps the surface on the outside, so the planner cannot read the surfaces again
     // for each block, as it can for a join when the tables have no statistics. The lookup holds
@@ -304,53 +329,11 @@ pub(super) fn statement(normal_work: &str) -> String {
                  WHEN lower(state.owner_getter)='0x0000000000000000000000000000000000000000' THEN 'zero'
                  ELSE 'nonzero' END)
         UNION
-        SELECT wrapper.logical_name_id
-        FROM journal LEFT JOIN project_wrapper_state wrapper
-          ON journal.family='project_wrapper_state' AND wrapper.chain_id=$1
-         AND wrapper.resource_id=(journal.key->>1)::uuid
-        WHERE journal.family='project_wrapper_state'
-          AND wrapper.logical_name_id IS NOT NULL
-          AND (journal.before_image IS NULL
-           OR wrapper.resource_id IS NULL
-           OR wrapper.logical_name_id IS DISTINCT FROM journal.before_image->>'logical_name_id'
-           OR COALESCE(wrapper.wrapper_state_position IS NOT NULL
-                AND jsonb_typeof(wrapper.wrapper_state_position)='object', false)
-              IS DISTINCT FROM COALESCE(jsonb_typeof(journal.before_image->'wrapper_state_position')='object', false)
-           OR COALESCE(CASE WHEN (journal.before_image->>'fuses') ~ '^-?[0-9]+$'
-                             AND (journal.before_image->>'fuses')::numeric BETWEEN -9223372036854775808 AND 9223372036854775807
-                            THEN ((journal.before_image->>'fuses')::bigint & 65536) <> 0 END, false)
-              IS DISTINCT FROM COALESCE(wrapper.fuses IS NOT NULL AND (wrapper.fuses & 65536) <> 0, false)
-           OR (CASE WHEN (journal.before_image->>'expiry_seconds') ~ '^[0-9]+$'
-                     AND (journal.before_image->>'expiry_seconds')::numeric <= 18446744073709551615
-                    THEN (journal.before_image->>'expiry_seconds')::numeric END)
-              IS DISTINCT FROM
-              (CASE WHEN wrapper.expiry_seconds::text ~ '^[0-9]+$'
-                     AND wrapper.expiry_seconds <= 18446744073709551615
-                    THEN wrapper.expiry_seconds END))
+        SELECT wrapper.logical_name_id {wrapper_rows}
+          AND wrapper.logical_name_id IS NOT NULL AND {wrapper_moved}
         UNION
-        SELECT journal.before_image->>'logical_name_id'
-        FROM journal LEFT JOIN project_wrapper_state wrapper
-          ON journal.family='project_wrapper_state' AND wrapper.chain_id=$1
-         AND wrapper.resource_id=(journal.key->>1)::uuid
-        WHERE journal.family='project_wrapper_state'
-          AND journal.before_image->>'logical_name_id' IS NOT NULL
-          AND (journal.before_image IS NULL
-           OR wrapper.resource_id IS NULL
-           OR wrapper.logical_name_id IS DISTINCT FROM journal.before_image->>'logical_name_id'
-           OR COALESCE(wrapper.wrapper_state_position IS NOT NULL
-                AND jsonb_typeof(wrapper.wrapper_state_position)='object', false)
-              IS DISTINCT FROM COALESCE(jsonb_typeof(journal.before_image->'wrapper_state_position')='object', false)
-           OR COALESCE(CASE WHEN (journal.before_image->>'fuses') ~ '^-?[0-9]+$'
-                             AND (journal.before_image->>'fuses')::numeric BETWEEN -9223372036854775808 AND 9223372036854775807
-                            THEN ((journal.before_image->>'fuses')::bigint & 65536) <> 0 END, false)
-              IS DISTINCT FROM COALESCE(wrapper.fuses IS NOT NULL AND (wrapper.fuses & 65536) <> 0, false)
-           OR (CASE WHEN (journal.before_image->>'expiry_seconds') ~ '^[0-9]+$'
-                     AND (journal.before_image->>'expiry_seconds')::numeric <= 18446744073709551615
-                    THEN (journal.before_image->>'expiry_seconds')::numeric END)
-              IS DISTINCT FROM
-              (CASE WHEN wrapper.expiry_seconds::text ~ '^[0-9]+$'
-                     AND wrapper.expiry_seconds <= 18446744073709551615
-                    THEN wrapper.expiry_seconds END))
+        SELECT journal.before_image->>'logical_name_id' {wrapper_rows}
+          AND journal.before_image->>'logical_name_id' IS NOT NULL AND {wrapper_moved}
     ), names_whose_change_can_move_descendants AS MATERIALIZED (
         SELECT logical_name_id FROM pointer_moved UNION SELECT logical_name_id FROM v1_pointer_moved
         UNION SELECT logical_name_id FROM otherwise_moved
@@ -382,14 +365,22 @@ pub(super) fn statement(normal_work: &str) -> String {
          AND lower(declared.declared_address)=changed.resolver
         JOIN manifest_versions manifest ON manifest.manifest_id=declared.manifest_id
          AND manifest.chain_id=declared.chain_id AND manifest.source_family='ens_v2_resolver_l1'
-    ), resolver_readers AS MATERIALIZED (
+    ), v1_resolver_readers AS MATERIALIZED (
+        SELECT pointer.namespace || ':' || lower(pointer.node) AS logical_name_id
+        FROM changed_resolvers changed JOIN project_registry_pointer pointer
+          ON pointer.chain_id=$1 AND pointer.resolver_address=changed.resolver
+        UNION
+        SELECT pointer.namespace || ':' || lower(pointer.namehash)
+        FROM changed_resolvers changed JOIN project_resource_pointer pointer
+          ON pointer.chain_id=$1 AND pointer.resolver_address=changed.resolver
+        WHERE pointer.source_family IN {v1_family}
+    ), v2_resolver_readers AS MATERIALIZED (
         SELECT pointer.namespace || ':' || lower(pointer.namehash) AS logical_name_id
         FROM changed_resolvers changed JOIN project_resource_pointer pointer
           ON pointer.chain_id=$1 AND pointer.resolver_address=changed.resolver
-        UNION
-        SELECT pointer.namespace || ':' || lower(pointer.node)
-        FROM changed_resolvers changed JOIN project_registry_pointer pointer
-          ON pointer.chain_id=$1 AND pointer.resolver_address=changed.resolver
+        WHERE pointer.source_family IS NULL OR pointer.source_family NOT IN {v1_family}
+    ), resolver_readers AS MATERIALIZED (
+        SELECT logical_name_id FROM v1_resolver_readers UNION SELECT logical_name_id FROM v2_resolver_readers
     ), source_names AS MATERIALIZED (
         SELECT logical_name_id FROM normal
         WHERE logical_name_id IN (SELECT logical_name_id FROM names_whose_change_can_move_descendants)
@@ -397,12 +388,13 @@ pub(super) fn statement(normal_work: &str) -> String {
         SELECT logical_name_id FROM resolver_readers
     ), narrow_names AS MATERIALIZED (
         -- The touched names whose only change that can move other names is their registry
-        -- pointer (see the module docs).
+        -- pointer, and the ENSv1 readers of a changed resolver (see the module docs).
         SELECT logical_name_id FROM normal
         WHERE logical_name_id IN (SELECT logical_name_id FROM pointer_moved
             UNION SELECT logical_name_id FROM v1_pointer_moved)
+        UNION SELECT logical_name_id FROM v1_resolver_readers WHERE logical_name_id IS NOT NULL
         EXCEPT SELECT logical_name_id FROM otherwise_moved
-        EXCEPT SELECT logical_name_id FROM resolver_readers
+        EXCEPT SELECT logical_name_id FROM v2_resolver_readers
     ), source_ancestors AS MATERIALIZED (
         -- An ancestor of two or more labels is the child's suffix from `depth`. The index
         -- finds the surfaces with that suffix's hash and the suffix comparison decides.
@@ -669,6 +661,14 @@ pub(super) fn statement(normal_work: &str) -> String {
               AND {under_prefix}
               AND {walks_ancestor_pointers}
               AND {has_no_own_resolver}
+            OFFSET 0
+        ) probe
+        UNION
+        -- An ENSv1 reader of a changed resolver recomposes itself, by the key of its surface.
+        SELECT probe.logical_name_id FROM v1_resolver_readers reader
+        CROSS JOIN LATERAL (
+            SELECT child.logical_name_id FROM name_surfaces child
+            WHERE child.logical_name_id=reader.logical_name_id AND {eth_name}
             OFFSET 0
         ) probe
         UNION

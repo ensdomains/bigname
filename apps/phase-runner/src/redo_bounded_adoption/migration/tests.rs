@@ -133,17 +133,23 @@ fn a_moved_singleton_qualifies_from_the_lower_start() {
     assert_eq!(diff.addresses.len(), 2, "{:?}", diff.addresses);
 }
 
-// An address added beside the unchanged entries of a repeatable role. No migration role is
-// repeatable today (the loader refuses a second entry), so this pins the shape for one.
+// Row 7c, the predicate's half. A second address added beside the unchanged entry of a repeatable
+// role, the UserRegistry implementation. Only the added address is reported, with its own start.
 #[test]
 fn an_address_added_beside_unchanged_entries_qualifies() {
-    let old = payload(&[factory(), contract("helper", CONTROLLER, 20)]);
+    let old = payload(&[
+        factory(),
+        contract("user_registry_implementation", IMPLEMENTATION, 20),
+    ]);
     let new = payload(&[
         factory(),
-        contract("helper", CONTROLLER, 20),
-        contract("helper", MOVED, 30),
+        contract("user_registry_implementation", IMPLEMENTATION, 20),
+        contract("user_registry_implementation", MOVED, 30),
     ]);
-    assert_eq!(verdict(&old, &new), Ok(vec![changed("helper", MOVED, 30)]));
+    assert_eq!(
+        verdict(&old, &new),
+        Ok(vec![changed("user_registry_implementation", MOVED, 30)])
+    );
 }
 
 // Row 3, the predicate's half.

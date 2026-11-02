@@ -402,10 +402,75 @@ pub(super) fn value_str<'a>(value: &'a Value, key: &str) -> anyhow::Result<&'a s
 }
 
 pub(super) fn declared_address(catalog: &Catalog, role: &str) -> anyhow::Result<String> {
-    Ok(catalog
-        .declared_address_for_role(MIGRATION_FAMILY, role)
-        .with_context(|| format!("migration manifest has no {role} declaration"))?
-        .to_ascii_lowercase())
+    let mut addresses = catalog.declared_addresses(MIGRATION_FAMILY, role);
+    match addresses.len() {
+        0 => anyhow::bail!("migration manifest has no {role} declaration"),
+        1 => Ok(addresses.remove(0)),
+        many => anyhow::bail!("migration manifest declares {many} {role} addresses, not one"),
+    }
+}
+
+/// The ENSv1→ENSv2 migration controllers at one block. Each is the address whose declared range
+/// holds the block, so a controller is never matched before its start or after its range closed.
+pub(super) struct Controllers {
+    unlocked: Option<String>,
+    locked: Option<String>,
+}
+
+impl Controllers {
+    const UNLOCKED: &str = "unlocked_migration_controller";
+    const LOCKED: &str = "locked_migration_controller";
+
+    /// Fails unless each controller role has exactly one live declaration, one with no end
+    /// block. Retired ranges may sit beside it. A role with only retired ranges, or with two
+    /// live addresses, would let a migration through an undeclared controller read as an
+    /// ordinary registration.
+    pub(super) fn ensure_declared(catalog: &Catalog) -> anyhow::Result<()> {
+        for role in [Self::UNLOCKED, Self::LOCKED] {
+            let live = catalog.live_addresses(MIGRATION_FAMILY, role);
+            anyhow::ensure!(
+                live.len() == 1,
+                "migration manifest needs exactly one live {role} declaration, found {}",
+                live.len()
+            );
+        }
+        Ok(())
+    }
+
+    /// The controllers whose declared ranges hold `block`. After [`Self::ensure_declared`], a
+    /// role is `None` only when no declared range holds the block, as before the live
+    /// declaration's start. Two addresses holding one block fail the batch.
+    pub(super) fn at(catalog: &Catalog, block: i64) -> anyhow::Result<Self> {
+        let at = |role| -> anyhow::Result<Option<String>> {
+            let mut addresses = catalog.declared_addresses_at(MIGRATION_FAMILY, role, block);
+            match addresses.len() {
+                0 => Ok(None),
+                1 => Ok(Some(addresses.remove(0))),
+                many => anyhow::bail!(
+                    "migration manifest declares {many} {role} addresses at block {block}, not one"
+                ),
+            }
+        };
+        Ok(Self {
+            unlocked: at(Self::UNLOCKED)?,
+            locked: at(Self::LOCKED)?,
+        })
+    }
+
+    pub(super) fn unlocked(&self) -> Option<&str> {
+        self.unlocked.as_deref()
+    }
+
+    pub(super) fn is_unlocked(&self, address: &str) -> bool {
+        self.unlocked()
+            .is_some_and(|unlocked| address.eq_ignore_ascii_case(unlocked))
+    }
+
+    pub(super) fn is_locked(&self, address: &str) -> bool {
+        self.locked
+            .as_deref()
+            .is_some_and(|locked| address.eq_ignore_ascii_case(locked))
+    }
 }
 
 pub(super) fn observation_evidence(observation: &MigrationObservation) -> Value {

@@ -514,11 +514,11 @@ starts differ. Every family-wide and all-emitter event of the registry family
 starts at the ETHRegistry's receipt block `26105621`, and every one of the
 resolver family at the ENSv1 mirror resolver's `26105292`. So the Ingest redo
 that admitting them stamps runs from the deployment's first block, not from
-block zero. No manifest declares the contracts the 2026-10-13 and
-2026-10-18 redeploys replaced, and none of them names a name.
+block zero. No manifest declares the contracts the 2026-10-13, 2026-10-18,
+2026-10-23 and 2026-10-26 redeploys replaced, and none of them names a name.
 The [complete deployment inventory](mainnet-deployment.md) records every address,
 its admission or explicit exclusion, and how an existing database moves to it.
-(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/.deployment.json:L4 @ ens_v2_mainnet_20261002@b1f97b91)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/.deployment.json:L4 @ ens_v2_mainnet_20261002@4f47cbcc)
 
 ### ENS execution (`mainnet` deployment profile)
 
@@ -1102,29 +1102,6 @@ precede delayed initialization: ordinary `RegistryCreated` remains required
 to admit the proxy, and no pre-initialization approvals are added. Other
 uncorrelated migration-source observations remain omitted.
 
-The reviewed factory and implementation pairs are listed per
-[deployment epoch](glossary.md#deployment-epoch) in
-`crates/adapters/src/schema_v2/migration/registry_origin.rs`.
-
-- A pair applies only while the active migration manifest has that epoch and declares
-  the factory and the implementation.
-- The `ens_v2_mainnet_20261002` row names factory
-  `0x77510ba162dfea3d8989e3f0928a691b345730d2` and implementations
-  `0xcf3edb3f5501de63b57254d910b6782ee370039b` (Wrapper) and
-  `0x75ff9adbcfce2469b097ac68f6ae650eae1351bb` (UserRegistry).
-- Earlier mainnet WrapperRegistry implementations are not listed, so a proxy that names
-  one keeps no origin. A redeploy adds a row.
-
-The permission reader keeps the same rows, with the deployment's chain, in
-`crates/storage/src/families/control/permissions/registry_support.rs`.
-
-- It reads a factory origin only under its own chain's row.
-- It reads a root or registry declaration as whichever registry an active root or
-  registry manifest of a reviewed epoch declares.
-
-(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/VerifiableFactory.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
-(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/WrapperRegistryImpl.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
-(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UserRegistryImpl.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
 The existing watch compiler adds two address-scoped entries for this UserRegistry
 implementation: the migration family's `ProxyDeployed` and `NameRenewed` topics,
 from `11820439`; its existing 16 entries remain unchanged. This is a watch-plan
@@ -1309,6 +1286,61 @@ The [official Sepolia deployment inventory](sepolia-deployment.md) accounts for
 all upstream addresses, including admitted resolution surfaces and explicit
 exclusions for payment, oracle, and administration helpers.
 
+#### Registry implementation declarations
+
+The supported registry implementations are the active migration manifest's own
+declarations. No code constant lists them. Two contract roles name them:
+`wrapper_registry_implementation` and `user_registry_implementation`.
+
+- Both roles are repeatable, like `ensv1_mirror_resolver`. A manifest may declare several
+  addresses under one role, each with its own `start_block`. The persisted
+  `declaration_name` is `<role>@<lowercase address>`. The same address twice under one
+  role is a load error.
+- A factory origin is kept exactly when its emitter is the declared `verifiable_factory`
+  and its implementation is a declared address for one of the two roles, and both
+  declarations' admitted ranges hold the origin's block. Ranges are inclusive at both ends.
+- The same rule holds for the locked and unlocked migration controllers. Each transaction
+  correlates against the controller address whose declared range holds its block.
+- Each controller role needs exactly one live declaration, one with no end block, beside any
+  retired ranges. Interpret refuses a batch whose migration manifest has none or two, or
+  whose declared ranges name two controllers at one of the batch's blocks. A role never
+  loses its live controller. A sender the manifest does not declare at that block, such as a
+  controller replaced before the live one's start, is not a controller, and its registration
+  reads as ordinary.
+- Declaring a further implementation pair adds two `[[contracts]]` entries. On the mainnet
+  profile it also moves two tests: the pinned-artifact test's role map, which looks for each
+  declared contract in `deployments/mainnet/`, and the rule that no replaced contract is
+  declared, since an earlier pair's artifacts live only in a replaced folder.
+- A pair that leaves the manifest is treated as never declared. A rebuild retains none of its
+  origins, and Project serves no model for registries created through it. An implementation
+  that produced registries must stay declared. The manifest has no way to end a range at a
+  chosen block.
+- Each origin's model follows the role its implementation is declared under. An address
+  declared under both roles is supported under neither.
+
+The mainnet manifest declares the one pair that produced registries: implementations
+`0xe86a4ef4d7a210aaa1d6a9594fc7add7cd2cf888` (Wrapper, from `26277138`) and
+`0xfaa23592aca10a6d8875b18ea86954e8eb6d8d72` (UserRegistry, from `26277137`), with
+factory `0x77510ba162dfea3d8989e3f0928a691b345730d2`. Earlier mainnet implementations
+are not declared, so a proxy that names one keeps no origin.
+
+The permission reader in
+`crates/storage/src/families/control/permissions/registry_support.rs` reads the same
+declarations from the active migration manifest of a reviewed
+[deployment epoch](glossary.md#deployment-epoch).
+
+- It reads a factory origin only under its own chain's epoch.
+- It reads a root or registry declaration as whichever registry an active root or
+  registry manifest of a reviewed epoch declares.
+- A later canonical `Upgraded` of the proxy to any other implementation, or to none,
+  is a departure, and the registry is no longer supported.
+  `normalized_events_registry_departure_idx` keys the implementation, so the probe
+  never visits a same-code upgrade.
+
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/VerifiableFactory.json:L2 @ ens_v2_mainnet_20261002@4f47cbcc)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/WrapperRegistryImpl.json:L2 @ ens_v2_mainnet_20261002@4f47cbcc)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UserRegistryImpl.json:L2 @ ens_v2_mainnet_20261002@4f47cbcc)
+
 ### Basenames mainnet
 
 Basenames mainnet admits six families:[^bn-readme-l22][^bn-readme-l28][^bn-readme-l29][^bn-readme-l30][^bn-readme-l33][^bn-readme-l34][^bn-readme-l36][^bn-readme-l37][^bn-readme-l69][^bn-readme-l70]
@@ -1347,7 +1379,7 @@ creates the new bounded active range.
 
 - `[[roots]]` seed canonical graph and watch-plan expansion; otherwise they follow the same identity rules as `[[contracts]]`.
 - Reusing the same address on the same chain across manifest versions, even across an inactive gap, carries forward the existing `contract_instance_id` and appends a new non-overlapping active range.
-- Changing a declared address closes the prior active range and admits a new instance, with a new `contract_instance_id` rather than ID reuse. No discovery edge records the succession: the loader writes only `proxy_implementation` edges, and the [`migration` edge kind](glossary.md#migration-edge-migration) the schema permits is [reserved surface](glossary.md#reserved-surface) with no writer. What ties the two instances together is the manifest declaration, not their addresses: successive manifest versions carry the same `(chain_id, declaration_kind, declaration_name, role)` tuple against different declared addresses. `declaration_name` is the role for every singleton role; the repeatable `ensv1_mirror_resolver` instance role persists `ensv1_mirror_resolver@<lowercase address>` per instance, so mirror instances are identified by address, never succeed one another, and a re-addressed mirror is a new declaration plus a retired one. Do not try to recover succession from the instances' active ranges — a retired address is closed at the chain head observed when the manifest loaded, while its successor opens at its own declared `start_block`, so the two ranges frequently overlap instead of abutting.
+- Changing a declared address closes the prior active range and admits a new instance, with a new `contract_instance_id` rather than ID reuse. No discovery edge records the succession: the loader writes only `proxy_implementation` edges, and the [`migration` edge kind](glossary.md#migration-edge-migration) the schema permits is [reserved surface](glossary.md#reserved-surface) with no writer. What ties the two instances together is the manifest declaration, not their addresses: successive manifest versions carry the same `(chain_id, declaration_kind, declaration_name, role)` tuple against different declared addresses. `declaration_name` is the role for every singleton role. The repeatable roles, `ensv1_mirror_resolver` and the two [registry implementation roles](#registry-implementation-declarations), persist `<role>@<lowercase address>` per instance, so their instances are identified by address, never succeed one another, and a re-addressed instance is a new declaration plus a retired one. Do not try to recover succession from the instances' active ranges — a retired address is closed at the chain head observed when the manifest loaded, while its successor opens at its own declared `start_block`, so the two ranges frequently overlap instead of abutting.
 - `proxy_kind = "none"` resolves the declared address directly; `implementation` is omitted.
 - `proxy_kind != "none"` requires `implementation`. The proxy and implementation are separate instances linked by a time-ranged proxy/implementation edge.
 - Changing only `implementation` keeps the proxy's identity. The implementation instance is reused if its address reappears, otherwise a new one is minted.
