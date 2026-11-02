@@ -1904,16 +1904,17 @@ async fn current_registry_handoff_retracts_surfaced_old_resolver_after_redo_and_
             .pointer("/registration/status")
             .and_then(Value::as_str),
         name.declared_summary
-            .pointer("/control/status")
+            .pointer("/control/owner")
             .and_then(Value::as_str),
     );
     assert_eq!(
         projected.0, None,
         "Project must not serve the retired fallback"
     );
-    // The cleared registry record did not end the lease. Its lapse past grace releases it.
+    // The cleared registry record did not end the lease. Its lapse past grace releases it, and
+    // a released name serves no owner.
     assert_eq!(projected.1, Some("released"));
-    assert_eq!(projected.2, Some("unregistered"));
+    assert_eq!(projected.2, None);
     assert_handoff_product_history(scratch.pool(), &clears).await?;
     scratch.cleanup().await
 }

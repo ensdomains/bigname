@@ -566,6 +566,7 @@ async fn v2_address_names_registration_dedupe_preserves_role_summary() -> Result
 }
 
 // Finite expiries remain ordered and visible when they cross the calendar formatting limit.
+// An expiry of zero releases the name, which then leaves the list.
 // The real ENSv2 grant/renewal test covers the wider unsigned domain.
 #[tokio::test]
 async fn v2_get_address_names_retains_finite_expiry_beyond_the_calendar_range() -> Result<()> {
@@ -579,11 +580,15 @@ async fn v2_get_address_names_retains_finite_expiry_beyond_the_calendar_range() 
                 &format!("/v1/addresses/{V2_ADDRESS}/names?sort=expires_at&order={order}"),
             ).await?;
             let rows = payload["data"].as_array().expect("expiry rows");
+            // A lease that ended in 1970 is released and leaves its holder's list.
+            if expiry == 0 {
+                assert!(rows.iter().all(|row| row["name"] != "alpha.eth"), "{payload}");
+                continue;
+            }
             let alpha = rows.iter().find(|row| row["name"] == "alpha.eth").unwrap();
             assert_eq!(alpha["expires_at"], json!(expiry.to_string()), "{payload}");
             assert!(alpha.get("expires_at_reason").is_none(), "{payload}");
-            let first = (expiry == 0) == (order == "asc");
-            let position = if first { 0 } else { rows.len() - 1 };
+            let position = if order == "desc" { 0 } else { rows.len() - 1 };
             assert_eq!(rows[position]["name"], json!("alpha.eth"), "{payload}");
         }
     }

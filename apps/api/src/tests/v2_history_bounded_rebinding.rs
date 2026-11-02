@@ -1030,9 +1030,11 @@ async fn a_released_name_has_no_owner_or_manager() -> Result<()> {
     }
     database.cleanup().await?;
 
+    // The lease is past its expiry and grace from the first block, so it is released and
+    // serves no owner even before its release row.
     assert_eq!(
         owners,
-        [json!(OWNER), Value::Null, json!(NEW_HOLDER), json!(HOLDER)]
+        [Value::Null, Value::Null, json!(NEW_HOLDER), json!(HOLDER)]
     );
     assert_eq!(
         other_rows,
