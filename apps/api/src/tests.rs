@@ -546,6 +546,7 @@ mod v2_resolver_eac_resources;
 include!("tests/v2_resolver_collections.rs");
 include!("tests/v2_resolver_generation_races.rs");
 include!("tests/v2_registries.rs");
+include!("tests/v2_registry_event_count_cap.rs");
 include!("tests/v2_registries_manifest_history.rs");
 include!("tests/v2_interpret_redo_loaders.rs");
 include!("tests/v2_primary_name.rs");

@@ -177,6 +177,7 @@ pub(crate) async fn get_registry(
     } else {
         None
     };
+    let events_cap = registry_events_count_cap();
     let events = if include_event_count {
         Some(
             bigname_storage::count_contract_events(
@@ -191,7 +192,8 @@ pub(crate) async fn get_registry(
         )
     } else {
         None
-    };
+    }
+    .filter(|count| events_cap.is_none_or(|cap| *count <= cap));
 
     let next_cursor = references.next_cursor.as_ref().map(|cursor| {
         let mut payload =
@@ -254,6 +256,11 @@ pub(crate) async fn get_registry(
         page: None,
         meta: selected_meta,
     }))
+}
+
+/// The cap on the `counts.events` count, or `None` to count every event.
+pub(crate) fn registry_events_count_cap() -> Option<u64> {
+    None
 }
 
 fn build_registry_overview(

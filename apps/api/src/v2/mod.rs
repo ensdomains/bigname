@@ -116,6 +116,8 @@ pub(crate) use permission_values::{
 };
 pub(crate) use permissions::get_permissions;
 pub(crate) use primary_name::get_primary_name;
+#[cfg(test)]
+pub(crate) use registries::registry_events_count_cap;
 pub(crate) use registries::{
     RegistryRef, get_registry, get_registry_labels, load_subregistry_refs, name_chain_id,
     snapshot_block_for_chain,
