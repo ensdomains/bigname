@@ -236,6 +236,32 @@ pub(in crate::schema_v2) fn lifecycle_namehash(
     )))
 }
 
+/// Record a numeric `NameRenewed`'s expiry as the transaction's registrar word without deriving
+/// rows, for a renewal the controller event that follows owns. A wrapped controller's renewal
+/// reads the latest word.
+pub(super) fn note_renewal_expiry(
+    selected: &Selected,
+    raw: &RawLogInput,
+    state: &mut State,
+) -> anyhow::Result<()> {
+    if selected.event.signature != "NameRenewed(uint256,uint256)" {
+        return Ok(());
+    }
+    let event = decode_event_log::<NameRenewed>(
+        &raw.topics,
+        &raw.data,
+        "BaseRegistrar NameRenewed log is malformed",
+    )?;
+    let namehash = registrar_namehash(selected, B256::from(event.id.to_be_bytes::<32>()));
+    state.note_v1_registrar_renewal_expiry(
+        &selected.source.namespace,
+        &namehash,
+        event.expires,
+        raw,
+    );
+    Ok(())
+}
+
 fn name_renewed(
     selected: &Selected,
     raw: &RawLogInput,

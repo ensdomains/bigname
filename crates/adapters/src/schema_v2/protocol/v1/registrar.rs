@@ -64,11 +64,13 @@ pub(super) fn interpret(
                 .iter()
                 .any(|event| event == "RegistrationGranted");
             // A controller that registers or renews through the BaseRegistrar emits its own
-            // label-bearing event after the numeric one, and that event owns the lease.
-            let mut ordinary = if context.graveyard_cleanup
-                || !lifecycle_enabled
-                || context.controller_lifecycle_follows
-            {
+            // label-bearing event after the numeric one, and that event owns the lease. The
+            // numeric renewal is still the registrar word of the transaction, which a wrapped
+            // controller's renewal reads.
+            let mut ordinary = if context.graveyard_cleanup || !lifecycle_enabled {
+                Interpreted::new()
+            } else if context.controller_lifecycle_follows {
+                base::note_renewal_expiry(selected, raw, state)?;
                 Interpreted::new()
             } else {
                 base::interpret(selected, raw, state, context.transaction_has_registry_setup)?
