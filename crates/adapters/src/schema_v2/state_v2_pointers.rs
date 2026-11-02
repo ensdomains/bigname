@@ -191,6 +191,28 @@ impl State {
         sharing
     }
 
+    /// Every token `registry` holds with a resolver: its token id, the resolver and the earlier
+    /// token ids whose resolver discovery key it still carries.
+    pub(in crate::schema_v2) fn v2_registry_resolver_tokens(
+        &self,
+        registry: &str,
+    ) -> Vec<(String, String, BTreeSet<String>)> {
+        let registry = registry.to_ascii_lowercase();
+        self.v2_tokens
+            .registry_keys(&registry)
+            .into_iter()
+            .filter_map(|key| {
+                let token = self.v2_tokens.get(&key)?;
+                let (_, token_id) = key.rsplit_once(':')?;
+                Some((
+                    token_id.to_owned(),
+                    token.resolver.clone()?,
+                    token.resolver_discovery_aliases.clone(),
+                ))
+            })
+            .collect()
+    }
+
     pub(in crate::schema_v2) fn v2_subregistry_reassertion_target(
         &self,
         emitter: &str,

@@ -162,6 +162,7 @@ pub(super) struct State {
     v2_dirty_tokens: OrdSet<String>,
     v2_dirty_registries: OrdSet<String>,
     v2_terminal_closure_hits: OrdSet<(String, String)>,
+    v2_reachability_changes: OrdMap<String, (bool, bool)>,
     v2_token_by_upstream_resource_index: Covered<maps::AddressId, (String, String), OrdSet<String>>,
     v2_token_by_name_index: Covered<maps::TokenName, (String, String), OrdSet<String>>,
     v2_tokens_by_current_name_index: Covered<maps::Name, String, OrdSet<String>>,

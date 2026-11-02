@@ -5,7 +5,7 @@ use super::{
     common::{contract_id, normalize_address, provenance},
     model::{
         AddressAdmissionInput, BatchOutput, ContractAddress, ContractInstance, DiscoveryEdge,
-        DiscoveryEdgeClosure, RawLogInput,
+        DiscoveryEdgeClosure, RawBlockInput, RawLogInput,
     },
     protocol::{DiscoveryDraft, EventDraft},
     state::State,
@@ -286,6 +286,10 @@ pub(super) fn materialize(
                     });
                 }
             }
+            draft @ (DiscoveryDraft::RegistryResolverEdge { .. }
+            | DiscoveryDraft::RegistryResolverClose { .. }) => {
+                registry_resolver(catalog, raw, &selected.event.name, draft, output)?;
+            }
             DiscoveryDraft::ResolverAnnouncement {
                 proxy_address,
                 implementation,
@@ -393,6 +397,143 @@ pub(super) fn materialize(
             }
         }
     }
+    Ok(())
+}
+
+/// The resolver edges of registries whose reachability a block boundary changed, positioned at
+/// the block's start with no transaction. An expiry crossing usually takes reachability away, but
+/// it can also give it: a registry whose parent claim points back at an unreachable parent falls
+/// back to a reachable mount when the claimed entry expires.
+pub(super) fn materialize_boundary(
+    catalog: &Catalog,
+    block: &RawBlockInput,
+    drafts: Vec<DiscoveryDraft>,
+    output: &mut BatchOutput,
+) -> anyhow::Result<()> {
+    for draft in drafts {
+        let (DiscoveryDraft::RegistryResolverEdge { registry, .. }
+        | DiscoveryDraft::RegistryResolverClose { registry, .. }) = &draft
+        else {
+            anyhow::bail!("an ENSv2 block boundary produced a non-registry discovery draft");
+        };
+        let raw = RawLogInput {
+            chain_id: block.chain_id.clone(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            block_timestamp: block.block_timestamp,
+            canonicality_state: block.canonicality_state.clone(),
+            transaction_hash: format!("block-boundary:{}", block.block_hash),
+            transaction_index: -1,
+            log_index: -1,
+            emitting_address: registry.clone(),
+            topics: Vec::new(),
+            data: Vec::new(),
+        };
+        registry_resolver(catalog, &raw, "RegistryPathExpired", draft, output)?;
+    }
+    Ok(())
+}
+
+/// A registry token's resolver edge opened or closed by a change in the registry's
+/// reachability. It runs from the instance, manifest and rule the registry's own
+/// `ResolverUpdated` would select, with the key that log writes, so the registry's next pointer
+/// log closes it. A registry nothing would interpret a `ResolverUpdated` for gets no edge, as
+/// before. A registry pointer admits nothing.
+fn registry_resolver(
+    catalog: &Catalog,
+    raw: &RawLogInput,
+    source_event: &str,
+    draft: DiscoveryDraft,
+    output: &mut BatchOutput,
+) -> anyhow::Result<()> {
+    let (registry, observation_key, to_address) = match draft {
+        DiscoveryDraft::RegistryResolverEdge {
+            registry,
+            observation_key,
+            to_address,
+        } => (registry, observation_key, Some(to_address)),
+        DiscoveryDraft::RegistryResolverClose {
+            registry,
+            observation_key,
+        } => (registry, observation_key, None),
+        _ => unreachable!("only registry resolver drafts reach this materializer"),
+    };
+    let probe = RawLogInput {
+        emitting_address: registry.clone(),
+        topics: vec![
+            crate::schema_v2::protocol::v2_registry::reachability::resolver_updated_topic0(),
+        ],
+        ..raw.clone()
+    };
+    let Some(selected) = catalog
+        .select(&probe)?
+        .filter(|selected| selected.event.name == "ResolverUpdated")
+    else {
+        return Ok(());
+    };
+    let from = selected.contract_instance_id;
+    let target = match to_address.as_deref().map(normalize_address).transpose()? {
+        Some(address) if address != ZERO_ADDRESS => Some((
+            catalog
+                .contract_instance_for_address(&address, raw.block_number)?
+                .unwrap_or_else(|| contract_id(&raw.chain_id, &address)),
+            address,
+        )),
+        _ => None,
+    };
+    output.discovery_edge_closures.push(DiscoveryEdgeClosure {
+        chain_id: raw.chain_id.clone(),
+        edge_kind: "resolver".to_owned(),
+        from_contract_instance_id: from,
+        observation_key: observation_key.clone(),
+        except_to_contract_instance_id: target.as_ref().map(|(instance, _)| *instance),
+        active_to_block_number: raw.block_number,
+        active_to_block_hash: raw.block_hash.clone(),
+        transaction_index: raw.transaction_index,
+        log_index: raw.log_index,
+    });
+    let Some((target, address)) = target.filter(|(target, _)| *target != from) else {
+        return Ok(());
+    };
+    let manifest_id = selected.source.manifest_id;
+    let admission_basis = catalog
+        .rule(manifest_id, "resolver", selected.emitter_role.as_deref())
+        .with_context(|| format!("ENSv2 registry {registry} has no resolver manifest rule"))?
+        .admission
+        .clone();
+    push_contract(output, manifest_id, raw, target, &address, source_event);
+    let provenance = if raw.log_index < 0 {
+        // A block boundary has no log position. The writer orders a raw-block edge before the
+        // block's logs, as it does a boundary's binding.
+        let mut value = crate::schema_v2::seam::raw_block_provenance();
+        let fields = value
+            .as_object_mut()
+            .expect("raw-block provenance is an object");
+        fields.insert("source_event".to_owned(), source_event.into());
+        fields.insert("source_manifest_id".to_owned(), manifest_id.into());
+        fields.insert("chain_id".to_owned(), raw.chain_id.clone().into());
+        fields.insert("block_hash".to_owned(), raw.block_hash.clone().into());
+        fields.insert("block_number".to_owned(), raw.block_number.into());
+        fields.insert("emitting_address".to_owned(), registry.clone().into());
+        fields.insert("observation_key".to_owned(), observation_key.clone().into());
+        value
+    } else {
+        discovery_provenance(raw, source_event, manifest_id, &observation_key)
+    };
+    output.discovery_edges.push(DiscoveryEdge {
+        chain_id: raw.chain_id.clone(),
+        edge_kind: "resolver".to_owned(),
+        from_contract_instance_id: from,
+        to_contract_instance_id: target,
+        discovery_source: source_event.to_owned(),
+        admission_basis,
+        source_manifest_id: manifest_id,
+        observation_key,
+        active_from_block_number: raw.block_number,
+        active_from_block_hash: raw.block_hash.clone(),
+        canonicality_state: raw.canonicality_state.clone(),
+        provenance,
+    });
     Ok(())
 }
 

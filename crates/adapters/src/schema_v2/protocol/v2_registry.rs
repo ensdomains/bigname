@@ -1,5 +1,6 @@
 pub(in crate::schema_v2) mod boundary;
 mod expiry;
+pub(in crate::schema_v2) mod reachability;
 mod registrar;
 mod topology;
 mod transfer;
@@ -102,7 +103,7 @@ fn registry(
             )?;
             let token_id = u256_word_hex(e.tokenId);
             let Some(before) = state.v2_token(&raw.emitting_address, &token_id) else {
-                return expiry::tokenless(selected, initial_output, &e);
+                return expiry::tokenless(selected, initial_output, &e, state);
             };
             state.set_v2_expiry(&raw.emitting_address, &token_id, e.newExpiry);
             let transitions = state.refresh_dirty_v2_names(raw.block_timestamp.unix_timestamp());
@@ -200,7 +201,6 @@ fn registry(
                 &raw.data,
                 "ResolverUpdated log is malformed",
             )?;
-            let address = address_hex(e.resolver);
             let mut output = token_event(
                 selected,
                 raw,
@@ -212,18 +212,13 @@ fn registry(
             let aliases = state.set_v2_resolver(
                 &raw.emitting_address,
                 &u256_word_hex(e.tokenId),
-                (e.resolver != Address::ZERO).then(|| address.clone()),
+                (e.resolver != Address::ZERO).then(|| address_hex(e.resolver)),
             );
             let protected_tokens =
                 state.live_v2_resolver_tokens_sharing(&raw.emitting_address, &aliases);
             let protected = topology::resolver_discovery_keys(raw, None, &protected_tokens)?;
             append_resolver_discovery_closures(&mut output, raw, None, &aliases, &protected)?;
-            output.discovery.push(DiscoveryDraft::Edge {
-                edge_kind: "resolver".to_owned(),
-                to_address: address,
-                admission_basis: "protocol_event".to_owned(),
-                observation_key: discovery_observation_key(raw, e.tokenId, true),
-            });
+            reachability::push_resolver_edge(&mut output, state, raw, e.tokenId, e.resolver);
             Ok(output)
         }
         "TokenResource" => transfer::token_resource(selected, raw, state),
@@ -285,6 +280,9 @@ fn registry(
         name => bail!("unsupported ENSv2 registry event {name}"),
     }?;
     initial_output.append(&mut output);
+    initial_output
+        .discovery
+        .extend(reachability::reachability_drafts(state)?);
     Ok(initial_output)
 }
 fn label_event(
