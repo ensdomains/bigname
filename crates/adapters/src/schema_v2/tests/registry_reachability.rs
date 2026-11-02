@@ -930,19 +930,29 @@ fn k4_a_remount_reopens_a_shared_link_to_its_latest_write() -> anyhow::Result<()
     Ok(())
 }
 
-/// `first` in one batch through `last_block`, then an unmount and a remount in the next: once
-/// continued in the session, once restored from the first batch's events and once restored from
-/// them folded as the loader keeps them. All three agree, and the restored output is returned.
+/// `first` in one batch through `last_block`, then an unmount and a remount in the next.
 fn remount_in_a_later_batch(
     first_logs: Vec<RawLogInput>,
     last_block: i64,
 ) -> anyhow::Result<BatchOutput> {
-    let first_input = batch(first_logs);
-    let first = interpret_test_batch(first_input.clone())?;
-    let mut second_input = batch(vec![
+    let second_logs = vec![
         mount(PARENT, "n", ZERO_ADDRESS, last_block + 1, 0),
         mount(PARENT, "n", CHILD, last_block + 2, 0),
-    ]);
+    ];
+    continued_in_a_later_batch(first_logs, last_block, second_logs)
+}
+
+/// `first` in one batch through `last_block`, then `second` in the next: once continued in the
+/// session, once restored from the first batch's events and once restored from them folded as
+/// the loader keeps them. All three agree, and the restored output is returned.
+fn continued_in_a_later_batch(
+    first_logs: Vec<RawLogInput>,
+    last_block: i64,
+    second_logs: Vec<RawLogInput>,
+) -> anyhow::Result<BatchOutput> {
+    let first_input = batch(first_logs);
+    let first = interpret_test_batch(first_input.clone())?;
+    let mut second_input = batch(second_logs);
     second_input.admissions.push(announced(CHILD, 1));
     let mut restored_input = second_input.clone();
     restored_input.prior_events = first.normalized_events.iter().map(prior_event).collect();
@@ -1124,6 +1134,93 @@ fn k8_a_remount_follows_the_surviving_version_after_the_writer_is_released() -> 
 #[test]
 fn k5r_a_released_writers_resolver_stays_out_of_a_remount_in_a_later_batch() -> anyhow::Result<()> {
     let restored = remount_in_a_later_batch(released_writer_then_reused_key(), 7)?;
+    assert_eq!(
+        reopened_at(&restored, 9),
+        [
+            (instance(RESOLVER_Y), key(CHILD, "p")),
+            (instance(RESOLVER_Y), key(CHILD, "a")),
+        ]
+        .into_iter()
+        .collect()
+    );
+    Ok(())
+}
+
+/// K9: version 2 of `a`'s token id writes `RESOLVER_Y` over version 1's `RESOLVER_X` and is then
+/// regenerated to `p`'s id. The write is still held, under the id it moved to, so a remount
+/// reopens the shared key to it, although version 1 has the greater token id.
+#[test]
+fn k9_a_write_regenerated_to_another_id_still_wins_the_remount() -> anyhow::Result<()> {
+    let mut logs = mounted_child();
+    logs.push(set_versioned_resolver(CHILD, "a", 2, RESOLVER_Y, 6, 0));
+    logs.push(regenerate(
+        CHILD,
+        versioned_token("a", 2),
+        versioned_token("p", 1),
+        7,
+        0,
+    ));
+    logs.push(mount(PARENT, "n", ZERO_ADDRESS, 8, 0));
+    logs.push(mount(PARENT, "n", CHILD, 9, 0));
+    let output = interpret_test_batch(batch(logs))?;
+    assert_eq!(
+        reopened_at(&output, 9),
+        [(instance(RESOLVER_Y), key(CHILD, "a"))]
+            .into_iter()
+            .collect()
+    );
+    Ok(())
+}
+
+/// U7r: U7's regeneration and remount in one batch, then another remount in the next. The mount
+/// restates the regenerated token's resolver, and restoring that restatement keeps the key the
+/// token carries, so the next remount reopens it on every path.
+#[test]
+fn u7r_a_carried_key_survives_a_restored_restatement() -> anyhow::Result<()> {
+    let mut logs = mounted_child();
+    logs.push(regenerate(
+        CHILD,
+        versioned_token("a", 1),
+        versioned_token("a-regenerated", 1),
+        6,
+        0,
+    ));
+    logs.push(mount(PARENT, "n", ZERO_ADDRESS, 7, 0));
+    logs.push(mount(PARENT, "n", CHILD, 8, 0));
+    let restored = remount_in_a_later_batch(logs, 8)?;
+    assert_eq!(
+        reopened_at(&restored, 10),
+        [(instance(RESOLVER_X), key(CHILD, "a"))]
+            .into_iter()
+            .collect()
+    );
+    Ok(())
+}
+
+/// K5s: K5's unregistration in one batch, and the regenerations onto the released id and the
+/// remount in the next. Restoring the released token's terminal restatement does not bring the
+/// token back, so the regeneration displaces nothing on any path.
+#[test]
+fn k5s_a_released_token_stays_released_across_a_restore() -> anyhow::Result<()> {
+    let first = released_writer_then_reused_key()
+        .into_iter()
+        .filter(|log| log.block_number <= 6)
+        .collect();
+    let (a, b, c) = (
+        versioned_token("p", 1),
+        versioned_token("a", 1),
+        versioned_token("carrier", 1),
+    );
+    let restored = continued_in_a_later_batch(
+        first,
+        6,
+        vec![
+            regenerate(CHILD, a, b, 7, 0),
+            regenerate(CHILD, b, c, 7, 1),
+            mount(PARENT, "n", ZERO_ADDRESS, 8, 0),
+            mount(PARENT, "n", CHILD, 9, 0),
+        ],
+    )?;
     assert_eq!(
         reopened_at(&restored, 9),
         [
