@@ -13,6 +13,7 @@ const ELSEWHERE: &str = "0x00000000000000000000000000000000000000c3";
 const PROXY: &str = "0x00000000000000000000000000000000000000c4";
 const RESOLVER_X: &str = "0x00000000000000000000000000000000000000e1";
 const RESOLVER_Y: &str = "0x00000000000000000000000000000000000000e2";
+const RESOLVER_Z: &str = "0x00000000000000000000000000000000000000e3";
 const SENDER: &str = "0x00000000000000000000000000000000000000a2";
 /// Far beyond every block timestamp here, which is the block number in seconds.
 const LIVE: u64 = 1_000_000;
@@ -931,12 +932,11 @@ fn k4_a_remount_reopens_a_shared_link_to_its_latest_write() -> anyhow::Result<()
 
 /// `first` in one batch through `last_block`, then an unmount and a remount in the next: once
 /// continued in the session, once restored from the first batch's events and once restored from
-/// them folded as the loader keeps them. None reopens a resolver edge at the remount, and all
-/// three agree.
-fn assert_a_cleared_link_stays_closed_across_batches(
+/// them folded as the loader keeps them. All three agree, and the restored output is returned.
+fn remount_in_a_later_batch(
     first_logs: Vec<RawLogInput>,
     last_block: i64,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<BatchOutput> {
     let first_input = batch(first_logs);
     let first = interpret_test_batch(first_input.clone())?;
     let mut second_input = batch(vec![
@@ -956,7 +956,6 @@ fn assert_a_cleared_link_stays_closed_across_batches(
     let folded = interpret_test_batch(folded_input)?;
     let (_, session) = interpret_test_batch_incremental(first_input, None)?;
     let (incremental, _) = interpret_test_batch_incremental(second_input, Some(session))?;
-    assert_eq!(resolver_edges(&restored, CHILD), Vec::new());
     for output in [&folded, &incremental] {
         assert_eq!(output.discovery_edges, restored.discovery_edges);
         assert_eq!(
@@ -964,6 +963,16 @@ fn assert_a_cleared_link_stays_closed_across_batches(
             restored.discovery_edge_closures
         );
     }
+    Ok(restored)
+}
+
+/// `remount_in_a_later_batch`, where no resolver edge reopens at the remount.
+fn assert_a_cleared_link_stays_closed_across_batches(
+    first_logs: Vec<RawLogInput>,
+    last_block: i64,
+) -> anyhow::Result<()> {
+    let restored = remount_in_a_later_batch(first_logs, last_block)?;
+    assert_eq!(resolver_edges(&restored, CHILD), Vec::new());
     Ok(())
 }
 
@@ -981,4 +990,148 @@ fn k3r_a_link_cleared_through_a_lesser_version_in_an_earlier_batch_stays_closed(
     logs.push(set_versioned_resolver(CHILD, "a", 2, RESOLVER_Y, 6, 0));
     logs.push(set_versioned_resolver(CHILD, "a", 1, ZERO_ADDRESS, 7, 0));
     assert_a_cleared_link_stays_closed_across_batches(logs, 7)
+}
+
+fn unregister(registry: &str, token_id: U256, block: i64, log: i64) -> RawLogInput {
+    raw_at(
+        v2_registry::LabelUnregistered {
+            tokenId: token_id,
+            sender: SENDER.parse().expect("address"),
+        }
+        .encode_log_data(),
+        block,
+        log,
+        registry,
+    )
+}
+
+fn regenerate(registry: &str, old: U256, new: U256, block: i64, log: i64) -> RawLogInput {
+    raw_at(
+        v2_registry::TokenRegenerated {
+            oldTokenId: old,
+            newTokenId: new,
+        }
+        .encode_log_data(),
+        block,
+        log,
+        registry,
+    )
+}
+
+/// `mounted_child`, where `a`'s token B holds `RESOLVER_X`, then: B is unregistered, token A
+/// (label `p`) is registered and writes `RESOLVER_Y`, A is regenerated to B's id, and that token to C (label
+/// `carrier`). C holds `RESOLVER_Y` and carries the keys of `p` and `a`. No event after B's
+/// unregistration selected `RESOLVER_X`.
+fn released_writer_then_reused_key() -> Vec<RawLogInput> {
+    let (a, b, c) = (
+        versioned_token("p", 1),
+        versioned_token("a", 1),
+        versioned_token("carrier", 1),
+    );
+    let mut logs = mounted_child();
+    logs.push(unregister(CHILD, b, 6, 0));
+    logs.push(register(CHILD, "p", LIVE, 6, 1));
+    logs.push(set_resolver(CHILD, "p", RESOLVER_Y, 6, 2));
+    logs.push(regenerate(CHILD, a, b, 7, 0));
+    logs.push(regenerate(CHILD, b, c, 7, 1));
+    logs
+}
+
+/// The resolver edges from `CHILD` that open at `block`, by target and key.
+fn reopened_at(output: &BatchOutput, block: i64) -> std::collections::BTreeSet<(Uuid, String)> {
+    resolver_edges(output, CHILD)
+        .into_iter()
+        .filter(|edge| edge.2 == block)
+        .map(|edge| (edge.0, edge.1))
+        .collect()
+}
+
+/// K5: a released token's write does not survive it. After B's key is carried onto C by
+/// regeneration, a remount reopens both of C's keys to C's resolver, and nothing to B's old one.
+#[test]
+fn k5_a_remount_does_not_reopen_a_released_writers_resolver() -> anyhow::Result<()> {
+    let mut logs = released_writer_then_reused_key();
+    logs.push(mount(PARENT, "n", ZERO_ADDRESS, 8, 0));
+    logs.push(mount(PARENT, "n", CHILD, 9, 0));
+    let output = interpret_test_batch(batch(logs))?;
+    assert_eq!(
+        reopened_at(&output, 9),
+        [
+            (instance(RESOLVER_Y), key(CHILD, "p")),
+            (instance(RESOLVER_Y), key(CHILD, "a")),
+        ]
+        .into_iter()
+        .collect()
+    );
+    Ok(())
+}
+
+/// K6: K5's sequence, then another version of `a`'s token id writes `RESOLVER_Z` on the reused
+/// key. That write is still held, so the remount reopens the key to it, not to C's resolver.
+/// C's token id is the greater one, so following the holders instead would pick C's.
+#[test]
+fn k6_a_held_write_after_the_reuse_still_wins_the_remount() -> anyhow::Result<()> {
+    let mut logs = released_writer_then_reused_key();
+    logs.push(set_versioned_resolver(CHILD, "a", 2, RESOLVER_Z, 7, 2));
+    logs.push(mount(PARENT, "n", ZERO_ADDRESS, 8, 0));
+    logs.push(mount(PARENT, "n", CHILD, 9, 0));
+    let output = interpret_test_batch(batch(logs))?;
+    assert_eq!(
+        reopened_at(&output, 9),
+        [
+            (instance(RESOLVER_Y), key(CHILD, "p")),
+            (instance(RESOLVER_Z), key(CHILD, "a")),
+        ]
+        .into_iter()
+        .collect()
+    );
+    Ok(())
+}
+
+/// K7: K1's clear, then the clearing version is unregistered. The clear still stands, so the
+/// link stays closed after a remount although version 1 still holds `RESOLVER_X`.
+#[test]
+fn k7_a_clear_outlives_the_token_that_wrote_it() -> anyhow::Result<()> {
+    let mut logs = cleared_through_another_version();
+    logs.push(unregister(CHILD, versioned_token("a", 2), 7, 0));
+    logs.push(mount(PARENT, "n", ZERO_ADDRESS, 8, 0));
+    logs.push(mount(PARENT, "n", CHILD, 9, 0));
+    let output = interpret_test_batch(batch(logs))?;
+    assert_eq!(reopened_at(&output, 9), std::collections::BTreeSet::new());
+    Ok(())
+}
+
+/// K8: version 2 of `a`'s token id writes `RESOLVER_Y` over version 1's `RESOLVER_X`, then
+/// version 2 is unregistered. A remount follows the surviving holder, version 1.
+#[test]
+fn k8_a_remount_follows_the_surviving_version_after_the_writer_is_released() -> anyhow::Result<()> {
+    let mut logs = mounted_child();
+    logs.push(set_versioned_resolver(CHILD, "a", 2, RESOLVER_Y, 6, 0));
+    logs.push(unregister(CHILD, versioned_token("a", 2), 7, 0));
+    logs.push(mount(PARENT, "n", ZERO_ADDRESS, 8, 0));
+    logs.push(mount(PARENT, "n", CHILD, 9, 0));
+    let output = interpret_test_batch(batch(logs))?;
+    assert_eq!(
+        reopened_at(&output, 9),
+        [(instance(RESOLVER_X), key(CHILD, "a"))]
+            .into_iter()
+            .collect()
+    );
+    Ok(())
+}
+
+/// K5r: K5's sequence in one batch and the remount in the next, three ways.
+#[test]
+fn k5r_a_released_writers_resolver_stays_out_of_a_remount_in_a_later_batch() -> anyhow::Result<()> {
+    let restored = remount_in_a_later_batch(released_writer_then_reused_key(), 7)?;
+    assert_eq!(
+        reopened_at(&restored, 9),
+        [
+            (instance(RESOLVER_Y), key(CHILD, "p")),
+            (instance(RESOLVER_Y), key(CHILD, "a")),
+        ]
+        .into_iter()
+        .collect()
+    );
+    Ok(())
 }
