@@ -690,8 +690,8 @@ async fn a_second_implementation_beside_an_open_bounded_redo_redoes_from_the_fir
     fixture.assert_hashes().await?;
     // The tables first, so a redo that starts too late shows the rows it kept.
     let ranges = run.assert_ranges(first, first);
-    fixture.assert_equals_full_pair().await?;
     ensure!(origins(fixture.pool()).await? == vec![first + 5, second + 5]);
+    fixture.assert_equals_full_pair().await?;
     ranges
 }
 
