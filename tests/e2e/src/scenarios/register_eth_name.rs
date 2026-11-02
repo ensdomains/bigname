@@ -92,6 +92,18 @@ async fn register_eth_name_end_to_end() -> Result<()> {
         );
     }
 
+    // The controller's event owns the lease: the registrar's uint256 `NameRegistered` in the
+    // same transaction adds no second grant (TYR-449).
+    let grants: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events
+         WHERE logical_name_id = $1 AND event_kind = 'RegistrationGranted'
+           AND canonicality_state = 'canonical'",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(&run.db.pool)
+    .await?;
+    assert_eq!(grants, 1, "one grant per controller registration");
+
     // --- layer 3: schema-v2 projection ---
     let projected = families::required_name_by_raw(&run.db.pool, "ens", "alice.eth").await?;
     let declared_summary = projected.declared_summary.clone();

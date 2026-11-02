@@ -712,6 +712,19 @@ async fn the_dao_calls_derive_controller_bridge_and_proxy_rows() -> Result<()> {
         bridged,
         [(Some(eth_name("nick")), Some(i64::try_from(V2_EXPIRY)?))]
     );
+    // No admitted ENSv1 controller event covers the BaseRegistrar renewal, so it is the ENSv1
+    // lease's own renewal, as on the Sepolia profile (TYR-449).
+    let lease_renewals: Vec<Option<i64>> = sqlx::query_scalar(
+        "SELECT (after_state ->> 'expiry')::bigint FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'RegistrationRenewed'
+           AND source_family = 'ens_v1_registrar_l1'
+           AND lower(raw_fact_ref ->> 'emitting_address') = $2",
+    )
+    .bind(CHAIN)
+    .bind(BASE_REGISTRAR)
+    .fetch_all(pool)
+    .await?;
+    assert_eq!(lease_renewals, [Some(i64::try_from(V1_EXPIRY)?)]);
 
     // No proxy row until call 15. Then the client-facing proxy hops to a proxy with no
     // `Upgraded` yet, which is not unadmitted, and the managed proxy's upgrade ends the walk at

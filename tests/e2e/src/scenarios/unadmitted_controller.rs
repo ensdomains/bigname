@@ -9,11 +9,12 @@ const YEAR: u64 = 365 * 24 * 60 * 60;
 /// An owner-added controller registers directly on the registrar
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L79 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L110 @ ens_v1@91c966f).
-/// This Mainnet profile does not admit the registrar-level uint256 lifecycle,
-/// so only registry facts derive. The proven registry path names the child and
-/// its control binding, while the unadmitted registration creates no lease facts.
+/// No admitted controller event follows the registrar's uint256 `NameRegistered`
+/// in its transaction, so the Mainnet profile interprets it as the lease's grant
+/// (TYR-449). The proven registry path names the child, and the lease and its
+/// token lineage are the name's, keyed by the token id.
 #[tokio::test]
-async fn unadmitted_controller_registration_derives_registry_side_only() -> Result<()> {
+async fn unadmitted_controller_registration_derives_the_registrar_lease() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let rpc = anvil.client();
 
@@ -62,57 +63,36 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
         "expected registrar mint + NameRegistered raw logs, saw {registrar_raw_logs}"
     );
 
-    // Nothing lease-bearing derives. Schema-v2 expands the registry-side
-    // child edge into its named authority, binding and permission facets;
-    // every derived event remains a registry-family fact.
-    let mut derived_kinds: Vec<(String, String)> = sqlx::query_as(
-        "SELECT event_kind, source_family FROM normalized_events \
-         WHERE transaction_hash = $1 AND canonicality_state = 'canonical'",
+    // The registrar's own events derive the lease: exactly one grant, named.
+    let grants: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT logical_name_id FROM normalized_events \
+         WHERE transaction_hash = $1 AND event_kind = 'RegistrationGranted' \
+         AND source_family = 'ens_v1_registrar_l1' AND canonicality_state = 'canonical'",
     )
     .bind(&register_tx)
     .fetch_all(&run.db.pool)
     .await?;
-    derived_kinds.sort_unstable();
     assert_eq!(
-        derived_kinds,
-        vec![
-            (
-                "AuthorityEpochChanged".to_owned(),
-                "ens_v1_registry_l1".to_owned(),
-            ),
-            (
-                "AuthorityTransferred".to_owned(),
-                "ens_v1_registry_l1".to_owned(),
-            ),
-            (
-                "PermissionChanged".to_owned(),
-                "ens_v1_registry_l1".to_owned(),
-            ),
-            (
-                "SubregistryChanged".to_owned(),
-                "ens_v1_registry_l1".to_owned(),
-            ),
-            ("SurfaceBound".to_owned(), "ens_v1_registry_l1".to_owned(),),
-        ],
-        "unadmitted-controller registration must derive only registry-side facets"
+        grants,
+        vec![Some(
+            "ens:0x71912a92f1d7b9f48a8ccc1e1a7bcc3ed43e88c682cb276692e6618bb96437ae".to_owned()
+        )],
+        "the registrar registration grants one named lease"
     );
-    let lease_events: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM normalized_events \
-         WHERE event_kind IN ('RegistrationGranted', 'TokenControlTransferred', \
-                              'ExpiryChanged', 'RegistrationRenewed') \
-         AND (after_state->>'labelhash' = $1 \
-              OR after_state->>'child_node' = $2 \
-              OR logical_name_id = 'ens:0x71912a92f1d7b9f48a8ccc1e1a7bcc3ed43e88c682cb276692e6618bb96437ae') \
-         AND canonicality_state = 'canonical'",
+    let lease_rows: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT event_kind FROM normalized_events \
+         WHERE transaction_hash = $1 AND source_family = 'ens_v1_registrar_l1' \
+         AND after_state->>'labelhash' = $2 AND canonicality_state = 'canonical'",
     )
+    .bind(&register_tx)
     .bind(&shadow_labelhash)
-    .bind(&shadow_node)
-    .fetch_one(&run.db.pool)
+    .fetch_all(&run.db.pool)
     .await?;
-    assert_eq!(lease_events, 0, "no lease facts may derive for shadow.eth");
+    assert!(
+        lease_rows.iter().any(|kind| kind == "ExpiryChanged"),
+        "the lease's expiry derives: {lease_rows:?}"
+    );
 
-    // The root-proven eth path makes this registry child addressable without
-    // attributing the unadmitted registrar's lease or token lineage to it.
     let child_rows = families::served_child_rows(&run.db.pool, &shadow_node).await?;
     assert_eq!(
         child_rows, 1,
@@ -125,11 +105,11 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
             .await?;
     assert_eq!(surfaces, 1, "the registry path proves the name surface");
     let row = families::required_name(&run.db.pool, &format!("ens:{shadow_node}")).await?;
-    assert_eq!(row.token_lineage_id, None);
-    assert_eq!(row.declared_summary["registration"]["expiry"], Value::Null);
+    assert!(row.token_lineage_id.is_some(), "{:?}", row.declared_summary);
+    assert_ne!(row.declared_summary["registration"]["expiry"], Value::Null);
     assert_eq!(
         row.declared_summary["registration"]["authority_kind"],
-        "registry_only"
+        "registrar"
     );
 
     let registrant_names: Value = {
@@ -150,10 +130,10 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
     assert_eq!(
         entries.len(),
         1,
-        "the direct registry owner holds the named child: {entries:?}"
+        "the registrant holds the lease: {entries:?}"
     );
     assert_eq!(entries[0]["namehash"], shadow_node);
-    assert_eq!(entries[0]["token_lineage_id"], Value::Null);
+    assert!(entries[0]["token_lineage_id"].is_string(), "{entries:?}");
 
     run.db.cleanup().await?;
     Ok(())
