@@ -5588,8 +5588,8 @@ and the compiled watch plan are unchanged, so stamp no Ingest redo.
 ## Numeric BaseRegistrar lifecycle on Mainnet
 
 The build that interprets the BaseRegistrar's own numeric `NameRegistered` and `NameRenewed` on
-the Mainnet profile unless the next admitted controller event of the same kind for the same node
-follows them in the transaction ([manifests](manifests.md#ens-mainnet),
+the Mainnet profile, except the BaseRegistrar call of an admitted controller event of the same
+kind for the same node later in the transaction ([manifests](manifests.md#ens-mainnet),
 [storage semantics](storage.md)) changes `crates/adapters/src` and
 `manifests/mainnet/ethereum/ens/ens_v1_registrar_l1/v1.toml`. It
 rotates the [interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
