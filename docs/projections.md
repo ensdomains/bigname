@@ -1608,11 +1608,13 @@ inventory serves that resolver's records for the node through a stand-in pointer
 built from the registry pointer, as the resolver-anchored records route does. A
 name its authority withholds, such as a released tombstone, composes the
 `resolver` it composed before, with no address and no latest event. A name the
-resolution path withholds still serves no resolver or records. A cleared
-registry pointer composes a null `resolver` whose latest event is the clear. A
-node with no registry pointer composes a null `resolver` with no latest event. A
-name that selects no resource, such as the ownerless registry profile, is
-unchanged.
+resolution path withholds still serves no resolver or records. The public routes
+serve a released ENSv1 name nothing new, but the records diagnostic
+(`/v1/diagnostics/names/{name}/records`) exposes retained state, so it can show
+such a name's registry resolver records through the stand-in. A cleared registry
+pointer composes a null `resolver` whose latest event is the clear. A node with
+no registry pointer composes a null `resolver` with no latest event. A name that
+selects no resource, such as the ownerless registry profile, is unchanged.
 
 The inventory records the node as one of its inputs, so a later registry pointer
 write recomposes it. The
