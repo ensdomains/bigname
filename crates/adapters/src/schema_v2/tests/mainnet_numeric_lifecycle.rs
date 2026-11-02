@@ -8,6 +8,7 @@ const REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
 const BASE_REGISTRAR: &str = "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85";
 const LEGACY_CONTROLLER: &str = "0x283af0b28c62c092c9727f1ee09c02ca627eb7f5";
 const NAME_WRAPPER: &str = "0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401";
+const WRAPPED_CONTROLLER: &str = "0x253553366da8546fc250f225fe3d25d0c782303b";
 const MIGRATOR: &str = "0x00000000000000000000000000000000000000c1";
 const HOLDER: &str = "0x00000000000000000000000000000000000000c2";
 const NEXT_HOLDER: &str = "0x00000000000000000000000000000000000000c3";
@@ -116,6 +117,12 @@ fn admissions() -> Vec<AddressAdmissionInput> {
             4494,
         ),
         admitted(WRAPPER_MANIFEST, "name_wrapper", NAME_WRAPPER, 4493),
+        admitted(
+            REGISTRAR_MANIFEST,
+            "wrapped_registrar_controller",
+            WRAPPED_CONTROLLER,
+            4496,
+        ),
     ]
 }
 
@@ -879,6 +886,73 @@ fn one_migration_mint_and_its_lapse_add_a_counted_number_of_rows() -> anyhow::Re
         "normalized rows added by the mint and by the lapse, other interpret rows added\n\
          mint now {mint:?}\nmint before {mint_before:?}\nlapse now {lapse:?}\n\
          lapse before {lapse_before:?}\nother {other} before {other_before}"
+    );
+    Ok(())
+}
+
+/// The migrated lease of [`LABEL`], renewed at block 3 by the legacy controller and wrapped at
+/// block 4, as row 8 builds it.
+fn wrapped_migrated_lease() -> anyhow::Result<Logs> {
+    let mut logs = Logs::default();
+    eth_root(&mut logs);
+    migration_mint(&mut logs, 2, LABEL);
+    logs.push(3, 0, BASE_REGISTRAR, numeric_renewal(LABEL, 50_000_000));
+    logs.push(
+        3,
+        0,
+        LEGACY_CONTROLLER,
+        controller_renewal(LABEL, 50_000_000),
+    );
+    logs.push(
+        4,
+        0,
+        BASE_REGISTRAR,
+        token_transfer(LABEL, HOLDER, NAME_WRAPPER),
+    );
+    logs.push(4, 0, REGISTRY, new_owner(LABEL, NAME_WRAPPER));
+    let mut dns = vec![u8::try_from(LABEL.len())?];
+    dns.extend(LABEL.as_bytes());
+    dns.extend(b"\x03eth\0");
+    logs.push(
+        4,
+        0,
+        NAME_WRAPPER,
+        super::NameWrapped {
+            node: node(LABEL).parse()?,
+            name: dns.into(),
+            owner: address(HOLDER),
+            fuses: 196_608,
+            expiry: 50_000_000 + 90 * 86_400,
+        }
+        .encode_log_data(),
+    );
+    Ok(logs)
+}
+
+/// Row 7c: in one transaction a renewal through a controller the profile does not admit, then
+/// one through the admitted wrapped controller. The second numeric renewal derives no rows, but
+/// it is still the registrar word the wrapped controller's renewal reads, so the wrapper expiry
+/// follows the second renewal, not the first
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L312-L337 @ ens_v1@91c966f).
+#[test]
+fn a_wrapped_controller_renewal_reads_the_numeric_renewal_it_covers() -> anyhow::Result<()> {
+    const FIRST: u64 = 60_000_000;
+    const SECOND: u64 = 70_000_000;
+    let mut logs = wrapped_migrated_lease()?;
+    logs.push(5, 0, BASE_REGISTRAR, numeric_renewal(LABEL, FIRST));
+    logs.push(5, 0, BASE_REGISTRAR, numeric_renewal(LABEL, SECOND));
+    logs.push(5, 0, WRAPPED_CONTROLLER, controller_renewal(LABEL, SECOND));
+    let output = logs.run(5)?;
+    let wrapper_expiries = at_block(of_kind(&output, "ExpiryChanged"), 5)
+        .into_iter()
+        .filter(|event| event.after_state["authority_kind"] == "wrapper")
+        .map(|event| event.after_state["expiry"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        wrapper_expiries,
+        [json!(SECOND + 90 * 86_400)],
+        "{:#?}",
+        at_block(of_kind(&output, "ExpiryChanged"), 5)
     );
     Ok(())
 }
