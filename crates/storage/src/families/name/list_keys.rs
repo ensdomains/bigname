@@ -25,10 +25,14 @@ pub(crate) fn listing_eligible(coverage: &Value, summary: &Value) -> bool {
 /// an ownership record for the node
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L157 @ ens_v1@91c966f).
-/// `None` for Basenames, an unresolved selection, or an ownerless registry row.
+/// `None` for Basenames, an unresolved selection, or an ownerless registry row without a lease.
+/// An ownerless registry row whose BaseRegistrar lease stands serves `ens_v1`: the lease, not the
+/// cleared registry record, is its authority.
 pub(crate) fn public_authority(provenance: &Value) -> Option<&'static str> {
     let selection = provenance.get("authority_selection")?;
-    if selection.get("ownerless_registry") == Some(&Value::Bool(true)) {
+    if selection.get("ownerless_registry") == Some(&Value::Bool(true))
+        && !lease_without_registry_owner(provenance)
+    {
         return None;
     }
     match selection.get("authority_arm").and_then(Value::as_str)? {
@@ -39,6 +43,14 @@ pub(crate) fn public_authority(provenance: &Value) -> Option<&'static str> {
         "ens_v2" => Some("ens_v2"),
         _ => None,
     }
+}
+
+/// Whether the composed row is in the ownerless-registry profile with an implied lease
+/// (docs/glossary.md, "Implied lease"): its registry owner is zero and its BaseRegistrar lease
+/// stands (`provenance.authority_selection.lease_without_registry_owner`).
+pub(crate) fn lease_without_registry_owner(provenance: &Value) -> bool {
+    provenance.pointer("/authority_selection/lease_without_registry_owner")
+        == Some(&Value::Bool(true))
 }
 
 /// SQL over a composed row aliased `nc`: its registration carries a finite expiry, an exact

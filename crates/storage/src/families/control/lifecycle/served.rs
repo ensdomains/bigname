@@ -10,7 +10,7 @@ use serde_json::{Map, Value, json};
 use super::{
     Clock, NameFacts, ShadowName,
     admission::{Authority, Probe, REGISTRAR, StagedName},
-    control::{control_owner, served_owner},
+    control::{control_owner, released_control, served_owner},
     expiry::{choose, classify_expiry, live_entry},
     laterals::{
         authority_context, expiry_event, implied_registered_at, latest_event_kind, registrant,
@@ -375,7 +375,8 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         }
     });
     // A cleared ENSv1 registry record does not end the BaseRegistrar lease: an ownerless name
-    // with an implied lease serves it and its holder, with no authority and no registry custody.
+    // with an implied lease serves it, its holder as owner, and no authority kind, registry owner
+    // or manager.
     let ownerless_unleased = selection.ownerless_registry && authority.implied_lease.is_none();
     let status = if ownerless_unleased {
         json!("unregistered")
@@ -512,9 +513,10 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
             registration.get("authority_kind").and_then(Value::as_str),
             Some("registrar" | "registry_only")
         );
-    let serves_control =
-        !(selection.ownerless_registry || selection.released_tombstone || v2_release);
-    let owner = served_owner(facts, folded, owner_required && serves_control)?;
+    let serves_control = !(ownerless_unleased || selection.released_tombstone || v2_release);
+    // The ownerless profile's zero registry owner names nobody.
+    let owner = served_owner(facts, folded, owner_required && serves_control)?
+        .filter(|_| !selection.ownerless_registry);
     // A wrapper grant's control is built like any other grant's.
     let live_control = || {
         let mut control = Map::new();
@@ -574,7 +576,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         control.insert("latest_event_kind".into(), opt_text(owner_kind.as_deref()));
         control
     };
-    let control = if serves_control {
+    let mut control = if serves_control {
         live_control()
     } else {
         Map::from_iter([("status".to_owned(), json!("unregistered"))])
@@ -588,6 +590,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         );
     }
     super::canonical::apply(facts, &tagged, clock, &mut registration, &mut trace)?;
+    released_control(&registration, &mut control);
     Ok(ShadowName {
         registration,
         control,

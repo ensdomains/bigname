@@ -6967,7 +6967,7 @@
           },
           "authority": {
             "$ref": "#/components/schemas/Authority",
-            "description": "Selected authority arm; omitted when none is selected or for an ownerless registry row without a retained registrar binding."
+            "description": "Selected authority arm; omitted when none is selected or for an ownerless registry row with neither a retained registrar binding nor an [implied lease](https://github.com/ensdomains/bigname/blob/main/docs/glossary.md#implied-lease)."
           },
           "ens_v1": {
             "$ref": "#/components/schemas/EnsV1",
@@ -7425,7 +7425,7 @@
           },
           "authority": {
             "$ref": "#/components/schemas/Authority",
-            "description": "Selected authority arm; omitted when none is selected or for an ownerless registry row without a retained registrar binding."
+            "description": "Selected authority arm; omitted when none is selected or for an ownerless registry row with neither a retained registrar binding nor an [implied lease](https://github.com/ensdomains/bigname/blob/main/docs/glossary.md#implied-lease)."
           },
           "ens_v1": {
             "$ref": "#/components/schemas/EnsV1",
@@ -7682,7 +7682,7 @@
           },
           "authority": {
             "$ref": "#/components/schemas/Authority",
-            "description": "Registry generation that owns the node, as the name's detail serves it; omitted when none is selected or for an ownerless registry row without a retained registrar binding."
+            "description": "Registry generation that owns the node, as the name's detail serves it; omitted when none is selected or for an ownerless registry row with neither a retained registrar binding nor an [implied lease](https://github.com/ensdomains/bigname/blob/main/docs/glossary.md#implied-lease)."
           },
           "ens_v1": {
             "$ref": "#/components/schemas/EnsV1",
@@ -7768,7 +7768,7 @@
           },
           "authority": {
             "$ref": "#/components/schemas/Authority",
-            "description": "Registry generation that owns the node, as the child's name row serves it, or for an ENSv1 registry child with no name row its registry's, `ens_v1` or `ens_v0`; omitted when none applies or for an ownerless registry row without a retained registrar binding."
+            "description": "Registry generation that owns the node, as the child's name row serves it, or for an ENSv1 registry child with no name row its registry's, `ens_v1` or `ens_v0`; omitted when none applies or for an ownerless registry row with neither a retained registrar binding nor an [implied lease](https://github.com/ensdomains/bigname/blob/main/docs/glossary.md#implied-lease)."
           },
           "ens_v1": {
             "$ref": "#/components/schemas/EnsV1",
@@ -7857,7 +7857,7 @@
           },
           "authority": {
             "$ref": "#/components/schemas/Authority",
-            "description": "Registry generation that owns the node: the selected authority arm, or for an ENSv1 registry child with no name row its registry's, `ens_v1` or `ens_v0`; omitted when none applies or for an ownerless registry row without a retained registrar binding."
+            "description": "Registry generation that owns the node: the selected authority arm, or for an ENSv1 registry child with no name row its registry's, `ens_v1` or `ens_v0`; omitted when none applies or for an ownerless registry row with neither a retained registrar binding nor an [implied lease](https://github.com/ensdomains/bigname/blob/main/docs/glossary.md#implied-lease)."
           },
           "ens_v1": {
             "$ref": "#/components/schemas/EnsV1",
@@ -8906,7 +8906,7 @@
           },
           "authority": {
             "$ref": "#/components/schemas/Authority",
-            "description": "Registry generation that owns the node, as the child's name row serves it, or for an ENSv1 registry child with no name row its registry's, `ens_v1` or `ens_v0`; omitted when none applies or for an ownerless registry row without a retained registrar binding."
+            "description": "Registry generation that owns the node, as the child's name row serves it, or for an ENSv1 registry child with no name row its registry's, `ens_v1` or `ens_v0`; omitted when none applies or for an ownerless registry row with neither a retained registrar binding nor an [implied lease](https://github.com/ensdomains/bigname/blob/main/docs/glossary.md#implied-lease)."
           },
           "ens_v1": {
             "$ref": "#/components/schemas/EnsV1",

@@ -1,5 +1,7 @@
 //! The control block's registry owner and latest kind, restated over the
 //! name's admitted retained events and the F2c registry node.
+use serde_json::{Map, Value};
+
 use super::{
     NameFacts,
     admission::{Authority, Probe},
@@ -204,6 +206,23 @@ impl std::fmt::Display for RequiredOwnerMissing {
 }
 
 impl std::error::Error for RequiredOwnerMissing {}
+
+/// The served status is the lifecycle status `canonical::apply` schedules, so a name it releases
+/// has no owner, whichever evidence released it: its lease's release, the ENSv1 schedule past
+/// grace, or the lapse of the ENSv2 reservation that stood for it (`docs/api-v1.md`, `owner`).
+/// The registration keeps its registrant.
+pub(super) fn released_control(
+    registration: &Map<String, Value>,
+    control: &mut Map<String, Value>,
+) {
+    if registration.get("lifecycle_status").and_then(Value::as_str) == Some("released") {
+        for field in ["owner", "registrant"] {
+            if let Some(value) = control.get_mut(field) {
+                *value = Value::Null;
+            }
+        }
+    }
+}
 
 /// The registry owner the control block serves. A name that needs one — an unwrapped ENSv1 or
 /// Basenames name whose `active` registration stands on its registrar lease or on its registry

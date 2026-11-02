@@ -31,7 +31,8 @@ pub fn name_current_registry_handoff_block_number(provenance: &Value) -> Option<
 }
 
 /// Whether Project classified the row as the supported ownerless registry
-/// profile. Such a row keeps its selected arm but serves no public `authority`.
+/// profile. Such a row keeps its selected arm, and serves no public `authority` unless its
+/// BaseRegistrar lease stands.
 pub fn name_current_is_ownerless_registry(provenance: &Value) -> bool {
     provenance.pointer("/authority_selection/ownerless_registry") == Some(&Value::Bool(true))
 }
@@ -40,7 +41,7 @@ pub fn name_current_is_ownerless_registry(provenance: &Value) -> bool {
 /// for the node
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L157 @ ens_v1@91c966f).
-/// `None` for Basenames, an unresolved selection, or an ownerless registry row.
+/// `None` for Basenames, an unresolved selection, or an ownerless registry row without a lease.
 pub fn name_current_public_authority(provenance: &Value) -> Option<&'static str> {
     crate::families::name::public_authority(provenance)
 }
@@ -75,8 +76,11 @@ pub(crate) fn push_public_authority_predicate(
 ) {
     builder.push(format!(
         r#"
-                  AND {alias}.provenance #> '{{authority_selection,ownerless_registry}}'
-                      IS DISTINCT FROM 'true'::jsonb
+                  AND ({alias}.provenance #> '{{authority_selection,ownerless_registry}}'
+                          IS DISTINCT FROM 'true'::jsonb
+                      OR {alias}.provenance
+                          #> '{{authority_selection,lease_without_registry_owner}}'
+                          = 'true'::jsonb)
                   AND CASE {alias}.provenance #>> '{{authority_selection,authority_arm}}'
                           WHEN 'ens_v1' THEN CASE
                               WHEN {alias}.provenance

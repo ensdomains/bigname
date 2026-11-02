@@ -974,7 +974,9 @@ collection route carry neither header.
   registry-only name's `registration_id`. `authority` is omitted for Basenames
   names, on a supported ownerless registry row, and on the
   `read_status=unsupported` identity-only object. A zero registry owner does not
-  remove `authority` supplied by a retained registrar binding. `migrated_at` is present only when ENSv2 is the currently selected
+  remove `authority` supplied by a retained registrar binding, and an ownerless
+  `.eth` second-level name whose [implied lease](glossary.md#implied-lease)
+  stands serves `ens_v1`. `migrated_at` is present only when ENSv2 is the currently selected
   `authority` and the name's history retains an activated `MigrationApplied`
   [migration boundary](glossary.md#migration-boundary): it is the decimal Unix-seconds block
   time of that migration event, read through the event's block in the chain
@@ -3550,7 +3552,7 @@ introduces it rebuilds Project from full history before serving the option; see
   the one-value set. A whitespace-only value is treated as absent. A value that
   names no authority (`authority=,`), any other value, or a repeated
   `authority` parameter returns `400 invalid_input`. Rows that serve no
-  `authority` (Basenames rows and ownerless registry rows) match no set, including all three
+  `authority` (Basenames rows and ownerless registry rows without an implied lease) match no set, including all three
   values, so `authority=ens_v0,ens_v1,ens_v2` is narrower than omitting the
   filter.
   `parent` keeps only names exactly one label below the given name, by the

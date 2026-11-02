@@ -11,7 +11,7 @@
 //!   powers hold `resource_control` and the NameWrapper mask allows, and otherwise revokes it
 //!   from its subject only.
 //! - The token holder (served as `owner`) is the composed `control.owner`, the owner the row
-//!   serves: the registrant, else the registry owner, and no one on a released registration,
+//!   serves: the registrant, else the registry owner, and no one on a released name,
 //!   once the owner lapsed, or while the admitted Graveyard holds the record. A name with no
 //!   token lineage is owned by its registry owner (a registry-only subname), or by its
 //!   registrant (a lease transferred without `reclaim`, under the registry-only binding that
@@ -75,12 +75,16 @@ pub(super) const EFFECTIVE_CONTROLLER: &str = "effective_controller";
 pub(super) const ROLE_HOLDER: &str = "role_holder";
 
 /// The (address, relation) pairs of one name; empty for a name without a bound, registered row.
+/// An ownerless registry row whose BaseRegistrar lease stands has no binding and serves only its
+/// token holder: its zero registry owner names no controller.
 pub(super) fn relations(input: &NameRelationsInput<'_>) -> Vec<(String, &'static str)> {
     let row = input.row;
     let summary = &row.declared_summary;
-    if row.surface_binding_id.is_none()
-        || row.resource_id.is_none()
-        || row.binding_kind.is_none()
+    let leased_ownerless = crate::families::name::lease_without_registry_owner(&row.provenance);
+    if (!leased_ownerless
+        && (row.surface_binding_id.is_none()
+            || row.resource_id.is_none()
+            || row.binding_kind.is_none()))
         || summary.pointer("/control/status").and_then(Value::as_str) == Some("unregistered")
     {
         return Vec::new();
@@ -104,11 +108,11 @@ pub(super) fn relations(input: &NameRelationsInput<'_>) -> Vec<(String, &'static
     if lineage || supported {
         out.push((owner, TOKEN_HOLDER));
     }
-    let released = summary
-        .pointer("/registration/status")
-        .and_then(Value::as_str)
-        == Some("released");
-    if (!lineage || open) && !released {
+    // A released name has no manager, whether its registration or its lifecycle status says so.
+    let released = ["/registration/status", "/registration/lifecycle_status"]
+        .iter()
+        .any(|path| summary.pointer(path).and_then(Value::as_str) == Some("released"));
+    if (!lineage || open) && !released && !leased_ownerless {
         let effective = if lineage {
             controller.or(registrant)
         } else {
