@@ -2845,8 +2845,10 @@ async fn a_classification_change_selects_its_readers_only_when_a_side_is_support
 
 // C1: an ENSV2Resolver declaration re-files the `eth` node's resolver from the ENSv1 family,
 // undeclared, to the declared row, which is unsupported too, so it selects no name. The
-// supported case is the contrast: were the role supported, the same change would select every
-// `.eth` name, since the `eth` node points at the resolver.
+// supported case is the contrast: were the role supported, the same change would select the
+// `eth` node, which points at the resolver, and `a.foo.eth`, three labels with no resolver of
+// its own, whose walk reaches `eth`'s pointer. The second-level names never read it, so the
+// frozen statement's `foo.eth` and `bar.eth` are dropped.
 #[tokio::test]
 async fn the_ensv2_resolver_declaration_selects_no_name() -> Result<()> {
     const ENSV2_RESOLVER: &str = "0x3071ad643ce4ed8b3d67b289845b45db82b068a4";
@@ -2860,16 +2862,18 @@ async fn the_ensv2_resolver_declaration_selects_no_name() -> Result<()> {
                 "read_features": []},
             "support_status": status, "unsupported_reason": reason, "manifest_id": 2})
     };
-    for (case, current, expected) in [
+    for (case, current, expected, dropped) in [
         (
             "declared, not projected",
             declared("unsupported", json!("composite_resolver_not_projected")),
+            &[][..],
             &[][..],
         ),
         (
             "supported instead",
             declared("supported", Value::Null),
-            &["eth", "foo.eth", "a.foo.eth", "bar.eth"][..],
+            &["eth", "a.foo.eth"][..],
+            &["foo.eth", "bar.eth"][..],
         ),
     ] {
         let mut world = World::new().await?;
@@ -2886,10 +2890,12 @@ async fn the_ensv2_resolver_declaration_selects_no_name() -> Result<()> {
             after: 4,
             root: Some(ROOT),
         };
-        world
-            .assert_selects(call, expected)
-            .await
-            .with_context(|| format!("ENSV2Resolver case {case}"))?;
+        let selects = if dropped.is_empty() {
+            world.assert_selects(call, expected).await
+        } else {
+            world.assert_narrows(call, expected, dropped).await
+        };
+        selects.with_context(|| format!("ENSV2Resolver case {case}"))?;
         world.cleanup().await?;
     }
     Ok(())
