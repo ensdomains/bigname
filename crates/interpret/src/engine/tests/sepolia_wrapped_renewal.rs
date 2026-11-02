@@ -180,7 +180,11 @@ async fn sepolia_wrapped_controller_renewal_in_grace_keeps_the_wrapper_expiry() 
         .bind(block_hash(number))
         .bind((number > SETUP_BLOCK).then(|| block_hash(number - 1)))
         .bind(number)
-        .bind(if number == sync_block { in_grace } else { number })
+        .bind(if number == sync_block {
+            in_grace
+        } else {
+            number
+        })
         .execute(pool)
         .await?;
     }
