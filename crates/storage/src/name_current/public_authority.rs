@@ -101,7 +101,7 @@ mod tests {
     use super::name_current_public_authority;
 
     #[test]
-    fn public_authority_refines_the_ens_v1_arm_and_omits_ownerless_rows() {
+    fn public_authority_refines_the_ens_v1_arm_and_omits_unleased_ownerless_rows() {
         for (selection, expected) in [
             (
                 json!({"authority_arm": "ens_v1", "registry_generation": "old"}),
@@ -125,6 +125,11 @@ mod tests {
             ),
             (
                 json!({"authority_arm": "ens_v1", "ownerless_registry": false}),
+                Some("ens_v1"),
+            ),
+            (
+                json!({"authority_arm": "ens_v1", "registry_generation": "current",
+                       "ownerless_registry": true, "lease_without_registry_owner": true}),
                 Some("ens_v1"),
             ),
         ] {

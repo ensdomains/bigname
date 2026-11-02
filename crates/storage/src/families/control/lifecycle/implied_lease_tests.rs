@@ -204,6 +204,32 @@ fn events_before_the_handoff_or_state_derived_imply_no_lease() {
     assert_eq!(implied(Name::migrated(vec![snapshot])), None);
 }
 
+/// TYR-438 row 1: a registrar-surface snapshot discloses the lease's retained state, and alone
+/// it implies no lease, on a registry-only handoff or in the ownerless-registry profile. Every
+/// migrated name with registrar rows also has a named renewal or expiry row, which implies it.
+#[test]
+fn a_registrar_surface_snapshot_alone_implies_no_lease() {
+    let snapshot = || {
+        ["RegistrationGranted", "ExpiryChanged"].map(|kind| {
+            event(
+                kind,
+                12,
+                LEASE,
+                json!({"state_derived": true, "registrar_surface_snapshot": true,
+                       "registrant": "0x0000000000000000000000000000000000000000"}),
+            )
+        })
+    };
+    assert_eq!(implied(Name::migrated(snapshot().into())), None);
+    let mut ownerless = Name::migrated(snapshot().into());
+    ownerless.binding = None;
+    ownerless.ownerless = true;
+    assert_eq!(implied(ownerless), None);
+    let mut renewed_too: Vec<LifecycleEvent> = snapshot().into();
+    renewed_too.extend(renewed(13, LEASE));
+    assert_eq!(implied(Name::migrated(renewed_too)), Some(LEASE.to_owned()));
+}
+
 #[test]
 fn another_names_event_implies_no_lease() {
     let other = event(

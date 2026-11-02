@@ -182,6 +182,7 @@ mod tests {
         for summary in [
             json!({"registration": {"status": "released"}}),
             json!({"registration": {"status": "released"}, "wrapper_state": "wrapped"}),
+            json!({"registration": {"status": "active", "lifecycle_status": "released"}}),
         ] {
             assert_eq!(
                 served_manager(&summary, Some(&holder), Some(&registry)),
