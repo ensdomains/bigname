@@ -76,6 +76,18 @@ pub(in crate::families) async fn prepare_names(
     Ok(())
 }
 
+/// The inventory work of one chunk of a composition pass's inventories stream: exactly
+/// `resources`, each composed in full.
+pub(in crate::families) async fn prepare_resources(
+    transaction: &mut Transaction<'_, Postgres>,
+    resources: &[uuid::Uuid],
+) -> Result<()> {
+    create(transaction).await?;
+    sqlx::query("/* project:families.lookup.pass_inventory_work */ INSERT INTO pg_temp.bigname_lookup_inventory_work SELECT DISTINCT unnest($1::uuid[]), true")
+        .bind(resources).execute(&mut **transaction).await.map_err(|e| ProjectError::database("failed to capture lookup inventory work", e))?;
+    Ok(())
+}
+
 async fn create(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query("/* project:families.lookup.create_name_work */ CREATE TEMP TABLE bigname_lookup_name_work (logical_name_id text COLLATE \"C\" PRIMARY KEY) ON COMMIT DROP")
         .execute(&mut **transaction).await.map_err(|e| ProjectError::database("failed to create lookup name work", e))?;

@@ -286,6 +286,24 @@ pub(crate) async fn lock(
     Ok(row.into())
 }
 
+/// Lock the chain's marker for this transaction in share mode: the fence of a composition pass
+/// worker (driver/compose/workers.rs). Workers hold it together, and every transaction that moves
+/// the generation takes the marker `FOR UPDATE` (`lock`) and so waits for every open chunk.
+pub(crate) async fn lock_shared(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+) -> Result<FamilyMarker> {
+    let row: Option<MarkerRow> = sqlx::query_as(&format!(
+        "/* project:families.marker.lock_shared */ SELECT {MARKER_COLUMNS}
+         FROM project_family_marker WHERE chain_id = $1 FOR SHARE"
+    ))
+    .bind(chain_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to share-lock the family marker", error))?;
+    Ok(row.map(FamilyMarker::from).unwrap_or_default())
+}
+
 /// The generation fence of every family transaction: the locked marker must be the one the
 /// driver planned from, block and sequence both.
 pub(crate) fn require(

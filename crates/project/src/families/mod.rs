@@ -104,6 +104,10 @@ pub const MAX_RANGE_EVENTS: u64 = 4096;
 /// set one summary composition already holds.
 pub const COMPOSE_CHUNK_KEYS: usize = 1000;
 
+/// The workers that compose the names stream of a rebuild's composition pass side by side, each
+/// on its own connection. One is the serial pass.
+pub const COMPOSE_WORKERS: u16 = 1;
+
 /// The block spans the composition pass's catalogue build scans the interpreted events in, each
 /// one transaction. On mainnet's 120 M events 64 spans keep one span near two minutes if the
 /// whole scan is about two hours, an estimate, well under the runner's 900 s heartbeat alarm.
@@ -247,6 +251,10 @@ pub struct FamilyOptions {
     pub max_range_events: u64,
     /// Keys one chunk of the composition pass composes; zero counts as one.
     pub compose_chunk_keys: usize,
+    /// Workers composing the composition pass's names stream side by side, at least one. The
+    /// pass's output does not depend on it. More than one needs a pool of one connection more
+    /// than the workers, or the pass is refused at its start.
+    pub compose_workers: u16,
     /// Block spans of the composition pass's catalogue build, at least one. The build's output
     /// does not depend on it. A build resumed with another count is refused.
     pub compose_builder_block_spans: u16,
@@ -277,6 +285,7 @@ impl FamilyOptions {
             max_range_blocks: MAX_RANGE_BLOCKS,
             max_range_events: MAX_RANGE_EVENTS,
             compose_chunk_keys: COMPOSE_CHUNK_KEYS,
+            compose_workers: COMPOSE_WORKERS,
             compose_builder_block_spans: COMPOSE_BUILDER_BLOCK_SPANS,
             compose_builder_key_partitions: COMPOSE_BUILDER_KEY_PARTITIONS,
             compose_builder_work_mem: None,
@@ -314,6 +323,11 @@ impl FamilyOptions {
 
     pub fn with_compose_chunk_keys(mut self, keys: usize) -> Self {
         self.compose_chunk_keys = keys.max(1);
+        self
+    }
+
+    pub fn with_compose_workers(mut self, workers: u16) -> Self {
+        self.compose_workers = workers.max(1);
         self
     }
 
