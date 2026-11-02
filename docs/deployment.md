@@ -5553,6 +5553,35 @@ After the redo, check on mainnet that a registry the factory created through the
 WrapperRegistry implementation lists its parent owner's grants on
 [`GET /v1/permissions`](api-v1-routes.md#get-v1permissions).
 
+## A `.eth` lease's holder owns the name whatever the registry owner is
+
+The build that serves a live BaseRegistrar lease's token holder as `owner` when the name's
+registry owner is zero, and that omits `owner` and `manager` whenever a name serves `status`
+`released` ([projections](projections.md#exact-name-projection), ownerless registry), changes
+the lifecycle composition and the name relations Project stores
+(`crates/storage/src/families/control/lifecycle/`, `crates/storage/src/families/name/`,
+`crates/storage/src/families/records/`, `crates/storage/src/address_names/`). It rotates the
+[projection content hash](glossary.md#projection-content-hash) for every chain. The
+[interpreter content hash](glossary.md#interpreter-content-hash) does not rotate.
+
+What changes for names:
+
+- A `.eth` second-level name whose registry owner is zero and that has an
+  [implied lease](glossary.md#implied-lease) serves the lease's token holder as `owner`, its
+  arm's `authority` (`ens_v1`, or `ens_v0` while only the 2017 registry records the node), and
+  no `manager` or registry owner. It is listed for the holder under `owner`, in address names
+  and in batch lookup, and it matches that `authority` filter. Before, it served no owner and
+  no authority and was listed for nobody.
+- A name the registrar schedule or a lapsed ENSv2 reservation released, while no release of its
+  lease is retained, serves no `owner` or `manager` and is listed for neither. Before, it served
+  `released` with the last owner.
+
+These rows arrive through re-derivation. Every chain needs one full-range Project redo and no
+Interpret redo, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary)
+under matching runner and API binaries. The change rides the next release that redoes
+Project and shares that release's Project redo. Do not mark old rows ready under the new
+hash.
+
 ## ENSv2 registry resolver edges only while reachable
 
 The build that gates an ENSv2 registry's resolver pointers on its reachability
