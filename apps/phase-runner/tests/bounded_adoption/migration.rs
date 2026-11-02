@@ -7,6 +7,7 @@
 //! only (`crates/adapters/src/schema_v2/migration/registry_origin.rs`), which is how these rows
 //! observe what an added or moved implementation changes.
 use alloy_primitives::U256;
+use bigname_test_support::fixture_logs::DatabaseAllowGuard;
 
 use super::*;
 
@@ -274,6 +275,20 @@ impl Fixture {
     }
 }
 
+/// The allowance for an `Initialized` own-log a row plants at an implementation or controller
+/// address.
+async fn allow_placeholder_own_log(fixture: &Fixture) -> DatabaseAllowGuard {
+    allow_unmatched_in(
+        fixture.pool(),
+        &[(
+            "Initialized(uint64)",
+            "placeholder own-log at an implementation address; the redo-range guards read \
+             raw-log presence, not interpretation",
+        )],
+    )
+    .await
+}
+
 /// A fixture whose baseline does not declare the UserRegistry implementation, with factory
 /// origins naming it at `START + 10` and at `start + 5`.
 async fn without_user_implementation(prefix: &str, span: i64, start: i64) -> Result<Fixture> {
@@ -303,6 +318,7 @@ async fn without_user_implementation(prefix: &str, span: i64, start: i64) -> Res
 async fn an_added_implementation_below_the_head_redoes_from_its_start() -> Result<()> {
     let start = START + 20;
     let fixture = without_user_implementation("migration_added", 59, start).await?;
+    let _own_log = allow_placeholder_own_log(&fixture).await;
     fixture
         .log(start, 1, USER_IMPLEMENTATION, &initialized())
         .await?;
@@ -898,6 +914,7 @@ async fn a_migration_admission_above_the_head_replays_one_block() -> Result<()> 
 async fn an_added_address_with_a_log_below_its_start_keeps_the_full_range() -> Result<()> {
     let start = START + 20;
     let fixture = without_user_implementation("migration_guard_added", 59, start).await?;
+    let _own_log = allow_placeholder_own_log(&fixture).await;
     fixture
         .log(start - 5, 1, USER_IMPLEMENTATION, &initialized())
         .await?;
@@ -941,6 +958,7 @@ async fn a_moved_address_with_a_log_below_its_old_start_keeps_the_full_range() -
         )
     })
     .await?;
+    let _own_log = allow_placeholder_own_log(&fixture).await;
     fixture
         .log(old - 1, 0, LOCKED_CONTROLLER, &initialized())
         .await?;
@@ -961,24 +979,41 @@ async fn a_moved_address_with_a_log_below_its_old_start_keeps_the_full_range() -
 }
 
 /// A fixture whose `role` moves from `from` at `old` to `REDEPLOYED` at `new`, with `logs` of
-/// `(block, emitter, log)`, synced after the initial pair.
+/// `(block, emitter, log)`, synced after the initial pair. The fixture admits no `ETH_REGISTRY`
+/// in the window, so its logs are raw-only and the returned allowance names them while the
+/// fixture runs.
 async fn role_moved(
     prefix: &str,
     role: &str,
     (from, old, new): (&str, i64, i64),
     logs: &[(i64, &str, alloy_primitives::LogData)],
-) -> Result<(Fixture, String)> {
+) -> Result<(Fixture, String, Option<DatabaseAllowGuard>)> {
     let fixture = Fixture::with(prefix, 59, |profile| {
         migration_baseline(profile, &[(role, Some((from, old)))])
     })
     .await?;
+    let raw_only = if logs.iter().any(|(_, emitter, _)| *emitter == ETH_REGISTRY) {
+        Some(
+            allow_unmatched_in(
+                fixture.pool(),
+                &[(
+                    ETH_REGISTRY,
+                    "the registry-sender guard reads raw-log presence, and the window admits no \
+                     registry",
+                )],
+            )
+            .await,
+        )
+    } else {
+        None
+    };
     for (block, emitter, log) in logs {
         fixture.log(*block, 0, emitter, log).await?;
     }
     fixture.initial_pair().await?;
     fixture.declare_migration(role, Some((REDEPLOYED, new)))?;
     let token = fixture.sync_migration().await?;
-    Ok((fixture, token))
+    Ok((fixture, token, raw_only))
 }
 
 /// The locked migration controller moved from `LOCKED_CONTROLLER` at `old` to `REDEPLOYED` at
@@ -998,13 +1033,14 @@ async fn controller_moved(
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    role_moved(
+    let (fixture, token, _) = role_moved(
         prefix,
         "locked_migration_controller",
         (LOCKED_CONTROLLER, old, new),
         &logs,
     )
-    .await
+    .await?;
+    Ok((fixture, token))
 }
 
 // The factory-sender guard. The controller lookup reads a factory `ProxyDeployed` naming the
@@ -1117,7 +1153,7 @@ async fn a_factory_log_naming_only_the_other_side_of_a_move_stays_bounded() -> R
 #[tokio::test]
 async fn a_registration_below_the_unlocked_controllers_start_keeps_the_full_range() -> Result<()> {
     let (old, new) = (START + 20, START + 30);
-    let (fixture, token) = role_moved(
+    let (fixture, token, _raw_only) = role_moved(
         "migration_registration_unlocked",
         "unlocked_migration_controller",
         (UNLOCKED_CONTROLLER, old, new),
@@ -1148,7 +1184,7 @@ async fn a_registration_below_the_unlocked_controllers_start_keeps_the_full_rang
 #[tokio::test]
 async fn a_registration_below_the_locked_controllers_start_keeps_the_full_range() -> Result<()> {
     let (old, new) = (START + 20, START + 30);
-    let (fixture, token) = role_moved(
+    let (fixture, token, _raw_only) = role_moved(
         "migration_registration_locked",
         "locked_migration_controller",
         (LOCKED_CONTROLLER, old, new),
@@ -1174,7 +1210,7 @@ async fn a_registration_below_the_locked_controllers_start_keeps_the_full_range(
 #[tokio::test]
 async fn registrations_naming_a_controller_at_its_start_stay_bounded() -> Result<()> {
     let (old, new) = (START + 20, START + 30);
-    let (fixture, token) = role_moved(
+    let (fixture, token, _raw_only) = role_moved(
         "migration_registration_at_start",
         "locked_migration_controller",
         (LOCKED_CONTROLLER, old, new),
@@ -1200,7 +1236,7 @@ async fn registrations_naming_a_controller_at_its_start_stay_bounded() -> Result
 async fn registrations_naming_the_unlocked_controller_at_its_start_stay_bounded() -> Result<()> {
     let (old, new) = (START + 20, START + 30);
     let token = U256::from_be_slice(REDEPLOYED.parse::<Address>()?.as_slice());
-    let (fixture, redo) = role_moved(
+    let (fixture, redo, _raw_only) = role_moved(
         "migration_registration_unlocked_at_start",
         "unlocked_migration_controller",
         (UNLOCKED_CONTROLLER, old, new),

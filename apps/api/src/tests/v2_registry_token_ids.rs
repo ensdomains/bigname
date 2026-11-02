@@ -359,7 +359,22 @@ async fn registry_token_ids_support_historical_preaudit_mint_order() -> Result<(
     assert_lifecycle(true).await
 }
 
+/// The retained pre-audit manifest never declared `TransferSingle`, so a test that interprets the
+/// historical fixture names those logs while it runs.
+fn allow_preaudit_transfers(
+    historical: bool,
+) -> Option<bigname_test_support::fixture_logs::AllowGuard> {
+    historical.then(|| {
+        bigname_test_support::fixture_logs::allow_unmatched(&[(
+            "TransferSingle(address,address,address,uint256,uint256)",
+            "the retained pre-audit manifest never declared it; the test expects HOLDER at block \
+             125",
+        )])
+    })
+}
+
 async fn assert_lifecycle(historical: bool) -> Result<()> {
+    let _preaudit = allow_preaudit_transfers(historical);
     let (manifest, output, logs) = fixture(historical)?;
     let registration = |block| {
         output

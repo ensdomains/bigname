@@ -456,6 +456,7 @@ pub(super) async fn interpret(
     from: i64,
     loaded: load::LoadedBatch,
 ) -> TestResult<(SchemaV2BatchOutput, load::CachedPrior)> {
+    let fixture_logs = bigname_test_support::fixture_logs::Snapshot::of(&loaded.input);
     let prepared = match loaded.prepared {
         Some(prepared) => *prepared,
         None => prepare_schema_v2_batch_incremental_with_provenance(
@@ -472,6 +473,7 @@ pub(super) async fn interpret(
     let values =
         load::prior_state_values(pool, chain, from, prepared.state_value_requests()).await?;
     let (output, adapter_session) = prepared.finish(values)?;
+    fixture_logs.check(pool, &output).await;
     let cache = load::fold_prior_cache(loaded.prior_cache, &output.normalized_events);
     Ok((
         output,

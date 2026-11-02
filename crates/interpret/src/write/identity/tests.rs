@@ -1741,9 +1741,14 @@ mod numeric_short_lease_connected {
         Marker,
         families::{self, FamilyMode, FamilyOptions},
     };
-    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+    use bigname_test_support::{TestDatabase, TestDatabaseConfig, fixture_logs::allow_unmatched};
     use serde_json::Value;
     use sqlx::{PgPool, types::Uuid};
+
+    /// Captured receipt topics no manifest declares: four logs at block 405 and one at 407.
+    const CAPTURED_405: &str = "0x4358b8fcf4f2cad484be30167cddf20e86b2a558bc465c1ca7daf4e6f288ff25";
+    const CAPTURED_407: &str = "0x4acabfe38b19342d926f219b03cae7c02831d64c4449ccd3d6726b8ef1f99630";
+    const CAPTURED: &str = "captured on-chain receipt; production drops this topic identically";
 
     pub(super) async fn database(input: &BatchInput) -> Result<TestDatabase> {
         let database = TestDatabase::create(TestDatabaseConfig::new("numeric_short_lease")).await?;
@@ -1973,6 +1978,7 @@ mod numeric_short_lease_connected {
     #[tokio::test]
     async fn declared_controller_enrichment_opens_one_registrar_binding_through_writer()
     -> Result<()> {
+        let _captured = allow_unmatched(&[(CAPTURED_405, CAPTURED)]);
         use alloy_primitives::{U256, keccak256};
         use alloy_sol_types::{SolEvent, sol};
         use serde_json::json;
@@ -2085,6 +2091,7 @@ mod numeric_short_lease_connected {
     #[tokio::test]
     async fn actual_order_raw_receipts_write_project_and_cold_restore_through_old_expiry()
     -> Result<()> {
+        let _captured = allow_unmatched(&[(CAPTURED_405, CAPTURED), (CAPTURED_407, CAPTURED)]);
         let input = fixture::input()?;
         fixture::assert_receipt_order(&input);
         let expected = fixture::fixture()?;
@@ -2188,6 +2195,7 @@ mod numeric_short_lease_connected {
     // position and the release closure are checked in the written rows before Project runs.
     #[tokio::test]
     async fn raw_migration_then_v2_release_is_written_before_project_serves_it() -> Result<()> {
+        let _captured = allow_unmatched(&[(CAPTURED_405, CAPTURED), (CAPTURED_407, CAPTURED)]);
         use alloy_sol_types::{SolEvent, sol};
         use bigname_adapters::schema_v2::{RawBlockInput, RawLogInput};
         sol! {
@@ -2394,6 +2402,7 @@ mod numeric_short_lease_connected {
 
     #[tokio::test]
     async fn later_readable_timestamp_does_not_move_public_registered_at() -> Result<()> {
+        let _captured = allow_unmatched(&[(CAPTURED_405, CAPTURED), (CAPTURED_407, CAPTURED)]);
         let mut input = fixture::input()?;
         for raw in input
             .raw_logs

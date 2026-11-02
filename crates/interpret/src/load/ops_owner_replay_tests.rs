@@ -5,14 +5,16 @@ use bigname_adapters::schema_v2::seam::{
 };
 use bigname_adapters::{
     SchemaV2AdapterSession, StateCacheCapacity, begin_schema_v2_adapter_restore_with_provenance,
-    prepare_schema_v2_batch_incremental_with_provenance,
 };
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
 use bigname_project::{
     Marker,
     families::{self, FamilyMode, FamilyOptions},
 };
-use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+use bigname_test_support::{
+    TestDatabase, TestDatabaseConfig,
+    fixture_logs::{allow_unmatched, prepare_checked_with_provenance},
+};
 use serde_json::Value;
 use sqlx::{PgPool, types::Uuid};
 
@@ -23,6 +25,15 @@ const CAPACITY: StateCacheCapacity = StateCacheCapacity::Unlimited;
 // are retained. No normalized event, current row or phase progress is seeded.
 #[tokio::test]
 async fn actual_token_sale_live_full_and_compacted_restore_project_identically() -> Result<()> {
+    const CAPTURED: &str = "captured on-chain receipt; production drops this topic identically";
+    let _captured = allow_unmatched(&[
+        (
+            "0x4acabfe38b19342d926f219b03cae7c02831d64c4449ccd3d6726b8ef1f99630",
+            CAPTURED,
+        ),
+        // An ERC-20 `Transfer` from a token contract no manifest declares.
+        ("0xcf7ed3acca5a467e9e704c703e8d87f634fb0fc9", CAPTURED),
+    ]);
     let fixture: Value =
         serde_json::from_str(include_str!("../../tests/fixtures/ops_owner_receipts.json"))?;
     let prefix_end = fixture["prefix_end"].as_i64().context("prefix end")?;
@@ -73,12 +84,8 @@ async fn actual_token_sale_live_full_and_compacted_restore_project_identically()
         .block_timestamp;
     // This genuine live session is returned by the producer, never reconstructed
     // from its output. Full and compacted sessions are compared to it below.
-    let prepared = prepare_schema_v2_batch_incremental_with_provenance(
-        prefix.input,
-        prefix.provenance_manifests,
-        None,
-        CAPACITY,
-    )?;
+    let prepared =
+        prepare_checked_with_provenance(prefix.input, prefix.provenance_manifests, None, CAPACITY)?;
     let values = load::prior_state_values(
         databases[0].pool(),
         CHAIN,
@@ -236,7 +243,7 @@ async fn actual_token_sale_live_full_and_compacted_restore_project_identically()
             expected,
             fixture_lineage(&fixture, prefix_end + 1, suffix_end)
         );
-        let prepared = prepare_schema_v2_batch_incremental_with_provenance(
+        let prepared = prepare_checked_with_provenance(
             loaded.input,
             loaded.provenance_manifests,
             loaded.adapter_session,

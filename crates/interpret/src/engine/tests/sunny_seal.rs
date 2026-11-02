@@ -2,6 +2,7 @@ use alloy_sol_types::SolCall;
 use bigname_adapters::schema_v2::seam::{
     INTERPRETER_STATE_KEY, TOKEN_CONTROL_TRANSFERRED_EVENT_KIND, TOKEN_LINEAGE_ID_KEY,
 };
+use bigname_test_support::fixture_logs::{AllowGuard, allow_unmatched};
 use serde_json::Value;
 
 use super::*;
@@ -10,11 +11,27 @@ const INCIDENT_BLOCK: i64 = 11_849_653;
 const LOGICAL: &str = "ens:0xe5700a9afdd4b3a7d54407ce2c473ca3e4183a1c1a63144e0b694bcd815e6343";
 const LEASE: &str = "850cba17-9ad5-5308-ac30-f6320ead6deb";
 const TRANSIENT_BINDING: &str = "a72322fd-2dbe-52d8-87cd-f492bcdb2e0c";
+/// The Sepolia `VerifiableFactory`, admitted through the migration family.
+const FACTORY: &str = "0xda70306c98e97ece36f997a21368e53298572991";
+
+/// The recorded transaction's logs no manifest selects: the resolver proxy's `Initialized` and
+/// another contract's event captured with the receipt.
+fn allow_captured_receipt() -> AllowGuard {
+    const CAPTURED: &str = "captured on-chain receipt; production drops this topic identically";
+    allow_unmatched(&[
+        ("Initialized(uint64)", CAPTURED),
+        (
+            "0x40dadaa36c6c2e3d7317e24757451ffb2d603d875f0ad5e92c5dd156573b1873",
+            CAPTURED,
+        ),
+    ])
+}
 
 /// Recorded Sepolia transaction and bounded retained state, including the prior ENSv2
 /// reservation's preimage and an ENSv1 lease that had never acquired a readable binding.
 #[tokio::test]
 async fn sunny_seal_recorded_migration_commits_without_a_cleanup_binding() -> TestResult {
+    let _captured = allow_captured_receipt();
     let database = database("interpret_sunny_seal_recorded").await?;
     let pool = database.pool();
     let fixture: Value = serde_json::from_str(include_str!(
@@ -52,6 +69,7 @@ async fn sunny_seal_recorded_migration_commits_without_a_cleanup_binding() -> Te
 #[tokio::test]
 async fn sunny_seal_warm_cold_combined_and_redo_preserve_the_same_current_authority() -> TestResult
 {
+    let _captured = allow_captured_receipt();
     let recorded: Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/sunny-seal-migration.json"
     ))?;
@@ -158,6 +176,7 @@ async fn assert_renewed(pool: &PgPool, block: i64, expiry: i64) -> TestResult {
 
 #[tokio::test]
 async fn sunny_seal_new_numeric_grant_and_its_renewal_keep_the_new_lease_binding() -> TestResult {
+    let _captured = allow_captured_receipt();
     sol! {
         function registerOnly(uint256 id, address owner, uint256 duration);
         event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires);
@@ -295,6 +314,7 @@ async fn sunny_seal_new_numeric_grant_and_its_renewal_keep_the_new_lease_binding
 #[tokio::test]
 async fn sunny_seal_incomplete_and_ordinary_transfers_gain_no_migration_attribution() -> TestResult
 {
+    let _captured = allow_captured_receipt();
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/sunny-seal-migration.json"
     ))?;
@@ -420,6 +440,13 @@ async fn prepare_recorded(
             .admissions
             .retain(|admission| admission.source_manifest_id != Some(1811));
     }
+    let _control = (!migration_enabled).then(|| {
+        allow_unmatched(&[(
+            FACTORY,
+            "the control batch removes the migration family on purpose, so the factory's \
+             ProxyDeployed has no admission",
+        )])
+    });
     let prepared = prepare_checked(
         loaded.input,
         loaded.adapter_session,
