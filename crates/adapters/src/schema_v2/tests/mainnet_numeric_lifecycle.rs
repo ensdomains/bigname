@@ -669,6 +669,153 @@ fn an_uncovered_numeric_renewal_before_a_controller_renewal_still_renews() -> an
     Ok(())
 }
 
+/// The Graveyard's launch block in these fixtures: every migration-family declaration starts here.
+const LAUNCH: i64 = 30;
+const MIGRATION_MANIFEST: i64 = 4495;
+const GRAVEYARD: &str = "0xda021a2c1c2f99574d861ef8c6fa745851beb7f6";
+/// The expiry the Graveyard registers a cleared token with: the largest `uint64` less the grace
+/// period, so the token never enters grace.
+const GRAVEYARD_CLEANUP_EXPIRY: u64 = u64::MAX - 90 * 86_400;
+
+/// `logs` under `registrar` with the checked-in Mainnet migration manifest admitted from
+/// [`LAUNCH`] at its real addresses.
+fn with_migration(logs: &Logs, registrar: ManifestInput, through: i64) -> BatchInput {
+    let mut input = logs.input(registrar, through);
+    input
+        .manifests
+        .push(checked_in("ens_v2_migration_l1", MIGRATION_MANIFEST));
+    for (instance, (role, address)) in [
+        (
+            "unlocked_migration_controller",
+            "0xab821ca676cf2e0790fa273526a165cfa86aeb64",
+        ),
+        (
+            "locked_migration_controller",
+            "0x3cea18620883a69ed349b23328a3b6302598e51a",
+        ),
+        ("graveyard", GRAVEYARD),
+        (
+            "ens_v1_renewal_bridge",
+            "0x56c447f308f463a01121c41e72b0e7e7557fcb68",
+        ),
+        (
+            "verifiable_factory",
+            "0x77510ba162dfea3d8989e3f0928a691b345730d2",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut admission = admitted(
+            MIGRATION_MANIFEST,
+            role,
+            address,
+            4500 + u128::try_from(instance).unwrap(),
+        );
+        admission.active_from_block = Some(LAUNCH);
+        input.admissions.push(admission);
+    }
+    input
+}
+
+/// Row 12: a post-launch Graveyard cleanup of a released lease carries only registrar and
+/// registry logs and no controller event. It opens no lease, and the output is exactly what the
+/// profile derived before TYR-449
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f).
+#[test]
+fn a_graveyard_cleanup_is_not_a_grant() -> anyhow::Result<()> {
+    let mut logs = controller_registration_logs();
+    logs.push(
+        LAUNCH,
+        0,
+        BASE_REGISTRAR,
+        token_transfer("known", HOLDER, ZERO_ADDRESS),
+    );
+    logs.push(
+        LAUNCH,
+        0,
+        BASE_REGISTRAR,
+        token_transfer("known", ZERO_ADDRESS, GRAVEYARD),
+    );
+    logs.push(LAUNCH, 0, REGISTRY, new_owner("known", GRAVEYARD));
+    logs.push(
+        LAUNCH,
+        0,
+        BASE_REGISTRAR,
+        numeric_registration("known", GRAVEYARD, GRAVEYARD_CLEANUP_EXPIRY),
+    );
+    let output = interpret_test_batch(with_migration(
+        &logs,
+        checked_in("ens_v1_registrar_l1", REGISTRAR_MANIFEST),
+        LAUNCH,
+    ))?;
+    let before = interpret_test_batch(with_migration(
+        &logs,
+        registrar_before_numeric_lifecycle(),
+        LAUNCH,
+    ))?;
+    let grants = at_block(of_kind(&output, "RegistrationGranted"), LAUNCH);
+    assert!(grants.is_empty(), "{grants:#?}");
+    assert!(
+        output.normalized_events.iter().any(|event| {
+            event.source_family == "ens_v2_migration_l1"
+                && event.after_state["lifecycle_classification"] == "graveyard_cleanup"
+        }),
+        "the cleanup is classified as one"
+    );
+    assert_eq!(output.normalized_events, before.normalized_events);
+    assert_eq!(output.surface_bindings, before.surface_bindings);
+    assert_eq!(output.binding_closures, before.binding_closures);
+    assert_eq!(output.resources, before.resources);
+    assert_eq!(output.name_surfaces, before.name_surfaces);
+    Ok(())
+}
+
+/// The basis for the redo's row estimate: the interpret rows one migration mint adds in its own
+/// transaction, and those its lapse adds through release, each against the declarations before
+/// TYR-449.
+#[test]
+fn one_migration_mint_and_its_lapse_add_a_counted_number_of_rows() -> anyhow::Result<()> {
+    let mut logs = Logs::default();
+    eth_root(&mut logs);
+    migration_mint(&mut logs, 2, LABEL);
+    let count = |registrar: ManifestInput| -> anyhow::Result<(Vec<String>, Vec<String>, usize)> {
+        let output = interpret_test_batch(logs.input(registrar, 21))?;
+        let kinds = |mint: bool| {
+            let mut kinds = output
+                .normalized_events
+                .iter()
+                .filter(|event| (event.block_number == Some(2)) == mint)
+                .filter(|event| event.block_number > Some(1))
+                .map(|event| event.event_kind.clone())
+                .collect::<Vec<_>>();
+            kinds.sort();
+            kinds
+        };
+        Ok((
+            kinds(true),
+            kinds(false),
+            output.surface_bindings.len() + output.binding_closures.len() + output.resources.len(),
+        ))
+    };
+    let (mint, lapse, other) = count(checked_in("ens_v1_registrar_l1", REGISTRAR_MANIFEST))?;
+    let (mint_before, lapse_before, other_before) = count(registrar_before_numeric_lifecycle())?;
+    let difference = |now: usize, before: usize| now as i64 - before as i64;
+    let added = (
+        difference(mint.len(), mint_before.len()),
+        difference(lapse.len(), lapse_before.len()),
+        difference(other, other_before),
+    );
+    assert_eq!(
+        added,
+        (10, 4, 2),
+        "normalized rows added by the mint and by the lapse, other interpret rows added\n\
+         mint now {mint:?}\nmint before {mint_before:?}\nlapse now {lapse:?}\n\
+         lapse before {lapse_before:?}\nother {other} before {other_before}"
+    );
+    Ok(())
+}
+
 /// Row 8: wrapping a migrated name after the renewal that revealed its label records the numeric
 /// lease as the wrapped registrar resource.
 #[test]

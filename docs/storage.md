@@ -956,10 +956,11 @@ Neither index restricts `consumer_visibility`. The statement filters it.
 When an ENSv1 BaseRegistrar manifest admits ordinary numeric registration and renewal,
 Interpret retains the registrar resource, token lineage, owner and expiry independently of
 registrar-controller logs. A numeric event followed in its transaction by an admitted
-controller event for the same node that declares `RegistrationGranted` is the controller's
-registration or renewal, which the controller event interprets, so the numeric event derives no
-lifecycle row. Only the Mainnet profile admits such controller events. Before an admitted
-plaintext label is known, these lifecycle rows
+controller event of the same kind for the same node that declares `RegistrationGranted`, with no
+other numeric event of that kind for the node between them, is the controller's registration or
+renewal, which the controller event interprets, so the numeric event derives no lifecycle row.
+Only the Mainnet profile admits such controller events. Before an admitted plaintext label is
+known, these lifecycle rows
 have no `logical_name_id` unless a proven registry path already establishes the name
 identity or does so in the same registration transaction. The numeric event alone creates
 no name surface. A previously admitted,

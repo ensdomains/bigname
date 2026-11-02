@@ -5576,6 +5576,9 @@ What changes for names:
   and expiry.
 - A registration or renewal through an admitted controller is interpreted exactly as before. The
   controller's event owns it, and the numeric event in its transaction derives nothing.
+- After the ENSv2 activation, a renewal through the ENSv1 renewal bridge has no admitted
+  controller event, so its numeric `NameRenewed` renews the ENSv1 lease, as on Sepolia.
+- A Graveyard cleanup is still skipped and opens no lease.
 
 The manifest-authority fingerprint changes on Ethereum Mainnet. The registrar manifest now
 declares the lifecycle events of the two numeric events. Synchronization records a

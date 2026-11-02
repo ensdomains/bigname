@@ -768,8 +768,8 @@ async fn lookahead_matches_full_state_for_every_batch() -> TestResult {
         bigname_adapters::schema_v2::seam::TOKEN_CONTROL_TRANSFERRED_EVENT_KIND,
         &|state| state["namehash"] == name("carol")[4..]
     ));
-    // Erin's numeric registration grants her lease before any surface names it. Her label first
-    // appears in the controller renewal, which discloses that lease from registrar evidence.
+    // Erin's numeric registration grants her lease, which retains its registrar evidence. Her
+    // label first appears in the controller renewal, which renews that lease.
     assert!(has("RegistrationGranted", &|state| {
         state["namehash"] == name("erin")[4..] && state.get("registrar_surface_evidence").is_some()
     }));
