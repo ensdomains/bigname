@@ -31,8 +31,11 @@ async fn actual_token_sale_live_full_and_compacted_restore_project_identically()
             "0x4acabfe38b19342d926f219b03cae7c02831d64c4449ccd3d6726b8ef1f99630",
             CAPTURED,
         ),
-        // An ERC-20 `Transfer` from a token contract no manifest declares.
-        ("0xcf7ed3acca5a467e9e704c703e8d87f634fb0fc9", CAPTURED),
+        (
+            "0xcf7ed3acca5a467e9e704c703e8d87f634fb0fc9",
+            "captured on-chain receipt: an ERC-20 Transfer from a token contract no manifest \
+             declares; production drops its logs identically",
+        ),
     ]);
     let fixture: Value =
         serde_json::from_str(include_str!("../../tests/fixtures/ops_owner_receipts.json"))?;

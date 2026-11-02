@@ -1033,13 +1033,17 @@ async fn controller_moved(
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    let (fixture, token, _) = role_moved(
+    let (fixture, token, raw_only) = role_moved(
         prefix,
         "locked_migration_controller",
         (LOCKED_CONTROLLER, old, new),
         &logs,
     )
     .await?;
+    ensure!(
+        raw_only.is_none(),
+        "factory logs need no raw-only allowance"
+    );
     Ok((fixture, token))
 }
 

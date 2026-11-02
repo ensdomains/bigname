@@ -422,6 +422,73 @@ fn a_log_after_its_admission_is_retired_is_reported() {
     assert_eq!(unmatched(&declared, &closure_only).len(), 2);
 }
 
+const TEXT_CHANGED: &str = "event TextChanged(bytes32 indexed node, string indexed indexedKey, \
+                            string key, string value)";
+const TEXT_CHANGED_SIGNATURE: &str = "TextChanged(bytes32,string,string,string)";
+const POINTED: &str = "0x00000000000000000000000000000000000000cc";
+
+/// A registry manifest (`registry_family`) and a resolver manifest (`resolver_family`) declaring
+/// a record event for any emitter, and a record log from `POINTED` after the registry pointed a
+/// name at it at block 5.
+fn pointer_batch(registry_family: &str, resolver_family: &str) -> (Batch, Outcome) {
+    let batch = Batch {
+        manifests: vec![
+            manifest(1, registry_family, &[(SUBREGISTRY_UPDATED, &["registry"])]),
+            manifest(2, resolver_family, &[(TEXT_CHANGED, &[])]),
+        ],
+        rules: Vec::new(),
+        admissions: Vec::new(),
+        logs: vec![
+            log(4, 0, POINTED, vec![topic(TEXT_CHANGED_SIGNATURE)]),
+            log(6, 0, POINTED, vec![topic(TEXT_CHANGED_SIGNATURE)]),
+        ],
+    };
+    let pointed = Uuid::from_u128(0xcc);
+    let outcome = Outcome {
+        edges: vec![Edge {
+            edge_kind: "resolver".to_owned(),
+            from: Uuid::from_u128(0x43),
+            to: pointed,
+            source_manifest_id: 1,
+            observation_key: "resolver:fixture".to_owned(),
+            position: (5, 0, 0),
+        }],
+        contract_addresses: vec![(pointed, POINTED.to_owned(), 5)],
+        ..Outcome::default()
+    };
+    (batch, outcome)
+}
+
+#[test]
+fn a_resolver_edge_infers_the_resolver_family_unless_a_registry_pointer_made_it() {
+    // A Basenames registry's resolver edge admits the resolver, and its record event comes from
+    // the inferred resolver family. The log before the edge's block is not read.
+    let (batch, outcome) = pointer_batch("basenames_base_registry", "basenames_base_resolver");
+    let reported = unmatched(&batch, &outcome);
+    assert_eq!(
+        reported
+            .iter()
+            .map(|item| item.log.position())
+            .collect::<Vec<_>>(),
+        [(4, 0, 0)]
+    );
+    assert_eq!(
+        reported[0].why,
+        Why::PreAdmissionUnrecorded { admitted_at: 5 }
+    );
+    // An ENSv2 registry's resolver pointer binds the name and admits nothing (`discovery.rs`), so
+    // both logs are unadmitted, and neither is blamed on a missing pre-admission skip.
+    let (batch, outcome) = pointer_batch("ens_v2_registry_l1", "ens_v2_resolver_l1");
+    let reported = unmatched(&batch, &outcome);
+    assert_eq!(reported.len(), 2);
+    assert!(
+        reported
+            .iter()
+            .all(|item| matches!(item.why, Why::NoAdmission { .. })),
+        "{reported:?}"
+    );
+}
+
 #[test]
 fn match_all_and_announced_implementation_candidates_count_as_matched() {
     let implementation = "0x00000000000000000000000000000000000000cc";

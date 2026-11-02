@@ -1617,7 +1617,9 @@ fn v2_released_name_record_input(
     const REGISTRY: &str = "ens_v2_registry_l1";
     const RESOLVER: &str = "ens_v2_resolver_l1";
     let registry = wiring.address(REGISTRY, "registry");
-    let resolver = wiring.address(RESOLVER, "resolver");
+    // The manifest declares its record events for `public_resolver_v2` only, so a record log
+    // from the `resolver` slot would be dropped by role.
+    let resolver = wiring.address(RESOLVER, "public_resolver_v2");
     let owner: Address = "0x00000000000000000000000000000000f0000001".parse()?;
     let sender: Address = "0x00000000000000000000000000000000f0000002".parse()?;
     let label = labelhash("alpha");
@@ -2594,7 +2596,9 @@ fn v2_regeneration_collision_input_inner(
     const REGISTRY: &str = "ens_v2_registry_l1";
     const RESOLVER: &str = "ens_v2_resolver_l1";
     let registry = wiring.address(REGISTRY, "registry");
-    let resolver = wiring.address(RESOLVER, "resolver");
+    // The manifest declares its record events for `public_resolver_v2` only, so a record log
+    // from the `resolver` slot would be dropped by role.
+    let resolver = wiring.address(RESOLVER, "public_resolver_v2");
     let owner: Address = "0x00000000000000000000000000000000f0000001".parse()?;
     let sender: Address = "0x00000000000000000000000000000000f0000002".parse()?;
     let alpha_hash = labelhash("alpha");

@@ -5,8 +5,11 @@
 //! the batch never admits, leaves the test exercising a smaller batch than the one it builds.
 //! [`unmatched`] re-derives the selection decision from a finished batch and reports every log
 //! that was neither selected nor recorded as a decode skip. It mirrors `Catalog::select` in
-//! `crates/adapters/src/schema_v2/catalog.rs`. The adapters fixture tests compare the two on every
-//! batch ([`assert_matches_catalog`]), so the mirror cannot drift silently.
+//! `crates/adapters/src/schema_v2/catalog.rs`, and replays the admissions the adapter opens and
+//! retires inside the batch (`crates/adapters/src/schema_v2/discovery.rs`). The adapters fixture
+//! tests compare the static selection with `Catalog::select` on every batch
+//! ([`assert_matches_catalog`]). The in-batch replay has no such comparison, so a change to where
+//! `discovery.rs` admits must be mirrored in `Replay::new` by hand.
 //!
 //! A test that drops a log on purpose names it with [`allow_unmatched`] (in-process batches) or
 //! [`allow_unmatched_in`] (batches the Interpret engine runs against a test database), with the
@@ -58,7 +61,6 @@ pub struct Manifest {
 pub struct Rule {
     pub manifest_id: i64,
     pub edge_kind: String,
-    pub from_role: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -146,7 +148,6 @@ macro_rules! fixture_log_views {
                     .map(|rule| $crate::fixture_logs::Rule {
                         manifest_id: rule.manifest_id,
                         edge_kind: rule.edge_kind.clone(),
-                        from_role: rule.from_role.clone(),
                     })
                     .collect(),
                 admissions: input
@@ -292,7 +293,7 @@ pub struct Admitted {
 /// Every log of a finished batch that no catalog candidate selected and no decode skip records.
 pub fn unmatched(batch: &Batch, outcome: &Outcome) -> Vec<Unmatched> {
     let oracle = Oracle::new(batch);
-    let replay = Replay::new(outcome);
+    let replay = Replay::new(batch, outcome);
     batch
         .logs
         .iter()
@@ -643,7 +644,22 @@ type RetirementKey = (String, Uuid, String);
 type ReplayEvent = (Position, u8, Option<usize>);
 
 impl Replay {
-    fn new(outcome: &Outcome) -> Self {
+    /// Mirrors the `catalog.admit` sites in `discovery.rs`: a `resolver` edge admits its target
+    /// unless a registry or root manifest produced it (a registry's resolver pointer binds the
+    /// name and admits nothing), and a `registry_announcement` edge always admits. Every edge's
+    /// closure is replayed whatever its kind.
+    fn new(batch: &Batch, outcome: &Outcome) -> Self {
+        let pointer_manifests = batch
+            .manifests
+            .iter()
+            .filter(|manifest| {
+                matches!(
+                    manifest.source_family.as_str(),
+                    "ens_v2_registry_l1" | "ens_v2_root_l1"
+                )
+            })
+            .map(|manifest| manifest.manifest_id)
+            .collect::<BTreeSet<_>>();
         let mut opened = Vec::new();
         let mut events: BTreeMap<RetirementKey, Vec<ReplayEvent>> = BTreeMap::new();
         for closure in &outcome.closures {
@@ -656,12 +672,15 @@ impl Replay {
                 .or_default()
                 .push((closure.position, 0, None));
         }
-        for edge in outcome.edges.iter().filter(|edge| {
-            matches!(
-                edge.edge_kind.as_str(),
-                "resolver" | "registry_announcement"
-            )
-        }) {
+        for edge in outcome
+            .edges
+            .iter()
+            .filter(|edge| match edge.edge_kind.as_str() {
+                "resolver" => !pointer_manifests.contains(&edge.source_manifest_id),
+                "registry_announcement" => true,
+                _ => false,
+            })
+        {
             let addresses = outcome
                 .contract_addresses
                 .iter()
