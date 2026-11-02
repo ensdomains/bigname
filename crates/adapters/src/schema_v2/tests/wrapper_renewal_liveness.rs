@@ -35,7 +35,10 @@ const PROBE_BLOCK: i64 = 4;
 
 /// How the deployment declares the wrapped controller's `NameRenewed`. Mainnet declares it with
 /// `RegistrationGranted`, so it takes the registrar name-event path. Sepolia declares only
-/// `ExpiryChanged` and `PreimageObserved`, so it takes the enrichment path.
+/// `ExpiryChanged` and `PreimageObserved`, so it takes the enrichment path. Both variants keep
+/// the BaseRegistrar's `NameRenewed` lifecycle-enabled, so it records the transaction's registrar
+/// word. Mainnet declares that event without `RegistrationGranted`, so there the word is the
+/// lease the controller's event sets, which the held-lease row covers.
 #[derive(Clone, Copy, Debug)]
 enum Declaration {
     Mainnet,
@@ -44,7 +47,8 @@ enum Declaration {
 
 const DECLARATIONS: [Declaration; 2] = [Declaration::Mainnet, Declaration::Sepolia];
 
-fn input(declaration: Declaration, raw_logs: Vec<RawLogInput>) -> BatchInput {
+fn input(declaration: Declaration, mut raw_logs: Vec<RawLogInput>) -> BatchInput {
+    raw_logs.sort_by_key(|raw| (raw.block_number, raw.transaction_index, raw.log_index));
     let controller_events: &[&str] = match declaration {
         Declaration::Mainnet => &[
             "RegistrationGranted",
@@ -93,7 +97,10 @@ fn input(declaration: Declaration, raw_logs: Vec<RawLogInput>) -> BatchInput {
             (
                 "NameRenewed",
                 "event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires)",
-                &["legacy_registrar_controller", "wrapped_registrar_controller"],
+                &[
+                    "legacy_registrar_controller",
+                    "wrapped_registrar_controller",
+                ],
                 controller_events,
             ),
         ],
@@ -178,8 +185,9 @@ fn controller_renewed(label: &str, cost: u64, expires: u64) -> alloy_primitives:
 }
 
 /// The name wrapped at block 1 with the wrap's stored expiry, then renewed at block 2 through
-/// the legacy controller, which calls only `BaseRegistrar.renew`, so the wrapper expiry trails
-/// the lease. Both blocks use transaction `transaction` so several names can share them.
+/// the legacy controller role, a controller that calls only `BaseRegistrar.renew` as the current
+/// controller does, so the wrapper expiry trails the lease. Both blocks use transaction
+/// `transaction` so several names can share them.
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L352-L368 @ ens_v1@91c966f)
 fn wrapped_then_bypassed(label: &str, transaction: i64) -> Vec<RawLogInput> {
     let mut dns_name = vec![u8::try_from(label.len()).expect("short label")];
@@ -437,7 +445,8 @@ fn a_paid_renewal_then_its_wrapper_sync_extends_the_wrapper_once() -> anyhow::Re
 #[test]
 fn a_renewal_that_bypasses_the_name_wrapper_derives_no_wrapper_expiry() -> anyhow::Result<()> {
     for declaration in DECLARATIONS {
-        let output = interpret_test_batch(input(declaration, wrapped_then_bypassed("lapsedwrap", 0)))?;
+        let output =
+            interpret_test_batch(input(declaration, wrapped_then_bypassed("lapsedwrap", 0)))?;
         assert_eq!(
             wrapper_expiries(&output, 2, "lapsedwrap"),
             Vec::<&NormalizedEvent>::new(),
