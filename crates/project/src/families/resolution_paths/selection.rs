@@ -373,12 +373,11 @@ pub(super) fn statement(normal_work: &str) -> String {
         SELECT pointer.namespace || ':' || lower(pointer.namehash)
         FROM changed_resolvers changed JOIN project_resource_pointer pointer
           ON pointer.chain_id=$1 AND pointer.resolver_address=changed.resolver
-        WHERE pointer.source_family IN {v1_family}
     ), v2_resolver_readers AS MATERIALIZED (
         SELECT pointer.namespace || ':' || lower(pointer.namehash) AS logical_name_id
         FROM changed_resolvers changed JOIN project_resource_pointer pointer
           ON pointer.chain_id=$1 AND pointer.resolver_address=changed.resolver
-        WHERE pointer.source_family IS NULL OR pointer.source_family NOT IN {v1_family}
+        WHERE false
     ), resolver_readers AS MATERIALIZED (
         SELECT logical_name_id FROM v1_resolver_readers UNION SELECT logical_name_id FROM v2_resolver_readers
     ), source_names AS MATERIALIZED (
@@ -661,6 +660,14 @@ pub(super) fn statement(normal_work: &str) -> String {
               AND {under_prefix}
               AND {walks_ancestor_pointers}
               AND {has_no_own_resolver}
+            OFFSET 0
+        ) probe
+        UNION
+        -- An ENSv1 reader of a changed resolver recomposes itself, by the key of its surface.
+        SELECT probe.logical_name_id FROM v1_resolver_readers reader
+        CROSS JOIN LATERAL (
+            SELECT child.logical_name_id FROM name_surfaces child
+            WHERE child.logical_name_id=reader.logical_name_id AND child.chain_id=$1
             OFFSET 0
         ) probe
         UNION
