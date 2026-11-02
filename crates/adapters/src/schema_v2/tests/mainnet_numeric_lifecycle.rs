@@ -1,6 +1,6 @@
 //! TYR-449: the mainnet profile's numeric BaseRegistrar `NameRegistered` and `NameRenewed` are
-//! lease lifecycle rows unless an admitted controller event for the same node follows in the same
-//! transaction. Every fixture reads the checked-in mainnet manifests at their real addresses.
+//! lease lifecycle rows unless the next admitted controller event of the same kind for the same
+//! node follows in the same transaction. Every fixture reads the checked-in mainnet manifests at their real addresses.
 use super::*;
 
 const REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
@@ -25,6 +25,12 @@ mod base {
         event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires);
         event NameRenewed(uint256 indexed id, uint256 expires);
         event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
+    }
+}
+
+mod bridge {
+    alloy_sol_types::sol! {
+        event NameRenewed(uint256 indexed tokenId, string label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 indexed referrer, uint256 amount);
     }
 }
 
@@ -284,6 +290,11 @@ fn controller_renewal(label: &str, expires: u64) -> alloy_primitives::LogData {
 /// itself, writes the registry record to HOLDER and hands HOLDER the token
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L152 @ ens_v1@91c966f).
 fn migration_mint(logs: &mut Logs, block: i64, label: &str) {
+    migration_mint_until(logs, block, label, EXPIRY);
+}
+
+/// [`migration_mint`] with the lease running until `expiry`.
+fn migration_mint_until(logs: &mut Logs, block: i64, label: &str, expiry: u64) {
     logs.push(
         block,
         0,
@@ -295,7 +306,7 @@ fn migration_mint(logs: &mut Logs, block: i64, label: &str) {
         block,
         0,
         BASE_REGISTRAR,
-        numeric_registration(label, MIGRATOR, EXPIRY),
+        numeric_registration(label, MIGRATOR, expiry),
     );
     logs.push(block, 0, REGISTRY, registry_transfer(label, HOLDER));
     logs.push(
@@ -359,7 +370,7 @@ fn of_kind<'a>(output: &'a BatchOutput, kind: &str) -> Vec<&'a NormalizedEvent> 
         .collect()
 }
 
-fn at_block<'a>(events: Vec<&'a NormalizedEvent>, number: i64) -> Vec<&'a NormalizedEvent> {
+fn at_block(events: Vec<&NormalizedEvent>, number: i64) -> Vec<&NormalizedEvent> {
     events
         .into_iter()
         .filter(|event| event.block_number == Some(number))
@@ -627,6 +638,247 @@ fn a_controller_renewal_still_owns_its_renewal() -> anyhow::Result<()> {
         LEGACY_CONTROLLER
     );
     assert_eq!(of_kind(&output, "RegistrationGranted").len(), 1);
+    Ok(())
+}
+
+/// Row 7b: a controller event covers only the numeric event of its kind just before it. A
+/// numeric renewal through another caller earlier in the transaction is still its own renewal.
+#[test]
+fn an_uncovered_numeric_renewal_before_a_controller_renewal_still_renews() -> anyhow::Result<()> {
+    let mut logs = Logs::default();
+    eth_root(&mut logs);
+    migration_mint(&mut logs, 2, LABEL);
+    logs.push(3, 0, BASE_REGISTRAR, numeric_renewal(LABEL, 40_000_000));
+    logs.push(3, 0, BASE_REGISTRAR, numeric_renewal(LABEL, 50_000_000));
+    logs.push(
+        3,
+        0,
+        LEGACY_CONTROLLER,
+        controller_renewal(LABEL, 50_000_000),
+    );
+    let output = logs.run(3)?;
+    let (_, lease) = mint_grant(&output);
+    let renewed = at_block(of_kind(&output, "RegistrationRenewed"), 3);
+    let emitted = renewed
+        .iter()
+        .map(|event| {
+            (
+                event.raw_fact_ref["emitting_address"].clone(),
+                event.after_state["expiry"].clone(),
+                event.resource_id,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        emitted,
+        [
+            (json!(BASE_REGISTRAR), json!(40_000_000), Some(lease)),
+            (json!(LEGACY_CONTROLLER), json!(50_000_000), Some(lease)),
+        ],
+        "{renewed:#?}"
+    );
+    Ok(())
+}
+
+/// The Graveyard's launch block in these fixtures: every migration-family declaration starts here.
+const LAUNCH: i64 = 30;
+const MIGRATION_MANIFEST: i64 = 4495;
+const GRAVEYARD: &str = "0xda021a2c1c2f99574d861ef8c6fa745851beb7f6";
+/// The expiry the Graveyard registers a cleared token with: the largest `uint64` less the grace
+/// period, so the token never enters grace.
+const GRAVEYARD_CLEANUP_EXPIRY: u64 = u64::MAX - 90 * 86_400;
+
+/// `logs` under `registrar` with the checked-in Mainnet migration manifest admitted from
+/// [`LAUNCH`] at its real addresses.
+fn with_migration(logs: &Logs, registrar: ManifestInput, through: i64) -> BatchInput {
+    let mut input = logs.input(registrar, through);
+    input
+        .manifests
+        .push(checked_in("ens_v2_migration_l1", MIGRATION_MANIFEST));
+    for (instance, (role, address)) in [
+        (
+            "unlocked_migration_controller",
+            "0xab821ca676cf2e0790fa273526a165cfa86aeb64",
+        ),
+        (
+            "locked_migration_controller",
+            "0x3cea18620883a69ed349b23328a3b6302598e51a",
+        ),
+        ("graveyard", GRAVEYARD),
+        (
+            "ens_v1_renewal_bridge",
+            "0x56c447f308f463a01121c41e72b0e7e7557fcb68",
+        ),
+        (
+            "verifiable_factory",
+            "0x77510ba162dfea3d8989e3f0928a691b345730d2",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut admission = admitted(
+            MIGRATION_MANIFEST,
+            role,
+            address,
+            4500 + u128::try_from(instance).unwrap(),
+        );
+        admission.active_from_block = Some(LAUNCH);
+        input.admissions.push(admission);
+    }
+    input
+}
+
+/// Row 12: a post-launch Graveyard cleanup of a released lease carries only registrar and
+/// registry logs and no controller event. It opens no lease, and the output is exactly what the
+/// profile derived before TYR-449
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f).
+#[test]
+fn a_graveyard_cleanup_is_not_a_grant() -> anyhow::Result<()> {
+    let mut logs = controller_registration_logs();
+    logs.push(
+        LAUNCH,
+        0,
+        BASE_REGISTRAR,
+        token_transfer("known", HOLDER, ZERO_ADDRESS),
+    );
+    logs.push(
+        LAUNCH,
+        0,
+        BASE_REGISTRAR,
+        token_transfer("known", ZERO_ADDRESS, GRAVEYARD),
+    );
+    logs.push(LAUNCH, 0, REGISTRY, new_owner("known", GRAVEYARD));
+    logs.push(
+        LAUNCH,
+        0,
+        BASE_REGISTRAR,
+        numeric_registration("known", GRAVEYARD, GRAVEYARD_CLEANUP_EXPIRY),
+    );
+    let output = interpret_test_batch(with_migration(
+        &logs,
+        checked_in("ens_v1_registrar_l1", REGISTRAR_MANIFEST),
+        LAUNCH,
+    ))?;
+    let before = interpret_test_batch(with_migration(
+        &logs,
+        registrar_before_numeric_lifecycle(),
+        LAUNCH,
+    ))?;
+    let grants = at_block(of_kind(&output, "RegistrationGranted"), LAUNCH);
+    assert!(grants.is_empty(), "{grants:#?}");
+    assert!(
+        output.normalized_events.iter().any(|event| {
+            event.source_family == "ens_v2_migration_l1"
+                && event.after_state["lifecycle_classification"] == "graveyard_cleanup"
+        }),
+        "the cleanup is classified as one"
+    );
+    assert_eq!(output.normalized_events, before.normalized_events);
+    assert_eq!(output.surface_bindings, before.surface_bindings);
+    assert_eq!(output.binding_closures, before.binding_closures);
+    assert_eq!(output.resources, before.resources);
+    assert_eq!(output.name_surfaces, before.name_surfaces);
+    Ok(())
+}
+
+const RENEWAL_BRIDGE: &str = "0x56c447f308f463a01121c41e72b0e7e7557fcb68";
+
+/// Row B-ii: after the ENSv2 activation a renewal through the ENSv1 renewal bridge emits the
+/// BaseRegistrar's numeric `NameRenewed` and the bridge's own `NameRenewed`, and no admitted ENSv1
+/// controller event. On a migrated name the numeric renewal renews the lease the migration mint
+/// opened, under its name, and derives no synthetic grant.
+#[test]
+fn a_bridged_renewal_of_a_migrated_name_renews_its_numeric_lease() -> anyhow::Result<()> {
+    const LIVE_EXPIRY: u64 = 50_000_000;
+    const RENEWED: u64 = 60_000_000;
+    let mut logs = Logs::default();
+    eth_root(&mut logs);
+    migration_mint_until(&mut logs, 2, LABEL, LIVE_EXPIRY);
+    logs.push(LAUNCH, 0, BASE_REGISTRAR, numeric_renewal(LABEL, RENEWED));
+    logs.push(
+        LAUNCH,
+        0,
+        RENEWAL_BRIDGE,
+        bridge::NameRenewed {
+            tokenId: token(LABEL),
+            label: LABEL.to_owned(),
+            duration: 31_536_000,
+            newExpiry: RENEWED,
+            paymentToken: Address::ZERO,
+            referrer: B256::ZERO,
+            amount: U256::from(1_u64),
+        }
+        .encode_log_data(),
+    );
+    let output = interpret_test_batch(with_migration(
+        &logs,
+        checked_in("ens_v1_registrar_l1", REGISTRAR_MANIFEST),
+        LAUNCH,
+    ))?;
+    let (_, lease) = mint_grant(&output);
+    let lease_rows = |kind: &str| {
+        at_block(of_kind(&output, kind), LAUNCH)
+            .into_iter()
+            .filter(|event| event.source_family == "ens_v1_registrar_l1")
+            .collect::<Vec<_>>()
+    };
+    let grants = lease_rows("RegistrationGranted");
+    assert!(grants.is_empty(), "no synthetic grant: {grants:#?}");
+    let renewed = lease_rows("RegistrationRenewed");
+    assert_eq!(renewed.len(), 1, "{renewed:#?}");
+    assert_eq!(renewed[0].resource_id, Some(lease));
+    assert_eq!(
+        renewed[0].logical_name_id.as_deref(),
+        Some(name(LABEL).as_str())
+    );
+    assert_eq!(renewed[0].after_state["registrant"], HOLDER);
+    assert_eq!(renewed[0].after_state["expiry"], RENEWED);
+    Ok(())
+}
+
+/// The basis for the redo's row estimate: the interpret rows one migration mint adds in its own
+/// transaction, and those its lapse adds through release, each against the declarations before
+/// TYR-449.
+#[test]
+fn one_migration_mint_and_its_lapse_add_a_counted_number_of_rows() -> anyhow::Result<()> {
+    let mut logs = Logs::default();
+    eth_root(&mut logs);
+    migration_mint(&mut logs, 2, LABEL);
+    let count = |registrar: ManifestInput| -> anyhow::Result<(Vec<String>, Vec<String>, usize)> {
+        let output = interpret_test_batch(logs.input(registrar, 21))?;
+        let kinds = |mint: bool| {
+            let mut kinds = output
+                .normalized_events
+                .iter()
+                .filter(|event| (event.block_number == Some(2)) == mint)
+                .filter(|event| event.block_number > Some(1))
+                .map(|event| event.event_kind.clone())
+                .collect::<Vec<_>>();
+            kinds.sort();
+            kinds
+        };
+        Ok((
+            kinds(true),
+            kinds(false),
+            output.surface_bindings.len() + output.binding_closures.len() + output.resources.len(),
+        ))
+    };
+    let (mint, lapse, other) = count(checked_in("ens_v1_registrar_l1", REGISTRAR_MANIFEST))?;
+    let (mint_before, lapse_before, other_before) = count(registrar_before_numeric_lifecycle())?;
+    let difference = |now: usize, before: usize| now as i64 - before as i64;
+    let added = (
+        difference(mint.len(), mint_before.len()),
+        difference(lapse.len(), lapse_before.len()),
+        difference(other, other_before),
+    );
+    assert_eq!(
+        added,
+        (14, 6, 9),
+        "normalized rows added by the mint and by the lapse, other interpret rows added\n\
+         mint now {mint:?}\nmint before {mint_before:?}\nlapse now {lapse:?}\n\
+         lapse before {lapse_before:?}\nother {other} before {other_before}"
+    );
     Ok(())
 }
 
