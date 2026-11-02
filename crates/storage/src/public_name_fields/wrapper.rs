@@ -86,14 +86,17 @@ pub const fn wrapper_lifecycle_matches_fuses(state: WrapperState, fuses: Wrapper
 /// wrapper-state condition, except while a wrapped `.eth` name is in registrar grace, when no one
 /// can (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L202-L222 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1082-L1089 @ ens_v1@91c966f).
-/// Burned fuses can still forbid a particular change. A released name, and a wrapped name whose
-/// NameWrapper state is unknown or lapsed (`wrapper_masked`), has no manager.
+/// Burned fuses can still forbid a particular change. A released name, whether its registration
+/// or its lifecycle status says so, and a wrapped name whose NameWrapper state is unknown or
+/// lapsed (`wrapper_masked`), has no manager.
 pub fn served_manager(
     declared_summary: &Value,
     owner: Option<&String>,
     registry_owner: Option<&String>,
 ) -> Option<String> {
-    if declared_summary.pointer("/registration/status") == Some(&Value::from("released"))
+    let released = Value::from("released");
+    if declared_summary.pointer("/registration/status") == Some(&released)
+        || declared_summary.pointer("/registration/lifecycle_status") == Some(&released)
         || declared_summary.get("wrapper_masked") == Some(&Value::Bool(true))
         || matches!(
             declared_summary
@@ -182,6 +185,7 @@ mod tests {
         for summary in [
             json!({"registration": {"status": "released"}}),
             json!({"registration": {"status": "released"}, "wrapper_state": "wrapped"}),
+            json!({"registration": {"status": "active", "lifecycle_status": "released"}}),
         ] {
             assert_eq!(
                 served_manager(&summary, Some(&holder), Some(&registry)),

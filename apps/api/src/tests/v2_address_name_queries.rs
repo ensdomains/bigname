@@ -320,8 +320,8 @@ async fn v2_address_names_authority_sets_match_any_listed_authority() -> Result<
         }}))
         .await?;
     republish_fixture_chain(&database, "base-mainnet").await?;
-    // alpha ens_v0, beta and gamma ens_v1, shared-two ens_v2; shared-one is ownerless and serves
-    // no authority, so no set matches it where it is listed.
+    // alpha ens_v0, beta and gamma ens_v1, shared-two ens_v2; shared-one is ownerless with an
+    // implied lease and serves its arm's ens_v0.
     seed_authority_shape_names(&database, V2_ADDRESS).await?;
 
     for (base, counted) in [
@@ -404,15 +404,18 @@ async fn v2_address_names_authority_sets_match_any_listed_authority() -> Result<
     let both = walk_address_names(
         &database,
         &format!("{names_uri}?authority=ens_v0,ens_v1"),
-        Some(3),
+        Some(4),
     )
     .await?;
-    assert_eq!(row_names(&both), ["alpha.eth", "beta.eth", "gamma.eth"]);
+    assert_eq!(
+        row_names(&both),
+        ["alpha.eth", "beta.eth", "gamma.eth", "shared-one.eth"]
+    );
     let authorities: Vec<&str> = both
         .iter()
         .map(|row| row["authority"].as_str().expect("authority"))
         .collect();
-    assert_eq!(authorities, ["ens_v0", "ens_v1", "ens_v1"]);
+    assert_eq!(authorities, ["ens_v0", "ens_v1", "ens_v1", "ens_v0"]);
 
     // The cursor binds the set, spelled canonically: a reordered set resumes, another does not,
     // and a one-value set is the single value it always was.

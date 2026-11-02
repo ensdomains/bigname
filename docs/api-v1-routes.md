@@ -395,7 +395,7 @@ collection route carry neither header.
   that `ens_v2` authority was proven by an ENSv1→ENSv2 migration transition;
   both apply to name results and reverse rows alike and are omitted on feed
   records, on `read_status=unsupported` records, and, for `authority`, on ownerless
-  registry rows. `profile=detail` records whose `authority` is `ens_v1` or
+  registry rows without an [implied lease](glossary.md#implied-lease). `profile=detail` records whose `authority` is `ens_v1` or
   `ens_v0` also carry the `ens_v1` object (`{expires_at, wrapper_state?,
   wrapper_fuses?, wrapper_expires_at?, wrapper_expires_at_reason?}`, the ENSv1
   lease date and NameWrapper position) exactly as
@@ -974,7 +974,10 @@ collection route carry neither header.
   registry-only name's `registration_id`. `authority` is omitted for Basenames
   names, on a supported ownerless registry row, and on the
   `read_status=unsupported` identity-only object. A zero registry owner does not
-  remove `authority` supplied by a retained registrar binding. `migrated_at` is present only when ENSv2 is the currently selected
+  remove `authority` supplied by a retained registrar binding, and an ownerless
+  `.eth` second-level name with an [implied lease](glossary.md#implied-lease)
+  keeps its arm's value (`ens_v1`, or `ens_v0` while only the 2017 registry
+  records the node). `migrated_at` is present only when ENSv2 is the currently selected
   `authority` and the name's history retains an activated `MigrationApplied`
   [migration boundary](glossary.md#migration-boundary): it is the decimal Unix-seconds block
   time of that migration event, read through the event's block in the chain
@@ -3550,7 +3553,7 @@ introduces it rebuilds Project from full history before serving the option; see
   the one-value set. A whitespace-only value is treated as absent. A value that
   names no authority (`authority=,`), any other value, or a repeated
   `authority` parameter returns `400 invalid_input`. Rows that serve no
-  `authority` (Basenames rows and ownerless registry rows) match no set, including all three
+  `authority` (Basenames rows and ownerless registry rows without an implied lease) match no set, including all three
   values, so `authority=ens_v0,ens_v1,ens_v2` is narrower than omitting the
   filter.
   `parent` keeps only names exactly one label below the given name, by the
@@ -5366,11 +5369,15 @@ For a registrar lease first identified by a later readable observation, registra
   `latestOwnerOf` still returns it, while `ownerOf` answers the zero address
   once the expiry passes
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L338-L354 @ ens_v2@a971bd64).
-  Bigname serves the latest holder, so an expired label counts as held by that
-  owner until its registration is released. Releasing it (`unregister`, which
-  emits `LabelUnregistered`) burns the token and ends the registration
+  Bigname serves the latest holder while the label's registration is not
+  released. A sub-registry label has no grace, so its registration is released
+  at its expiry: from then on it is served with `owner` absent, stays listed
+  and falls under `exclude_owner`, as `ownerOf` answers. A `.eth` label in the
+  ETHRegistry keeps its owner through its grace. Unregistering a label
+  (`unregister`, which emits `LabelUnregistered`) burns the token and ends the
+  registration
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64),
-  and a released label is not a label of the registry. The two parameters
+  and an unregistered label is not a label of the registry. The two parameters
   cannot be combined. A blank value, empty or
   only whitespace, counts as absent, as for the other optional address
   parameters: `owner=&exclude_owner=<address>` is an `exclude_owner` request and

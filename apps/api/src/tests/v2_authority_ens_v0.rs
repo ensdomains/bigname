@@ -1,11 +1,11 @@
 use super::*;
 
 /// The public `authority` each name of `seed_authority_shape_names` serves. `shared-one.eth`
-/// is the ownerless registry profile: it keeps its ENSv1 arm (and its 2017-registry generation)
-/// but serves no `authority`.
+/// is the ownerless registry profile with an implied lease: it keeps its ENSv1 arm and serves
+/// that arm's authority, `ens_v0` while only the 2017 registry records its node.
 fn expected_authority(name: &str) -> Option<&'static str> {
     match name {
-        "alpha.eth" => Some("ens_v0"),
+        "alpha.eth" | "shared-one.eth" => Some("ens_v0"),
         "beta.eth" | "gamma.eth" => Some("ens_v1"),
         "shared-two.eth" => Some("ens_v2"),
         _ => None,
@@ -78,7 +78,7 @@ async fn v2_address_names_split_the_ens_v1_arm_by_registry_generation() -> Resul
         &format!("/v1/addresses/{V2_ADDRESS}/names?authority=ens_v0"),
     )
     .await?;
-    assert_eq!(names(&v0), vec!["alpha.eth"]);
+    assert_eq!(names(&v0), vec!["alpha.eth", "shared-one.eth"]);
     let v1 = v2_address_names_payload_for_database(
         &database,
         &format!("/v1/addresses/{V2_ADDRESS}/names?authority=ens_v1&page_size=1"),
@@ -98,7 +98,7 @@ async fn v2_address_names_split_the_ens_v1_arm_by_registry_generation() -> Resul
         &format!("/v1/addresses/{V2_ADDRESS}/names?relation=resolves_to&authority=ens_v0"),
     )
     .await?;
-    assert_eq!(names(&resolved_v0), vec!["alpha.eth"]);
+    assert_eq!(names(&resolved_v0), vec!["alpha.eth", "shared-one.eth"]);
 
     // `ens_v0` has nothing to do with the ENSv1→ENSv2 migration.
     let migrated = v2_address_names_payload_for_database(
@@ -138,7 +138,7 @@ async fn v2_address_names_split_the_ens_v1_arm_by_registry_generation() -> Resul
 }
 
 #[tokio::test]
-async fn v2_name_detail_and_lookup_serve_ens_v0_and_omit_ownerless_authority() -> Result<()> {
+async fn v2_name_detail_and_lookup_serve_ens_v0_on_the_ownerless_lease() -> Result<()> {
     const HOLDER: &str = "0x0000000000000000000000000000000000000abc";
     let database = TestDatabase::new_migrated().await?;
     seed_authority_shape_names(&database, HOLDER).await?;
@@ -178,7 +178,7 @@ async fn v2_name_detail_and_lookup_serve_ens_v0_and_omit_ownerless_authority() -
     let reverse = results[AUTHORITY_SHAPE_NAMES.len()]["records"]
         .as_array()
         .expect("reverse detail records");
-    // The ownerless name has no selected binding, so the holder has no relation to it.
+    // The ownerless name has no selected binding, but its lease's holder owns it.
     let mut listed = reverse
         .iter()
         .map(|record| record["name"].as_str().expect("reverse record name"))
@@ -186,7 +186,13 @@ async fn v2_name_detail_and_lookup_serve_ens_v0_and_omit_ownerless_authority() -
     listed.sort_unstable();
     assert_eq!(
         listed,
-        ["alpha.eth", "beta.eth", "gamma.eth", "shared-two.eth"],
+        [
+            "alpha.eth",
+            "beta.eth",
+            "gamma.eth",
+            "shared-one.eth",
+            "shared-two.eth"
+        ],
         "{lookup}"
     );
     for record in reverse {

@@ -334,14 +334,11 @@ async fn v2_get_names_lists_a_namespace_expiry_window_in_expiry_order() -> Resul
     );
     assert_eq!(payload["data"][0]["namespace"], json!("ens"));
     assert_eq!(payload["data"][0]["display_name"], json!("gamma.eth"));
-    assert_eq!(
-        payload["data"][0]["owner"],
-        json!("0x00000000000000000000000000000000000000c2")
-    );
-    assert_eq!(
-        payload["data"][0]["manager"],
-        json!("0x00000000000000000000000000000000000000c1")
-    );
+    // Past its expiry and grace at the read's clock, gamma is released and serves no owner or
+    // manager.
+    assert_eq!(payload["data"][0]["status"], json!("released"));
+    assert!(payload["data"][0].get("owner").is_none_or(Value::is_null));
+    assert!(payload["data"][0].get("manager").is_none_or(Value::is_null));
     assert!(payload["data"][0].get("registrant").is_none());
     assert_eq!(
         payload["data"][0]["registered_at"],

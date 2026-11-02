@@ -14,10 +14,12 @@ pub struct AddressNameCurrentRow {
     pub namespace: String,
     pub canonical_display_name: String,
     pub namehash: String,
-    pub surface_binding_id: Uuid,
+    /// None for an ownerless registry name with an implied lease, which has no selected binding
+    /// and whose `resource_id` is the lease's.
+    pub surface_binding_id: Option<Uuid>,
     pub resource_id: Uuid,
     pub token_lineage_id: Option<Uuid>,
-    pub binding_kind: SurfaceBindingKind,
+    pub binding_kind: Option<SurfaceBindingKind>,
     pub provenance: Value,
     pub coverage: Value,
     pub chain_positions: Value,
@@ -177,8 +179,10 @@ impl AddressNamesCurrentOrder {
 /// otherwise its current registry owner, `served_manager` its current registry owner,
 /// `served_authority` the registry generation that owns its node and `served_lifecycle_shadow`
 /// whether its only surface is a shadow one a NameWrapper or ENSv1 registrar event observed.
-/// Every other entry has a surface binding and binding kind, no `served_owner`,
-/// `served_manager` or `served_authority`, and `served_lifecycle_shadow` false.
+/// An ownerless registry name with an implied lease has a name row but no surface binding or
+/// binding kind, and its `resource_id` is the lease's. Every other entry has a surface binding
+/// and binding kind. Neither carries `served_owner`, `served_manager` or `served_authority`, and
+/// both have `served_lifecycle_shadow` false.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AddressNameCurrentEntry {
     pub address: String,
@@ -202,12 +206,14 @@ pub struct AddressNameCurrentEntry {
     pub served_manager: Option<String>,
     pub served_authority: Option<String>,
     pub served_lifecycle_shadow: bool,
+    /// Whether this is a surface-less ENSv1 registry child's entry.
+    pub registry_child: bool,
 }
 
 impl AddressNameCurrentEntry {
     /// True for a surface-less ENSv1 registry child's entry.
     pub fn is_registry_child(&self) -> bool {
-        self.surface_binding_id.is_none()
+        self.registry_child
     }
 }
 
