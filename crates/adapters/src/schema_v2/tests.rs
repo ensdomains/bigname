@@ -18656,6 +18656,7 @@ fn interpret_test_batch(mut input: BatchInput) -> anyhow::Result<BatchOutput> {
         input.blocks = blocks.into_values().collect();
     }
     let output = super::interpret_schema_v2_batch(input.clone())?;
+    check_fixture_logs(&input, &output);
     // Every fixture input the lookahead covers doubles as a loader-equivalence case:
     // interpreting it from lookahead-scoped state must give exactly the output of full
     // restored state.
@@ -18714,8 +18715,51 @@ fn interpret_test_batch_incremental(
         }
         input.blocks = blocks.into_values().collect();
     }
-    super::prepare_schema_v2_batch_incremental(input, session, StateCacheCapacity::Unlimited)?
-        .finish(Vec::new())
+    checked_finish(input, session)
+}
+
+bigname_test_support::fixture_log_views!(BatchInput, BatchOutput);
+
+/// Fails the test when a raw log of a finished fixture batch was neither selected nor recorded
+/// as a decode skip, unless an allowance names it (`bigname_test_support::fixture_logs`). Every
+/// batch also pins the oracle that decides this to the real selector: on the batch's input
+/// admissions, `Catalog::select` and the oracle must agree on every log.
+fn check_fixture_logs(input: &BatchInput, output: &BatchOutput) {
+    let batch = fixture_batch(input);
+    if let Ok(catalog) = super::catalog::Catalog::new(
+        input.manifests.clone(),
+        input.discovery_rules.clone(),
+        input.admissions.clone(),
+    ) {
+        let verdicts = input
+            .raw_logs
+            .iter()
+            .map(|raw| catalog.select(raw).ok().map(|selected| selected.is_some()))
+            .collect::<Vec<_>>();
+        bigname_test_support::fixture_logs::assert_matches_catalog(&batch, &verdicts);
+    }
+    bigname_test_support::fixture_logs::assert_selectable(&batch, &fixture_outcome(output));
+}
+
+/// `interpret_schema_v2_batch` with [`check_fixture_logs`].
+fn checked_interpret(input: BatchInput) -> anyhow::Result<BatchOutput> {
+    let checked = input.clone();
+    let output = super::interpret_schema_v2_batch(input)?;
+    check_fixture_logs(&checked, &output);
+    Ok(output)
+}
+
+/// One incremental batch with no reloaded state values, with [`check_fixture_logs`].
+fn checked_finish(
+    input: BatchInput,
+    session: Option<AdapterSession>,
+) -> anyhow::Result<(BatchOutput, AdapterSession)> {
+    let checked = input.clone();
+    let (output, session) =
+        super::prepare_schema_v2_batch_incremental(input, session, StateCacheCapacity::Unlimited)?
+            .finish(Vec::new())?;
+    check_fixture_logs(&checked, &output);
+    Ok((output, session))
 }
 
 #[test]
@@ -21464,7 +21508,7 @@ mod numeric_short_lease_tests {
         let input = fixture::input()?;
         fixture::assert_receipt_order(&input);
         let expected = fixture::fixture()?;
-        let prefix = interpret_schema_v2_batch(fixture::range(&input, 403, 406))?;
+        let prefix = checked_interpret(fixture::range(&input, 403, 406))?;
         let original = fixture::registrar_grant(&prefix);
         assert!(original.logical_name_id.is_none());
         assert!(
@@ -21473,7 +21517,7 @@ mod numeric_short_lease_tests {
                 .iter()
                 .all(|binding| Some(binding.resource_id) != original.resource_id)
         );
-        let full = interpret_schema_v2_batch(input.clone())?;
+        let full = checked_interpret(input.clone())?;
         assert_eq!(
             fixture::registrar_grant(&full),
             original,
@@ -21551,23 +21595,13 @@ mod numeric_short_lease_tests {
         );
         for split in [403, 406, 407, 414, 415] {
             let before = fixture::range(&input, 403, split);
-            let (head, session) = prepare_schema_v2_batch_incremental(
-                before.clone(),
-                None,
-                StateCacheCapacity::Unlimited,
-            )?
-            .finish(Vec::new())?;
+            let (head, session) = checked_finish(before.clone(), None)?;
             let tail = fixture::range(&input, split + 1, 416);
-            let (continued, _) = prepare_schema_v2_batch_incremental(
-                tail.clone(),
-                Some(session),
-                StateCacheCapacity::Unlimited,
-            )?
-            .finish(Vec::new())?;
+            let (continued, _) = checked_finish(tail.clone(), Some(session))?;
             let mut restored_input = tail;
             restored_input.prior_events =
                 seam::fold_prior_events(Vec::new(), &head.normalized_events, &before.blocks)?;
-            let restored = interpret_schema_v2_batch(restored_input)?;
+            let restored = checked_interpret(restored_input)?;
             assert_eq!(
                 continued, restored,
                 "cold restoration at {split} changed output"
@@ -21603,7 +21637,7 @@ mod numeric_short_lease_tests {
         {
             block.block_timestamp += time::Duration::seconds(5);
         }
-        let output = interpret_schema_v2_batch(fixture::range(&input, 403, 414))?;
+        let output = checked_interpret(fixture::range(&input, 403, 414))?;
         let snapshot = snapshot(&output);
         assert_eq!(
             snapshot.after_state["original_registered_at"],

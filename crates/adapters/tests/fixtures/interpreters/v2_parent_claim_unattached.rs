@@ -88,7 +88,7 @@ fn run(case_id: &str) -> Result<()> {
         fixture.expected_child_lifecycle,
         "{case_id}: one batch per block"
     );
-    let whole = [interpret_schema_v2_batch(input)?];
+    let whole = [interpret_checked(input)?];
     assert_eq!(
         child_lifecycle(&whole, &fixture.child_token_id, &names),
         fixture.expected_child_lifecycle,

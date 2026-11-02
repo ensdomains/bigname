@@ -2,10 +2,9 @@ use alloy_primitives::{Address, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, ManifestInput, RawBlockInput, RawLogInput,
-    interpret_schema_v2_batch,
     seam::{LOG_INDEX_KEY, TRANSACTION_INDEX_KEY},
 };
-use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+use bigname_test_support::{TestDatabase, TestDatabaseConfig, fixture_logs::interpret_checked};
 use serde_json::json;
 use time::OffsetDateTime;
 
@@ -115,7 +114,7 @@ async fn registrar_only_batch_persists_resource_keyed_events_without_a_surface()
             .collect::<Vec<_>>()
     };
     let registrar = "0x0000000000000000000000000000000000000042";
-    let mut output = interpret_schema_v2_batch(BatchInput {
+    let mut output = interpret_checked(BatchInput {
         chain_id: "batch-test".to_owned(),
         manifests: vec![
             manifest(

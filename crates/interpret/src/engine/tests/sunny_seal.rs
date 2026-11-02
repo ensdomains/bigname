@@ -420,7 +420,7 @@ async fn prepare_recorded(
             .admissions
             .retain(|admission| admission.source_manifest_id != Some(1811));
     }
-    let prepared = prepare_schema_v2_batch_incremental(
+    let prepared = prepare_checked(
         loaded.input,
         loaded.adapter_session,
         StateCacheCapacity::Unlimited,

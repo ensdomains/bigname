@@ -1,10 +1,10 @@
 use alloy_sol_types::SolEvent;
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, BatchOutput, DiscoveryRuleInput, ManifestInput,
-    RawBlockInput, RawLogInput, interpret_schema_v2_batch, seam,
+    RawBlockInput, RawLogInput, seam,
 };
 use bigname_domain::normalization::ENS_NORMALIZER_VERSION;
-use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+use bigname_test_support::{TestDatabase, TestDatabaseConfig, fixture_logs::interpret_checked};
 use time::OffsetDateTime;
 
 type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -17,7 +17,7 @@ fn malformed_adapter_output() -> TestResult<BatchOutput> {
         "{:#x}",
         alloy_primitives::keccak256("AddrChanged(bytes32,address)")
     );
-    Ok(interpret_schema_v2_batch(BatchInput {
+    Ok(interpret_checked(BatchInput {
         chain_id: chain_id.to_owned(),
         manifests: vec![ManifestInput {
             manifest_id: 1,
@@ -216,7 +216,7 @@ fn inconsistent_adapter_output() -> TestResult<BatchOutput> {
         values: vec![alloy_primitives::U256::from(1)],
     }
     .encode_log_data();
-    Ok(interpret_schema_v2_batch(BatchInput {
+    Ok(interpret_checked(BatchInput {
         chain_id: chain_id.to_owned(),
         manifests: vec![ManifestInput {
             manifest_id: 1,

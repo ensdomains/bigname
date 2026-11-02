@@ -213,6 +213,59 @@ async fn production_interpret_writes_plain_events_identity_preimages_and_flags()
     scratch.cleanup().await
 }
 
+/// A raw log no admitted manifest event selects fails a test that runs the Interpret engine, and
+/// passes once the test names it with a reason (`bigname_test_support::fixture_logs`).
+#[tokio::test]
+async fn an_unselected_fixture_log_fails_an_engine_batch_unless_allowed() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_unselected_fixture_log").await?;
+    let chain = "unselected-fixture-log";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
+    insert_log(
+        scratch.pool(),
+        chain,
+        &format!("{chain}-transaction-1"),
+        1,
+        CONTRACT,
+        &[keccak256("Undeclared(address)")],
+        &[],
+    )
+    .await?;
+
+    let pool = scratch.pool().clone();
+    let failed =
+        tokio::spawn(async move { run_engine(&pool, chain, 0, 1, InterpretRunMode::Normal).await })
+            .await
+            .expect_err("an unselected fixture log fails the engine batch");
+    let message = failed
+        .into_panic()
+        .downcast::<String>()
+        .map(|message| *message)
+        .unwrap_or_default();
+    for expected in [
+        "matched no catalog candidate",
+        "production_interpret_unselected_fixture_log",
+        CONTRACT,
+        "no topic",
+    ] {
+        assert!(
+            message.contains(expected),
+            "{expected} missing from:\n{message}"
+        );
+    }
+
+    let allowance = bigname_test_support::fixture_logs::allow_unmatched_in(
+        scratch.pool(),
+        &[(
+            "Undeclared(address)",
+            "the test seeds this log to prove the engine check",
+        )],
+    )
+    .await;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+    drop(allowance);
+    scratch.cleanup().await
+}
+
 #[tokio::test]
 async fn same_transaction_registry_permission_writes_with_registration_resource() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_same_transaction_resource").await?;

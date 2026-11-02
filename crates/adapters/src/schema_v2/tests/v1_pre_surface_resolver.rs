@@ -415,13 +415,16 @@ fn prepare_with_provenance(
         }
         batch.blocks = blocks.into_values().collect();
     }
-    super::super::prepare_schema_v2_batch_incremental_with_provenance(
+    let checked = batch.clone();
+    let (output, session) = super::super::prepare_schema_v2_batch_incremental_with_provenance(
         batch,
         provenance,
         session,
         StateCacheCapacity::Unlimited,
     )?
-    .finish(Vec::new())
+    .finish(Vec::new())?;
+    check_fixture_logs(&checked, &output);
+    Ok((output, session))
 }
 
 fn state_derived_pointer(output: &BatchOutput) -> Option<&NormalizedEvent> {

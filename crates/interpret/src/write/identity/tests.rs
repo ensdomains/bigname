@@ -2037,7 +2037,7 @@ mod numeric_short_lease_connected {
         admission.role = Some("controller".to_owned());
         admission.contract_instance_id = Uuid::from_u128(999_999);
         input.admissions.push(admission);
-        let (output, _) = adapter::prepare_schema_v2_batch_incremental(
+        let (output, _) = bigname_test_support::fixture_logs::prepare_checked(
             input.clone(),
             None,
             StateCacheCapacity::Unlimited,
@@ -2104,7 +2104,7 @@ mod numeric_short_lease_connected {
                 if cold {
                     part.prior_events = retained.clone();
                 }
-                let (output, next) = adapter::prepare_schema_v2_batch_incremental(
+                let (output, next) = bigname_test_support::fixture_logs::prepare_checked(
                     part.clone(),
                     session.take(),
                     StateCacheCapacity::Unlimited,
@@ -2260,7 +2260,7 @@ mod numeric_short_lease_connected {
                 (RELEASE_BLOCK, RELEASE_BLOCK),
             ] {
                 let part = fixture::range(&input, from, to);
-                let (output, next) = adapter::prepare_schema_v2_batch_incremental(
+                let (output, next) = bigname_test_support::fixture_logs::prepare_checked(
                     part.clone(),
                     session.take(),
                     StateCacheCapacity::Unlimited,
@@ -2411,7 +2411,7 @@ mod numeric_short_lease_connected {
         }
         let input = fixture::range(&input, 403, 414);
         let database = database(&input).await?;
-        let output = adapter::interpret_schema_v2_batch(input.clone())?;
+        let output = bigname_test_support::fixture_logs::interpret_checked(input.clone())?;
         write(database.pool(), &input, &output).await?;
         project(database.pool(), 403, 414, None).await?;
         assert_pre(
@@ -2435,7 +2435,7 @@ mod zero_owner_migration_connected {
     use super::numeric_short_lease_fixture::range;
     use super::zero_owner_migration_fixture as fixture;
     use anyhow::Result;
-    use bigname_adapters::schema_v2::{self as adapter, BatchInput, StateCacheCapacity};
+    use bigname_adapters::schema_v2::{BatchInput, StateCacheCapacity};
     use sqlx::types::Uuid;
     use time::OffsetDateTime;
 
@@ -2455,7 +2455,7 @@ mod zero_owner_migration_connected {
         let result = async {
             let pool = database.pool();
             let history = range(&input, migration - 1, migration - 1);
-            let (output, session) = adapter::prepare_schema_v2_batch_incremental(
+            let (output, session) = bigname_test_support::fixture_logs::prepare_checked(
                 history.clone(),
                 None,
                 StateCacheCapacity::Unlimited,
@@ -2469,7 +2469,7 @@ mod zero_owner_migration_connected {
                 .expect("debut.eth lease");
             write(pool, &history, &output).await?;
             let part = range(&input, migration, migration);
-            let (output, _) = adapter::prepare_schema_v2_batch_incremental(
+            let (output, _) = bigname_test_support::fixture_logs::prepare_checked(
                 part.clone(),
                 Some(session),
                 StateCacheCapacity::Unlimited,

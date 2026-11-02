@@ -17,9 +17,10 @@ use alloy_sol_types::{SolEvent, sol};
 use anyhow::{Context, Result};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, BatchOutput, DiscoveryRuleInput, ManifestInput,
-    RawBlockInput, RawLogInput, StateCacheCapacity, prepare_schema_v2_batch_incremental,
+    RawBlockInput, RawLogInput, StateCacheCapacity,
 };
 use bigname_project::families::{self, FamilyMode};
+use bigname_test_support::fixture_logs::prepare_checked;
 use serde_json::{Value, json};
 use sqlx::types::Uuid;
 use support::{CHAIN, Event, Fixture, hash};
@@ -282,7 +283,7 @@ fn timestamp(block: i64) -> OffsetDateTime {
 }
 
 fn interpret(logs: &Logs, blocks: i64) -> Result<BatchOutput> {
-    let (output, _) = prepare_schema_v2_batch_incremental(
+    let (output, _) = prepare_checked(
         BatchInput {
             chain_id: CHAIN.to_owned(),
             manifests: manifests()?,

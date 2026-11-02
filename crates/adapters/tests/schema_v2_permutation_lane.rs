@@ -36,7 +36,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use alloy_primitives::{Address, B256, LogData, U256, keccak256};
 use alloy_sol_types::SolEvent;
 use anyhow::{Context, Result, bail};
-use bigname_adapters::schema_v2::{BatchInput, BatchOutput, interpret_schema_v2_batch, seam};
+use bigname_adapters::schema_v2::{BatchInput, BatchOutput, seam};
+use bigname_test_support::fixture_logs::interpret_checked;
 use serde_json::Value;
 
 use permutation::{
@@ -380,7 +381,7 @@ fn v2_regeneration_collision_closes_displaced_registration_in_every_replay_shape
         ("unregister-comparator", false),
     ] {
         let input = v2_regeneration_collision_input(&wiring, collision)?;
-        let fresh = interpret_schema_v2_batch(input.clone())?;
+        let fresh = interpret_checked(input.clone())?;
         assert_v2_regeneration_collision_output(&fresh, collision)?;
         let converged = converge(
             &format!("directed=v2-{case}"),
@@ -471,7 +472,7 @@ fn v2_replacement_null_roles_do_not_restore_displaced_token() -> Result<()> {
         .iter()
         .map(|block| block.block_hash.as_str())
         .collect::<BTreeSet<_>>();
-    let prefix = interpret_schema_v2_batch(BatchInput {
+    let prefix = interpret_checked(BatchInput {
         blocks: prefix_blocks.clone(),
         raw_logs: input
             .raw_logs
@@ -482,7 +483,7 @@ fn v2_replacement_null_roles_do_not_restore_displaced_token() -> Result<()> {
         ..input.clone()
     })?;
     let prior = seam::fold_prior_events(Vec::new(), &prefix.normalized_events, &prefix_blocks)?;
-    let restored_expiry = interpret_schema_v2_batch(BatchInput {
+    let restored_expiry = interpret_checked(BatchInput {
         prior_events: prior,
         blocks: vec![input.blocks[5].clone()],
         raw_logs: input
@@ -515,13 +516,13 @@ fn v2_same_token_claim_clears_reserved_topology_after_restore() -> Result<()> {
     let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
     let input = v2_same_token_claim_with_reserved_topology_input(&wiring)?;
     let claim_block = 20_000_403;
-    let whole = interpret_schema_v2_batch(input.clone())?;
+    let whole = interpret_checked(input.clone())?;
     let prefix_blocks = input.blocks[..3].to_vec();
     let prefix_hashes = prefix_blocks
         .iter()
         .map(|block| block.block_hash.as_str())
         .collect::<BTreeSet<_>>();
-    let prefix = interpret_schema_v2_batch(BatchInput {
+    let prefix = interpret_checked(BatchInput {
         blocks: prefix_blocks.clone(),
         raw_logs: input
             .raw_logs
@@ -532,7 +533,7 @@ fn v2_same_token_claim_clears_reserved_topology_after_restore() -> Result<()> {
         ..input.clone()
     })?;
     let prior = seam::fold_prior_events(Vec::new(), &prefix.normalized_events, &prefix_blocks)?;
-    let restored_claim = interpret_schema_v2_batch(BatchInput {
+    let restored_claim = interpret_checked(BatchInput {
         prior_events: prior,
         blocks: vec![input.blocks[3].clone()],
         raw_logs: input
@@ -564,7 +565,7 @@ fn v2_label_registration_preserves_a_shared_subregistry_observation_key() -> Res
     let checked_in = checked_in_manifests()?;
     let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
     let input = v2_shared_subregistry_observation_input(&wiring, SharedSubregistryCase::Label)?;
-    let output = interpret_schema_v2_batch(input)?;
+    let output = interpret_checked(input)?;
     let observation_key = v2_shared_subregistry_observation_key(&wiring);
 
     assert_subregistry_target_reasserted(
@@ -588,7 +589,7 @@ fn v2_label_reservation_preserves_a_shared_subregistry_observation_key() -> Resu
     let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
     let input =
         v2_shared_subregistry_observation_input(&wiring, SharedSubregistryCase::Reservation)?;
-    let output = interpret_schema_v2_batch(input.clone())?;
+    let output = interpret_checked(input.clone())?;
     let observation_key = v2_shared_subregistry_observation_key(&wiring);
 
     assert_subregistry_target_reasserted(
@@ -611,7 +612,7 @@ fn v2_regeneration_collision_preserves_a_shared_subregistry_observation_key() ->
     let checked_in = checked_in_manifests()?;
     let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
     let input = v2_shared_subregistry_observation_input(&wiring, SharedSubregistryCase::Collision)?;
-    let output = interpret_schema_v2_batch(input)?;
+    let output = interpret_checked(input)?;
     let observation_key = v2_shared_subregistry_observation_key(&wiring);
 
     assert_subregistry_target_reasserted(
@@ -635,7 +636,7 @@ fn v2_label_replacement_preserves_a_shared_subregistry_observation_key() -> Resu
     let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
     let input =
         v2_shared_subregistry_observation_input(&wiring, SharedSubregistryCase::Replacement)?;
-    let output = interpret_schema_v2_batch(input.clone())?;
+    let output = interpret_checked(input.clone())?;
     let observation_key = v2_shared_subregistry_observation_key(&wiring);
 
     assert_subregistry_target_reasserted(
@@ -659,7 +660,7 @@ fn v2_unregister_preserves_a_shared_subregistry_key_until_the_last_holder_leaves
     let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
     let input =
         v2_shared_subregistry_observation_input(&wiring, SharedSubregistryCase::Unregister)?;
-    let output = interpret_schema_v2_batch(input.clone())?;
+    let output = interpret_checked(input.clone())?;
     let observation_key = v2_shared_subregistry_observation_key(&wiring);
 
     assert_subregistry_target_reasserted(
@@ -690,7 +691,7 @@ fn v2_last_subregistry_asserter_departure_reasserts_the_surviving_holder() -> Re
         &wiring,
         SharedSubregistryCase::LastAsserterDeparture,
     )?;
-    let output = interpret_schema_v2_batch(input.clone())?;
+    let output = interpret_checked(input.clone())?;
 
     assert_subregistry_reassertion(
         &output,
@@ -717,7 +718,7 @@ fn v2_zero_subregistry_update_stays_dark_after_current_holder_departure_in_every
         &wiring,
         SharedSubregistryCase::AuthoritativeClear,
     )?;
-    let output = interpret_schema_v2_batch(input.clone())?;
+    let output = interpret_checked(input.clone())?;
     let observation_key = v2_shared_subregistry_observation_key(&wiring);
     let clear_block = 20_000_204;
     let departure_block = 20_000_205;
@@ -774,7 +775,7 @@ fn v2_lifecycle_null_restore_preserves_the_shared_subregistry_survivor() -> Resu
         &wiring,
         SharedSubregistryCase::LifecycleNullThenRegistration,
     )?;
-    let output = interpret_schema_v2_batch(input.clone())?;
+    let output = interpret_checked(input.clone())?;
 
     assert_subregistry_target_reasserted(
         &output,
@@ -797,7 +798,7 @@ fn v2_repeated_subregistry_clear_survives_compaction_and_allows_a_fresh_sibling(
         &wiring,
         SharedSubregistryCase::ClearReopenThenDeparture,
     )?;
-    let output = interpret_schema_v2_batch(input.clone())?;
+    let output = interpret_checked(input.clone())?;
     let observation_key = v2_shared_subregistry_observation_key(&wiring);
 
     assert_subregistry_target_reasserted(
@@ -882,7 +883,7 @@ fn v2_unattached_parent_claim_keeps_the_mount_path_in_every_replay_shape() -> Re
         let context = scenario.describe();
         let input = wiring.batch_input(&scenario.blocks, &scenario.logs)?;
         let blocks = input.blocks.len();
-        let fresh = interpret_schema_v2_batch(input.clone())?;
+        let fresh = interpret_checked(input.clone())?;
         converge(
             &context,
             input,
@@ -936,7 +937,7 @@ fn v2_cross_base_regeneration_reasserts_the_old_key_to_its_surviving_holder() ->
         &wiring,
         SharedSubregistryCase::CrossBaseRegeneration,
     )?;
-    let output = interpret_schema_v2_batch(input.clone())?;
+    let output = interpret_checked(input.clone())?;
 
     assert_subregistry_reassertion(
         &output,
@@ -962,7 +963,7 @@ fn v2_subregistry_reassertion_chooses_the_greatest_retained_token_id() -> Result
         &wiring,
         SharedSubregistryCase::DeterministicSurvivor,
     )?;
-    let output = interpret_schema_v2_batch(input.clone())?;
+    let output = interpret_checked(input.clone())?;
 
     assert_subregistry_reassertion(
         &output,
@@ -988,7 +989,7 @@ fn v2_occupied_regeneration_emits_one_destination_subregistry_edge() -> Result<(
         &wiring,
         SharedSubregistryCase::OccupiedDestinationWithSharedHolder,
     )?;
-    let output = interpret_schema_v2_batch(input.clone())?;
+    let output = interpret_checked(input.clone())?;
 
     assert_subregistry_target_reasserted(
         &output,
@@ -1013,7 +1014,7 @@ fn v2_pointerless_label_addition_elects_the_greatest_pointer_holder() -> Result<
         &wiring,
         SharedSubregistryCase::PointerlessAddition,
     )?;
-    let output = interpret_schema_v2_batch(input.clone())?;
+    let output = interpret_checked(input.clone())?;
 
     assert_subregistry_target_reasserted(
         &output,
@@ -1119,7 +1120,7 @@ fn v2_regeneration_collision_preserves_resolver_intake_until_explicit_update() -
             source_key_retired,
             source_key_reused,
         )?;
-        let fresh = interpret_schema_v2_batch(input.clone())?;
+        let fresh = interpret_checked(input.clone())?;
         let (token_a, token_b) = v2_regeneration_collision_tokens(same_observation_key);
         let old_key = observation_key(token_b);
         let new_key = observation_key(token_a);
@@ -1223,7 +1224,7 @@ fn v2_regeneration_alias_protection_survives_repeated_token_restore() -> Result<
         registry.to_ascii_lowercase(),
         U256::from_be_bytes(bytes)
     );
-    let fresh = interpret_schema_v2_batch(input.clone())?;
+    let fresh = interpret_checked(input.clone())?;
     assert!(!fresh.discovery_edge_closures.iter().any(|closure| {
         closure.active_to_block_number == 20_000_105
             && closure.edge_kind == "resolver"
@@ -1243,7 +1244,7 @@ fn v2_regeneration_collision_closes_displaced_discovery_and_child_registrations(
     let checked_in = checked_in_manifests()?;
     let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
     let input = v2_regeneration_collision_displaced_subregistry_input(&wiring)?;
-    let fresh = interpret_schema_v2_batch(input.clone())?;
+    let fresh = interpret_checked(input.clone())?;
     let discovery_closures = fresh
         .discovery_edge_closures
         .iter()
@@ -1302,7 +1303,7 @@ fn v2_regeneration_collision_releases_a_resource_pending_displaced_registration(
     input.raw_logs.retain(|raw| {
         !(raw.block_number == 20_000_000 && raw.transaction_index == 1 && raw.log_index == 0)
     });
-    let fresh = interpret_schema_v2_batch(input.clone())?;
+    let fresh = interpret_checked(input.clone())?;
     let alpha = format!("ens:{:#x}", namehash(&["alpha", "eth"]));
     let regenerated = fresh
         .normalized_events
