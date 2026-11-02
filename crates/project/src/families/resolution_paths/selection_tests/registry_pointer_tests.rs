@@ -31,28 +31,29 @@ const NAMES: [&str; 8] = [
     "bar.eth",
     "z.bar.eth",
 ];
-const BEFORE: &str = "0x00000000000000000000000000000000000000c0";
-const AFTER: &str = "0x00000000000000000000000000000000000000c1";
-const SET: &str = "0x00000000000000000000000000000000000000c2";
-const FOO_RESOLVER: &str = "0x00000000000000000000000000000000000000d1";
-const A_RESOLVER: &str = "0x00000000000000000000000000000000000000d2";
-const POINTERS: [(&str, &str); 3] = [
+pub(super) const BEFORE: &str = "0x00000000000000000000000000000000000000c0";
+pub(super) const AFTER: &str = "0x00000000000000000000000000000000000000c1";
+pub(super) const SET: &str = "0x00000000000000000000000000000000000000c2";
+pub(super) const FOO_RESOLVER: &str = "0x00000000000000000000000000000000000000d1";
+pub(super) const A_RESOLVER: &str = "0x00000000000000000000000000000000000000d2";
+pub(super) const POINTERS: [(&str, &str); 3] = [
     ("foo.eth", FOO_RESOLVER),
     ("a.foo.eth", A_RESOLVER),
     ("c.foo.eth", ZERO_ADDR),
 ];
-const CALL: Call<'static> = Call {
+pub(super) const CALL: Call<'static> = Call {
     block: 5,
     after: 4,
     root: Some(ROOT),
 };
 /// The names an `eth` pointer change selects in the default tree: `eth` itself, and the names
 /// of three or more labels with no resolver of their own.
-const UNDER_ETH: [&str; 5] = ["eth", "b.foo.eth", "c.foo.eth", "x.a.foo.eth", "z.bar.eth"];
+pub(super) const UNDER_ETH: [&str; 5] =
+    ["eth", "b.foo.eth", "c.foo.eth", "x.a.foo.eth", "z.bar.eth"];
 
 /// The tree with `pointers` written by earlier publications. `window` names a surface anchored
 /// at the publication's block instead of block 0.
-async fn tree(pointers: &[(&str, &str)], window: Option<&str>) -> Result<World> {
+pub(super) async fn tree(pointers: &[(&str, &str)], window: Option<&str>) -> Result<World> {
     let mut world = World::new().await?;
     for name in NAMES {
         let block = if window == Some(name) { 5 } else { 0 };
@@ -66,7 +67,7 @@ async fn tree(pointers: &[(&str, &str)], window: Option<&str>) -> Result<World> 
 
 /// The publication at block 5 set the registry pointer of `name` to `after`. `before` is the
 /// resolver it replaced, or `None` for the node's first pointer row.
-async fn pointer_changed(
+pub(super) async fn pointer_changed(
     world: &World,
     name: &str,
     before: Option<&str>,
@@ -281,8 +282,9 @@ async fn a_pointer_set_back_to_its_resolver_selects_the_node_alone() -> Result<(
 
 // Rows E and G. When `eth`'s pointer changes and another change in the publication names the
 // same path, every `.eth` name is selected: a wrapper row, an owner getter class, a resource
-// pointer, a reclassified resolver its pointer names, a surface in the window, or an ENSv2
-// entry. An entry change of `foo` alone keeps the names under `foo.eth`, `a.foo.eth` included.
+// pointer, a surface in the window, or an ENSv2 entry. An entry change of `foo` alone keeps the
+// names under `foo.eth`, `a.foo.eth` included. A reclassified resolver its pointer names is not
+// another change (`a_pointer_moved_to_a_reclassified_resolver_stays_narrow`).
 #[tokio::test]
 async fn another_change_of_the_same_path_keeps_the_whole_subtree() -> Result<()> {
     const RESOURCE: &str = "00000000-0000-0000-0000-000000000003";
@@ -291,7 +293,6 @@ async fn another_change_of_the_same_path_keeps_the_whole_subtree() -> Result<()>
         "wrapper row",
         "owner getter class",
         "resource pointer",
-        "reclassified resolver",
         "surface in the window",
         "eth entry",
         "foo entry alone",
@@ -345,7 +346,6 @@ async fn another_change_of_the_same_path_keeps_the_whole_subtree() -> Result<()>
                     )
                     .await?;
             }
-            "reclassified resolver" => world.reclassify(AFTER).await?,
             "eth entry" => world.entry_changed(5, ROOT, &labelhash("eth")).await?,
             "foo entry alone" => world.entry_changed(5, ETH, &labelhash("foo")).await?,
             _ => {}
@@ -368,6 +368,23 @@ async fn another_change_of_the_same_path_keeps_the_whole_subtree() -> Result<()>
     }
     ensure!(failures.is_empty(), "{}", failures.join("\n"));
     Ok(())
+}
+
+// Row B10. `eth`'s pointer moves to a resolver whose classification changes in the same
+// publication. `eth` reads that resolver as its own pointer, so both changes are pointer
+// changes and `eth` stays narrow: the second-level names and `a.foo.eth`, which has its own
+// resolver, are not selected.
+#[tokio::test]
+async fn a_pointer_moved_to_a_reclassified_resolver_stays_narrow() -> Result<()> {
+    let world = tree(&POINTERS, None).await?;
+    world.eth().await?;
+    world.mount(ETH, &labelhash("foo"), &registry(1)).await?;
+    pointer_changed(&world, "eth", Some(BEFORE), AFTER).await?;
+    world.reclassify(AFTER).await?;
+    world
+        .assert_narrows(CALL, &UNDER_ETH, &["foo.eth", "a.foo.eth", "bar.eth"])
+        .await?;
+    world.cleanup().await
 }
 
 // Row D at three labels. A pointer-only change at `a.foo.eth`, with no change at `eth`, selects
@@ -410,9 +427,11 @@ async fn a_pointer_change_on_a_null_first_label_keeps_the_whole_subtree() -> Res
     world.cleanup().await
 }
 
-// A reclassified resolver makes the names whose pointers name it full prefixes, and only
-// those. `a.foo.eth`'s resolver is reclassified in the block that changes `eth`'s pointer. The
-// names under `a.foo.eth` are selected whatever their pointers, and `eth` stays narrow.
+// Row B4. A reclassified resolver is read as their own pointer by the names whose registry
+// pointers name it. `a.foo.eth`'s resolver is reclassified in the block that changes `eth`'s
+// pointer. Under `a.foo.eth` only the names that read its pointer are selected:
+// `x.a.foo.eth`, and not `y.a.foo.eth`, which has its own. `a.foo.eth` recomposes itself and
+// `eth` stays narrow.
 #[tokio::test]
 async fn a_reclassified_resolver_widens_only_the_names_that_point_at_it() -> Result<()> {
     let mut world = tree(&POINTERS, None).await?;
@@ -421,7 +440,7 @@ async fn a_reclassified_resolver_widens_only_the_names_that_point_at_it() -> Res
     pointer_changed(&world, "eth", Some(BEFORE), AFTER).await?;
     world.reclassify(A_RESOLVER).await?;
     world
-        .assert_selects(
+        .assert_narrows(
             CALL,
             &[
                 "eth",
@@ -429,9 +448,9 @@ async fn a_reclassified_resolver_widens_only_the_names_that_point_at_it() -> Res
                 "b.foo.eth",
                 "c.foo.eth",
                 "x.a.foo.eth",
-                "y.a.foo.eth",
                 "z.bar.eth",
             ],
+            &["y.a.foo.eth"],
         )
         .await?;
     world.cleanup().await

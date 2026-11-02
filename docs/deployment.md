@@ -5476,6 +5476,35 @@ hash-rotating changes. Do not mark old rows ready under the new hash.
 It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
 and the compiled watch plan are unchanged, so stamp no Ingest redo.
 
+## A resolver's classification change recomposes only the names that read it
+
+The build that narrows which names a resolver's classification change recomposes
+(see [owned key families](projections.md#owned-key-families)) changes one
+Project statement, `project:families.resolution_paths.prepare`.
+
+- A name whose ENSv1 registry pointer names the changed resolver reads it as its
+  own pointer. It recomposes itself and the `.eth` names under it that read
+  that pointer: names of three or more labels with no resolver of their own.
+  Before, it recomposed every name under it, so a change of the resolver `eth`
+  points at recomposed every `.eth` name.
+- The same holds for an ENSv1 resource pointer at the resolver, which one ENSv1
+  `ResolverChanged` writes beside the registry pointer.
+- A name whose ENSv2 resource pointer names the resolver, or that also has
+  another change in the publication, still recomposes every name under it.
+- Which names Project recomposes in each batch changes, not what they serve.
+  Stored rows and API responses are the same as before.
+- The statement is in `crates/project/src`, an input of the
+  [projection content hash](glossary.md#projection-content-hash) only. That hash
+  rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, at a
+  planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+  matching runner and API binaries. The change rides the next release that
+  redoes Project and shares that release's Project redo.
+- It adds no table, schema-migration, manifest or setting. The
+  manifest-authority fingerprint and the compiled watch plan are unchanged, so
+  stamp no Ingest redo.
+
 ## ENSv2 registry resolver edges only while reachable
 
 The build that gates an ENSv2 registry's resolver pointers on its reachability
