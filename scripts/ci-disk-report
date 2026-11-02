@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Usage: scripts/ci-disk-report <label> [postgres-container]
+#
+# Prints free space on the runner's filesystems and the size of the
+# directories a Rust test job fills: the Cargo target directory and its build
+# outputs, the Cargo registry and git checkouts, the Rust toolchains, the
+# temporary directories and Docker's storage. With a PostgreSQL service
+# container it also prints the size of the server's data directory, read
+# through `docker exec`. It appends one line with the free space on / to the
+# job summary. Every probe has a time limit, and the script never fails the
+# job.
+set -u
+
+label=${1:-} container=${2:-}
+[ -n "$label" ] || label=unlabelled
+
+echo "== disk report: $label"
+df -h / /mnt /tmp 2>/dev/null | awk '!seen[$0]++'
+
+cargo_home=${CARGO_HOME:-$HOME/.cargo}
+paths=()
+for path in \
+  target target/debug/deps target/debug/build target/debug/incremental target/nextest \
+  "$cargo_home/registry" "$cargo_home/git" "${RUSTUP_HOME:-$HOME/.rustup}" \
+  "${RUNNER_TEMP:-}" /tmp; do
+  [ -n "$path" ] && [ -e "$path" ] && paths+=("$path")
+done
+if [ "${#paths[@]}" -gt 0 ]; then
+  timeout 90 du -sh -- "${paths[@]}" 2>/dev/null || echo "du did not finish within 90 s"
+fi
+
+if command -v docker >/dev/null 2>&1; then
+  timeout 30 docker system df 2>/dev/null || echo "docker system df did not finish within 30 s"
+  if [ -n "$container" ]; then
+    timeout 30 docker exec "$container" du -sh /var/lib/postgresql/data 2>/dev/null ||
+      echo "PostgreSQL data directory size unavailable"
+  fi
+fi
+
+line=$(df -h --output=avail,size / | tail -n 1 | awk '{print $1 " free of " $2}')
+echo "disk report $label: / has $line"
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  echo "- Disk, $label: / has $line" >>"$GITHUB_STEP_SUMMARY"
+fi
+exit 0
