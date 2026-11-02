@@ -664,14 +664,6 @@ pub(super) fn statement(normal_work: &str) -> String {
             OFFSET 0
         ) probe
         UNION
-        -- An ENSv1 reader of a changed resolver recomposes itself, by the key of its surface.
-        SELECT probe.logical_name_id FROM v1_resolver_readers reader
-        CROSS JOIN LATERAL (
-            SELECT child.logical_name_id FROM name_surfaces child
-            WHERE child.logical_name_id=reader.logical_name_id AND {eth_name}
-            OFFSET 0
-        ) probe
-        UNION
         -- A first label hash that is null has no key to look up. Label hash arrays compare
         -- two nulls as equal, so such a prefix keeps the read of every surface.
         SELECT child.logical_name_id FROM name_surfaces child
