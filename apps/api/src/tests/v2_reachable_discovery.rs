@@ -138,6 +138,28 @@ async fn classification(database: &TestDatabase, resolver: &str) -> Result<Optio
     .await?)
 }
 
+/// Diagnostic dump (throwaway branch).
+async fn diag(database: &TestDatabase, label: &str) -> Result<()> {
+    for (title, sql) in [
+        ("events", "SELECT jsonb_build_object('b', block_number, 't', transaction_index, 'l', log_index, 'kind', event_kind, 'name', logical_name_id, 'res', resource_id, 'vis', consumer_visibility, 'src', after_state->>'source_event', 'resolver', after_state->>'resolver', 'token', after_state->>'token_id', 'emitter', raw_fact_ref->>'emitting_address')::text FROM normalized_events WHERE chain_id = 'ethereum-mainnet' AND event_kind IN ('ResolverChanged','RegistrationGranted','SurfaceBound','SubregistryChanged','RegistrationReserved') ORDER BY block_number, transaction_index NULLS FIRST, log_index NULLS FIRST, event_kind"),
+        ("pointers", "SELECT to_jsonb(p)::text FROM project_resource_pointer p"),
+        ("named_pointers", "SELECT to_jsonb(p)::text FROM project_named_resource_pointer p"),
+        ("edges", "SELECT (to_jsonb(e) - 'provenance' || jsonb_build_object('key', provenance->>'observation_key'))::text FROM discovery_edges e WHERE edge_kind = 'resolver'"),
+        ("classification", "SELECT (to_jsonb(c) - 'normalized_event_id')::text FROM project_resolver_classification c"),
+        ("summary", "SELECT jsonb_build_object('row', to_jsonb(s) - 'declared_summary', 'resolver', to_jsonb(s)->'declared_summary'->'resolver', 'coverage', to_jsonb(s)->'declared_summary'->'coverage')::text FROM project_name_summary s WHERE to_jsonb(s)::text LIKE '%n.eth%'"),
+    ] {
+        let rows: Vec<String> = match sqlx::query_scalar(sql).fetch_all(&database.pool).await {
+            Ok(rows) => rows,
+            Err(error) => vec![format!("ERROR {error}")],
+        };
+        eprintln!("DIAG {label} {title} ({} rows)", rows.len());
+        for row in rows {
+            eprintln!("DIAG {label} {title}: {row}");
+        }
+    }
+    Ok(())
+}
+
 async fn ok(database: &TestDatabase, uri: &str) -> Result<Value> {
     let (status, body) = get(database, uri).await?;
     assert_eq!(status, StatusCode::OK, "{uri}: {body:#}");
@@ -269,6 +291,7 @@ async fn m1_a_registry_mounted_later_serves_its_entry_and_opens_its_edge_at_the_
 
     let detail = ok(&database, "/v1/names/a.n.eth?namespace=ens").await?;
     assert_eq!(detail["data"]["status"], json!("active"), "{detail:#}");
+    diag(&database, "m1").await?;
     let detail = ok(&database, "/v1/names/b.n.eth?namespace=ens").await?;
     assert_eq!(
         detail["data"]["resolver"]["address"],
@@ -317,6 +340,7 @@ async fn m3_a_resolver_changed_before_the_mount_serves_only_the_current_one() ->
     let count = blocks.len();
     publish(&database, blocks).await?;
 
+    diag(&database, "m3").await?;
     let detail = ok(&database, "/v1/names/a.n.eth?namespace=ens").await?;
     assert_eq!(
         detail["data"]["resolver"]["address"],
@@ -361,6 +385,7 @@ async fn m5_a_pointer_before_the_mount_in_one_transaction_opens_at_the_mount() -
     let count = blocks.len();
     publish(&database, blocks).await?;
 
+    diag(&database, "m5").await?;
     let detail = ok(&database, "/v1/names/a.n.eth?namespace=ens").await?;
     assert_eq!(
         detail["data"]["resolver"]["address"],
