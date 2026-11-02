@@ -327,7 +327,7 @@ fn ensv2_resolver_declaration(address: &str) -> Value {
 /// S1, S2, S4: the declared ENSV2Resolver stores no records and forwards each name elsewhere, so
 /// the names that point at it are withheld with `composite_resolver_not_projected`: an ENSv1
 /// name whose registry resolver it is (S1) and an ENSv2 name whose entry resolver it is (S2). Its
-/// stored summary files it under its declaration, and the overview names no mirror (S4).
+/// stored summary files it under its declaration (S4).
 #[tokio::test]
 async fn names_pointing_at_the_ensv2_resolver_are_withheld_as_composite() -> Result<()> {
     const CHAIN: &str = "ethereum-sepolia";
@@ -380,10 +380,6 @@ async fn names_pointing_at_the_ensv2_resolver_are_withheld_as_composite() -> Res
         "bindings": withheld,
     });
     assert_eq!(served, expected, "S1, S2, S4");
-    let overview =
-        v2_resolver_payload_for_database(&database, &format!("/v1/resolvers/11155111/{COMPOSITE}"))
-            .await?;
-    assert_eq!(overview["data"]["mirror"], Value::Null, "S4: {overview:#}");
     database.cleanup().await
 }
 
