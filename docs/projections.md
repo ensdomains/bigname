@@ -654,11 +654,11 @@ BaseRegistrar's own `NameRegistered` wrote dates the lease itself. The derived g
 and its zero-address registrant names no holder. A lease whose only grant is the derived one
 dates from the first current-registry record under a NameWrapper binding or a registry-only
 binding that records the lease too, and every ENSv1→ENSv2 migration path keeps that start. The
-selected binding, its authority kind and the registry owner stay as they were. A name whose binding records a lease with registrar rows, a
-name with no binding outside the ownerless-registry profile, a wrapper-selected name, a name
-selected under ENSv2 and any name other than a `.eth` second-level name have no implied lease.
-A migrated name never renewed is released by its lease's schedule like any other lapsed `.eth`
-name.
+selected binding, its authority kind and the registry owner stay as they were. A name whose
+binding records a lease with registrar rows, a name with no binding outside the
+ownerless-registry profile, a wrapper-selected name, a name selected under ENSv2 and any name
+other than a `.eth` second-level name have no implied lease. A migrated name never renewed is
+released by its lease's schedule like any other lapsed `.eth` name.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L155 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
