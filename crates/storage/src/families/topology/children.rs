@@ -241,7 +241,12 @@ pub(super) fn push_selected<'a>(
         builder.push_bind(children);
         builder.push(")");
     }
-    let _ = registration_limit; // RED: behaviour disabled
+    if let Some(limit) = registration_limit {
+        // RED: behaviour disabled, the bind kept so the statement's parameters do not move.
+        builder.push(" AND ");
+        builder.push_bind(limit);
+        builder.push(" IS NOT NULL");
+    }
     builder.push(format!(
         "
         ), v1_edges AS (
