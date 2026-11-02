@@ -303,6 +303,28 @@ async fn registry_label_count_plan_stops_at_the_cap() -> Result<()> {
                     "{mode}: v2_candidates is not a Limit that keeps {KEPT}: {cte:?}"
                 )),
             }
+            // The edge lookups are probes by child node, at most one per kept registration (and
+            // per edge found, for the latest-edge veto), not an enumeration of the parent's edges.
+            let mut probes = Vec::new();
+            scans(root, &mut probes);
+            for probe in probes.iter().filter(|scan| {
+                scan.relation == "project_child_edge_candidate"
+                    && matches!(scan.alias, "edge" | "other")
+                    && scan.loops > 0
+            }) {
+                let by_child = !probe.indexes.is_empty()
+                    && probe.indexes.iter().all(|(name, condition)| {
+                        *name == "project_child_edge_candidate_child_idx"
+                            && condition.contains("child_node")
+                    });
+                if !by_child || probe.loops > KEPT {
+                    failures.push(format!(
+                        "{mode}: {} of the edge candidates as {} is not a bounded probe by \
+                         child node: {:?}, {} loops",
+                        probe.node_type, probe.alias, probe.indexes, probe.loops
+                    ));
+                }
+            }
             let registrations: u64 = nodes
                 .iter()
                 .filter(|node| {
@@ -321,11 +343,11 @@ async fn registry_label_count_plan_stops_at_the_cap() -> Result<()> {
                 let alias = node["Alias"].as_str().unwrap_or_default();
                 if relation == "project_child_edge_candidate"
                     && matches!(alias, "edge" | "other")
-                    && loops(node) > KEPT
+                    && visited(node) > 2 * KEPT
                 {
                     failures.push(format!(
-                        "{mode}: {alias} probes ran {} times, over cap + 1",
-                        loops(node)
+                        "{mode}: {alias} visited {} edge candidates, over 2 x (cap + 1)",
+                        visited(node)
                     ));
                 }
                 if node["Node Type"] == "WindowAgg" && rows(node) > 2 * KEPT {

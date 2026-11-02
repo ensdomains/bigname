@@ -492,7 +492,7 @@ async fn child_counts_do_not_probe_the_lifecycle_table() -> Result<()> {
             (
                 "one_count",
                 "text, text",
-                count_query(PARENT, None),
+                count_query(PARENT),
                 format!("'{PARENT}'"),
             ),
             (
