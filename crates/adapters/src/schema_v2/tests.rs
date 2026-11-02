@@ -39,6 +39,9 @@ mod v1_resolver_after_reregistration;
 #[path = "tests/same_transaction_pointer.rs"]
 mod same_transaction_pointer;
 
+#[path = "tests/registry_reachability.rs"]
+mod registry_reachability;
+
 #[path = "tests/v1_wrapped_registration_resolver.rs"]
 mod v1_wrapped_registration_resolver;
 
