@@ -463,12 +463,14 @@ async fn replace_manifest_children(
 }
 
 /// The persisted `declaration_name` of a `[[contracts]]` entry: the role for singleton roles, whose
-/// name is the succession key across manifest versions, and `<role>@<address>` for the repeatable
-/// [ENSv1 mirror resolver](../../../docs/glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
-/// instance role, whose instances are identified by address and never succeed one another
-/// (`docs/manifests.md` § ENSv1 mirror resolver declarations).
+/// name is the succession key across manifest versions, and `<role>@<address>` for a repeatable
+/// instance role ([`crate::REPEATABLE_CONTRACT_ROLES`]), such as the
+/// [ENSv1 mirror resolver](../../../docs/glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver),
+/// whose instances are identified by address and never succeed one another
+/// (`docs/manifests.md` § ENSv1 mirror resolver declarations, § Registry implementation
+/// declarations).
 pub fn contract_declaration_name(role: &str, normalized_address: &str) -> String {
-    if role == crate::ENSV1_MIRROR_RESOLVER_ROLE {
+    if crate::is_repeatable_contract_role(role) {
         format!("{role}@{normalized_address}")
     } else {
         role.to_owned()

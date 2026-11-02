@@ -2,8 +2,9 @@ use anyhow::Context;
 use serde_json::Value;
 
 use super::support::{
-    RegistryGroup, associate_event, correlation_id, event_evidence, logical_edge_identity,
-    mark_direct_position, observation_evidence, required_position, same_transaction, value_str,
+    Controllers, RegistryGroup, associate_event, correlation_id, event_evidence,
+    logical_edge_identity, mark_direct_position, observation_evidence, required_position,
+    same_transaction, value_str,
 };
 use super::{CANDIDATE, MIGRATION_FAMILY};
 use crate::schema_v2::{
@@ -15,14 +16,15 @@ pub(super) const CORRELATION_KIND: &str = "migration_registry_creation";
 pub(super) fn correlate_registry_creation(
     catalog: &Catalog,
     observations: &[&MigrationObservation],
-    locked_controller: &str,
+    controllers: &Controllers,
     output: &mut BatchOutput,
 ) -> anyhow::Result<Vec<RegistryGroup>> {
     let mut groups = Vec::new();
-    for factory in observations.iter().copied().filter(|observation| {
-        proxy_sender(observation)
-            .is_some_and(|sender| sender.eq_ignore_ascii_case(locked_controller))
-    }) {
+    for factory in observations
+        .iter()
+        .copied()
+        .filter(|observation| proxy_sender(observation).is_some_and(|s| controllers.is_locked(s)))
+    {
         if let Some(group) = admit(catalog, factory, output)? {
             groups.push(group);
         }

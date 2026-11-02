@@ -162,7 +162,7 @@ start_block = 26105621
 # Each registry keeps its own ERC-1155 owner-to-operator approvals, and an approved operator
 # gets the roles the current token owner holds on a token's own resource.
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/erc1155/ERC1155Singleton.sol:L73-L75 @ ens_v2_mainnet_20261002@b1f97b91)
-# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registry/PermissionedRegistry.sol:L625-L639 @ ens_v2_mainnet_20261002@4f47cbcc)
 # A standard approval declaration: the list stays empty and the adapter maps the event to
 # AccountPermissionChanged. It is an ordinary family-wide event, so discovered user and
 # ENSv1→ENSv2 migration-created registries are watched as well as the declared ETHRegistry.
@@ -178,7 +178,7 @@ start_block = 26105621
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet-root-20261013/RootRegistry.json:L2995 @ ens_v2_mainnet_20261002@b1f97b91)
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ETHRegistry.json:L362 @ ens_v2_mainnet_20261002@b1f97b91)
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/UserRegistryImpl.json:L425 @ ens_v2_mainnet_20261002@b1f97b91)
-# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/WrapperRegistryImpl.json:L520 @ ens_v2_mainnet_20261002@b1f97b91)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/WrapperRegistryImpl.json:L536 @ ens_v2_mainnet_20261002@4f47cbcc)
 [[abi.events]]
 name = "ApprovalForAll"
 fragment = "event ApprovalForAll(address indexed account, address indexed operator, bool approved)"
