@@ -395,8 +395,8 @@ registry profile. The selected arm is kept. Such a row is unregistered, serves
 no `authority` and matches no public `authority` filter, unless the name is a
 `.eth` second-level name with an [implied lease](glossary.md#implied-lease).
 Then `lease_without_registry_owner` is `true` as well, and the row serves its
-arm's `authority`, `ens_v1`, or `ens_v0` while only the 2017 registry records the
-node. A cleared ENSv1 registry record does
+arm's `authority` (`ens_v1`, or `ens_v0` while only the 2017 registry records the
+node). A cleared ENSv1 registry record does
 not end that BaseRegistrar lease: until its expiry plus grace nobody else can
 register the name, and its token holder can `reclaim` the record
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L104 @ ens_v1@91c966f)
@@ -406,8 +406,9 @@ below states, `active`, `expired` or `released` by the ENSv1 schedule. Its
 registrant and its `control.owner` are the token holder the lease's registrar
 rows record, the latest token transfer from the first current-registry record
 on included, and null when they record none. Its authority kind, registry owner
-and `manager` stay absent: the zero registry owner names nobody. The address
-relations do not list such a row yet, because it has no selected binding.
+and `manager` stay absent: the zero registry owner names nobody. The token holder
+is its only address relation, `owner`. With no selected binding, that relation's
+row stands on the lease's resource and carries no surface binding.
 
 After the [Universal Resolver cutover](glossary.md#universal-resolver-cutover),
 ENSv1-selected descendants below `.eth` share one publication-scoped ENSv2 path

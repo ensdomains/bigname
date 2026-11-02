@@ -75,12 +75,16 @@ pub(super) const EFFECTIVE_CONTROLLER: &str = "effective_controller";
 pub(super) const ROLE_HOLDER: &str = "role_holder";
 
 /// The (address, relation) pairs of one name; empty for a name without a bound, registered row.
+/// An ownerless registry name with an implied lease has no binding and is related only to its
+/// token holder: its zero registry owner names no controller.
 pub(super) fn relations(input: &NameRelationsInput<'_>) -> Vec<(String, &'static str)> {
     let row = input.row;
     let summary = &row.declared_summary;
-    if row.surface_binding_id.is_none()
-        || row.resource_id.is_none()
-        || row.binding_kind.is_none()
+    let ownerless_lease = crate::families::name::lease_without_registry_owner(&row.provenance);
+    if (!ownerless_lease
+        && (row.surface_binding_id.is_none()
+            || row.resource_id.is_none()
+            || row.binding_kind.is_none()))
         || summary.pointer("/control/status").and_then(Value::as_str) == Some("unregistered")
     {
         return Vec::new();
@@ -108,7 +112,7 @@ pub(super) fn relations(input: &NameRelationsInput<'_>) -> Vec<(String, &'static
     let released = ["/registration/status", "/registration/lifecycle_status"]
         .iter()
         .any(|path| summary.pointer(path).and_then(Value::as_str) == Some("released"));
-    if (!lineage || open) && !released {
+    if (!lineage || open) && !released && !ownerless_lease {
         let effective = if lineage {
             controller.or(registrant)
         } else {

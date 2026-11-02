@@ -13,13 +13,14 @@ use super::{
 /// The columns of a composed address-name row set. `registry_child` marks a surface-less ENSv1
 /// registry child's row (`families::records::registry_children`), which has no surface binding
 /// and carries its `served_owner`, `served_authority` and `served_lifecycle_shadow`; other rows
-/// leave all four null.
+/// leave all four null. `ownerless_lease` marks the row of an ownerless registry name with an
+/// implied lease, which has a surface but no binding and stands on the lease's resource.
 const ADDRESS_NAMES_COLUMNS: &str = "anc(address text, logical_name_id text, relation text,
     namespace text, raw_name text, normalized_name text, namehash text, surface_binding_id uuid, resource_id uuid,
     token_lineage_id uuid, binding_kind text, support_status text, unsupported_reason text,
     provenance jsonb, chain_positions jsonb, canonicality_summary jsonb, manifest_version bigint,
     last_recomputed_at timestamptz, registry_child boolean, served_owner text,
-    served_authority text, served_lifecycle_shadow boolean)";
+    served_authority text, served_lifecycle_shadow boolean, ownerless_lease boolean)";
 
 /// The columns of a composed address-record row set.
 const ADDRESS_RECORDS_COLUMNS: &str = "arc(address text, coin_type text, logical_name_id text,

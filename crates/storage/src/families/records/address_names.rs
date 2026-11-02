@@ -234,7 +234,7 @@ impl AddressComposer<'_> {
                 out.push(ComposedName {
                     logical_name_id: row.logical_name_id.clone(),
                     canonical_display_name: row.canonical_display_name.clone(),
-                    resource_id: row.resource_id.map(|resource| resource.to_string()),
+                    resource_id: relation_resource(row),
                     rows,
                     name: name_row(row),
                 });
@@ -306,6 +306,22 @@ pub(super) fn publication_stamps(publication: &FamilyPublication) -> (Value, Val
     )
 }
 
+/// The resource a name's address-name rows stand on: its selected binding's, or, for an
+/// ownerless registry name with an implied lease, which has no binding, the lease's
+/// (`registration.resource_id`).
+fn relation_resource(row: &NameCurrentRow) -> Option<String> {
+    if let Some(resource) = row.resource_id {
+        return Some(resource.to_string());
+    }
+    if !crate::families::name::lease_without_registry_owner(&row.provenance) {
+        return None;
+    }
+    row.declared_summary
+        .pointer("/registration/resource_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
 fn address_name_row(
     address: &str,
     relation: &str,
@@ -322,9 +338,10 @@ fn address_name_row(
         "normalized_name": row.normalized_name,
         "namehash": row.namehash,
         "surface_binding_id": row.surface_binding_id,
-        "resource_id": row.resource_id,
+        "resource_id": relation_resource(row),
         "token_lineage_id": row.token_lineage_id,
         "binding_kind": row.binding_kind.map(|kind| kind.as_str()),
+        "ownerless_lease": crate::families::name::lease_without_registry_owner(&row.provenance),
         "support_status": "supported",
         "unsupported_reason": null,
         "provenance": provenance,

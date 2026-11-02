@@ -5458,8 +5458,9 @@ What changes for names:
 - A `.eth` second-level name whose registry owner is zero and that has an
   [implied lease](glossary.md#implied-lease) serves the lease's token holder as `owner`, its
   arm's `authority` (`ens_v1`, or `ens_v0` while only the 2017 registry records the node), and
-  no `manager` or registry owner. It matches that `authority` filter. Before, it served no owner
-  and no authority.
+  no `manager` or registry owner. It is listed for the holder under `owner`, in address names
+  and in batch lookup, and it matches that `authority` filter. Before, it served no owner and
+  no authority and was listed for nobody.
 - A name the registrar schedule or a lapsed ENSv2 reservation released, while no release of its
   lease is retained, serves no `owner` or `manager` and is listed for neither. Before, it served
   `released` with the last owner.

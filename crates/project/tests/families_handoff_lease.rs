@@ -12,7 +12,13 @@ mod support;
 use anyhow::{Context, Result, ensure};
 use bigname_project::families::FamilyMode;
 use bigname_storage::{
-    families::name::load_family_name,
+    AddressNameRelation, AddressNamesCurrentDedupe, AddressNamesCurrentOrder,
+    AddressNamesCurrentSort, AddressNamesPageRequest,
+    families::{
+        lookup::compose_lookup_names_at,
+        name::{load_family_name, load_family_publication},
+    },
+    load_family_address_names_capped_page,
     public_name_fields::{declared_owner, declared_registry_owner, served_manager},
 };
 use serde_json::{Value, json};
@@ -1658,7 +1664,7 @@ async fn registered_by_controller(fixture: &Fixture, name: &str, lease: &str) ->
 /// controller registration whose holder later moved the token and then cleared the registry
 /// record. The cleared record does not end the lease, so the name serves it, with the token
 /// holder as registrant and owner, `ens_v1` authority, no authority kind, no registry owner and
-/// no manager. The address relations do not list it yet: they need a selected binding.
+/// no manager. The holder's address names list it under `owner`.
 #[tokio::test]
 async fn an_ownerless_name_serves_its_lease_and_holder() -> Result<()> {
     let fixture = Fixture::new("families_handoff_lease_ownerless", 6).await?;
@@ -1678,8 +1684,7 @@ async fn an_ownerless_name_serves_its_lease_and_holder() -> Result<()> {
                "registry_owner": Value::Null, "manager": Value::Null,
                "public_authority": "ens_v1"}),
     )?;
-    // The address relations need a selected binding, which the ownerless profile has none of.
-    ensure!(relations(&fixture, HOLDER, &name).await?.is_empty());
+    assert_listed_for_holder(&fixture, &name, &lease).await?;
     fixture.assert_rebuild_equal(5).await?;
     fixture.cleanup().await
 }
@@ -2077,6 +2082,71 @@ async fn relations(fixture: &Fixture, address: &str, name: &str) -> Result<Vec<S
     )
 }
 
+/// The relations batch lookup composes for `name`, as (address, relation) pairs.
+async fn lookup_relations(fixture: &Fixture, name: &str) -> Result<Vec<(String, String)>> {
+    let publication = load_family_publication(&fixture.pool, CHAIN)
+        .await?
+        .context("a published chain")?;
+    let mut conn = fixture.pool.acquire().await?;
+    let names = compose_lookup_names_at(&mut conn, &publication, &[name.to_owned()]).await?;
+    Ok(names
+        .get(name)
+        .map(|composed| {
+            composed
+                .relations
+                .iter()
+                .map(|relation| (relation.address.clone(), relation.relation.clone()))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// An ownerless name with an implied lease is listed for HOLDER under `owner` only: by the
+/// address-name rows, by the page `GET /v1/addresses/{address}/names` reads, with
+/// `authority=ens_v1` and by the lease's resource, and by batch lookup.
+async fn assert_listed_for_holder(fixture: &Fixture, name: &str, lease: &str) -> Result<()> {
+    ensure!(
+        relations(fixture, HOLDER, name).await? == ["token_holder"],
+        "{name}: address-name rows"
+    );
+    let page = load_family_address_names_capped_page(
+        &fixture.pool,
+        &AddressNamesPageRequest {
+            address: HOLDER,
+            namespace: None,
+            relations: Some(&[AddressNameRelation::TokenHolder]),
+            dedupe_by: AddressNamesCurrentDedupe::Resource,
+            q: None,
+            authority: Some(&["ens_v1"]),
+            is_migrated: None,
+            parent: None,
+            sort: AddressNamesCurrentSort::Name,
+            order: AddressNamesCurrentOrder::Asc,
+            cursor: None,
+            page_size: 50,
+        },
+        true,
+    )
+    .await?;
+    let entry = page
+        .entries
+        .iter()
+        .find(|entry| entry.logical_name_id == name)
+        .with_context(|| format!("{name} is not on {HOLDER}'s page: {:?}", page.entries))?;
+    ensure!(
+        entry.relations == [AddressNameRelation::TokenHolder]
+            && !entry.is_registry_child()
+            && entry.surface_binding_id.is_none()
+            && entry.resource_id.to_string() == lease,
+        "{name}: {entry:?}"
+    );
+    ensure!(
+        lookup_relations(fixture, name).await? == [(HOLDER.to_owned(), "token_holder".to_owned())],
+        "{name}: batch lookup"
+    );
+    Ok(())
+}
+
 /// A migrated name `n` (`0x1000 + n` its lease, `0x3000 + n` its registry resource): the 2020
 /// handoff at block 1 for OWNER, a registry-only binding that records no lease and closes at
 /// `closed_at`, a controller renewal at block 2 until `expiry`, and the token's move to HOLDER
@@ -2389,7 +2459,8 @@ async fn a_lease_lapsed_under_a_reservation_serves_no_owner_or_manager() -> Resu
 /// TYR-439, a registry-only binding before the clear: a migrated name whose holder cleared the
 /// registry record. A live lease's token holder is the owner whatever the registry owner is
 /// (`docs/api-v1.md`, `owner`), live or in grace, and the name serves `ens_v1` authority with no
-/// authority kind. The address relations do not list it yet: they need a selected binding. The zero registry owner names nobody, so it serves no registry owner and no
+/// authority kind. The holder's address names list it under `owner`, on the lease's resource,
+/// and batch lookup relates the holder to it the same way. The zero registry owner names nobody, so it serves no registry owner and no
 /// manager. A released lease serves no owner and keeps its holder as the lapsed registration's
 /// owner. A cleared record with no lease evidence stays unregistered with no authority.
 #[tokio::test]
@@ -2456,9 +2527,7 @@ async fn a_zero_registry_owner_serves_the_lease_holder() -> Result<()> {
                    "public_authority": "ens_v1"}),
         )
         .with_context(|| format!("live or in grace: {name}"))?;
-        // The address relations need a selected binding, which the ownerless profile has none
-        // of.
-        ensure!(relations(&fixture, HOLDER, name).await?.is_empty());
+        assert_listed_for_holder(&fixture, name, lease).await?;
     }
     check(
         &served(&fixture, &released).await?,
@@ -2468,6 +2537,7 @@ async fn a_zero_registry_owner_serves_the_lease_holder() -> Result<()> {
     )
     .context("released")?;
     ensure!(relations(&fixture, HOLDER, &released).await?.is_empty());
+    ensure!(lookup_relations(&fixture, &released).await?.is_empty());
     check(
         &served(&fixture, &unleased).await?,
         json!({"owner": Value::Null, "summary_owner": Value::Null, "manager": Value::Null,

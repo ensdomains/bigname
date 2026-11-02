@@ -976,7 +976,8 @@ collection route carry neither header.
   `read_status=unsupported` identity-only object. A zero registry owner does not
   remove `authority` supplied by a retained registrar binding, and an ownerless
   `.eth` second-level name with an [implied lease](glossary.md#implied-lease)
-  keeps it, `ens_v1`, or `ens_v0` while only the 2017 registry records the node. `migrated_at` is present only when ENSv2 is the currently selected
+  keeps its arm's value (`ens_v1`, or `ens_v0` while only the 2017 registry
+  records the node). `migrated_at` is present only when ENSv2 is the currently selected
   `authority` and the name's history retains an activated `MigrationApplied`
   [migration boundary](glossary.md#migration-boundary): it is the decimal Unix-seconds block
   time of that migration event, read through the event's block in the chain

@@ -215,10 +215,10 @@ pub(super) fn released_control(
     registration: &Map<String, Value>,
     control: &mut Map<String, Value>,
 ) {
-    if registration.get("lifecycle_status").and_then(Value::as_str) == Some("released") {
-        if let Some(owner) = control.get_mut("owner") {
-            *owner = Value::Null;
-        }
+    if registration.get("lifecycle_status").and_then(Value::as_str) == Some("released")
+        && let Some(owner) = control.get_mut("owner")
+    {
+        *owner = Value::Null;
     }
 }
 

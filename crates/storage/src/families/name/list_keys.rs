@@ -48,7 +48,7 @@ pub(crate) fn public_authority(provenance: &Value) -> Option<&'static str> {
 /// Whether the composed row is in the ownerless-registry profile with an implied lease
 /// (docs/glossary.md, "Implied lease"): its registry owner is zero and bigname knows its
 /// BaseRegistrar lease (`provenance.authority_selection.lease_without_registry_owner`).
-fn lease_without_registry_owner(provenance: &Value) -> bool {
+pub(crate) fn lease_without_registry_owner(provenance: &Value) -> bool {
     provenance.pointer("/authority_selection/lease_without_registry_owner")
         == Some(&Value::Bool(true))
 }
