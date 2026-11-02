@@ -5449,7 +5449,7 @@ registry owner is zero, and that omits `owner` and `manager` whenever a name ser
 `released` ([projections](projections.md#exact-name-projection), ownerless registry), changes
 the lifecycle composition and the name relations Project stores
 (`crates/storage/src/families/control/lifecycle/`, `crates/storage/src/families/name/`,
-`crates/storage/src/families/records/`). It rotates the
+`crates/storage/src/families/records/`, `crates/storage/src/address_names/`). It rotates the
 [projection content hash](glossary.md#projection-content-hash) for every chain. The
 [interpreter content hash](glossary.md#interpreter-content-hash) does not rotate.
 
