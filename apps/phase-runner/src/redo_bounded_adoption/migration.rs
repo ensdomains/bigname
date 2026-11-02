@@ -9,9 +9,10 @@
 //! every row the change can alter. The controller lookups read a controller as the indexed
 //! `sender` of a factory or registry log, which no first-effect arm can find. They compare it only
 //! with the controller whose declared range holds the log's block (`Controllers::at` in
-//! `crates/adapters/src/schema_v2/migration/support.rs`), so they rest on the declared start being
-//! the deployment block. `start_refusal` refuses the bound where a log shows otherwise: a log the
-//! address emitted, or a factory or registry log naming it as `sender`.
+//! `crates/adapters/src/schema_v2/migration/support.rs`), so a manifest change cannot alter a row
+//! below the lowest start on either side. A log below a declared start shows the declaration
+//! misreads the chain, and `start_refusal` then keeps the full range: a log the address emitted,
+//! or a factory or registry log naming it as `sender`.
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
@@ -41,8 +42,8 @@ const FACTORY_EVENT: &str = "ProxyDeployed";
 /// compares the `sender` of a same-transaction `RegistrationGranted`, built from that log, with
 /// the controllers whose declared ranges hold the transaction's block
 /// (`crates/adapters/src/schema_v2/migration.rs`, `correlate_authority_transitions`), and its
-/// launch gate is the Graveyard's start, below a redeployed controller's. The emitters are the registry family's own, read from its current
-/// manifest.
+/// launch gate is the Graveyard's start, below a redeployed controller's. The emitters are the
+/// registry family's own, read from its current manifest.
 const REGISTRY_SENDER_ROLES: [&str; 2] = [
     "unlocked_migration_controller",
     "locked_migration_controller",
@@ -302,9 +303,10 @@ fn other_watches(side: &Side<'_>, addresses: &BTreeSet<&str>) -> BTreeSet<String
 /// The adapters read each controller only inside its declared range: `Controllers::at` in
 /// `crates/adapters/src/schema_v2/migration/support.rs`, taken per transaction block by
 /// `migration.rs` for `correlate_registry_creation` and `correlate_authority_transitions`, and
-/// per block by `unwrapped_reconcile.rs`. So where each declared start is the deployment block,
-/// the bounded pair equals the full pair by construction. This guard checks that premise. It can
-/// only refuse a bound, never pass a wrong one.
+/// per block by `unwrapped_reconcile.rs`. So the bounded pair equals the full pair by
+/// construction. The guard is defence: where a log shows a declared start is not the deployment
+/// block, it refuses the bound rather than redo on a manifest that misreads the chain. It can only
+/// refuse a bound, never pass a wrong one.
 pub(crate) async fn start_refusal(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
