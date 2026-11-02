@@ -184,7 +184,8 @@ fn unmounted_registry() -> Result<Vec<(u64, Logs)>> {
 
 /// N1 and F2's route half: a registry nothing reachable mounts is known to the registries route
 /// with no name, opens no resolver edge, and gives the resolver it points at no supported
-/// classification. Its `eth` entry and subregistry name nothing.
+/// classification. Its `eth` entry and subregistry name nothing: the registries route gives the
+/// registry no name.
 #[tokio::test]
 async fn n1_an_unmounted_registry_adds_no_resolver_edge_or_supported_classification() -> Result<()>
 {
@@ -213,8 +214,6 @@ async fn n1_an_unmounted_registry_adds_no_resolver_edge_or_supported_classificat
         json!("registry_created"),
         "{registry:#}"
     );
-    let (_, eth) = get(&database, "/v1/names/eth?namespace=ens").await?;
-    assert!(!eth.to_string().contains(RESOLVER_X), "{eth:#}");
 
     assert_eq!(resolver_edges(&database, REGISTRY).await?, Vec::new());
     let row = classification(&database, RESOLVER_X).await?;
@@ -255,10 +254,13 @@ async fn c1_an_unmounted_registry_leaves_a_v1_resolver_classification_alone() ->
         "/v1/names/{}?namespace=ens",
         super::v2_mainnet_admission::NAME
     );
+    let served_resolver = ok(&without, &name).await?["data"]["resolver"].clone();
     assert_eq!(
-        ok(&with, &name).await?["data"]["resolver"],
-        ok(&without, &name).await?["data"]["resolver"]
+        served_resolver["address"],
+        json!(PUBLIC_RESOLVER),
+        "{served_resolver:#}"
     );
+    assert_eq!(ok(&with, &name).await?["data"]["resolver"], served_resolver);
     assert_eq!(resolver_edges(&with, REGISTRY).await?, Vec::new());
     let served = |row: Option<Value>| -> Result<Value> {
         let row = row.context("the ENSv1 resolver is classified")?;
@@ -434,7 +436,8 @@ async fn m5_a_pointer_before_the_mount_in_one_transaction_opens_at_the_mount() -
 }
 
 /// U3: the mounting `n.eth` entry expires between blocks. At the next block the name is no
-/// longer served with the resolver, and the registry's edge ends there, with no log.
+/// longer served with the resolver, and the registry's edge ends there, with no log. The entry
+/// has a resource and a resolver the routes know, so it would serve if it were still named.
 #[tokio::test]
 async fn u3_an_expired_mount_closes_the_registry_edge_at_the_next_block() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -445,7 +448,8 @@ async fn u3_an_expired_mount_closes_the_registry_edge_at_the_next_block() -> Res
             REGISTERED + 60,
             vec![
                 register(REGISTRY, "a", FOREVER)?,
-                set_resolver(REGISTRY, "a", RESOLVER_X)?,
+                resource(REGISTRY, "a", 1),
+                set_resolver(REGISTRY, "a", PUBLIC_RESOLVER)?,
             ],
         ),
         (REGISTERED + 120, vec![register(ETH_REGISTRY, "n", expiry)?]),
@@ -458,13 +462,13 @@ async fn u3_an_expired_mount_closes_the_registry_edge_at_the_next_block() -> Res
 
     let (status, detail) = get(&database, "/v1/names/a.n.eth?namespace=ens").await?;
     assert!(
-        status != StatusCode::OK || detail["data"]["resolver"]["address"] != json!(RESOLVER_X),
+        status != StatusCode::OK || detail["data"]["resolver"]["address"] != json!(PUBLIC_RESOLVER),
         "{detail:#}"
     );
     assert_eq!(
         resolver_edges(&database, REGISTRY).await?,
         vec![(
-            RESOLVER_X.to_owned(),
+            PUBLIC_RESOLVER.to_owned(),
             block(3, count),
             Some(block(4, count)),
             key(REGISTRY, "a")
