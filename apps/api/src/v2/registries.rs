@@ -61,8 +61,8 @@ pub(crate) struct RegistryCounts {
     pub(crate) labels: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) roles: Option<u64>,
-    /// Absent without `include=counts`, `null` above the count cap.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Serialized absent without `include=counts` and `null` above the count cap.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) events: Option<Option<u64>>,
 }
 
