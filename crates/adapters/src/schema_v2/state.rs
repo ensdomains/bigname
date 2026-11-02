@@ -4,7 +4,7 @@ use serde_json::Value;
 use uuid::Uuid;
 #[path = "state_expiry.rs"]
 mod expiry;
-pub(super) use expiry::{ENS_GRACE_PERIOD_SECS, v1_registration_is_live};
+pub(super) use expiry::{ENS_GRACE_PERIOD_SECS, v1_lease_active_at, v1_registration_is_live};
 #[path = "state_incremental.rs"]
 mod incremental;
 pub(super) use incremental::restored_raw_label;

@@ -208,3 +208,16 @@ pub(in crate::schema_v2) fn v1_registration_is_live(
             .is_none_or(|release| at_unix_timestamp <= release)
     })
 }
+
+/// Whether `BaseRegistrar.ownerOf` answers for a lease with this stored expiry at the block: it
+/// requires the full `uint256` expiry to be strictly later than the block timestamp, so a lease
+/// in grace has no readable owner.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
+pub(in crate::schema_v2) fn v1_lease_active_at(
+    expiry: alloy_primitives::U256,
+    at_unix_timestamp: i64,
+) -> bool {
+    u64::try_from(at_unix_timestamp)
+        .ok()
+        .is_none_or(|now| expiry > alloy_primitives::U256::from(now))
+}

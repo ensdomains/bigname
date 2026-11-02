@@ -57,6 +57,9 @@ mod wrapper_permissions;
 #[path = "tests/wrapper_registry_write.rs"]
 mod wrapper_registry_write;
 
+#[path = "tests/wrapper_renewal_liveness.rs"]
+mod wrapper_renewal_liveness;
+
 #[path = "tests/unwrapped_child_under_wrapped_parent.rs"]
 mod unwrapped_child_under_wrapped_parent;
 

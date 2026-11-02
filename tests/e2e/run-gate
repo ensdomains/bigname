@@ -3,12 +3,12 @@ set -uo pipefail
 
 # Keep the inventory counts and assignments together. Test-list changes should
 # require edits only in this block; the checks below reject every other drift.
-expected_total=104
-expected_runnable=101
+expected_total=105
+expected_runnable=102
 expected_ignored=3
 shard_count=6
 # Per shard, in shard order.
-expected_shard_runnable=(17 17 16 17 17 17)
+expected_shard_runnable=(17 17 17 17 17 17)
 expected_shard_ignored=(1 1 1 0 0 0)
 
 expected_ignored_tests=(
@@ -77,6 +77,7 @@ shard_3_tests=(
     "scenarios::reverse_primary::reverse_node_name_set_changed_then_cleared_updates_declared_claim"
     "scenarios::reverse_primary_claims::authorised_third_party_name_record_keys_claimed_address"
     "scenarios::support::tests::temp_dirs_created_concurrently_are_distinct"
+    "scenarios::wrapper_renewal_and_transfers::a_wrapped_renewal_that_leaves_the_lease_in_grace_serves_a_lapsed_wrapper"
 )
 
 shard_4_tests=(
