@@ -843,8 +843,8 @@ collection route carry neither header.
   `source`, `include=counts`. `source` accepts `indexed` or `verified`; omitting it is identical
   to `source=indexed`. This name-profile route does not accept `source=auto`.
   `include=counts` adds `subname_count`, the name's direct readable subname
-  count (the same per-parent aggregate `GET /v1/names/{name}/subnames` reports
-  as `page.total_count`), and `record_count`, the known record-selector count
+  count (the per-parent aggregate `GET /v1/names/{name}/subnames` reports as
+  its unfiltered `page.total_count` up to 10,000), and `record_count`, the known record-selector count
   of the current registration's record inventory with the same meaning as on
   address-name rows; `record_count` is omitted when the row has no current
   record inventory. A name served through its ENSv1 registry pointer counts
@@ -5360,9 +5360,10 @@ For a registrar lease first identified by a later readable observation, registra
   `counts.labels` is `null` for a historical selection that differs from the
   current published position. The creation, pointer, reference, role and event
   evidence and `counts.labels` are read on one database snapshot of the captured
-  publication: `counts.labels` finds the registry's representative pointing name
-  there and takes that name's labels-route total, or `0` when no name points at
-  the registry. It describes the same publication as `name`, `parent_registry`,
+  publication: with `include=counts`, `counts.labels` finds the registry's
+  representative pointing name there and takes that name's labels-route total,
+  or `0` when no name points at the registry, and `null` above the registration
+  cap. It describes the same publication as `name`, `parent_registry`,
   `referenced_by` and `meta.as_of`; a publication during the read does not
   affect the response.
 - Status semantics: an unknown registry returns `404 not_found` at every

@@ -903,7 +903,11 @@ async fn v2_get_registry_role_counts_fold_assignments_and_current_label_holders(
         json!(3),
         "{historical}"
     );
-    assert_eq!(historical["data"]["counts"]["labels"], Value::Null);
+    assert_eq!(
+        historical["data"]["counts"].get("labels"),
+        Some(&Value::Null),
+        "{historical}"
+    );
 
     // A losing-fork revocation must not erase the surviving canonical grant.
     sqlx::query("UPDATE bigname_phase.normalized_events SET canonicality_state = 'orphaned' WHERE event_identity = 'second-holder-revoke'")

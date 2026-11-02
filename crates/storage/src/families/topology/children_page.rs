@@ -3,7 +3,7 @@
 //! optional prefix or substring filter, the expiry fence with its null treatment, the name and timestamp sorts, the
 //! keyset cursor, and a registry's labels as the ENSv2 children its subregistry holds, optionally
 //! narrowed by the owner each serves (`project_name_summary.owner`). The total
-//! is an exact count over the same filtered relation, taken in the same statement as the page;
+//! is an exact count, or `cap + 1` past a caller's cap, over the same filtered relation;
 //! there is no maintained child count, because eligibility depends on the parent's current
 //! state. Expiry filtering uses the canonical status stored at the publication clock. A caller's
 //! fixed `evaluated_at` adds an expiry fence; neither uses the database's transaction time.
