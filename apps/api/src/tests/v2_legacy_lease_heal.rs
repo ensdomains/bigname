@@ -1128,12 +1128,10 @@ async fn an_ownerless_name_without_a_release_serves_through_its_retained_pointer
     database.cleanup().await
 }
 
-/// TYR-439 on the records route: the ownerless fixture whose lease ran out past its grace, by a
-/// later `ExpiryChanged` to a past expiry, with no release row. The fill serves it `released`
-/// with no owner, so it serves no resolver or records, through its retained registry pointer or
-/// otherwise.
-#[tokio::test]
-async fn an_ownerless_name_whose_lease_lapsed_serves_no_resolver_or_records() -> Result<()> {
+/// The ownerless fixture whose lease ran out past its grace, by a later `ExpiryChanged` to a past
+/// expiry, with no release row, and with a live ENSv2 reservation of the name when `reserved`.
+/// Asserts the stored row is still the ownerless profile the fill reads.
+async fn lapsed_ownerless(reserved: bool) -> Result<TestDatabase> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     seed_alice_state_inputs(&database, AliceInputState::Ownerless).await?;
     append_alice_name_input(
@@ -1143,38 +1141,81 @@ async fn an_ownerless_name_whose_lease_lapsed_serves_no_resolver_or_records() ->
         json!({"authority_kind": "registrar", "expiry": 1_700_000_000}),
     )
     .await?;
-    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
     let logical = bigname_storage::logical_name_id_for_name("ens", "alice.eth");
+    if reserved {
+        let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100;
+        let mut reservation = history_event(
+            &format!("alice-lapsed-reserved-{ordinal}"),
+            Some(&logical),
+            None,
+            Some("ethereum-mainnet"),
+            Some(21_000_003),
+            Some("0xbinding"),
+            Some("0xalice-current"),
+            Some(ordinal),
+            CanonicalityState::Canonical,
+        );
+        reservation.event_kind = "RegistrationReserved".into();
+        reservation.source_family = "ens_v2_registry_l1".into();
+        reservation.before_state = json!({});
+        reservation.after_state = json!({"source_event": "LabelReserved", "status": "reserved",
+            "expiry": 4_000_000_000_u64, "token_id": "4294967297",
+            "current_token_id": "4294967297",
+            "registry_contract_instance_id": Uuid::from_u128(0x4400).to_string()});
+        bigname_storage::insert_normalized_event_fixtures(&database.pool, &[reservation]).await?;
+    }
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
     let stored = composed(&database, &logical).await?;
     assert_eq!(
         stored.provenance["authority_selection"]["ownerless_registry"], true,
         "{}",
         stored.provenance
     );
-    for field in ["authority_kind", "resource_id", "ens_v1_expiry"] {
+    for field in ["authority_kind", "resource_id", "ens_v1_expiry", "expiry"] {
         assert!(
             stored.declared_summary["registration"][field].is_null(),
             "{field}: {}",
             stored.declared_summary
         );
     }
+    Ok(database)
+}
 
-    let (detail, records) = ownerless_reads(&database).await?;
-    assert_owner(&detail, None, None, "released");
-    assert_eq!(detail["authority"], "ens_v1", "{detail}");
-    assert!(detail["resolver"].is_null(), "{detail}");
-    assert!(detail["records"].is_null(), "{detail}");
-    assert!(records["resolver"].is_null(), "{records}");
-    assert_ne!(
-        records["records"]["text:description"]["status"],
-        json!("ok"),
-        "{records}"
-    );
-    let record = lookup_by_name(&database, "detail", &["alice.eth"])
-        .await?
-        .remove(0);
-    assert_owner(&record, None, None, "released");
-    database.cleanup().await
+/// TYR-439, advisor ruling on the P2: an ownerless name whose lease ran out past its grace with
+/// no release row is served as composed. Its stored row carries no ENSv2 term (the ownerless
+/// profile drops it), so the lease alone cannot say whether a live reservation still holds the
+/// name. Name detail and lookup serve it unregistered, with no owner, manager or `authority`, and
+/// its retained registry pointer still serves its resolver and records, with a live reservation
+/// or without one.
+#[tokio::test]
+async fn an_ownerless_name_whose_lease_lapsed_is_served_as_composed() -> Result<()> {
+    for reserved in [false, true] {
+        let database = lapsed_ownerless(reserved).await?;
+        let (detail, records) = ownerless_reads(&database).await?;
+        assert_owner(&detail, None, None, "unregistered");
+        assert!(detail.get("authority").is_none(), "{reserved}: {detail}");
+        let resolver = json!("0x0000000000000000000000000000000000000abc");
+        assert_eq!(
+            detail["resolver"]["address"], resolver,
+            "{reserved}: {detail}"
+        );
+        assert_eq!(
+            records["resolver"]["address"], resolver,
+            "{reserved}: {records}"
+        );
+        assert_eq!(
+            records["records"]["text:description"],
+            json!({"status": "ok", "value": "Alice profile"}),
+            "{reserved}: {records}"
+        );
+        let record = lookup_by_name(&database, "detail", &["alice.eth"])
+            .await?
+            .remove(0);
+        assert_owner(&record, None, None, "unregistered");
+        assert!(record.get("authority").is_none(), "{reserved}: {record}");
+        database.cleanup().await?;
+    }
+    Ok(())
 }
 
 /// The alias walk is decided on the stored composed row, before the fill reads the release. That
