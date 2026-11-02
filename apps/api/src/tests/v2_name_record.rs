@@ -899,13 +899,7 @@ async fn v2_null_exact_resolver_auto_and_verified_execute_universal_resolver() -
         "0x0000000000000000000000000000000000000def",
     )
     .await?;
-    append_name_resolver_input(
-        &database,
-        "ens",
-        "alice.eth",
-        "0x0000000000000000000000000000000000000000",
-    )
-    .await?;
+    drop_name_resolver_inputs(&database, "alice.eth").await?;
 
     let executed_address = "0x0000000000000000000000000000000000000e0e";
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
@@ -1062,13 +1056,7 @@ async fn assert_null_resolver_route_flip_is_stale(source: &str) -> Result<()> {
         "0x0000000000000000000000000000000000000def",
     )
     .await?;
-    append_name_resolver_input(
-        &database,
-        "ens",
-        "alice.eth",
-        "0x0000000000000000000000000000000000000000",
-    )
-    .await?;
+    drop_name_resolver_inputs(&database, "alice.eth").await?;
 
     let (rpc_url, rpc_handle) =
         spawn_primary_name_mock_rpc(vec![resolution_basenames_l1_addr60_response(
