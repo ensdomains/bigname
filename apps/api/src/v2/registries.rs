@@ -61,8 +61,9 @@ pub(crate) struct RegistryCounts {
     pub(crate) labels: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) roles: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) events: Option<u64>,
+    /// Absent without `include=counts`, `null` above the count cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) events: Option<Option<u64>>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -179,21 +180,21 @@ pub(crate) async fn get_registry(
     };
     let events_cap = registry_events_count_cap();
     let events = if include_event_count {
-        Some(
-            bigname_storage::count_contract_events(
-                collection.conn().await?,
-                chain_id_slug,
-                &normalized_address,
-                &product_history_event_kinds(),
-                as_of_block,
-            )
-            .await
-            .map_err(|_| internal_error(chain_id_slug, &normalized_address))?,
+        let count = bigname_storage::count_contract_events(
+            collection.conn().await?,
+            chain_id_slug,
+            &normalized_address,
+            &product_history_event_kinds(),
+            as_of_block,
+            events_cap,
         )
+        .await
+        .map_err(|_| internal_error(chain_id_slug, &normalized_address))?;
+        // A capped count above its cap means the exact count was not computed.
+        Some(Some(count).filter(|count| events_cap.is_none_or(|cap| *count <= cap)))
     } else {
         None
-    }
-    .filter(|count| events_cap.is_none_or(|cap| *count <= cap));
+    };
 
     let next_cursor = references.next_cursor.as_ref().map(|cursor| {
         let mut payload =
@@ -258,9 +259,10 @@ pub(crate) async fn get_registry(
     }))
 }
 
-/// The cap on the `counts.events` count, or `None` to count every event.
+/// The cap on the `counts.events` count, or `None` to count every event. It is the
+/// `/v1/events` emitter opt-in cap, so the overview and the contract feed cap alike.
 pub(crate) fn registry_events_count_cap() -> Option<u64> {
-    None
+    Some(super::emitter_exact_count_cap())
 }
 
 fn build_registry_overview(
@@ -268,7 +270,7 @@ fn build_registry_overview(
     chain_id: u64,
     serving: Option<&SubregistryPointer>,
     labels: Option<i64>,
-    events: Option<u64>,
+    events: Option<Option<u64>>,
     referenced_by: ReferencedBy,
 ) -> RegistryOverview {
     let created = registry.created;
