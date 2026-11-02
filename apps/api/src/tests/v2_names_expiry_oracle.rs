@@ -22,8 +22,9 @@ enum OracleShape {
     EnsV2,
     /// A registrar-family grant whose binding row is deleted: the composed row is unsupported.
     Unsupported,
-    /// A `registry_old` Transfer to the zero owner, the binding ended and no token: the composed
-    /// row serves no authority and no registration.
+    /// A registrar-family grant, then a `registry_old` Transfer to the zero owner, the binding
+    /// ended and no token: the composed row serves the grant's lease, and `authority` `ens_v0`
+    /// because only the 2017 registry holds the node's record.
     Ownerless,
     /// A registrar-family grant followed by a `RegistrationReleased` event after its binding
     /// ended.
@@ -172,7 +173,7 @@ impl OracleFixture {
 /// - `big.eth` expires at 2^63 and `max.eth` at the largest uint64, past every bigint;
 /// - `orphan.eth` is unsupported yet keeps a finite expiry in the tie second and is not listed;
 /// - `ownerless.eth` has a cleared registry record over a live lease, which the record does not
-///   end, so it serves the lease and is listed in the tie second with no `authority`;
+///   end, so it serves the lease and is listed in the tie second with `authority` `ens_v0`;
 /// - `lapsed.eth` was released at 230 and keeps its 2020 expiry.
 async fn seed_expiry_oracle_fixture(database: &TestDatabase) -> Result<OracleFixture> {
     seed_bounded_membership_blocks(database, 240).await?;
@@ -345,7 +346,7 @@ async fn v2_names_expiry_oracle_fixture_lists_each_shape() -> Result<()> {
     );
     assert_eq!(all, expected, "orphan.eth is never listed");
     for (authority, names) in [
-        ("ens_v0", vec!["early.eth", "tie01.eth", "tie04.eth"]),
+        ("ens_v0", vec!["early.eth", "ownerless.eth", "tie01.eth"]),
         ("ens_v2", vec!["kid.late.eth", "tie00.eth", "tie03.eth"]),
     ] {
         let listed = oracle_walk(

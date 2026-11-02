@@ -191,7 +191,7 @@ async fn v2_registry_labels_filter_by_owner() -> Result<()> {
             fixture_label("amber", Some(LABEL_OWNER_A), LABEL_LIVE),
             fixture_label("basil", Some(LABEL_OWNER_B), LABEL_LIVE),
             fixture_label("cedar", None, LABEL_LIVE),
-            // Expired but not released: still held by its owner.
+            // An ENSv2 label has no grace: past its expiry it is released and serves no owner.
             fixture_label("delta", Some(LABEL_OWNER_A), LABEL_EXPIRED),
             fixture_label("ember", Some(LABEL_OWNER_A), LABEL_LIVE),
         ],
@@ -210,24 +210,23 @@ async fn v2_registry_labels_filter_by_owner() -> Result<()> {
     );
     assert!(totals.iter().all(|total| total == &json!(5)), "{totals:?}");
     assert_eq!(all[2].1, None, "cedar is served without an owner");
+    assert_eq!(all[3].1, None, "released delta is served without an owner");
 
-    // owner=A: A's labels only, the expired one included, counted before paging; the
+    // owner=A: A's labels only, the released one excluded, counted before paging; the
     // address is compared lower-cased.
     let upper_a = format!("0x{}", LABEL_OWNER_A[2..].to_ascii_uppercase());
     for owner in [LABEL_OWNER_A, upper_a.as_str()] {
         let (owned, totals) = walk_labels(&database, &format!("owner={owner}&page_size=1")).await?;
-        assert_eq!(
-            names(&owned),
-            ["amber.alpha.eth", "delta.alpha.eth", "ember.alpha.eth"]
-        );
+        assert_eq!(names(&owned), ["amber.alpha.eth", "ember.alpha.eth"]);
         assert!(
             owned
                 .iter()
                 .all(|(_, served)| served.as_deref() == Some(LABEL_OWNER_A))
         );
-        assert!(totals.iter().all(|total| total == &json!(3)), "{totals:?}");
+        assert!(totals.iter().all(|total| total == &json!(2)), "{totals:?}");
     }
-    // exclude_owner=A: every other label, the ownerless one included and served without owner.
+    // exclude_owner=A: every other label, the ownerless and released ones included and served
+    // without owner.
     let (excluded, totals) = walk_labels(
         &database,
         &format!("exclude_owner={LABEL_OWNER_A}&page_size=1"),
@@ -238,9 +237,10 @@ async fn v2_registry_labels_filter_by_owner() -> Result<()> {
         [
             ("basil.alpha.eth".to_owned(), Some(LABEL_OWNER_B.to_owned())),
             ("cedar.alpha.eth".to_owned(), None),
+            ("delta.alpha.eth".to_owned(), None),
         ]
     );
-    assert!(totals.iter().all(|total| total == &json!(2)), "{totals:?}");
+    assert!(totals.iter().all(|total| total == &json!(3)), "{totals:?}");
     // The two filters partition the labels, for each address.
     for owner in [LABEL_OWNER_A, LABEL_OWNER_B, CHILD_OWNER] {
         let (owned, _) = walk_labels(&database, &format!("owner={owner}&page_size=50")).await?;
@@ -333,7 +333,7 @@ async fn v2_registry_labels_filter_by_owner() -> Result<()> {
     assert_eq!(status, StatusCode::OK, "{body:#}");
     assert_eq!(
         body["data"][0]["name"],
-        json!("delta.alpha.eth"),
+        json!("ember.alpha.eth"),
         "{body:#}"
     );
 
