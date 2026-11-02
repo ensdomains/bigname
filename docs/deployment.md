@@ -5573,9 +5573,11 @@ changes. The resolver's own summary moves to the ENSv2 resolver family and manif
   [manifest-authority marker](glossary.md#manifest-authority-marker) on mainnet and stamps a
   required Ingest redo from block `26216293`, the declaration's start
   ([watch-plan widening](manifests.md#mandatory-historical-fetch-after-watch-plan-widening)).
-  The contract emits none of the family's events, so that fetch returns no log. Complete it
-  before the Interpret redo, as for any marker. Sepolia changes no manifest and gets no
-  marker and no Ingest redo.
+  The contract's deployed ABI declares no event, so it emits none of the family's events and
+  that fetch returns no log.
+  (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ENSV2Resolver.json:L3-L548 @ ens_v2_mainnet_20261002@4f47cbcc)
+  Complete it before the Interpret redo, as for any marker. Sepolia changes no manifest and
+  gets no marker and no Ingest redo.
 - Schema-migration `20261102120000_project_resolver_classification_reason_comment.sql`
   replaces the comment on `project_resolver_classification.unsupported_reason` so it names the
   new reason. It changes no column, index or row, and needs no preparation.
