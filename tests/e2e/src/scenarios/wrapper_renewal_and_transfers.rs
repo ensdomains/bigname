@@ -194,7 +194,11 @@ async fn a_wrapped_renewal_that_leaves_the_lease_in_grace_serves_a_lapsed_wrappe
     let (alice, bob) = (accounts[1], accounts[2]);
     let resolver = deployment.public_resolver.address;
     // `CANNOT_UNWRAP` locks the second name. `_wrapETH2LD` burns `PARENT_CANNOT_CONTROL` on all.
-    let names = [("graceheld", 0_u16), ("gracelocked", 1), ("gracerevived", 0)];
+    let names = [
+        ("graceheld", 0_u16),
+        ("gracelocked", 1),
+        ("gracerevived", 0),
+    ];
     let mut wrapped_expiries = Vec::new();
     for (label, fuses) in names {
         ens_v1::register_eth_name(&rpc, &deployment, label, alice, YEAR, resolver).await?;
