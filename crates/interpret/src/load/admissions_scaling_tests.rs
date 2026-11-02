@@ -6,7 +6,9 @@
 //! separate their cost from N's. Each case prints its timings and its `EXPLAIN (ANALYZE, BUFFERS)`
 //! plan. The assertions hold the row counts and keep the growth from 1,000 to 50,000 announced
 //! registries within linear-with-a-sort.
-use bigname_adapters::schema_v2::seam::ADMISSION_DISCOVERY_EDGE_KINDS;
+use bigname_adapters::schema_v2::seam::{
+    ADMISSION_DISCOVERY_EDGE_KINDS, OBSERVATION_KEY, REGISTRY_ANNOUNCEMENT_EDGE_KIND,
+};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use sqlx::PgConnection;
 use std::time::{Duration, Instant};
@@ -37,30 +39,41 @@ async fn database() -> Result<TestDatabase> {
 }
 
 /// One active registry manifest declaring one registry, `announced` registries that announced
-/// themselves, and `excluded` resolver edges from the declared registry to ten resolvers.
+/// themselves, and `excluded` resolver edges from the declared registry to ten resolvers. The
+/// three address ranges are disjoint: announced registries start `0xa`, the declared registry ends
+/// `d0` and the resolvers end `e0`, both below `0xa`.
 async fn seed(connection: &mut PgConnection, announced: i64, excluded: i64) -> Result {
-    let statements = [
-        "INSERT INTO manifest_versions (manifest_version, namespace, source_family, chain_id, deployment_label, rollout_status, normalizer_version, file_path, manifest_payload) VALUES (1, 'ens', 'ens_v2_registry_l1', $1, 'scaling', 'active', 'test', 'scaling.toml', '{}')",
+    let resolver = ADMISSION_DISCOVERY_EDGE_KINDS
+        .iter()
+        .copied()
+        .find(|kind| *kind != REGISTRY_ANNOUNCEMENT_EDGE_KIND)
+        .expect("the resolver admission edge kind");
+    // `$1` is the chain, `$2` a row count and `$3` an edge kind, each bound only where used.
+    let edges = format!(
+        "INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id, discovery_source, admission_basis, source_manifest_id, active_from_block_number, active_from_block_hash, canonicality_state, provenance) SELECT $1, $3, {{from}}, {{to}}, 'seeded', 'protocol_event', 1, n, 'block-' || n, 'canonical', jsonb_build_object('{OBSERVATION_KEY}', $3 || ':' || n) FROM generate_series(1, $2::bigint) n"
+    );
+    let statements: [(String, Option<i64>, Option<&str>); 10] = [
+        ("INSERT INTO manifest_versions (manifest_version, namespace, source_family, chain_id, deployment_label, rollout_status, normalizer_version, file_path, manifest_payload) VALUES (1, 'ens', 'ens_v2_registry_l1', $1, 'scaling', 'active', 'test', 'scaling.toml', '{}')".to_owned(), None, None),
         // The declared registry.
-        "INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind) VALUES (md5('declared')::uuid, $1, 'contract')",
-        "INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number, source_manifest_id) VALUES (md5('declared')::uuid, $1, '0x00000000000000000000000000000000000000d0', 0, 1)",
-        "INSERT INTO manifest_contract_instances (manifest_id, chain_id, declaration_kind, declaration_name, contract_instance_id, declared_address, role, proxy_kind) VALUES (1, $1, 'contract', 'registry', md5('declared')::uuid, '0x00000000000000000000000000000000000000d0', 'registry', 'none')",
-        // The announced registries.
-        "INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind) SELECT md5('announced' || n)::uuid, $1, 'contract' FROM generate_series(1, $2::bigint) n",
-        "INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number, source_manifest_id) SELECT md5('announced' || n)::uuid, $1, '0x' || lpad(to_hex(n), 40, '0'), n, 1 FROM generate_series(1, $2::bigint) n",
-        "INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id, discovery_source, admission_basis, source_manifest_id, active_from_block_number, active_from_block_hash, canonicality_state, provenance) SELECT $1, 'registry_announcement', md5('announced' || n)::uuid, md5('announced' || n)::uuid, 'RegistryCreated', 'protocol_event', 1, n, 'block-' || n, 'canonical', jsonb_build_object('observation_key', 'registry_announcement:' || n) FROM generate_series(1, $2::bigint) n",
-        // The resolvers the excluded edges point at.
-        "INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind) SELECT md5('resolver' || n)::uuid, $1, 'contract' FROM generate_series(1, 10) n",
-        "INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number, source_manifest_id) SELECT md5('resolver' || n)::uuid, $1, '0x' || lpad(to_hex(n), 38, '0') || 'e0', 0, 1 FROM generate_series(1, 10) n",
-        "INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id, discovery_source, admission_basis, source_manifest_id, active_from_block_number, active_from_block_hash, canonicality_state, provenance) SELECT $1, 'resolver', md5('declared')::uuid, md5('resolver' || (n % 10 + 1))::uuid, 'ResolverUpdated', 'protocol_event', 1, n, 'block-' || n, 'canonical', jsonb_build_object('observation_key', 'resolver:' || n) FROM generate_series(1, $3::bigint) n",
+        ("INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind) VALUES (md5('declared')::uuid, $1, 'contract')".to_owned(), None, None),
+        ("INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number, source_manifest_id) VALUES (md5('declared')::uuid, $1, '0x00000000000000000000000000000000000000d0', 0, 1)".to_owned(), None, None),
+        ("INSERT INTO manifest_contract_instances (manifest_id, chain_id, declaration_kind, declaration_name, contract_instance_id, declared_address, role, proxy_kind) VALUES (1, $1, 'contract', 'registry', md5('declared')::uuid, '0x00000000000000000000000000000000000000d0', 'registry', 'none')".to_owned(), None, None),
+        // The announced registries, each with its self-edge.
+        ("INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind) SELECT md5('announced' || n)::uuid, $1, 'contract' FROM generate_series(1, $2::bigint) n".to_owned(), Some(announced), None),
+        ("INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number, source_manifest_id) SELECT md5('announced' || n)::uuid, $1, '0xa' || lpad(to_hex(n), 39, '0'), n, 1 FROM generate_series(1, $2::bigint) n".to_owned(), Some(announced), None),
+        (edges.replace("{from}", "md5('announced' || n)::uuid").replace("{to}", "md5('announced' || n)::uuid"), Some(announced), Some(REGISTRY_ANNOUNCEMENT_EDGE_KIND)),
+        // The ten targets of the declared registry's resolver edges.
+        ("INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind) SELECT md5('target' || n)::uuid, $1, 'contract' FROM generate_series(1, 10) n".to_owned(), None, None),
+        ("INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number, source_manifest_id) SELECT md5('target' || n)::uuid, $1, '0x' || lpad(to_hex(n), 38, '0') || 'e0', 0, 1 FROM generate_series(1, 10) n".to_owned(), None, None),
+        (edges.replace("{from}", "md5('declared')::uuid").replace("{to}", "md5('target' || (n % 10 + 1))::uuid"), Some(excluded), Some(resolver)),
     ];
-    for statement in statements {
+    for (statement, count, kind) in &statements {
         let mut query = sqlx::query(statement).bind(CHAIN);
-        if statement.contains("$2") {
-            query = query.bind(announced);
+        if let Some(count) = count {
+            query = query.bind(*count);
         }
-        if statement.contains("$3") {
-            query = query.bind(excluded);
+        if let Some(kind) = kind {
+            query = query.bind(*kind);
         }
         query.execute(&mut *connection).await?;
     }

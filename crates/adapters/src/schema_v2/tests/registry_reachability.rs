@@ -33,6 +33,7 @@ fn registry_manifest() -> ManifestInput {
         "ParentChanged",
         "RegistryCreated",
         "TokenResourceLinked",
+        "TokenRegenerated",
         "Upgraded",
     ];
     manifest_with_events(
@@ -74,6 +75,12 @@ fn registry_manifest() -> ManifestInput {
             (
                 "Upgraded",
                 "event Upgraded(address indexed implementation)",
+                &["registry"],
+                ALL,
+            ),
+            (
+                "TokenRegenerated",
+                "event TokenRegenerated(uint256 indexed oldTokenId, uint256 indexed newTokenId)",
                 &["registry"],
                 ALL,
             ),
@@ -237,8 +244,13 @@ fn resolver_closures_of(
         .collect()
 }
 
+/// The resolver closes from `registry` from block 5 on. A registration closes its token's stale
+/// keys at its own log, before any edge exists, and every case here registers before block 5.
 fn resolver_closures(output: &BatchOutput, registry: &str) -> Vec<(String, i64, i64, i64)> {
     resolver_closures_of(output, registry, false)
+        .into_iter()
+        .filter(|closure| closure.1 >= 5)
+        .collect()
 }
 
 fn named(output: &BatchOutput, name: &str) -> bool {
@@ -672,5 +684,125 @@ fn s1_announcement_spam_adds_no_resolver_edge() -> anyhow::Result<()> {
         );
         assert!(output.name_surfaces.is_empty());
     }
+    Ok(())
+}
+
+fn parent_claim(registry: &str, parent: &str, label: &str, block: i64, log: i64) -> RawLogInput {
+    raw_at(
+        v2_registry::ParentUpdated {
+            parent: parent.parse().expect("address"),
+            label: label.to_owned(),
+            sender: SENDER.parse().expect("address"),
+        }
+        .encode_log_data(),
+        block,
+        log,
+        registry,
+    )
+}
+
+/// `CHILD` holds `a` pointing at `RESOLVER_X` and claims `ELSEWHERE`'s `p`, which points back
+/// until it expires at 10. `ELSEWHERE` is announced and unreachable. `PARENT` mounts `CHILD` at
+/// block 4, but the claim that points back wins, so `CHILD` is unreachable until `p` expires.
+fn claimed_by_unreachable_parent() -> Vec<RawLogInput> {
+    vec![
+        announce(ELSEWHERE, 1, 0),
+        announce(CHILD, 1, 1),
+        register(ELSEWHERE, "p", 10, 2, 0),
+        mount(ELSEWHERE, "p", CHILD, 2, 1),
+        register(CHILD, "a", LIVE, 2, 2),
+        set_resolver(CHILD, "a", RESOLVER_X, 2, 3),
+        parent_claim(CHILD, ELSEWHERE, "p", 3, 0),
+        register(PARENT, "n", LIVE, 4, 0),
+        mount(PARENT, "n", CHILD, 4, 1),
+    ]
+}
+
+/// U5: when the claimed entry expires, the walk falls back to `PARENT`'s mount, so a block
+/// boundary makes `CHILD` reachable. Its edge opens at the boundary with a raw-block position,
+/// which sorts before the block's logs.
+#[test]
+fn u5_an_expired_parent_claim_opens_the_edge_at_the_boundary() -> anyhow::Result<()> {
+    let mut logs = claimed_by_unreachable_parent();
+    logs.push(register(PARENT, "later", LIVE, 12, 0));
+    let output = interpret_test_batch(batch(logs))?;
+    assert_eq!(
+        resolver_edges(&output, CHILD),
+        vec![(
+            instance(RESOLVER_X),
+            key(CHILD, "a"),
+            12,
+            i64::MIN,
+            i64::MIN
+        )]
+    );
+    let opened = output
+        .discovery_edges
+        .iter()
+        .find(|edge| edge.edge_kind == "resolver")
+        .expect("the boundary edge");
+    assert!(crate::schema_v2::seam::is_raw_block_provenance(
+        &opened.provenance
+    ));
+    assert_eq!(opened.discovery_source, "RegistryPathExpired");
+    assert_eq!(opened.source_manifest_id, MANIFEST);
+    assert!(named(&output, "a.n.eth"));
+    Ok(())
+}
+
+/// U6: a parent claim that points back at an unreachable parent takes reachability away from a
+/// mounted registry at the claim's log.
+#[test]
+fn u6_a_parent_claim_to_an_unreachable_parent_closes_at_its_log() -> anyhow::Result<()> {
+    let mut logs = mounted_child();
+    logs.push(announce(ELSEWHERE, 6, 0));
+    logs.push(register(ELSEWHERE, "p", LIVE, 6, 1));
+    logs.push(mount(ELSEWHERE, "p", CHILD, 6, 2));
+    logs.push(parent_claim(CHILD, ELSEWHERE, "p", 7, 0));
+    let output = interpret_test_batch(batch(logs))?;
+    assert_eq!(
+        resolver_edges(&output, CHILD),
+        vec![(instance(RESOLVER_X), key(CHILD, "a"), 5, 0, 0)]
+    );
+    assert_eq!(
+        resolver_closures(&output, CHILD),
+        vec![(key(CHILD, "a"), 7, 0, 0)]
+    );
+    Ok(())
+}
+
+/// U4 with a regenerated token: the survivor carries its predecessor's key, so losing and
+/// regaining reachability closes and reopens that one key, once each.
+#[test]
+fn u7_a_regenerated_token_reopens_its_carried_key_once() -> anyhow::Result<()> {
+    let mut logs = mounted_child();
+    logs.push(raw_at(
+        v2_registry::TokenRegenerated {
+            oldTokenId: versioned_token("a", 1),
+            newTokenId: versioned_token("a", 2),
+        }
+        .encode_log_data(),
+        6,
+        0,
+        CHILD,
+    ));
+    logs.push(mount(PARENT, "n", ZERO_ADDRESS, 7, 0));
+    logs.push(mount(PARENT, "n", CHILD, 8, 0));
+    let output = interpret_test_batch(batch(logs))?;
+    let reopened = resolver_edges(&output, CHILD)
+        .into_iter()
+        .filter(|edge| edge.2 == 8)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reopened,
+        vec![(instance(RESOLVER_X), key(CHILD, "a"), 8, 0, 0)]
+    );
+    assert_eq!(
+        resolver_closures(&output, CHILD)
+            .into_iter()
+            .filter(|closure| closure.1 == 7)
+            .collect::<Vec<_>>(),
+        vec![(key(CHILD, "a"), 7, 0, 0)]
+    );
     Ok(())
 }

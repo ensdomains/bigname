@@ -14,7 +14,11 @@ sol! {
     event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender);
     event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender);
     event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender);
+    event Upgraded(address indexed implementation);
 }
+
+/// The declared `PermissionedResolver` implementation on the mainnet profile.
+const RESOLVER_IMPLEMENTATION: &str = "0x565b0f456a04ac9b48758190e90030623cff57c5";
 
 /// The values `publish` uses (v2_mainnet_admission.rs).
 const CHAIN: &str = "ethereum-mainnet";
@@ -459,8 +463,8 @@ async fn t1_mounting_an_ancestor_serves_and_opens_both_registries() -> Result<()
     database.cleanup().await
 }
 
-/// The per-registry announcement report the advisor's staging check asked for (scope section
-/// 4), run in-repo against a corpus with one mounted and one unmounted announced registry. Per
+/// A per-registry announcement report, run against a corpus with one mounted and one unmounted
+/// announced registry. Per
 /// announced address: its announcement block, the first block a named registry-family
 /// `SubregistryChanged` targets it, its `ResolverUpdated` logs before that block, and its
 /// resolver edges, all and still open.
@@ -563,6 +567,348 @@ async fn the_per_registry_announcement_report_reads_mounts_and_edges() -> Result
     assert_eq!(
         row(OTHER_REGISTRY)?,
         (OTHER_REGISTRY.to_owned(), block(3, count), None, 1, 0, 0)
+    );
+    database.cleanup().await
+}
+
+/// Replaces every block from `from` with `replacement`, one block each, then reruns Interpret over
+/// them as a redo and rebuilds Project at the new head. The replaced blocks are orphaned, as an
+/// Ingest rewind leaves them.
+async fn reorganize(
+    database: &TestDatabase,
+    from: i64,
+    replacement: Vec<(u64, Logs)>,
+) -> Result<()> {
+    let pool = &database.pool;
+    let original = |block: i64| format!("{CHAIN}-block-{block}");
+    let replaced = |block: i64| format!("{CHAIN}-block-{block}-reorganized");
+    let head = from + replacement.len() as i64 - 1;
+    assert_eq!(head, HEAD, "the replacement ends at the published head");
+    let mut transaction = pool.begin().await?;
+    for (offset, (time, logs)) in replacement.into_iter().enumerate() {
+        let block = from + offset as i64;
+        let parent = if offset == 0 {
+            original(block - 1)
+        } else {
+            replaced(block - 1)
+        };
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, parent_hash, block_number, block_timestamp,
+                 canonicality_state
+             ) VALUES ($1, $2, $3, $4, to_timestamp($5), 'observed')",
+        )
+        .bind(CHAIN)
+        .bind(replaced(block))
+        .bind(parent)
+        .bind(block)
+        .bind(time as f64)
+        .execute(&mut *transaction)
+        .await?;
+        let transaction_hash = format!("{CHAIN}-transaction-{block}-reorganized");
+        if let Some((to, _)) = logs.last() {
+            sqlx::query(
+                "INSERT INTO raw_transactions (
+                     chain_id, block_hash, block_number, transaction_hash, transaction_index,
+                     from_address, to_address
+                 ) VALUES ($1, $2, $3, $4, 0, $5, $6)",
+            )
+            .bind(CHAIN)
+            .bind(replaced(block))
+            .bind(block)
+            .bind(&transaction_hash)
+            .bind(OWNER)
+            .bind(*to)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        for (index, (emitter, data)) in logs.into_iter().enumerate() {
+            let topics: Vec<String> = data
+                .topics()
+                .iter()
+                .map(|topic| format!("{topic:#x}"))
+                .collect();
+            sqlx::query(
+                "INSERT INTO raw_logs (
+                     chain_id, block_hash, block_number, transaction_hash, transaction_index,
+                     log_index, emitting_address, topics, data
+                 ) VALUES ($1, $2, $3, $4, 0, $5, $6, $7, $8)",
+            )
+            .bind(CHAIN)
+            .bind(replaced(block))
+            .bind(block)
+            .bind(&transaction_hash)
+            .bind(index as i64)
+            .bind(emitter)
+            .bind(topics)
+            .bind(data.data.as_ref())
+            .execute(&mut *transaction)
+            .await?;
+        }
+    }
+    sqlx::query("UPDATE chain_heads SET latest_block_hash = $2, latest_block_number = $3 WHERE chain_id = $1")
+        .bind(CHAIN)
+        .bind(original(from - 1))
+        .bind(from - 1)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "UPDATE chain_lineage SET canonicality_state = 'orphaned'
+         WHERE chain_id = $1 AND block_number >= $2 AND block_hash NOT LIKE '%-reorganized'",
+    )
+    .bind(CHAIN)
+    .bind(from)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE chain_lineage SET canonicality_state = 'canonical'
+         WHERE chain_id = $1 AND block_hash LIKE '%-reorganized'",
+    )
+    .bind(CHAIN)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("UPDATE chain_heads SET latest_block_hash = $2, latest_block_number = $3 WHERE chain_id = $1")
+        .bind(CHAIN)
+        .bind(replaced(head))
+        .bind(head)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET current_block_hash = $2,
+             live_handoff_block_hash = CASE WHEN phase_name = 'ingest' THEN $2 END
+         WHERE chain_id = $1 AND current_block_hash = $3",
+    )
+    .bind(CHAIN)
+    .bind(replaced(head))
+    .bind(original(head))
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    bigname_interpret::Engine::new(pool.clone())
+        .run_batch(bigname_interpret::BatchRequest {
+            chain_id: CHAIN.into(),
+            from_block: from,
+            to_block: head,
+            resume_current: None,
+            mode: bigname_interpret::RunMode::Redo,
+        })
+        .await?;
+    let input = bigname_project::families::input_token(pool, CHAIN).await?;
+    let publication = bigname_project::families::apply(
+        pool,
+        CHAIN,
+        &bigname_project::Marker {
+            number: head,
+            hash: replaced(head),
+        },
+        bigname_project::families::FamilyMode::Rebuild,
+        &input,
+        &bigname_project::families::FamilyOptions::new(
+            bigname_content_hash::PROJECTION_CONTENT_HASH,
+        ),
+    )
+    .await?;
+    assert_eq!(publication.marker.map(|marker| marker.number), Some(head));
+    Ok(())
+}
+
+/// O2: M1's mount block is reorganized away and the mount lands one block later. The edge the
+/// orphaned mount opened is orphaned with it, and the registry's edge opens at the new mount,
+/// where its entry serves from.
+#[tokio::test]
+async fn o2_a_reorganized_mount_orphans_its_edge_and_reopens_at_the_new_mount() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let mut blocks = unmounted_registry()?;
+    blocks.push((REGISTERED + 180, vec![mount(ETH_REGISTRY, "n", REGISTRY)?]));
+    blocks.push((REGISTERED + DAY, vec![]));
+    let count = blocks.len();
+    publish(&database, blocks).await?;
+    let first_mount = block(3, count);
+    assert_eq!(
+        resolver_edges(&database, REGISTRY).await?,
+        vec![(RESOLVER_X.to_owned(), first_mount, None, key(REGISTRY, "a"))]
+    );
+
+    reorganize(
+        &database,
+        first_mount,
+        vec![
+            (REGISTERED + 180, vec![]),
+            (REGISTERED + DAY, vec![mount(ETH_REGISTRY, "n", REGISTRY)?]),
+        ],
+    )
+    .await?;
+
+    let second_mount = block(4, count);
+    assert_eq!(
+        resolver_edges(&database, REGISTRY).await?,
+        vec![(
+            RESOLVER_X.to_owned(),
+            second_mount,
+            None,
+            key(REGISTRY, "a")
+        )]
+    );
+    let orphaned: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM discovery_edges
+         WHERE chain_id = $1 AND edge_kind = 'resolver' AND active_from_block_number = $2
+           AND canonicality_state = 'orphaned'",
+    )
+    .bind(CHAIN)
+    .bind(first_mount)
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(orphaned, 1, "the orphaned mount's edge is orphaned with it");
+    let detail = ok(&database, "/v1/names/a.n.eth?namespace=ens").await?;
+    assert_eq!(
+        detail["data"]["resolver"]["address"],
+        json!(RESOLVER_X),
+        "{detail:#}"
+    );
+    let row = classification(&database, RESOLVER_X)
+        .await?
+        .context("the mounted registry's resolver is classified")?;
+    assert_eq!(row["block_number"], json!(second_mount), "{row:#}");
+    database.cleanup().await
+}
+
+/// O1: the registry's announcement block, and the block where `n.eth` mounts it, are
+/// reorganized away. The replacement mounts it before it announces again at the head, and its
+/// own entry and pointer are gone. Nothing from the orphaned blocks stays live: one announcement
+/// edge from the new block, and no resolver edge, where the mount had opened one.
+#[tokio::test]
+async fn o1_a_reorganized_announcement_leaves_nothing_live_from_the_orphaned_block() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let blocks = vec![
+        (REGISTERED - 60, vec![]),
+        (REGISTERED, vec![announce(REGISTRY)]),
+        (
+            REGISTERED + 60,
+            vec![
+                register(REGISTRY, "a", FOREVER)?,
+                set_resolver(REGISTRY, "a", RESOLVER_X)?,
+                register(ETH_REGISTRY, "n", FOREVER)?,
+                mount(ETH_REGISTRY, "n", REGISTRY)?,
+            ],
+        ),
+        (REGISTERED + DAY, vec![]),
+    ];
+    let count = blocks.len();
+    publish(&database, blocks).await?;
+    let announced = block(1, count);
+    assert_eq!(
+        resolver_edges(&database, REGISTRY).await?.len(),
+        1,
+        "the mount opened the registry's edge"
+    );
+
+    reorganize(
+        &database,
+        announced,
+        vec![
+            (REGISTERED, vec![]),
+            (
+                REGISTERED + 60,
+                vec![
+                    register(ETH_REGISTRY, "n", FOREVER)?,
+                    mount(ETH_REGISTRY, "n", REGISTRY)?,
+                ],
+            ),
+            (REGISTERED + DAY, vec![announce(REGISTRY)]),
+        ],
+    )
+    .await?;
+
+    let announcements: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT edge.active_from_block_number, edge.canonicality_state::text
+         FROM discovery_edges edge
+         JOIN contract_instance_addresses address
+           ON address.contract_instance_id = edge.from_contract_instance_id
+          AND address.chain_id = edge.chain_id
+         WHERE edge.chain_id = $1 AND edge.edge_kind = 'registry_announcement'
+           AND lower(address.address) = $2
+         ORDER BY 1",
+    )
+    .bind(CHAIN)
+    .bind(REGISTRY)
+    .fetch_all(&database.pool)
+    .await?;
+    assert_eq!(
+        announcements,
+        vec![
+            (announced, "orphaned".to_owned()),
+            (block(3, count), "canonical".to_owned())
+        ]
+    );
+    assert_eq!(resolver_edges(&database, REGISTRY).await?, vec![]);
+    database.cleanup().await
+}
+
+/// A contract that announces itself as a resolver, through `Upgraded` naming the declared
+/// implementation, before it announces itself as a registry in the same transaction. The edge
+/// its mount opens runs under the registry manifest and rule its own `ResolverUpdated` selects,
+/// not the resolver admission that came first.
+#[tokio::test]
+async fn m1_a_registry_that_announced_itself_as_a_resolver_first_opens_under_the_registry_rule()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let blocks = vec![
+        (
+            REGISTERED,
+            vec![
+                (
+                    REGISTRY,
+                    Upgraded {
+                        implementation: RESOLVER_IMPLEMENTATION.parse()?,
+                    }
+                    .encode_log_data(),
+                ),
+                announce(REGISTRY),
+                register(REGISTRY, "a", FOREVER)?,
+                set_resolver(REGISTRY, "a", RESOLVER_X)?,
+            ],
+        ),
+        (
+            REGISTERED + 60,
+            vec![
+                register(ETH_REGISTRY, "n", FOREVER)?,
+                mount(ETH_REGISTRY, "n", REGISTRY)?,
+            ],
+        ),
+        (REGISTERED + DAY, vec![]),
+    ];
+    let count = blocks.len();
+    publish(&database, blocks).await?;
+
+    let mounted = block(1, count);
+    assert_eq!(
+        resolver_edges(&database, REGISTRY).await?,
+        vec![(RESOLVER_X.to_owned(), mounted, None, key(REGISTRY, "a"))]
+    );
+    let (family, basis): (String, String) = sqlx::query_as(
+        "SELECT manifest.source_family, edge.admission_basis
+         FROM discovery_edges edge
+         JOIN manifest_versions manifest ON manifest.manifest_id = edge.source_manifest_id
+         JOIN contract_instance_addresses source
+           ON source.contract_instance_id = edge.from_contract_instance_id
+          AND source.chain_id = edge.chain_id
+         WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
+           AND lower(source.address) = $2",
+    )
+    .bind(CHAIN)
+    .bind(REGISTRY)
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(
+        (family.as_str(), basis.as_str()),
+        ("ens_v2_registry_l1", "reachable_from_root")
+    );
+    let detail = ok(&database, "/v1/names/a.n.eth?namespace=ens").await?;
+    assert_eq!(
+        detail["data"]["resolver"]["address"],
+        json!(RESOLVER_X),
+        "{detail:#}"
     );
     database.cleanup().await
 }

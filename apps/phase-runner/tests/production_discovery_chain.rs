@@ -22,8 +22,8 @@ use phase_runner::{
     ingest_phase::IngestPhase,
     interpret_phase::InterpretPhase,
     phase::{
-        CompletedPhaseFuture, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture,
-        PhaseName, PhaseProgress, PhaseSet, RunMode, VerificationLevel,
+        AfterProgressFuture, CompletedPhaseFuture, LoopbackPhase, Phase, PhaseBatchOutcome,
+        PhaseContext, PhaseFuture, PhaseName, PhaseProgress, PhaseSet, RunMode, VerificationLevel,
     },
     runner::PhaseRunner,
 };
@@ -660,6 +660,14 @@ impl Phase for RecordedPhase {
 
     fn revalidate_completed(&self, context: PhaseContext) -> CompletedPhaseFuture<'_> {
         self.inner.revalidate_completed(context)
+    }
+
+    fn after_progress_recorded(&self, chain_id: &str) -> AfterProgressFuture<'_> {
+        self.inner.after_progress_recorded(chain_id)
+    }
+
+    fn has_after_progress_work(&self, chain_id: &str) -> bool {
+        self.inner.has_after_progress_work(chain_id)
     }
 }
 
