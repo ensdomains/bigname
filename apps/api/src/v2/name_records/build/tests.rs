@@ -353,10 +353,19 @@ fn rows_that_are_not_a_registry_clear_keep_their_auto_answer() {
 
     let mut released = registry_clear_row();
     released.declared_summary["registration"] = json!({"status": "released"});
-    let answer = indexed_satisfying_record_answer(&released, None, &record, true)
-        .expect("a released name must evaluate")
-        .expect("a released name keeps its terminal miss");
-    assert_eq!(answer.status, Status::NotFound);
+    let mut ownerless_subname = registry_clear_row();
+    ownerless_subname.declared_summary["registration"] =
+        json!({"status": "active", "authority_kind": "registry_only"});
+    ownerless_subname.declared_summary["unresolvable_reason"] = json!("ens_v2_path_no_resolver");
+    for (class, row) in [
+        ("a released name", released),
+        ("an ownerless registry-only subname", ownerless_subname),
+    ] {
+        let answer = indexed_satisfying_record_answer(&row, None, &record, true)
+            .expect("a name with no current registration must evaluate")
+            .expect("a name with no current registration keeps its terminal miss");
+        assert_eq!(answer.status, Status::NotFound, "{class}");
+    }
 }
 
 fn null_resolver_discovery_row() -> NameCurrentRow {

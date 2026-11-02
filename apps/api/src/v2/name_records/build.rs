@@ -9,7 +9,9 @@ use serde_json::Value;
 use tracing::error;
 
 use crate::v2::name_record::row_has_current_registration;
-use crate::v2::support::{ResolutionRecordKey, serving_record_inventory};
+use crate::v2::support::{
+    ResolutionRecordKey, composed_ens_v1_registry_clear, serving_record_inventory,
+};
 
 use super::super::vocab::{
     MISSING_UNSUPPORTED_REASON, downgrades_unsupported_name, projected_row_product_reason,
@@ -299,6 +301,9 @@ fn indexed_satisfying_record_answer(
     record: &ResolutionRecordKey,
     admit_null_resolver_discovery: bool,
 ) -> V2Result<Option<RecordAnswer>> {
+    if composed_ens_v1_registry_clear(row) {
+        return Ok(Some(not_found_answer(None)?));
+    }
     if admit_null_resolver_discovery && ens_universal_resolver_discovery_candidate(row) {
         return Ok(None);
     }
