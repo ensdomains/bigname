@@ -782,7 +782,10 @@ Rules:
   anchor) populate
   it with a capped count over the page's exact filters: exact up to 10,000
   product-visible rows and `null` beyond by default; `include=total_count`
-  requests an exact uncapped count on anchored history. On name history with
+  requests an exact uncapped count on anchored history. The exception is a
+  `/v1/events` read that only `resolver` or `contract_address` anchors, with
+  no `name`, `registration_id`, or `address`. There `include=total_count`
+  counts exactly up to 100,000 rows and reports `null` beyond. On name history with
   `include=child_registrations` the count covers the name's rows and its direct
   child registration rows together, each event once. It is always `null` for unanchored event
   reads. `GET /v1/names/{name}/subnames` populates it with the parent's direct

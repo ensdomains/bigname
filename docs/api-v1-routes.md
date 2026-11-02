@@ -2300,6 +2300,13 @@ A recognized namespace with no available publication returns retryable `409 stal
   on continuation pages; the flag does not bind cursors. Each opt-in request
   counts again at its current published position. No cached or approximate
   total is returned, and an exact empty result is zero.
+- A `/v1/events` read that only an emitting contract anchors (`resolver`,
+  `contract_address`, or both, with no `name`, `registration_id`, or
+  `address`) caps the opt-in count at 100,000 rows. One contract can emit more
+  rows than an exact count reads within the request deadline. Up to the cap
+  `include=total_count` returns the exact total as above. Above it the count
+  stops after 100,001 rows and the page reports `total_count=null`. The rows,
+  `next_cursor`, and `has_more` are the same as without the flag.
 
 ### History event payloads (`include=data`, `include=raw`)
 
@@ -4666,7 +4673,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `order` | query | enum SortOrder | no | `desc` | Ascending or descending result order. |
 | `from_timestamp` | query | string | no | none | Inclusive timestamp lower bound, decimal Unix seconds or RFC 3339; retains input precision. |
 | `to_timestamp` | query | string | no | none | Inclusive timestamp upper bound, decimal Unix seconds or RFC 3339; must not precede from_timestamp. |
-| `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. |
+| `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count requests an exact total. When only resolver or contract_address anchors the read, it is exact up to 100,000 rows and null above. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
 | `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
@@ -4795,7 +4802,9 @@ For a registrar lease first identified by a later readable observation, registra
   rule: populated (exact up to 10,000 rows, `null` beyond) when `name`,
   `registration_id`, `address`, or `resolver` anchors the read; opting into
   `include=total_count` removes that cap and also enables exact filtered totals
-  for contract-address reads, whose default remains null. Other unanchored
+  for contract-address reads, whose default remains null. When only
+  `resolver` or `contract_address` anchors the read, the opt-in count is
+  exact up to 100,000 rows and `null` beyond. Other unanchored
   reads always return null.
 - Walk behavior: each page and its counts read the publication captured when
   that page is admitted, disclosed in `meta.as_of`. The continuation cursor
