@@ -359,7 +359,7 @@ fn of_kind<'a>(output: &'a BatchOutput, kind: &str) -> Vec<&'a NormalizedEvent> 
         .collect()
 }
 
-fn at_block<'a>(events: Vec<&'a NormalizedEvent>, number: i64) -> Vec<&'a NormalizedEvent> {
+fn at_block(events: Vec<&NormalizedEvent>, number: i64) -> Vec<&NormalizedEvent> {
     events
         .into_iter()
         .filter(|event| event.block_number == Some(number))
@@ -627,6 +627,45 @@ fn a_controller_renewal_still_owns_its_renewal() -> anyhow::Result<()> {
         LEGACY_CONTROLLER
     );
     assert_eq!(of_kind(&output, "RegistrationGranted").len(), 1);
+    Ok(())
+}
+
+/// Row 7b: a controller event covers only the numeric event of its kind just before it. A
+/// numeric renewal through another caller earlier in the transaction is still its own renewal.
+#[test]
+fn an_uncovered_numeric_renewal_before_a_controller_renewal_still_renews() -> anyhow::Result<()> {
+    let mut logs = Logs::default();
+    eth_root(&mut logs);
+    migration_mint(&mut logs, 2, LABEL);
+    logs.push(3, 0, BASE_REGISTRAR, numeric_renewal(LABEL, 40_000_000));
+    logs.push(3, 0, BASE_REGISTRAR, numeric_renewal(LABEL, 50_000_000));
+    logs.push(
+        3,
+        0,
+        LEGACY_CONTROLLER,
+        controller_renewal(LABEL, 50_000_000),
+    );
+    let output = logs.run(3)?;
+    let (_, lease) = mint_grant(&output);
+    let renewed = at_block(of_kind(&output, "RegistrationRenewed"), 3);
+    let emitted = renewed
+        .iter()
+        .map(|event| {
+            (
+                event.raw_fact_ref["emitting_address"].clone(),
+                event.after_state["expiry"].clone(),
+                event.resource_id,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        emitted,
+        [
+            (json!(BASE_REGISTRAR), json!(40_000_000), Some(lease)),
+            (json!(LEGACY_CONTROLLER), json!(50_000_000), Some(lease)),
+        ],
+        "{renewed:#?}"
+    );
     Ok(())
 }
 

@@ -63,7 +63,12 @@ pub(super) fn interpret(
                 .normalized_events
                 .iter()
                 .any(|event| event == "RegistrationGranted");
-            let mut ordinary = if context.graveyard_cleanup || !lifecycle_enabled {
+            // A controller that registers or renews through the BaseRegistrar emits its own
+            // label-bearing event after the numeric one, and that event owns the lease.
+            let mut ordinary = if context.graveyard_cleanup
+                || !lifecycle_enabled
+                || context.controller_lifecycle_follows
+            {
                 Interpreted::new()
             } else {
                 base::interpret(selected, raw, state, context.transaction_has_registry_setup)?

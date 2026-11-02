@@ -7,7 +7,8 @@ use crate::schema_v2::{
     catalog::{Catalog, Selected},
     migration::RegistrarContext,
     protocol::v1::{
-        registrar_registration, registrar_registration_namehash, registrar_token_transfer,
+        registrar_controller_lifecycle, registrar_numeric_lifecycle, registrar_registration,
+        registrar_registration_namehash, registrar_token_transfer,
         registry_registration_setup_namehash,
     },
 };
@@ -26,6 +27,17 @@ pub(super) struct TransactionIndex {
     name_unwraps: BTreeMap<TransactionNodeKey, Vec<i64>>,
     /// The registrations of each node, with a numeric registration's registrant.
     registrations: BTreeMap<TransactionNodeKey, Vec<(i64, Option<String>)>>,
+    /// The admitted controller registrations and renewals of each node, by log index, `true` for a
+    /// registration.
+    controller_lifecycles: BTreeMap<TransactionNodeKey, Vec<(i64, bool)>>,
+    /// The numeric BaseRegistrar registrations and renewals of each node, in the same form.
+    numeric_lifecycles: BTreeMap<TransactionNodeKey, Vec<(i64, bool)>>,
+}
+
+/// Whether `selected` is a BaseRegistrar log of the ENSv1 `.eth` registrar family.
+fn numeric_lifecycle(selected: &Selected) -> bool {
+    selected.source.source_family == "ens_v1_registrar_l1"
+        && selected.emitter_role.as_deref() == Some("registrar")
 }
 
 fn key(selected: &Selected, raw: &RawLogInput, node: String) -> TransactionNodeKey {
@@ -56,6 +68,23 @@ impl TransactionIndex {
                     .entry(key(&selected, raw, namehash))
                     .or_default()
                     .push((raw.log_index, registrant));
+            }
+            if let Some((namehash, registration)) = registrar_controller_lifecycle(&selected, raw) {
+                index
+                    .controller_lifecycles
+                    .entry(key(&selected, raw, namehash))
+                    .or_default()
+                    .push((raw.log_index, registration));
+            }
+            if numeric_lifecycle(&selected)
+                && let Ok(Some((namehash, registration))) =
+                    registrar_numeric_lifecycle(&selected, raw)
+            {
+                index
+                    .numeric_lifecycles
+                    .entry(key(&selected, raw, namehash))
+                    .or_default()
+                    .push((raw.log_index, registration));
             }
             match selected.source.source_family.as_str() {
                 "ens_v1_registry_l1" => {
@@ -103,6 +132,29 @@ impl TransactionIndex {
     ) -> anyhow::Result<()> {
         context.matched_wrapper_completion = self.wrapper_completions.matched(raw);
         context.wrapper_mint_completion = self.wrapper_completions.mint_completion(raw);
+        if numeric_lifecycle(selected)
+            && let Some((namehash, registration)) = registrar_numeric_lifecycle(selected, raw)?
+        {
+            // A controller event owns this numeric event when it is the next of its kind for the
+            // node: a numeric event of the same kind between them is the controller's own call.
+            let node = key(selected, raw, namehash);
+            let numeric = self.numeric_lifecycles.get(&node);
+            context.controller_lifecycle_follows = self
+                .controller_lifecycles
+                .get(&node)
+                .is_some_and(|controllers| {
+                    controllers.iter().any(|&(controller, kind)| {
+                        kind == registration
+                            && controller > raw.log_index
+                            && !numeric.is_some_and(|numeric| {
+                                numeric.iter().any(|&(log, numeric_kind)| {
+                                    numeric_kind == registration
+                                        && (raw.log_index + 1..controller).contains(&log)
+                                })
+                            })
+                    })
+                });
+        }
         if let Some((namehash, owner)) = registrar_registration_namehash(selected, raw)? {
             context.transaction_has_registry_setup = self
                 .registry_setups

@@ -438,6 +438,29 @@ fn canonical(value: &Value, replacements: &[(String, String)], ids: &mut Vec<Str
     }
 }
 
+/// `summary` without the fields that record where in its transaction a fact landed: the event
+/// heads and latest event kinds, and the authority key, which embeds the granting log's position.
+/// A controller emits its event after the registry and token writes the migration mint makes
+/// after its numeric event, so these differ between twins that serve the same lease.
+fn positionless(mut summary: Value) -> Value {
+    fn strip(value: &mut Value) {
+        match value {
+            Value::Object(fields) => {
+                fields.remove("history");
+                fields.remove("latest_event_kind");
+                if let Some(Value::String(key)) = fields.get_mut("authority_key") {
+                    *key = key.split(':').next().unwrap_or_default().to_owned();
+                }
+                fields.values_mut().for_each(strip);
+            }
+            Value::Array(items) => items.iter_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    strip(&mut summary);
+    summary
+}
+
 /// What a client reads for `label`.eth: the composed row's summary, coverage and binding shape,
 /// its `project_name_summary` row, and the relations of every party to it. Identities and the
 /// label's text are canonicalized.
@@ -445,7 +468,10 @@ async fn served(pool: &PgPool, label: &str) -> Result<Value> {
     let logical_name_id = name(label);
     let row = project_name(pool, &logical_name_id).await?;
     let summary: Option<Value> = sqlx::query_scalar(
-        "SELECT to_jsonb(summary) - 'logical_name_id' FROM project_name_summary summary
+        // The surface's raw bytes and their sort key exist only for a learned label, so the
+        // migrated twin serves none: they are label knowledge, not composition.
+        "SELECT to_jsonb(summary) - 'logical_name_id' - 'raw_name' - 'order_name' - 'namehash'
+         FROM project_name_summary summary
          WHERE chain_id = $1 AND logical_name_id = $2",
     )
     .bind(CHAIN)
@@ -474,7 +500,7 @@ async fn served(pool: &PgPool, label: &str) -> Result<Value> {
     let mut ids = Vec::new();
     Ok(canonical(
         &json!({
-            "declared_summary": row.declared_summary,
+            "declared_summary": positionless(row.declared_summary),
             "coverage": row.coverage,
             "binding_kind": row.binding_kind.map(|kind| kind.as_str()),
             "has_binding": row.surface_binding_id.is_some(),
@@ -630,12 +656,13 @@ async fn a_migrated_name_is_renamed_on_read_and_registered_again() -> Result<()>
     );
     sqlx::query(
         "INSERT INTO label_preimages (
-             labelhash, label, normalized_label, canonical_display_label, source_kind,
-             source_priority
-         ) VALUES ($1, $2, $2, $2, 'import', 0)",
+             labelhash, raw_label, decoded_label, normalizer_version, normalized_under_version,
+             source_kind, source_priority
+         ) VALUES ($1, convert_to($2, 'UTF8'), $2, $3, true, 'import', 0)",
     )
     .bind(format!("{:#x}", labelhash("migrated-plain")))
     .bind("migrated-plain")
+    .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
     .execute(pool)
     .await?;
     let renamed = project_name(pool, &name("migrated-plain"))

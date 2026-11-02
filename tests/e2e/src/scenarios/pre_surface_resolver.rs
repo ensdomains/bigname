@@ -113,9 +113,13 @@ async fn exercise(ownerless: bool) -> Result<()> {
         assert!(!registration["registered_at"].is_null(), "{name_body}");
         assert!(!registration["ens_v1_expiry"].is_null(), "{name_body}");
         assert_eq!(registration["authority_kind"], Value::Null);
-        // The registrant is the lease's holder when its registrar rows record one. Here the
-        // registrar's own mint precedes the lease the renewal names, so the lease records none.
-        assert!(registration["registrant"].is_null(), "{name_body}");
+        // The registrant is the lease's holder its registrar rows record: the registrar's own
+        // numeric mint opens the lease, since the owner-added controller is not admitted.
+        assert_eq!(
+            registration["registrant"],
+            format!("{owner:#x}"),
+            "{name_body}"
+        );
         assert_eq!(
             name_body["declared_state"]["control"]["status"],
             "unregistered"
@@ -123,13 +127,13 @@ async fn exercise(ownerless: bool) -> Result<()> {
         assert_eq!(name_body["data"]["resource_id"], Value::Null);
         assert_eq!(name_body["data"]["token_lineage_id"], Value::Null);
         assert_eq!(name_body["data"]["binding_kind"], Value::Null);
-        for field in [
-            "registry_owner",
-            "manager",
-            "registrant",
-            "registration_id",
-            "token_id",
-        ] {
+        assert!(
+            name_body["declared_state"]["control"]
+                .get("registrant")
+                .is_none_or(Value::is_null),
+            "ownerless control must serve no registrant: {name_body}"
+        );
+        for field in ["registry_owner", "manager", "registration_id", "token_id"] {
             assert!(
                 name_body["declared_state"]["registration"]
                     .get(field)
@@ -155,7 +159,11 @@ async fn exercise(ownerless: bool) -> Result<()> {
             Value::Null
         );
         assert!(name_body["data"]["resource_id"].is_string());
-        assert_eq!(name_body["data"]["token_lineage_id"], Value::Null);
+        // The registrar's numeric mint names the lease, so the binding carries its token.
+        assert!(
+            name_body["data"]["token_lineage_id"].is_string(),
+            "{name_body}"
+        );
         assert_eq!(control_bindings, 1);
     }
 

@@ -35,10 +35,11 @@ const PROBE_BLOCK: i64 = 4;
 
 /// How the deployment declares the wrapped controller's `NameRenewed`. Mainnet declares it with
 /// `RegistrationGranted`, so it takes the registrar name-event path. Sepolia declares only
-/// `ExpiryChanged` and `PreimageObserved`, so it takes the enrichment path. Both variants keep
-/// the BaseRegistrar's `NameRenewed` lifecycle-enabled, so it records the transaction's registrar
-/// word. Mainnet declares that event without `RegistrationGranted`, so there the word is the
-/// lease the controller's event sets, which the held-lease row covers.
+/// `ExpiryChanged` and `PreimageObserved`, so it takes the enrichment path. On Sepolia the
+/// BaseRegistrar's `NameRenewed` is lifecycle-interpreted and records the transaction's registrar
+/// word. On Mainnet the controller's `NameRenewed` follows it in the same transaction, so the
+/// numeric event derives nothing and the word is the lease the controller's event sets, which the
+/// held-lease row covers.
 #[derive(Clone, Copy, Debug)]
 enum Declaration {
     Mainnet,

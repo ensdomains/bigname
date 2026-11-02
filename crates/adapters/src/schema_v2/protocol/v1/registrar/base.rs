@@ -203,6 +203,39 @@ pub(in crate::schema_v2) fn registration_namehash(
         address_hex(event.owner),
     )))
 }
+/// The node of a numeric BaseRegistrar `NameRegistered` or `NameRenewed`, and whether it is a
+/// registration.
+pub(in crate::schema_v2) fn lifecycle_namehash(
+    selected: &Selected,
+    raw: &RawLogInput,
+) -> anyhow::Result<Option<(String, bool)>> {
+    let (id, registration) = match selected.event.signature.as_str() {
+        "NameRegistered(uint256,address,uint256)" => (
+            decode_event_log::<NameRegistered>(
+                &raw.topics,
+                &raw.data,
+                "BaseRegistrar NameRegistered log is malformed",
+            )?
+            .id,
+            true,
+        ),
+        "NameRenewed(uint256,uint256)" => (
+            decode_event_log::<NameRenewed>(
+                &raw.topics,
+                &raw.data,
+                "BaseRegistrar NameRenewed log is malformed",
+            )?
+            .id,
+            false,
+        ),
+        _ => return Ok(None),
+    };
+    Ok(Some((
+        registrar_namehash(selected, B256::from(id.to_be_bytes::<32>())),
+        registration,
+    )))
+}
+
 fn name_renewed(
     selected: &Selected,
     raw: &RawLogInput,

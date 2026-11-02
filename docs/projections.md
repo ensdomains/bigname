@@ -622,12 +622,15 @@ which Project builds before it reaches the block's grants.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L69 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
 
-A name the January 2020 registrar migration moved has a lease that no grant opened. The
-migration emitted the BaseRegistrar's own `NameRegistered` in the transaction that wrote the
-name's first current-registry record, and no controller event, so the name is selected through
-a registry-only binding that stands for no lease, or through no binding once its registry owner
-is zero (the ownerless-registry profile above). Its first controller renewal names the lease: the adapter mints the
-lease's resource there and derives a `RegistrationGranted` beside the renewal. That lease is the
+A name the January 2020 registrar migration moved has its lease from the migration's own
+transaction. The migration emitted the BaseRegistrar's numeric `NameRegistered` in the
+transaction that wrote the name's first current-registry record, and no controller event, so
+the registrar adapter interprets it as the lease's grant, named by the name's namehash whether
+or not its label is known ([storage semantics](storage.md)). A name selected through a
+registry-only binding that stands for no lease, or through no binding once its registry owner
+is zero (the ownerless-registry profile above), still reads a lease. When a renewal is a lease's
+first row, the adapter mints the lease's resource there and derives a `RegistrationGranted`
+beside the renewal. The lease is the
 name's [implied lease](glossary.md#implied-lease): the resource of the name's latest own
 `RegistrationGranted`, `RegistrationRenewed`, `RegistrationReleased` or `ExpiryChanged` row of
 the `ens_v1_registrar_l1` family with registrar authority kind, at or after the name's first
@@ -646,8 +649,8 @@ ENSv1→ENSv2 migration path keeps that start. The selected binding, its authori
 registry owner stay as they were. A name whose binding records a lease with registrar rows, a
 name with no binding outside the ownerless-registry profile, a wrapper-selected name, a name
 selected under ENSv2 and any name other than a `.eth` second-level name have no implied lease.
-The migration's own `NameRegistered` is still not interpreted, so a migrated name never renewed
-has no lease row and serves as before.
+A migrated name never renewed is released by its lease's schedule like any other lapsed `.eth`
+name.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L155 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)

@@ -11,6 +11,7 @@ use super::{
 
 mod activation;
 mod child;
+mod context;
 mod registry;
 mod registry_origin;
 mod renewals;
@@ -19,6 +20,7 @@ mod unwrapped_reconcile;
 use activation::activate_complete_groups;
 #[cfg(any(test, feature = "test-activation"))]
 pub use activation::inject_activated_transition_for_test;
+pub(super) use context::RegistrarContext;
 use registry::correlate_registry_creation;
 use renewals::correlate_renewals;
 use support::*;
@@ -28,18 +30,6 @@ const MIGRATION_FAMILY: &str = "ens_v2_migration_l1";
 const V1_REGISTRAR_FAMILY: &str = "ens_v1_registrar_l1";
 const CANDIDATE: &str = "candidate";
 const TRANSITION_KIND: &str = "authority_transition";
-
-#[derive(Clone, Copy, Debug, Default)]
-pub(super) struct RegistrarContext<'a> {
-    pub(super) matched_wrapper_completion: bool,
-    pub(super) wrapper_mint_completion: Option<&'a super::RawLogInput>,
-    pub(super) migration_enabled: bool,
-    pub(super) graveyard_cleanup: bool,
-    pub(super) transaction_has_registry_setup: bool,
-    pub(super) registration_follows: bool,
-    pub(super) registry_graveyard: Option<alloy_primitives::Address>,
-    pub(super) wrapper_custody: super::protocol::v1::WrapperCustody,
-}
 
 pub(super) fn registrar_context<'a>(
     catalog: &Catalog,
