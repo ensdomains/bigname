@@ -66,16 +66,18 @@ pub struct FamilyChildRow {
 }
 
 /// A registry's labels: the ENSv2 children whose registration `registry` emitted, narrowed by
-/// the owner each serves when `owner` is given.
+/// the owner each serves when `owner` is given. Only [`count_registry_labels`] bounds the
+/// registry's registrations under the parent (`registration_limit`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RegistryLabels<'a> {
     pub(crate) registry: &'a str,
     pub(crate) owner: Option<RegistryLabelOwnerFilter<'a>>,
+    pub(crate) registration_limit: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FamilyChildrenPage {
-    /// Exact number of children the filters admit, before the cursor.
+    /// Exact number of children the filters admit, before the cursor, or `cap + 1` above a cap.
     pub total_count: u64,
     pub rows: Vec<FamilyChildRow>,
     pub next_cursor: Option<ChildrenCurrentKeysetCursor>,
@@ -101,6 +103,7 @@ pub async fn load_children_shadow_page(
         None,
         cursor,
         page_size,
+        None,
     )
     .await
 }
@@ -122,7 +125,7 @@ pub async fn count_children_shadow(
         .context("failed to fix the count snapshot")?;
     let mut counts = Vec::with_capacity(parent_logical_name_ids.len());
     for parent in parent_logical_name_ids {
-        counts.push((parent.clone(), count(&mut transaction, parent, None).await?));
+        counts.push((parent.clone(), count(&mut transaction, parent).await?));
     }
     transaction
         .commit()
@@ -155,14 +158,9 @@ pub(crate) async fn require_publication(
     Ok(())
 }
 
-/// The exact unfiltered child count of one parent, or of the labels its registry `registry`
-/// holds.
-pub(crate) async fn count(
-    conn: &mut PgConnection,
-    parent_logical_name_id: &str,
-    registry: Option<&str>,
-) -> Result<u64> {
-    let count: i64 = count_query(parent_logical_name_id, registry)
+/// The exact unfiltered child count of one parent.
+async fn count(conn: &mut PgConnection, parent_logical_name_id: &str) -> Result<u64> {
+    let count: i64 = count_query(parent_logical_name_id)
         .build_query_scalar()
         .fetch_one(&mut *conn)
         .await
@@ -170,6 +168,38 @@ pub(crate) async fn count(
             format!("failed to count the children shadow of {parent_logical_name_id}")
         })?;
     u64::try_from(count).context("negative children shadow count")
+}
+
+/// The exact number of labels `registry` holds under `parent_logical_name_id`, or `None` when
+/// it holds more than `cap` registrations there. The statement keeps at most `cap + 1` of them, in
+/// no order, so it reads a bounded relation, and the labels among a partial set are no count.
+pub(crate) async fn count_registry_labels(
+    conn: &mut PgConnection,
+    parent_logical_name_id: &str,
+    registry: &str,
+    cap: u64,
+) -> Result<Option<u64>> {
+    let limit = past(cap)?;
+    let (registrations, labels): (i64, i64) =
+        registry_labels_count_query(parent_logical_name_id, registry, limit)
+            .build_query_as()
+            .fetch_one(&mut *conn)
+            .await
+            .context("failed to count the labels of a registry")?;
+    if registrations >= limit {
+        return Ok(None);
+    }
+    Ok(Some(
+        u64::try_from(labels).context("negative registry label count")?,
+    ))
+}
+
+/// The bind of a `LIMIT` that keeps one row past `cap`.
+fn past(cap: u64) -> Result<i64> {
+    i64::try_from(cap)
+        .ok()
+        .and_then(|cap| cap.checked_add(1))
+        .context("children count cap is too large")
 }
 
 /// The exact unfiltered child count of each of `parent_logical_name_ids` in one statement, keyed
@@ -193,22 +223,41 @@ pub(crate) async fn counts(
         .collect()
 }
 
-fn count_query<'a>(
+fn count_query(parent_logical_name_id: &str) -> QueryBuilder<'_, Postgres> {
+    let mut builder = QueryBuilder::<Postgres>::new("WITH ");
+    push_children(
+        &mut builder,
+        Parents::One(parent_logical_name_id),
+        &ChildrenCurrentPageFilter::default(),
+        None,
+        None,
+    );
+    builder.push(") SELECT count(*) FROM children");
+    builder
+}
+
+/// The registrations kept (at most `registration_limit`) and the labels among them.
+fn registry_labels_count_query<'a>(
     parent_logical_name_id: &'a str,
-    registry: Option<&'a str>,
+    registry: &'a str,
+    registration_limit: i64,
 ) -> QueryBuilder<'a, Postgres> {
     let mut builder = QueryBuilder::<Postgres>::new("WITH ");
     push_children(
         &mut builder,
         Parents::One(parent_logical_name_id),
         &ChildrenCurrentPageFilter::default(),
-        registry.map(|registry| RegistryLabels {
+        Some(RegistryLabels {
             registry,
             owner: None,
+            registration_limit: Some(registration_limit),
         }),
         None,
     );
-    builder.push(") SELECT count(*) FROM children");
+    builder.push(
+        ") SELECT (SELECT count(*) FROM v2_candidates) AS registrations,
+                  (SELECT count(*) FROM children) AS labels",
+    );
     builder
 }
 
@@ -228,7 +277,7 @@ fn counts_query(parent_logical_name_ids: &[String]) -> QueryBuilder<'_, Postgres
     builder
 }
 
-/// One page and its exact total in one statement.
+/// One page and its total in one statement; the total stops at `total_cap + 1`, not the rows.
 pub(crate) async fn page(
     conn: &mut PgConnection,
     parent_logical_name_id: &str,
@@ -236,11 +285,13 @@ pub(crate) async fn page(
     registry: Option<RegistryLabels<'_>>,
     cursor: Option<&ChildrenCurrentKeysetCursor>,
     page_size: u64,
+    total_cap: Option<u64>,
 ) -> Result<FamilyChildrenPage> {
     if page_size == 0 {
         bail!("children shadow page_size must be positive");
     }
     let limit = i64::try_from(page_size).context("children shadow page_size is too large")? + 1;
+    let total_limit = total_cap.map(past).transpose()?;
     if let Some(cursor) = cursor {
         let matches = matches!(
             (filter.sort, &cursor.sort_value),
@@ -254,7 +305,14 @@ pub(crate) async fn page(
             bail!("children shadow cursor sort value does not match the sort");
         }
     }
-    let mut builder = page_query(parent_logical_name_id, filter, registry, cursor, limit);
+    let mut builder = page_query(
+        parent_logical_name_id,
+        filter,
+        registry,
+        cursor,
+        limit,
+        total_limit,
+    );
     let rows = builder
         .build()
         .fetch_all(&mut *conn)
@@ -299,6 +357,7 @@ fn page_query<'a>(
     registry: Option<RegistryLabels<'a>>,
     cursor: Option<&'a ChildrenCurrentKeysetCursor>,
     limit: i64,
+    total_limit: Option<i64>,
 ) -> QueryBuilder<'a, Postgres> {
     let mut builder = QueryBuilder::<Postgres>::new("WITH ");
     push_children(
@@ -315,10 +374,14 @@ fn page_query<'a>(
     push_order(&mut builder, filter.sort, filter.order, "");
     builder.push(" LIMIT ");
     builder.push_bind(limit);
-    builder.push(
-        ") SELECT total.total_count, page.* FROM (SELECT count(*) AS total_count FROM children) total
-           LEFT JOIN page ON TRUE",
-    );
+    builder.push(") SELECT total.total_count, page.* FROM (SELECT count(*) AS total_count FROM ");
+    if let Some(total_limit) = total_limit {
+        builder.push("(SELECT 1 FROM children LIMIT ");
+        builder.push_bind(total_limit).push(") capped");
+    } else {
+        builder.push("children");
+    }
+    builder.push(") total LEFT JOIN page ON TRUE");
     push_order(&mut builder, filter.sort, filter.order, "page.");
     builder
 }
@@ -339,6 +402,7 @@ pub(super) fn push_children<'a>(
         parents,
         registry.map(|labels| labels.registry),
         children,
+        registry.and_then(|labels| labels.registration_limit),
     );
     let sort_timestamp = match filter.sort {
         ChildrenCurrentSort::Name => "NULL::NUMERIC",

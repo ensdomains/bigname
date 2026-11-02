@@ -296,7 +296,8 @@ async fn v2_get_registry_serves_name_parent_creation_counts_and_references() -> 
     assert_eq!(data["created_transaction_hash"], json!("0xtx61"));
     assert_eq!(data["created_basis"], json!("registry_created"));
     assert_eq!(data["created_at"], json!("1700000061"));
-    assert_eq!(data["counts"], json!({ "labels": 2 }));
+    // Without include=counts no count is read or served.
+    assert_eq!(data["counts"], json!({}));
     assert_eq!(
         data["referenced_by"]["data"],
         json!([{
@@ -337,7 +338,13 @@ async fn v2_get_registry_serves_name_parent_creation_counts_and_references() -> 
     assert_eq!(child["data"]["created_basis"], json!("subregistry_pointer"));
     assert_eq!(child["data"]["created_block_number"], json!(63));
     assert_eq!(child["data"]["created_transaction_hash"], json!("0xtx63"));
-    assert_eq!(child["data"]["counts"], json!({ "labels": 0 }));
+    assert_eq!(child["data"]["counts"], json!({}));
+    let child_counted = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ONE_REGISTRY}?include=counts"),
+    )
+    .await?;
+    assert_eq!(child_counted["data"]["counts"]["labels"], json!(0));
 
     database.cleanup().await
 }
@@ -354,7 +361,13 @@ async fn v2_get_registry_root_has_no_name_or_parent_and_declared_registries_reso
     assert_eq!(root["data"]["parent_registry"], Value::Null);
     assert_eq!(root["data"]["created_basis"], json!("registry_created"));
     assert_eq!(root["data"]["created_block_number"], json!(60));
-    assert_eq!(root["data"]["counts"], json!({ "labels": 0 }));
+    assert_eq!(root["data"]["counts"], json!({}));
+    let root_counted = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ROOT_REGISTRY}?include=counts"),
+    )
+    .await?;
+    assert_eq!(root_counted["data"]["counts"]["labels"], json!(0));
     assert_eq!(root["data"]["referenced_by"]["data"], json!([]));
     assert_eq!(
         root["data"]["referenced_by"]["page"]["has_more"],

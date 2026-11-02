@@ -3652,7 +3652,18 @@ async fn v2_subname_collections_filter_orphaned_observations_and_surfaces() -> R
             .collect::<Vec<_>>(),
         vec!["alpha.parent.eth"]
     );
-    assert_eq!(page.summary.child_count, 1);
+    let summaries = bigname_storage::load_children_current_summaries(
+        &database.pool,
+        std::slice::from_ref(&parent_logical_name_id),
+    )
+    .await?;
+    assert_eq!(
+        summaries
+            .iter()
+            .map(|summary| summary.child_count)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -6142,6 +6153,7 @@ async fn v2_subname_filtered_totals_match_every_page_and_fixed_expiry_time() -> 
         &filter,
         None,
         1,
+        None,
     )
     .await?;
     let next = bigname_storage::load_children_current_page_filtered(
@@ -6150,6 +6162,7 @@ async fn v2_subname_filtered_totals_match_every_page_and_fixed_expiry_time() -> 
         &filter,
         first.next_cursor.as_ref(),
         1,
+        None,
     )
     .await?;
     assert_eq!(first.total_count, next.total_count);
