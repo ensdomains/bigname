@@ -149,6 +149,138 @@ async fn renewal_moves_the_wrapper_expiry(controller: &str, database_name: &str)
     Ok(())
 }
 
+/// The same name after a renewal through a controller that calls only `BaseRegistrar.renew`,
+/// which leaves the wrapper expiry behind the lease, then a duration-0 renewal through the wrapped
+/// controller in the lease's grace period, the call `ETHRenewerV1.syncWrapper` makes. The lease
+/// is still expired after it, so `registrar.ownerOf` reverts and `NameWrapper.renew` writes
+/// nothing: neither a normal run nor a redo derives a wrapper expiry from that renewal.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318-L330 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L106-L112 @ ens_v2_sepolia_20260629@ccaeb58)
+#[tokio::test]
+async fn sepolia_wrapped_controller_renewal_in_grace_keeps_the_wrapper_expiry() -> TestResult {
+    const BYPASSING_CONTROLLER: &str = "0x00000000000000000000000000000000000000c3";
+    let sync_block = MIGRATION_BLOCK;
+    let in_grace = i64::try_from(RENEWED_EXPIRY + 10 * 24 * 60 * 60)?;
+    let database = database("interpret_sepolia_wrapped_renewal_in_grace").await?;
+    let pool = database.pool();
+    let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/sepolia");
+    sync_schema_v2_repository(pool, &load_repository(manifest_root)?).await?;
+    seed_lineage(pool).await?;
+    sqlx::query(
+        "UPDATE chain_lineage SET block_timestamp = to_timestamp($1)
+         WHERE chain_id = $2 AND block_number = $3",
+    )
+    .bind(in_grace)
+    .bind(CHAIN)
+    .bind(sync_block)
+    .execute(pool)
+    .await?;
+
+    let label = b"gracewrapped";
+    let labelhash = keccak256(label);
+    let namehash = eth_namehash(labelhash);
+    let logical_name_id = format!("ens:{namehash:#x}");
+    let token = U256::from_be_bytes(labelhash.0);
+    seed_wrapped_registration(pool, label, labelhash, namehash).await?;
+    insert_transaction(pool, RENEWAL_BLOCK, BYPASSING_CONTROLLER).await?;
+    insert_log(
+        pool,
+        RENEWAL_BLOCK,
+        0,
+        BASE_REGISTRAR,
+        renewal_events::NameRenewed {
+            id: token,
+            expires: U256::from(RENEWED_EXPIRY),
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    insert_transaction(pool, sync_block, WRAPPED_CONTROLLER).await?;
+    insert_log(
+        pool,
+        sync_block,
+        0,
+        BASE_REGISTRAR,
+        renewal_events::NameRenewed {
+            id: token,
+            expires: U256::from(RENEWED_EXPIRY),
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    insert_log(
+        pool,
+        sync_block,
+        1,
+        WRAPPED_CONTROLLER,
+        wrapped_controller::NameRenewed {
+            name: std::str::from_utf8(label)?.to_owned(),
+            label: labelhash,
+            cost: U256::ZERO,
+            expires: U256::from(RENEWED_EXPIRY),
+        }
+        .encode_log_data(),
+    )
+    .await?;
+
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            from_block: REGISTRATION_BLOCK,
+            to_block: REGISTRATION_BLOCK,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+    stamp_interpreter_hash(pool, bigname_content_hash::INTERPRETER_CONTENT_HASH).await?;
+    for mode in [RunMode::Normal, RunMode::Redo] {
+        Engine::new(pool.clone())
+            .run_batch(BatchRequest {
+                chain_id: CHAIN.to_owned(),
+                from_block: RENEWAL_BLOCK,
+                to_block: sync_block,
+                resume_current: Some(Marker {
+                    number: REGISTRATION_BLOCK,
+                    hash: block_hash(REGISTRATION_BLOCK),
+                }),
+                mode,
+            })
+            .await?;
+        let renewals: Vec<ExpiryRow> = sqlx::query_as(
+            "SELECT resource_id, source_family, (after_state ->> 'expiry')::bigint,
+                    after_state ->> 'authority_kind'
+             FROM normalized_events
+             WHERE chain_id = $1 AND logical_name_id = $2 AND block_number = $3
+               AND event_kind = 'ExpiryChanged'
+             ORDER BY log_index, normalized_event_id",
+        )
+        .bind(CHAIN)
+        .bind(&logical_name_id)
+        .bind(sync_block)
+        .fetch_all(pool)
+        .await?;
+        assert!(
+            renewals
+                .iter()
+                .all(|(_, _, _, kind)| kind.as_deref() != Some("wrapper")),
+            "{mode:?}: a renewal that leaves the lease expired derives no wrapper expiry: \
+             {renewals:?}"
+        );
+        assert!(
+            renewals.iter().any(|(_, _, expiry, kind)| {
+                *expiry == Some(i64::try_from(RENEWED_EXPIRY).unwrap_or_default())
+                    && kind.as_deref() != Some("wrapper")
+            }),
+            "{mode:?}: the BaseRegistrar renewal is still read: {renewals:?}"
+        );
+    }
+    database.cleanup().await?;
+    Ok(())
+}
+
 /// A name registered straight into the NameWrapper names the NameWrapper as its BaseRegistrar
 /// registrant, but the NameWrapper never owns it: the wrapped token's holder does. Its owner
 /// history has no anchor for that name.
