@@ -325,6 +325,7 @@ fn v2_unregistered_record_name_link_is_batch_grid_independent() -> Result<()> {
     let expected_name = format!("ens:{node:#x}");
     let input = v2_released_name_record_input(
         &wiring,
+        NODE_ABI_RESOLVER,
         vec![
             V2Resolver::NameChanged {
                 node,
@@ -380,7 +381,7 @@ fn v2_regeneration_collision_closes_displaced_registration_in_every_replay_shape
         ("regeneration-collision", true),
         ("unregister-comparator", false),
     ] {
-        let input = v2_regeneration_collision_input(&wiring, collision)?;
+        let input = v2_regeneration_collision_input(&wiring, NODE_ABI_RESOLVER, collision)?;
         let fresh = interpret_checked(input.clone())?;
         assert_v2_regeneration_collision_output(&fresh, collision)?;
         let converged = converge(
@@ -1299,7 +1300,7 @@ fn v2_regeneration_collision_closes_displaced_discovery_and_child_registrations(
 fn v2_regeneration_collision_releases_a_resource_pending_displaced_registration() -> Result<()> {
     let checked_in = checked_in_manifests()?;
     let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
-    let mut input = v2_regeneration_collision_input(&wiring, true)?;
+    let mut input = v2_regeneration_collision_input(&wiring, PUBLIC_RESOLVER, true)?;
     input.raw_logs.retain(|raw| {
         !(raw.block_number == 20_000_000 && raw.transaction_index == 1 && raw.log_index == 0)
     });
@@ -1451,6 +1452,7 @@ fn v2_unregistered_record_version_name_link_is_batch_grid_independent() -> Resul
     let expected_name = format!("ens:{node:#x}");
     let input = v2_released_name_record_input(
         &wiring,
+        NODE_ABI_RESOLVER,
         vec![
             V2Resolver::VersionChanged {
                 node,
@@ -1499,6 +1501,7 @@ fn v2_unregistered_record_stream_rethreads_before_state_after_restore() -> Resul
     let node = namehash(&["alpha", "eth"]);
     let input = v2_released_name_record_input(
         &wiring,
+        NODE_ABI_RESOLVER,
         vec![
             V2Resolver::NameChanged {
                 node,
@@ -1542,6 +1545,7 @@ fn v2_release_then_resolver_only_batches_restore_boundary_clock_exactly() -> Res
     let node = namehash(&["alpha", "eth"]);
     let mut input = v2_released_name_record_input(
         &wiring,
+        PUBLIC_RESOLVER,
         vec![
             V2Resolver::AddressChanged {
                 node,
@@ -1609,17 +1613,24 @@ fn v2_shadow_registry_preimage_does_not_gain_record_attribution_after_restore() 
     Ok(())
 }
 
+/// The resolver slot whose records the stand-in node-resolver ABI (`with_node_resolver_abi`)
+/// reads. That ABI declares no emitter roles, and records from this slot take the ENSv2 resolver
+/// path that links each record to its name.
+const NODE_ABI_RESOLVER: &str = "resolver";
+/// The checked-in Sepolia resolver manifest declares its record events for this role only, so a
+/// record from any other slot is dropped by role.
+const PUBLIC_RESOLVER: &str = "public_resolver_v2";
+
 /// Builds a released-name sequence followed by the supplied resolver events.
 fn v2_released_name_record_input(
     wiring: &Wiring,
+    resolver_role: &'static str,
     resolver_events: Vec<LogData>,
 ) -> Result<BatchInput> {
     const REGISTRY: &str = "ens_v2_registry_l1";
     const RESOLVER: &str = "ens_v2_resolver_l1";
     let registry = wiring.address(REGISTRY, "registry");
-    // The manifest declares its record events for `public_resolver_v2` only, so a record log
-    // from the `resolver` slot would be dropped by role.
-    let resolver = wiring.address(RESOLVER, "public_resolver_v2");
+    let resolver = wiring.address(RESOLVER, resolver_role);
     let owner: Address = "0x00000000000000000000000000000000f0000001".parse()?;
     let sender: Address = "0x00000000000000000000000000000000f0000002".parse()?;
     let label = labelhash("alpha");
@@ -1705,8 +1716,20 @@ fn v2_released_name_record_input(
 /// Registers two ENSv2 names, then either regenerates the second token onto the first token's
 /// occupied key or unregisters the first token as the terminal-boundary comparator. A later renewal
 /// and resolver record expose any surviving attribution to the displaced registration.
-fn v2_regeneration_collision_input(wiring: &Wiring, collision: bool) -> Result<BatchInput> {
-    v2_regeneration_collision_input_inner(wiring, collision, false, false, false, false)
+fn v2_regeneration_collision_input(
+    wiring: &Wiring,
+    resolver_role: &'static str,
+    collision: bool,
+) -> Result<BatchInput> {
+    v2_regeneration_collision_input_inner(
+        wiring,
+        resolver_role,
+        collision,
+        false,
+        false,
+        false,
+        false,
+    )
 }
 
 fn v2_label_collision_with_topology_input(wiring: &Wiring) -> Result<BatchInput> {
@@ -1902,6 +1925,7 @@ fn v2_regeneration_collision_input_with_topology(
 ) -> Result<BatchInput> {
     v2_regeneration_collision_input_inner(
         wiring,
+        PUBLIC_RESOLVER,
         true,
         true,
         same_observation_key,
@@ -2587,6 +2611,7 @@ fn v2_regeneration_collision_displaced_subregistry_input(wiring: &Wiring) -> Res
 
 fn v2_regeneration_collision_input_inner(
     wiring: &Wiring,
+    resolver_role: &'static str,
     collision: bool,
     survivor_topology: bool,
     same_observation_key: bool,
@@ -2596,9 +2621,7 @@ fn v2_regeneration_collision_input_inner(
     const REGISTRY: &str = "ens_v2_registry_l1";
     const RESOLVER: &str = "ens_v2_resolver_l1";
     let registry = wiring.address(REGISTRY, "registry");
-    // The manifest declares its record events for `public_resolver_v2` only, so a record log
-    // from the `resolver` slot would be dropped by role.
-    let resolver = wiring.address(RESOLVER, "public_resolver_v2");
+    let resolver = wiring.address(RESOLVER, resolver_role);
     let owner: Address = "0x00000000000000000000000000000000f0000001".parse()?;
     let sender: Address = "0x00000000000000000000000000000000f0000002".parse()?;
     let alpha_hash = labelhash("alpha");
