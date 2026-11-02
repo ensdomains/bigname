@@ -283,6 +283,82 @@ fn null_resolver_discovery_keeps_avatar_stale_without_a_record_boundary() {
     assert_eq!(records.records["avatar"].status, Status::Stale);
 }
 
+/// The discovery-shaped row as Project composes an ENSv1 registry clear: the latest pointer write
+/// is the ENSv1 clear, and the stored registry pointer is null.
+fn registry_clear_row() -> NameCurrentRow {
+    let mut row = null_resolver_discovery_row();
+    row.declared_summary["resolver"]["latest_event_kind"] = json!("ResolverChanged");
+    row.declared_summary["ens_v1_resolver"] = Value::Null;
+    row.provenance = json!({
+        "authority_selection": {"authority_arm": "ens_v1"},
+        "resolver_pointer_source_family": "ens_v1_registry_l1",
+    });
+    row
+}
+
+#[test]
+fn an_auto_read_of_a_registry_clear_needs_no_lookup() {
+    let record = parse_resolution_record_key("addr:60").expect("test selector must parse");
+    let row = registry_clear_row();
+    assert!(
+        ens_universal_resolver_discovery_candidate(&row),
+        "the clear keeps the discovery shape, so only the clear check keeps it indexed"
+    );
+    let (source, records) =
+        build_auto_name_records(&row, None, std::slice::from_ref(&record), None, false, true)
+            .expect("a registry clear must answer without a lookup");
+    assert_eq!(source, Source::Indexed);
+    assert_eq!(records.records["addr:60"].status, Status::NotFound);
+    assert!(records.resolver.is_none());
+    assert!(
+        indexed_records_requiring_verified_fallback(&row, None, &[record], true)
+            .expect("fallback must evaluate")
+            .is_empty()
+    );
+}
+
+/// Rows that are not a registry clear keep the answer they had before the clear check: the
+/// discovery shapes still fall through to the chain, and a released name keeps its terminal miss.
+#[test]
+fn rows_that_are_not_a_registry_clear_keep_their_auto_answer() {
+    let record = parse_resolution_record_key("addr:60").expect("test selector must parse");
+    let mut ens_v2_arm = registry_clear_row();
+    ens_v2_arm.provenance = json!({
+        "authority_selection": {"authority_arm": "ens_v2"},
+        "resolver_pointer_source_family": "ens_v2_registry_l1",
+    });
+    let mut withheld = registry_clear_row();
+    withheld.declared_summary["unresolvable_reason"] = json!("ens_v2_path_no_resolver");
+    let mut withheld_live_pointer = registry_clear_row();
+    withheld_live_pointer.declared_summary["ens_v1_resolver"] = json!({
+        "chain_id": "ethereum-mainnet",
+        "address": "0x231b0ee14048e9dccd1d247744d114a4eb5e8e63",
+    });
+    let mut never_set = registry_clear_row();
+    never_set.declared_summary["resolver"]["latest_event_kind"] = Value::Null;
+    never_set.provenance = json!({"authority_selection": {"authority_arm": "ens_v1"}});
+    for (class, row) in [
+        ("a cleared ENSv1 pointer under an ENSv2 arm", ens_v2_arm),
+        ("a withheld clear", withheld),
+        ("a withheld live pointer", withheld_live_pointer),
+        ("no observed pointer write", never_set),
+    ] {
+        assert!(
+            indexed_satisfying_record_answer(&row, None, &record, true)
+                .expect("candidate must evaluate")
+                .is_none(),
+            "{class} falls through to the chain"
+        );
+    }
+
+    let mut released = registry_clear_row();
+    released.declared_summary["registration"] = json!({"status": "released"});
+    let answer = indexed_satisfying_record_answer(&released, None, &record, true)
+        .expect("a released name must evaluate")
+        .expect("a released name keeps its terminal miss");
+    assert_eq!(answer.status, Status::NotFound);
+}
+
 fn null_resolver_discovery_row() -> NameCurrentRow {
     let timestamp =
         OffsetDateTime::from_unix_timestamp(1_717_171_719).expect("test timestamp must be valid");
