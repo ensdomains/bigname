@@ -559,6 +559,11 @@ async fn a_registry_entry_follows_its_token_through_the_registry_logs() -> Resul
 /// under the registry manifest has none.
 #[tokio::test]
 async fn every_admitted_registry_keeps_its_own_approvals_and_entries() -> Result<()> {
+    let _resolver = bigname_test_support::fixture_logs::allow_unmatched(&[(
+        RESOLVER,
+        "a registry's resolver pointer admits nothing, so the resolver's ApprovalForAll stays \
+         unread, and the test proves it is not a registry approval",
+    )]);
     let mut logs = Logs::default();
     logs.register(1, ETH_REGISTRY, "alice", (0, 0), ALICE)
         .register(1, ROOT_REGISTRY, "eth", (0, 0), BOB)

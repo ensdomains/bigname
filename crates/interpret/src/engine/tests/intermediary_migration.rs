@@ -3,6 +3,7 @@ use super::*;
 use bigname_adapters::schema_v2::seam::{
     LOG_INDEX_KEY, TOKEN_CONTROL_TRANSFERRED_EVENT_KIND, TOKEN_LINEAGE_ID_KEY,
 };
+use bigname_test_support::fixture_logs::{AllowGuard, allow_unmatched};
 use serde_json::Value;
 
 const LOGICAL: &str = "ens:0x25951599af2d0b44f9144675c5d830ddfd835e6bac3c4aea1baa7c9d0c9d9524";
@@ -102,6 +103,37 @@ async fn prepare(chain: &[Value], time_step: i64, prefix_only: bool) -> TestResu
     Ok(db)
 }
 
+/// The captured receipts' logs no manifest in the fixture profile selects: undeclared topics, and
+/// declared topics from contracts the profile does not admit.
+fn allow_captured_receipts() -> AllowGuard {
+    const CAPTURED: &str = "captured on-chain receipt; production drops this topic identically";
+    allow_unmatched(&[
+        ("OwnershipTransferred(address,address)", CAPTURED),
+        ("ReverseClaimed(address,bytes32)", CAPTURED),
+        ("Initialized(uint64)", CAPTURED),
+        (
+            "0x4c97694570a07277810af7e5669ffd5f6a2d6b74b6e9a274b8b870fd5114cf87",
+            CAPTURED,
+        ),
+        (
+            "0x2d9461f4916036390b11b47e528b3b051e2f8faa661e2a410dec33c82012ede4",
+            CAPTURED,
+        ),
+        (
+            "0x1c7fc0b502196498c71ac9519a0d4b981ad9332bb9f67a3688f7beda68fb7ac9",
+            CAPTURED,
+        ),
+        (
+            "0x4acabfe38b19342d926f219b03cae7c02831d64c4449ccd3d6726b8ef1f99630",
+            CAPTURED,
+        ),
+        ("0x4a679253410272dd5232b3ff7cf5dbb88f295319", CAPTURED),
+        ("0xa82ff9afd8f496c3d6ac40e2a0f282e47488cfc9", CAPTURED),
+        ("0xc3e53f4d16ae77db1c982e75a937b9f60fe63690", CAPTURED),
+        ("0x67d269191c92caf3cd7723f116c85e6e9bf55933", CAPTURED),
+    ])
+}
+
 fn request(mode: RunMode) -> BatchRequest {
     BatchRequest {
         chain_id: CHAIN.to_owned(),
@@ -117,6 +149,7 @@ fn request(mode: RunMode) -> BatchRequest {
 #[tokio::test]
 async fn intermediary_migration_preserves_ordinary_prefix_across_restore_batching_and_redo()
 -> TestResult {
+    let _captured = allow_captured_receipts();
     let chain: Vec<Value> = serde_json::from_str(include_str!(
         "../../../tests/fixtures/intermediary-migration/chain.json"
     ))?;

@@ -276,6 +276,10 @@ fn every_admitted_registry_states_its_own_operator_approvals() -> anyhow::Result
 /// registry: its ApprovalForAll is a resolver approval, which this adapter does not read.
 #[test]
 fn a_resolver_admitted_by_a_registry_pointer_states_no_registry_approval() -> anyhow::Result<()> {
+    let _dropped = allow_unmatched(&[(
+        POINTED_RESOLVER,
+        "the test proves a resolver's approval is not read as a registry approval",
+    )]);
     let output = interpret_test_batch(input(vec![approval(1, 0, POINTED_RESOLVER, true)], 1))?;
     assert_eq!(output.normalized_events, Vec::new());
     Ok(())

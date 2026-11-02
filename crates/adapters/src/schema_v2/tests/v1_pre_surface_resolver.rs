@@ -2475,6 +2475,10 @@ mod public_v2_records {
     }
     #[test]
     fn wrong_role_and_undeclared_address_do_not_admit_public_node_decoder() -> anyhow::Result<()> {
+        let _dropped = allow_unmatched(&[(
+            CONTRACT,
+            "the test proves a public node event under the wrong role or from an undeclared address is not read",
+        )]);
         let event = raw(resolver::AddrChanged {
             node: B256::ZERO,
             a: ZERO_ADDRESS.parse()?,

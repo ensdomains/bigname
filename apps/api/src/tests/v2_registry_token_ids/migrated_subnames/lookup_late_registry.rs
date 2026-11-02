@@ -147,6 +147,22 @@ async fn assert_retained(database: &TestDatabase, resolver: Address) -> Result<V
 async fn lookup_precomputation_late_registry_initialization_refreshes_stored_unknown() -> Result<()>
 {
     let (database, mut logs, resolver) = setup().await?;
+    let _dropped = bigname_test_support::fixture_logs::allow_unmatched_in(
+        &database.pool,
+        &[
+            (
+                "Upgraded(address)",
+                "the factory proxy's own upgrade log, before any initializer; the test proves \
+                 origin alone admits nothing",
+            ),
+            (
+                "URIUpdated(string,address,address)",
+                "UserRegistry.initialize's final log; no manifest declares it and production \
+                 drops it the same way (upstream UserRegistry.sol:L57-L69)",
+            ),
+        ],
+    )
+    .await;
     let registry: Address = REGISTRY.parse()?;
     let owner: Address = HOLDER.parse()?;
     let implementation: Address = USER.parse()?;

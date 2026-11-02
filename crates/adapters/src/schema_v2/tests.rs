@@ -1,5 +1,6 @@
 use alloy_primitives::{Address, B256, U256, hex, keccak256};
 use alloy_sol_types::{SolEvent, sol};
+use bigname_test_support::fixture_logs::allow_unmatched;
 use serde_json::json;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -16736,6 +16737,10 @@ fn registry_approval_for_all_emits_account_permission_state() -> anyhow::Result<
 
 #[test]
 fn resolver_approval_cannot_use_match_all_fallback() -> anyhow::Result<()> {
+    let _dropped = allow_unmatched(&[(
+        "0x0000000000000000000000000000000000000099",
+        "the test proves an address-scoped approval from an unadmitted resolver does not fall back to match-all",
+    )]);
     let encoded = approvals::Approved {
         owner: CONTRACT.parse()?,
         node: B256::repeat_byte(0x22),
@@ -16823,6 +16828,10 @@ fn approval_admission_rejects_unknown_output_and_malformed_logs() -> anyhow::Res
 
 #[test]
 fn ens_v2_shared_resolver_signature_requires_address_admission() -> anyhow::Result<()> {
+    let _dropped = allow_unmatched(&[(
+        "0x0000000000000000000000000000000000000099",
+        "the test proves a shared resolver signature from an unadmitted address is not read",
+    )]);
     let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest(
@@ -17448,6 +17457,10 @@ fn non_malformed_error_from_undeclared_match_all_selection_is_fatal() -> anyhow:
 
 #[test]
 fn detached_resolver_loses_address_scoped_admission_in_the_same_batch() -> anyhow::Result<()> {
+    let _dropped = allow_unmatched(&[(
+        "0x0000000000000000000000000000000000000050",
+        "the old resolver's record log follows its detachment in the same batch, and the test proves it is not read",
+    )]);
     const OLD_RESOLVER: &str = "0x0000000000000000000000000000000000000050";
     const NEW_RESOLVER: &str = "0x0000000000000000000000000000000000000051";
     let registry_id = Uuid::from_u128(50);
@@ -21491,6 +21504,14 @@ mod zero_owner_migration_fixture;
 mod numeric_short_lease_tests {
     use super::{numeric_short_lease_fixture as fixture, *};
 
+    /// Topics of the captured receipts that no manifest in the fixture declares.
+    const RECEIPT_TOPIC_A: &str =
+        "0x4358b8fcf4f2cad484be30167cddf20e86b2a558bc465c1ca7daf4e6f288ff25";
+    const RECEIPT_TOPIC_B: &str =
+        "0x4acabfe38b19342d926f219b03cae7c02831d64c4449ccd3d6726b8ef1f99630";
+    const CAPTURED_RECEIPT: &str =
+        "captured on-chain receipt; production drops this topic identically";
+
     fn snapshot(output: &BatchOutput) -> &NormalizedEvent {
         output
             .normalized_events
@@ -21505,6 +21526,7 @@ mod numeric_short_lease_tests {
     #[test]
     fn captured_numeric_registration_then_readable_reservation_migrates_without_a_controller()
     -> anyhow::Result<()> {
+        let _receipt = allow_unmatched(&[(RECEIPT_TOPIC_A, CAPTURED_RECEIPT)]);
         let input = fixture::input()?;
         fixture::assert_receipt_order(&input);
         let expected = fixture::fixture()?;
@@ -21621,6 +21643,10 @@ mod numeric_short_lease_tests {
 
     #[test]
     fn later_trigger_time_preserves_original_numeric_registration_time() -> anyhow::Result<()> {
+        let _receipt = allow_unmatched(&[
+            (RECEIPT_TOPIC_A, CAPTURED_RECEIPT),
+            (RECEIPT_TOPIC_B, CAPTURED_RECEIPT),
+        ]);
         let mut input = fixture::input()?;
         // Explicit constructed timing variant; all captured receipt topics/data/order stay unchanged.
         for raw in input
