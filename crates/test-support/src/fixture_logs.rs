@@ -260,7 +260,8 @@ pub enum Why {
         admitted: Vec<Admitted>,
         declared: Vec<DeclaredEvent>,
     },
-    /// The topic0 is declared, but only for roles the emitter's admissions do not carry.
+    /// The topic0 is declared, but only for roles, or in manifests, the emitter's admissions do
+    /// not carry.
     RoleMismatch {
         admitted: Vec<Admitted>,
         declared: Vec<DeclaredEvent>,
@@ -612,7 +613,22 @@ impl<'a> Oracle<'a> {
             .filter(|event| event.topic0.eq_ignore_ascii_case(topic0))
             .cloned()
             .collect::<Vec<_>>();
-        if with_topic.is_empty() {
+        if !with_topic.is_empty() {
+            return Why::RoleMismatch {
+                admitted,
+                declared: with_topic,
+            };
+        }
+        // A manifest the admissions do not reach may still declare the topic0, for the role the
+        // emitter was meant to carry.
+        let elsewhere = self
+            .sources
+            .iter()
+            .flat_map(|source| &source.events)
+            .filter(|event| event.topic0.eq_ignore_ascii_case(topic0))
+            .cloned()
+            .collect::<Vec<_>>();
+        if elsewhere.is_empty() {
             Why::NoTopic {
                 admitted,
                 declared: events.cloned().collect(),
@@ -620,7 +636,7 @@ impl<'a> Oracle<'a> {
         } else {
             Why::RoleMismatch {
                 admitted,
-                declared: with_topic,
+                declared: elsewhere,
             }
         }
     }
