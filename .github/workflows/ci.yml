@@ -499,10 +499,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # The test build fills most of the runner's root disk. Three shards ran
-      # out of space on 2026-11-02 while linking test binaries.
+      # The test binaries take about 34 GB. Three shards ran out of space on
+      # 2026-11-02 while linking them. The removals take up to two minutes, so
+      # they run in the background while the toolchain installs and the cache
+      # restores. The build needs the space minutes later.
       - name: Free runner disk space
-        run: scripts/ci-free-disk
+        run: nohup scripts/ci-free-disk >"$RUNNER_TEMP/ci-free-disk.log" 2>&1 &
 
       - name: Install pinned Rust
         uses: dtolnay/rust-toolchain@master

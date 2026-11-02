@@ -6,7 +6,8 @@
 # outputs, the Cargo registry and git checkouts, the Rust toolchains, the
 # temporary directories and Docker's storage. With a PostgreSQL service
 # container it also prints the size of the server's data directory, read
-# through `docker exec`. It appends one line with the free space on / to the
+# through `docker exec`, and the result of scripts/ci-free-disk once it has
+# finished. It appends one line with the free space on / to the
 # job summary. Each directory is measured on its own, because one `du` over
 # nested paths counts every file once only. Every probe has a time limit, and
 # the script never fails the job.
@@ -16,6 +17,13 @@ label=${1:-} container=${2:-}
 [ -n "$label" ] || label=unlabelled
 
 echo "== disk report: $label"
+if [ -n "${RUNNER_TEMP:-}" ] && [ -f "$RUNNER_TEMP/ci-free-disk.log" ]; then
+  if pgrep -f scripts/ci-free-disk >/dev/null 2>&1; then
+    echo "scripts/ci-free-disk is still running."
+  else
+    cat "$RUNNER_TEMP/ci-free-disk.log"
+  fi
+fi
 timeout 10 df -h / /mnt /tmp 2>/dev/null | awk '!seen[$0]++'
 
 cargo_home=${CARGO_HOME:-$HOME/.cargo}

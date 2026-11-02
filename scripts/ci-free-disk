@@ -10,7 +10,8 @@
 # Only these directories and unused Docker images are removed. The Rust
 # toolchain, the Cargo home, the workspace and running service containers are
 # kept. The removals run in parallel. The script prints free space before and
-# after, and never fails the job.
+# after, and never fails the job. Other steps may write to the disk while it
+# runs, so the difference it prints is a net change.
 set -u
 
 avail() { df --output=avail -B1M / | tail -n 1 | tr -d ' '; }
