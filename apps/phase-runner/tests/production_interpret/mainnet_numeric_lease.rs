@@ -647,6 +647,19 @@ async fn a_migrated_name_is_renamed_on_read_and_registered_again() -> Result<()>
         anyhow::Ok(json!({"events": events, "families": family_state(&pool, CHAIN).await?}))
     };
     let before = stored(pool.clone()).await?;
+    let leased = project_name(pool, &name("migrated-plain")).await?;
+    anyhow::ensure!(
+        leased
+            .declared_summary
+            .pointer("/registration/authority_kind")
+            == Some(&json!("registrar"))
+            && leased
+                .declared_summary
+                .pointer("/registration/resource_id")
+                .is_some_and(Value::is_string),
+        "the name the import renames is on its numeric lease: {:#}",
+        leased.declared_summary
+    );
     let rendered = project_name(pool, &name("migrated-plain"))
         .await?
         .normalized_name;
@@ -678,6 +691,37 @@ async fn a_migrated_name_is_renamed_on_read_and_registered_again() -> Result<()>
     );
 
     through(pool, LIVE + 1, HEAD, FamilyMode::Normal).await?;
+    // The mint lease is released past grace, and the controller registration after it opens a
+    // new lease.
+    let leases: Vec<(String, Option<String>, i64)> = sqlx::query_as(
+        "SELECT event_kind, resource_id::text, block_number FROM normalized_events
+         WHERE chain_id = $1 AND logical_name_id = $2 AND source_family = 'ens_v1_registrar_l1'
+           AND consumer_visibility = 'activated'
+           AND event_kind IN ('RegistrationGranted', 'RegistrationReleased')
+         ORDER BY block_number, log_index",
+    )
+    .bind(CHAIN)
+    .bind(name("migrated-again"))
+    .fetch_all(pool)
+    .await?;
+    let kinds = leases
+        .iter()
+        .map(|(kind, _, _)| kind.as_str())
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        kinds
+            == [
+                "RegistrationGranted",
+                "RegistrationReleased",
+                "RegistrationGranted"
+            ]
+            && leases[0].1 == leases[1].1
+            && leases[1].1 != leases[2].1
+            && leases[0].2 == MINT
+            && leases[1].2 < AGAIN
+            && leases[2].2 == AGAIN,
+        "the mint lease, its release and the new lease: {leases:?}"
+    );
     let again = project_name(pool, &name("migrated-again")).await?;
     let (registered_at, at_again): (Option<i64>, i64) = sqlx::query_as(
         "SELECT extract(epoch FROM summary.registered_at)::bigint,
