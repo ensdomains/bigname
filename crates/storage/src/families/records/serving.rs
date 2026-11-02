@@ -284,27 +284,30 @@ pub(crate) async fn registry_stand_ins(
     let probed = probe_events(conn, &unnumbered).await?;
     Ok(found
         .into_iter()
-        .map(|(resource_id, logical_name_id, namespace, node, registry)| {
-            let pointer = registry.map(|(resolver_address, source_family, position, event_id)| {
-                ServingPointer {
+        .map(
+            |(resource_id, logical_name_id, namespace, node, registry)| {
+                let pointer =
+                    registry.map(|(resolver_address, source_family, position, event_id)| {
+                        ServingPointer {
+                            resource_id,
+                            logical_name_id,
+                            namespace: namespace.clone(),
+                            source_family,
+                            namehash: node.clone(),
+                            resolver_address,
+                            pointer_event_id: event_id.or(probed
+                                .get(&position.event_identity)
+                                .map(|event| event.normalized_event_id)),
+                            block_number: position.block_number,
+                        }
+                    });
+                RegistryStandIn {
                     resource_id,
-                    logical_name_id,
-                    namespace: namespace.clone(),
-                    source_family,
-                    namehash: node.clone(),
-                    resolver_address,
-                    pointer_event_id: event_id.or(probed
-                        .get(&position.event_identity)
-                        .map(|event| event.normalized_event_id)),
-                    block_number: position.block_number,
+                    node: (namespace, node),
+                    pointer,
                 }
-            });
-            RegistryStandIn {
-                resource_id,
-                node: (namespace, node),
-                pointer,
-            }
-        })
+            },
+        )
         .collect())
 }
 
