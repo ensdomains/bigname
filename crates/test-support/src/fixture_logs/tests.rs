@@ -561,3 +561,5 @@ fn a_drift_between_oracle_and_catalog_fails() {
     );
     assert!(message.contains("fixture-log oracle drops"), "{message}");
 }
+
+mod red_demo;
