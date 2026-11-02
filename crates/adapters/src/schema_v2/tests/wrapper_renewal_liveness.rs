@@ -38,8 +38,7 @@ const PROBE_BLOCK: i64 = 4;
 /// `ExpiryChanged` and `PreimageObserved`, so it takes the enrichment path. On Sepolia the
 /// BaseRegistrar's `NameRenewed` is lifecycle-interpreted and records the transaction's registrar
 /// word. On Mainnet the controller's `NameRenewed` follows it in the same transaction, so the
-/// numeric event derives nothing and the word is the lease the controller's event sets, which the
-/// held-lease row covers.
+/// numeric event derives no rows but still records the transaction's registrar word.
 #[derive(Clone, Copy, Debug)]
 enum Declaration {
     Mainnet,

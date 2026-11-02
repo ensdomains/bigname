@@ -961,39 +961,7 @@ fn a_wrapped_controller_renewal_reads_the_numeric_renewal_it_covers() -> anyhow:
 /// lease as the wrapped registrar resource.
 #[test]
 fn a_wrap_after_a_numeric_lease_records_that_lease() -> anyhow::Result<()> {
-    let mut logs = Logs::default();
-    eth_root(&mut logs);
-    migration_mint(&mut logs, 2, LABEL);
-    logs.push(3, 0, BASE_REGISTRAR, numeric_renewal(LABEL, 50_000_000));
-    logs.push(
-        3,
-        0,
-        LEGACY_CONTROLLER,
-        controller_renewal(LABEL, 50_000_000),
-    );
-    logs.push(
-        4,
-        0,
-        BASE_REGISTRAR,
-        token_transfer(LABEL, HOLDER, NAME_WRAPPER),
-    );
-    logs.push(4, 0, REGISTRY, new_owner(LABEL, NAME_WRAPPER));
-    let mut dns = vec![u8::try_from(LABEL.len())?];
-    dns.extend(LABEL.as_bytes());
-    dns.extend(b"\x03eth\0");
-    logs.push(
-        4,
-        0,
-        NAME_WRAPPER,
-        super::NameWrapped {
-            node: node(LABEL).parse()?,
-            name: dns.into(),
-            owner: address(HOLDER),
-            fuses: 196_608,
-            expiry: 50_000_000 + 90 * 86_400,
-        }
-        .encode_log_data(),
-    );
+    let logs = wrapped_migrated_lease()?;
     let output = logs.run(4)?;
     let (_, lease) = mint_grant(&output);
     let wrapped = output
