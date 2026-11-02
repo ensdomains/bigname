@@ -964,22 +964,31 @@ fn composite() -> Value {
     )
 }
 
+/// The fields of [`served`] a declared ENSV2Resolver's row is judged by.
+fn composite_view(fields: &Value) -> Value {
+    let mut view = brief(fields);
+    view["basis"] = fields["classification"]["basis"].clone();
+    view["read_features"] = fields["classification"]["read_features"].clone();
+    view["manifest_id"] = fields["manifest_id"].clone();
+    view["admission_namespace"] = fields["admission_namespace"].clone();
+    view
+}
+
+/// [`composite_view`] of the declared ENSV2Resolver's row under the manifest `manifest_id`.
+fn composite_expected(manifest_id: i64) -> Value {
+    let mut view = composite();
+    view["basis"] = json!("manifest_declared_address");
+    view["read_features"] = json!([]);
+    view["manifest_id"] = json!(manifest_id);
+    view["admission_namespace"] = json!("ens");
+    view
+}
+
 /// Asserts `fields` are the declared ENSV2Resolver's row under the manifest `manifest_id`.
 fn assert_composite(fields: &Value, manifest_id: i64, row: &str) {
-    assert_eq!(brief(fields), composite(), "{row}");
     assert_eq!(
-        json!({
-            "basis": fields["classification"]["basis"],
-            "read_features": fields["classification"]["read_features"],
-            "manifest_id": fields["manifest_id"],
-            "admission_namespace": fields["admission_namespace"],
-        }),
-        json!({
-            "basis": "manifest_declared_address",
-            "read_features": [],
-            "manifest_id": manifest_id,
-            "admission_namespace": "ens",
-        }),
+        composite_view(fields),
+        composite_expected(manifest_id),
         "{row}"
     );
 }
@@ -1077,11 +1086,14 @@ async fn the_ensv2_resolver_is_declared_and_not_projected() -> Result<()> {
 
         fixture.apply(2, FamilyMode::Normal).await?;
         let mut at_2 = std::collections::BTreeMap::new();
+        let (mut filed_at_2, mut declared) = (json!({}), json!({}));
         for (row, address) in [("D1", &d1), ("D2", &d2), ("D3", &d3), ("D5", &d5)] {
             let fields = served(&fixture, address).await?;
-            assert_composite(&fields, m.v2_resolver, &format!("{row} at 2 ({mode})"));
+            filed_at_2[row] = composite_view(&fields);
+            declared[row] = composite_expected(m.v2_resolver);
             at_2.insert(row, fields);
         }
+        assert_eq!(filed_at_2, declared, "D1, D2, D3, D5 at 2 ({mode})");
         for (row, address, role) in [
             ("D7 mirror", &m1, "ensv1_mirror_resolver"),
             ("D7 PublicResolverV2", &p1, "public_resolver_v2"),
@@ -1224,13 +1236,7 @@ async fn a_manifest_update_declaring_the_ensv2_resolver_refiles_it_alone() -> Re
                 "X1: {row} keeps its fields ({mode})"
             );
         }
-        assert_composite(
-            &served(&fixture, &eth).await?,
-            m.v2_resolver,
-            &format!("X1: the declaration re-files the eth resolver ({mode})"),
-        );
-
-        let (image, written): (Value, Value) = sqlx::query_as(
+        let flip: Option<(Value, Value)> = sqlx::query_as(
             "SELECT journal.before_image, to_jsonb(stored)
              FROM project_family_undo journal
              JOIN project_resolver_classification stored
@@ -1242,7 +1248,7 @@ async fn a_manifest_update_declaring_the_ensv2_resolver_refiles_it_alone() -> Re
         )
         .bind(CHAIN)
         .bind(&eth)
-        .fetch_one(&fixture.pool)
+        .fetch_optional(&fixture.pool)
         .await?;
         let consumed = |row: &Value| {
             json!({
@@ -1251,15 +1257,22 @@ async fn a_manifest_update_declaring_the_ensv2_resolver_refiles_it_alone() -> Re
                 "reason": row["unsupported_reason"],
             })
         };
+        // C1: the flip is between two unsupported rows.
         assert_eq!(
-            (consumed(&image), consumed(&written)),
-            (
-                json!({"family": "ens_v1_resolver_l1", "support": "unsupported",
-                       "reason": "resolver_not_declared"}),
-                json!({"family": "ens_v2_resolver_l1", "support": "unsupported",
-                       "reason": "composite_resolver_not_projected"}),
-            ),
-            "C1: the flip is between two unsupported rows ({mode})"
+            json!({
+                "X1": composite_view(&served(&fixture, &eth).await?),
+                "C1": flip.map(|(image, written)| json!([consumed(&image), consumed(&written)])),
+            }),
+            json!({
+                "X1": composite_expected(m.v2_resolver),
+                "C1": [
+                    {"family": "ens_v1_resolver_l1", "support": "unsupported",
+                     "reason": "resolver_not_declared"},
+                    {"family": "ens_v2_resolver_l1", "support": "unsupported",
+                     "reason": "composite_resolver_not_projected"},
+                ],
+            }),
+            "X1, C1: the declaration re-files the eth resolver ({mode})"
         );
         fixture.assert_undo_restores(8).await?;
         fixture.assert_rebuild_equal(8).await?;
