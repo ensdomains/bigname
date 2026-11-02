@@ -73,7 +73,9 @@ macro_rules! publication_read_filter {
 pub(crate) const ADDRESS_NAMES_PUBLICATION_READ_FILTER: &str = publication_read_filter!();
 
 // Project owns the selected binding. Interpret can close it before the next publication,
-// so read eligibility checks canonicality, not its mutable active_to field.
+// so read eligibility checks canonicality, not its mutable active_to field. An ownerless
+// registry row with an implied lease (`ownerless_lease`) has no binding: its row stands on the
+// lease's resource and is read through its surface and that resource.
 pub const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = concat!(
     publication_read_filter!(),
     r#"  AND surface.canonicality_state IN (
@@ -96,15 +98,20 @@ pub const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = concat!(
       'safe'::bigname_phase.canonicality_state,
       'finalized'::bigname_phase.canonicality_state
   )
-  AND binding.canonicality_state IN (
-      'canonical'::bigname_phase.canonicality_state,
-      'safe'::bigname_phase.canonicality_state,
-      'finalized'::bigname_phase.canonicality_state
-  )
-  AND binding_lineage.canonicality_state IN (
-      'canonical'::bigname_phase.canonicality_state,
-      'safe'::bigname_phase.canonicality_state,
-      'finalized'::bigname_phase.canonicality_state
+  AND (
+      (anc.ownerless_lease IS TRUE AND anc.surface_binding_id IS NULL)
+      OR (
+          binding.canonicality_state IN (
+              'canonical'::bigname_phase.canonicality_state,
+              'safe'::bigname_phase.canonicality_state,
+              'finalized'::bigname_phase.canonicality_state
+          )
+          AND binding_lineage.canonicality_state IN (
+              'canonical'::bigname_phase.canonicality_state,
+              'safe'::bigname_phase.canonicality_state,
+              'finalized'::bigname_phase.canonicality_state
+          )
+      )
   )
   AND (
       anc.token_lineage_id IS NULL
@@ -129,7 +136,7 @@ pub const DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS: &str = r#"
     ON surface.logical_name_id = anc.logical_name_id
   JOIN bigname_phase.resources resource
     ON resource.resource_id = anc.resource_id
-  JOIN bigname_phase.surface_bindings binding
+  LEFT JOIN bigname_phase.surface_bindings binding
     ON binding.surface_binding_id = anc.surface_binding_id
   LEFT JOIN bigname_phase.token_lineages token_lineage
     ON token_lineage.token_lineage_id = anc.token_lineage_id
@@ -139,7 +146,7 @@ pub const DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS: &str = r#"
   JOIN bigname_phase.chain_lineage resource_lineage
     ON resource_lineage.chain_id = resource.chain_id
    AND resource_lineage.block_hash = resource.block_hash
-  JOIN bigname_phase.chain_lineage binding_lineage
+  LEFT JOIN bigname_phase.chain_lineage binding_lineage
     ON binding_lineage.chain_id = binding.chain_id
    AND binding_lineage.block_hash = binding.block_hash
   LEFT JOIN bigname_phase.chain_lineage token_lineage_lineage

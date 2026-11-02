@@ -286,8 +286,9 @@ async fn admit_fixture_resolver(
 /// - `beta.eth` was recorded there first and then written by the current registry (`ens_v1`,
 ///   with a handoff);
 /// - `gamma.eth` is recorded only in the current registry (`ens_v1`);
-/// - `shared-one.eth` is an ownerless 2017-registry name: its binding ended and the registry
-///   reports no owner for its node, so it serves no `authority`;
+/// - `shared-one.eth` is an ownerless 2017-registry name with an implied lease: its binding
+///   ended and the registry reports no owner for its node, so it serves its arm's `ens_v0` and
+///   lists its lease's holder;
 /// - `shared-two.eth` is an ENSv2 registration (`ens_v2`).
 ///
 /// Each name is seeded at block 38; the shape events are at block 39, where the families are

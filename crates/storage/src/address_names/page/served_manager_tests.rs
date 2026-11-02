@@ -37,6 +37,7 @@ fn entry(surface_binding_id: Option<Uuid>) -> AddressNameCurrentEntry {
         served_manager: None,
         served_authority: None,
         served_lifecycle_shadow: false,
+        registry_child: surface_binding_id.is_none(),
     }
 }
 

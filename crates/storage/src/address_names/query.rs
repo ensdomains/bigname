@@ -58,6 +58,7 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                 anc.served_owner,
                 anc.served_authority,
                 anc.served_lifecycle_shadow,
+                anc.registry_child IS TRUE AS registry_child,
                 CASE anc.relation
                     WHEN 'token_holder' THEN 1
                     WHEN 'effective_controller' THEN 2
@@ -155,7 +156,8 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                 last_recomputed_at,
                 served_owner,
                 served_authority,
-                served_lifecycle_shadow
+                served_lifecycle_shadow,
+                registry_child
             FROM filtered
             ORDER BY
                 address ASC,
@@ -201,7 +203,8 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                 representatives.last_recomputed_at,
                 representatives.served_owner,
                 representatives.served_authority,
-                representatives.served_lifecycle_shadow
+                representatives.served_lifecycle_shadow,
+                representatives.registry_child
             FROM representatives
             JOIN relation_facets
               ON relation_facets.address = representatives.address
@@ -232,7 +235,8 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                 last_recomputed_at,
                 served_owner,
                 served_authority,
-                served_lifecycle_shadow
+                served_lifecycle_shadow,
+                registry_child
             FROM filtered
             ORDER BY
                 address ASC,
@@ -279,7 +283,8 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                 representatives.last_recomputed_at,
                 representatives.served_owner,
                 representatives.served_authority,
-                representatives.served_lifecycle_shadow
+                representatives.served_lifecycle_shadow,
+                representatives.registry_child
             FROM representatives
             JOIN relation_facets
               ON relation_facets.address = representatives.address

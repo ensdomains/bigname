@@ -105,7 +105,8 @@ async fn exercise(ownerless: bool) -> Result<()> {
     .await?;
     if ownerless {
         // A cleared registry record does not end the BaseRegistrar lease: the name serves the
-        // lease's registration with no authority and no registry custody (docs/projections.md).
+        // lease's registration and control with no authority kind and no registry custody
+        // (docs/projections.md).
         let registration = &name_body["declared_state"]["registration"];
         assert_eq!(registration["status"], "active", "{name_body}");
         assert_eq!(registration["lifecycle_status"], "active", "{name_body}");
@@ -116,10 +117,8 @@ async fn exercise(ownerless: bool) -> Result<()> {
         // The registrant is the lease's holder when its registrar rows record one. Here the
         // registrar's own mint precedes the lease the renewal names, so the lease records none.
         assert!(registration["registrant"].is_null(), "{name_body}");
-        assert_eq!(
-            name_body["declared_state"]["control"]["status"],
-            "unregistered"
-        );
+        // Its control stands on the lease and follows the lease's schedule.
+        assert_eq!(name_body["declared_state"]["control"]["status"], "active");
         assert_eq!(name_body["data"]["resource_id"], Value::Null);
         assert_eq!(name_body["data"]["token_lineage_id"], Value::Null);
         assert_eq!(name_body["data"]["binding_kind"], Value::Null);

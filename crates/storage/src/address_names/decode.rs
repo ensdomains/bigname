@@ -67,6 +67,8 @@ pub(super) fn decode_address_name_current_entry(row: PgRow) -> Result<AddressNam
             "served_lifecycle_shadow",
         )?
         .unwrap_or(false),
+        registry_child: crate::sql_row::get::<Option<bool>>(&row, "registry_child")?
+            .unwrap_or(false),
     })
 }
 

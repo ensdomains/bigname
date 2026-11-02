@@ -49,6 +49,32 @@ pub async fn surface(fixture: &Fixture, name: &str) -> Result<String> {
     surface_at(fixture, name, 0).await
 }
 
+/// The surface of `name` at block 0 with its real namehash and label hashes but no raw bytes:
+/// a name whose labels were never learned, served as `[<labelhash>]` per label.
+pub async fn unknown_surface(fixture: &Fixture, name: &str) -> Result<String> {
+    let logical_name_id = logical_name_id(name);
+    let labelhashes: Vec<String> = name
+        .split('.')
+        .map(|label| format!("{:#x}", keccak256(label.as_bytes())))
+        .collect();
+    sqlx::query(
+        "INSERT INTO name_surfaces (logical_name_id, namespace, namehash, labelhashes,
+             normalizer_version, visibility_state, chain_id, block_hash, block_number,
+             canonicality_state)
+         VALUES ($1, 'ens', $2, $3, $4, 'active', $5, $6, 0, 'canonical')
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(&logical_name_id)
+    .bind(logical_name_id.trim_start_matches("ens:"))
+    .bind(labelhashes)
+    .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
+    .bind(CHAIN)
+    .bind(hash(0))
+    .execute(&fixture.pool)
+    .await?;
+    Ok(logical_name_id)
+}
+
 /// The surface of `name` anchored at `block`, with its real namehash and label hashes.
 pub async fn surface_at(fixture: &Fixture, name: &str, block: i64) -> Result<String> {
     let logical_name_id = logical_name_id(name);
