@@ -581,7 +581,7 @@ async fn a_numeric_lease_composes_like_a_controller_lease() -> Result<()> {
             );
         }
         let plain = served(pool, "migrated-plain").await?;
-        let status = field(&plain, "/declared_summary/registration/status");
+        let status = field(&plain, "/summary/registration_status");
         anyhow::ensure!(
             *status
                 == json!(match phase {

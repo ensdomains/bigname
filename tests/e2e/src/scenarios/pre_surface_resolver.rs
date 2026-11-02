@@ -104,45 +104,28 @@ async fn exercise(ownerless: bool) -> Result<()> {
     .fetch_one(&run.db.pool)
     .await?;
     if ownerless {
-        // A cleared registry record does not end the BaseRegistrar lease: the name serves the
-        // lease's registration and control with no authority kind and no registry custody
-        // (docs/projections.md).
+        // A cleared registry record does not end the BaseRegistrar lease. The registrar's own
+        // numeric mint opened that lease and bound the name to it, because the owner-added
+        // controller is not admitted, and that binding survives the cleared record as it does
+        // for a name an admitted controller registers (docs/projections.md).
         let registration = &name_body["declared_state"]["registration"];
         assert_eq!(registration["status"], "active", "{name_body}");
         assert_eq!(registration["lifecycle_status"], "active", "{name_body}");
         assert!(registration["resource_id"].is_string(), "{name_body}");
         assert!(!registration["registered_at"].is_null(), "{name_body}");
         assert!(!registration["ens_v1_expiry"].is_null(), "{name_body}");
-        assert_eq!(registration["authority_kind"], Value::Null);
-        // The registrant is the lease's holder its registrar rows record: the registrar's own
-        // numeric mint opens the lease, since the owner-added controller is not admitted.
+        assert_eq!(registration["authority_kind"], "registrar", "{name_body}");
         assert_eq!(
             registration["registrant"],
             format!("{owner:#x}"),
             "{name_body}"
         );
-        // Its control stands on the lease and follows the lease's schedule.
-        assert_eq!(name_body["declared_state"]["control"]["status"], "active");
-        assert_eq!(name_body["data"]["resource_id"], Value::Null);
-        assert_eq!(name_body["data"]["token_lineage_id"], Value::Null);
-        assert_eq!(name_body["data"]["binding_kind"], Value::Null);
-        assert_eq!(
-            name_body["declared_state"]["control"]["registrant"],
-            format!("{owner:#x}"),
-            "the lease's control carries its registrant: {name_body}"
+        assert!(name_body["data"]["resource_id"].is_string(), "{name_body}");
+        assert!(
+            name_body["data"]["token_lineage_id"].is_string(),
+            "{name_body}"
         );
-        for field in ["registry_owner", "manager", "registration_id", "token_id"] {
-            assert!(
-                name_body["declared_state"]["registration"]
-                    .get(field)
-                    .is_none_or(Value::is_null)
-                    && name_body["declared_state"]["control"]
-                        .get(field)
-                        .is_none_or(Value::is_null),
-                "ownerless field {field} must be absent: {name_body}"
-            );
-        }
-        assert_eq!(control_bindings, 0);
+        assert_eq!(control_bindings, 1);
     } else {
         assert_eq!(
             name_body["declared_state"]["registration"]["status"],
