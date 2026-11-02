@@ -5454,7 +5454,11 @@ What changes for names:
 
 - A renewal that leaves the lease expired, such as `ETHRenewerV1.syncWrapper`'s
   `renew(label, 0)` on a name in grace or a renewal in grace too short to reach the block time,
-  no longer moves the stored wrapper expiry. `NameWrapper.renew` writes nothing in that case.
+  no longer moves the stored wrapper expiry. `NameWrapper.renew` writes nothing in that case,
+  because `BaseRegistrar.ownerOf` reverts unless the lease ends after the block timestamp.
+  (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L106-L112 @ ens_v2_sepolia_20260629@ccaeb58)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318-L330 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
 - An emancipated or locked name whose stored wrapper expiry has passed while its lease is in
   grace serves the lapsed-wrapper shape: no `owner` or `manager`, `ens_v1.wrapper_state`
   `lapsed`, and `ens_v1.wrapper_expires_at` equal to the NameWrapper's own stored expiry. Its
