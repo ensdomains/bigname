@@ -786,7 +786,7 @@ surface of the chain once.
 An Interpret redo finds the surfaces whose raw labels lost their
 [preimage witness](glossary.md#preimage-witness) through two partial indexes of Interpret's
 own, installed by the identity baseline and
-`20261027130000_name_surfaces_lost_witness_indexes.sql`. They change no row:
+`20261027140000_name_surfaces_lost_witness_indexes.sql`. They change no row:
 
 | Index | Serves |
 | --- | --- |

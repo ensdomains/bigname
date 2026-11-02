@@ -5057,13 +5057,13 @@ observations and updates the targets by name, so no plan of it joins every surfa
   the stamped Project redo it installs before the matching API serves, as the
   [handoff](#phase-runner-configuration) describes. The change rides the next release that
   redoes Interpret and shares that release's redo pair.
-- `20261027130000_name_surfaces_lost_witness_indexes.sql` adds
+- `20261027140000_name_surfaces_lost_witness_indexes.sql` adds
   `name_surfaces_released_witness_idx` and `name_surfaces_byte_shadow_idx`, both on
   `name_surfaces (chain_id, logical_name_id)`. Each is a plain `CREATE INDEX` with a SHARE
   lock on `name_surfaces` until the schema-migration commits, which blocks Interpret's writes
   to it. Apply it with the phase runner, redo processes and API stopped, with the
   `lock_timeout`, `statement_timeout` and retry procedure of [Server Compose](#server-compose)
-  and `--target-version 20261027130000`. On a large initialized database, prebuild both
+  and `--target-version 20261027140000`. On a large initialized database, prebuild both
   concurrently first, outside a transaction, so the schema-migration finds them and skips the
   builds:
 
