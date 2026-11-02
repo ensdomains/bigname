@@ -1490,6 +1490,47 @@ fn repository_rejects_invalid_resolver_read_feature_declarations() -> Result<()>
     Ok(())
 }
 
+/// The ENSV2Resolver is declared with no read features. In an implementation family the loader
+/// permits contract-level features only on the direct PublicResolverV2, so
+/// `ensip10_extended_resolver` on its declaration does not load.
+#[test]
+fn the_ensv2_resolver_declaration_takes_no_read_features() -> Result<()> {
+    let checked_in = fs::read_to_string(
+        checked_in_manifest_root("manifests/mainnet")
+            .join("ethereum/ens/ens_v2_resolver_l1/v1.toml"),
+    )?;
+    let declaration = "role = \"ensv2_resolver\"\naddress = \"0x3071ad643ce4ed8b3d67b289845b45db82b068a4\"\nproxy_kind = \"none\"\nstart_block = 26216293\n";
+    assert!(checked_in.contains(declaration));
+    let featured = checked_in.replace(
+        declaration,
+        &format!("{declaration}read_features = [\"ensip10_extended_resolver\"]\n"),
+    );
+    for (case, contents, loads) in [
+        ("checked in", &checked_in, true),
+        ("featured", &featured, false),
+    ] {
+        let test_dir = TestDir::new()?;
+        test_dir.write_manifest_for_chain_combo(
+            "ethereum",
+            "ens",
+            "ens_v2_resolver_l1",
+            "v1",
+            contents,
+        )?;
+        match load_repository(&test_dir.path) {
+            Ok(_) => assert!(loads, "{case} loaded"),
+            Err(error) => {
+                assert!(!loads, "{case}: {error:#}");
+                assert!(
+                    format!("{error:#}").contains("implementation family"),
+                    "{case}: {error:#}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn mainnet_registrar_family_pins_the_base_registrar_event_surface() -> Result<()> {
     let repository = load_repository(checked_in_manifest_root("manifests/mainnet"))?;
