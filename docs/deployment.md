@@ -5441,3 +5441,37 @@ hash-rotating changes. Do not mark old rows ready under the new hash.
 
 It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
 and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## Wrapper expiry from a renewal that leaves the lease expired
+
+The build that derives a wrapped `.eth` name's NameWrapper expiry from a wrapped-controller
+renewal only when the renewed lease is later than the block timestamp
+([architecture](architecture.md)) changes `crates/adapters/src`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain. The
+[projection content hash](glossary.md#projection-content-hash) moves with it.
+
+What changes for names:
+
+- A renewal that leaves the lease expired, such as `ETHRenewerV1.syncWrapper`'s
+  `renew(label, 0)` on a name in grace or a renewal in grace too short to reach the block time,
+  no longer moves the stored wrapper expiry. `NameWrapper.renew` writes nothing in that case,
+  because `BaseRegistrar.ownerOf` reverts unless the lease ends after the block timestamp.
+  (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L106-L112 @ ens_v2_sepolia_20260629@ccaeb58)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318-L330 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
+- An emancipated or locked name whose stored wrapper expiry has passed while its lease is in
+  grace serves the lapsed-wrapper shape: no `owner` or `manager`, `ens_v1.wrapper_state`
+  `lapsed`, and `ens_v1.wrapper_expires_at` equal to the NameWrapper's own stored expiry. Its
+  `status` and lease dates are unchanged.
+- A renewal that brings the lease back still moves the wrapper expiry to the new lease plus the
+  grace period.
+
+These rows arrive through re-derivation, not through an in-place change. Every chain needs a
+full-history Interpret redo, then the Project redo it installs, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+binaries. A Project redo alone does not apply it. The change rides the next re-derivation
+release and shares that release's one Interpret and Project redo pair with its other
+hash-rotating changes. Do not mark old rows ready under the new hash.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
+and the compiled watch plan are unchanged, so stamp no Ingest redo.

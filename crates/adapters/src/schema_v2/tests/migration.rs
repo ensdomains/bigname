@@ -11,6 +11,7 @@ mod announced_resolver;
 mod child;
 mod expiry;
 mod intermediary;
+mod sync_wrapper_liveness;
 mod zero_owner;
 
 const MIGRATION_MANIFEST_ID: i64 = 100;
@@ -2432,7 +2433,8 @@ fn candidate_registrar_renewal_cannot_change_later_ordinary_wrapper_output() -> 
         .as_i64()
         .unwrap();
     let initial_wrapper_expiry = 7_776_100;
-    let registrar_expiry = 200;
+    // Later than the envelope's block, so the NameWrapper writes the renewal.
+    let registrar_expiry = 1_000;
     let later_wrapper_expiry = 7_776_300;
     let setup = vec![
         raw_at_transaction(
@@ -2532,7 +2534,7 @@ fn candidate_registrar_renewal_cannot_change_later_ordinary_wrapper_output() -> 
     assert!(correlated.normalized_events.iter().any(|event| {
         event.source_family == "ens_v2_migration_l1"
             && event.after_state["source_event"] == "NameRenewed"
-            && event.after_state["wrapper_expiry"] == 7_776_200
+            && event.after_state["wrapper_expiry"] == 7_777_000
     }));
     assert_eq!(
         wrapper_expiry_event(&correlated),
