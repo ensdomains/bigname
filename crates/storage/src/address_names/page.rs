@@ -252,6 +252,7 @@ pub(crate) async fn load_address_names_page_entries_from(
             served_owner,
             served_authority,
             served_lifecycle_shadow,
+            registry_child,
         "#,
     );
     if sort.is_timestamp() {
