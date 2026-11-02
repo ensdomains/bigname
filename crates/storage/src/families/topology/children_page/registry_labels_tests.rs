@@ -3,7 +3,7 @@
 //! the statement without that narrowing on every case the arm selection distinguishes, and the
 //! narrowed count, executed under custom and generic plans, must probe the registration index by
 //! registry and the edge candidate index by child node in the latest-edge veto's cross-parent
-//! lookup.
+//! lookup. A read without a registry skips the join that carries the registration's emitter.
 use anyhow::{Result, ensure};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::Value;
@@ -379,6 +379,210 @@ async fn registry_label_count_plan_stops_at_the_cap() -> Result<()> {
             }
             if !failures.is_empty() {
                 eprintln!("{mode}: {plan:#}");
+            }
+        }
+        ensure!(failures.is_empty(), "{}", failures.join("\n"));
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+/// The join that carries an ENSv2 registration's emitter, which only a registry's labels read.
+const EMITTER_JOIN: &str = "
+            LEFT JOIN bigname_phase.normalized_events registration_event
+              ON registration_event.event_identity = registration.event_identity";
+const PREIMAGE_JOIN: &str = "ON preimage.labelhash = lower(child.labelhashes[1])";
+
+/// The statement with the emitter join restored after the ENSv2 preimage join.
+fn with_emitter_join(sql: &str) -> Result<String> {
+    ensure!(
+        sql.matches(PREIMAGE_JOIN).count() == 1,
+        "the ENSv2 preimage join moved:\n{sql}"
+    );
+    Ok(sql.replace(PREIMAGE_JOIN, &format!("{PREIMAGE_JOIN}{EMITTER_JOIN}")))
+}
+
+enum Bind<'a> {
+    Text(&'a str),
+    Texts(&'a [String]),
+    Int(i64),
+}
+
+/// Every row of `sql` as JSON text, sorted, so two statements over the same rows with the same
+/// `ORDER BY` compare equal.
+async fn json_rows(conn: &mut PgConnection, sql: &str, binds: &[Bind<'_>]) -> Result<Vec<String>> {
+    let wrapped = format!("SELECT to_jsonb(result)::text FROM ({sql}) result");
+    let mut query = sqlx::query_scalar::<_, String>(&wrapped);
+    for bind in binds {
+        query = match bind {
+            Bind::Text(value) => query.bind(*value),
+            Bind::Texts(value) => query.bind(*value),
+            Bind::Int(value) => query.bind(*value),
+        };
+    }
+    let mut rows = query.fetch_all(&mut *conn).await?;
+    rows.sort();
+    Ok(rows)
+}
+
+/// A read without a registry reads no registration's emitter, so its statement has no join to
+/// `normalized_events` for it. The join is at most one row per registration
+/// (`normalized_events_event_identity_key`) and no such read projects or filters the emitter, so
+/// every read shape returns the same rows with the join restored: the subnames page under both
+/// sorts and the expiry fence, with and without a total cap, the per-parent counts and the
+/// by-node read. Under custom and generic plans, the subnames page scans `normalized_events` only
+/// in the shadow flags' `observed` probes, while a registry's labels page still reads the emitter.
+#[tokio::test]
+async fn children_without_a_registry_skip_the_emitter_join() -> Result<()> {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("children_emitter_join").pool_max_connections(1),
+    )
+    .await?;
+    let result = async {
+        let mut conn = database.pool().acquire().await?;
+        install(&mut conn).await?;
+        let hash = bigname_content_hash::PROJECTION_CONTENT_HASH;
+        let mut failures = Vec::new();
+        let by_expiry = ChildrenCurrentPageFilter {
+            include_expired: false,
+            sort: ChildrenCurrentSort::ExpiresAt,
+            order: ChildrenCurrentOrder::Desc,
+            ..ChildrenCurrentPageFilter::default()
+        };
+        let filters = [ChildrenCurrentPageFilter::default(), by_expiry];
+        let parents = [ETH.to_owned(), OTHER_PARENT.to_owned()];
+        // ENSv1 only; both arms with no arm, with no summary, with ENSv1 and with ENSv2
+        // selected; moved under another parent; ENSv2 only with no arm; another registry's.
+        let nodes: Vec<String> = [3790_u64, 3805, 3815, 3825, 3850, 3833, 4595, 4005]
+            .into_iter()
+            .map(|n| format!("0x{n:064x}"))
+            .collect();
+        let mut statements = Vec::new();
+        for mode in PLAN_MODES {
+            for parent in [ETH, OTHER_PARENT] {
+                for filter in &filters {
+                    for total_limit in [None, Some(10_001_i64)] {
+                        let query = page_query(parent, filter, None, None, 10_001, total_limit);
+                        let mut binds =
+                            vec![Bind::Text(parent), Bind::Text(hash), Bind::Int(10_001)];
+                        binds.extend(total_limit.map(Bind::Int));
+                        statements.push((
+                            mode,
+                            format!("page {parent} {:?} cap {total_limit:?}", filter.sort),
+                            query.sql().to_owned(),
+                            binds,
+                        ));
+                    }
+                }
+            }
+            statements.push((
+                mode,
+                "counts".to_owned(),
+                counts_query(&parents).sql().to_owned(),
+                vec![Bind::Texts(&parents), Bind::Text(hash)],
+            ));
+            let mut by_node = QueryBuilder::<Postgres>::new("WITH ");
+            push_children(
+                &mut by_node,
+                Parents::One(ETH),
+                &filters[0],
+                None,
+                Some(nodes.as_slice()),
+            );
+            by_node.push(") SELECT * FROM children");
+            statements.push((
+                mode,
+                "by node".to_owned(),
+                by_node.sql().to_owned(),
+                vec![
+                    Bind::Text(ETH),
+                    Bind::Text(hash),
+                    Bind::Texts(&nodes),
+                    Bind::Texts(&nodes),
+                ],
+            ));
+        }
+        for (mode, label, sql, binds) in &statements {
+            raw_sql(&format!("SET plan_cache_mode = {mode}"))
+                .execute(&mut *conn)
+                .await?;
+            if sql.contains("registration_event") {
+                failures.push(format!("{mode} {label}: joins the registration's emitter"));
+                continue;
+            }
+            let rows = json_rows(&mut conn, sql, binds).await?;
+            let joined = json_rows(&mut conn, &with_emitter_join(sql)?, binds).await?;
+            if rows.is_empty() || rows != joined {
+                failures.push(format!(
+                    "{mode} {label}: {} rows, {} with the emitter join",
+                    rows.len(),
+                    joined.len()
+                ));
+            }
+        }
+
+        let filter = ChildrenCurrentPageFilter::default();
+        let eth_registry = registry(1);
+        let subnames = page_query(ETH, &filter, None, None, 11, None);
+        raw_sql(&format!(
+            "PREPARE subnames_page (text, text, bigint) AS {}",
+            subnames.sql()
+        ))
+        .execute(&mut *conn)
+        .await?;
+        let labels = page_query(
+            ETH,
+            &filter,
+            Some(RegistryLabels {
+                registry: &eth_registry,
+                owner: None,
+                registration_limit: None,
+            }),
+            None,
+            11,
+            None,
+        );
+        raw_sql(&format!(
+            "PREPARE labels_page (text, text, text, text, bigint) AS {}",
+            labels.sql()
+        ))
+        .execute(&mut *conn)
+        .await?;
+        for mode in PLAN_MODES {
+            raw_sql(&format!("SET plan_cache_mode = {mode}"))
+                .execute(&mut *conn)
+                .await?;
+            for (statement, arguments, reads_emitter) in [
+                ("subnames_page", format!("'{ETH}', '{hash}', 11"), false),
+                (
+                    "labels_page",
+                    format!("'{ETH}', '{hash}', '{eth_registry}', '{eth_registry}', 11"),
+                    true,
+                ),
+            ] {
+                let plan: Value = sqlx::query_scalar(&format!(
+                    "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE {statement} ({arguments})"
+                ))
+                .fetch_one(&mut *conn)
+                .await?;
+                let mut nodes = Vec::new();
+                every_node(&plan[0]["Plan"], &mut nodes);
+                let events: Vec<&str> = nodes
+                    .iter()
+                    .filter(|node| node["Relation Name"] == "normalized_events")
+                    .map(|node| node["Alias"].as_str().unwrap_or_default())
+                    .collect();
+                if events.contains(&"registration_event") != reads_emitter
+                    || events
+                        .iter()
+                        .any(|alias| !matches!(*alias, "registration_event" | "observed"))
+                {
+                    failures.push(format!(
+                        "{mode} {statement}: scans normalized_events as {events:?}"
+                    ));
+                }
             }
         }
         ensure!(failures.is_empty(), "{}", failures.join("\n"));
