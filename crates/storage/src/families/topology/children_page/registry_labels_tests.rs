@@ -394,14 +394,19 @@ const EMITTER_JOIN: &str = "
             LEFT JOIN bigname_phase.normalized_events registration_event
               ON registration_event.event_identity = registration.event_identity";
 const PREIMAGE_JOIN: &str = "ON preimage.labelhash = lower(child.labelhashes[1])";
+const NO_EMITTER: &str = "registration.event_identity, NULL::text AS registry_address";
+const EMITTER: &str = "registration.event_identity, \
+    lower(registration_event.raw_fact_ref ->> 'emitting_address') AS registry_address";
 
-/// The statement with the emitter join restored after the ENSv2 preimage join.
+/// The statement with the ENSv2 candidates' emitter column and its join restored.
 fn with_emitter_join(sql: &str) -> Result<String> {
     ensure!(
-        sql.matches(PREIMAGE_JOIN).count() == 1,
-        "the ENSv2 preimage join moved:\n{sql}"
+        sql.matches(PREIMAGE_JOIN).count() == 1 && sql.matches(NO_EMITTER).count() == 1,
+        "the ENSv2 preimage join or emitter column moved:\n{sql}"
     );
-    Ok(sql.replace(PREIMAGE_JOIN, &format!("{PREIMAGE_JOIN}{EMITTER_JOIN}")))
+    Ok(sql
+        .replace(NO_EMITTER, EMITTER)
+        .replace(PREIMAGE_JOIN, &format!("{PREIMAGE_JOIN}{EMITTER_JOIN}")))
 }
 
 enum Bind<'a> {
@@ -453,8 +458,12 @@ async fn children_without_a_registry_skip_the_emitter_join() -> Result<()> {
         };
         let filters = [ChildrenCurrentPageFilter::default(), by_expiry];
         let parents = [ETH.to_owned(), OTHER_PARENT.to_owned()];
-        // ENSv1 only; both arms with no arm, with no summary, with ENSv1 and with ENSv2
-        // selected; moved under another parent; ENSv2 only with no arm; another registry's.
+        // In order:
+        // - ENSv1 only.
+        // - Both arms with no arm, with no summary, with ENSv1 selected, with ENSv2 selected.
+        // - Moved under another parent.
+        // - ENSv2 only with no arm.
+        // - Another registry's registration.
         let nodes: Vec<String> = [3790_u64, 3805, 3815, 3825, 3850, 3833, 4595, 4005]
             .into_iter()
             .map(|n| format!("0x{n:064x}"))
@@ -514,7 +523,11 @@ async fn children_without_a_registry_skip_the_emitter_join() -> Result<()> {
             }
             let rows = json_rows(&mut conn, sql, binds).await?;
             let joined = json_rows(&mut conn, &with_emitter_join(sql)?, binds).await?;
-            if rows.is_empty() || rows != joined {
+            let children = rows
+                .iter()
+                .filter(|row| !row.contains(r#""child_logical_name_id": null"#))
+                .count();
+            if children == 0 || rows != joined {
                 failures.push(format!(
                     "{mode} {label}: {} rows, {} with the emitter join",
                     rows.len(),

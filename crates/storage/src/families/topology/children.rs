@@ -55,12 +55,12 @@ pub(super) enum Parents<'a> {
 /// `selected` one row per served child with `pair_rank = 1`, before the page read filter, with
 /// its parent as `parent_logical_name_id`. With `registry`, an ENSv2 child carries the emitter of
 /// its registration event as `registry_address` and every other child null. Without it every
-/// child carries null and no event is read. For a registry's labels, `registry`
-/// keeps the ENSv2 candidates of a parent whose current subregistry it is, and the other arms'
-/// candidates only for those children: no other child can be a label, and another arm only
-/// decides the arm of a child it shares. `children`, the child nodes a read wants (lowercase, no
-/// namespace), keeps both arms' candidates of only those children, read by child node rather
-/// than by enumerating the parent's edges; the windows below partition by child, so whole
+/// child carries null and no event is read. For a registry's labels, `registry` keeps the ENSv2
+/// candidates of a parent whose current subregistry it is, and the other arms' candidates only
+/// for those children: no other child can be a label, and another arm only decides the arm of a
+/// child it shares. `children`, the child nodes a read wants (lowercase, no namespace), keeps
+/// both arms' candidates of only those children, read by child node rather than by enumerating
+/// the parent's edges; the windows below partition by child, so whole
 /// children in or out leave every rank unchanged. `registration_limit` keeps at most that many
 /// ENSv2 candidates, in no order, so everything after them is bounded too: only a capped count
 /// may set it, and it must report a candidate count above its cap as not computed.
@@ -108,8 +108,7 @@ pub(super) fn push_selected<'a>(
     );
     builder.push_bind(bigname_content_hash::PROJECTION_CONTENT_HASH);
     // The registry a registry's labels read is the registration's emitter, as the served labels
-    // read `raw_fact_refs[0].registration.emitting_address`. No other read uses it, so only a
-    // registry's read joins the event that carries it.
+    // read `raw_fact_refs[0].registration.emitting_address`.
     let (registry_address, registration_event) = if registry.is_some() {
         (
             "lower(registration_event.raw_fact_ref ->> 'emitting_address')",
