@@ -2422,3 +2422,38 @@ async fn a_heavily_renewed_legacy_lease_still_finds_its_holder() -> Result<()> {
     }
     database.cleanup().await
 }
+
+/// The holder statement on a lease moved before its 150 renewals reads only the lease's own
+/// events, beside the registrar noise of [`seed_registrar_noise`], and names the transfer's
+/// recipient.
+#[tokio::test]
+async fn the_lease_holder_read_reads_only_the_leases_own_events() -> Result<()> {
+    let database = new_database().await?;
+    let registry = Uuid::from_u128(0x7ef0);
+    let logical = seed_registry_only(&database, "migrated.eth", 0x7ef0, true).await?;
+    let lease = Uuid::from_u128(0x7eff);
+    let events = long_lease();
+    seed_lease(&database, &logical, lease, &events).await?;
+    seed_transfer(&database, &logical, lease, GRANTED + 1, HOLDER).await?;
+    publish(&database).await?;
+    seed_registrar_noise(&database, &logical, registry).await?;
+
+    let sql = crate::v2::support::LEASE_HOLDER_SQL;
+    let plan: Value = sqlx::query_scalar(&format!("EXPLAIN (ANALYZE, FORMAT JSON) {sql}"))
+        .bind(lease)
+        .bind(HEAD)
+        .bind(Some(HANDOFF))
+        .bind(CHAIN)
+        .fetch_one(&database.pool)
+        .await?;
+    assert_reads_only_the_lease(&plan, lease, events.len() as u64 + 1);
+    let holder: Option<String> = sqlx::query_scalar(sql)
+        .bind(lease)
+        .bind(HEAD)
+        .bind(Some(HANDOFF))
+        .bind(CHAIN)
+        .fetch_optional(&database.pool)
+        .await?;
+    assert_eq!(holder.as_deref(), Some(HOLDER));
+    database.cleanup().await
+}
