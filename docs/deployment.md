@@ -5455,10 +5455,11 @@ the lifecycle composition and the name relations Project stores
 
 What changes for names:
 
-- A `.eth` second-level name whose registry owner is zero and whose
-  [implied lease](glossary.md#implied-lease) stands serves the lease's token holder as `owner`,
-  `ens_v1` as `authority`, and no `manager` or registry owner. It is listed for the holder under
-  `owner` and matches `authority=ens_v1`. Before, it served no owner and no authority.
+- A `.eth` second-level name whose registry owner is zero and that has an
+  [implied lease](glossary.md#implied-lease) serves the lease's token holder as `owner`, its
+  arm's `authority` (`ens_v1`, or `ens_v0` while only the 2017 registry records the node), and
+  no `manager` or registry owner. It matches that `authority` filter. Before, it served no owner
+  and no authority.
 - A name the registrar schedule or a lapsed ENSv2 reservation released, while no release of its
   lease is retained, serves no `owner` or `manager` and is listed for neither. Before, it served
   `released` with the last owner.

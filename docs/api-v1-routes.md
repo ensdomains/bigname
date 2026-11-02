@@ -395,7 +395,7 @@ collection route carry neither header.
   that `ens_v2` authority was proven by an ENSv1→ENSv2 migration transition;
   both apply to name results and reverse rows alike and are omitted on feed
   records, on `read_status=unsupported` records, and, for `authority`, on ownerless
-  registry rows. `profile=detail` records whose `authority` is `ens_v1` or
+  registry rows without an [implied lease](glossary.md#implied-lease). `profile=detail` records whose `authority` is `ens_v1` or
   `ens_v0` also carry the `ens_v1` object (`{expires_at, wrapper_state?,
   wrapper_fuses?, wrapper_expires_at?, wrapper_expires_at_reason?}`, the ENSv1
   lease date and NameWrapper position) exactly as
@@ -975,8 +975,8 @@ collection route carry neither header.
   names, on a supported ownerless registry row, and on the
   `read_status=unsupported` identity-only object. A zero registry owner does not
   remove `authority` supplied by a retained registrar binding, and an ownerless
-  `.eth` second-level name whose [implied lease](glossary.md#implied-lease)
-  stands serves `ens_v1`. `migrated_at` is present only when ENSv2 is the currently selected
+  `.eth` second-level name with an [implied lease](glossary.md#implied-lease)
+  keeps it, `ens_v1`, or `ens_v0` while only the 2017 registry records the node. `migrated_at` is present only when ENSv2 is the currently selected
   `authority` and the name's history retains an activated `MigrationApplied`
   [migration boundary](glossary.md#migration-boundary): it is the decimal Unix-seconds block
   time of that migration event, read through the event's block in the chain

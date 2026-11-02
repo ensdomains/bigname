@@ -204,7 +204,7 @@ fn events_before_the_handoff_or_state_derived_imply_no_lease() {
     assert_eq!(implied(Name::migrated(vec![snapshot])), None);
 }
 
-/// TYR-438 row 1: a registrar-surface snapshot discloses the lease's retained state, and alone
+/// TYR-438: a registrar-surface snapshot discloses the lease's retained state, and alone
 /// it implies no lease, on a registry-only handoff or in the ownerless-registry profile. Every
 /// migrated name with registrar rows also has a named renewal or expiry row, which implies it.
 #[test]

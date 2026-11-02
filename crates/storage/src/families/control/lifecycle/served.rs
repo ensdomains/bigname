@@ -375,8 +375,8 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         }
     });
     // A cleared ENSv1 registry record does not end the BaseRegistrar lease: an ownerless name
-    // with an implied lease serves it, its holder as owner, and no authority kind, registry owner
-    // or manager.
+    // with an implied lease serves it and its holder as owner, with no authority kind, registry
+    // owner or manager.
     let ownerless_unleased = selection.ownerless_registry && authority.implied_lease.is_none();
     let status = if ownerless_unleased {
         json!("unregistered")

@@ -26,8 +26,8 @@ pub(crate) fn listing_eligible(coverage: &Value, summary: &Value) -> bool {
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L157 @ ens_v1@91c966f).
 /// `None` for Basenames, an unresolved selection, or an ownerless registry row without a lease.
-/// An ownerless registry row whose BaseRegistrar lease stands serves `ens_v1`: the lease, not the
-/// cleared registry record, is its authority.
+/// An ownerless registry row with an implied lease keeps its arm's value: the cleared registry
+/// record does not end the lease.
 pub(crate) fn public_authority(provenance: &Value) -> Option<&'static str> {
     let selection = provenance.get("authority_selection")?;
     if selection.get("ownerless_registry") == Some(&Value::Bool(true))
@@ -46,9 +46,9 @@ pub(crate) fn public_authority(provenance: &Value) -> Option<&'static str> {
 }
 
 /// Whether the composed row is in the ownerless-registry profile with an implied lease
-/// (docs/glossary.md, "Implied lease"): its registry owner is zero and its BaseRegistrar lease
-/// stands (`provenance.authority_selection.lease_without_registry_owner`).
-pub(crate) fn lease_without_registry_owner(provenance: &Value) -> bool {
+/// (docs/glossary.md, "Implied lease"): its registry owner is zero and bigname knows its
+/// BaseRegistrar lease (`provenance.authority_selection.lease_without_registry_owner`).
+fn lease_without_registry_owner(provenance: &Value) -> bool {
     provenance.pointer("/authority_selection/lease_without_registry_owner")
         == Some(&Value::Bool(true))
 }

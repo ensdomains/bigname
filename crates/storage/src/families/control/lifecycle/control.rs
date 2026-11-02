@@ -210,16 +210,14 @@ impl std::error::Error for RequiredOwnerMissing {}
 /// The served status is the lifecycle status `canonical::apply` schedules, so a name it releases
 /// has no owner, whichever evidence released it: its lease's release, the ENSv1 schedule past
 /// grace, or the lapse of the ENSv2 reservation that stood for it (`docs/api-v1.md`, `owner`).
-/// The registration keeps its registrant.
+/// The registrant stays.
 pub(super) fn released_control(
     registration: &Map<String, Value>,
     control: &mut Map<String, Value>,
 ) {
     if registration.get("lifecycle_status").and_then(Value::as_str) == Some("released") {
-        for field in ["owner", "registrant"] {
-            if let Some(value) = control.get_mut(field) {
-                *value = Value::Null;
-            }
+        if let Some(owner) = control.get_mut("owner") {
+            *owner = Value::Null;
         }
     }
 }

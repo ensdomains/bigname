@@ -1654,11 +1654,11 @@ async fn registered_by_controller(fixture: &Fixture, name: &str, lease: &str) ->
     Ok(())
 }
 
-/// TYR-439, the registrar-candidate row: the ownerless-registry profile with a live lease, a
+/// TYR-439, a registrar binding before the clear: the ownerless-registry profile with a live lease, a
 /// controller registration whose holder later moved the token and then cleared the registry
 /// record. The cleared record does not end the lease, so the name serves it, with the token
 /// holder as registrant and owner, `ens_v1` authority, no authority kind, no registry owner and
-/// no manager.
+/// no manager. The address relations do not list it yet: they need a selected binding.
 #[tokio::test]
 async fn an_ownerless_name_serves_its_lease_and_holder() -> Result<()> {
     let fixture = Fixture::new("families_handoff_lease_ownerless", 6).await?;
@@ -1678,7 +1678,8 @@ async fn an_ownerless_name_serves_its_lease_and_holder() -> Result<()> {
                "registry_owner": Value::Null, "manager": Value::Null,
                "public_authority": "ens_v1"}),
     )?;
-    ensure!(relations(&fixture, HOLDER, &name).await? == ["token_holder"]);
+    // The address relations need a selected binding, which the ownerless profile has none of.
+    ensure!(relations(&fixture, HOLDER, &name).await?.is_empty());
     fixture.assert_rebuild_equal(5).await?;
     fixture.cleanup().await
 }
@@ -2109,7 +2110,7 @@ async fn legacy_moved(
     Ok((name, lease, registry))
 }
 
-/// TYR-438 rows a1-T, a1-R, d, a1-W and a1-RR: a migrated name renewed through a controller
+/// TYR-438: a migrated name renewed through a controller
 /// (TYR-405's implied lease) whose token moved to HOLDER without `reclaim`. The holder is the
 /// owner and the registry owner stays the manager. A later `reclaim` by the holder makes it the
 /// manager too, and a registry `Transfer` to another address moves only the manager
@@ -2202,7 +2203,7 @@ async fn a_legacy_lease_serves_its_token_holder() -> Result<()> {
                "registrant": HOLDER, "registry_owner": OWNER, "manager": OWNER,
                "public_authority": "ens_v1"}),
     )
-    .context("a1-T: transferred without reclaim")?;
+    .context("transferred without reclaim")?;
     ensure!(relations(&fixture, HOLDER, &moved).await? == ["token_holder"]);
     for (name, lease, registry_owner) in &recorded {
         check(
@@ -2211,26 +2212,26 @@ async fn a_legacy_lease_serves_its_token_holder() -> Result<()> {
                    "owner": HOLDER, "summary_owner": HOLDER, "registry_owner": registry_owner,
                    "manager": registry_owner}),
         )
-        .with_context(|| format!("a1-R and d: {name}"))?;
+        .with_context(|| format!("registry record moved after the transfer: {name}"))?;
     }
     check(
         &served(&fixture, &wrapped_name).await?,
         json!({"status": "active", "owner": NEW_HOLDER, "summary_owner": NEW_HOLDER,
                "manager": NEW_HOLDER}),
     )
-    .context("a1-W: wrapped")?;
+    .context("wrapped")?;
     check(
         &served(&fixture, &again).await?,
         json!({"status": "active", "resource_id": new_lease, "expires_at": LEASE_EXPIRY,
                "owner": NEW_HOLDER, "summary_owner": NEW_HOLDER,
                "registry_owner": NEW_HOLDER, "manager": NEW_HOLDER}),
     )
-    .context("a1-RR: registered again")?;
+    .context("registered again")?;
     fixture.assert_rebuild_equal(6).await?;
     fixture.cleanup().await
 }
 
-/// TYR-438 row 14: a token transfer before the name's first current-registry record names no
+/// TYR-438: a token transfer before the name's first current-registry record names no
 /// holder of the implied lease, so the registry owner stays the owner. No migrated name was
 /// found in that shape, so the gate stays.
 #[tokio::test]
@@ -2251,7 +2252,7 @@ async fn a_transfer_before_the_first_current_record_names_no_holder() -> Result<
     fixture.cleanup().await
 }
 
-/// TYR-438 row 15: a lease renewed 150 times and then moved still finds its holder and its
+/// TYR-438: a lease renewed 150 times and then moved still finds its holder and its
 /// latest expiry. The composition reads every row of the lease.
 #[tokio::test]
 async fn a_heavily_renewed_legacy_lease_still_finds_its_holder() -> Result<()> {
@@ -2286,7 +2287,7 @@ async fn a_heavily_renewed_legacy_lease_still_finds_its_holder() -> Result<()> {
     fixture.cleanup().await
 }
 
-/// TYR-438 D4, rows 8a and 8c: a name whose served status is `released` serves no owner and no
+/// TYR-438: a name whose served status is `released` serves no owner and no
 /// manager, whichever evidence released it (`docs/api-v1.md`, `owner`). A lapsed lease whose
 /// release Interpret wrote, a name in both the lapsed and the legacy class, keeps its holder
 /// only as the lapsed registration's owner. A lease past its expiry and grace with no release
@@ -2306,14 +2307,14 @@ async fn a_released_status_serves_no_owner_or_manager() -> Result<()> {
         json!({"status": "released", "expires_at": lapsed, "lapsed_owner": HOLDER,
                "owner": Value::Null, "summary_owner": Value::Null, "manager": Value::Null}),
     )
-    .context("8a: released by its settled release")?;
+    .context("released by its settled release")?;
     check(
         &served(&fixture, &unsettled).await?,
         json!({"status": "released", "lifecycle_status": "released", "expires_at": lapsed,
                "registrant": HOLDER, "owner": Value::Null, "summary_owner": Value::Null,
                "manager": Value::Null}),
     )
-    .context("8c: released by its schedule")?;
+    .context("released by its schedule")?;
     for name in [&settled, &unsettled] {
         for address in [HOLDER, OWNER] {
             ensure!(
@@ -2326,7 +2327,7 @@ async fn a_released_status_serves_no_owner_or_manager() -> Result<()> {
     fixture.cleanup().await
 }
 
-/// TYR-438 D4, rows 8b and b′: a lease lapsed under a live premigration reservation serves no
+/// TYR-438: a lease lapsed under a live premigration reservation serves no
 /// owner or manager, and keeps its holder as the lapsed registration's owner. A reservation
 /// that lapses later releases a name whose lease never did: from then on it serves no owner or
 /// manager although the lease's own rows never released it.
@@ -2367,28 +2368,28 @@ async fn a_lease_lapsed_under_a_reservation_serves_no_owner_or_manager() -> Resu
         &served(&fixture, &graced).await?,
         json!({"status": "active", "owner": OWNER, "manager": OWNER}),
     )
-    .context("b′ before the reservation lapses")?;
+    .context("before the reservation lapses")?;
     fixture.apply(8, FamilyMode::Normal).await?;
     check(
         &served(&fixture, &graced).await?,
         json!({"status": "released", "lifecycle_status": "released", "owner": Value::Null,
                "summary_owner": Value::Null, "manager": Value::Null}),
     )
-    .context("b′: released by its reservation")?;
+    .context("released by its reservation")?;
     check(
         &served(&fixture, &reserved_name).await?,
         json!({"lapsed_owner": HOLDER, "owner": Value::Null, "summary_owner": Value::Null,
                "manager": Value::Null}),
     )
-    .context("8b: lapsed under a live reservation")?;
+    .context("lapsed under a live reservation")?;
     fixture.assert_rebuild_equal(8).await?;
     fixture.cleanup().await
 }
 
-/// TYR-439, the registry-only-candidate rows 11a to 11d: a migrated name whose holder cleared the
+/// TYR-439, a registry-only binding before the clear: a migrated name whose holder cleared the
 /// registry record. A live lease's token holder is the owner whatever the registry owner is
 /// (`docs/api-v1.md`, `owner`), live or in grace, and the name serves `ens_v1` authority with no
-/// authority kind. The zero registry owner names nobody, so it serves no registry owner and no
+/// authority kind. The address relations do not list it yet: they need a selected binding. The zero registry owner names nobody, so it serves no registry owner and no
 /// manager. A released lease serves no owner and keeps its holder as the lapsed registration's
 /// owner. A cleared record with no lease evidence stays unregistered with no authority.
 #[tokio::test]
@@ -2454,8 +2455,10 @@ async fn a_zero_registry_owner_serves_the_lease_holder() -> Result<()> {
                    "registry_owner": Value::Null, "manager": Value::Null,
                    "public_authority": "ens_v1"}),
         )
-        .with_context(|| format!("11a/11b: {name}"))?;
-        ensure!(relations(&fixture, HOLDER, name).await? == ["token_holder"]);
+        .with_context(|| format!("live or in grace: {name}"))?;
+        // The address relations need a selected binding, which the ownerless profile has none
+        // of.
+        ensure!(relations(&fixture, HOLDER, name).await?.is_empty());
     }
     check(
         &served(&fixture, &released).await?,
@@ -2463,14 +2466,14 @@ async fn a_zero_registry_owner_serves_the_lease_holder() -> Result<()> {
                "summary_owner": Value::Null, "manager": Value::Null,
                "public_authority": "ens_v1"}),
     )
-    .context("11c: released")?;
+    .context("released")?;
     ensure!(relations(&fixture, HOLDER, &released).await?.is_empty());
     check(
         &served(&fixture, &unleased).await?,
         json!({"owner": Value::Null, "summary_owner": Value::Null, "manager": Value::Null,
                "public_authority": Value::Null}),
     )
-    .context("11d: no lease")?;
+    .context("no lease")?;
     fixture.assert_expiry_selector().await?;
     fixture.assert_rebuild_equal(5).await?;
     fixture.cleanup().await
