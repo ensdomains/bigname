@@ -983,8 +983,10 @@ collection route carry neither header.
   `read_status=unsupported` identity-only object. A zero registry owner does not
   remove `authority` supplied by a retained registrar binding. Nor does it remove the
   `authority` of an ownerless `.eth` second-level name that the read-time lease fill under
-  [`registered_at`](api-v1.md#naming-dictionary) serves a lease for: it serves its ENSv1
-  arm's `authority`, the lease's `status` and holder, and no `manager`. `migrated_at` is present only when ENSv2 is the currently selected
+  [`registered_at`](api-v1.md#naming-dictionary) serves a lease for, while the lease is live
+  or in grace or released by its own release row: it serves its ENSv1 arm's `authority`, the
+  lease's `status` and holder, and no `manager`. `migrated_at` is present only when ENSv2 is
+  the currently selected
   `authority` and the name's history retains an activated `MigrationApplied`
   [migration boundary](glossary.md#migration-boundary): it is the decimal Unix-seconds block
   time of that migration event, read through the event's block in the chain
@@ -1133,10 +1135,12 @@ collection route carry neither header.
   evidence of current ownership. A `.eth` second-level name of this profile
   that the read-time lease fill under
   [`registered_at`](api-v1.md#naming-dictionary) serves a lease for is the
-  exception on name detail: it serves the lease's `status`, its holder as
-  `owner`, no `manager` and its arm's `authority`, and a lease served as
-  `released` withholds the resolver. It still matches no `authority` filter
-  value on address names.
+  exception on name detail while the lease is live or in grace, or released by
+  its own release row: it serves the lease's `status`, its holder as `owner`,
+  no `manager` and its arm's `authority`, and a lease served as `released`
+  withholds the resolver. Past the lease's grace with no release row it keeps
+  the profile's stored status and control and omits `authority`. It still
+  matches no `authority` filter value on address names.
 - Pagination behavior: none.
 - Status semantics: valid names with no name-profile data return `404 not_found`.
   Invalid path names return `400 invalid_input`.
@@ -3682,8 +3686,10 @@ introduces it rebuilds Project from full history before serving the option; see
   fill serves its arm's `authority` for is not matched by that value. A `.eth` second-level
   name whose BaseRegistrar rows are not attributed to it, typically one whose label is
   unknown, is outside the fill and keeps its stored registration and status, so a lapsed lease
-  of such a name can still be served `active`. These limits end at the reconcile release, whose Project redo stores
-  the lease.
+  of such a name can still be served `active`. An ownerless name whose lease is past its
+  grace with no release row also keeps its stored status and control, because its stored row
+  carries no ENSv2 term to show whether a live reservation still holds the name. These limits
+  end at the reconcile release, whose Project redo stores the lease.
   `relation` accepts a comma-separated set of v2 vocabulary values
   `owner`, `manager`, and `role_holder`; `any` normalizes to all
   three values. Rows match when any listed relation matches. `owner` matches

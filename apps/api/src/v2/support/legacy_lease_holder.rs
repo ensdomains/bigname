@@ -8,7 +8,8 @@
 //! (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L174 @ ens_v1@91c966f).
 //! So a name whose registry owner is zero keeps its lease: it serves the lease's status, its
 //! holder and its registry's `authority`, and no `manager`, since a zero registry owner names no
-//! account.
+//! account. Past the lease's grace with no release it stays as composed, because its stored row
+//! carries no ENSv2 term to show whether a live reservation still holds the name.
 //!
 //! The holder is read in its own statement, so a lease with more events than the fill's events
 //! window still finds it. Like the rest of the fill it stands until the stored registration
@@ -106,8 +107,8 @@ pub(super) async fn load_lease_holder(
 /// registration's owner. Any other row is owned by the holder when there is one, unless its
 /// lease is released under a stored term that outlives the release, which keeps the composed
 /// control. An ownerless row takes the lease's status, unless the fill serves the lease's release,
-/// and its arm's `authority`. Without a known clock it stays as composed. A zero registry owner is
-/// served as none.
+/// and its arm's `authority`. Without a known clock, or past the lease's grace with no release,
+/// it stays as composed. A zero registry owner is served as none.
 pub(super) fn serve_lease_holder(
     summary: &mut Value,
     provenance: &mut Value,
@@ -138,10 +139,13 @@ pub(super) fn serve_lease_holder(
         let (Some(expiry), Some(clock)) = (expiry, clock) else {
             return;
         };
-        registration.insert(
-            "lifecycle_status".into(),
-            json!(lease_lifecycle_status(expiry, clock)),
-        );
+        let status = lease_lifecycle_status(expiry, clock);
+        // The ownerless profile stores no ENSv2 term, so a lease past its grace cannot tell
+        // whether a live reservation still holds the name: the row stays as composed.
+        if status == "released" {
+            return;
+        }
+        registration.insert("lifecycle_status".into(), json!(status));
     }
     if ownerless
         && let Some(selection) = provenance

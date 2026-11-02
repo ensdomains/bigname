@@ -173,9 +173,12 @@ fn an_ownerless_row_serves_its_lease_holder_status_and_authority() {
     }
 }
 
+/// Past the lease's grace with no release, an ownerless row stays as composed: its stored row
+/// carries no ENSv2 term to say whether a live reservation still holds the name.
 #[test]
-fn an_ownerless_row_past_its_lease_grace_serves_released_with_no_owner() {
+fn an_ownerless_row_past_its_lease_grace_stays_as_composed() {
     let mut summary = healed_ownerless();
+    let composed = summary.clone();
     let mut provenance = provenance(true);
     serve_lease_holder(
         &mut summary,
@@ -183,8 +186,9 @@ fn an_ownerless_row_past_its_lease_grace_serves_released_with_no_owner() {
         Some(HOLDER),
         Some(LEASE_EXPIRY + GRACE + 1),
     );
-    assert_eq!(served(&summary), (None, None, RegistrationStatus::Released));
-    assert_eq!(name_current_public_authority(&provenance), Some("ens_v1"));
+    assert_eq!(summary, composed);
+    assert_eq!(provenance, self::provenance(true));
+    assert_eq!(name_current_public_authority(&provenance), None);
 }
 
 #[test]
