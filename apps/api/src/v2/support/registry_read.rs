@@ -97,11 +97,10 @@ fn decide(row: &NameCurrentRow) -> Decision {
 }
 
 /// Whether `row` serves its node's ENSv1 registry clear: an ENSv1 pointer row that may serve a
-/// resolver, whose latest pointer write serves none and whose stored registry pointer is null. A node with no observed
-/// pointer write has no `latest_event_kind`, and a withheld live pointer keeps its registry
-/// pointer, so neither is a clear. Only a `.eth` name: a DNS name's ancestor is its TLD, whose
-/// ENSIP-10 resolver can answer from DNS. An auto records read answers such a row `not_found` from
-/// the index instead of asking the chain.
+/// resolver, whose latest pointer write serves none and whose stored registry pointer is null. A
+/// node with no observed pointer write has no `latest_event_kind`, and a withheld live pointer
+/// keeps its registry pointer, so neither is a clear. Only a `.eth` name counts: a DNS name's
+/// ancestor is its TLD, whose ENSIP-10 resolver can answer from DNS.
 pub(crate) fn composed_ens_v1_registry_clear(row: &NameCurrentRow) -> bool {
     let Some(resolver) = row
         .declared_summary

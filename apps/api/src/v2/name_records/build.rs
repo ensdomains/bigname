@@ -132,6 +132,7 @@ pub(crate) fn indexed_records_requiring_verified_fallback(
     record_inventory: Option<&RecordInventoryCurrentRow>,
     requested_records: &[ResolutionRecordKey],
     admit_null_resolver_discovery: bool,
+    through_alias: bool,
 ) -> V2Result<Vec<ResolutionRecordKey>> {
     let record_inventory = record_inventory.filter(|_| row_has_current_registration(row));
     let mut fallback_records = Vec::new();
@@ -141,6 +142,7 @@ pub(crate) fn indexed_records_requiring_verified_fallback(
             record_inventory,
             record,
             admit_null_resolver_discovery,
+            through_alias,
         )?
         .is_none()
         {
@@ -157,6 +159,7 @@ pub(crate) fn build_auto_name_records(
     verified_lookup: Option<VerifiedRecordLookup>,
     include_inventory: bool,
     admit_null_resolver_discovery: bool,
+    through_alias: bool,
 ) -> V2Result<(Source, NameRecords)> {
     let has_current_registration = row_has_current_registration(row);
     let record_inventory = record_inventory.filter(|_| has_current_registration);
@@ -169,6 +172,7 @@ pub(crate) fn build_auto_name_records(
             record_inventory,
             record,
             admit_null_resolver_discovery,
+            through_alias,
         )? {
             answers.insert(record.record_key.clone(), answer);
         } else {
@@ -295,13 +299,16 @@ pub(crate) fn indexed_record_answer(
     Ok(answer)
 }
 
+/// `through_alias` says the request named an alias path, whose resolver the chain discovers for
+/// the path requested, so the canonical node's registry clear does not answer it.
 fn indexed_satisfying_record_answer(
     row: &NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
     record: &ResolutionRecordKey,
     admit_null_resolver_discovery: bool,
+    through_alias: bool,
 ) -> V2Result<Option<RecordAnswer>> {
-    if composed_ens_v1_registry_clear(row) {
+    if !through_alias && composed_ens_v1_registry_clear(row) {
         return Ok(Some(not_found_answer(None)?));
     }
     if admit_null_resolver_discovery && ens_universal_resolver_discovery_candidate(row) {

@@ -52,7 +52,7 @@ fn auto_rejects_derived_answer_from_nonauthoritative_inventory() {
         "explicit indexed must not serve a derived value from incomplete coverage"
     );
     assert!(
-        indexed_satisfying_record_answer(&row, Some(&inventory), &record, false)
+        indexed_satisfying_record_answer(&row, Some(&inventory), &record, false, false)
             .expect("auto satisfaction must evaluate")
             .is_none(),
         "auto must verify when projected inventory authority is incomplete"
@@ -77,7 +77,7 @@ fn unsupported_inventory_refuses_exact_success_and_leaves_auto_unsatisfied() {
         "the row's own reason is the public reason"
     );
     assert!(
-        indexed_satisfying_record_answer(&row, Some(&inventory), &record, false)
+        indexed_satisfying_record_answer(&row, Some(&inventory), &record, false, false)
             .expect("auto satisfaction must evaluate")
             .is_none(),
         "a retained value on an unsupported row does not satisfy auto"
@@ -139,9 +139,15 @@ fn auto_null_resolver_falls_through_only_for_the_ens_mainnet_discovery_shape() {
     let record = parse_resolution_record_key("addr:60").expect("test selector must parse");
     let row = null_resolver_discovery_row();
     assert!(
-        indexed_satisfying_record_answer(&row, Some(&exact_success_inventory()), &record, true)
-            .expect("candidate must evaluate")
-            .is_none()
+        indexed_satisfying_record_answer(
+            &row,
+            Some(&exact_success_inventory()),
+            &record,
+            true,
+            false
+        )
+        .expect("candidate must evaluate")
+        .is_none()
     );
     let (source, records) = build_auto_name_records(
         &row,
@@ -150,6 +156,7 @@ fn auto_null_resolver_falls_through_only_for_the_ens_mainnet_discovery_shape() {
         Some(VerifiedRecordLookup::NotSupported),
         false,
         true,
+        false,
     )
     .expect("unavailable execution must stay explicit");
     assert_eq!(source, Source::Verified);
@@ -184,7 +191,7 @@ fn auto_null_resolver_falls_through_only_for_the_ens_mainnet_discovery_shape() {
     rejected.push(malformed);
 
     for rejected_row in rejected {
-        let answer = indexed_satisfying_record_answer(&rejected_row, None, &record, true)
+        let answer = indexed_satisfying_record_answer(&rejected_row, None, &record, true, false)
             .expect("rejected shape must retain the terminal miss")
             .expect("rejected shape must not fall through");
         assert_eq!(answer.status, Status::NotFound);
@@ -229,7 +236,7 @@ fn sepolia_null_resolver_admission_matches_executed_discovery_and_rejects_route_
             "a discovery-to-direct route change must remain stale"
         );
         assert!(
-            indexed_satisfying_record_answer(&candidate, None, &record, true)
+            indexed_satisfying_record_answer(&candidate, None, &record, true, false)
                 .expect("candidate must evaluate")
                 .is_none()
         );
@@ -240,6 +247,7 @@ fn sepolia_null_resolver_admission_matches_executed_discovery_and_rejects_route_
             Some(VerifiedRecordLookup::NotSupported),
             false,
             true,
+            false,
         )
         .expect("unadmitted execution must remain explicit");
         assert_eq!(unavailable.records["addr:60"].status, Status::Unsupported);
@@ -277,6 +285,7 @@ fn null_resolver_discovery_keeps_avatar_stale_without_a_record_boundary() {
         )),
         false,
         true,
+        false,
     )
     .expect("stale discovery answer must build");
 
@@ -304,17 +313,48 @@ fn an_auto_read_of_a_registry_clear_needs_no_lookup() {
         ens_universal_resolver_discovery_candidate(&row),
         "the clear keeps the discovery shape, so only the clear check keeps it indexed"
     );
-    let (source, records) =
-        build_auto_name_records(&row, None, std::slice::from_ref(&record), None, false, true)
-            .expect("a registry clear must answer without a lookup");
+    let (source, records) = build_auto_name_records(
+        &row,
+        None,
+        std::slice::from_ref(&record),
+        None,
+        false,
+        true,
+        false,
+    )
+    .expect("a registry clear must answer without a lookup");
     assert_eq!(source, Source::Indexed);
     assert_eq!(records.records["addr:60"].status, Status::NotFound);
     assert!(records.resolver.is_none());
     assert!(
-        indexed_records_requiring_verified_fallback(&row, None, &[record], true)
+        indexed_records_requiring_verified_fallback(&row, None, &[record], true, false)
             .expect("fallback must evaluate")
             .is_empty()
     );
+}
+
+/// An alias path reads the chain for the path requested, so the served row's registry clear does
+/// not answer it.
+#[test]
+fn a_registry_clear_under_an_alias_path_still_asks_the_chain() {
+    let record = parse_resolution_record_key("addr:60").expect("test selector must parse");
+    let row = registry_clear_row();
+    assert!(
+        indexed_satisfying_record_answer(&row, None, &record, true, true)
+            .expect("candidate must evaluate")
+            .is_none()
+    );
+    let (source, _) = build_auto_name_records(
+        &row,
+        None,
+        std::slice::from_ref(&record),
+        Some(VerifiedRecordLookup::NotSupported),
+        false,
+        true,
+        true,
+    )
+    .expect("unavailable execution must stay explicit");
+    assert_eq!(source, Source::Verified);
 }
 
 /// Rows that are not a registry clear keep the answer they had before the clear check: the
@@ -344,7 +384,7 @@ fn rows_that_are_not_a_registry_clear_keep_their_auto_answer() {
         ("no observed pointer write", never_set),
     ] {
         assert!(
-            indexed_satisfying_record_answer(&row, None, &record, true)
+            indexed_satisfying_record_answer(&row, None, &record, true, false)
                 .expect("candidate must evaluate")
                 .is_none(),
             "{class} falls through to the chain"
@@ -361,7 +401,7 @@ fn rows_that_are_not_a_registry_clear_keep_their_auto_answer() {
         ("a released name", released),
         ("an ownerless registry-only subname", ownerless_subname),
     ] {
-        let answer = indexed_satisfying_record_answer(&row, None, &record, true)
+        let answer = indexed_satisfying_record_answer(&row, None, &record, true, false)
             .expect("a name with no current registration must evaluate")
             .expect("a name with no current registration keeps its terminal miss");
         assert_eq!(answer.status, Status::NotFound, "{class}");

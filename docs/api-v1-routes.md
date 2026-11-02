@@ -1544,13 +1544,16 @@ its value map:
   ([known divergence](upstream.md#ensv1-registry-clear-answers-from-the-index)).
   A name with no observed pointer write is not a clear and keeps discovery.
   A name outside `.eth`, such as a DNS name, keeps discovery too, because its
-  TLD's ENSIP-10 resolver can answer it from DNS.
+  TLD's ENSIP-10 resolver can answer it from DNS. So does a request that names
+  an [alias path](api-v1.md#alias-paths), because the chain reads the path
+  requested.
   `source=verified` runs discovery for a clear as for any other null-resolver
   name.
   Basenames and other chains and namespaces do not enter this route. Outside this
   null-exact-resolver class, exact indexed `ok` answers and authoritative
   ENSIP-19 derived answers satisfy auto without a provider request. Within this
-  class, all requested keys execute through verified lookup because retained
+  class, except an ENSv1 registry clear, all requested keys execute through
+  verified lookup because retained
   exact inventory predates the resolver-clear boundary. If no admitted
   Universal Resolver entrypoint is available at execution time, the requested
   keys are explicitly `unsupported`; auto never turns that inability to execute
