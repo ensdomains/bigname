@@ -845,7 +845,9 @@ it, it uses none. It stores no records, and its ABI declares no event.
 (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ENSV2Resolver.json:L3-L548 @ ens_v2_mainnet_20261002@4f47cbcc)
 
 The declaration is a classification input only. When the declaration applies
-and the address has any candidate, Project files it as `ens_v2_resolver_l1` /
+and the address has a candidate whose family's active manifest is in the
+declaration's namespace, such as an ENS pointer, entry or resolver edge,
+Project files it as `ens_v2_resolver_l1` /
 `ensv2_resolver` with basis `manifest_declared_address`, `unsupported`, with
 `composite_resolver_not_projected`. It takes rank 0 like the other direct
 roles, so ENSv1 pointers, ENSv2 entries and an `Upgraded` never re-file it.

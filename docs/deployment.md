@@ -5518,5 +5518,5 @@ changes. The resolver's own summary moves to the ENSv2 resolver family and manif
   new reason. It changes no column, index or row, and needs no preparation.
 - It adds no table or setting.
 
-After the redo, check on mainnet that `GET /v1/names/eth/records` withholds every key with
-`composite_resolver_not_projected`.
+After the redo, check on mainnet that the address's `project_resolver_classification` row is
+`ens_v2_resolver_l1` / `ensv2_resolver`, `unsupported`, with `composite_resolver_not_projected`.
