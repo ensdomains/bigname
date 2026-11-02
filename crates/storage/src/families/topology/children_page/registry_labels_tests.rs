@@ -414,7 +414,7 @@ enum Bind<'a> {
 /// `ORDER BY` compare equal.
 async fn json_rows(conn: &mut PgConnection, sql: &str, binds: &[Bind<'_>]) -> Result<Vec<String>> {
     let wrapped = format!("SELECT to_jsonb(result)::text FROM ({sql}) result");
-    let mut query = sqlx::query_scalar::<_, String>(&wrapped);
+    let mut query = sqlx::query_scalar::<Postgres, String>(&wrapped);
     for bind in binds {
         query = match bind {
             Bind::Text(value) => query.bind(*value),
