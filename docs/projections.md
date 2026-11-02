@@ -2343,8 +2343,12 @@ says which names it expands.
 - A resolver's classification changes while it is supported before or after the
   change, a deleted supported row included. A walk reads a classification only
   while it is supported, so a change between two unsupported or missing rows
-  expands nothing. This expands the names whose registry or
-  resource pointer names that resolver, and the names under each. When an ENSv2
+  expands nothing. A name whose registry pointer, or ENSv1 resource pointer,
+  names that resolver reads it as its own pointer, so it expands as an ENSv1
+  registry pointer change does, above: the name, and the names under it of three
+  or more labels with no resolver of their own. A name whose other resource
+  pointer names it expands with every name under it, and so does a name that
+  also expands for another reason in the publication. When an ENSv2
   event set such a resource pointer, the name at that event's entry and the
   names mounted below it expand too. An ENSv2 resource pointer cleared when its
   canonical name was retired can still have that resolver as its last nonzero
