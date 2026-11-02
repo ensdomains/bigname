@@ -71,6 +71,8 @@ impl State {
 
     // Candidate ENSv1→ENSv2 migration evidence may describe the wrapper expiry derived during
     // syncWrapper, but it must not advance the independently admitted NameWrapper state.
+    // NameWrapper.renew writes nothing while the renewed lease is still expired at the block, as
+    // after `renew(label, 0)` on a name in grace, so that envelope derives no wrapper expiry.
     // (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L104-L111 @ ens_v2_sepolia_20260629@ccaeb58)
     // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318-L337 @ ens_v1@91c966f)
     pub(in crate::schema_v2) fn correlated_v1_wrapper_expiry(
@@ -84,6 +86,10 @@ impl State {
         let key = v1_key(namespace, namehash);
         let registry_owner = self.v1_registry_owners.get(&key)?.clone();
         if !self.v1_registrar_controllers.contains(&registry_owner)
+            || !super::v1_lease_active_at(
+                alloy_primitives::U256::from(registrar_expiry),
+                raw.block_timestamp.unix_timestamp(),
+            )
             || self
                 .v1_names
                 .get(&key)
