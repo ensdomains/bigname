@@ -273,7 +273,10 @@ async fn handoff_transfer_arms_skip_new_owner_rows_filed_under_a_top_level_node(
                 && !scan.to_string().contains("SubregistryChanged");
             if transfer_arm {
                 assert_eq!(scan_index_name(scan), TRANSFER_INDEX, "{scan}");
-                assert_eq!(scan["Rows Removed by Filter"].as_u64().unwrap_or(0), 0, "the Transfer arm read the children's NewOwner rows: {scan}");
+                // The parent's one Transfer is the old registry's, so the current owner arm
+                // reads it and drops it by role. Any more is a child's NewOwner row.
+                let removed = scan["Rows Removed by Filter"].as_u64().unwrap_or(0);
+                assert!(removed <= 1, "the Transfer arm read the children's NewOwner rows: {scan}");
                 transfer_scans += 1;
             }
         }
