@@ -175,18 +175,23 @@ fn a_node_without_a_registry_pointer_composes_nothing() {
 
 #[test]
 fn a_withheld_or_unresolvable_name_does_not_serve_the_registry_pointer() {
+    // The block equals the one composed without the registry pointer: no address, no latest
+    // event and no source family, so withholding is unchanged.
     let node = pointer(Some(LEASE), A, 10, Some(NAME));
     let mut withheld = scope(Some(REGISTRY_ONLY), "ens_v1");
     withheld.withholds = true;
-    let kept = (
-        Value::Null,
-        Value::from("ResolverChanged"),
-        Some(REGISTRY.to_owned()),
+    assert_eq!(block(&withheld, None, Some(&node), None), none());
+    assert_eq!(
+        block(&withheld, None, Some(&node), None),
+        block(&withheld, None, None, None)
     );
-    assert_eq!(block(&withheld, None, Some(&node), None), kept);
     let mut unresolvable = scope(Some(REGISTRY_ONLY), "ens_v1");
     unresolvable.unresolvable = true;
-    assert_eq!(block(&unresolvable, None, Some(&node), None), kept);
+    assert_eq!(block(&unresolvable, None, Some(&node), None), none());
+    assert_eq!(
+        block(&unresolvable, None, Some(&node), None),
+        block(&unresolvable, None, None, None)
+    );
 }
 
 #[test]

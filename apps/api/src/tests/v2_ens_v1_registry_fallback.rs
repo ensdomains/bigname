@@ -731,3 +731,72 @@ async fn o2_a_selected_registry_only_resource_serves_the_leases_pointer() -> Res
     assert_eq!(found, [json!(NAME)]);
     Ok(())
 }
+
+/// R1's fixture read 70 days past the lease, once the reservation has lapsed, so the chain's
+/// ENSv2 path has no live entry for the name. Returns the served view, with the keyed route's
+/// status, and the stored summary resolver.
+async fn lapsed_from(steps: &[Reshape]) -> Result<(Value, Option<String>)> {
+    let database = TestDatabase::new_migrated().await?;
+    let first = interpret_from(&database, bare()?, written_then_transferred()?).await?;
+    reshape(&database.pool, first, steps).await?;
+    sqlx::query(
+        "UPDATE chain_lineage SET block_timestamp = to_timestamp($3)
+         WHERE chain_id = $1 AND block_number = $2",
+    )
+    .bind(CHAIN)
+    .bind(HEAD)
+    .bind((LEASE + 70 * DAY) as f64)
+    .execute(&database.pool)
+    .await?;
+    project(&database.pool, HEAD, FamilyMode::Rebuild).await?;
+    let uri = format!("/v1/names/{NAME}?namespace=ens");
+    let detail = ok(&database, &uri).await?;
+    let (status, looked) = lookup(
+        &database,
+        json!({"profile": "detail", "inputs": [{"name": NAME}]}),
+    )
+    .await?;
+    anyhow::ensure!(status == StatusCode::OK, "{looked:#}");
+    let uri = format!("/v1/names/{NAME}/records?namespace=ens&keys={KEYS}");
+    let (keyed_status, keyed) = get(&database, &uri).await?;
+    let summary = summary_resolver(&database).await?;
+    database.cleanup().await?;
+    let record = &looked["data"][0]["record"];
+    let view = json!({
+        "unresolvable_reason": detail["data"]["unresolvable_reason"],
+        "resolver": detail["data"]["resolver"],
+        "ens_v1_resolver": detail["data"]["ens_v1"]["resolver"],
+        "records": detail["data"]["records"],
+        "lookup_resolver": record["resolver"],
+        "lookup_records": record["records"],
+        "keyed_status": keyed_status.as_u16(),
+        "keyed": keyed,
+    });
+    Ok((view, summary))
+}
+
+/// W1: a withheld name keeps what it served before. R1's name, its selected resource without a
+/// pointer of its own, is read once its ENSv2 path has no live entry. It serves no resolver and
+/// no records on any route, only `ens_v1.resolver`, exactly as the same logs serve when Interpret
+/// wrote the registry-read copy on the selected resource.
+#[tokio::test]
+async fn w1_a_withheld_name_serves_what_it_served_before() -> Result<()> {
+    let reshaped = [Reshape::Uncopied(1), Reshape::Uncarried(3)];
+    let (view, summary) = lapsed_from(&reshaped).await?;
+    let (reference, reference_summary) = lapsed_from(&[]).await?;
+    assert_eq!(
+        view["unresolvable_reason"],
+        json!("no_live_ens_v2_entry"),
+        "{view:#}"
+    );
+    for field in ["resolver", "lookup_resolver"] {
+        assert!(view[field].is_null(), "{field}: {view:#}");
+    }
+    for field in ["records", "lookup_records"] {
+        assert!(view[field].is_null(), "{field}: {view:#}");
+    }
+    assert_eq!(view["ens_v1_resolver"], resolver(NEXT), "{view:#}");
+    assert_eq!(view, reference);
+    assert_eq!(summary, reference_summary);
+    Ok(())
+}
