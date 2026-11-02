@@ -11,6 +11,8 @@ use sqlx::{PgConnection, PgPool, types::Uuid};
 use crate::{InterpretError, Result};
 
 pub(crate) mod adaptive;
+#[cfg(test)]
+mod admissions_scaling_tests;
 mod cache;
 pub(crate) mod lookahead;
 mod lookahead_query;
@@ -363,7 +365,65 @@ async fn load_admissions(
     chain_id: &str,
     before_block: i64,
 ) -> Result<Vec<AddressAdmissionInput>> {
-    let statement = format!(
+    let statement = admissions_statement();
+    let rows: Vec<AdmissionRow> = sqlx::query_as(&statement)
+        .bind(chain_id)
+        .bind(before_block)
+        .bind(
+            ADMISSION_DISCOVERY_EDGE_KINDS
+                .iter()
+                .map(|kind| (*kind).to_owned())
+                .collect::<Vec<_>>(),
+        )
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(|error| {
+            InterpretError::database("failed to load admitted contract ranges", error)
+        })?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                address,
+                contract_instance_id,
+                source_manifest_id,
+                role,
+                discovery_edge_kind,
+                discovery_from_contract_instance_id,
+                discovery_observation_key,
+                active_from_block,
+                active_to_block,
+            )| AddressAdmissionInput {
+                address,
+                contract_instance_id,
+                source_manifest_id,
+                role,
+                discovery_edge_kind,
+                discovery_from_contract_instance_id,
+                discovery_observation_key,
+                active_from_block,
+                active_to_block,
+            },
+        )
+        .collect())
+}
+
+type AdmissionRow = (
+    String,
+    Uuid,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    Option<Uuid>,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+);
+
+/// The admitted-address statement, binding the chain, the batch's first block and the admission
+/// edge kinds. The scaling test plans it too.
+fn admissions_statement() -> String {
+    format!(
         "
         WITH declared AS (
             SELECT lower(address.address) AS address,
@@ -455,57 +515,7 @@ async fn load_admissions(
         FROM discovered
         ORDER BY address, contract_instance_id, edge_kind NULLS FIRST
         "
-    );
-    let rows: Vec<(
-        String,
-        Uuid,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<Uuid>,
-        Option<String>,
-        Option<i64>,
-        Option<i64>,
-    )> = sqlx::query_as(&statement)
-        .bind(chain_id)
-        .bind(before_block)
-        .bind(
-            ADMISSION_DISCOVERY_EDGE_KINDS
-                .iter()
-                .map(|kind| (*kind).to_owned())
-                .collect::<Vec<_>>(),
-        )
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(|error| {
-            InterpretError::database("failed to load admitted contract ranges", error)
-        })?;
-    Ok(rows
-        .into_iter()
-        .map(
-            |(
-                address,
-                contract_instance_id,
-                source_manifest_id,
-                role,
-                discovery_edge_kind,
-                discovery_from_contract_instance_id,
-                discovery_observation_key,
-                active_from_block,
-                active_to_block,
-            )| AddressAdmissionInput {
-                address,
-                contract_instance_id,
-                source_manifest_id,
-                role,
-                discovery_edge_kind,
-                discovery_from_contract_instance_id,
-                discovery_observation_key,
-                active_from_block,
-                active_to_block,
-            },
-        )
-        .collect())
+    )
 }
 
 async fn load_raw_logs(

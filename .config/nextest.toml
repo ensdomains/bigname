@@ -10,3 +10,10 @@ fail-fast = false
 
 [profile.ci.junit]
 path = "junit.xml"
+
+# The load_admissions scaling test prints its timings and query plans, and the announced registry
+# chain test prints its phase runs. A passing test's output is hidden by default, so this shows
+# theirs in the log.
+[[profile.default.overrides]]
+filter = 'test(admissions_scaling) | test(announced_registry_chain)'
+success-output = "immediate"
