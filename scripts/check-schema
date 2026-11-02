@@ -837,6 +837,7 @@ check_served_projection_removal() {
             fi
             emit_phase_migration "$serving_read_index_migration" baseline-first
             emit_phase_migration "$serving_read_index_migration" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261102120000_project_resolver_classification_reason_comment.sql" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -994,7 +995,8 @@ for migration_file in \
     "$ROOT/migrations/20261016130000_project_repair_record_composing.sql" \
     "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" \
     "$ROOT/migrations/20261027150000_registry_permission_departure_index.sql" \
-    "$serving_read_index_migration"
+    "$serving_read_index_migration" \
+    "$ROOT/migrations/20261102120000_project_resolver_classification_reason_comment.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1334,7 +1336,9 @@ for migration_file in \
     "$ROOT/migrations/20261015120000_project_address_controller_candidate_transfer_comments.sql" \
     "$ROOT/migrations/20261015120000_project_address_controller_candidate_transfer_comments.sql" \
     "$ROOT/migrations/20261016130000_project_repair_record_composing.sql" \
-    "$ROOT/migrations/20261016130000_project_repair_record_composing.sql"
+    "$ROOT/migrations/20261016130000_project_repair_record_composing.sql" \
+    "$ROOT/migrations/20261102120000_project_resolver_classification_reason_comment.sql" \
+    "$ROOT/migrations/20261102120000_project_resolver_classification_reason_comment.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done

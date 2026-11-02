@@ -22,6 +22,11 @@
 /// also takes rank 0 from any candidate whose family's active manifest is in its namespace, not
 /// only from an edge, so it holds while the edges to it change.
 ///
+/// A declared ENSV2Resolver (`ensv2_resolver`) is filed under its declaration and is never
+/// supported, with `composite_resolver_not_projected`: it stores no records and forwards each
+/// name to the resolver the ENSv2 walk selects, `eth` excepted
+/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/ENSV2Resolver.sol:L52-L70 @ ens_v2_mainnet_20261002@4f47cbcc).
+///
 /// `admissions` starts from the input addresses and asks, per active manifest, for one
 /// qualifying resolver edge: a resolver many names point at has far more edges than the block
 /// has touched resolvers, and every consumer reads only the (address, namespace, family) set.
@@ -43,7 +48,8 @@ declared AS (
     )) WITH ORDINALITY declarations(declaration, declaration_ordinality)
     WHERE (manifest.source_family = 'ens_v1_resolver_l1'
            OR (manifest.source_family = 'ens_v2_resolver_l1'
-               AND declaration ->> 'role' IN ('public_resolver_v2', 'ensv1_mirror_resolver')
+               AND declaration ->> 'role' IN ('public_resolver_v2', 'ensv1_mirror_resolver',
+                                              'ensv2_resolver')
                AND declaration ->> 'proxy_kind' = 'none'))
       AND lower(declaration ->> 'address') IN (SELECT resolver_address FROM input)
       AND (declaration ->> 'start_block' IS NULL
@@ -261,6 +267,11 @@ classified AS (
                      AND direct.resolver_address = candidate.resolver_address
                      AND direct.classification_role = 'ensv1_mirror_resolver'
                      AND direct.source_family = 'ens_v2_resolver_l1') AS direct_mirror,
+           EXISTS (SELECT 1 FROM declared direct
+                   WHERE direct.manifest_id = manifest.manifest_id
+                     AND direct.resolver_address = candidate.resolver_address
+                     AND direct.classification_role = 'ensv2_resolver'
+                     AND direct.source_family = 'ens_v2_resolver_l1') AS direct_ensv2_resolver,
            EXISTS (
                SELECT 1 FROM jsonb_array_elements(COALESCE(
                    manifest.manifest_payload -> 'resolver_implementations', '[]'::jsonb
@@ -288,6 +299,8 @@ supported AS (
                 WHEN source_family = 'ens_v2_resolver_l1'
                      AND classification_role = 'ensv1_mirror_resolver' THEN direct_mirror
                 WHEN source_family = 'ens_v2_resolver_l1'
+                     AND classification_role = 'ensv2_resolver' THEN false
+                WHEN source_family = 'ens_v2_resolver_l1'
                     THEN upgraded_to_declared AND upgrade IS NOT NULL
                 ELSE exact_declared END AS supported,
            CASE
@@ -298,6 +311,10 @@ supported AS (
                WHEN source_family = 'ens_v2_resolver_l1'
                 AND classification_role = 'ensv1_mirror_resolver'
                    THEN CASE WHEN NOT direct_mirror THEN 'resolver_not_declared' END
+               WHEN source_family = 'ens_v2_resolver_l1'
+                AND classification_role = 'ensv2_resolver'
+                   THEN CASE WHEN direct_ensv2_resolver THEN 'composite_resolver_not_projected'
+                             ELSE 'resolver_not_declared' END
                WHEN source_family = 'ens_v2_resolver_l1' AND upgrade IS NULL
                    THEN 'resolver_implementation_unknown'
                WHEN source_family = 'ens_v2_resolver_l1' AND NOT upgraded_to_declared
@@ -314,7 +331,7 @@ SELECT jsonb_build_object(
                'role', classification_role,
                'basis', CASE WHEN source_family = 'ens_v2_resolver_l1'
                     AND COALESCE(classification_role, '')
-                        NOT IN ('public_resolver_v2', 'ensv1_mirror_resolver')
+                        NOT IN ('public_resolver_v2', 'ensv1_mirror_resolver', 'ensv2_resolver')
                    THEN 'erc1967_upgraded_history'
                    ELSE 'manifest_declared_address' END,
                'implementation', implementation,
@@ -322,7 +339,7 @@ SELECT jsonb_build_object(
                    WHEN NOT supported THEN '[]'::jsonb
                    WHEN source_family = 'ens_v2_resolver_l1'
                     AND COALESCE(classification_role, '')
-                        NOT IN ('public_resolver_v2', 'ensv1_mirror_resolver')
+                        NOT IN ('public_resolver_v2', 'ensv1_mirror_resolver', 'ensv2_resolver')
                        THEN implementation_read_features
                    ELSE declared_read_features
                END,

@@ -59,6 +59,27 @@ proxy_kind = "none"
 start_block = 26216323
 read_features = ["ensip19_default_address"]
 
+# The ENSV2Resolver resolves a name through the ENSv2 registry tree from the declared root
+# registry, and overrides `eth` itself with the ENSv1 `.eth` resolver, which no manifest declares.
+# It stores no records and its ABI declares no event. The declaration files the address under
+# this family and withholds the records of the names that point at it with
+# `composite_resolver_not_projected`. bigname derives no record through it
+# (docs/manifests.md, "ENSV2Resolver declaration").
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ENSV2Resolver.json:L2 @ ens_v2_mainnet_20261002@4f47cbcc)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ENSV2Resolver.json:L3-L548 @ ens_v2_mainnet_20261002@4f47cbcc)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ENSV2Resolver.json:L835 @ ens_v2_mainnet_20261002@4f47cbcc)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/ENSV2Resolver.sol:L35-L45 @ ens_v2_mainnet_20261002@4f47cbcc)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/ENSV2Resolver.sol:L52-L70 @ ens_v2_mainnet_20261002@4f47cbcc)
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/deploy/00_ENSV2Resolver.ts:L45-L56 @ ens_v2_mainnet_20261002@4f47cbcc)
+# It implements IExtendedResolver, but `read_features` stays empty: an unsupported row publishes
+# none, and this family permits contract-level features only on the direct PublicResolverV2.
+# (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/AbstractMirrorResolver.sol:L43-L55 @ ens_v2_mainnet_20261002@4f47cbcc)
+[[contracts]]
+role = "ensv2_resolver"
+address = "0x3071ad643ce4ed8b3d67b289845b45db82b068a4"
+proxy_kind = "none"
+start_block = 26216293
+
 # Creation precedes initializer record writes, including on a proxy.
 # (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/PermissionedResolver.sol:L121 @ ens_v2_mainnet_20261002@b1f97b91)
 [[abi.events]]
