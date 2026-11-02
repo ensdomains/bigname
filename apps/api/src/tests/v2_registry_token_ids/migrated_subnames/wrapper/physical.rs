@@ -510,8 +510,7 @@ async fn assert_released_leaf(
 
 /// `deep.side105.eth`, X's canonical name, serves records through X's `deep` token while the
 /// entry is live.
-#[tokio::test]
-async fn an_active_ensv2_name_keeps_its_record_resource() -> Result<()> {
+async fn an_active_ensv2_name_keeps_its_record_resource_body() -> Result<()> {
     let (database, _, resources) = setup_native().await?;
     let detail = lookup_publication::assert_name_prepared_parity(&database, SIDE_DEEP).await?;
     assert_eq!(detail["authority"], "ens_v2", "{detail:#}");
@@ -595,8 +594,7 @@ async fn empty_clock(database: &TestDatabase, block: i64, clock: u64) -> Result<
     seed_and_run_with(database, &[], block, block, &[], Some(clock as i64)).await
 }
 
-#[tokio::test]
-async fn migrated_subname_canonical_expiry_moves_the_registry_to_its_live_mount() -> Result<()> {
+async fn migrated_subname_canonical_expiry_moves_the_registry_to_its_live_mount_body() -> Result<()> {
     eprintln!(
         "TYR105 physical fingerprint {}",
         bigname_content_hash::INTERPRETER_CONTENT_HASH
@@ -767,3 +765,48 @@ async fn migrated_subname_canonical_expiry_moves_the_registry_to_its_live_mount(
 
 #[path = "physical/classifier.rs"]
 mod classifier;
+
+/// Diagnostic (throwaway): runs a test body pinned on a 64 MiB thread stack, as `tokio::test`
+/// pins it on the test thread, and prints roughly how much of that stack it touched.
+fn diag_stack(label: &'static str, body: fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>>>>) -> Result<()> {
+    const SIZE: usize = 64 << 20;
+    std::thread::Builder::new()
+        .stack_size(SIZE)
+        .spawn(move || {
+            let marker = 0u8;
+            let top = std::ptr::addr_of!(marker) as usize;
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+            let result = runtime.block_on(async move { body().await });
+            let low = top - SIZE + (2 << 20);
+            let mut address = low & !4095;
+            while address < top {
+                let page = unsafe { std::slice::from_raw_parts(address as *const u8, 4096) };
+                if page.iter().any(|byte| *byte != 0) {
+                    break;
+                }
+                address += 4096;
+            }
+            eprintln!("DIAGSTACK {label} touched about {} KiB", (top - address) / 1024);
+            result
+        })?
+        .join()
+        .expect("diagnostic thread panicked")
+}
+
+#[test]
+fn diag_stack_canonical_expiry() -> Result<()> {
+    diag_stack("canonical_expiry", || {
+        let body = migrated_subname_canonical_expiry_moves_the_registry_to_its_live_mount_body();
+        eprintln!("DIAGSIZE canonical_expiry future {} bytes", std::mem::size_of_val(&body));
+        Box::pin(body)
+    })
+}
+
+#[test]
+fn diag_stack_active_name() -> Result<()> {
+    diag_stack("active_name", || {
+        let body = an_active_ensv2_name_keeps_its_record_resource_body();
+        eprintln!("DIAGSIZE active_name future {} bytes", std::mem::size_of_val(&body));
+        Box::pin(body)
+    })
+}
