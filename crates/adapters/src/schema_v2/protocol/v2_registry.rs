@@ -218,7 +218,7 @@ fn registry(
                 state.live_v2_resolver_tokens_sharing(&raw.emitting_address, &aliases);
             let protected = topology::resolver_discovery_keys(raw, None, &protected_tokens)?;
             append_resolver_discovery_closures(&mut output, raw, None, &aliases, &protected)?;
-            reachability::push_resolver_edge(&mut output, state, raw, e.tokenId, e.resolver);
+            reachability::push_resolver_edge(&mut output, selected, state, raw, &e);
             Ok(output)
         }
         "TokenResource" => transfer::token_resource(selected, raw, state),

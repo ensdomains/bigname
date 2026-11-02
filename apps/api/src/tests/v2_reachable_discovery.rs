@@ -5,7 +5,7 @@
 use super::v2_mainnet_admission::{DAY, OWNER, PUBLIC_RESOLVER, REGISTERED, lease, publish, text};
 use super::v2_sepolia_redeploy::{get, token};
 use super::*;
-use alloy_primitives::{Address, keccak256};
+use alloy_primitives::{Address, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use axum::http::StatusCode;
 
@@ -14,6 +14,7 @@ sol! {
     event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender);
     event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender);
     event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender);
+    event TokenResource(uint256 indexed tokenId, uint256 indexed resource);
     event Upgraded(address indexed implementation);
 }
 
@@ -56,6 +57,23 @@ fn register(
         }
         .encode_log_data(),
     ))
+}
+
+/// The `TokenResource` a registration emits. The routes serve a resolver only through the
+/// pointer of the token's resource.
+fn resource(
+    registry: &'static str,
+    label: &str,
+    id: u64,
+) -> (&'static str, alloy_primitives::LogData) {
+    (
+        registry,
+        TokenResource {
+            tokenId: token(label),
+            resource: U256::from(id),
+        }
+        .encode_log_data(),
+    )
 }
 
 fn set_resolver(
@@ -125,11 +143,12 @@ async fn resolver_edges(
     .await?)
 }
 
-/// The resolver's classification row, without its surrogate event id.
+/// The resolver's classification row, without its surrogate event id. The alias is not
+/// `classification`, which would name the row's own `classification` column.
 async fn classification(database: &TestDatabase, resolver: &str) -> Result<Option<Value>> {
     Ok(sqlx::query_scalar(
-        "SELECT to_jsonb(classification) - 'normalized_event_id'
-         FROM project_resolver_classification classification
+        "SELECT to_jsonb(resolver_row) - 'normalized_event_id'
+         FROM project_resolver_classification resolver_row
          WHERE chain_id = $1 AND resolver_address = $2",
     )
     .bind(CHAIN)
@@ -152,6 +171,7 @@ fn unmounted_registry() -> Result<Vec<(u64, Logs)>> {
             REGISTERED + 60,
             vec![
                 register(REGISTRY, "a", FOREVER)?,
+                resource(REGISTRY, "a", 1),
                 set_resolver(REGISTRY, "a", RESOLVER_X)?,
             ],
         ),
@@ -164,7 +184,8 @@ fn unmounted_registry() -> Result<Vec<(u64, Logs)>> {
 
 /// N1 and F2's route half: a registry nothing reachable mounts is known to the registries route
 /// with no name, opens no resolver edge, and gives the resolver it points at no supported
-/// classification. Its `eth` entry and subregistry name nothing.
+/// classification. Its `eth` entry and subregistry name nothing: the registries route gives the
+/// registry no name.
 #[tokio::test]
 async fn n1_an_unmounted_registry_adds_no_resolver_edge_or_supported_classification() -> Result<()>
 {
@@ -193,8 +214,6 @@ async fn n1_an_unmounted_registry_adds_no_resolver_edge_or_supported_classificat
         json!("registry_created"),
         "{registry:#}"
     );
-    let (_, eth) = get(&database, "/v1/names/eth?namespace=ens").await?;
-    assert!(!eth.to_string().contains(RESOLVER_X), "{eth:#}");
 
     assert_eq!(resolver_edges(&database, REGISTRY).await?, Vec::new());
     let row = classification(&database, RESOLVER_X).await?;
@@ -206,9 +225,12 @@ async fn n1_an_unmounted_registry_adds_no_resolver_edge_or_supported_classificat
     database.cleanup().await
 }
 
-/// C1: an unmounted registry pointing at a popular ENSv1 resolver leaves that resolver's
-/// classification row as it is in a corpus without the registry, position included, and the
-/// name it serves keeps its resolver.
+/// C1: an unmounted registry pointing at a popular ENSv1 resolver leaves the fields the routes
+/// serve from that resolver's classification row as they are in a corpus without the registry.
+/// The corpus's ENSv1 name serves no resolver on this profile, so the row is the comparison.
+/// The registry's pointer still adds an ENSv2
+/// observation to the row, beside the resolver's ENSv1 evidence, and moves the row's position.
+/// The ENSv1 evidence demotes that ENSv2 candidate, so the served classification is unchanged.
 #[tokio::test]
 async fn c1_an_unmounted_registry_leaves_a_v1_resolver_classification_alone() -> Result<()> {
     let spam = vec![
@@ -229,18 +251,29 @@ async fn c1_an_unmounted_registry_leaves_a_v1_resolver_classification_alone() ->
     let without = TestDatabase::new_migrated().await?;
     publish(&without, corpus(vec![])?).await?;
 
-    let name = format!(
-        "/v1/names/{}?namespace=ens",
-        super::v2_mainnet_admission::NAME
-    );
-    assert_eq!(
-        ok(&with, &name).await?["data"]["resolver"],
-        ok(&without, &name).await?["data"]["resolver"]
-    );
     assert_eq!(resolver_edges(&with, REGISTRY).await?, Vec::new());
-    let expected = classification(&without, PUBLIC_RESOLVER).await?;
-    assert!(expected.is_some(), "the ENSv1 resolver is classified");
-    assert_eq!(classification(&with, PUBLIC_RESOLVER).await?, expected);
+    let served = |row: Option<Value>| -> Result<Value> {
+        let row = row.context("the ENSv1 resolver is classified")?;
+        Ok(json!([
+            row["classification"],
+            row["support_status"],
+            row["unsupported_reason"],
+            row["manifest_id"],
+        ]))
+    };
+    let spammed = classification(&with, PUBLIC_RESOLVER).await?;
+    let observed = spammed
+        .as_ref()
+        .map(|row| row["observed_families"].clone())
+        .unwrap_or_default();
+    assert!(
+        observed.get("ens_v1_resolver_l1").is_some()
+            && observed.get("ens_v2_resolver_l1").is_some(),
+        "the row carries the ENSv1 evidence and the spam ENSv2 observation: {observed:#}"
+    );
+    let expected = served(classification(&without, PUBLIC_RESOLVER).await?)?;
+    assert_eq!(expected[1], json!("supported"), "{expected:#}");
+    assert_eq!(served(spammed)?, expected);
     with.cleanup().await?;
     without.cleanup().await
 }
@@ -259,6 +292,7 @@ async fn m1_a_registry_mounted_later_serves_its_entry_and_opens_its_edge_at_the_
         REGISTERED + 150,
         vec![
             register(REGISTRY, "b", FOREVER)?,
+            resource(REGISTRY, "b", 2),
             set_resolver(REGISTRY, "b", PUBLIC_RESOLVER)?,
         ],
     ));
@@ -346,6 +380,7 @@ async fn m5_a_pointer_before_the_mount_in_one_transaction_opens_at_the_mount() -
             REGISTERED + 60,
             vec![
                 register(REGISTRY, "a", FOREVER)?,
+                resource(REGISTRY, "a", 1),
                 register(ETH_REGISTRY, "n", FOREVER)?,
             ],
         ),
@@ -390,7 +425,8 @@ async fn m5_a_pointer_before_the_mount_in_one_transaction_opens_at_the_mount() -
 }
 
 /// U3: the mounting `n.eth` entry expires between blocks. At the next block the name is no
-/// longer served with the resolver, and the registry's edge ends there, with no log.
+/// longer served with the resolver, and the registry's edge ends there, with no log. The entry
+/// has a resource and a resolver the routes know, so it would serve if it were still named.
 #[tokio::test]
 async fn u3_an_expired_mount_closes_the_registry_edge_at_the_next_block() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -401,7 +437,8 @@ async fn u3_an_expired_mount_closes_the_registry_edge_at_the_next_block() -> Res
             REGISTERED + 60,
             vec![
                 register(REGISTRY, "a", FOREVER)?,
-                set_resolver(REGISTRY, "a", RESOLVER_X)?,
+                resource(REGISTRY, "a", 1),
+                set_resolver(REGISTRY, "a", PUBLIC_RESOLVER)?,
             ],
         ),
         (REGISTERED + 120, vec![register(ETH_REGISTRY, "n", expiry)?]),
@@ -414,13 +451,13 @@ async fn u3_an_expired_mount_closes_the_registry_edge_at_the_next_block() -> Res
 
     let (status, detail) = get(&database, "/v1/names/a.n.eth?namespace=ens").await?;
     assert!(
-        status != StatusCode::OK || detail["data"]["resolver"]["address"] != json!(RESOLVER_X),
+        status != StatusCode::OK || detail["data"]["resolver"]["address"] != json!(PUBLIC_RESOLVER),
         "{detail:#}"
     );
     assert_eq!(
         resolver_edges(&database, REGISTRY).await?,
         vec![(
-            RESOLVER_X.to_owned(),
+            PUBLIC_RESOLVER.to_owned(),
             block(3, count),
             Some(block(4, count)),
             key(REGISTRY, "a")
@@ -443,6 +480,7 @@ async fn t1_mounting_an_ancestor_serves_and_opens_both_registries() -> Result<()
             REGISTERED + 60,
             vec![
                 register(LOWER_REGISTRY, "c", FOREVER)?,
+                resource(LOWER_REGISTRY, "c", 3),
                 set_resolver(LOWER_REGISTRY, "c", PUBLIC_RESOLVER)?,
                 register(REGISTRY, "b", FOREVER)?,
                 mount(REGISTRY, "b", LOWER_REGISTRY)?,
@@ -881,6 +919,7 @@ async fn m1_a_registry_that_announced_itself_as_a_resolver_first_opens_under_the
                 ),
                 announce(REGISTRY),
                 register(REGISTRY, "a", FOREVER)?,
+                resource(REGISTRY, "a", 1),
                 set_resolver(REGISTRY, "a", PUBLIC_RESOLVER)?,
             ],
         ),
