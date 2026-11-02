@@ -287,7 +287,7 @@ pub(crate) async fn get_subnames(
             cursor: params.cursor.clone(),
             next_cursor,
             page_size: params.page_size,
-            total_count: Some(storage_page.total_count).filter(|total| *total <= total_cap),
+            total_count: Some(storage_page.total_count).filter(|_| total_cap > 0), // RED
             has_more,
         }),
         meta: snapshot.finish(&state).await?,

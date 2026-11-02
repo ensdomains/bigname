@@ -241,10 +241,7 @@ pub(super) fn push_selected<'a>(
         builder.push_bind(children);
         builder.push(")");
     }
-    if let Some(limit) = registration_limit {
-        builder.push(" LIMIT ");
-        builder.push_bind(limit);
-    }
+    let _ = registration_limit; // RED: behaviour disabled
     builder.push(format!(
         "
         ), v1_edges AS (

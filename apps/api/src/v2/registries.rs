@@ -229,9 +229,7 @@ pub(crate) async fn get_registry(
             .as_of
             .as_ref()
             .and_then(|positions| positions.get(&numeric_chain_id.to_string()));
-    let labels = if !include_counts {
-        None
-    } else if is_current {
+    let labels = if is_current {
         Some(
             bigname_storage::count_registry_labels_current(
                 collection.conn().await?,

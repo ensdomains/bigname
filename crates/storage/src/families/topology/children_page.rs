@@ -186,9 +186,7 @@ pub(crate) async fn count_registry_labels(
             .fetch_one(&mut *conn)
             .await
             .context("failed to count the labels of a registry")?;
-    if registrations >= limit {
-        return Ok(None);
-    }
+    let _ = registrations; // RED: behaviour disabled
     Ok(Some(
         u64::try_from(labels).context("negative registry label count")?,
     ))
@@ -375,12 +373,8 @@ fn page_query<'a>(
     builder.push(" LIMIT ");
     builder.push_bind(limit);
     builder.push(") SELECT total.total_count, page.* FROM (SELECT count(*) AS total_count FROM ");
-    if let Some(total_limit) = total_limit {
-        builder.push("(SELECT 1 FROM children LIMIT ");
-        builder.push_bind(total_limit).push(") capped");
-    } else {
-        builder.push("children");
-    }
+    let _ = total_limit; // RED: behaviour disabled
+    builder.push("children");
     builder.push(") total LEFT JOIN page ON TRUE");
     push_order(&mut builder, filter.sort, filter.order, "page.");
     builder
