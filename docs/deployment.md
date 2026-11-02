@@ -5590,7 +5590,8 @@ and the compiled watch plan are unchanged, so stamp no Ingest redo.
 The build that interprets the BaseRegistrar's own numeric `NameRegistered` and `NameRenewed` on
 the Mainnet profile unless the next admitted controller event of the same kind for the same node
 follows them in the transaction ([manifests](manifests.md#ens-mainnet),
-[storage semantics](storage.md)) changes `crates/adapters/src` and `manifests/mainnet/ethereum/ens/ens_v1_registrar_l1/v1.toml`. It
+[storage semantics](storage.md)) changes `crates/adapters/src` and
+`manifests/mainnet/ethereum/ens/ens_v1_registrar_l1/v1.toml`. It
 rotates the [interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
 
 What changes for names:
@@ -5609,7 +5610,8 @@ What changes for names:
 - A registration or renewal through an admitted controller is interpreted exactly as before. The
   controller's event owns it, and the numeric event in its transaction derives nothing.
 - After the ENSv2 activation, a renewal through the ENSv1 renewal bridge has no admitted
-  controller event, so its numeric `NameRenewed` renews the ENSv1 lease, as on Sepolia.
+  controller event, so its numeric `NameRenewed` renews the ENSv1 lease, as on Sepolia. The
+  lease's rows change under a name the ENSv2 arm decides, and what that name serves does not.
 - A Graveyard cleanup is still skipped and opens no lease.
 
 The manifest-authority fingerprint changes on Ethereum Mainnet. The registrar manifest now

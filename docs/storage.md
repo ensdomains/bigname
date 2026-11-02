@@ -961,8 +961,8 @@ other numeric event of that kind for the node between them, is the controller's 
 renewal, which the controller event interprets, so the numeric event derives no lifecycle row.
 Only the Mainnet profile admits such controller events. Before an admitted plaintext label is
 known, these lifecycle rows have no `logical_name_id` unless a proven registry path already
-establishes the name identity or does so in the same registration transaction. The numeric event alone creates
-no name surface. A previously admitted,
+establishes the name identity or does so in the same registration transaction. The numeric
+event alone creates no name surface. A previously admitted,
 non-shadow preimage in the same namespace can make the name known before numeric registration;
 with matching current-registry ownership setup, that registration binds the registrar resource.
 A later admitted controller preimage binds the current retained ENSv1 authority, while a preimage

@@ -1,6 +1,7 @@
 //! TYR-449: the mainnet profile's numeric BaseRegistrar `NameRegistered` and `NameRenewed` are
 //! lease lifecycle rows unless the next admitted controller event of the same kind for the same
-//! node follows in the same transaction. Every fixture reads the checked-in mainnet manifests at their real addresses.
+//! node follows in the same transaction. Every fixture reads the checked-in mainnet manifests at
+//! their real addresses.
 use super::*;
 
 const REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";

@@ -1191,13 +1191,13 @@ async fn a_universal_resolver_upgrade_after_admission_writes_no_summary_row() ->
     fixture.cleanup().await
 }
 
-/// `summary` without the ENSv1 lease's own expiry and without the fields that record where the
-/// latest fact landed: the event heads and the latest event kinds.
-fn without_ens_v1_expiry(mut summary: Value) -> Value {
+/// `summary` without the fields that record where the latest fact landed: the event heads and
+/// the latest event kinds.
+fn positionless(mut summary: Value) -> Value {
     fn strip(value: &mut Value) {
         match value {
             Value::Object(fields) => {
-                for key in ["ens_v1_expiry", "history", "latest_event_kind"] {
+                for key in ["history", "latest_event_kind"] {
                     fields.remove(key);
                 }
                 fields.values_mut().for_each(strip);
@@ -1213,9 +1213,11 @@ fn without_ens_v1_expiry(mut summary: Value) -> Value {
 /// After the ENSv2 activation a renewal through the ENSv1 renewal bridge renews a migrated
 /// name's ENSv1 lease: no admitted ENSv1 controller event covers the BaseRegistrar's numeric
 /// `NameRenewed`, so the adapter writes it on the lease (TYR-449). The name stays
-/// ENSv2-selected, and everything it serves is unchanged except the lease's own expiry.
+/// ENSv2-selected and serves nothing new. Its composition reads only ENSv2 rows, and
+/// `ens_v1_expiry` is null for a name the ENSv2 arm decides, before and after
+/// (docs/projections.md).
 #[tokio::test]
-async fn a_bridged_renewal_moves_only_the_ens_v1_expiry_of_a_migrated_name() -> Result<()> {
+async fn a_bridged_renewal_moves_nothing_a_migrated_name_serves() -> Result<()> {
     const RENEWED: u64 = LEASE_EXPIRY + 365 * DAY;
     let fixture = Fixture::new("families_expiry_grace_bridged_renewal", 12).await?;
     declared_path::root_eth_entry(&fixture).await?;
@@ -1235,7 +1237,8 @@ async fn a_bridged_renewal_moves_only_the_ens_v1_expiry_of_a_migrated_name() -> 
     };
     let before = composed(&fixture).await?;
     ensure!(
-        served(&fixture, &alice).await?["arm"] == json!("ens_v2"),
+        served(&fixture, &alice).await?["arm"] == json!("ens_v2")
+            && before["registration"]["ens_v1_expiry"].is_null(),
         "{before}"
     );
 
@@ -1243,12 +1246,8 @@ async fn a_bridged_renewal_moves_only_the_ens_v1_expiry_of_a_migrated_name() -> 
     fixture.apply(9, FamilyMode::Normal).await?;
     let after = composed(&fixture).await?;
     ensure!(
-        after["registration"]["ens_v1_expiry"] == json!(RENEWED.to_string()),
-        "the lease's own expiry moves: {after}"
-    );
-    ensure!(
-        without_ens_v1_expiry(after.clone()) == without_ens_v1_expiry(before.clone()),
-        "nothing else the name serves moves:\nbefore {before:#}\nafter {after:#}"
+        positionless(after.clone()) == positionless(before.clone()),
+        "the name serves the same answer:\nbefore {before:#}\nafter {after:#}"
     );
 
     fixture.assert_undo_restores(9).await?;
