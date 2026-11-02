@@ -271,13 +271,18 @@ fn block_hash(block: i64) -> String {
 /// One Engine batch per block, `premigrated` first and an empty block at `HEAD` last. Returns
 /// the base block.
 async fn interpret(database: &TestDatabase, after: Vec<Logs>) -> Result<i64> {
+    interpret_from(database, premigrated()?, after).await
+}
+
+/// [`interpret`] with `base` in place of `premigrated`.
+async fn interpret_from(database: &TestDatabase, base: Logs, after: Vec<Logs>) -> Result<i64> {
     let pool = &database.pool;
     bigname_manifests::sync_schema_v2_repository(
         pool,
         &bigname_manifests::load_repository(checked_in_profile())?,
     )
     .await?;
-    let mut blocks = vec![premigrated()?];
+    let mut blocks = vec![base];
     blocks.extend(after);
     blocks.push(Vec::new());
     let first = HEAD + 1 - blocks.len() as i64;
@@ -1366,3 +1371,6 @@ async fn p17_a_registry_pointer_moves_a_record_named_at_another_node() -> Result
     }
     Ok(())
 }
+
+#[path = "v2_ens_v1_registry_fallback.rs"]
+mod fallback;

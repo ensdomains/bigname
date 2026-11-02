@@ -250,3 +250,7 @@ pub fn resolver_block<'a>(
         latest.map(|(pointer, _)| pointer.source_family.clone()),
     )
 }
+
+#[cfg(test)]
+#[path = "serving_tests.rs"]
+mod tests;

@@ -264,6 +264,90 @@ async fn a_child_of_a_reserved_mainnet_name_is_served() -> Result<()> {
     Ok(())
 }
 
+/// Clears the name of every registry `ResolverChanged` Interpret wrote for `node`, as it writes
+/// one before it knows the name, then rebuilds the families at the head.
+async fn unnamed_and_rebuilt(database: &TestDatabase, node: B256) -> Result<()> {
+    const CHAIN: &str = "ethereum-mainnet";
+    let pool = &database.pool;
+    let cleared: Vec<String> = sqlx::query_scalar(
+        "UPDATE bigname_phase.normalized_events SET logical_name_id = NULL
+         WHERE chain_id = $1 AND event_kind = 'ResolverChanged'
+           AND source_family = 'ens_v1_registry_l1' AND logical_name_id = $2
+         RETURNING event_identity",
+    )
+    .bind(CHAIN)
+    .bind(format!("ens:{node:#x}"))
+    .fetch_all(pool)
+    .await?;
+    anyhow::ensure!(!cleared.is_empty(), "{node:#x} has no named registry pointer");
+    let (number, hash): (i64, String) = sqlx::query_as(
+        "SELECT latest_block_number, latest_block_hash FROM chain_heads WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .fetch_one(pool)
+    .await?;
+    let input = bigname_project::families::input_token(pool, CHAIN).await?;
+    let outcome = bigname_project::families::apply(
+        pool,
+        CHAIN,
+        &bigname_project::Marker {
+            number,
+            hash: hash.clone(),
+        },
+        bigname_project::families::FamilyMode::Rebuild,
+        &input,
+        &bigname_project::families::FamilyOptions::new(
+            bigname_content_hash::PROJECTION_CONTENT_HASH,
+        ),
+    )
+    .await?;
+    anyhow::ensure!(
+        outcome.marker.as_ref().map(|marker| marker.number) == Some(number),
+        "the families published {hash}: {outcome:?}"
+    );
+    Ok(())
+}
+
+/// S1: the sub.brantly.eth shape with the child's own registry `NewResolver` left without a name,
+/// so the child's selected resource has no pointer it admits. The child reads its registry
+/// pointer instead, the ENSv2 path walk through the reservation's mirror finds that same
+/// resolver, and the name serves it and its avatar on name detail and both records reads, as
+/// the pin above does with the pointer named.
+#[tokio::test]
+async fn s1_a_child_without_an_admitted_pointer_serves_its_registry_resolver() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    publish(
+        &database,
+        vec![
+            (REGISTERED - 120, root_eth()?),
+            (REGISTERED, lease()?),
+            (REGISTERED + 60, text()?),
+            (RESERVED, reservation()?),
+            (RESERVED + 60, child()?),
+            (RESERVED + DAY, vec![]),
+        ],
+    )
+    .await?;
+    unnamed_and_rebuilt(&database, child_node()).await?;
+    let name = format!("[{:x}].{NAME}", keccak256(b"sub"));
+    let view = served(&database, &name).await?;
+    database.cleanup().await?;
+    for field in [
+        "resolver",
+        "ens_v1_resolver",
+        "keyed_resolver",
+        "default_resolver",
+    ] {
+        assert_eq!(view[field], public_resolver(), "{field}: {view:#}");
+    }
+    assert_eq!(
+        view["keyed"]["text:avatar"],
+        json!({"status": "ok", "value": "child.png"}),
+        "{view:#}"
+    );
+    Ok(())
+}
+
 /// Row 7: the default read's fill takes the client's verified rate-limit token. With a limit of
 /// one request per second, three default reads of a name with an unretained text from one client
 /// at once all answer `200`, and one chain read fills one of them. The other two keep the indexed
