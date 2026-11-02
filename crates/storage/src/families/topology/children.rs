@@ -53,8 +53,9 @@ pub(super) enum Parents<'a> {
 /// Push `clock`, `parent`, `parent_migration`, `candidates` and `selected` CTE definitions (each
 /// followed by a comma) for `parents`. `clock` holds one row per chain of the parents, and
 /// `selected` one row per served child with `pair_rank = 1`, before the page read filter, with
-/// its parent as `parent_logical_name_id`; an ENSv2 child carries the emitter of its
-/// registration event as `registry_address`, others null. For a registry's labels, `registry`
+/// its parent as `parent_logical_name_id`. With `registry`, an ENSv2 child carries the emitter of
+/// its registration event as `registry_address` and every other child null. Without it every
+/// child carries null and no event is read. For a registry's labels, `registry`
 /// keeps the ENSv2 candidates of a parent whose current subregistry it is, and the other arms'
 /// candidates only for those children: no other child can be a label, and another arm only
 /// decides the arm of a child it shares. `children`, the child nodes a read wants (lowercase, no
@@ -106,6 +107,19 @@ pub(super) fn push_selected<'a>(
             WHERE marker.state = 'live' AND marker.input_content_hash = ",
     );
     builder.push_bind(bigname_content_hash::PROJECTION_CONTENT_HASH);
+    // The registry a registry's labels read is the registration's emitter, as the served labels
+    // read `raw_fact_refs[0].registration.emitting_address`. No other read uses it, so only a
+    // registry's read joins the event that carries it.
+    let (registry_address, registration_event) = if registry.is_some() {
+        (
+            "lower(registration_event.raw_fact_ref ->> 'emitting_address')",
+            "
+            LEFT JOIN bigname_phase.normalized_events registration_event
+              ON registration_event.event_identity = registration.event_identity",
+        )
+    } else {
+        ("NULL::text", "")
+    };
     builder.push(format!(
         "
         ), parent AS (
@@ -185,9 +199,7 @@ pub(super) fn push_selected<'a>(
                    registration.registrant, 'ens_v2' AS authority_arm,
                    GREATEST(registration.block_number, subregistry.block_number) AS block_number,
                    registration.transaction_index, registration.log_index,
-                   registration.event_identity,
-                   lower(registration_event.raw_fact_ref ->> 'emitting_address')
-                       AS registry_address,
+                   registration.event_identity, {registry_address} AS registry_address,
                    NULL::text AS registry_authority
             FROM parent JOIN clock ON clock.chain_id = parent.chain_id
             JOIN bigname_phase.project_parent_subregistry subregistry
@@ -208,11 +220,7 @@ pub(super) fn push_selected<'a>(
              AND child.labelhashes[2:cardinality(child.labelhashes)] = parent.labelhashes
              AND {child_readable}
             LEFT JOIN bigname_phase.label_preimages preimage
-              ON preimage.labelhash = lower(child.labelhashes[1])
-            -- The registry a registry's labels read is the registration's emitter, as the
-            -- served labels read `raw_fact_refs[0].registration.emitting_address`.
-            LEFT JOIN bigname_phase.normalized_events registration_event
-              ON registration_event.event_identity = registration.event_identity
+              ON preimage.labelhash = lower(child.labelhashes[1]){registration_event}
             WHERE parent.raw_name <> ''",
         parent_name = rendered_name_sql("surface"),
         parent_readable = readable_surface("surface"),
