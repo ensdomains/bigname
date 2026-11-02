@@ -158,9 +158,9 @@ pub(super) struct State {
     v2_resolver_tokens_by_observation: Covered<maps::AddressId, (String, String), OrdSet<String>>,
     v2_resolver_aliases_by_observation:
         Covered<maps::AddressId, (String, String), OrdSet<(String, String)>>,
-    /// The latest `ResolverUpdated` on each `(registry, observation id)` link: the token id it
-    /// named and the resolver it wrote, none for a clear.
-    v2_resolver_link_writes: Covered<maps::AddressId, (String, String), (String, Option<String>)>,
+    /// The resolver the latest `ResolverUpdated` on each `(registry, observation id)` link wrote,
+    /// none for a clear.
+    v2_resolver_link_writes: Covered<maps::AddressId, (String, String), Option<String>>,
     v2_expiries: maps::V2Expiries,
     v2_dirty_tokens: OrdSet<String>,
     v2_dirty_registries: OrdSet<String>,

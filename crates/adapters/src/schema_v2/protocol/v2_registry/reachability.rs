@@ -74,9 +74,11 @@ pub(super) fn push_resolver_edge(
 ///
 /// Token ids that differ only in their version bits write one link, so a key's edge follows the
 /// link's latest `ResolverUpdated`, not each token's own resolver: a key whose latest write
-/// cleared it stays closed, and one whose latest write named a resolver reopens to it. A key no
-/// `ResolverUpdated` wrote, such as one a regenerated token carries from a write before this
-/// state, reopens to the resolver of the greatest token id holding it, so a key has one target.
+/// cleared it stays closed, and one whose latest write named a resolver reopens to it while a
+/// token holding the key still holds that resolver, under its own id or one it was regenerated
+/// to. Otherwise, as for a key no `ResolverUpdated` wrote or one whose writer was released, the
+/// key reopens to the resolver of the greatest token id holding it, so a key has one target and
+/// never one only a released token held.
 pub(in crate::schema_v2) fn reachability_drafts(
     state: &mut State,
 ) -> anyhow::Result<Vec<DiscoveryDraft>> {
@@ -105,9 +107,9 @@ pub(in crate::schema_v2) fn reachability_drafts(
         }
         for (observation_key, (link, holders)) in holders {
             let to_address = match state.v2_resolver_link_write(&registry, &link) {
-                Some((_, None)) => continue,
-                Some((_, Some(resolver))) => resolver.clone(),
-                None => match holders.last() {
+                Some(None) => continue,
+                Some(Some(resolver)) if holders.contains(resolver) => resolver.clone(),
+                _ => match holders.last() {
                     Some(resolver) => resolver.clone(),
                     None => continue,
                 },

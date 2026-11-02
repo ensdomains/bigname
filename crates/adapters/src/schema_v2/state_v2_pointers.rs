@@ -153,7 +153,10 @@ impl State {
         // This source-event gate and the separately retained zero clear must stay paired so other
         // event kinds cannot replace the clear during compaction.
         if after_state.get("source_event").and_then(Value::as_str) != Some("SubregistryUpdated") {
-            self.set_v2_subregistry(emitter, token_id, subregistry);
+            // A terminal restatement of a token already released does not bring it back.
+            if subregistry.is_some() || self.v2_tokens.contains_key(&v2_key(emitter, token_id)) {
+                self.set_v2_subregistry(emitter, token_id, subregistry);
+            }
             return;
         }
         let invalidated = after_state
@@ -244,13 +247,16 @@ impl State {
                 emitter.to_ascii_lowercase(),
                 resolver_observation_id(token_id),
             ),
-            (token_id.to_ascii_lowercase(), resolver.clone()),
+            resolver.clone(),
         );
         self.set_v2_resolver(emitter, token_id, resolver)
     }
 
     /// A restored `ResolverChanged`. Only a `ResolverUpdated` log's own event writes the link: a
-    /// name transition's restatement of a token's resolver carries no `sender`.
+    /// name transition's restatement of a token's resolver carries no `sender`. A restatement
+    /// changes no state when the live interpreter emitted it, so one that restates the token's
+    /// current resolver keeps the keys the token carries, and a terminal restatement of a token
+    /// already released does not bring it back.
     pub(in crate::schema_v2) fn restore_v2_resolver_change(
         &mut self,
         emitter: &str,
@@ -265,18 +271,29 @@ impl State {
             && after_state.get("sender").is_some()
         {
             self.write_v2_resolver_link(emitter, token_id, resolver);
-        } else {
-            self.set_v2_resolver(emitter, token_id, resolver);
+            return;
+        }
+        let key = v2_key(emitter, token_id);
+        match self
+            .v2_tokens
+            .get(&key)
+            .map(|token| token.resolver == resolver)
+        {
+            Some(true) => self.mark_v2_token_dirty(key),
+            None if resolver.is_none() => {}
+            _ => {
+                self.set_v2_resolver(emitter, token_id, resolver);
+            }
         }
     }
 
-    /// The latest `ResolverUpdated` on `token_id`'s resolver link: the token id it named and
-    /// the resolver it wrote, none for a clear.
+    /// The resolver the latest `ResolverUpdated` on `token_id`'s resolver link wrote, none for
+    /// a clear.
     pub(in crate::schema_v2) fn v2_resolver_link_write(
         &self,
         emitter: &str,
         token_id: &str,
-    ) -> Option<&(String, Option<String>)> {
+    ) -> Option<&Option<String>> {
         self.v2_resolver_link_writes.get(&(
             emitter.to_ascii_lowercase(),
             resolver_observation_id(token_id),

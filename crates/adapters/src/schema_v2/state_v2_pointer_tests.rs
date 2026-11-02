@@ -221,10 +221,7 @@ fn v2_restored_restatement_leaves_the_resolver_link_write_alone() {
         SECOND,
         &json!({"source_event": "ResolverUpdated", "token_id": SECOND, "resolver": null, "sender": "0x02"}),
     );
-    assert_eq!(
-        state.v2_resolver_link_write(ROOT, FIRST),
-        Some(&(SECOND.to_owned(), None))
-    );
+    assert_eq!(state.v2_resolver_link_write(ROOT, FIRST), Some(&None));
     state.restore_v2_resolver_change(
         ROOT,
         FIRST,
@@ -234,8 +231,5 @@ fn v2_restored_restatement_leaves_the_resolver_link_write_alone() {
         state.v2_token(ROOT, FIRST).unwrap().resolver.as_deref(),
         Some("0xresolver")
     );
-    assert_eq!(
-        state.v2_resolver_link_write(ROOT, FIRST),
-        Some(&(SECOND.to_owned(), None))
-    );
+    assert_eq!(state.v2_resolver_link_write(ROOT, FIRST), Some(&None));
 }
