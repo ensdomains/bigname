@@ -218,8 +218,11 @@ pub fn resolver_block<'a>(
     // An `ens_v1` name whose selected resource has no admitted pointer of its own reads the
     // node's registry pointer, whatever resource or name Interpret attached the registry's
     // `NewResolver` to: the write can land on another candidate's resource, such as a legacy
-    // name's lease beside its selected registry-only resource, or carry no name. A withheld or
-    // unresolvable name keeps the block it composed before: no address and no latest event.
+    // name's lease beside its selected registry-only resource, or carry no name. A name its
+    // authority withholds, such as a released tombstone, keeps the block it composed before: no
+    // address and no latest event. A name the resolution path withholds reads the registry
+    // pointer here, and `compose::apply_resolution` then clears its address, so it serves no
+    // resolver as before.
     let fallback = node_pointer.filter(|pointer| {
         own.is_none()
             && resourceless.is_none()

@@ -1606,11 +1606,13 @@ selected authority arm is `ens_v1`, that selects a resource and admits its
 pointers, then serves the node's registry pointer as its `resolver`. Its record
 inventory serves that resolver's records for the node through a stand-in pointer
 built from the registry pointer, as the resolver-anchored records route does. A
-withheld name, such as a released tombstone, composes the `resolver` it composed
-before, with no address and no latest event. A cleared registry pointer composes
-a null `resolver` whose latest event is the clear. A node with no registry
-pointer composes a null `resolver` with no latest event. A name that selects no
-resource, such as the ownerless registry profile, is unchanged.
+name its authority withholds, such as a released tombstone, composes the
+`resolver` it composed before, with no address and no latest event. A name the
+resolution path withholds still serves no resolver or records. A cleared
+registry pointer composes a null `resolver` whose latest event is the clear. A
+node with no registry pointer composes a null `resolver` with no latest event. A
+name that selects no resource, such as the ownerless registry profile, is
+unchanged.
 
 The inventory records the node as one of its inputs, so a later registry pointer
 write recomposes it. The

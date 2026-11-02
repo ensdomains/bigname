@@ -714,11 +714,14 @@ async fn undo_restores_a_clock_only_summary_and_rewrites_nothing_for_an_empty_bl
     .bind(CHAIN)
     .fetch_all(&fixture.pool)
     .await?;
+    // Name 1's resource has no pointer of its own, so its record inventory also depends on the
+    // node's registry pointer: two dependency rows.
     ensure!(
         journalled
             == [
                 "marker",
                 "project_history_catalogue_marker",
+                "project_lookup_dependency",
                 "project_lookup_dependency",
                 "project_lookup_inventory",
                 "project_lookup_name",
