@@ -458,7 +458,6 @@ fn settle_block_boundary(
         }
     }
     let drafts = protocol::v2_registry::reachability::reachability_drafts(state)?;
-    eprintln!("DIAGSTEP boundary {} drafts {}", block.block_number, drafts.len());
     discovery::materialize_boundary(catalog, block, drafts, output)
 }
 

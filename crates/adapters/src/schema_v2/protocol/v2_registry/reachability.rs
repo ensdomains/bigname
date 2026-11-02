@@ -82,7 +82,6 @@ pub(in crate::schema_v2) fn reachability_drafts(
     };
     let mut drafts = Vec::new();
     for (registry, reachable) in state.take_v2_reachability_changes() {
-        eprintln!("DIAGSTEP flip {registry} {reachable}");
         let mut targets = BTreeMap::new();
         for (token_id, resolver, aliases) in state.v2_registry_resolver_tokens(&registry) {
             let mut tokens = aliases

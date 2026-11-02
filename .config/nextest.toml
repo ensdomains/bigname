@@ -15,5 +15,5 @@ path = "junit.xml"
 # chain test prints its phase runs. A passing test's output is hidden by default, so this shows
 # theirs in the log.
 [[profile.default.overrides]]
-filter = 'test(admissions_scaling) | test(announced_registry_chain) | test(m1_a_registry_mounted_later) | test(diag_stack)'
+filter = 'test(admissions_scaling) | test(announced_registry_chain)'
 success-output = "immediate"

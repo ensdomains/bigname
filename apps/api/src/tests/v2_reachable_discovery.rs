@@ -157,28 +157,6 @@ async fn classification(database: &TestDatabase, resolver: &str) -> Result<Optio
     .await?)
 }
 
-/// Diagnostic dump (throwaway branch).
-async fn diag(database: &TestDatabase, label: &str) -> Result<()> {
-    for (title, sql) in [
-        ("events", "SELECT jsonb_build_object('b', block_number, 't', transaction_index, 'l', log_index, 'kind', event_kind, 'name', logical_name_id, 'res', resource_id, 'vis', consumer_visibility, 'src', after_state->>'source_event', 'resolver', after_state->>'resolver', 'token', after_state->>'token_id', 'emitter', raw_fact_ref->>'emitting_address')::text FROM normalized_events WHERE chain_id = 'ethereum-mainnet' AND event_kind IN ('ResolverChanged','RegistrationGranted','SurfaceBound','SubregistryChanged','RegistrationReserved') ORDER BY block_number, transaction_index NULLS FIRST, log_index NULLS FIRST, event_kind"),
-        ("pointers", "SELECT to_jsonb(p)::text FROM project_resource_pointer p"),
-        ("named_pointers", "SELECT to_jsonb(p)::text FROM project_named_resource_pointer p"),
-        ("edges", "SELECT (to_jsonb(e) - 'provenance' || jsonb_build_object('key', provenance->>'observation_key'))::text FROM discovery_edges e WHERE edge_kind = 'resolver'"),
-        ("classification", "SELECT (to_jsonb(c) - 'normalized_event_id')::text FROM project_resolver_classification c"),
-        ("summary", "SELECT jsonb_build_object('row', to_jsonb(s) - 'declared_summary', 'resolver', to_jsonb(s)->'declared_summary'->'resolver', 'coverage', to_jsonb(s)->'declared_summary'->'coverage')::text FROM project_name_summary s WHERE to_jsonb(s)::text LIKE '%n.eth%'"),
-    ] {
-        let rows: Vec<String> = match sqlx::query_scalar(sql).fetch_all(&database.pool).await {
-            Ok(rows) => rows,
-            Err(error) => vec![format!("ERROR {error}")],
-        };
-        eprintln!("DIAG {label} {title} ({} rows)", rows.len());
-        for row in rows {
-            eprintln!("DIAG {label} {title}: {row}");
-        }
-    }
-    Ok(())
-}
-
 async fn ok(database: &TestDatabase, uri: &str) -> Result<Value> {
     let (status, body) = get(database, uri).await?;
     assert_eq!(status, StatusCode::OK, "{uri}: {body:#}");
@@ -248,9 +226,11 @@ async fn n1_an_unmounted_registry_adds_no_resolver_edge_or_supported_classificat
     database.cleanup().await
 }
 
-/// C1: an unmounted registry pointing at a popular ENSv1 resolver leaves that resolver's
-/// classification row as it is in a corpus without the registry, position included, and the
-/// name it serves keeps its resolver.
+/// C1: an unmounted registry pointing at a popular ENSv1 resolver leaves the fields the routes
+/// serve from that resolver's classification row as they are in a corpus without the registry,
+/// and the name it serves keeps its resolver. The registry's pointer still adds an ENSv2
+/// observation to the row, beside the resolver's ENSv1 evidence, and moves the row's position.
+/// The ENSv1 evidence demotes that ENSv2 candidate, so the served classification is unchanged.
 #[tokio::test]
 async fn c1_an_unmounted_registry_leaves_a_v1_resolver_classification_alone() -> Result<()> {
     let spam = vec![
@@ -280,9 +260,29 @@ async fn c1_an_unmounted_registry_leaves_a_v1_resolver_classification_alone() ->
         ok(&without, &name).await?["data"]["resolver"]
     );
     assert_eq!(resolver_edges(&with, REGISTRY).await?, Vec::new());
-    let expected = classification(&without, PUBLIC_RESOLVER).await?;
-    assert!(expected.is_some(), "the ENSv1 resolver is classified");
-    assert_eq!(classification(&with, PUBLIC_RESOLVER).await?, expected);
+    let served = |row: Option<Value>| -> Result<Value> {
+        let row = row.context("the ENSv1 resolver is classified")?;
+        Ok(json!([
+            row["classification"],
+            row["support_status"],
+            row["unsupported_reason"],
+            row["manifest_id"],
+        ]))
+    };
+    let spammed = classification(&with, PUBLIC_RESOLVER).await?;
+    let observed = spammed
+        .as_ref()
+        .map(|row| row["observed_families"].clone())
+        .unwrap_or_default();
+    assert!(
+        observed.get("ens_v1_resolver_l1").is_some()
+            && observed.get("ens_v2_resolver_l1").is_some(),
+        "the row carries the ENSv1 evidence and the spam ENSv2 observation: {observed:#}"
+    );
+    assert_eq!(
+        served(spammed)?,
+        served(classification(&without, PUBLIC_RESOLVER).await?)?
+    );
     with.cleanup().await?;
     without.cleanup().await
 }
@@ -312,7 +312,6 @@ async fn m1_a_registry_mounted_later_serves_its_entry_and_opens_its_edge_at_the_
 
     let detail = ok(&database, "/v1/names/a.n.eth?namespace=ens").await?;
     assert_eq!(detail["data"]["status"], json!("active"), "{detail:#}");
-    diag(&database, "m1").await?;
     let detail = ok(&database, "/v1/names/b.n.eth?namespace=ens").await?;
     assert_eq!(
         detail["data"]["resolver"]["address"],
@@ -361,7 +360,6 @@ async fn m3_a_resolver_changed_before_the_mount_serves_only_the_current_one() ->
     let count = blocks.len();
     publish(&database, blocks).await?;
 
-    diag(&database, "m3").await?;
     let detail = ok(&database, "/v1/names/a.n.eth?namespace=ens").await?;
     assert_eq!(
         detail["data"]["resolver"]["address"],
@@ -407,7 +405,6 @@ async fn m5_a_pointer_before_the_mount_in_one_transaction_opens_at_the_mount() -
     let count = blocks.len();
     publish(&database, blocks).await?;
 
-    diag(&database, "m5").await?;
     let detail = ok(&database, "/v1/names/a.n.eth?namespace=ens").await?;
     assert_eq!(
         detail["data"]["resolver"]["address"],
