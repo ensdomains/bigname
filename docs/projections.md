@@ -408,9 +408,9 @@ rows record, the latest token transfer from the first current-registry record
 on included, and null when they record none. Its authority kind, registry owner
 and `manager` stay absent: the zero registry owner names nobody. The token holder
 is its only address relation, `owner`. With no selected binding, that relation's
-row stands on the lease's resource and carries no surface binding. Address
-history anchors on that row only where a binding of the name ever recorded the
-lease. Otherwise the holder's history shows the events the holder took part in.
+row stands on the lease's resource and carries no surface binding. On a read
+at a published block, address history anchors on that row only where the name
+has a binding on the lease's resource at or below that block.
 
 After the [Universal Resolver cutover](glossary.md#universal-resolver-cutover),
 ENSv1-selected descendants below `.eth` share one publication-scoped ENSv2 path
