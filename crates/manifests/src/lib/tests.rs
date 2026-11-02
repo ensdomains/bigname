@@ -12,6 +12,9 @@ use uuid::Uuid;
 
 use super::*;
 
+#[path = "registry_implementation_tests.rs"]
+mod registry_implementations;
+
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
 struct TestDir {

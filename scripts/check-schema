@@ -529,10 +529,10 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=500
+expected_refusal_assertions=508
 predecessor_shape_proof_count=0
 # Includes registration_lifecycle applied after lookup_precomputation on the removal path.
-expected_predecessor_shape_proof_count=86
+expected_predecessor_shape_proof_count=87
 refusal_probe_seconds=0
 timing_started=$SECONDS
 unread_index_migration="$ROOT/migrations/20261012130000_drop_unread_indexes.sql"
@@ -824,6 +824,11 @@ check_served_projection_removal() {
                 emit_phase_migration "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" preceding-shape
             fi
             emit_phase_migration "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" baseline-first
+            # The registry departure index: absent from the pre-7c shape, present in the baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261027150000_registry_permission_departure_index.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261027150000_registry_permission_departure_index.sql" baseline-first
             # The serving read indexes: the two on the pointer tables are absent from the pre-7c
             # shape. The lineage and name surface tables come from the current baseline, so the
             # other two are present there and are adopted.
@@ -988,6 +993,7 @@ for migration_file in \
     "$unnamed_lease_index_migration" \
     "$ROOT/migrations/20261016130000_project_repair_record_composing.sql" \
     "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" \
+    "$ROOT/migrations/20261027150000_registry_permission_departure_index.sql" \
     "$serving_read_index_migration"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
@@ -1344,6 +1350,8 @@ emit_phase_migration "$ROOT/migrations/20261005200000_registry_permission_histor
 emit_phase_migration "$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql" baseline-first | run_psql
 emit_phase_migration "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" preceding-shape | run_psql
 emit_phase_migration "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" baseline-first | run_psql
+emit_phase_migration "$ROOT/migrations/20261027150000_registry_permission_departure_index.sql" preceding-shape | run_psql
+emit_phase_migration "$ROOT/migrations/20261027150000_registry_permission_departure_index.sql" baseline-first | run_psql
 # The historical normalized-event fixture lacks the registrar lease index. Install
 # the current operational definition before walk-set and exact-adoption checks.
 render_phase_migration "$ROOT/ops/history-registrar-lease-index/install.sql" | run_psql
@@ -1359,8 +1367,9 @@ emit_phase_migration "$ROOT/migrations/20261007120000_project_lookup_precomputat
 # adoption/rerun, each refusal, and full-set validation before the first build.
 permission_index_migration="$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql"
 permission_mainnet_migration="$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql"
+permission_departure_migration="$ROOT/migrations/20261027150000_registry_permission_departure_index.sql"
 permission_index_install="$ROOT/ops/registry-permission-indexes/install.sql"
-permission_indexes=(normalized_events_registry_origin_idx normalized_events_registry_announcement_idx normalized_events_wrapper_departure_idx normalized_events_user_registry_departure_idx normalized_events_mainnet_wrapper_departure_idx normalized_events_mainnet_user_registry_departure_idx project_grant_registry_parent_idx)
+permission_indexes=(normalized_events_registry_origin_idx normalized_events_registry_announcement_idx normalized_events_wrapper_departure_idx normalized_events_user_registry_departure_idx normalized_events_mainnet_wrapper_departure_idx normalized_events_mainnet_user_registry_departure_idx normalized_events_registry_departure_idx project_grant_registry_parent_idx)
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     cat <<'SQL'
@@ -1373,6 +1382,7 @@ WHERE indexrelid IN ('normalized_events_registry_origin_idx'::regclass,
     'normalized_events_user_registry_departure_idx'::regclass,
     'normalized_events_mainnet_wrapper_departure_idx'::regclass,
     'normalized_events_mainnet_user_registry_departure_idx'::regclass,
+    'normalized_events_registry_departure_idx'::regclass,
     'project_grant_registry_parent_idx'::regclass);
 DROP INDEX normalized_events_registry_origin_idx;
 DROP INDEX normalized_events_registry_announcement_idx;
@@ -1380,6 +1390,7 @@ DROP INDEX normalized_events_wrapper_departure_idx;
 DROP INDEX normalized_events_user_registry_departure_idx;
 DROP INDEX normalized_events_mainnet_wrapper_departure_idx;
 DROP INDEX normalized_events_mainnet_user_registry_departure_idx;
+DROP INDEX normalized_events_registry_departure_idx;
 DROP INDEX project_grant_registry_parent_idx;
 INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
     manifest_version, chain_id, derivation_kind)
@@ -1394,6 +1405,8 @@ assert_migration_refusal permission-populated-missing-set "$permission_index_mig
     'missing prebuilt index normalized_events_registry_origin_idx on populated normalized_events; run ops/registry-permission-indexes/install.sql before this schema-migration' </dev/null
 assert_migration_refusal permission-mainnet-populated-missing-set "$permission_mainnet_migration" \
     'missing prebuilt index normalized_events_mainnet_wrapper_departure_idx on populated normalized_events; run ops/registry-permission-indexes/install.sql before this schema-migration' </dev/null
+assert_migration_refusal permission-departure-populated-missing-set "$permission_departure_migration" \
+    'missing prebuilt index normalized_events_registry_departure_idx on populated normalized_events; run ops/registry-permission-indexes/install.sql before this schema-migration' </dev/null
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     render_phase_migration "$permission_index_install"
@@ -1405,18 +1418,21 @@ FROM pg_index WHERE indexrelid IN ('normalized_events_registry_origin_idx'::regc
     'normalized_events_user_registry_departure_idx'::regclass,
     'normalized_events_mainnet_wrapper_departure_idx'::regclass,
     'normalized_events_mainnet_user_registry_departure_idx'::regclass,
+    'normalized_events_registry_departure_idx'::regclass,
     'project_grant_registry_parent_idx'::regclass);
 SQL
     render_phase_migration "$permission_index_install"
     emit_phase_migration "$permission_index_migration" specialized
     emit_phase_migration "$permission_mainnet_migration" specialized
+    emit_phase_migration "$permission_departure_migration" specialized
     emit_quote_all_identifiers_probe "$permission_index_migration" in-transaction
     emit_quote_all_identifiers_probe "$permission_mainnet_migration" in-transaction
+    emit_quote_all_identifiers_probe "$permission_departure_migration" in-transaction
     emit_quote_all_identifiers_probe "$permission_index_install" outside-transaction
     cat <<'SQL'
 DO $$ BEGIN
     IF (SELECT count(*) FROM pg_index actual JOIN permission_prebuilt_oids expected
-        ON actual.indexrelid = expected.indexrelid) <> 7 THEN
+        ON actual.indexrelid = expected.indexrelid) <> 8 THEN
         RAISE EXCEPTION 'permission index adoption/rerun rebuilt a prebuilt index';
     END IF;
     IF EXISTS (SELECT 1 FROM expected_permission_indexes expected
@@ -1438,11 +1454,13 @@ for permission_index in "${permission_indexes[@]}"; do
     permission_migration="$permission_index_migration"
     case "$permission_index" in
         normalized_events_mainnet_*) permission_migration="$permission_mainnet_migration" ;;
+        normalized_events_registry_departure_idx) permission_migration="$permission_departure_migration" ;;
     esac
     permission_invalid="$scratch_schema.$permission_index is invalid or has an unexpected definition; follow ops/registry-permission-indexes/README.md before retrying"
     # The first missing-index cases above cover these names with every index absent.
     if [ "$permission_index" != normalized_events_registry_origin_idx ] \
-        && [ "$permission_index" != normalized_events_mainnet_wrapper_departure_idx ]; then
+        && [ "$permission_index" != normalized_events_mainnet_wrapper_departure_idx ] \
+        && [ "$permission_index" != normalized_events_registry_departure_idx ]; then
         assert_migration_refusal "permission-missing-$permission_index" "$permission_migration" \
             "missing prebuilt index $permission_index on populated $permission_relation; run ops/registry-permission-indexes/install.sql before this schema-migration" <<SQL
 DROP INDEX $permission_index;
@@ -1513,6 +1531,7 @@ SQL
     render_phase_migration "$permission_index_install"
     emit_phase_migration "$permission_index_migration" specialized
     emit_phase_migration "$permission_mainnet_migration" specialized
+    emit_phase_migration "$permission_departure_migration" specialized
     printf '%s\n' "DELETE FROM normalized_events WHERE event_identity = 'permission-index-prebuild-probe';" \
         "DELETE FROM project_grant WHERE event_identity = 'permission-grant-prebuild-probe';" \
         'DROP TABLE expected_permission_indexes;'
@@ -3668,8 +3687,8 @@ JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
 WHERE pg_index.indrelid = 'normalized_events'::regclass;
 DO \$\$
 BEGIN
-    IF (SELECT count(*) FROM walk_index_baseline WHERE index_name IN ($walk_index_dropped)) <> 32 THEN
-        RAISE EXCEPTION 'drop.sql does not list 32 baseline indexes on normalized_events';
+    IF (SELECT count(*) FROM walk_index_baseline WHERE index_name IN ($walk_index_dropped)) <> 33 THEN
+        RAISE EXCEPTION 'drop.sql does not list 33 baseline indexes on normalized_events';
     END IF;
 END \$\$;
 INSERT INTO chain_phase_state (chain_id, phase_name, current_block_number, current_block_hash)
@@ -7035,6 +7054,9 @@ BEGIN
                 ('normalized_events_mainnet_user_registry_departure_idx', 'normalized_events',
                     ARRAY['chain_id', '%lower%after_state%proxy_address%', 'block_number'],
                     ARRAY['%source_family%ens_v2_registry_l1%', '%event_kind%Upgraded%', '%canonicality_state%canonical%safe%finalized%', '%implementation%IS DISTINCT FROM%0x75ff9adbcfce2469b097ac68f6ae650eae1351bb%']),
+                ('normalized_events_registry_departure_idx', 'normalized_events',
+                    ARRAY['chain_id', '%lower%after_state%proxy_address%', '%lower%after_state%implementation%', 'block_number'],
+                    ARRAY['%source_family%ens_v2_registry_l1%', '%event_kind%Upgraded%', '%canonicality_state%canonical%safe%finalized%']),
                 (
                     'normalized_events_history_discovery_name_idx',
                     'normalized_events',

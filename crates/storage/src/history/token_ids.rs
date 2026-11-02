@@ -125,7 +125,7 @@ fn decimal_token(word: &str) -> Result<String> {
 // The rule holds per reviewed deployment, a (chain, deployment label) row each. The October 2
 // mainnet registries have the same order.
 // (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/access-control/EnhancedAccessControl.sol:L280-L287 @ ens_v2_mainnet_20261002@b1f97b91)
-// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registry/PermissionedRegistry.sol:L577-L587 @ ens_v2_mainnet_20261002@b1f97b91)
+// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registry/PermissionedRegistry.sol:L580-L590 @ ens_v2_mainnet_20261002@4f47cbcc)
 const TOKEN_IDS_SQL: &str = "/* storage:history.token_ids */
     SELECT target.normalized_event_id, token.token_id
     FROM jsonb_to_recordset($1::jsonb) requested(event_id bigint, chain_id text,
