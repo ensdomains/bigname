@@ -103,6 +103,23 @@ pub struct NamespaceManifestSnapshot {
 /// `[[contracts]].role` of a declared ENSv2-side resolver instance that stores no records and answers
 /// by forwarding to the same name's ENSv1 resolver (`docs/manifests.md` § ENSv1 mirror resolver).
 pub const ENSV1_MIRROR_RESOLVER_ROLE: &str = "ensv1_mirror_resolver";
+/// `[[contracts]].role` of a WrapperRegistry implementation whose `VerifiableFactory` proxies
+/// bigname recognises (`docs/manifests.md` § Registry implementation declarations).
+pub const WRAPPER_REGISTRY_IMPLEMENTATION_ROLE: &str = "wrapper_registry_implementation";
+/// `[[contracts]].role` of a UserRegistry implementation whose `VerifiableFactory` proxies
+/// bigname recognises (`docs/manifests.md` § Registry implementation declarations).
+pub const USER_REGISTRY_IMPLEMENTATION_ROLE: &str = "user_registry_implementation";
+/// Roles that name an instance kind rather than a singleton: a family may declare several
+/// instances of each, at distinct addresses. Every other role is declared at most once.
+pub const REPEATABLE_CONTRACT_ROLES: &[&str] = &[
+    ENSV1_MIRROR_RESOLVER_ROLE,
+    WRAPPER_REGISTRY_IMPLEMENTATION_ROLE,
+    USER_REGISTRY_IMPLEMENTATION_ROLE,
+];
+
+pub fn is_repeatable_contract_role(role: &str) -> bool {
+    REPEATABLE_CONTRACT_ROLES.contains(&role)
+}
 /// `correlation_addresses` key naming the ENSv1 registry a declared mirror resolver reads.
 pub const ENSV1_MIRROR_REGISTRY_CORRELATION_KEY: &str = "ens_v1_registry";
 

@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use anyhow::{Context, Result, bail};
 use bigname_domain::vocabulary::parse_alloy_evm_address;
 
@@ -26,19 +24,12 @@ pub(super) fn validate_mirror_declarations(manifests: &[LoadedManifest]) -> Resu
                 loaded.relative_path.display(),
             );
         }
-        let mut addresses = BTreeSet::new();
+        // Distinct addresses are held by repository/contract_roles.rs.
         for mirror in &mirrors {
             if mirror.proxy_kind != "none" || !mirror.read_features.is_empty() {
                 bail!(
                     "manifest {} must declare {ENSV1_MIRROR_RESOLVER_ROLE} with proxy_kind = \"none\" and no read_features; the mirror stores no records and its getter behavior belongs to the mirrored ENSv1 resolver",
                     loaded.relative_path.display(),
-                );
-            }
-            if !addresses.insert(mirror.address.to_ascii_lowercase()) {
-                bail!(
-                    "manifest {} declares {ENSV1_MIRROR_RESOLVER_ROLE} address {} more than once",
-                    loaded.relative_path.display(),
-                    mirror.address.to_ascii_lowercase(),
                 );
             }
         }
