@@ -829,7 +829,9 @@ collection route carry neither header.
   no resolver and no records. A pointer to an address no resolver manifest
   declares serves that address, with no readable records and the
   `resolver_not_declared` inventory any name pointing at an undeclared
-  resolver is served. Migrated
+  resolver is served. A pointer to the declared ENSV2Resolver serves it with
+  `composite_resolver_not_projected` instead
+  ([manifests.md § ENSV2Resolver declaration](manifests.md#ensv2resolver-declaration)). Migrated
   (`ens_v2`) names and Basenames names are served as stored. Other routes,
   such as `POST /v1/lookup`, subname rows and address-name rows, serve the
   stored resolver.

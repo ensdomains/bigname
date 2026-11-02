@@ -1565,7 +1565,10 @@ under ENSv1); `resolver_implementation_unknown` when a discovered proxy
 has no canonical `Upgraded` observation — neither an ERC-1967 `Upgraded` log
 nor a factory announcement — so its implementation is unknown;
 `resolver_implementation_not_declared` when the latest observation names an
-implementation outside the active manifest's `resolver_implementations`; and
+implementation outside the active manifest's `resolver_implementations`;
+`composite_resolver_not_projected` for a declared ENSV2Resolver, which stores no
+records and forwards each name to another resolver
+([manifests.md § ENSV2Resolver declaration](manifests.md#ensv2resolver-declaration)); and
 `resolver_binding_enumeration_not_projected` on the binding summary of a
 supported resolver whose family does not project binding enumeration.
 

@@ -5489,3 +5489,34 @@ read by the range that holds each transaction's block. The build moves the
 After the redo, check on mainnet that a registry the factory created through the declared
 WrapperRegistry implementation lists its parent owner's grants on
 [`GET /v1/permissions`](api-v1-routes.md#get-v1permissions).
+
+## The ENSV2Resolver is declared and not projected
+
+The mainnet ENSv2 resolver manifest declares the ENSV2Resolver
+`0x3071ad643ce4ed8b3d67b289845b45db82b068a4` from block `26216293`, with role `ensv2_resolver`
+([ENSV2Resolver declaration](manifests.md#ensv2resolver-declaration)). Project files the
+address under that declaration as unsupported, with `composite_resolver_not_projected`. It is
+the ENSv1 `eth` node's resolver, and a handful of names point at it. Their records stay
+withheld, and only the reason changes, from `resolver_not_declared`. No resolution outcome
+changes. The resolver's own summary moves to the ENSv2 resolver family and manifest.
+
+- The [projection content hash](glossary.md#projection-content-hash) rotates for every chain.
+  The [interpreter content hash](glossary.md#interpreter-content-hash) does not: the change
+  touches no `[[abi.events]]` block and no interpret-side source. The change rides the next
+  full re-derivation release and shares its Interpret and Project redo pair. A Project redo
+  alone does not apply it.
+- The manifest is edited in place as version 1, so it keeps its `manifest_id`, and no
+  supported row is re-stamped. Manifest synchronization records a
+  [manifest-authority marker](glossary.md#manifest-authority-marker) on mainnet and stamps a
+  required Ingest redo from block `26216293`, the declaration's start
+  ([watch-plan widening](manifests.md#mandatory-historical-fetch-after-watch-plan-widening)).
+  The contract emits none of the family's events, so that fetch returns no log. Complete it
+  before the Interpret redo, as for any marker. Sepolia changes no manifest and gets no
+  marker and no Ingest redo.
+- Schema-migration `20261102120000_project_resolver_classification_reason_comment.sql`
+  replaces the comment on `project_resolver_classification.unsupported_reason` so it names the
+  new reason. It changes no column, index or row, and needs no preparation.
+- It adds no table or setting.
+
+After the redo, check on mainnet that `GET /v1/names/eth/records` withholds every key with
+`composite_resolver_not_projected`.

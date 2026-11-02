@@ -516,6 +516,8 @@ resolver family at the ENSv1 mirror resolver's `26105292`. So the Ingest redo
 that admitting them stamps runs from the deployment's first block, not from
 block zero. No manifest declares the contracts the 2026-10-13, 2026-10-18,
 2026-10-23 and 2026-10-26 redeploys replaced, and none of them names a name.
+The resolver family also declares the ENSV2Resolver, as declared and not
+projected ([ENSV2Resolver declaration](#ensv2resolver-declaration)).
 The [complete deployment inventory](mainnet-deployment.md) records every address,
 its admission or explicit exclusion, and how an existing database moves to it.
 (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/.deployment.json:L4 @ ens_v2_mainnet_20261002@4f47cbcc)
@@ -828,6 +830,40 @@ declares as a change of every `.eth` name, when the mirror is supported before o
 change. The mainnet deployment's mirror is
 `0x394d8eb4a4fdf599384deab25f31d111d755c398`, and it applies once a mainnet manifest declares
 it. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ENSV1Resolver.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
+
+#### ENSV2Resolver declaration
+
+An `ens_v2_resolver_l1` manifest may declare upstream's `ENSV2Resolver` with
+role `ensv2_resolver`, `proxy_kind = "none"`, no `read_features`, its deployment
+address and its creation block. The contract walks the ENSv2 registry tree from
+the root registry it was built with and forwards the call to the resolver it
+finds. For `eth` itself it forwards to the ENSv1 `.eth` resolver instead. When
+the resolver it finds is a composite resolver that would send the call back to
+it, it uses none. It stores no records, and its ABI declares no event.
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/ENSV2Resolver.sol:L35-L45 @ ens_v2_mainnet_20261002@4f47cbcc)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/ENSV2Resolver.sol:L52-L70 @ ens_v2_mainnet_20261002@4f47cbcc)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ENSV2Resolver.json:L3-L548 @ ens_v2_mainnet_20261002@4f47cbcc)
+
+The declaration is a classification input only. When the declaration applies
+and the address has any candidate, Project files it as `ens_v2_resolver_l1` /
+`ensv2_resolver` with basis `manifest_declared_address`, `unsupported`, with
+`composite_resolver_not_projected`. It takes rank 0 like the other direct
+roles, so ENSv1 pointers, ENSv2 entries and an `Upgraded` never re-file it.
+Every reader withholds the records of a name that points at it with that
+reason. A mirror walk that reaches it reads it as unsupported, so no resolution
+path decision changes. bigname derives no record through it, as for any
+ancestor's extended resolver: the contract implements `IExtendedResolver`, but
+an unsupported row publishes no read feature, and this family permits
+contract-level `read_features` only on the direct `public_resolver_v2`.
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/AbstractMirrorResolver.sol:L43-L55 @ ens_v2_mainnet_20261002@4f47cbcc)
+
+The `.eth` resolver it forwards `eth` to is not declared, so the `eth` node's
+own records stay unknown. Adding the declaration widens the watch plan by one
+emitter, and the [mandatory historical fetch](#mandatory-historical-fetch-after-watch-plan-widening)
+it stamps is empty. The mainnet declaration is
+`0x3071ad643ce4ed8b3d67b289845b45db82b068a4` from block `26216293`.
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ENSV2Resolver.json:L2 @ ens_v2_mainnet_20261002@4f47cbcc)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ENSV2Resolver.json:L835 @ ens_v2_mainnet_20261002@4f47cbcc)
 
 #### ENSv2 migration-family admission plan
 
