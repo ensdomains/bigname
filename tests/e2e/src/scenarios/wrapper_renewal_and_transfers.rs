@@ -2,13 +2,15 @@ use std::collections::BTreeSet;
 
 use alloy_primitives::Address;
 use anyhow::{Context, Result};
+use bigname_storage::public_name_fields::{self, RegistrationStatus, WrapperState};
 use sqlx::types::Uuid;
 
 use super::support;
 use crate::harness::responses::{exact_name, pointer};
 use crate::harness::{anvil::Anvil, ens_v1, repo_root};
 
-const YEAR: u64 = 365 * 24 * 60 * 60;
+const DAY: u64 = 24 * 60 * 60;
+const YEAR: u64 = 365 * DAY;
 
 async fn resource_token_lineage(
     run: &support::PipelineRun,
@@ -165,6 +167,146 @@ async fn wrapped_renewal_tracks_registrar_expiry_without_wrapper_event() -> Resu
         renewal_expiry.to_string(),
         "exact-name expiry should track the registrar renewal, not stale wrapper storage; body: {body}"
     );
+
+    run.db.cleanup().await?;
+    Ok(())
+}
+
+/// A renewal through the wrapped controller that leaves the lease expired runs
+/// `NameWrapper.renew` against the deployed contracts: `registrar.ownerOf` reverts, so the
+/// NameWrapper keeps its stored expiry and, past it, reports no owner. Each name was wrapped and
+/// then renewed through the current controller, which calls only `BaseRegistrar.renew`, so its
+/// wrapper expiry trails the lease and has passed once the lease is in grace. Two renewals in
+/// grace leave the lease expired: `renew(label, 0)`, the call `ETHRenewerV1.syncWrapper` makes,
+/// on an emancipated name, and a one-day renewal on a locked one. bigname serves both as lapsed
+/// wrappers, with the chain's stored wrapper expiry and no owner or manager. A renewal in grace
+/// that brings the lease back writes the wrapper, and bigname serves the holder again.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L312-L337 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
+#[tokio::test]
+async fn a_wrapped_renewal_that_leaves_the_lease_in_grace_serves_a_lapsed_wrapper() -> Result<()> {
+    let anvil = Anvil::spawn().await?;
+    let rpc = anvil.client();
+
+    let deployment = ens_v1::deploy_ens_v1(&rpc, &repo_root()).await?;
+    let accounts = rpc.accounts().await?;
+    let (alice, bob) = (accounts[1], accounts[2]);
+    let resolver = deployment.public_resolver.address;
+    // `CANNOT_UNWRAP` locks the second name. `_wrapETH2LD` burns `PARENT_CANNOT_CONTROL` on all.
+    let names = [
+        ("graceheld", 0_u16),
+        ("gracelocked", 1),
+        ("gracerevived", 0),
+    ];
+    let mut wrapped_expiries = Vec::new();
+    for (label, fuses) in names {
+        ens_v1::register_eth_name(&rpc, &deployment, label, alice, YEAR, resolver).await?;
+        ens_v1::wrap_eth_2ld(&rpc, &deployment, alice, label, bob, fuses, resolver).await?;
+        ens_v1::renew_eth_name(&rpc, &deployment, alice, label, YEAR).await?;
+        let wrapped = ens_v1::wrapped_name_data(&rpc, &deployment, &format!("{label}.eth")).await?;
+        wrapped_expiries.push(wrapped.expiry);
+    }
+    let last_lease = ens_v1::eth_name_expiry(&rpc, &deployment, "gracerevived").await?;
+    let now = u64::try_from(rpc.block_timestamp().await?)?;
+    rpc.increase_time(last_lease + 10 * DAY - now).await?;
+    let renewals = [
+        ens_v1::renew_wrapped_eth_name(&rpc, &deployment, alice, "graceheld", 0).await?,
+        ens_v1::renew_wrapped_eth_name(&rpc, &deployment, alice, "gracelocked", DAY).await?,
+        ens_v1::renew_wrapped_eth_name(&rpc, &deployment, alice, "gracerevived", YEAR).await?,
+    ];
+
+    let mut chain_expiries = Vec::new();
+    for (index, (label, _)) in names.into_iter().enumerate() {
+        let data = ens_v1::wrapped_name_data(&rpc, &deployment, &format!("{label}.eth")).await?;
+        if index < 2 {
+            assert_eq!(
+                data.expiry, wrapped_expiries[index],
+                "{label}: NameWrapper.renew writes nothing while the lease stays expired"
+            );
+            assert_eq!(data.owner, Address::ZERO, "{label}: past its expiry");
+        } else {
+            let lease = ens_v1::eth_name_expiry(&rpc, &deployment, label).await?;
+            assert_eq!(
+                data.expiry,
+                lease + 90 * DAY,
+                "{label}: the renewal wrote it"
+            );
+            assert_eq!(data.owner, bob, "{label}");
+        }
+        chain_expiries.push(data.expiry);
+    }
+
+    let run = support::ingest_and_serve(&anvil, &deployment, None).await?;
+    for (index, (label, _)) in names.into_iter().enumerate() {
+        let name = format!("{label}.eth");
+        let lapsed = index < 2;
+        let derived: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM normalized_events \
+             WHERE lower(transaction_hash) = lower($1) \
+               AND event_kind = 'ExpiryChanged' \
+               AND after_state->>'authority_kind' = 'wrapper' \
+               AND canonicality_state = 'canonical'",
+        )
+        .bind(&renewals[index])
+        .fetch_one(&run.db.pool)
+        .await?;
+        assert_eq!(
+            derived,
+            i64::from(!lapsed),
+            "{name}: a wrapper expiry is derived exactly when the renewal writes one"
+        );
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT expiry_seconds::BIGINT FROM project_wrapper_state \
+             WHERE logical_name_id = $1 \
+             ORDER BY block_number DESC \
+             LIMIT 1",
+        )
+        .bind(format!("ens:{:#x}", ens_v1::namehash(&name)))
+        .fetch_one(&run.db.pool)
+        .await?;
+        assert_eq!(
+            stored,
+            i64::try_from(chain_expiries[index])?,
+            "{name}: the stored wrapper expiry is the chain's"
+        );
+
+        let body = exact_name(&run.api, "ens", &name).await?;
+        let summary = &body["declared_state"];
+        let has_binding = body["data"]["resource_id"].is_string();
+        let fields = public_name_fields::registration_fields("ens", summary, has_binding);
+        let wrapper = public_name_fields::ens_v1(Some("ens_v1"), summary)?.context("ens_v1")?;
+        if lapsed {
+            assert_eq!(fields.owner, None, "{name}: body: {body}");
+            assert_eq!(fields.manager, None, "{name}: body: {body}");
+            assert_eq!(
+                wrapper.wrapper_state,
+                Some(WrapperState::Lapsed),
+                "{name}: body: {body}"
+            );
+            assert_eq!(
+                fields.status,
+                RegistrationStatus::Expired,
+                "{name}: body: {body}"
+            );
+        } else {
+            assert_eq!(
+                fields.owner.map(|owner| owner.to_ascii_lowercase()),
+                Some(format!("{bob:#x}")),
+                "{name}: body: {body}"
+            );
+            assert_eq!(
+                wrapper.wrapper_state,
+                Some(WrapperState::Emancipated),
+                "{name}: body: {body}"
+            );
+            assert_eq!(
+                fields.status,
+                RegistrationStatus::Active,
+                "{name}: body: {body}"
+            );
+        }
+    }
 
     run.db.cleanup().await?;
     Ok(())

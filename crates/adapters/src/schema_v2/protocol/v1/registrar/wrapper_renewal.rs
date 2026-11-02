@@ -6,7 +6,7 @@ use crate::schema_v2::{
     catalog::Selected,
     model::RawLogInput,
     protocol::EventDraft,
-    state::{State, V1NameState},
+    state::{State, V1NameState, v1_lease_active_at},
 };
 
 const ENS_GRACE_PERIOD_SECS: u64 = 90 * 24 * 60 * 60;
@@ -52,6 +52,13 @@ pub(super) fn event(
     let registrar_word = state
         .v1_registrar_renewal_expiry(&selected.source.namespace, namehash, raw)
         .unwrap_or_else(|| U256::from(registrar_expiry));
+    // NameWrapper.renew writes the wrapper expiry only once `registrar.ownerOf` answers after the
+    // registrar renewal, so a renewal that leaves the lease expired, such as `renew(label, 0)` on
+    // a name in grace, leaves the wrapper expiry as it was.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318-L330 @ ens_v1@91c966f)
+    if !v1_lease_active_at(registrar_word, raw.block_timestamp.unix_timestamp()) {
+        return Ok(None);
+    }
     let wrapper_expiry = wrapper_expiry(registrar_word)?;
     let Some((previous_expiry, wrapper)) =
         state.renew_v1_wrapper_expiry(&selected.source.namespace, namehash, wrapper_expiry)
@@ -100,6 +107,22 @@ mod tests {
         assert_eq!(
             wrapper_expiry(U256::from(1) << 255).unwrap(),
             ENS_GRACE_PERIOD_SECS
+        );
+    }
+
+    #[test]
+    fn the_lease_is_active_only_while_its_full_width_expiry_is_later_than_the_block() {
+        let at = 1_900_000_000_i64;
+        let word = U256::from(1_900_000_000_u64);
+        assert!(!v1_lease_active_at(word - U256::from(1), at));
+        assert!(
+            !v1_lease_active_at(word, at),
+            "ownerOf needs a strictly later expiry"
+        );
+        assert!(v1_lease_active_at(word + U256::from(1), at));
+        assert!(
+            v1_lease_active_at((U256::from(1) << 64) + U256::from(1), at),
+            "the comparison keeps the registrar's uint256 width"
         );
     }
 
