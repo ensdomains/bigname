@@ -177,35 +177,6 @@ async fn point(
         .await
 }
 
-/// The names the resolution path selection of the publication at `target` chose. The fixture's
-/// pool holds one session, so a session table of the work table's name and shape, created
-/// here, is the one the selection writes into (`CREATE TEMP TABLE IF NOT EXISTS`), and it
-/// outlives the publication.
-async fn selected(fixture: &Fixture, target: i64, names: &[&str]) -> Result<BTreeSet<String>> {
-    sqlx::raw_sql(
-        "CREATE TEMP TABLE bigname_resolution_path_work (logical_name_id text PRIMARY KEY)",
-    )
-    .execute(&fixture.pool)
-    .await?;
-    fixture.apply(target, FamilyMode::Normal).await?;
-    let ids: Vec<String> =
-        sqlx::query_scalar("SELECT logical_name_id FROM pg_temp.bigname_resolution_path_work")
-            .fetch_all(&fixture.pool)
-            .await?;
-    sqlx::raw_sql("DROP TABLE pg_temp.bigname_resolution_path_work")
-        .execute(&fixture.pool)
-        .await?;
-    Ok(ids
-        .into_iter()
-        .map(|id| {
-            names
-                .iter()
-                .find(|name| ens_v2_path::logical_name_id(name) == id)
-                .map_or(id, |name| (*name).to_owned())
-        })
-        .collect())
-}
-
 // One ENSv1 `ResolverChanged` for a second-level name with a resource writes both the node's
 // registry pointer (F4) and the resource's pointer (F5). Under that name only the names of three
 // or more labels with no resolver of their own read the change, so `b.foo.eth`, which has its
@@ -233,7 +204,7 @@ async fn an_ensv1_resolver_change_of_a_second_level_name_selects_only_its_reader
     point(&fixture, 5, 1, "foo.eth", 1, R2).await?;
     fixture.apply(4, FamilyMode::Normal).await?;
 
-    let selected = selected(&fixture, 5, &NAMES).await?;
+    let selected = fixture.selected_paths(5, &NAMES).await?;
     let expected: BTreeSet<String> = ["foo.eth", "a.foo.eth", "x.a.foo.eth"]
         .map(str::to_owned)
         .into();

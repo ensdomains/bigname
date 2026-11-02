@@ -884,6 +884,40 @@ impl Fixture {
         Ok(())
     }
 
+    /// Apply through `target` and return the names the resolution path selection of those
+    /// publications chose, spelled as in `names` where one matches. The fixture's pool holds one
+    /// session, so a session table of the work table's name and shape, created here, is the one
+    /// the selection writes into (`CREATE TEMP TABLE IF NOT EXISTS`), and it outlives the
+    /// publication.
+    pub async fn selected_paths(
+        &self,
+        target: i64,
+        names: &[&str],
+    ) -> Result<std::collections::BTreeSet<String>> {
+        raw_sql(
+            "CREATE TEMP TABLE bigname_resolution_path_work (logical_name_id text PRIMARY KEY)",
+        )
+        .execute(&self.pool)
+        .await?;
+        self.apply(target, FamilyMode::Normal).await?;
+        let ids: Vec<String> =
+            sqlx::query_scalar("SELECT logical_name_id FROM pg_temp.bigname_resolution_path_work")
+                .fetch_all(&self.pool)
+                .await?;
+        raw_sql("DROP TABLE pg_temp.bigname_resolution_path_work")
+            .execute(&self.pool)
+            .await?;
+        Ok(ids
+            .into_iter()
+            .map(|id| {
+                names
+                    .iter()
+                    .find(|name| ens_v2_path::logical_name_id(name) == id)
+                    .map_or(id, |name| (*name).to_owned())
+            })
+            .collect())
+    }
+
     /// An event with its namespace, family and payloads set, at `block` and log `log` in
     /// transaction 0.
     #[allow(clippy::too_many_arguments)]
