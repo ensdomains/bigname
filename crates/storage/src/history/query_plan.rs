@@ -1,6 +1,6 @@
 use anyhow::Result;
 use serde_json::Value;
-use sqlx::{Connection, PgPool, Postgres, QueryBuilder};
+use sqlx::{Arguments, Connection, Execute, PgPool, Postgres, QueryBuilder};
 
 use super::{
     EventHistoryFilter, EventHistoryReadFilter, HistorySummaryMode,
