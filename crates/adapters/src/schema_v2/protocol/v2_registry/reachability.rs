@@ -5,7 +5,7 @@
 //! so an announced registry that nothing reachable mounts adds no resolver edge, and with it no
 //! resolver classification, Project work block or name selection. Its events are still
 //! interpreted, because a later mount names the entries it already holds.
-use alloy_primitives::{Address, U256};
+use alloy_primitives::U256;
 use alloy_sol_types::SolEvent;
 use anyhow::Context;
 use std::collections::BTreeMap;
@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use crate::{
     evm_abi::address_hex,
     schema_v2::{
+        catalog::Selected,
         model::RawLogInput,
         protocol::{DiscoveryDraft, Interpreted},
         state::State,
@@ -46,20 +47,23 @@ pub(in crate::schema_v2) fn resolver_updated_topic0() -> String {
 /// The edge a `ResolverUpdated` log opens, when its registry is reachable after the log.
 pub(super) fn push_resolver_edge(
     output: &mut Interpreted,
+    selected: &Selected,
     state: &State,
     raw: &RawLogInput,
-    token_id: U256,
-    resolver: Address,
+    event: &super::ResolverUpdated,
 ) {
     if !state.v2_registry_reachable(&raw.emitting_address, raw.block_timestamp.unix_timestamp()) {
         return;
     }
-    output.discovery.push(DiscoveryDraft::Edge {
-        edge_kind: "resolver".to_owned(),
-        to_address: address_hex(resolver),
-        admission_basis: "protocol_event".to_owned(),
-        observation_key: observation_key(&raw.emitting_address, token_id, true),
-    });
+    match selected.event.name.as_str() {
+        "ResolverUpdated" => output.discovery.push(DiscoveryDraft::Edge {
+            edge_kind: "resolver".to_owned(),
+            to_address: address_hex(event.resolver),
+            admission_basis: "protocol_event".to_owned(),
+            observation_key: observation_key(&raw.emitting_address, event.tokenId, true),
+        }),
+        _ => unreachable!("resolver edge dispatch selected another manifest event"),
+    }
 }
 
 /// The resolver edges of every registry whose reachability changed since the last call. A
@@ -78,6 +82,7 @@ pub(in crate::schema_v2) fn reachability_drafts(
     };
     let mut drafts = Vec::new();
     for (registry, reachable) in state.take_v2_reachability_changes() {
+        eprintln!("DIAGSTEP flip {registry} {reachable}");
         let mut targets = BTreeMap::new();
         for (token_id, resolver, aliases) in state.v2_registry_resolver_tokens(&registry) {
             let mut tokens = aliases

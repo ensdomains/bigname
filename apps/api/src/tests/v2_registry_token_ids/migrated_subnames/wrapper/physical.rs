@@ -602,9 +602,13 @@ async fn migrated_subname_canonical_expiry_moves_the_registry_to_its_live_mount(
         bigname_content_hash::INTERPRETER_CONTENT_HASH
     );
     let started = std::time::Instant::now();
+    eprintln!("DIAGSTEP setup start");
     let (database, resolver, resources) = setup_native().await?;
+    eprintln!("DIAGSTEP setup done");
     let before = replay::families(&database).await?;
+    eprintln!("DIAGSTEP clock start");
     empty_clock(&database, 124, T).await?;
+    eprintln!("DIAGSTEP clock done");
     assert_canonical_move(&database, &resources, resolver, true).await?;
     let leaf = path_get(&database, &format!("/v1/names/{LEAF}")).await?;
     assert_eq!(

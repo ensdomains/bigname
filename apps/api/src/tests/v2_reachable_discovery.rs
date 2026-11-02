@@ -5,7 +5,7 @@
 use super::v2_mainnet_admission::{DAY, OWNER, PUBLIC_RESOLVER, REGISTERED, lease, publish, text};
 use super::v2_sepolia_redeploy::{get, token};
 use super::*;
-use alloy_primitives::{Address, keccak256};
+use alloy_primitives::{Address, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use axum::http::StatusCode;
 
@@ -14,6 +14,7 @@ sol! {
     event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender);
     event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender);
     event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender);
+    event TokenResource(uint256 indexed tokenId, uint256 indexed resource);
     event Upgraded(address indexed implementation);
 }
 
@@ -56,6 +57,23 @@ fn register(
         }
         .encode_log_data(),
     ))
+}
+
+/// The `TokenResource` a registration emits. The routes serve a resolver only through the
+/// pointer of the token's resource.
+fn resource(
+    registry: &'static str,
+    label: &str,
+    id: u64,
+) -> (&'static str, alloy_primitives::LogData) {
+    (
+        registry,
+        TokenResource {
+            tokenId: token(label),
+            resource: U256::from(id),
+        }
+        .encode_log_data(),
+    )
 }
 
 fn set_resolver(
@@ -125,11 +143,12 @@ async fn resolver_edges(
     .await?)
 }
 
-/// The resolver's classification row, without its surrogate event id.
+/// The resolver's classification row, without its surrogate event id. The alias is not
+/// `classification`, which would name the row's own `classification` column.
 async fn classification(database: &TestDatabase, resolver: &str) -> Result<Option<Value>> {
     Ok(sqlx::query_scalar(
-        "SELECT to_jsonb(classification) - 'normalized_event_id'
-         FROM project_resolver_classification classification
+        "SELECT to_jsonb(resolver_row) - 'normalized_event_id'
+         FROM project_resolver_classification resolver_row
          WHERE chain_id = $1 AND resolver_address = $2",
     )
     .bind(CHAIN)
@@ -174,6 +193,7 @@ fn unmounted_registry() -> Result<Vec<(u64, Logs)>> {
             REGISTERED + 60,
             vec![
                 register(REGISTRY, "a", FOREVER)?,
+                resource(REGISTRY, "a", 1),
                 set_resolver(REGISTRY, "a", RESOLVER_X)?,
             ],
         ),
@@ -281,6 +301,7 @@ async fn m1_a_registry_mounted_later_serves_its_entry_and_opens_its_edge_at_the_
         REGISTERED + 150,
         vec![
             register(REGISTRY, "b", FOREVER)?,
+            resource(REGISTRY, "b", 2),
             set_resolver(REGISTRY, "b", PUBLIC_RESOLVER)?,
         ],
     ));
@@ -370,6 +391,7 @@ async fn m5_a_pointer_before_the_mount_in_one_transaction_opens_at_the_mount() -
             REGISTERED + 60,
             vec![
                 register(REGISTRY, "a", FOREVER)?,
+                resource(REGISTRY, "a", 1),
                 register(ETH_REGISTRY, "n", FOREVER)?,
             ],
         ),
@@ -468,6 +490,7 @@ async fn t1_mounting_an_ancestor_serves_and_opens_both_registries() -> Result<()
             REGISTERED + 60,
             vec![
                 register(LOWER_REGISTRY, "c", FOREVER)?,
+                resource(LOWER_REGISTRY, "c", 3),
                 set_resolver(LOWER_REGISTRY, "c", PUBLIC_RESOLVER)?,
                 register(REGISTRY, "b", FOREVER)?,
                 mount(REGISTRY, "b", LOWER_REGISTRY)?,
@@ -906,6 +929,7 @@ async fn m1_a_registry_that_announced_itself_as_a_resolver_first_opens_under_the
                 ),
                 announce(REGISTRY),
                 register(REGISTRY, "a", FOREVER)?,
+                resource(REGISTRY, "a", 1),
                 set_resolver(REGISTRY, "a", PUBLIC_RESOLVER)?,
             ],
         ),

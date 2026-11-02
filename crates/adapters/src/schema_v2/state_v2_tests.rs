@@ -173,11 +173,15 @@ fn v2_contested_surface_expiry_reasserts_the_surviving_holder() {
 }
 fn assert_targeted_refresh_matches_full_walk(mut baseline: State, mutate: impl Fn(&mut State)) {
     baseline.refresh_dirty_v2_names(1);
+    // Interpret drains reachability changes into discovery drafts after every log, so a state
+    // between logs holds none. The targeted refresh records them and the full walk does not.
+    baseline.take_v2_reachability_changes();
     let mut targeted = baseline.clone();
     let mut full_walk = baseline;
     mutate(&mut targeted);
     mutate(&mut full_walk);
     let targeted_transitions = targeted.refresh_dirty_v2_names(2);
+    targeted.take_v2_reachability_changes();
     let full_walk_transitions = full_walk.refresh_all_v2_names(2);
     assert_eq!(targeted_transitions, full_walk_transitions);
     assert_eq!(targeted, full_walk);
