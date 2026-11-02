@@ -1553,8 +1553,8 @@ its value map:
   null-exact-resolver class, exact indexed `ok` answers and authoritative
   ENSIP-19 derived answers satisfy auto without a provider request. Within this
   class, except an ENSv1 registry clear, all requested keys execute through
-  verified lookup because retained
-  exact inventory predates the resolver-clear boundary. If no admitted
+  verified lookup because retained exact inventory predates the resolver-clear
+  boundary. If no admitted
   Universal Resolver entrypoint is available at execution time, the requested
   keys are explicitly `unsupported`; auto never turns that inability to execute
   into an indexed null-resolver `not_found`. For
