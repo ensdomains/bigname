@@ -2627,7 +2627,11 @@ resolver
 (upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L63-L88 @ ens_v1@91c966f).
 This path does not turn the ancestor into the name's declared exact resolver
-and has no live/indexed comparison.
+and has no live/indexed comparison. A `source=auto` records read does not take
+it for an ENSv1 registry clear, a `.eth` name whose `authority` is `ens_v1` or `ens_v0` and whose
+latest observed ENSv1 pointer write set the pointer to zero. That read answers
+`not_found` from the index
+([records route](api-v1-routes.md#ensv1-registry-clear-on-an-auto-read)).
 
 ## Universal Resolver cutover
 
