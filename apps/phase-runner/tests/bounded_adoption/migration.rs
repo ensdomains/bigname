@@ -1008,7 +1008,7 @@ async fn controller_moved(
 }
 
 // The factory-sender guard. The controller lookup reads a factory `ProxyDeployed` naming the
-// declared controller as its indexed `sender`, whatever the block
+// controller declared at the log's block as its indexed `sender`
 // (`crates/adapters/src/schema_v2/migration/registry.rs`). A factory log naming the new controller
 // below its declared start, and below the bound, shows the start is not its deployment block: the
 // redo keeps the full range and names the factory log's block. The full range then runs, and the
