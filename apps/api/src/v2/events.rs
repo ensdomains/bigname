@@ -138,14 +138,7 @@ pub(crate) async fn get_events(
         &snapshot.block_bounds(),
     ));
     parsed.storage_filter.publication_block_bounds = Some(snapshot.block_bounds());
-    let exact_count = params.include.iter().any(|v| v == "total_count");
-    let summary_mode = if exact_count && (parsed.anchored || params.contract_address.is_some()) {
-        HistorySummaryMode::Count
-    } else if parsed.anchored {
-        HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP)
-    } else {
-        HistorySummaryMode::None
-    };
+    let summary_mode = events_summary_mode(&params, parsed.anchored);
 
     let storage_page = bigname_storage::load_event_history_page_with_redo_policy(
         &state.pool,
@@ -333,6 +326,32 @@ pub(crate) fn events_storage_cursor(
         event_identity,
         position: None,
     })
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static EMITTER_EXACT_COUNT_CAP: u64;
+}
+
+/// Runs `future` with `cap` in place of the opt-in count cap on emitter-anchored reads.
+#[cfg(test)]
+pub(crate) async fn with_emitter_count_cap<F: std::future::Future>(
+    cap: u64,
+    future: F,
+) -> F::Output {
+    EMITTER_EXACT_COUNT_CAP.scope(cap, future).await
+}
+
+/// The summary a `/v1/events` read runs for its anchors and `include=total_count`.
+pub(crate) fn events_summary_mode(params: &QueryParams, anchored: bool) -> HistorySummaryMode {
+    let exact_count = params.include.iter().any(|v| v == "total_count");
+    if exact_count && (anchored || params.contract_address.is_some()) {
+        HistorySummaryMode::Count
+    } else if anchored {
+        HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP)
+    } else {
+        HistorySummaryMode::None
+    }
 }
 
 pub(crate) fn resolve_events_namespace(params: &QueryParams) -> V2Result<Option<String>> {

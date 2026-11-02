@@ -1,11 +1,14 @@
 use anyhow::Result;
-use sqlx::{PgPool, Postgres, QueryBuilder};
+use serde_json::Value;
+use sqlx::{Connection, PgPool, Postgres, QueryBuilder};
 
 use super::{
-    EventHistoryReadFilter,
+    EventHistoryFilter, EventHistoryReadFilter, HistorySummaryMode,
     columns::push_history_select,
     duplicates::push_product_history_duplicate_filter,
+    event_history_read_filter,
     paging::{push_history_filters, push_history_order},
+    summary::push_history_count_query,
     wrapped_registrar::{
         ResourceNamehashAnchor, push_namehash_surfaces_query, push_registrar_grant_resources_query,
         push_registrar_namehash_anchors_query, push_wrapped_registrar_resources_query,
@@ -86,4 +89,74 @@ pub(super) struct HistoryPlanLookup<'a> {
     pub(super) chain_id: &'a str,
     pub(super) namespace: &'a str,
     pub(super) namehash: &'a str,
+}
+
+/// `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` of the summary count an app-facing event-history
+/// page runs for `mode`, as a canonical product read builds it, executed as a prepared statement
+/// on a generic or a custom plan. `None` for a mode that runs no count. A test-support seam,
+/// never a production query path.
+pub async fn explain_event_history_count_for_test(
+    pool: &PgPool,
+    filter: EventHistoryFilter,
+    mode: HistorySummaryMode,
+    generic_plan: bool,
+) -> Result<Option<Value>> {
+    let limit = match mode {
+        HistorySummaryMode::Count => None,
+        HistorySummaryMode::CappedCount(cap) => Some(i64::try_from(cap.saturating_add(1))?),
+        HistorySummaryMode::None | HistorySummaryMode::Full => return Ok(None),
+    };
+    let filter = event_history_read_filter(pool, filter, true, false).await?;
+    let mut connection = pool.acquire().await?.detach();
+    let mut transaction = connection.begin().await?;
+    let filter = filter.with_attributed_records(&mut transaction).await?;
+    let mut query = QueryBuilder::<Postgres>::new("");
+    push_history_count_query(&mut query, &filter, true, limit);
+    let (setting, expected) = if generic_plan {
+        ("force_generic_plan", (1, 0))
+    } else {
+        ("force_custom_plan", (0, 1))
+    };
+    sqlx::query(&format!("SET LOCAL plan_cache_mode = {setting}"))
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::raw_sql(&format!("PREPARE history_count AS {}", query.sql()))
+        .execute(&mut *transaction)
+        .await?;
+    let mut built = query.build();
+    let arguments = built
+        .take_arguments()
+        .map_err(anyhow::Error::from_boxed)?
+        .unwrap_or_default();
+    // EXECUTE takes no protocol parameters, so PostgreSQL renders each bound value as a quoted
+    // literal for it.
+    let placeholders = (1..=arguments.len())
+        .map(|index| format!("quote_nullable(${index})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let literals: Vec<String> =
+        sqlx::query_scalar_with(&format!("SELECT ARRAY[{placeholders}]"), arguments)
+            .persistent(false)
+            .fetch_one(&mut *transaction)
+            .await?;
+    let plan: Value = sqlx::query_scalar(&format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE history_count({})",
+        literals.join(", ")
+    ))
+    .persistent(false)
+    .fetch_one(&mut *transaction)
+    .await?;
+    let plans: (i64, i64) = sqlx::query_as(
+        "SELECT generic_plans, custom_plans FROM pg_prepared_statements
+         WHERE name = 'history_count'",
+    )
+    .fetch_one(&mut *transaction)
+    .await?;
+    anyhow::ensure!(
+        plans == expected,
+        "expected {setting} plan counts {expected:?}, found {plans:?}"
+    );
+    transaction.rollback().await?;
+    connection.close().await?;
+    Ok(Some(plan))
 }

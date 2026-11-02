@@ -501,6 +501,7 @@ include!("tests/v2_history_keyset.rs");
 include!("tests/v2_history_keyset_walk.rs");
 include!("tests/v2_history_query_filters.rs");
 include!("tests/v2_contract_event_counts.rs");
+include!("tests/v2_events_emitter_count.rs");
 include!("tests/v2_tokenless_expiry_events.rs");
 include!("tests/v2_history_block_order.rs");
 include!("tests/v2_history_block_order_children.rs");
