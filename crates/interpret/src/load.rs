@@ -19,6 +19,8 @@ mod lookahead_query;
 mod manifests;
 mod migration;
 mod prior;
+#[cfg(test)]
+mod registry_implementation_sync_tests;
 mod resume;
 
 pub(crate) use cache::{PriorCache, fold as fold_prior_cache};

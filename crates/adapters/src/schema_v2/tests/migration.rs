@@ -9,7 +9,9 @@ use super::*;
 
 mod announced_resolver;
 mod child;
+mod controller_ranges;
 mod expiry;
+mod implementation_announcement;
 mod intermediary;
 mod sync_wrapper_liveness;
 mod zero_owner;
