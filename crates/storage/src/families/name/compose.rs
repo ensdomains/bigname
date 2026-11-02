@@ -360,7 +360,11 @@ pub(super) fn compose(parts: &Parts<'_>, shape: CoverageShape) -> Result<NameCur
         provenance.insert("registrant_position".into(), position.clone());
     }
     provenance.insert("derivation_kind".into(), json!("name_current_rebuild"));
-    provenance.insert("authority_selection".into(), parts.selection.provenance());
+    let mut authority_selection = parts.selection.provenance();
+    if selection.ownerless_registry && shadow.trace.contains_key("implied_lease") {
+        authority_selection["lease_without_registry_owner"] = json!(true);
+    }
+    provenance.insert("authority_selection".into(), authority_selection);
     provenance.insert(
         "read_reachability".into(),
         Serving::read_reachability(parts.serving),
