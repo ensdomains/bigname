@@ -227,7 +227,13 @@ fn a_migrated_wrapped_name_renewed_on_ensv1_derives_no_wrapper_expiry() -> anyho
     envelope.insert(2, controller_renewed(2));
     envelope[3].log_index = 3;
     logs.extend(envelope);
-    logs.push(base_renewed_at(addresses, base_token, renewed, block + 2, 0));
+    logs.push(base_renewed_at(
+        addresses,
+        base_token,
+        renewed,
+        block + 2,
+        0,
+    ));
     let mut direct = controller_renewed(1);
     direct.block_number = block + 2;
     direct.block_hash = format!("block-{}", block + 2);

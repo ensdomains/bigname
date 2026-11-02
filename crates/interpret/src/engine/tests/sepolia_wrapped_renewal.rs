@@ -168,16 +168,22 @@ async fn sepolia_wrapped_controller_renewal_in_grace_keeps_the_wrapper_expiry() 
         .join("../..")
         .join("manifests/sepolia");
     sync_schema_v2_repository(pool, &load_repository(manifest_root)?).await?;
-    seed_lineage(pool).await?;
-    sqlx::query(
-        "UPDATE chain_lineage SET block_timestamp = to_timestamp($1)
-         WHERE chain_id = $2 AND block_number = $3",
-    )
-    .bind(in_grace)
-    .bind(CHAIN)
-    .bind(sync_block)
-    .execute(pool)
-    .await?;
+    // `seed_lineage`, except that the sync block lands in the renewed lease's grace period.
+    for number in SETUP_BLOCK..=sync_block {
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, parent_hash, block_number,
+                 block_timestamp, canonicality_state
+             ) VALUES ($1, $2, $3, $4, to_timestamp($5), 'canonical')",
+        )
+        .bind(CHAIN)
+        .bind(block_hash(number))
+        .bind((number > SETUP_BLOCK).then(|| block_hash(number - 1)))
+        .bind(number)
+        .bind(if number == sync_block { in_grace } else { number })
+        .execute(pool)
+        .await?;
+    }
 
     let label = b"gracewrapped";
     let labelhash = keccak256(label);
