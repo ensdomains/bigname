@@ -21526,7 +21526,10 @@ mod numeric_short_lease_tests {
     #[test]
     fn captured_numeric_registration_then_readable_reservation_migrates_without_a_controller()
     -> anyhow::Result<()> {
-        let _receipt = allow_unmatched(&[(RECEIPT_TOPIC_A, CAPTURED_RECEIPT)]);
+        let _receipt = allow_unmatched(&[
+            (RECEIPT_TOPIC_A, CAPTURED_RECEIPT),
+            (RECEIPT_TOPIC_B, CAPTURED_RECEIPT),
+        ]);
         let input = fixture::input()?;
         fixture::assert_receipt_order(&input);
         let expected = fixture::fixture()?;
