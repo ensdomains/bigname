@@ -8,8 +8,8 @@ pub(in crate::schema_v2) struct RegistrarContext<'a> {
     pub(in crate::schema_v2) graveyard_cleanup: bool,
     pub(in crate::schema_v2) transaction_has_registry_setup: bool,
     pub(in crate::schema_v2) registration_follows: bool,
-    /// An admitted controller event later in the transaction owns this numeric BaseRegistrar
-    /// registration or renewal.
+    /// The next admitted controller event of the same kind for the node, later in the
+    /// transaction, owns this numeric BaseRegistrar registration or renewal.
     pub(in crate::schema_v2) controller_lifecycle_follows: bool,
     pub(in crate::schema_v2) registry_graveyard: Option<alloy_primitives::Address>,
     pub(in crate::schema_v2) wrapper_custody: crate::schema_v2::protocol::v1::WrapperCustody,

@@ -1,6 +1,6 @@
 //! TYR-449: the mainnet profile's numeric BaseRegistrar `NameRegistered` and `NameRenewed` are
-//! lease lifecycle rows unless an admitted controller event for the same node follows in the same
-//! transaction. Every fixture reads the checked-in mainnet manifests at their real addresses.
+//! lease lifecycle rows unless the next admitted controller event of the same kind for the same
+//! node follows in the same transaction. Every fixture reads the checked-in mainnet manifests at their real addresses.
 use super::*;
 
 const REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
@@ -25,6 +25,12 @@ mod base {
         event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires);
         event NameRenewed(uint256 indexed id, uint256 expires);
         event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
+    }
+}
+
+mod bridge {
+    alloy_sol_types::sol! {
+        event NameRenewed(uint256 indexed tokenId, string label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 indexed referrer, uint256 amount);
     }
 }
 
@@ -284,6 +290,11 @@ fn controller_renewal(label: &str, expires: u64) -> alloy_primitives::LogData {
 /// itself, writes the registry record to HOLDER and hands HOLDER the token
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L152 @ ens_v1@91c966f).
 fn migration_mint(logs: &mut Logs, block: i64, label: &str) {
+    migration_mint_until(logs, block, label, EXPIRY);
+}
+
+/// [`migration_mint`] with the lease running until `expiry`.
+fn migration_mint_until(logs: &mut Logs, block: i64, label: &str, expiry: u64) {
     logs.push(
         block,
         0,
@@ -295,7 +306,7 @@ fn migration_mint(logs: &mut Logs, block: i64, label: &str) {
         block,
         0,
         BASE_REGISTRAR,
-        numeric_registration(label, MIGRATOR, EXPIRY),
+        numeric_registration(label, MIGRATOR, expiry),
     );
     logs.push(block, 0, REGISTRY, registry_transfer(label, HOLDER));
     logs.push(
@@ -771,6 +782,61 @@ fn a_graveyard_cleanup_is_not_a_grant() -> anyhow::Result<()> {
     Ok(())
 }
 
+const RENEWAL_BRIDGE: &str = "0x56c447f308f463a01121c41e72b0e7e7557fcb68";
+
+/// Row B-ii: after the ENSv2 activation a renewal through the ENSv1 renewal bridge emits the
+/// BaseRegistrar's numeric `NameRenewed` and the bridge's own `NameRenewed`, and no admitted ENSv1
+/// controller event. On a migrated name the numeric renewal renews the lease the migration mint
+/// opened, under its name, and derives no synthetic grant.
+#[test]
+fn a_bridged_renewal_of_a_migrated_name_renews_its_numeric_lease() -> anyhow::Result<()> {
+    const LIVE_EXPIRY: u64 = 50_000_000;
+    const RENEWED: u64 = 60_000_000;
+    let mut logs = Logs::default();
+    eth_root(&mut logs);
+    migration_mint_until(&mut logs, 2, LABEL, LIVE_EXPIRY);
+    logs.push(LAUNCH, 0, BASE_REGISTRAR, numeric_renewal(LABEL, RENEWED));
+    logs.push(
+        LAUNCH,
+        0,
+        RENEWAL_BRIDGE,
+        bridge::NameRenewed {
+            tokenId: token(LABEL),
+            label: LABEL.to_owned(),
+            duration: 31_536_000,
+            newExpiry: RENEWED,
+            paymentToken: Address::ZERO,
+            referrer: B256::ZERO,
+            amount: U256::from(1_u64),
+        }
+        .encode_log_data(),
+    );
+    let output = interpret_test_batch(with_migration(
+        &logs,
+        checked_in("ens_v1_registrar_l1", REGISTRAR_MANIFEST),
+        LAUNCH,
+    ))?;
+    let (_, lease) = mint_grant(&output);
+    let lease_rows = |kind: &str| {
+        at_block(of_kind(&output, kind), LAUNCH)
+            .into_iter()
+            .filter(|event| event.source_family == "ens_v1_registrar_l1")
+            .collect::<Vec<_>>()
+    };
+    let grants = lease_rows("RegistrationGranted");
+    assert!(grants.is_empty(), "no synthetic grant: {grants:#?}");
+    let renewed = lease_rows("RegistrationRenewed");
+    assert_eq!(renewed.len(), 1, "{renewed:#?}");
+    assert_eq!(renewed[0].resource_id, Some(lease));
+    assert_eq!(
+        renewed[0].logical_name_id.as_deref(),
+        Some(name(LABEL).as_str())
+    );
+    assert_eq!(renewed[0].after_state["registrant"], HOLDER);
+    assert_eq!(renewed[0].after_state["expiry"], RENEWED);
+    Ok(())
+}
+
 /// The basis for the redo's row estimate: the interpret rows one migration mint adds in its own
 /// transaction, and those its lapse adds through release, each against the declarations before
 /// TYR-449.
@@ -808,7 +874,7 @@ fn one_migration_mint_and_its_lapse_add_a_counted_number_of_rows() -> anyhow::Re
     );
     assert_eq!(
         added,
-        (10, 4, 2),
+        (14, 6, 9),
         "normalized rows added by the mint and by the lapse, other interpret rows added\n\
          mint now {mint:?}\nmint before {mint_before:?}\nlapse now {lapse:?}\n\
          lapse before {lapse_before:?}\nother {other} before {other_before}"

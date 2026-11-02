@@ -1190,3 +1190,68 @@ async fn a_universal_resolver_upgrade_after_admission_writes_no_summary_row() ->
     fixture.assert_rebuild_equal(7).await?;
     fixture.cleanup().await
 }
+
+/// `summary` without the ENSv1 lease's own expiry and without the fields that record where the
+/// latest fact landed: the event heads and the latest event kinds.
+fn without_ens_v1_expiry(mut summary: Value) -> Value {
+    fn strip(value: &mut Value) {
+        match value {
+            Value::Object(fields) => {
+                for key in ["ens_v1_expiry", "history", "latest_event_kind"] {
+                    fields.remove(key);
+                }
+                fields.values_mut().for_each(strip);
+            }
+            Value::Array(items) => items.iter_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    strip(&mut summary);
+    summary
+}
+
+/// After the ENSv2 activation a renewal through the ENSv1 renewal bridge renews a migrated
+/// name's ENSv1 lease: no admitted ENSv1 controller event covers the BaseRegistrar's numeric
+/// `NameRenewed`, so the adapter writes it on the lease (TYR-449). The name stays
+/// ENSv2-selected, and everything it serves is unchanged except the lease's own expiry.
+#[tokio::test]
+async fn a_bridged_renewal_moves_only_the_ens_v1_expiry_of_a_migrated_name() -> Result<()> {
+    const RENEWED: u64 = LEASE_EXPIRY + 365 * DAY;
+    let fixture = Fixture::new("families_expiry_grace_bridged_renewal", 12).await?;
+    declared_path::root_eth_entry(&fixture).await?;
+    let alice = leased(&fixture, "alice.eth", 1, 1).await?;
+    reserved(&fixture, &alice, 1, 4).await?;
+    migrated(&fixture, &alice, 1, 7).await?;
+    fixture.apply(7, FamilyMode::Normal).await?;
+    let composed = |fixture: &Fixture| {
+        let alice = alice.clone();
+        let pool = fixture.pool.clone();
+        async move {
+            let row = load_family_name(&pool, &alice)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("{alice} has no composed row"))?;
+            anyhow::Ok(row.declared_summary)
+        }
+    };
+    let before = composed(&fixture).await?;
+    ensure!(
+        served(&fixture, &alice).await?["arm"] == json!("ens_v2"),
+        "{before}"
+    );
+
+    lease_event(&fixture, &alice, 1, 9, "RegistrationRenewed", RENEWED).await?;
+    fixture.apply(9, FamilyMode::Normal).await?;
+    let after = composed(&fixture).await?;
+    ensure!(
+        after["registration"]["ens_v1_expiry"] == json!(RENEWED.to_string()),
+        "the lease's own expiry moves: {after}"
+    );
+    ensure!(
+        without_ens_v1_expiry(after.clone()) == without_ens_v1_expiry(before.clone()),
+        "nothing else the name serves moves:\nbefore {before:#}\nafter {after:#}"
+    );
+
+    fixture.assert_undo_restores(9).await?;
+    fixture.assert_rebuild_equal(9).await?;
+    fixture.cleanup().await
+}
