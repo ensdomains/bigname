@@ -351,6 +351,7 @@ async fn names_pointing_at_the_ensv2_resolver_are_withheld_as_composite() -> Res
     .await?;
     register_an_ensv1_name_at(&database, CHAIN, BLOCK, V1_NAME, COMPOSITE).await?;
 
+    let (mut served, mut expected) = (json!({}), json!({}));
     for (row, name, key) in [
         ("S1", V1_NAME, "text:url"),
         ("S2", "alice.eth", "text:description"),
@@ -360,17 +361,10 @@ async fn names_pointing_at_the_ensv2_resolver_are_withheld_as_composite() -> Res
             &format!("/v1/names/{name}/records?source=indexed&keys={key}"),
         )
         .await?;
-        assert_eq!(
-            payload["data"]["resolver"]["address"],
-            json!(COMPOSITE),
-            "{row}: {payload:#}"
-        );
-        assert_eq!(
-            payload["data"]["records"][key], withheld,
-            "{row}: {payload:#}"
-        );
+        served[row] = json!({"resolver": payload["data"]["resolver"]["address"],
+                             "record": payload["data"]["records"][key]});
+        expected[row] = json!({"resolver": COMPOSITE, "record": withheld});
     }
-
     let resolver = bigname_storage::families::topology::load_family_resolver_current(
         &database.pool,
         CHAIN,
@@ -378,18 +372,14 @@ async fn names_pointing_at_the_ensv2_resolver_are_withheld_as_composite() -> Res
     )
     .await?
     .context("S4: the resolver's summary")?;
-    assert_eq!(
-        resolver.declared_summary["classification"],
-        json!({"source_family": "ens_v2_resolver_l1", "role": "ensv2_resolver",
-               "basis": "manifest_declared_address", "read_features": []}),
-        "S4: {:#}",
-        resolver.declared_summary
-    );
-    assert_eq!(
-        resolver.declared_summary["bindings"], withheld,
-        "S4: {:#}",
-        resolver.declared_summary
-    );
+    served["S4"] = json!({"classification": resolver.declared_summary["classification"],
+                          "bindings": resolver.declared_summary["bindings"]});
+    expected["S4"] = json!({
+        "classification": {"source_family": "ens_v2_resolver_l1", "role": "ensv2_resolver",
+                           "basis": "manifest_declared_address", "read_features": []},
+        "bindings": withheld,
+    });
+    assert_eq!(served, expected, "S1, S2, S4");
     let overview =
         v2_resolver_payload_for_database(&database, &format!("/v1/resolvers/11155111/{COMPOSITE}"))
             .await?;
