@@ -559,6 +559,18 @@ jobs:
             echo "- Exact hit: \`$CACHE_HIT\`"
           } >>"$GITHUB_STEP_SUMMARY"
 
+      # The build needs about 34 GB. With less than 40 GB free, the build waits
+      # for the removals to finish, for up to three minutes.
+      - name: Wait for the disk cleanup when space is short
+        run: |
+          start=$SECONDS
+          for _ in $(seq 180); do
+            pgrep -f scripts/ci-free-disk >/dev/null || break
+            [ "$(df --output=avail -BG / | tail -n 1 | tr -dc 0-9)" -lt 40 ] || break
+            sleep 1
+          done
+          echo "waited $((SECONDS - start)) s for the disk cleanup"
+
       - name: Report disk before the build
         run: scripts/ci-disk-report "before the build" "${{ job.services.postgres.id }}"
 
