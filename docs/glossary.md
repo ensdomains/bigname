@@ -1493,6 +1493,11 @@ pushes registrar expiry into NameWrapper by adding NameWrapper as an ENSv1
 registrar controller and removing it again within the same call
 (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2_sepolia_20260629@ccaeb58)
 (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2_sepolia_20260629@ccaeb58).
+It moves the NameWrapper expiry only for a lease that is live at that block. A
+name in grace keeps its NameWrapper expiry, because `NameWrapper.renew` writes
+only after `BaseRegistrar.ownerOf` answers
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318-L330 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f).
 Any code that treats the ENSv1 controller set as static, or `ControllerAdded`
 as a rare governance event, is wrong once this is live.
 
