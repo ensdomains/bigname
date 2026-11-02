@@ -536,9 +536,11 @@ CREATE INDEX IF NOT EXISTS normalized_events_pointer_before_resolver_history_idx
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
 -- History's registry handoff read (crates/storage/src/history/registry_handoffs.rs) finds
--- the owner events of one name in source family ens_v1_registry_l1 by chain and name key:
--- AuthorityTransferred events by node, SubregistryChanged events by child_node. These
--- access paths intentionally have no consumer_visibility restriction.
+-- the owner events of one name in source family ens_v1_registry_l1 by chain and name key.
+-- It finds SubregistryChanged events by child_node through
+-- normalized_events_project_name_child_idx. Its Transfer arms read
+-- normalized_events_v1_transfer_node_idx below, not normalized_events_project_name_node_idx.
+-- These access paths intentionally have no consumer_visibility restriction.
 CREATE INDEX IF NOT EXISTS normalized_events_project_name_node_idx
     ON normalized_events (chain_id, (namespace || ':' || lower(after_state ->> 'node')), block_number)
     INCLUDE (normalized_event_id)
@@ -557,7 +559,7 @@ CREATE INDEX IF NOT EXISTS normalized_events_project_name_child_idx
       AND canonicality_state IN ('canonical', 'safe', 'finalized')
       AND (namespace || ':' || lower(after_state ->> 'child_node')) IS NOT NULL;
 
--- The two Transfer arms of the same read find a name's registry Transfer events by chain and
+-- The two Transfer arms of the handoff read find a name's registry Transfer events by chain and
 -- name key. A parent node such as eth also keys every child's NewOwner events in
 -- normalized_events_project_name_node_idx, and none of them is a Transfer, so that index
 -- would read them all. This one holds Transfer events only.

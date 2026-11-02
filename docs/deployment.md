@@ -5155,8 +5155,8 @@ raw-backed or structural search document of at most 2000 bytes they insert or ch
 ## A partial index for the Transfer arm of the history handoff probe
 
 The build that adds `normalized_events_v1_transfer_node_idx` changes how history's registry
-handoff read finds a name's registry `Transfer` events. The read runs for a name history page
-with `include=data` ([table ownership](storage.md#table-ownership)).
+handoff read finds a name's registry `Transfer` events. The read runs for history pages with
+`include=data` ([table ownership](storage.md#table-ownership)).
 
 - Before, its two `Transfer` arms read `normalized_events_project_name_node_idx`. Under a
   top-level node such as `eth` that index holds every second-level name's `NewOwner` events,
