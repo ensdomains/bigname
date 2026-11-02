@@ -26,6 +26,8 @@ use adaptive::AdaptiveInterpretArgs;
 #[path = "cli_families.rs"]
 mod families;
 use families::ProjectFamiliesArgs;
+#[path = "cli_live.rs"]
+pub mod live;
 #[path = "cli_redo.rs"]
 mod redo_resolution;
 use redo_resolution::resolve_redo;
@@ -184,6 +186,9 @@ struct RunArgs {
 
     #[command(flatten)]
     project_families: ProjectFamiliesArgs,
+
+    #[command(flatten)]
+    live: live::LiveArgs,
 }
 
 #[derive(Debug, Args)]
@@ -311,6 +316,7 @@ pub enum ResolvedCommand {
         runtime: RuntimeConfig,
         hydration_rpc_urls: bigname_lookup::ChainRpcUrls,
         project_families: FamilySettings,
+        live_publication_lag_blocks: u32,
     },
     Redo {
         database_url: String,
@@ -408,6 +414,7 @@ fn resolve_run(args: RunArgs) -> RunnerResult<ResolvedCommand> {
         runtime,
         hydration_rpc_urls,
         project_families: args.project_families.into(),
+        live_publication_lag_blocks: args.live.live_publication_lag_blocks,
     })
 }
 

@@ -4,7 +4,9 @@ use sqlx::{Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use super::{
-    HistoryBlockWindow, attribution::AttributedRecords, lineage::same_fork_predicate,
+    HistoryBlockWindow,
+    attribution::AttributedRecords,
+    lineage::{lineage_probe, same_fork_predicate},
     selectors::HistorySelector,
 };
 
@@ -250,17 +252,16 @@ pub(super) fn push_attributing_resource_is_registration(
             .push(" AND wrapper_binding.canonicality_state IN ('canonical', 'safe', 'finalized')");
     }
     push_publication_bound(builder, "wrapper_binding", published);
-    builder.push(
+    builder.push(format!(
         " OFFSET 0
             ) wrapper_binding
-            LEFT JOIN bigname_phase.chain_lineage wrapper_lineage
-              ON wrapper_lineage.chain_id = wrapper_binding.chain_id
-             AND wrapper_lineage.block_hash = wrapper_binding.block_hash
+            {}
             WHERE wrapper_binding.chain_id = ne.chain_id
               AND wrapper_binding.event_kind = 'SurfaceBound'
               AND wrapper_binding.source_family = 'ens_v1_wrapper_l1'
               AND (wrapper_binding.after_state ->> 'wrapped_registrar_resource_id')::uuid = ",
-    );
+        lineage_probe("wrapper_lineage", "wrapper_binding"),
+    ));
     builder.push_bind(registration_id);
     if canonical_only {
         builder.push(

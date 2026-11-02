@@ -927,16 +927,30 @@ async fn a_range_ends_before_the_block_past_its_event_cap() -> Result<()> {
 // ENSv2 entry and pointer changes select the names under them from the journal of the whole
 // publication. The path history writes an entry event at block 5, pointer events at block 7,
 // two entry events at block 8 and a created-registry event at block 9, with blocks that name
-// nothing between them. A range holds several of those changes and publishes them once, at its
+// nothing between them. On top, a second registry is created at block 10 and `sub`'s entry
+// points at it from block 12, so a publication holds the creation alone, the mount alone, or
+// both. A range holds several of those changes and publishes them once, at its
 // last block. Followed block by block, rebuilt in
 // one range, in ranges of four and of two blocks, and block by block, it writes the same rows.
-// Block 8 is also undone and applied again on the way.
+// Blocks 8 and 12 are also undone and applied again on the way.
 #[tokio::test]
 async fn an_ensv2_path_fixture_rebuilds_equal_in_ranges_and_block_by_block() -> Result<()> {
     let fixture = Fixture::new("families_range_ens_v2_path", 12).await?;
+    const LATE_REGISTRY: &str = "0x00000000000000000000000000000000000000ea";
     let names = ens_v2_path::history(&fixture).await?;
+    ens_v2_path::created(&fixture, 10, 5, LATE_REGISTRY).await?;
+    ens_v2_path::point(
+        &fixture,
+        12,
+        1,
+        ens_v2_path::USER_REGISTRY,
+        "sub",
+        ens_v2_path::Pointer::Subregistry(LATE_REGISTRY),
+    )
+    .await?;
     fixture.assert_undo_restores(8).await?;
-    follow(&fixture, 9, 12).await?;
+    follow(&fixture, 9, 11).await?;
+    fixture.assert_undo_restores(12).await?;
     // No event after block 3 names `sub.bob.eth`. The entry changes still moved its row.
     let unresolvable: Option<String> = sqlx::query_scalar(
         "SELECT core -> 'declared_summary' ->> 'unresolvable_reason'
@@ -950,7 +964,7 @@ async fn an_ensv2_path_fixture_rebuilds_equal_in_ranges_and_block_by_block() -> 
         unresolvable.is_none(),
         "the path history left sub.bob.eth unresolvable for {unresolvable:?}"
     );
-    // Five blocks change a path: 5, 7, 8, 9 and 10. A rebuild in fewer than five ranges puts
+    // Six blocks change a path: 5, 7, 8, 9, 10 and 12. A rebuild in fewer than five ranges puts
     // two of them in one range.
     let whole = rebuild_equal(&fixture, 12, &in_ranges(12)).await?;
     ensure!(

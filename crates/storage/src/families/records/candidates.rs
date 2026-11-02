@@ -204,3 +204,7 @@ pub(crate) async fn candidate_resources_from(
     }
     Ok(candidates)
 }
+
+#[cfg(test)]
+#[path = "candidates_plan_tests.rs"]
+mod plan_tests;

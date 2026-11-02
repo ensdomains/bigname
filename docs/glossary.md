@@ -918,6 +918,18 @@ group is complete. Completeness never reconstructs evidence, widens a selector,
 or turns ordinary factory, reservation, or registration evidence into a
 migration boundary.
 
+<a id="implied-lease"></a>
+## Implied lease
+
+the BaseRegistrar lease of an ENSv1 `.eth` second-level name selected through a
+[registry-only handoff](#registry-only-handoff) that records no lease, or in the
+ownerless-registry profile once its registry owner is zero. The January 2020 registrar migration moved names onto the current
+BaseRegistrar with the registrar's own `NameRegistered` and no controller event,
+so bigname holds no grant for them. Their later controller renewals still name
+the lease. The implied lease is the resource of the name's latest own registrar
+lifecycle row at or after its first current-registry record, and the lifecycle
+composes the registration on it (`docs/projections.md`, registry-only bindings).
+
 ## Independently admitted event
 
 an ordinary normalized event that an existing ENSv1 or ENSv2 adapter rule derives without an ENSv1→ENSv2 migration correlation; ordinary normalization gives it an empty `migration_correlation_ids` set and `consumer_visibility=activated`, and correlation may attach a separate association without rewriting the event ([`normalized.rs`](../crates/adapters/src/schema_v2/normalized.rs#L76-L95), [`migration/support.rs`](../crates/adapters/src/schema_v2/migration/support.rs#L243-L278)).

@@ -478,7 +478,7 @@ field requires no schema migration or replay.
 | `ens_names` | operator rainbow load | Unverified rainbow-table candidates consumed by the import command. |
 | `normalized_events` | Interpret; manifest synchronization for `SourceManifestUpdated` only | Protocol events normalized transactionally with identity output, plus retained manifest-authority history. Manifest synchronization's rows must not be deleted or rebuilt as Interpret output: [discovery-rule widening checks](glossary.md#discovery-rule-widening-and-narrowing) reconstruct historical declaration floors from them. |
 | `discovery_watch_admissions` | Interpret | The last acknowledged [discovery-watch admission snapshot](glossary.md#discovery-watch-admission-snapshot) for each active manifest-authority fingerprint and lineage-orphaning epoch. This is replay coordination state, never fetched-fact evidence, redo authority, projection, or serving data. |
-| `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding, and for logs that preceded their emitter's same-batch discovery admission; never identity, normalized-event, projection, or serving data. |
+| `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding or because they contradict themselves or their emitter's earlier logs, and for logs that preceded their emitter's same-batch discovery admission; never identity, normalized-event, projection, or serving data. |
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or [discovery edges](glossary.md#discovery-graph--discovery-edge). The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `child_registration_events` | Project | Historical membership of each name's [direct child registration](glossary.md#direct-child-registration) events, rebuildable from canonical interpreted input; name history selects rows through it and reads the events themselves from `normalized_events`. |
 | `project_family_marker`, `project_family_undo`, `project_repair_record` and [owned key family tables](glossary.md#per-block-publication) | Project | Permanent current serving state, publication generation, undo journal and repair progress. Readers compose names, records, control, permissions, resolver collections, reverse claims and address relations from one family snapshot. Child lists and counts use `project_child_edge_candidate`, `project_parent_subregistry` and `project_name_summary`; the `GET /v1/names` expiry walk reads `project_name_summary.authority_arm` to skip names an `authority` filter cannot list. An unavailable marker or overlapping redo refuses composed reads. Family data is rebuildable from canonical interpreted input; hash-pinned hydration overlays follow the documented replay policy. |
@@ -722,7 +722,7 @@ Family indexes serve these concrete readers:
   `project_registry_binding_observation` primary key and
   `project_binding_candidate_resource_idx`.
 - The [ENSv2 registry entry](projections.md#ensv2-registry-entries) tables carry the indexes
-  the registry operator read will use and no reader uses yet:
+  the registry operator read will use, two of which no reader uses yet:
   `project_ens_v2_entry_owner_owner_idx` `(chain_id, owner, registry, entry_key)` over rows
   with an owner, from an approval's owner to the entries it owns in the approving registry;
   `project_ens_v2_entry_owner_resource_idx` `(chain_id, resource_id)` over rows with a
@@ -730,6 +730,8 @@ Family indexes serve these concrete readers:
   `project_ens_v2_registry_parent_entry_idx` `(chain_id, parent, parent_entry_key)` over rows
   with a parent, from a parent entry to the registries that name it. Schema-migration
   `20261005140000_project_ens_v2_registry_entries.sql` adds the two tables and these indexes.
+  One of the three now has a reader: `project:families.resolution_paths.prepare` reads
+  `project_ens_v2_entry_owner_resource_idx` in its `slots` and `chains` steps, listed below.
 - The composed name reader's resource pointer lookup
   (`storage:families.name.resource_pointers`) can probe `project_resource_pointer_pkey` by
   resource and the partial `project_resource_pointer_root_node_idx` (ENSv2 root registry
@@ -753,6 +755,19 @@ Family indexes serve these concrete readers:
   family marker. No index is added.
 
 
+Three read-only indexes serve other API reads. The baselines and
+`20261028120000_serving_read_indexes.sql` install them, with `name_surfaces_name_prefix_idx`
+below. They change no row:
+
+| Index | Table and writer | Serves |
+| --- | --- | --- |
+| `chain_lineage_timestamp_idx` | `chain_lineage`, Ingest | the history timestamp window (`resolve_chain_block_ranges`): the first readable block at or after a `from_timestamp` bound and the last at or before a `to_timestamp` bound, one ordered probe for each |
+| `project_resource_pointer_namehash_resolver_idx` | `project_resource_pointer`, Project | the `resolves_to` candidates (`candidates.rs` under `crates/storage/src/families/records`): the resource pointers at an inverse-index row's node or name and resolver |
+| `project_registry_pointer_resource_idx` | `project_registry_pointer`, Project | `storage:families.records.names_reaching_resources`: the registry pointers on each candidate resource |
+
+The timestamp index has no canonicality column. The window statement filters each probed
+row's state, and readable blocks are almost every row of the table.
+
 Interpret writes `discovery_edges` and `contract_instance_addresses`. A phase
 that reads them may add read-only indexes through its own schema-migration, never
 changing a row, when it records each index here with the statement it serves.
@@ -767,13 +782,20 @@ The owned key families add six, named for their reader:
 | `project_families_discovery_edges_resolver_destination_idx` | `project:families.classification.activated`: whether an address that starts or stops at the block is any resolver edge's destination, deactivated edges included. `project:families.input.work_blocks`: the same test, one probe for each address that starts or stops in the requested range |
 | `project_families_discovery_edges_resolver_admission_idx` | `project:families.classification.classify`: one active resolver edge per active manifest to each touched resolver's contract instance |
 
-Interpret also writes `name_surfaces`. The API's name-ordered readers add one read-only
-index on it, installed by the identity baseline and its own schema-migration and changing no
-row:
+Interpret also writes `name_surfaces`. The API's name-ordered readers add two read-only
+indexes on it, installed by the identity baseline and their own schema-migrations and changing
+no row:
 
 | Index | Serves |
 | --- | --- |
 | `name_surfaces_name_order_idx` | `storage:families.name.search_candidates`: readable surfaces in name order after the keyset cursor |
+| `name_surfaces_name_prefix_idx` | `storage:families.name.search_candidates`, raw-name statement: the surfaces whose raw name has the searched prefix, as one range |
+
+`name_surfaces_name_prefix_idx` keys the raw name with the `text_pattern_ops` operator class,
+so a `LIKE` prefix becomes a range on it under any database collation. The name order index
+gives that range only under the C collation. The prefix index has the name order index's
+predicate, and the reader carries the same bounds. Its order is byte order, so the reader
+sorts the matched rows into name order.
 
 The same reader, `storage:families.records.reverse_candidates` and Project's raw-name sweep
 (`project:families.derived.summary_raw_name_sweep`) also read
@@ -793,7 +815,27 @@ Project's selection of the names under a changed ENSv2 path
 | Index | Serves |
 | --- | --- |
 | `name_surfaces_project_path_hash_idx` | `project:families.resolution_paths.prepare`, step `source_ancestors`: the ancestors of a touched name, one probe for each suffix of its label hash path |
-| `name_surfaces_project_entry_keys_idx` | `project:families.resolution_paths.prepare`, steps `candidates` and `affected`: the surfaces that hold a label of a changed ENSv2 entry, and the names under a changed path, found by its first label |
+| `name_surfaces_project_entry_keys_idx` | `project:families.resolution_paths.prepare`, steps `candidates` and `affected`: the surfaces that hold the key of an entry that points at a changed registry, one key per probe. The surfaces that hold a changed root registry entry's label, one key per probe. The surfaces that hold a changed ENSv2 entry's label and the key of an entry that points at its registry, two or three key hashes in one probe (the third from step `chains`). The names under a changed path, found by its first label |
+
+The same statement finds the entries that point at a registry changed in the
+publication or holding a changed entry, and the ENSv1→ENSv2 migration evidence
+of a touched name's ancestors, through
+four indexes that already exist. It adds none:
+
+| Index | Serves |
+| --- | --- |
+| `normalized_events_v2_key_probe_idx` | `project:families.resolution_paths.prepare`, step `slots`: the `SubregistryChanged` events that name a changed registry or the registry of a changed entry, one probe for each registry. Step `chains`: the same events for each registry above, when a changed entry has the key of an entry that points at its registry, one probe for each registry it climbs to |
+| `project_ens_v2_entry_owner_resource_idx` | the same step: the entry of each such event's resource |
+| `normalized_events_resource_history_idx` | the same step: the events of that resource, for an entry row that holds no resource yet and is tied to its pointer by the event that last wrote it. The `reached` step reads each entry's latest pointer through the same index |
+| `normalized_events_name_history_idx` | `project:families.resolution_paths.prepare`, step `changed_registries`: the `MigrationApplied` events of each ancestor of a touched name |
+
+`normalized_events_v2_key_probe_idx` is an index of Interpret's lookahead loader
+(see [walk index set](#walk-index-set)). The `slots` and `chains` steps repeat
+the index's array expression and its two predicates, so a change to that index
+must change the steps with it. The plan tests
+`the_registry_route_probes_read_their_indexes` and
+`the_changed_entry_probes_read_their_indexes` fail when a step stops reading
+the index.
 
 - `name_surfaces_project_path_hash_idx` is a btree on
   `(namespace, hash_array_extended(labelhashes, 0))`.
@@ -1207,15 +1249,51 @@ ignore, so replaying or redoing the same log under one interpreter build does
 not duplicate the diagnostic. The rows remain append-only across canonicality
 changes and derived-state rebuilds; they are not replay input.
 
+The table also records a well-formed log from an undeclared emitter that
+decodes cleanly but contradicts itself or the emitter's own earlier logs.
+Any contract can emit the ENSv2 registry event signatures, and Interpret admits
+an emitter that announces itself with `RegistryCreated()` as a registry
+([manifests.md](manifests.md#discovery-admission)). Five checks make such a
+log inconsistent. Each is named in the row's `decode_context`, which reads
+`inconsistent <check>: <reason>`:
+
+- `label_hash_mismatch`: a `LabelRegistered` or `LabelReserved` whose `label`
+  does not hash to its `labelHash`.
+- `transfer_batch_length_mismatch`: a `TransferBatch` whose `ids` and `values`
+  differ in length.
+- `token_resource_conflict`: a `TokenResource` that links a token to a
+  different resource from the one the token already holds, whether an earlier
+  `TokenResource` linked it or a `LabelReserved` assigned it.
+- `token_resource_ambiguous`: an `EACRolesChanged` for a resource that the
+  emitter's earlier logs linked to two different tokens.
+  Every later role change on that resource from that emitter is skipped too.
+- `token_regenerated_without_predecessor`: a `TokenRegenerated` whose
+  `oldTokenId` names a token the emitter holds no earlier state for, or one
+  since released, regenerated away, or displaced by a later registration or
+  reservation of its label. Earlier state is a registration, reservation or
+  `TokenResource` link of the token, a `SubregistryUpdated` or
+  `ResolverUpdated` for it, or an earlier `TokenRegenerated` to it.
+
+The decision reads only the log and the state the emitter's earlier logs left,
+so a redo reproduces it. Interpret treats the log as absent: the batch's other
+logs, including earlier and later logs of the same transaction, are interpreted
+exactly as they would be without it. The same log from a manifest-declared
+emitter is fatal, and every other interpretation error stays fatal for every
+emitter. A committed batch also logs one warning for each such row and counts
+it in `phase_runner_interpret_inconsistent_log_skips_total`
+([pipeline monitoring](runbooks/pipeline-monitoring.md#interpret-inconsistent-log-skips)).
+The table's column comments still describe only malformed logs.
+
 The same table also records a well-formed log that Interpret could not select
 because its emitter was admitted by discovery only in a later block of the
 same batch: discovery is forward-only from the admitting observation, so the
 earlier log stays uninterpreted. Such a row carries the source family the
 emitter interprets under, the log's `topic0` as its selection signature,
 `match_all = false`, and a `decode_context` naming the admitting block. A log
-from the admitting block itself is interpreted by the same-block second pass
+from the admitting block itself is interpreted in log order in a later pass of the block
 ([manifests.md](manifests.md#resolver-admission-by-implementation-announcement))
-and produces no row.
+and produces no pre-admission row. It can still produce a malformed-log or
+inconsistent-log row.
 
 For a manifest-declared address, an omitted `start_block` is initially stored
 as `contract_instance_addresses.active_from_block_number = NULL`; interval
@@ -1819,6 +1897,16 @@ or multiple eligible predecessors remain integrity errors in the writer.
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
+
+A lease that bigname first learns of from a legacy-controller `NameRenewed`, with
+no registration observed, records the zero address as its holder until a
+BaseRegistrar transfer names one. For such a lease the proof does not compare the sender of the
+holder-to-controller transfer with the recorded holder, since the controller
+takes the token from whoever holds it. Every other clause above still applies,
+so a transfer of that lease to anyone but the controller is not reconciled.
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L121 @ ens_v2@a971bd64)
+Each unwrapped boundary that derives without the proof logs a warning naming
+the clause that refused it, with the chain, block, transaction and name.
 
 For the `.eth` second-level names covered by slice 2A, zero matching ENSv1
 predecessors and multiple matching ENSv1 predecessors are both integrity
@@ -3016,7 +3104,7 @@ The 17 kept indexes and the statements that read them:
 | `normalized_events_chain_block_number_idx`, `normalized_events_chain_block_number_desc_idx` | the redo-range clear and preparation, the full-state restore, the loader-choice family probe and the due-names block-before-batch read; either twin serves each |
 | `normalized_events_projection_idx` | the manifest sync's retained admission history (`retained_admission_manifests` in `crates/manifests/src/schema_v2_persistence.rs`), which reads every `SourceManifestUpdated` row by kind |
 | `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |
-| `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows |
+| `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows. Project also reads `normalized_events_v2_key_probe_idx`, in the `slots` and `chains` steps of `project:families.resolution_paths.prepare` ([table ownership](#table-ownership)) |
 
 The other 33 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
 these: `normalized_events_history_account_owner_idx`,

@@ -170,8 +170,9 @@ impl OracleFixture {
 /// - `early.eth` and `late.eth` expire before and after it, `kid.late.eth` and `kid.tie00.eth`
 ///   are one label below listed names;
 /// - `big.eth` expires at 2^63 and `max.eth` at the largest uint64, past every bigint;
-/// - `orphan.eth` is unsupported yet keeps a finite expiry in the tie second, and
-///   `ownerless.eth` serves no registration; neither is listed;
+/// - `orphan.eth` is unsupported yet keeps a finite expiry in the tie second and is not listed;
+/// - `ownerless.eth` has a cleared registry record over a live lease, which the record does not
+///   end, so it serves the lease and is listed in the tie second with no `authority`;
 /// - `lapsed.eth` was released at 230 and keeps its 2020 expiry.
 async fn seed_expiry_oracle_fixture(database: &TestDatabase) -> Result<OracleFixture> {
     seed_bounded_membership_blocks(database, 240).await?;
@@ -334,7 +335,7 @@ async fn v2_names_expiry_oracle_fixture_lists_each_shape() -> Result<()> {
     let ties = (0..ORACLE_TIE_NAMES).map(|index| format!("tie{index:02}.eth"));
     let mut expected = vec!["lapsed.eth".to_owned(), "early.eth".to_owned()];
     let mut tie_second: Vec<String> = ties
-        .chain(["kid.late.eth".to_owned()])
+        .chain(["kid.late.eth".to_owned(), "ownerless.eth".to_owned()])
         .collect();
     tie_second.sort();
     expected.extend(tie_second);
@@ -342,7 +343,7 @@ async fn v2_names_expiry_oracle_fixture_lists_each_shape() -> Result<()> {
         ["frac-a.eth", "frac-b.eth", "kid.tie00.eth", "late.eth", "big.eth", "max.eth"]
             .map(str::to_owned),
     );
-    assert_eq!(all, expected, "orphan.eth and ownerless.eth are never listed");
+    assert_eq!(all, expected, "orphan.eth is never listed");
     for (authority, names) in [
         ("ens_v0", vec!["early.eth", "tie01.eth", "tie04.eth"]),
         ("ens_v2", vec!["kid.late.eth", "tie00.eth", "tie03.eth"]),

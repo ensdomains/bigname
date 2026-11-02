@@ -600,3 +600,61 @@ async fn failed_text_hydration_retracts_the_previous_head_value() -> Result<()> 
 async fn text_hydration_rpc_failure_serves_no_value_for_the_new_write() -> Result<()> {
     text_failure(FAILED_MULTICALL_BATCH).await
 }
+
+// Publication lag, row 9: with block 2 loaded and a lag of one, block 1 is the readable head, so
+// Project hydrates there and pins its read to block 1's hash, never to the newest loaded block.
+#[tokio::test]
+async fn lagged_publication_hydrates_at_the_readable_head() -> Result<()> {
+    let db = setup("live_family_reverse_lagged", 2).await?;
+    seed_reverse(db.pool(), ADDRESS).await?;
+    let rpc = HydrationRpc::spawn(BTreeMap::from([
+        (block_hash(1, 1), "alice.eth".into()),
+        (block_hash(1, 2), "bob.eth".into()),
+    ]))
+    .await?;
+    let genesis = BlockMarker::new(0, block_hash(1, 0))?;
+    publish_lagged_heads(
+        db.pool(),
+        ETHEREUM,
+        &HeadMarkers {
+            latest: BlockMarker::new(2, block_hash(1, 2))?,
+            safe: Some(genesis.clone()),
+            finalized: Some(genesis),
+        },
+        1,
+    )
+    .await?;
+    let head: (i64, String) = sqlx::query_as(
+        "SELECT latest_block_number, latest_block_hash FROM chain_heads WHERE chain_id = $1",
+    )
+    .bind(ETHEREUM)
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(head, (1, block_hash(1, 1)));
+    project(db.pool(), Some(urls(&rpc.endpoint)?), 1, 1, false).await?;
+    assert_primary(
+        db.pool(),
+        ADDRESS,
+        "success",
+        Some("alice.eth"),
+        Some(&block_hash(1, 1)),
+    )
+    .await?;
+    let attempt: (Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT attempt_block, attempt_hash FROM project_reverse_tuple WHERE address = $1",
+    )
+    .bind(ADDRESS)
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(attempt, (Some(1), Some(block_hash(1, 1))));
+    let newest: String = sqlx::query_scalar(
+        "SELECT canonicality_state::text FROM chain_lineage
+         WHERE chain_id = $1 AND block_number = 2",
+    )
+    .bind(ETHEREUM)
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(newest, "observed");
+    rpc.server.abort();
+    db.cleanup().await
+}

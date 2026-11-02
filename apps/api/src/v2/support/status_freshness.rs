@@ -10,6 +10,7 @@ pub(crate) const DEFAULT_PROVIDER_TIMEOUT_MS: u64 = 750;
 pub(crate) const DEFAULT_PROVIDER_REFRESH_SECS: u64 = 5;
 pub(crate) const DEFAULT_PROVIDER_CACHE_TTL_SECS: u64 = 30;
 pub(crate) const DEFAULT_MAX_BLOCK_LAG: i64 = 30;
+/// The runner's `MAX_LIVE_PUBLICATION_LAG_BLOCKS` is sized to stay under this on 12-second blocks.
 pub(crate) const DEFAULT_MAX_LAG_SECS: i64 = 60;
 
 #[derive(Clone, Debug)]

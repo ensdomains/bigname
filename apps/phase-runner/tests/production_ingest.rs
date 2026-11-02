@@ -5684,3 +5684,71 @@ fn receipt() -> Value {
         "logsBloom": "0x"
     })
 }
+
+/// The loopback Live phase, lagging its publications by two blocks.
+struct LaggingLivePhase;
+
+impl Phase for LaggingLivePhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Live
+    }
+
+    fn publication_lag_blocks(&self) -> u32 {
+        2
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move { LoopbackPhase::new(PhaseName::Live).run_batch(context).await })
+    }
+}
+
+// Live publication lag, row 13: Ingest publishes the top of its own batch, whatever lag Live
+// carries, because the Ingest handoff and cursor record that block.
+#[tokio::test]
+async fn ingest_publishes_its_batch_top_when_live_lags_its_publication() -> Result<()> {
+    let scratch = ScratchDatabase::create("ingest_unlagged_beside_lagged_live").await?;
+    let chain_id = "ethereum-mainnet";
+    seed_watch_set(scratch.pool(), chain_id).await?;
+    let (endpoint, server) = spawn_rpc(true, false).await?;
+    let chain = ChainConfig::new(
+        chain_id,
+        vec![SourceConfig::new(
+            chain_id,
+            "rpc",
+            "drpc",
+            SeedBasis::EthereumHead,
+            0,
+            endpoint,
+        )?],
+        false,
+    )?;
+    let database = scratch.runner();
+    let phases = PhaseSet::new([
+        Arc::new(IngestPhase::new(database.pool().clone())) as Arc<dyn Phase>,
+        Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(LoopbackPhase::new(PhaseName::Verify)),
+        Arc::new(LaggingLivePhase),
+    ])?;
+    let runner = PhaseRunner::new(
+        database,
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "ingest-beside-lagged-live",
+        TimingConfig {
+            initial_backoff: Duration::from_millis(1),
+            maximum_backoff: Duration::from_millis(4),
+            live_poll_interval: Duration::from_millis(1),
+        },
+    )?;
+    run_until_ingest_handoff(runner, chain, scratch.pool(), BLOCK_1).await?;
+    server.abort();
+    let head: (i64, String) = sqlx::query_as(
+        "SELECT latest_block_number, latest_block_hash FROM chain_heads WHERE chain_id = $1",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(head, (1, BLOCK_1.to_owned()));
+    scratch.cleanup().await
+}

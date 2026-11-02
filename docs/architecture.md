@@ -677,6 +677,32 @@ declaration, the safe serving result remains explicit `unsupported`; this
 precedence restores availability and completeness rather than correcting
 previously served values.
 
+Below rank 0, ENSv1 evidence keeps an address in the ENSv1 family. Either
+protocol's registry can point a name at any address
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L95 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registry/PermissionedRegistry.sol:L156-L161 @ ens_v2_mainnet_20261002@b1f97b91),
+so a pointer says nothing about the address's record model. When an address
+has an `ens_v1_resolver_l1` candidate of any source (a pointer, an observed
+event or an edge), its `ens_v2_resolver_l1` candidates rank after every other
+candidate, unless an ENSv2 declaration names the address or it has an
+`Upgraded` of the `ens_v2_resolver_l1` family. Any such `Upgraded` counts,
+whichever implementation the latest one names: an upgrade to an implementation
+the manifest does not declare stays ENSv2 with
+`resolver_implementation_not_declared`. A
+[creation self-edge](glossary.md#resolver-creation-capture) is not such
+evidence. ENSv1 evidence and `Upgraded` observations only accumulate, so a
+pointer that comes and goes, or an upgrade between declared and undeclared
+implementations, never moves an address between families. An
+address that both protocols name and that neither a declaration nor such an
+`Upgraded` identifies is therefore unsupported as an undeclared ENSv1
+resolver.
+
+An ENSv2 declaration also takes rank 0 from any candidate whose family's active
+manifest is in the declaration's namespace, not only from a resolver edge. An
+ENSv1 pointer proves that a name in the namespace uses the address as well as an
+ENSv2 one does, so the declaration holds while the edges to the address open
+and close.
+
 [Watch-plan](glossary.md) expansion includes manifest-declared instances, registry-announcement admissions, resolver admissions, and proxy/implementation targets. Announcement admission is forward-only from the observed event; bootstrap can discover earlier announcements only back to the configured ingest coverage start and therefore assumes that coverage reaches the deployment. A `subregistry` edge changes parent-child topology only; it never admits the child emitter. Match-all signature scopes are manifest event subscriptions rather than address rows.
 
 ## Intake architecture

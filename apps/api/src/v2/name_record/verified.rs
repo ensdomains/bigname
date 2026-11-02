@@ -14,12 +14,13 @@ use super::super::{
     SnapshotReadResource, Source, Status, V2Result, default_requested_records,
     name_records::{
         RecordAnswer, RecordSelection, VERIFIED_NOT_SUPPORTED_REASON, build_verified_name_records,
-        ensure_default_record_limit, load_verified_record_lookup_for_resource, verified_discovery,
+        ensure_default_record_limit, load_verified_record_lookup_for_resource,
     },
 };
 use super::{NameRecord, build_name_record, row_has_current_registration, string_field};
 use crate::v2::record_groups::RecordGroups;
 
+/// `lookup_discovery` is the served name's `ServedName::lookup_discovery`.
 pub(super) async fn build_name_record_for_source(
     state: &AppState,
     row: &NameCurrentRow,
@@ -27,7 +28,7 @@ pub(super) async fn build_name_record_for_source(
     chain_id: Option<u64>,
     selected_snapshot: &mut SelectedSnapshot,
     source: Source,
-    alias: Option<&AliasPath>,
+    (alias, lookup_discovery): (Option<&AliasPath>, bool),
 ) -> V2Result<NameRecord> {
     if let Some(record) = unsupported_name_record(row)? {
         return Ok(record);
@@ -42,6 +43,7 @@ pub(super) async fn build_name_record_for_source(
                 chain_id,
                 selected_snapshot,
                 alias,
+                lookup_discovery,
             )
             .await
         }
@@ -108,6 +110,7 @@ async fn build_verified_name_record(
     chain_id: Option<u64>,
     selected_snapshot: &mut SelectedSnapshot,
     alias: Option<&AliasPath>,
+    lookup_discovery: bool,
 ) -> V2Result<NameRecord> {
     // Mirror build_name_record's serving guard before deriving requested records: only a
     // current registration or classified ownerless registry read path may steer lookup.
@@ -134,7 +137,7 @@ async fn build_verified_name_record(
         record_inventory,
         RecordSelection::requested(&requested_records),
         verified_lookup,
-        verified_discovery(row, alias),
+        lookup_discovery,
         false,
         false,
     )?;

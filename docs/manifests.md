@@ -354,8 +354,9 @@ ABI entries use Alloy-parseable human-readable Solidity fragments, not handwritt
   that adding the event stamps, and the first-effect scan of that change. The
   scan can bound the Interpret and Project redo only where the runner bounds
   them ([Manifest-authority marker](deployment.md#manifest-authority-marker)),
-  which it never does for a change to an ENSv2 root, registry or migration
-  manifest. Adding or editing an event block also rotates the
+  which it never does for a change to an ENSv2 root or registry manifest, or
+  for an event block change of the ENSv2 migration manifest. Adding or editing
+  an event block also rotates the
   [interpreter content hash](glossary.md#interpreter-content-hash), so the
   Interpret and Project redo that follow run over the full range. Runtime
   intake and Interpret keep each emitter's own active range, and intake still
@@ -469,7 +470,7 @@ The ENS primary-name route does not introduce a second manifest capability. `ens
 
 `ens_v1_registry_l1` owns the current ENS registry at `0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E` with `start_block = 9380380`,[^subgraph-l15] plus `ENSRegistryOld` at `0x314159265dd8dbb310642f98f50c066173c1259b` with `start_block = 3327417` as old-registry [fallback-handoff](glossary.md#registry-fallback-handoff) input.[^subgraph-l39][^subgraph-l44] Old-registry logs do not union with current logs by latest block: a current-registry `NewOwner` or `Transfer` establishes the node's current-registry record; later old-registry `NewOwner`, `Transfer`, `NewTTL`, and non-root `NewResolver` updates for that node are suppressed.[^subgraph-ts-l134][^subgraph-ts-l230][^subgraph-ts-l238][^subgraph-ts-l246] Either ownership event creates the first current-registry record and ends a resolver pointer selected from the old registry because `ENSRegistryWithFallback.resolver` delegates only while that record does not exist. Resolver selections already made in the current registry survive later owner reassignments, including an old-registry `Transfer`. (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L54 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L172 @ ens_v1@91c966f) Root-resolver updates from the old registry are the one frozen exception.[^v1-ensregfb-l40]
 
-`ens_v1_registrar_l1` owns `.eth` BaseRegistrar at `start_block = 9380410`[^subgraph-l122] plus the legacy, wrapped, and current ETHRegistrarController contracts as label-bearing intake (LegacyEthRegistrarController `9380471`,[^subgraph-l145] WrappedETHRegistrarController `16925618`,[^v1-wrapethrc-l640] current ETHRegistrarController `22764821`).[^v1-ethrc-l706] Controllers do not split into a separate source-family owner. This admitted controller set is the whole of ordinary `.eth` registration and expiry intake: the BaseRegistrar's own `NameRegistered` and `NameRenewed` are decoded but derive no registration or expiry fact, even though it is the registrar that declares those events (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L15 @ ens_v1@91c966f) and writes `expiries[]` (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L142 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L166 @ ens_v1@91c966f). Controller-sourced events are what carry the human-readable label, so admission is what binds a registration to a name rather than a token id. The operational cost is that a rotation is silent: until a newly authorized controller is admitted here, registrations through it yield no label, registration, or expiry fact for this family, and renewals through it leave a stale expiry that can later settle a spurious `RegistrationReleased`. Adding or rotating a Mainnet controller is therefore a manifest change, not a no-op. The full divergence is recorded in [`upstream.md`](upstream.md#known-divergences). The wrapped controller's `NameRenewed` additionally derives a wrapper-resource expiry observation under this family because its renewal calls `NameWrapper.renew`, which stores registrar expiry plus grace without emitting `ExpiryExtended`. (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L333 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L337 @ ens_v1@91c966f)
+`ens_v1_registrar_l1` owns `.eth` BaseRegistrar at `start_block = 9380410`[^subgraph-l122] plus the legacy, wrapped, and current ETHRegistrarController contracts as label-bearing intake (LegacyEthRegistrarController `9380471`,[^subgraph-l145] WrappedETHRegistrarController `16925618`,[^v1-wrapethrc-l640] current ETHRegistrarController `22764821`).[^v1-ethrc-l706] Controllers do not split into a separate source-family owner. This admitted controller set is the whole of ordinary `.eth` registration and expiry intake: the BaseRegistrar's own `NameRegistered` and `NameRenewed` are decoded but derive no registration or expiry fact, even though it is the registrar that declares those events (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L15 @ ens_v1@91c966f) and writes `expiries[]` (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L142 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L166 @ ens_v1@91c966f). Controller-sourced events are what carry the human-readable label, so admission is what binds a registration to a name rather than a token id. The operational cost is that a rotation is silent: until a newly authorized controller is admitted here, registrations through it yield no label, registration, or expiry fact for this family, and renewals through it leave a stale expiry that can later settle a spurious `RegistrationReleased`. Adding or rotating a Mainnet controller is therefore a manifest change, not a no-op. The January 2020 registrar migration registered names through the BaseRegistrar alone, so those names have no grant. Project composes a migrated name that was renewed since on its [implied lease](glossary.md#implied-lease). The full divergence is recorded in [`upstream.md`](upstream.md#known-divergences). The wrapped controller's `NameRenewed` additionally derives a wrapper-resource expiry observation under this family because its renewal calls `NameWrapper.renew`, which stores registrar expiry plus grace without emitting `ExpiryExtended`. (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L333 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L337 @ ens_v1@91c966f)
 
 `ens_v1_wrapper_l1` owns NameWrapper at `0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401` with `start_block = 16925608`,[^v1-namewrapper-deploy] for wrapper authority, direct fuse/expiry observations, wrapper-revealed names, and wrapper-driven registry changes.[^v1-iname-l27][^v1-iname-l35][^v1-iname-l37][^v1-iname-l38]
 
@@ -823,7 +824,8 @@ fallback's mirror from the `ensv1_mirror_resolver` contract of the active
 [deployment epoch](glossary.md#deployment-epoch) of the chain. A path that reaches the
 fallback with no such declaration, or with two, is unknown. Project's resolution path
 selection treats a classification change of any mirror a chain's ENSv2 resolver manifest
-declares as a change of every `.eth` name. The mainnet deployment's mirror is
+declares as a change of every `.eth` name, when the mirror is supported before or after the
+change. The mainnet deployment's mirror is
 `0x394d8eb4a4fdf599384deab25f31d111d755c398`, and it applies once a mainnet manifest declares
 it. (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ENSV1Resolver.json:L2 @ ens_v2_mainnet_20261002@b1f97b91)
 
@@ -1436,7 +1438,11 @@ catalog. A malformed event log from an address declared in an active
 of event selection scope. A malformed event log from an undeclared address is
 skipped and recorded as an operator diagnostic whether that address was
 admitted through discovery or the event was selected across every emitting
-address. All other interpretation error classes keep their fatal posture. This
+address. A well-formed ENSv2 registry log from an undeclared address that
+contradicts itself or that address's own earlier logs is skipped and recorded
+the same way, one log at a time. The same log from a declared address is
+fatal. [Table ownership](storage.md#table-ownership) lists the five checks.
+All other interpretation error classes keep their fatal posture. This
 decision uses only the catalog's declaration record for the emitting address,
 never an address or role claimed by the log itself. Missing or extra topics are
 malformed ABI input under this rule. ENSv2 `setSubregistry` stores the registry pointer and
@@ -2050,8 +2056,12 @@ of a removed or narrowed discovery rule and a retired declaration are read from
 their old start. A move across namespaces retires one manifest and adds
 another, and is bounded the same way. Retiring a family that matches every
 emitter costs the full pair. A change to the ENSv2
-root, registry or migration family gains nothing from the timing, because
-stored rows of every name read it, so its redo stays the full range.
+root or registry family gains nothing from the timing, because stored rows of
+every name read it, so its redo stays the full range. An `ens_v2_migration_l1`
+change that only adds an address or moves a role to another address is bounded
+from the lowest start on either side. Every other change of that family keeps
+the full range ([manifest-authority
+marker](deployment.md#manifest-authority-marker)).
 
 The legacy resolver-profile authority journal, input queue, and reconciliation tables remain only in immutable migration history. Their Rust APIs and consumers have been deleted. Current manifests and schema-v2 discovery edges are the admission truth; legacy rows do not gate synchronization or interpretation.
 
@@ -2126,22 +2136,56 @@ instance (the same instance the log's `proxy_implementation` edge names),
 because only registry announcements and `ResolverCreated` observations may produce self-edges. The
 announcement edge never closes: a later registry pointer to another resolver
 closes only the pointer edge. A registry-pointer edge is binding history only
-and admits nothing. A resolver that announces nothing (no `ResolverCreated()`,
+and admits nothing for capture. Project still reads it when it classifies the
+address: it admits a same-namespace declaration at rank 0, and it proposes its
+family at rank 1 only for an address without ENSv1 evidence
+([architecture.md § Discovery graph](architecture.md#discovery-graph)). A resolver that announces nothing (no `ResolverCreated()`,
 and no `Upgraded` or `ProxyDeployed` naming a declared implementation) is not
 admitted, so none of its events are read, including any record events it
 emitted before or after a registry pointed a name at it. This is expected
 behaviour, not a gap to repair. Names that point at such a resolver still show
-it, and it stays `unsupported` with `resolver_implementation_unknown`
+it, and it stays `unsupported` with `resolver_implementation_unknown`, or with
+`resolver_not_declared` when an ENSv1 name points at it too
 ([projections.md](projections.md#resolver-and-records)).
 
 Same-block admission: when a discovery observation admits an address at block
 `B`, Interpret also interprets that address's earlier logs in block `B` (lower
-log index) in a second pass after the block's remaining logs, then restores
-chain order for the block's normalized events so stream-chained before-states
-follow log order. The result is a pure function of the block's raw logs. A log
-whose emitter is admitted only in a later block of the same batch stays
-uninterpreted — no lookback — and is recorded as an operator diagnostic in
-`interpret_decode_skips` ([storage.md](storage.md#table-ownership)).
+log index). It does so by interpreting the block again:
+
+| Pass | What Interpret does |
+| --- | --- |
+| First | Interprets the block's logs in log order with the admissions it holds. A log whose emitter is not admitted yet stays uninterpreted. |
+| Next | If the previous pass admitted a new entry, discards that pass and interprets the whole block again from its first log, in log order, with every admission so far. |
+| Last | The first pass that admits no new entry. Its output is the block's output. |
+
+A pass counts as admitting only an entry the catalog neither holds nor admitted
+earlier in the block. So every pass but the last admits a distinct entry, and a block takes
+at most one pass more than the distinct entries its logs admit. A discarded pass
+leaves only its admissions behind: every entry it retired is put back, so the
+next pass starts from the block's starting admissions plus every entry admitted
+in the block, and a retirement takes effect only at its log in the last pass.
+In a rerun's earlier logs, more than one entry can be live for one address: a
+restored entry and the entry that replaced it, or, after repeated discards,
+equal copies of one entry. Selection reads them as one when they share
+instance, manifest and role. If they ever differ and both read a log,
+selection stops the batch instead of dropping the log. Each deployment today
+declares one authority manifest. Each admission
+is made by a log that is selected without an earlier admission from its block:
+a `RegistryCreated` or `ResolverCreated` announcement, an `Upgraded` naming a
+declared implementation, or a declared factory's `ProxyDeployed`. With the
+current adapters the first pass finds them all, so every block that admits a
+catalog entry not already live is interpreted twice and every other block once.
+
+An emitter announced in block `B` therefore has every log in `B` interpreted
+in Ethereum order, as if it had been admitted at the block's start, and a later
+log of any emitter reads the state those logs leave. The result is a pure
+function of the block's raw logs. A log whose emitter is never admitted in the
+block, or whose selection is refused, stays uninterpreted. A log whose emitter
+is admitted only in a later block of the same batch stays uninterpreted — no
+lookback — and is recorded as an operator diagnostic in
+`interpret_decode_skips` ([storage.md](storage.md#table-ownership)). An
+earlier same-block log skipped as malformed or inconsistent is recorded once,
+as that skip.
 
 The project support rule for `ens_v2_resolver_l1` is unchanged in shape: an
 exact `public_resolver_v2` declaration is supported directly; otherwise the

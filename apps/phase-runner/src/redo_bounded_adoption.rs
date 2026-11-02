@@ -2,9 +2,9 @@
 //! bounded to the manifest change's first effect where that is sound (docs/deployment.md §
 //! Manifest-authority marker). The change is read as a diff: the manifest set the owned key
 //! families were last published with (the family marker's set key) against the latest
-//! SourceManifestUpdated event of every manifest now. The bounded redo applies only when the
-//! families were published under this binary's interpreter content hash, and it never applies to
-//! a change of an ENSv2 manifest. Otherwise the redo is the full range, as before.
+//! SourceManifestUpdated event of every manifest now. It is bounded only when the families were
+//! published under this binary's interpreter content hash, never for an ENSv2 root or registry
+//! manifest, and for an ENSv2 migration manifest only when an address is added or moved.
 use std::collections::BTreeMap;
 
 use serde_json::Value;
@@ -13,6 +13,7 @@ use sqlx::{Postgres, Transaction};
 use crate::{
     error::{ErrorKind, RunnerError, RunnerResult},
     phase::{BlockRange, PhaseName, RunMode},
+    redo_bounded_adoption::migration::{MIGRATION_FAMILY, migration_change_qualifies},
     redo_first_effect::{FirstEffect, ManifestDiff, Side},
     redo_hash_adoption::{full_hash_range, require_full_hash_redo},
     redo_manifest_attestation::has_marker_prefix,
@@ -20,15 +21,14 @@ use crate::{
     transitions::PhaseStateRow,
 };
 
-/// Families whose stored rows are composed from the publication's manifest set by event, below
-/// any first effect (`crates/storage/src/families/control/permissions/registry_support.rs`), or
-/// read from the live manifest tables (`crates/storage/src/families/control/lifecycle/policy.rs`).
-/// A root change is also an admission change, whose sweep part 4 of TYR-356 makes resumable.
-const WHOLE_REDO_FAMILIES: [&str; 3] = [
-    "ens_v2_root_l1",
-    "ens_v2_registry_l1",
-    "ens_v2_migration_l1",
-];
+pub(crate) mod migration;
+
+/// Families whose stored rows read the declarations at the publication block, below any first
+/// effect (`crates/storage/src/families/control/permissions/registry_support.rs`,
+/// `Declarations::declared`), or from the live manifest tables
+/// (`crates/storage/src/families/control/lifecycle/policy.rs`). A root change is also an
+/// admission change, which composes every name again.
+const WHOLE_REDO_FAMILIES: [&str; 2] = ["ens_v2_root_l1", "ens_v2_registry_l1"];
 
 /// Payload fields Interpret classifies events against at every block, not from a declaration's
 /// start: the Universal Resolver implementations an `Upgraded` log is classified against
@@ -79,7 +79,8 @@ const CURRENT_SET: &str = "SELECT DISTINCT ON (event.source_manifest_id) {COLUMN
     ORDER BY event.source_manifest_id, event.normalized_event_id DESC";
 
 /// Decide the redo of chain `chain_id`'s marker on `phase` against the head `through`. Reads
-/// the family marker and the manifest events only: the first-effect scan runs separately.
+/// the family marker, the manifest events and, for a migration manifest change, the logs below
+/// each changed address's start: the first-effect scan runs separately.
 pub(crate) async fn plan(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -152,6 +153,7 @@ pub(crate) async fn plan(
         manifests.entry(row.0).or_default().1 = Some(row);
     }
     let mut diff = ManifestDiff::default();
+    let mut migrated = Vec::new();
     for (manifest_id, (before, after)) in manifests {
         let (old, new) = (side(before), side(after));
         if old.as_ref().map(|side| (side.rollout_status, side.payload))
@@ -184,6 +186,25 @@ pub(crate) async fn plan(
                 "manifest {manifest_id} changed `{field}`, which Interpret reads at every block"
             )));
         }
+        if before
+            .into_iter()
+            .chain(after)
+            .any(|row| row.4 == MIGRATION_FAMILY)
+        {
+            match migration_change_qualifies(old.as_ref(), new.as_ref()) {
+                Ok(changed) => migrated.extend(
+                    changed
+                        .into_iter()
+                        .map(|declaration| (manifest_id, declaration)),
+                ),
+                Err(reason) => {
+                    return Ok(Plan::Full(format!(
+                        "manifest {manifest_id} of family {MIGRATION_FAMILY} changed, and the \
+                         bounded redo covers only an address added or moved there: {reason}"
+                    )));
+                }
+            }
+        }
         // Base Project reads the Ethereum Mainnet `basenames_execution` manifest at every block,
         // so its change keeps the Project redo full. Base Interpret does not read it, so its redo
         // bounds to Base's own changes (docs/manifests.md § Discovery admission).
@@ -198,6 +219,11 @@ pub(crate) async fn plan(
             continue;
         }
         diff.add(old.as_ref(), new.as_ref());
+    }
+    if let Some(reason) =
+        migration::start_refusal(transaction, chain_id, &migrated, &current, through).await?
+    {
+        return Ok(Plan::Full(reason));
     }
     Ok(Plan::Bounded {
         diff,

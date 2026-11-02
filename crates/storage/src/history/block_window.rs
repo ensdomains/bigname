@@ -3,6 +3,38 @@ use sqlx::{PgConnection, types::time::OffsetDateTime};
 
 use super::ChainBlockRange;
 
+/// The first readable block at or after a timestamp, probed in
+/// `chain_lineage_timestamp_idx` order.
+const FIRST_AT_OR_AFTER_SQL: &str = r#"
+        SELECT block_number
+        FROM bigname_phase.chain_lineage
+        WHERE chain_id = $1
+          AND canonicality_state IN (
+              'canonical'::bigname_phase.canonicality_state,
+              'safe'::bigname_phase.canonicality_state,
+              'finalized'::bigname_phase.canonicality_state
+          )
+          AND block_timestamp >= $2
+        ORDER BY block_timestamp ASC, block_number ASC
+        LIMIT 1
+        "#;
+
+/// The last readable block at or before a timestamp, probed in
+/// `chain_lineage_timestamp_idx` order read backward.
+const LAST_AT_OR_BEFORE_SQL: &str = r#"
+        SELECT block_number
+        FROM bigname_phase.chain_lineage
+        WHERE chain_id = $1
+          AND canonicality_state IN (
+              'canonical'::bigname_phase.canonicality_state,
+              'safe'::bigname_phase.canonicality_state,
+              'finalized'::bigname_phase.canonicality_state
+          )
+          AND block_timestamp <= $2
+        ORDER BY block_timestamp DESC, block_number DESC
+        LIMIT 1
+        "#;
+
 /// Resolve an inclusive timestamp window to per-chain inclusive block ranges
 /// using readable `chain_lineage` rows only; no RPC is involved.
 ///
@@ -58,26 +90,14 @@ async fn first_readable_block_at_or_after(
     let Some(parameter) = microsecond_bound(at, true) else {
         return Ok(None);
     };
-    sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT block_number
-        FROM bigname_phase.chain_lineage
-        WHERE chain_id = $1
-          AND canonicality_state IN (
-              'canonical'::bigname_phase.canonicality_state,
-              'safe'::bigname_phase.canonicality_state,
-              'finalized'::bigname_phase.canonicality_state
-          )
-          AND block_timestamp >= $2
-        ORDER BY block_timestamp ASC, block_number ASC
-        LIMIT 1
-        "#,
-    )
-    .bind(chain_id)
-    .bind(parameter)
-    .fetch_optional(connection)
-    .await
-    .with_context(|| format!("failed to resolve the first block at or after {at} on {chain_id}"))
+    sqlx::query_scalar::<_, i64>(FIRST_AT_OR_AFTER_SQL)
+        .bind(chain_id)
+        .bind(parameter)
+        .fetch_optional(connection)
+        .await
+        .with_context(|| {
+            format!("failed to resolve the first block at or after {at} on {chain_id}")
+        })
 }
 
 async fn last_readable_block_at_or_before(
@@ -88,26 +108,14 @@ async fn last_readable_block_at_or_before(
     let Some(parameter) = microsecond_bound(at, false) else {
         return Ok(None);
     };
-    sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT block_number
-        FROM bigname_phase.chain_lineage
-        WHERE chain_id = $1
-          AND canonicality_state IN (
-              'canonical'::bigname_phase.canonicality_state,
-              'safe'::bigname_phase.canonicality_state,
-              'finalized'::bigname_phase.canonicality_state
-          )
-          AND block_timestamp <= $2
-        ORDER BY block_timestamp DESC, block_number DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(chain_id)
-    .bind(parameter)
-    .fetch_optional(connection)
-    .await
-    .with_context(|| format!("failed to resolve the last block at or before {at} on {chain_id}"))
+    sqlx::query_scalar::<_, i64>(LAST_AT_OR_BEFORE_SQL)
+        .bind(chain_id)
+        .bind(parameter)
+        .fetch_optional(connection)
+        .await
+        .with_context(|| {
+            format!("failed to resolve the last block at or before {at} on {chain_id}")
+        })
 }
 
 // PostgreSQL stores microseconds, while accepted clock bounds retain nanoseconds. SQLx's
@@ -130,6 +138,10 @@ fn microsecond_bound(at: OffsetDateTime, round_up: bool) -> Option<OffsetDateTim
     };
     OffsetDateTime::from_unix_timestamp_nanos(rounded).ok()
 }
+
+#[cfg(test)]
+#[path = "block_window_plan_tests.rs"]
+mod plan_tests;
 
 #[cfg(test)]
 mod tests {

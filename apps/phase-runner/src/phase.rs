@@ -250,6 +250,12 @@ pub trait Phase: Send + Sync {
 
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_>;
 
+    /// How far below a batch's newest loaded block the runner publishes the readable head. Only
+    /// Live lags its publication; every other phase publishes what it reports.
+    fn publication_lag_blocks(&self) -> u32 {
+        0
+    }
+
     /// Work that follows a batch once its progress is recorded, in transactions of its own; Project
     /// applies the owned key families here, one family run per call, and Interpret refreshes the
     /// planner statistics of `normalized_events`. The runner calls again while

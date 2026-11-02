@@ -476,6 +476,14 @@ async fn rebuild_fixture_families(
     block: i64,
     hash: &str,
 ) -> Result<()> {
+    // A template-copied database has no statistics on these tables, and the rebuild's history
+    // edge discovery plans a nested full index scan without them.
+    sqlx::query(
+        "ANALYZE bigname_phase.normalized_events, bigname_phase.name_surfaces, \
+         bigname_phase.chain_lineage",
+    )
+    .execute(pool)
+    .await?;
     let token = bigname_project::families::input_token(pool, chain).await?;
     let outcome = bigname_project::families::apply(
         pool,

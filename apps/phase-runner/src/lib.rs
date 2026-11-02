@@ -61,6 +61,8 @@ mod verify_store;
 pub use bigname_content_hash::{INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH};
 pub use progress_monitor::RunnerPhaseProgress;
 #[doc(hidden)]
+pub use redo_bounded_adoption::migration::sender_statement;
+#[doc(hidden)]
 pub use redo_first_effect::first_effect_statements;
 #[doc(hidden)]
 pub use redo_stamp::{CREATE_STAMP, EXTEND_STAMP, REQUIRED_REDO_PREFIX};

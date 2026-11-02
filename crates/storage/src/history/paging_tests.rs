@@ -1419,3 +1419,6 @@ mod resolver_arm_equivalence_tests;
 
 #[path = "resolver_cost_tests.rs"]
 mod resolver_cost_tests;
+
+#[path = "resolver_lineage_plan_tests.rs"]
+mod resolver_lineage_plan_tests;

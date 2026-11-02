@@ -46,6 +46,8 @@ mod source;
 mod summary;
 mod token_ids;
 mod wrapped_registrar;
+#[cfg(test)]
+mod wrapped_registrar_plan_tests;
 
 use anyhow::{Context, Result};
 use serde_json::Value;

@@ -194,6 +194,33 @@ diagnose them on their own. Lowering the in-flight limit or batch size can
 help rate limits and load-related timeouts; it does nothing for a genuine
 reorg.
 
+## Interpret inconsistent-log skips
+
+`phase_runner_interpret_inconsistent_log_skips_total{chain,site}` counts the
+event logs committed Interpret batches skipped because the log, from an
+emitter no manifest declares, contradicts itself or the emitter's own earlier
+logs. `site` names the failed check, as listed under
+[table ownership](../storage.md#table-ownership): `label_hash_mismatch`,
+`transfer_batch_length_mismatch`, `token_resource_conflict`,
+`token_resource_ambiguous` or `token_regenerated_without_predecessor`. A
+retried batch or a redo counts its skips again, so compare the rate with the
+phase's mode. The counter has no dashboard panel or paging rule yet.
+
+Each skip also writes one `interpret_decode_skips` row and logs one warning,
+`skipped an inconsistent event log from an emitter no manifest declares`, with
+the chain, block, transaction, log index, emitter, source family and site.
+Interpret keeps going, and the skipped log changes no name. A rising rate from
+one emitter means that contract keeps emitting such logs. Read the rows by
+emitter with:
+
+```sql
+SELECT emitting_address, split_part(decode_context, ':', 1) AS check_name, count(*)
+FROM interpret_decode_skips
+WHERE decode_context LIKE 'inconsistent %'
+GROUP BY emitting_address, check_name
+ORDER BY count(*) DESC;
+```
+
 ## Served lag
 
 Two gauges measure how far the newest data the API could serve trails the
@@ -211,14 +238,18 @@ ops dashboards tracked in Linear TYR-34.
   `phase_runner_redo_in_progress` reports active repairs separately. The
   publication gauge is not expected to return to zero.
 - `phase_runner_served_lag_blocks{chain}` is the newest observed
-  execution-client head minus that publication block. It is the only one of
-  the two expected to return to zero. A non-zero value means the newest
-  publication is that many blocks behind the newest block the runner has seen.
-  Because the API stops serving a chain once its publication trails the stored
-  head by more than `BIGNAME_API_PUBLICATION_LAG_TOLERANCE_BLOCKS` (one block by
-  default), a value above that tolerance usually means readers are getting
-  stale-data errors, not old answers. The Project latency target
-  (Linear TYR-36) requires this gauge to return to zero every normal block.
+  execution-client head minus that publication block. A non-zero value means
+  the newest publication is that many blocks behind the newest block the runner
+  has seen. It includes the configured
+  [Live publication lag](../deployment.md#live-publication-lag) N, so at steady
+  state it reads N, and 0 when no lag is set. Read it against N, not against
+  the API's `BIGNAME_API_PUBLICATION_LAG_TOLERANCE_BLOCKS`. That tolerance
+  compares the publication with the stored head, and the stored head lags by N
+  too, so the API keeps serving while this gauge reads N. A value above N
+  means Project or the head itself is behind, and readers may get stale-data
+  errors once the publication trails the stored head by more than the
+  tolerance. The Project latency target (Linear TYR-36) requires this gauge to
+  return to N, or to zero without a lag, every normal block.
 
 `-1` on either gauge means unavailable, never healthy or caught up. The lag
 reads `-1` when either side is missing, and also when the observed head is below

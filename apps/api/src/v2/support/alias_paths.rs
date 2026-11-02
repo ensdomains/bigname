@@ -59,19 +59,51 @@ impl AliasPath {
 pub(crate) struct ServedName {
     pub(crate) row: NameCurrentRow,
     pub(crate) alias: Option<AliasPath>,
+    /// What the row serves through its ENSv1 registry pointer, decided on the same snapshot.
+    pub(crate) registry: RegistryRead,
+    /// Whether a verified read runs Universal Resolver discovery
+    /// (`name_records::verified_discovery`). The lookup engine reloads the composed row, not
+    /// `row` as the registry read left it, so this is decided on the composed row.
+    pub(crate) lookup_discovery: bool,
 }
 
 /// The requested name's row when it holds a current registration. Otherwise the requested
 /// path is walked: when it reaches a token whose canonical name is another, that name's row is
 /// served under the requested path, if it is still the token's own row. A path that reaches
 /// nothing serves what it served before, the row or `404 not_found`. Every read runs on
-/// `conn`'s one snapshot.
+/// `conn`'s one snapshot. An ENSv1 name serves the resolver its registry record holds
+/// (`serve_ens_v1_registry_resolver`).
 pub(crate) async fn load_served_name_for_selected_snapshot(
     conn: &mut PgConnection,
     namespace: &str,
     name: &str,
     selected_snapshot: &SelectedSnapshot,
 ) -> ApiResult<ServedName> {
+    let (mut row, alias) =
+        load_composed_served_name(&mut *conn, namespace, name, selected_snapshot).await?;
+    let lookup_discovery = crate::v2::name_records::verified_discovery(&row, alias.as_ref());
+    let registry = serve_ens_v1_registry_resolver(&mut *conn, &mut row)
+        .await
+        .map_err(|error| {
+            error!(service = "api", error = %error, "failed to read the ENSv1 registry resolver");
+            ApiError::internal_error(format!(
+                "failed to read the ENSv1 registry resolver of {namespace}/{name}"
+            ))
+        })?;
+    Ok(ServedName {
+        row,
+        alias,
+        registry,
+        lookup_discovery,
+    })
+}
+
+async fn load_composed_served_name(
+    conn: &mut PgConnection,
+    namespace: &str,
+    name: &str,
+    selected_snapshot: &SelectedSnapshot,
+) -> ApiResult<(NameCurrentRow, Option<AliasPath>)> {
     let stored =
         load_name_current_for_selected_snapshot(&mut *conn, namespace, name, selected_snapshot)
             .await;
@@ -80,7 +112,7 @@ pub(crate) async fn load_served_name_for_selected_snapshot(
         Err(error) => error.status == StatusCode::NOT_FOUND,
     };
     if !walks {
-        return stored.map(|row| ServedName { row, alias: None });
+        return stored.map(|row| (row, None));
     }
     let walk = bigname_storage::families::alias_path::resolve_alias_path(
         &mut *conn,
@@ -94,7 +126,7 @@ pub(crate) async fn load_served_name_for_selected_snapshot(
     #[cfg(test)]
     let _ = ALIAS_WALK_STATEMENTS.try_with(|count| count.set(count.get() + walk.statements));
     let Some(target) = walk.target else {
-        return stored.map(|row| ServedName { row, alias: None });
+        return stored.map(|row| (row, None));
     };
     let row = match load_name_current_for_snapshot(
         &mut *conn,
@@ -116,10 +148,7 @@ pub(crate) async fn load_served_name_for_selected_snapshot(
         }
     };
     let canonical_name = row.normalized_name.clone();
-    Ok(ServedName {
-        row,
-        alias: Some(AliasPath::new(name, canonical_name)),
-    })
+    Ok((row, Some(AliasPath::new(name, canonical_name))))
 }
 
 /// Whether `row` is the reached token's own row. A token's row is bound to its resource. A

@@ -34,6 +34,7 @@ mod query_parsing;
 mod record_json;
 mod record_keys;
 mod records;
+mod registry_read;
 mod resolution_lookup;
 mod resolution_verified;
 mod reverse_identity;
@@ -52,6 +53,7 @@ pub(crate) use query_parsing::*;
 pub(crate) use record_json::*;
 pub(crate) use record_keys::*;
 pub(crate) use records::*;
+pub(crate) use registry_read::*;
 pub(crate) use resolution_lookup::*;
 pub(crate) use resolution_verified::*;
 #[cfg(test)]

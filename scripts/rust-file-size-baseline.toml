@@ -12,7 +12,7 @@ wiring_files = ["lib.rs", "main.rs"]
 
 [[files]]
 path = "crates/adapters/src/schema_v2/protocol/v2_registry.rs"
-loc = 663
+loc = 661
 justification = "ENSv2 registry dispatch keeps raw registration and reservation admission adjacent to retained topology refresh while expiry lifecycle helpers live in the bounded sibling module."
 
 [[files]]
@@ -24,6 +24,11 @@ justification = "ENSv2 topology removal and rebound groups remain adjacent while
 path = "crates/manifests/src/schema_v2_persistence.rs"
 loc = 607
 justification = "Manifest state, address-epoch persistence, and derived-phase invalidation remain in one transaction boundary; PR #583 grew the file to 598 lines on main and this branch's nine-line no-effect notice crosses the threshold when rebased. Split on the next substantive touch."
+
+[[files]]
+path = "crates/project/src/families/resolution_paths/selection.rs"
+loc = 731
+justification = "One SQL statement selects the names a publication recomposes. Its steps read each other's CTEs, so the changed-entry slot lookup, its upward key search and the candidate probes stay in the statement they feed. Most of the file is the statement's text and the comments that say why each probe is exact."
 
 [[files]]
 path = "tools/benchmark-gate/src/api_load.rs"
@@ -46,11 +51,6 @@ path = "tools/benchmark-gate/src/database.rs"
 loc = 1046
 justification = "Read-only and disposable-copy connection preflights, per-connection instance pinning, marker authorization, and their database-backed safety tests remain co-located for one reviewable connection boundary."
 review_justification = "Reviewed as non-serving release tooling: the file is below the 1200 LOC ceiling and most of its length is focused refusal-path coverage for the two connection modes rather than additional production responsibilities."
-
-[[files]]
-path = "apps/phase-runner/src/heads.rs"
-loc = 616
-justification = "Head-marker validation, retained provider finality, and publication checks share this module; database persistence is already split into heads/persist.rs. Preserve that boundary for this integration."
 
 [[files]]
 path = "apps/phase-runner/src/verify_phase.rs"

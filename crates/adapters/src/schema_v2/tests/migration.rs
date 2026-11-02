@@ -13,6 +13,7 @@ mod controller_ranges;
 mod expiry;
 mod implementation_announcement;
 mod intermediary;
+mod zero_owner;
 
 const MIGRATION_MANIFEST_ID: i64 = 100;
 const REGISTRY_MANIFEST_ID: i64 = 101;

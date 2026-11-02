@@ -20,6 +20,7 @@ use crate::families::records::{
     facts::{ResolverClassification, load_classifications_at},
     inventory_selection::{Plan, Selected, select_plans},
     inventory_types::FamilyRecordInventory,
+    is_cleared,
     mirror::{evaluate_family_mirror_at, is_mirror_pointer},
     serving::ServingPointer,
 };
@@ -92,6 +93,56 @@ impl FamilyRecordInventory {
             });
             row
         }))
+    }
+
+    /// The node's `project_registry_pointer` row on `chain_id`, read on `conn`: `None` with no
+    /// row, `Some(None)` for a zero pointer or a pointer event without a resolver, and the
+    /// lower-cased resolver otherwise. ENSv1 clients read the resolver from the registry
+    /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137-L141 @ ens_v1@91c966f).
+    /// The composed row's `declared_summary.ens_v1_resolver` carries the same value but reads a
+    /// missing row as null, so this read only tells a clear from no pointer write.
+    pub async fn load_ens_v1_registry_pointer(
+        conn: &mut PgConnection,
+        chain_id: &str,
+        namespace: &str,
+        node: &str,
+    ) -> Result<Option<Option<String>>> {
+        let registry: Option<Option<String>> = sqlx::query_scalar(
+            "/* storage:families.records.ens_v1_registry_resolver */
+             SELECT NULLIF(pointer.resolver_address, '')
+             FROM bigname_phase.project_registry_pointer pointer
+             WHERE pointer.chain_id = $1 AND pointer.namespace = $2 AND pointer.node = $3",
+        )
+        .bind(chain_id)
+        .bind(namespace)
+        .bind(node.to_ascii_lowercase())
+        .fetch_optional(&mut *conn)
+        .await?;
+        Ok(registry.map(|address| {
+            address
+                .filter(|address| !is_cleared(Some(address)))
+                .map(|address| address.to_ascii_lowercase())
+        }))
+    }
+
+    /// Whether `resolver_address` has a classification on `chain_id` at the servable family
+    /// publication, read on `conn`, which is what the resolver-anchored read needs to assemble
+    /// its records.
+    pub async fn resolver_is_classified(
+        conn: &mut PgConnection,
+        chain_id: &str,
+        resolver_address: &str,
+    ) -> Result<bool> {
+        let publication = crate::families::name::servable_publication(conn, chain_id).await?;
+        let resolver = resolver_address.to_ascii_lowercase();
+        Ok(load_classifications_at(
+            conn,
+            chain_id,
+            std::slice::from_ref(&resolver),
+            Some(&publication),
+        )
+        .await?
+        .contains_key(&resolver))
     }
 
     /// The family inventory `resolver_address` holds for `node`, read on `conn`, which the

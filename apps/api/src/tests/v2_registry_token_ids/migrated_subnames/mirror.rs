@@ -125,3 +125,108 @@ async fn migrated_subname_mirror_custom_target_is_unknown_and_restoration_retain
     assert_consumers(&database, true, resolver, None).await?;
     database.cleanup().await
 }
+
+async fn summary_of(database: &TestDatabase, logical_name_id: &str) -> Result<Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT to_jsonb(summary) FROM project_name_summary summary WHERE logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .fetch_one(&database.pool)
+    .await?)
+}
+
+/// The parts of a name's lookup row that its resolution decision writes.
+async fn lookup_of(database: &TestDatabase, logical_name_id: &str) -> Result<Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT jsonb_build_object('declared_summary', core->'declared_summary',
+                'supported', supported, 'record_serving_resource_id', record_serving_resource_id)
+         FROM bigname_phase.project_lookup_name WHERE chain_id = $1 AND logical_name_id = $2",
+    )
+    .bind(PATH_CHAIN)
+    .bind(logical_name_id)
+    .fetch_one(&database.pool)
+    .await?)
+}
+
+// Composition never reads an ancestor's registry pointer for a `.eth` second-level name: the
+// ENSv1 mirror walk runs only for a name below one. The resolution path selection relies on it
+// when a pointer-only change skips such names (`walks_ancestor_pointers` in
+// crates/project/src/families/resolution_paths/selection.rs). `NAME` is still on the ENSv1 arm,
+// reserved in ENSv2 with the mirror as its resolver, and has no pointer of its own. A resolver
+// set on `eth` leaves its summary, its lookup row and its served resolution as they were, after
+// the block and after a rebuild that composes every name again.
+#[tokio::test]
+async fn an_eth_pointer_leaves_a_second_level_name_on_the_ens_v1_arm_as_it_was() -> Result<()> {
+    let (database, logs, _) = setup().await?;
+    let initial: Vec<_> = logs
+        .into_iter()
+        .filter(|log| log.block_number <= BASE + 121)
+        .collect();
+    seed_and_run(&database, &initial, 120, 121).await?;
+    let parent = bigname_storage::logical_name_id_for_name("ens", NAME);
+    let summary = summary_of(&database, &parent).await?;
+    assert_eq!(summary["authority_arm"], "ens_v1", "{summary:#}");
+    let lookup = lookup_of(&database, &parent).await?;
+    let resolution = |detail: &Value| {
+        json!({
+            "resolver": detail["data"]["resolver"],
+            "resolution_unsupported_reason": detail["data"]["resolution_unsupported_reason"],
+            "unresolvable_reason": detail["data"]["unresolvable_reason"],
+        })
+    };
+    let before = resolution(&path_get(&database, &format!("/v1/names/{NAME}")).await?);
+    let v1: Address = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".parse()?;
+    let eth_node = bigname_lookup::ens_namehash_hex("eth")?;
+    let set = emitted(
+        NewResolver {
+            node: eth_node.parse()?,
+            resolver: CUSTOM.parse()?,
+        }
+        .encode_log_data(),
+        v1,
+        122,
+        0,
+    );
+    seed_and_run_with(&database, &[set], 122, 122, &[(122, 0, HOLDER)], None).await?;
+    // The walk the gate keeps `NAME` out of would read `eth`'s pointer: the row is written, and
+    // `eth` has a canonical surface by the block, which the walk joins at every depth
+    // (crates/storage/src/families/records/mirror.rs). So the checks below can fail.
+    let pointer: Option<String> = sqlx::query_scalar(
+        "SELECT resolver_address FROM bigname_phase.project_registry_pointer
+         WHERE chain_id = $1 AND namespace = 'ens' AND node = lower($2)",
+    )
+    .bind(PATH_CHAIN)
+    .bind(&eth_node)
+    .fetch_optional(&database.pool)
+    .await?;
+    assert_eq!(pointer.as_deref(), Some(CUSTOM), "eth's registry pointer");
+    let surfaced: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM bigname_phase.name_surfaces
+         WHERE chain_id = $1 AND namespace = 'ens' AND namehash = lower($2)
+           AND block_number <= $3 AND canonicality_state IN ('canonical', 'safe', 'finalized'))",
+    )
+    .bind(PATH_CHAIN)
+    .bind(&eth_node)
+    .bind(BASE + 122)
+    .fetch_one(&database.pool)
+    .await?;
+    assert!(surfaced, "eth has no canonical surface by the block");
+    for step in ["the block", "a rebuild"] {
+        if step == "a rebuild" {
+            replay::assert_rebuild(&database, 122).await?;
+        }
+        assert_eq!(
+            summary_of(&database, &parent).await?,
+            summary,
+            "after {step}"
+        );
+        assert_eq!(
+            lookup_of(&database, &parent).await?,
+            lookup,
+            "lookup after {step}"
+        );
+        let detail = path_get(&database, &format!("/v1/names/{NAME}")).await?;
+        assert_eq!(resolution(&detail), before, "after {step}: {detail:#}");
+    }
+    database.cleanup().await
+}

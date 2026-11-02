@@ -3,7 +3,7 @@ use std::{future::Future, pin::Pin, sync::Arc};
 use crate::{
     config::ChainConfig,
     error::{RunnerError, RunnerResult},
-    heads::publish_heads,
+    heads::publish_lagged_heads,
     ingest_progress,
     metrics::{RunnerLoopHeartbeat, RunnerMetricsFeed},
     phase::{
@@ -153,7 +153,8 @@ impl PhaseRunner {
             let heads =
                 crate::heads::retain_stored_finality(self.store.pool(), &chain.chain_id, heads)
                     .await?;
-            publish_heads(self.store.pool(), &chain.chain_id, &heads).await?;
+            let lag = self.phases.get(phase_name).publication_lag_blocks();
+            publish_lagged_heads(self.store.pool(), &chain.chain_id, &heads, lag).await?;
         }
         phase_lock.check_alive().await?;
         if mode.is_redo() {

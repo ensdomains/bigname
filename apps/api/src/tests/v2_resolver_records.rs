@@ -585,15 +585,15 @@ async fn answers_the_same_inventory_wrapped_and_unwrapped() -> Result<()> {
     database.cleanup().await
 }
 
-/// A resolver with an overview row whose implementation is not an admitted profile: every key
-/// is unsupported with the row's reason, as on the name records route.
+/// A resolver with an overview row that no declaration or upgrade admits: every key is
+/// unsupported with the row's reason, as on the name records route.
 #[tokio::test]
 async fn answers_unsupported_per_key_for_an_unsupported_classification() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     seed_unknown_resolver_inputs(&database, &unknown_resolver_record_writes()).await?;
     let refused = json!({
         "status": "unsupported",
-        "unsupported_reason": "resolver_implementation_unknown"
+        "unsupported_reason": "resolver_not_declared"
     });
     for query in [
         "keys=addr:60,text:description,text:url&include=inventory",

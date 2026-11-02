@@ -390,10 +390,21 @@ A produced fixture where the registration's provisional owner writes the
 record and later hands the token and the record on shows transient removal
 dropping the earlier write's `AuthorityTransferred` while the later write's
 stays.
-`ownerless_registry` is `true` exactly when the row is the supported,
-unregistered ownerless registry profile; the selected arm is kept, but the API
-serves no `authority` for such a row and no public `authority` filter matches
-it.
+`ownerless_registry` is `true` exactly when the row is the supported ownerless
+registry profile. The selected arm is kept, but the API serves no `authority`
+for such a row and no public `authority` filter matches it. Such a row is
+unregistered unless the name is a `.eth` second-level name with an
+[implied lease](glossary.md#implied-lease). A cleared ENSv1 registry record does
+not end that BaseRegistrar lease: until its expiry plus grace nobody else can
+register the name, and its token holder can `reclaim` the record
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L104 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f).
+The row then serves the lease's registration as the implied lease paragraph
+below states, `active`, `expired` or `released` by the ENSv1 schedule. Its
+registrant is the token holder the lease's registrar rows record, the latest
+token transfer from the first current-registry record on included, and null
+when they record none. Its authority kind and registry owner stay absent, and
+its control stays `unregistered`.
 
 After the [Universal Resolver cutover](glossary.md#universal-resolver-cutover),
 ENSv1-selected descendants below `.eth` share one publication-scoped ENSv2 path
@@ -610,6 +621,54 @@ binding that carried that handoff over, including one opened later in the grant'
 which Project builds before it reaches the block's grants.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L69 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
+
+A name the January 2020 registrar migration moved has a lease that no grant opened. The
+migration emitted the BaseRegistrar's own `NameRegistered` in the transaction that wrote the
+name's first current-registry record, and no controller event, so the name is selected through
+a registry-only binding that stands for no lease, or through no binding once its registry owner
+is zero (the ownerless-registry profile above). Its first controller renewal names the lease: the adapter mints the
+lease's resource there and derives a `RegistrationGranted` beside the renewal. That lease is the
+name's [implied lease](glossary.md#implied-lease): the resource of the name's latest own
+`RegistrationGranted`, `RegistrationRenewed`, `RegistrationReleased` or `ExpiryChanged` row of
+the `ens_v1_registrar_l1` family with registrar authority kind, at or after the name's first
+current-registry record. Those four kinds on that resource reach the registration. Its token
+transfers from the first current-registry record on reach the registrant, under any later
+registry-only binding or none. A `reclaim` after a cleared record opens such a binding but moves
+no token. The registration then serves the lease's `resource_id` and identity, its expiry and
+`ens_v1.expires_at`, and `active`, `expired` or `released` by the ENSv1 schedule. A released
+lease is `released` even when its release carries no expiry. `registered_at` is the time of
+the first current-registry record's block, the migration's own registration block, or of the
+lease's first row when the node has none. A grant a controller registration wrote dates the
+lease itself. The derived grant does not, and its zero-address registrant names no holder. A
+lease whose only grant is the derived one dates from the first current-registry record under a
+NameWrapper binding or a registry-only binding that records the lease too, and every
+ENSv1→ENSv2 migration path keeps that start. The selected binding, its authority kind and the
+registry owner stay as they were. A name whose binding records a lease with registrar rows, a
+name with no binding outside the ownerless-registry profile, a wrapper-selected name, a name
+selected under ENSv2 and any name other than a `.eth` second-level name have no implied lease.
+The migration's own `NameRegistered` is still not interpreted, so a migrated name never renewed
+has no lease row and serves as before.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L155 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+
+On a cut-over chain an ENSv1 `.eth` name with an ownerless ENSv2 reservation keeps its lease's
+`registered_at` and identity, unless an ENSv2 registration of the name came after the lease and
+before the current ENSv2 entry. An earlier reservation is not such a registration: premigration
+reserves a name only for its ENSv1 lease, so a reservation that was replaced by a later one
+stood for the same lease. A reservation already expired when written is never live
+(`docs/architecture.md`, authority selection) and supplies none of an ENSv1-selected name's
+dates. A re-reservation keeps the entry's token and resource, so it lands on the key of the
+reservation it replaces and ends it: a live reservation that lapsed before it supplies none
+either. The re-reservation still counts as the name's latest ENSv2 entry, so an older entry of
+the name, a release included, supplies none either. Premigration reserves at the lease's expiry
+plus 62 days, so a lease more than 62 days into its 90-day grace is reserved already expired, and
+a later run reserves the name again once it reads as available. Until then the
+lease serves its own expiry and the ENSv1 grace, a renewal included, and the release Interpret
+derives for that reservation ends nothing.
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/script/preMigration.ts:L775-L792 @ ens_v2_mainnet_20261002@b1f97b91)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registrar/BatchRegistrar.sol:L48-L72 @ ens_v2_mainnet_20261002@b1f97b91)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registry/PermissionedRegistry.sol:L486-L494 @ ens_v2_mainnet_20261002@b1f97b91)
 
 The release of the retained lease releases the name like any other lapse. On chain the registry
 keeps the owner and resolver it held after an ordinary lapse too; what makes a lapsed `.eth`
@@ -1499,7 +1558,10 @@ The resolver classification's `unsupported_reason` for an ENSv2 resolver (and th
 `coverage.unsupported_reason` copied onto its record inventory) uses a closed
 vocabulary: `resolver_not_declared` when an exact `public_resolver_v2`
 declaration is required and absent (also the ENSv1 and Basenames reason for an
-undeclared address); `resolver_implementation_unknown` when a discovered proxy
+undeclared address, which includes an address both protocols name that no
+declaration or ENSv2 `Upgraded` identifies, as
+[architecture.md § Discovery graph](architecture.md#discovery-graph) files it
+under ENSv1); `resolver_implementation_unknown` when a discovered proxy
 has no canonical `Upgraded` observation — neither an ERC-1967 `Upgraded` log
 nor a factory announcement — so its implementation is unknown;
 `resolver_implementation_not_declared` when the latest observation names an
@@ -1750,7 +1812,8 @@ rotating a proxy to an unflagged implementation removes the rule on the same
 scoped rebuild. Full and incremental rebuilds select the feature from the same
 current resolver classification.
 
-A pointer from `ens_v2_registry_l1` or `ens_v2_root_l1` whose target is a
+A pointer from `ens_v2_registry_l1`, `ens_v2_root_l1`, `ens_v1_registry_l1`,
+`ens_v1_registrar_l1`, or `ens_v1_wrapper_l1` whose target is a
 supported
 [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
 (`classification.role = ensv1_mirror_resolver`, declared under
@@ -1774,6 +1837,11 @@ receives `resolve(name, data)` and answers by its own logic.
 (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L66-L70 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L88-L96 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L108-L127 @ ens_v1@91c966f)
+An ENSv1 name that points at the mirror is walked the same way. Its own
+registry node names the mirror, so the mirror would call itself, and the walk
+selects the mirror and serves `unsupported` below, never an empty record set.
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/AbstractMirrorResolver.sol:L67-L69 @ ens_v2_mainnet_20261002@b1f97b91)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_mainnet_20261002@b1f97b91)
 
 The family inventory reader reproduces this from current pointer keys and
 classification at the selected publication. The registry's
@@ -2046,8 +2114,9 @@ with the marker, and the replayed block composes every name again. A followed
 publication therefore leaves the rows a rebuild under the same manifest set
 leaves at the same block. Manifest sync still moves the phase hashes, so an
 attested Interpret and Project redo adopts every manifest change. It starts at
-the change's first effect, except that a change to the ENSv2 root, registry or
-migration family keeps the full range
+the change's first effect, except that a change to the ENSv2 root or registry
+family keeps the full range, and so does a migration manifest change other than
+an address added or moved
 ([manifest-authority marker](deployment.md#manifest-authority-marker)).
 
 ## Owned key families
@@ -2248,13 +2317,33 @@ says which names it expands.
   logs a registry emits when it sets an entry's resolver or subregistry
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/interfaces/IRegistryEvents.sol:L56-L70 @ ens_v2_sepolia_20261001@07e55a05)
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L148-L161 @ ens_v2_sepolia_20261001@07e55a05).
-- A registry pointer or resource pointer row is new, or its resolver address
-  changes. For a resource pointer, a change of its last nonzero resolver address
-  counts too. This expands the name the pointer names and the names under it.
+- A resource pointer row is new, or its resolver address changes. A change of
+  its last nonzero resolver address counts too. This expands the name the
+  pointer names and the names under it. An ENSv1 resource pointer that was an
+  ENSv1 pointer before the change, or no pointer, and names the same name
+  expands as an ENSv1 registry pointer change does, below. One ENSv1
+  `ResolverChanged` of a name with a resource writes both rows, and no name
+  reads an ENSv1 resource pointer of its ancestor: the ENSv1 mirror walk reads
+  the registry pointer, and the ENSv2 path walk reads only ENSv2 pointer events.
+- An ENSv1 registry pointer row is new, or its resolver address changes. This
+  expands the name the pointer names and the names under it that read the
+  pointer: names of three or more labels with no resolver of their own. ENSv1
+  resolution uses the nearest node that has a resolver
+  (upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f),
+  and the name summary and lookup name composition read an ancestor's registry
+  pointer only for a name below a `.eth` second-level name. The record
+  inventory reads ancestors' pointers at any depth, and it recomposes a
+  resource through its own dependency on each node it read, not through this
+  list. A pointer with no resolver, an empty one or the zero
+  address counts as no resolver. When the same name also expands for any other
+  reason in the publication, every name under it expands.
 - A resource pointer is deleted or moves to another name. This expands the name
   it named before and the names under it. After a move it also expands the name
   it names now and the names under that.
-- A resolver's classification changes. This expands the names whose registry or
+- A resolver's classification changes while it is supported before or after the
+  change, a deleted supported row included. A walk reads a classification only
+  while it is supported, so a change between two unsupported or missing rows
+  expands nothing. This expands the names whose registry or
   resource pointer names that resolver, and the names under each. When an ENSv2
   event set such a resource pointer, the name at that event's entry and the
   names mounted below it expand too. An ENSv2 resource pointer cleared when its
@@ -2347,33 +2436,81 @@ it as an ancestor before its block, and from its block the names under it are
 recomposed.
 
 The capture is one statement, `project:families.resolution_paths.prepare`. It
-looks names up in `name_surfaces` through two indexes Project owns there
+looks names up in `name_surfaces` through two indexes Project owns there, and
+entries that point at a changed registry through indexes that already exist
 ([storage](storage.md#table-ownership)).
 
 - It finds the ancestors of each name an item expands by name, by the hash of
   each suffix of that name's label hash path.
-- It finds the names that hold a changed entry's label, and the names under a
-  changed path, by the hash of the label's entry key. The entry key is the
-  label hash with its low 32 bits cleared, as
+- It finds the names under a changed path by the hash of its first label's
+  entry key. The entry key is the label hash with its low 32 bits cleared, as
   [ENSv2 registry entries](#ensv2-registry-entries) defines it.
+- The walk from the root registry reaches any other registry only through an
+  entry whose `SubregistryChanged` event names it, an entry that points at it.
+  For each registry that changed or holds a changed entry, the statement finds
+  the entries with such an event. That set holds every entry that points at
+  the registry at the publication. It can also hold an entry that pointed at it
+  earlier. The walk reads each entry's latest pointer and decides, as it did
+  before. An entry row that holds no resource is tied to its pointer by the
+  event that last wrote the row, and the lookup reads only canonical events.
+  That loses no entry: entry rows are undone with the journal before a replay,
+  so at a publication no entry row cites an orphaned event.
+- A registry is changed in a publication when an event of its blocks creates,
+  upgrades or announces it, or when a name an item expands by name is, or sits
+  under, a name whose retained ENSv1→ENSv2 migration evidence holds the
+  registry's creation. The keys of the entries that point at it count as
+  changed entry keys, and the statement finds the names that hold one, by the
+  hash of the key.
+- A changed entry of the root registry moves names whose last label has its
+  key, and, where an entry points at the root, names that hold its label
+  directly above that entry's label. The statement finds the first by that
+  key's hash alone. A changed entry of any other registry moves only names that
+  hold its label directly above the label of an entry that points at the
+  registry. The statement finds those names, and the second kind under the
+  root, by the hashes of both keys, so the index returns only the names that
+  hold both. When the two keys are the same, it also looks up the entries that
+  point at the registry holding that entry, and so on up, and adds the first
+  key that differs, when there is one. A registry that no entry points at is
+  never reached by the walk, so its entries read no name and select none.
+- A change of the root registry itself has no entry to look up. The walk's
+  first row carries it.
+- It reads the ENSv1→ENSv2 migration evidence of each ancestor by name, one
+  lookup for each ancestor.
+- It reads the surfaces of the affected names last, and counts the names
+  first. Up to 5% of the rows of `name_surfaces` it reads each surface by its
+  primary or unique key, in a lookup that holds only the key. Beyond that it
+  full-joins the names to the readable surfaces, which the planner can only
+  hash or merge. It then reads `affected` once and every row of
+  `name_surfaces` once. Either way it looks up each surface's block in
+  `chain_lineage` by the block's key, in a lateral lookup that holds only that
+  key and keeps the surface outside. These access paths hold on tables with no
+  statistics too.
+- The bound is 5% of the planner's row count of `name_surfaces`, across every
+  chain the database holds. The full join reads that whole table, so its cost
+  follows that count. A table never analyzed has no row count, and then the
+  statement counts its rows, a million at most. 5% is the conservative end of
+  the crossover measured between the two shapes.
 
-The surfaces it reads then follow the names the publication touches, not the
-number of names on the chain. The indexes change how the statement finds its
-rows and not which names it selects.
+The surfaces it reads then follow the names the publication touches and the
+names under the entries that point at a changed registry, not the number of
+names on the chain. Past 5% of the rows of `name_surfaces` the last step reads
+every surface once instead of probing each name. A changed registry that no
+entry points at reads no surface. The indexes change how the statement finds
+its rows and not which names it selects.
 
-Four cases still read every observed ENS surface:
+Two cases still read every observed ENS surface:
 
-- A registry is created, upgraded or announced in the publication.
-- A name an item expands by name is, or sits under, a name whose retained
-  ENSv1→ENSv2 migration evidence holds a created registry. The ENSv1→ENSv2
-  migration can be in any earlier block.
 - The classification of the
   [v1 fallback resolver](glossary.md#v1-fallback-resolver-ensv1resolver-exposed-as-v1_resolver)
   changes.
 - A changed path has no labels, which is the root registry itself.
 
-A path whose first label hash is null also reads them all. How often real
-publications take the second case has not been measured.
+One more reads every surface that holds a label: a change of an entry whose
+key equals the key of every entry above it on a route up to the root, such as
+the `eth` entry of the registry the root's `eth` entry points at (`eth.eth`).
+The lookup then holds that key alone.
+
+A path whose first label hash is null also reads them all.
 
 A manifest sync has no block position: its existing phase-hash
 invalidation requires the normal full Interpret/Project redo.
@@ -2746,7 +2883,12 @@ reader supplies its admitted publication to the same inventory selector.
 
 Lookup captures name work before summary clocks are consumed, reuses the shared
 resolution-path work, and refreshes after the other derived families and before
-the marker advances. It adds no range boundary. Only changed rows enter the
+the marker advances. An inventory reads a resolver's classification object and
+unsupported reason in every state, and its manifest only while it is supported.
+So a classification change refreshes the inventories that depend on the
+resolver whenever one of those fields changes, but not for a manifest change
+between two unsupported rows. Text hydration re-derives a resolver's keys only
+for a classification change with a supported side. It adds no range boundary. Only changed rows enter the
 existing first-before-image journal. Resource inventories are shared by aliases
 and retained only while referenced. The factored tables and indexes are detailed
 in [storage](storage.md#published-lookup-state).

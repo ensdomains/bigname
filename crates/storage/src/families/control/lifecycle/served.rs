@@ -13,8 +13,8 @@ use super::{
     control::{control_owner, served_owner},
     expiry::{choose, classify_expiry, live_entry},
     laterals::{
-        authority_context, expiry_event, latest_event_kind, migrated_lease, registered_at,
-        registrant, registrar_resource,
+        authority_context, expiry_event, implied_registered_at, latest_event_kind, registrant,
+        registrar_resource, registration_start,
     },
     select::select_v2,
     tombstone::deciding_fact,
@@ -74,28 +74,9 @@ fn opt_text(value: Option<&str>) -> Value {
     value.map_or(Value::Null, |text| Value::String(text.to_owned()))
 }
 
-/// The admission inputs of one name: its selection, binding candidates, selected binding,
-/// wrapper modifier and retained events.
+/// The admission inputs of one name (`Authority::of`).
 pub(super) fn authority_of(facts: &NameFacts) -> Authority<'_> {
-    let selection = &facts.input.selection;
-    Authority {
-        name: &facts.input.logical_name_id,
-        selection,
-        candidates: &facts.candidates,
-        lease_candidates: &facts.lease_candidates,
-        binding: selection.surface_binding_id.as_deref().and_then(|id| {
-            facts
-                .candidates
-                .iter()
-                .find(|candidate| candidate.surface_binding_id == id)
-        }),
-        wrapper_modifier: selection
-            .resource_id
-            .as_deref()
-            .and_then(|resource| facts.wrappers.get(resource))
-            .is_some_and(|wrapper| wrapper.has_modifier),
-        events: &facts.events,
-    }
+    Authority::of(facts)
 }
 
 /// Every retained event of the name with its staged name, admission and ENSv2 lifecycle key.
@@ -147,6 +128,9 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     let tagged = tag(facts, &authority);
 
     let mut trace = Map::new();
+    if let Some(lease) = authority.implied_lease {
+        trace.insert("implied_lease".into(), json!(lease.resource));
+    }
     // A released ENSv2 tombstone serves the fact that decided it, on the tombstone's resource;
     // every other ENSv2 name the registration fold.
     let tombstone = deciding_fact(facts, clock)?;
@@ -270,12 +254,12 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         |tagged| &tagged.event.position,
     )
     .map(|tagged| tagged.event);
-    let registered_at = grant.map_or(Value::Null, |grant| {
-        registered_at(
-            facts,
-            migrated_lease(facts, &tagged, grant).unwrap_or(grant),
-        )
-    });
+    let registered_at = match authority.implied_lease {
+        Some(lease) => implied_registered_at(facts, lease, &tagged, &in_scope, &mut trace),
+        None => grant.map_or(Value::Null, |grant| {
+            registration_start(facts, &tagged, grant).time(facts, &mut trace)
+        }),
+    };
 
     let wrapper_row = event_resource.and_then(|resource| facts.wrappers.get(resource));
     let effective = wrapper_row.map(|row| effective_wrapper(row, clock.timestamp_seconds));
@@ -390,7 +374,10 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
             event.released_at.clone()
         }
     });
-    let status = if selection.ownerless_registry {
+    // A cleared ENSv1 registry record does not end the BaseRegistrar lease: an ownerless name
+    // with an implied lease serves it and its holder, with no authority and no registry custody.
+    let ownerless_unleased = selection.ownerless_registry && authority.implied_lease.is_none();
+    let status = if ownerless_unleased {
         json!("unregistered")
     } else {
         match selected_kind {
@@ -434,9 +421,18 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     let v2_release = selected_kind == Some("RegistrationReleased") && is_v2;
     let mut unreleased = None;
     if selection.ownerless_registry {
-        for field in ["authority_kind", "authority_key", "registrant", "expiry"] {
-            registration.insert(field.into(), Value::Null);
+        // The registrant is a lease field: the token holder the lease's registrar rows record.
+        let fields: &[&str] = if ownerless_unleased {
+            &["authority_kind", "authority_key", "registrant", "expiry"]
+        } else {
+            &["authority_kind", "authority_key"]
+        };
+        for field in fields {
+            registration.insert((*field).into(), Value::Null);
         }
+    }
+    if ownerless_unleased {
+        // The ownerless-registry profile without a lease serves no registration to lapse.
     } else if selection.released_tombstone {
         registration.insert("authority_kind".into(), Value::Null);
         registration.insert("authority_key".into(), Value::Null);

@@ -302,7 +302,9 @@ headers appear only on `200` responses whose body carries `meta.as_of_token`,
 and only for indexed reads: `source=verified` and `source=auto` execute against
 a provider per request and are never cached, and the primary-name route
 qualifies only when `source=indexed` is explicit, because its default answer
-set includes the verified source. Errors, `POST /v1/lookup`, and every
+set includes the verified source. A response whose body reports
+`meta.source=verified` carries neither header, which covers a records read with
+no `source` that answered a `value_not_retained` key through verified lookup. Errors, `POST /v1/lookup`, and every
 collection route carry neither header.
 
 
@@ -816,6 +818,21 @@ collection route carry neither header.
   served path's record under the requested `name`, `display_name` and `namehash`, with
   `canonical_name` naming the served path. A path that resolves to no token answers as
   before, with the name's own row or `404 not_found`.
+- ENSv1 registry resolver: ENSv1 clients read a name's resolver from the ENSv1
+  registry (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137-L141 @ ens_v1@91c966f).
+  A name whose `authority` is `ens_v1` or `ens_v0`, that serves a resolver and
+  that is not withheld (no `unresolvable_reason` or
+  `resolution_unsupported_reason`) serves the resolver its registry pointer
+  names, `ens_v1.resolver`, whenever its stored resolver names another one, and
+  `records` and `primary_address` come from that resolver's records for the
+  node. The pointer is read on the request's snapshot. A registry clear serves
+  no resolver and no records. A pointer to an address no resolver manifest
+  declares serves that address, with no readable records and the
+  `resolver_not_declared` inventory any name pointing at an undeclared
+  resolver is served. Migrated
+  (`ens_v2`) names and Basenames names are served as stored. Other routes,
+  such as `POST /v1/lookup`, subname rows and address-name rows, serve the
+  stored resolver.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`,
   `source`, `include=counts`. `source` accepts `indexed` or `verified`; omitting it is identical
   to `source=indexed`. This name-profile route does not accept `source=auto`.
@@ -824,14 +841,18 @@ collection route carry neither header.
   as `page.total_count`), and `record_count`, the known record-selector count
   of the current registration's record inventory with the same meaning as on
   address-name rows; `record_count` is omitted when the row has no current
-  record inventory. Neither count is added to any `read_status=unsupported`
+  record inventory. A name served through its ENSv1 registry pointer counts
+  the inventory its `records` come from, so a registry clear omits
+  `record_count`. Neither count is added to any `read_status=unsupported`
   name-level record, including a verified unsupported record that retains its
   registration fields. There is no `event_count`: bigname keeps no
   precomputed per-name event total, and counting history rows on the request
   path would be an unbounded scan, so the expansion does not offer one. Any
   other `include` value returns `400 invalid_input`.
   Counts require the current publication on the name's chain and are read on
-  one database snapshot of the captured publication. A historical selection at
+  one database snapshot of the captured publication. A name served through its
+  ENSv1 registry pointer takes `record_count` from its records' inventory at
+  that same publication. A historical selection at
   another position returns `409 stale`, as does a publication that lands before
   the counts' first read; a publication during the counts read does not affect
   them. Historical profiles without counts retain their existing behavior.
@@ -951,7 +972,7 @@ collection route carry neither header.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L84 @ ens_v1@91c966f). An
   `ens_v0` name keeps every field it would have as `ens_v1`, including a
   registry-only name's `registration_id`. `authority` is omitted for Basenames
-  names, on a supported, unregistered ownerless registry row, and on the
+  names, on a supported ownerless registry row, and on the
   `read_status=unsupported` identity-only object. A zero registry owner does not
   remove `authority` supplied by a retained registrar binding. `migrated_at` is present only when ENSv2 is the currently selected
   `authority` and the name's history retains an activated `MigrationApplied`
@@ -1224,6 +1245,15 @@ its value map:
   resolver, indexed records and inventory, and `canonical_name` names the served path.
   `source=verified` and the verified keys of `source=auto` read the chain for the
   requested path. A path that resolves to no token answers as before.
+- ENSv1 registry resolver: as on [name detail](#get-v1namesname), a name whose
+  `authority` is `ens_v1` or `ens_v0` serves the resolver its ENSv1 registry
+  pointer names, `ens_v1.resolver`, and that resolver's records for the node,
+  whenever its stored resolver names another one. A registry clear serves no
+  resolver and no records. A pointer to an address no resolver manifest
+  declares serves that address with its `resolver_not_declared` inventory.
+  `source=verified` and the verified keys of `source=auto` read the chain as
+  for any other name. Whether that read runs Universal Resolver discovery
+  still follows the stored resolver.
 - Records this route withholds, for a released name, a lapsed reservation or
   a name whose resolution is withheld, can still be read by resolver:
   [`GET /v1/resolvers/{chain_id}/{address}/records`](#get-v1resolverschain_idaddressrecords)
@@ -1368,14 +1398,15 @@ its value map:
   `source=verified` is unaffected by
   indexed coverage. For retained non-API diagnostic comparisons, an unsupported
   inventory compares as `unsupported`, never as a retained entry value.
-  A name whose current ENSv2 resolver is a declared
+  A name whose current ENSv2 or ENSv1 resolver is a declared
   [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
   keeps that mirror as `data.resolver`, and its indexed `records` and
   `include=inventory` come from the ENSv1 resolver the mirror's registry walk
   selects at the name's own node, read for the queried node exactly as Project
   derived it ([`projections.md`](projections.md#resolver-and-records)); the
   response shape does not change. When no consulted node has a projected
-  resolver, or the walk's nearest resolver belongs to an ancestor, the
+  resolver, the walk's nearest resolver belongs to an ancestor, or an ENSv1
+  name's own registry resolver is the mirror itself, the
   inventory is unsupported with `mirrored_resolver_not_projected`: explicit
   indexed keys answer `unsupported` with that reason, a request without `keys`
   returns `records: {}` because the row names no keys, and `source=auto` with
@@ -1419,7 +1450,20 @@ its value map:
   back to verified lookup. Without `keys` (omitted, empty, or only
   whitespace), `source=auto` is an indexed read of the default key set: it
   makes no verified fallback, reports `meta.source=indexed`, and returns the
-  same answers as `source=indexed`. A verified read has two closed refusal
+  same answers as `source=indexed`. A request that names no `source`, or a
+  blank one, reads indexed and then answers each key whose indexed answer is
+  `value_not_retained` through verified lookup, and only those keys, within
+  the verified lookup's RPC timeouts. A key the lookup answers `ok` or
+  `not_found` takes that answer, and the response then reports
+  `meta.source=verified`, even when most keys kept their indexed answers. A
+  lookup that fails or is refused leaves the indexed answers as they are. Only
+  a read that has a key to fill is admitted as verified execution, and only
+  for the fill: it takes the client's verified rate-limit token and a
+  verified-execution in-flight slot before the lookup and holds the slot
+  across it. When either is refused, the read keeps its indexed answers and
+  still answers `200`. A read with nothing to fill takes neither. A response that reports
+  `meta.source=verified` carries neither caching header. An explicit
+  `source=indexed` never reads the chain and keeps both. A verified read has two closed refusal
   reasons of its own, reported per key on this route and as `data.unsupported_reason` on the verified
   exact-name detail route: `verified_records_not_supported` when the projected
   row carries no topology the engine admits (a bound name without a record

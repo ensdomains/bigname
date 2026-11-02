@@ -397,6 +397,7 @@ The implemented phases use:
 - `BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR`
 - `BIGNAME_PHASE_RUNNER_REDO_METRICS_BIND_ADDR`
 - `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS`
+- `BIGNAME_PHASE_RUNNER_LIVE_PUBLICATION_LAG_BLOCKS` — optional, 0 (default) to 3; see [Live publication lag](#live-publication-lag)
 
 An unset optional ceiling configures no limit; Docker inspection may show its bare
 variable name without `=`. An explicitly empty `KEY=` value is invalid.
@@ -407,6 +408,53 @@ the unchanged CLI accepts zero. Direct CLI defaults remain floor zero, path `.`
 and no ceiling; the existing capacity poll interval remains five seconds.
 These settings are read at startup. Shell values override `--env-file`, so inspect
 both interpolation inputs and the effective service/container configuration.
+
+### Live publication lag
+
+`BIGNAME_PHASE_RUNNER_LIVE_PUBLICATION_LAG_BLOCKS` (`--live-publication-lag-blocks`)
+makes live follow publish the readable head that many blocks below the newest block
+it has loaded. The blocks above it stay `observed`, and Interpret, Project,
+hydration and the API read none of them. A reorg that replaces only those blocks
+orphans them with no downstream redo. Without the lag, a one-block reorg at the
+head redoes Interpret and Project for that block, and the API refuses to serve the
+chain until the redo completes. A reorg deeper than the lag still redoes the
+readable blocks it replaces.
+
+Served data runs N blocks behind head, about 24 seconds at N=2. Each live poll
+loads those N blocks again from the node. The writes are no-ops, so the cost is N
+block reads per poll. The setting applies to every chain the runner follows.
+Finite Ingest and a rewind publish without it. A redo publishes no heads.
+Server Compose forwards the variable to the phase-runner service, 0 when unset or empty.
+
+The API's `BIGNAME_API_PUBLICATION_LAG_TOLERANCE_BLOCKS` keeps its default. The
+stored head itself lags, so the publication stands at the head as before. The
+runner refuses a value above 3 at startup. `/v1/status` reads `stale` once the
+published block is more than 60 seconds (`DEFAULT_MAX_LAG_SECS`) older than the
+network head. On a chain with 12-second blocks, each lagged block adds 12 seconds
+to the age the head already has, up to one block plus the five-second network-head
+refresh. That makes 53 seconds at 3 blocks and 65 at 4.
+
+Metrics under the lag:
+
+- `phase_runner_publication_lag_blocks{chain}` is the configured lag.
+- `phase_runner_publication_gap_blocks{chain}` is the newest block Live has loaded
+  minus the published chain head. At steady state it equals the configured lag,
+  and it is 0 without one. It also reads 0 while the node reports a head below
+  the published one: Live then records the published head as its position, even
+  though the observed blocks above it are still stored. Both gauges carry the
+  same `chain` label, so the two join on instance and chain.
+- `phase-runner redo` exports `phase_runner_publication_lag_blocks` as 0 on its
+  own metrics listener, whatever `run` was given.
+- `phase_runner_chain_head_block` is the published, lagged head.
+- `phase_runner_head_lag_blocks{phase="live"}` reads 0 when Live is caught up.
+  Live's target is the node's head and its position the newest block it loaded,
+  which match once it has caught up.
+  Interpret and Project stand on the published head, so theirs read 0 too.
+- `phase_runner_served_lag_blocks` measures from the node's head, so at steady
+  state it reads the lag rather than 0. A rule that alerts on it above 1 fires at
+  a lag of 2.
+- `/v1/status` reports the network head beside the canonical block, so its
+  `ingestion_lag_blocks` reads the lag.
 
 The runner syncs every manifest in the
 [deployment profile](glossary.md#deployment-profile), whichever chains
@@ -1041,14 +1089,54 @@ The redo keeps the full range, and the refusal says why after "because", when:
 
 - the owned key families were last published under another interpreter content
   hash, or, for the Project redo only, another projection content hash
-- the change edits a manifest of the ENSv2 root, registry or migration family,
-  whose declarations stored rows of every name read
+- the change edits a manifest of the ENSv2 root or registry family, whose
+  declarations stored rows of every name read
+- the change edits the `ens_v2_migration_l1` manifest other than by adding an
+  address or moving one, as the next paragraph describes
+- an address such a migration change adds or moves emitted a retained log
+  below its declared `start_block`, or a retained factory `ProxyDeployed` or
+  registry `LabelRegistered` log below that start names it as `sender`
 - the change edits `universal_resolver_implementations` or
   `correlation_addresses`, which Interpret reads at every block
 - the marker records no change of the published set, as when manifest sync
   repaired an address floor
 - the family marker records no published set, as on a fresh corpus or after a
   cold restore.
+
+An `ens_v2_migration_l1` change is bounded when the manifest stays active and
+only its `[[contracts]]` entries differ. Each role whose entries differ either
+gains an entry it did not declare before, or moves its one entry to another
+address. Each added or moved entry has `proxy_kind = "none"`, and its role emits
+none of the family's `[[abi.events]]`. Every other field must be equal. So must
+the compiled watch plan, apart from the watches of the added and moved
+addresses. Every reader of the family's declarations reads one at or above its
+`start_block`, or where the declared contract already existed, so the redo runs
+from the lowest start on either side. For an addition that is the new start.
+For a move it is the lower of the two starts, normally the old one. Removing a
+declaration, or editing one in place, keeps the full range. That includes a
+`start_block` edit of an unchanged address.
+
+The bound assumes each changed `start_block` is the contract's deployment block.
+Interpret reads the locked migration controller as the `sender` of a factory
+`ProxyDeployed` log, and both migration controllers as the `sender` of a
+registry `LabelRegistered` log, by address alone. The first-effect scan cannot
+search that field. A changed address that emitted a retained log below its
+declared start shows the assumption is wrong, so the redo keeps the full range.
+For a changed controller, on each side of a move, the redo also reads the
+retained logs below that start whose `sender` topic is the controller's
+address: the declared `verifiable_factory`'s `ProxyDeployed` logs for the locked
+controller, and the `LabelRegistered` logs of the registry family's current
+`registry` declarations for both. Each topic's position comes from the event's
+indexed inputs in its manifest's `[[abi.events]]`. A hit keeps the full range,
+and the refusal names the log's block.
+
+The stamped Project redo undoes to the bound and replays from it while the bound
+lies inside the [family undo journal](glossary.md#family-undo-journal). Once
+the chain publishes finalized and safe blocks, each publication prunes the
+journal to 256 blocks below the block it publishes, or to the finalized or safe
+block when that is lower. A deeper bound makes the Project redo clear its
+families and rebuild them, which costs as much as a full-range Project redo.
+The Interpret redo stays bounded either way.
 
 Retiring a family that matches events from every emitter, such as
 `ens_v1_resolver_l1`, finds its first matched log near the family's start, so
@@ -4739,7 +4827,7 @@ admission changes (see
   (`phase-runner redo --chain <chain> --phase project`).
 - A manifest sync still moves the manifest-authority fingerprint, so the runner
   asks for the attested redo before it follows again. A change to the ENSv2
-  root, registry or migration family keeps that redo the full range
+  root or registry family keeps that redo the full range
   ([manifest-authority marker](#manifest-authority-marker)), so a followed
   chain meets a changed admission only inside a redo that composes every name
   anyway.
@@ -4821,6 +4909,28 @@ observes `eth`, and a busy contract emits many logs in one batch.
   matching runner and API binaries. The change rides the next re-derivation release and
   shares that release's one Interpret and Project redo pair with its other hash-rotating
   changes. Do not mark old rows ready under the new hash.
+
+## Address-only ENSv2 migration manifest changes redo from their first effect
+
+The build that bounds the redo of an `ens_v2_migration_l1` change that only adds
+an address or moves a role to another address
+([manifest-authority marker](#manifest-authority-marker)) changes
+`apps/phase-runner` only, which is an input of neither content hash.
+
+- The [interpreter content hash](glossary.md#interpreter-content-hash) and the
+  [projection content hash](glossary.md#projection-content-hash) do not rotate.
+  The build needs no redo of its own and ships as an image swap.
+- It adds no schema-migration, table, manifest or setting. The
+  manifest-authority fingerprint and the compiled watch plan are unchanged, so
+  stamp no Ingest redo.
+- A later migration manifest change of that shape still records a marker and
+  stamps any Ingest redo its widened watches need. Run the full range the fence
+  error prints, as for any marker. The attested Interpret redo then runs from
+  the lowest declared start on either side of the change, and the Project redo
+  it stamps runs from there too.
+- When that start lies below Project's family undo journal, the Project redo
+  rebuilds its families, so it takes as long as a full-range Project redo. The
+  Interpret redo stays bounded.
 
 ## A family rebuild in ranges composes once, in a composition pass
 
@@ -4936,6 +5046,401 @@ content hash, then check on Sepolia that `GET /v1/names/phantombug01.eth` serves
 `0x8948458626811dd0c23eb25cc74291247077cc51`, equal to its `ens_v1.resolver` (registry
 `NewResolver` at block 11982720), and that `GET /v1/names/phantombug01.eth/records?keys=addr:61`
 finds the record.
+
+## A registry pointer change recomposes only the names that read it
+
+The build that narrows which names an ENSv1 registry pointer change recomposes
+(see [owned key families](projections.md#owned-key-families)) changes one
+Project statement, `project:families.resolution_paths.prepare`.
+
+- A name whose only change in a publication is its registry pointer recomposes
+  itself and the `.eth` names under it that read that pointer: names of three or
+  more labels with no resolver of their own. Before, it recomposed every name
+  under it, so a pointer change at `eth` recomposed every `.eth` name.
+- One ENSv1 `ResolverChanged` of a name with a resource also changes the
+  resource's pointer. That change counts as the same registry pointer change,
+  so the rule applies to registered names too.
+- A name that also has another change in the publication still recomposes every
+  name under it.
+- Which names Project recomposes in each batch changes, not what they serve.
+  Stored rows and API responses are the same as before.
+- The statement is in `crates/project/src`, an input of the
+  [projection content hash](glossary.md#projection-content-hash) only. That hash
+  rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, at a
+  planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+  matching runner and API binaries. The change rides the next release that
+  redoes Project and shares that release's Project redo.
+- It adds no table, schema-migration, manifest or setting. The
+  manifest-authority fingerprint and the compiled watch plan are unchanged, so
+  stamp no Ingest redo.
+
+## Changed registries in the resolution path selection
+
+The build that makes a publication with a changed ENSv2 registry read only the
+names under the entries that point at it (see
+[owned key families](projections.md#owned-key-families) and
+[table ownership](storage.md#table-ownership)) changes one Project statement
+and no schema.
+
+- `project:families.resolution_paths.prepare` read every `name_surfaces` row of
+  the namespace when a publication created, upgraded or announced a registry,
+  or touched a name at or under one whose ENSv1→ENSv2 migration evidence holds
+  a created registry. It now finds the entries that point at the registry
+  through indexes that already exist. The names it selects are the same.
+- Stored rows do not change. API responses do not change.
+- It adds no schema-migration, index, table, manifest or setting.
+- The statement now reads `normalized_events_v2_key_probe_idx`. That index is
+  in the [walk index set](storage.md#walk-index-set), so
+  `ops/walk-index-set/drop.sql` does not drop it.
+- The statement is in `crates/project/src`, an input of the
+  [projection content hash](glossary.md#projection-content-hash) only. That hash
+  rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, at a
+  planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+  matching runner and API binaries. The change rides the next release that
+  redoes Project and shares that release's Project redo. The
+  manifest-authority fingerprint and the compiled watch plan are unchanged, so
+  stamp no Ingest redo.
+- The lookup by registry reads a GIN index. Flush its pending list before a
+  Project redo:
+  `SELECT gin_clean_pending_list('bigname_phase.normalized_events_v2_key_probe_idx');`
+
+## Changed entries in the resolution path selection
+
+The build that makes a changed ENSv2 entry read only the names where the walk
+from the root registry can read it (see
+[owned key families](projections.md#owned-key-families) and
+[table ownership](storage.md#table-ownership)) changes one Project statement
+and no schema.
+
+- `project:families.resolution_paths.prepare` read every `name_surfaces` row
+  that held a changed entry's label, wherever the label sat and whether or not
+  anything pointed at the entry's registry. For a registry other than the root
+  it now reads only the names that hold both the entry's label and the label of
+  an entry that points at the registry, and keeps those that hold them
+  adjacent. A registry that nothing points at reads no name. A root registry
+  entry still reads every name that holds its label and keeps those whose last
+  label has its key, or that hold it directly above a slot of the root. The
+  names it selects are the same.
+- Its last step, which reads the surfaces of the names it selects, now counts
+  them first. Up to 5% of the rows of `name_surfaces` it reads each surface by
+  its primary or unique key, so a high row estimate cannot turn a few names
+  into a read of every surface. Beyond that it reads every row of
+  `name_surfaces` once and joins the result to the names by a hash or merge
+  join, never a probe per name. Either way it looks up each surface's block in
+  `chain_lineage` by the block's key, once per surface. Each lookup holds only
+  its key, so the access paths hold on tables with no statistics too. A
+  rebuild range journals all its blocks under its last one, so a range that
+  covers most registrations takes that arm.
+- The bound is 5% of the planner's row count of `name_surfaces`
+  (`pg_class.reltuples`), across every chain the database holds. The full join
+  reads that whole table, so its cost follows that count. Until the table is
+  first analyzed the statement counts its rows instead, a million at most.
+- The bound follows the statistics. With autovacuum off for `name_surfaces`,
+  or ANALYZE behind a bulk load, the row count lags and large selections take
+  the one-pass arm. A TRUNCATE resets the count, and the bound falls back to
+  the capped count until the next ANALYZE.
+- Stored rows do not change. API responses do not change.
+- It adds no schema-migration, index, table, manifest or setting.
+- The statement now reads `normalized_events_v2_key_probe_idx` for the registry
+  of each changed entry too. That index is in the
+  [walk index set](storage.md#walk-index-set), so
+  `ops/walk-index-set/drop.sql` does not drop it.
+- The statement is in `crates/project/src`, an input of the
+  [projection content hash](glossary.md#projection-content-hash) only. That hash
+  rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, at a
+  planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+  matching runner and API binaries. The change rides the next release that
+  redoes Project and shares that release's Project redo. The
+  manifest-authority fingerprint and the compiled watch plan are unchanged, so
+  stamp no Ingest redo.
+- The lookup by registry reads a GIN index. Flush its pending list before a
+  Project redo:
+  `SELECT gin_clean_pending_list('bigname_phase.normalized_events_v2_key_probe_idx');`
+
+## Resolvers that both protocols name stay ENSv1
+
+The build that ranks a resolver's ENSv2 candidates after its ENSv1 evidence, and lets an ENSv2
+declaration take rank 0 without a resolver edge
+([architecture](architecture.md#discovery-graph)), changes the resolver classification Project
+stores (`crates/project/src/families/classification/sql.rs`). It also walks an ENSv1 pointer at
+an ENSv1 mirror resolver as the mirror would (`crates/storage/src/families/records/mirror.rs`),
+which changes the record inventories Project stores. It rotates the
+[projection content hash](glossary.md#projection-content-hash) for every chain. The
+[interpreter content hash](glossary.md#interpreter-content-hash) does not rotate.
+
+What changes for names:
+
+- A handful of undeclared resolvers that both protocols name move back to the ENSv1 family,
+  unsupported before and after. Names that point at one see the coverage reason of their
+  records change once, from `resolver_implementation_unknown` to `resolver_not_declared`.
+- An ENSv2 registry `ResolverUpdated` that names a resolver an ENSv1 name already points at
+  no longer re-files that resolver, so it recomposes nothing that reads its classification.
+- A declared ENSv2 resolver that an ENSv1 name points at keeps its declaration with or without
+  an ENSv2 edge to it.
+- An ENSv1 name whose own resolver is a declared ENSv1 mirror resolver serves its records as
+  `unsupported` with `mirrored_resolver_not_projected`, not as an empty record set
+  ([projections](projections.md#resolver-and-records)).
+
+These rows arrive through re-derivation. Every chain needs one full-range Project redo and no
+Interpret redo, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary)
+under matching runner and API binaries. The change shares the release's Project redo. Do not
+mark old rows ready under the new hash.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
+and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## History reads probe each event's lineage row by key
+
+The build that makes history reads look up each event's `chain_lineage` row by key changes
+the history source (`crates/storage/src/history/source.rs`), the registration identity and
+its lookups (`registration_identity.rs`, `registry_registration.rs` and `filters.rs` beside
+it), the child-registration arm (`child_arm.rs`), the resolver page arms
+(`resolver_source.rs`) and the registry reads (`crates/storage/src/registries/reads.rs`).
+
+- The history source joins each event to its block's lineage row through a correlated
+  lookup that ends in `LIMIT 1`. PostgreSQL can only run it as one index probe per event.
+  Before, it was a plain join, and a registration-scoped events page or count on mainnet
+  could hash or walk the whole lineage table to join a few hundred events.
+- Each registration lookup, the precheck of a registration handle, the child-registration
+  arm, the resolver page arms and the registry reads reach their rows' lineage rows the same
+  way.
+- The two lookups that judge a surface binding at an event's time read that event's lineage
+  row themselves, instead of the joined row.
+- Stored rows and API responses are the same as before. Only the plans change.
+- Other request-path lineage reads keep their plain joins, for a follow-up that measures
+  each route first: the address evidence read (`address_evidence.rs`), the readable surface
+  (`push_readable_surface`: attribution, mirror and address walk), the anchor loads in
+  `wrapped_registrar.rs`, and the page decorations in `token_ids.rs`, `payment_values.rs`
+  and `registry_handoffs.rs`.
+- The fork walk of a non-canonical read in `lineage.rs` keeps its plain joins too. It is off
+  the request path, because no route makes a non-canonical read.
+- The address-pair lookup (`pair_lineage` in `address_pairs.rs`) stays as it is, because
+  outer parameters bind its key.
+- The history source is an input of the
+  [projection content hash](glossary.md#projection-content-hash) only, because Project's
+  history-catalogue membership reads through it. That hash rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not. Every chain
+  needs one full-range Project redo and no Interpret redo, at a planned
+  [re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and
+  API binaries. The change rides the next release that redoes Project and shares that
+  release's Project redo.
+- It adds no table, schema-migration, manifest or setting. The manifest-authority
+  fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## A migrated `.eth` name serves its BaseRegistrar lease
+
+The build that composes a `.eth` name the January 2020 registrar migration moved on its
+[implied lease](glossary.md#implied-lease)
+([projections](projections.md#exact-name-projection), implied lease) changes the lifecycle composition
+Project stores (`crates/storage/src/families/control/lifecycle/`). It rotates the
+[projection content hash](glossary.md#projection-content-hash) for every chain. The
+[interpreter content hash](glossary.md#interpreter-content-hash) does not rotate.
+
+What changes for names:
+
+- A migrated name renewed since the migration serves its lease's `registration_id`,
+  `ens_v1.expires_at` and `registered_at`, the time of the migration's own transaction. A
+  lease lapsed past grace serves `released`. Before, the name served `active` with no lease.
+- A `.eth` second-level name whose registry owner is zero and whose lease has a registrar row,
+  migrated or not, serves that lease as registered, or released once lapsed. Its registrant is
+  the lease's token holder when the lease records one. It serves no `authority` and no registry
+  owner. Before, it served `unregistered`.
+- A cut-over registrar lease whose premigration reservation was replaced keeps its
+  `registered_at` and `registration_id`.
+- A reservation already expired when written no longer supplies an ENSv1 name's expiry or
+  status, and neither does the lapsed reservation it replaced. The lease's own expiry and
+  grace serve until a later reservation.
+
+These rows arrive through re-derivation. Every chain needs one full-range Project redo and no
+Interpret redo, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary)
+under matching runner and API binaries. The change rides the next release that redoes
+Project and shares that release's Project redo. Do not mark old rows ready under the new
+hash.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
+and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+Before the release is recorded, confirm that the Project redo adopted the new projection
+content hash, then check on Ethereum Mainnet that `GET /v1/names/coathup.eth` serves a
+`registered_at`, a `registration_id` and `ens_v1.expires_at`, and that
+`GET /v1/names/kaaboosd.eth` serves `active` with a `registered_at`.
+
+## Read indexes for history windows, search prefixes and `resolves_to`
+
+The build that adds four read-only btree indexes changes no stored row and no response
+body. Each serves an API read that otherwise scans its whole table:
+
+- History, address-history and events pages with `from_timestamp` or `to_timestamp` map each
+  bound to a block through `chain_lineage_timestamp_idx` on `chain_lineage`.
+- `GET /v1/search` with a raw-name prefix reads its matches as one range of
+  `name_surfaces_name_prefix_idx` on `name_surfaces`.
+- `relation=resolves_to` on `GET /v1/addresses/{address}/names` finds its candidate
+  resources through `project_resource_pointer_namehash_resolver_idx` on
+  `project_resource_pointer`, and the names that reach them through
+  `project_registry_pointer_resource_idx` on `project_registry_pointer`.
+
+[Table ownership](storage.md#table-ownership) lists each index with the statement it
+serves.
+
+- Neither content hash rotates. The baselines and schema-migrations are inputs of neither
+  hash. The served statements are in files that are inputs of neither, and the Rust change
+  only names them for their plan tests. No redo is needed. The change ships as an image
+  swap plus the schema-migration.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Schema-migration `20261028120000_serving_read_indexes.sql` installs the four indexes. An
+index that already exists under its name, with the reviewed definition, is adopted without a
+build and without a lock on its table. This covers an index an operator created
+concurrently under the same name before the release. A missing index is built with an
+ordinary `CREATE INDEX`, which holds a SHARE lock on its table until the schema-migration
+commits and blocks the table's writers. Apply the schema-migration with the phase runner,
+redo processes and API stopped, with the same `lock_timeout`, `statement_timeout` and retry
+procedure as the other index schema-migrations and `--target-version 20261028120000`.
+
+On a large initialized database, prebuild the missing indexes concurrently first, outside a
+transaction. The phase runner and API can keep running while they build. The
+schema-migration then finds them by name and skips the builds:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS chain_lineage_timestamp_idx
+    ON bigname_phase.chain_lineage (chain_id, block_timestamp, block_number);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS project_resource_pointer_namehash_resolver_idx
+    ON bigname_phase.project_resource_pointer (chain_id, namehash, resolver_address);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_name_prefix_idx
+    ON bigname_phase.name_surfaces (raw_name text_pattern_ops, namespace, namehash, logical_name_id)
+    WHERE visibility_state = 'active'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND octet_length(raw_name) <= 2000;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS project_registry_pointer_resource_idx
+    ON bigname_phase.project_registry_pointer (chain_id, resource_id);
+```
+
+`IF NOT EXISTS` matches the index name only. An interrupted concurrent build leaves an
+invalid index. The schema-migration checks all four names before its own builds and again
+after them. It refuses a name that is not an index, is on another table, is not valid and
+ready, or has another definition, and its error names the index. Check the same things
+yourself after each concurrent build, so the schema-migration does not stop inside the
+maintenance window:
+
+```sql
+SET search_path = pg_catalog;
+SELECT c.relname, c.relkind, i.indrelid::regclass, i.indisvalid, i.indisready,
+       pg_get_indexdef(i.indexrelid)
+FROM pg_class AS c
+LEFT JOIN pg_index AS i ON i.indexrelid = c.oid
+WHERE c.relnamespace = 'bigname_phase'::regnamespace
+  AND c.relname IN (
+      'chain_lineage_timestamp_idx',
+      'project_resource_pointer_namehash_resolver_idx',
+      'name_surfaces_name_prefix_idx',
+      'project_registry_pointer_resource_idx');
+RESET search_path;
+```
+
+Each row has `relkind` `i`, its own table as `indrelid`, and `indisvalid` and `indisready`
+true. The definitions must be exactly these lines, which are the text the schema-migration
+compares:
+
+```text
+CREATE INDEX chain_lineage_timestamp_idx ON bigname_phase.chain_lineage USING btree (chain_id, block_timestamp, block_number)
+CREATE INDEX project_resource_pointer_namehash_resolver_idx ON bigname_phase.project_resource_pointer USING btree (chain_id, namehash, resolver_address)
+CREATE INDEX name_surfaces_name_prefix_idx ON bigname_phase.name_surfaces USING btree (raw_name text_pattern_ops, namespace, namehash, logical_name_id) WHERE ((visibility_state = 'active'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (octet_length(raw_name) <= 2000))
+CREATE INDEX project_registry_pointer_resource_idx ON bigname_phase.project_registry_pointer USING btree (chain_id, resource_id)
+```
+
+A missing index has no row. The schema-migration then builds it under the SHARE lock, so
+build it concurrently first.
+
+The remedy depends on the refusal:
+
+- A name that is not an index: remove or rename that relation, then build the index.
+- An index of the name on another table, or one that is not valid and ready: drop it with
+  `DROP INDEX CONCURRENTLY bigname_phase.<index name>`, then build it again with the
+  statement above.
+- Another definition: the error prints the definition it found and the one it expects.
+  Drop the index the same way and build it again with the statement above.
+
+Before any drop, confirm in `pg_stat_progress_create_index` that no build of the index is
+still running. Then run the schema-migrations again.
+
+Ingest writes one more btree entry for each block it stores. Project writes one more for
+each resource pointer and registry pointer it stores. Interpret writes one more for each
+readable, active name surface whose raw name is at most 2000 bytes.
+
+## Inconsistent logs from undeclared emitters are skipped
+
+The build that skips a well-formed ENSv2 registry log that contradicts itself or its emitter's
+earlier logs, when no manifest declares the emitter
+([table ownership](storage.md#table-ownership)), changes the ENSv2 registry adapter, the skip
+decision and the interpretation of a block that announces a registry in `crates/adapters/src`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain. The
+[projection content hash](glossary.md#projection-content-hash) moves with it.
+
+What changes:
+
+- Interpret no longer stops a chain on such a log. Before, one `LabelRegistered` whose label
+  did not hash to its `labelHash` from any contract that had emitted `RegistryCreated()`
+  failed the Interpret phase until an operator intervened. Now the log is skipped and the
+  chain keeps up.
+- The skipped log writes one `interpret_decode_skips` row whose `decode_context` starts with
+  `inconsistent`, logs one warning and counts in
+  `phase_runner_interpret_inconsistent_log_skips_total`
+  ([pipeline monitoring](runbooks/pipeline-monitoring.md#interpret-inconsistent-log-skips)).
+- Served data can change only where a chain holds such a log, or in a block that admits a
+  registry or a resolver (`RegistryCreated`, `ResolverCreated`, `ProxyDeployed` or `Upgraded`):
+  the admitted contract's logs in the block now run in Ethereum order as if it had been
+  admitted at the block's start. A manifest-declared emitter still stops on the same log.
+- Every block that admits a catalog entry not already live is interpreted twice, so Interpret
+  does that block's work twice. That includes a later block that announces an admitted
+  contract again, such as a proxy's `Upgraded` naming a declared implementation once more.
+  Every other block is interpreted once.
+
+Every chain needs a full-history Interpret redo, then the stamped Project redo it installs,
+at a planned [re-derivation boundary](glossary.md#re-derivation-boundary) under matching
+runner and API binaries. The change shares the release's one Interpret and Project redo
+pair with its other hash-rotating changes. Do not mark old rows ready under the new hash.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
+and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## ENSv1→ENSv2 migration of a lease with no known holder
+
+The build that reconciles the unwrapped ENSv1→ENSv2 migration of a `.eth` lease bigname first
+learned of from a legacy-controller `NameRenewed`
+([storage](storage.md#ensv1ensv2-correlation-visibility)) changes the migration proof in
+`crates/adapters/src`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain. The
+[projection content hash](glossary.md#projection-content-hash) moves with it.
+
+What changes for names:
+
+- Interpret no longer stops at such a migration with "leaves 1 ENSv1 bindings open at its
+  predecessor cleanup". The name serves its ENSv2 registration after the migration block, like a
+  name with a known holder.
+- Such a lease records the zero address as its holder. The proof now skips only its holder
+  comparison for that lease, and checks every other clause. The writer's stop is unchanged.
+- A migration of such a lease that had already moved on the BaseRegistrar, or that went through
+  the NameWrapper, is unchanged.
+- Each unwrapped boundary that derives without the proof logs a warning,
+  `unwrapped ENSv1→ENSv2 migration boundary derives without its cleanup proof`, with a
+  `clause` field naming the check that refused it.
+
+These rows arrive through re-derivation, not through an in-place change. Every chain needs a
+full-history Interpret redo, then the Project redo it installs, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+binaries. A Project redo alone does not apply it. The change rides the next re-derivation
+release and shares that release's one Interpret and Project redo pair with its other
+hash-rotating changes. Do not mark old rows ready under the new hash.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
+and the compiled watch plan are unchanged, so stamp no Ingest redo.
 
 ## Registry implementations read from the migration manifest
 

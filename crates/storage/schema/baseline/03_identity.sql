@@ -348,6 +348,15 @@ CREATE INDEX IF NOT EXISTS name_surfaces_name_order_idx
       AND canonicality_state IN ('canonical', 'safe', 'finalized')
       AND octet_length(raw_name) <= 2000;
 
+-- A prefix search (storage:families.name.search_candidates) reads the raw names with a
+-- prefix as one range. The name order index cannot give that range under a collation other
+-- than C, and text_pattern_ops can under any. The predicate is the name order index's.
+CREATE INDEX IF NOT EXISTS name_surfaces_name_prefix_idx
+    ON name_surfaces (raw_name text_pattern_ops, namespace, namehash, logical_name_id)
+    WHERE visibility_state = 'active'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND octet_length(raw_name) <= 2000;
+
 CREATE TABLE IF NOT EXISTS surface_bindings (
     surface_binding_id uuid PRIMARY KEY,
     logical_name_id text NOT NULL,

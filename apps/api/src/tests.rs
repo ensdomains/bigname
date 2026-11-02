@@ -650,8 +650,15 @@ mod v2_resolver_records;
 #[path = "tests/resolver_node_inventory.rs"]
 mod resolver_node_inventory;
 
+#[path = "tests/v2_resolver_precedence.rs"]
+mod v2_resolver_precedence;
+
 #[path = "tests/v2_ens_v1_resolver.rs"]
 mod v2_ens_v1_resolver;
 
+#[path = "tests/v2_ens_v1_registry_read.rs"]
+mod v2_ens_v1_registry_read;
+#[path = "tests/v2_ens_v1_registry_read_mainnet.rs"]
+mod v2_ens_v1_registry_read_mainnet;
 #[path = "tests/v2_ens_v1_registry_serving.rs"]
 mod v2_ens_v1_registry_serving;

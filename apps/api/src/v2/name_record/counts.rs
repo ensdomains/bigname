@@ -1,14 +1,17 @@
-use bigname_storage::{NameCurrentRow, SelectedSnapshot};
+use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow, SelectedSnapshot};
 
 use crate::AppState;
 use crate::v2::collection_snapshot::CollectionSnapshot;
+use crate::v2::support::RegistryRead;
 use crate::v2::{Status, V2Error, V2Result, name_chain_id, snapshot_meta};
 
 use super::NameRecord;
 
+/// `served` is the request's registry read and the record inventory `records` came from.
 pub(super) async fn apply(
     state: &AppState,
     row: &NameCurrentRow,
+    served: (&RegistryRead, Option<&RecordInventoryCurrentRow>),
     selected: &SelectedSnapshot,
     snapshot: Option<&mut CollectionSnapshot>,
     record: &mut NameRecord,
@@ -18,7 +21,7 @@ pub(super) async fn apply(
     };
     #[cfg(test)]
     crate::v2::search_public_namespace_read_test_hooks::run(&state.pool).await?;
-    let counts = load_name_counts(snapshot.conn().await?, row).await?;
+    let counts = load_name_counts(snapshot.conn().await?, row, served).await?;
     let current = snapshot.finish(state).await?;
     let selected_meta = snapshot_meta(selected)?;
     let chain_id = name_chain_id(row)
@@ -54,9 +57,12 @@ pub(super) struct NameCounts {
 
 /// The direct readable subname count and, when the row has current record inventory, its known
 /// record-selector count; both are the same bounded reads the subnames and address-name routes run.
+/// When the registry read serves another resolver or a clear, the count is that of the inventory
+/// `records` came from, and is omitted with it.
 pub(super) async fn load_name_counts(
     conn: &mut sqlx::PgConnection,
     row: &NameCurrentRow,
+    (registry, served_inventory): (&RegistryRead, Option<&RecordInventoryCurrentRow>),
 ) -> V2Result<NameCounts> {
     let subname_count = bigname_storage::load_children_current_summaries(
         &mut *conn,
@@ -71,15 +77,25 @@ pub(super) async fn load_name_counts(
     .next()
     .and_then(|summary| u64::try_from(summary.child_count).ok())
     .unwrap_or_default();
-    let record_count = bigname_storage::families::records::load_family_record_counts(conn, &[row])
-        .await
-        .map_err(crate::v2::name_rows_error(
-            crate::v2::SnapshotReadResource::Name,
-            |_| V2Error::internal_error("failed to load record counts"),
-        ))?
-        .into_iter()
-        .next()
-        .flatten();
+    let record_count = match registry {
+        RegistryRead::Composed => {
+            bigname_storage::families::records::load_family_record_counts(conn, &[row])
+                .await
+                .map_err(crate::v2::name_rows_error(
+                    crate::v2::SnapshotReadResource::Name,
+                    |_| V2Error::internal_error("failed to load record counts"),
+                ))?
+                .into_iter()
+                .next()
+                .flatten()
+        }
+        RegistryRead::Cleared | RegistryRead::Resolver(_) => served_inventory.map(|inventory| {
+            inventory
+                .selectors
+                .as_array()
+                .map_or(0, |selectors| selectors.len() as u64)
+        }),
+    };
     Ok(NameCounts {
         subname_count,
         record_count,

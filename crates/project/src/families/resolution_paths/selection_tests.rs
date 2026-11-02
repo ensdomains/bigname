@@ -3,8 +3,10 @@
 //!
 //! The statement is a function of the tables it reads and its five parameters, and it writes only
 //! the work table. So a row test seeds those tables directly, runs `prepare` and compares the
-//! names it selected with a literal set. Any seeded state is a valid input, including ones Interpret never
-//! writes: a null or upper-case label hash, a surface first observed above the publication.
+//! names it selected with a literal set and with `oracle::statement`, the selection as it stood
+//! before a changed registry was looked up by the entries that point at it. Any seeded state is
+//! a valid input, including ones Interpret never writes: a null or upper-case label hash, a
+//! surface first observed above the publication.
 //!
 //! Each test names the ordering or edge fact it holds in place. A publication is one
 //! transaction: it journals the rows of its block, or of every block of its rebuild range under
@@ -13,7 +15,15 @@
 //! block, and every name surface as a path member whatever its block, visibility or
 //! canonicality. Only its last step keeps the readable surfaces at or below the block.
 //!
-//! `scaling_tests.rs` holds the tests on how many surfaces a selection reads.
+//! `registry_pointer_tests.rs` holds the rows on which names a registry pointer change expands,
+//! `registry_route_tests.rs` the rows of the selections that start from a changed registry
+//! or from ENSv1→ENSv2 migration evidence, and `entry_slot_tests.rs` the rows of the names a
+//! changed entry selects by the registry that holds it. `scaling_tests.rs` holds the tests on
+//! how many surfaces a selection reads.
+mod entry_slot_tests;
+mod oracle;
+mod registry_pointer_tests;
+mod registry_route_tests;
 mod scaling_tests;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,6 +47,8 @@ const ROOT: &str = "0x00000000000000000000000000000000000000a0";
 /// The registry the root's `eth` entry points at.
 const ETH: &str = "0x00000000000000000000000000000000000000a1";
 const PLAN_MODES: [&str; 2] = ["force_custom_plan", "force_generic_plan"];
+const WORK_TABLE: &str = "CREATE TEMP TABLE bigname_resolution_path_work (
+    logical_name_id text PRIMARY KEY) ON COMMIT DROP";
 
 /// A registry other than the root's and `eth`'s.
 fn registry(n: u8) -> String {
@@ -312,6 +324,22 @@ impl World {
             Some(before),
         )
         .await
+    }
+
+    /// The registry pointer of `name` holds `resolver` since block 1, with no journal row: an
+    /// earlier publication wrote it.
+    async fn registry_pointer_at(&self, name: &str, resolver: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO project_registry_pointer (chain_id, namespace, node, block_number,
+                 event_identity, resolver_address, source_family)
+             VALUES ($1, 'ens', $2, 1, 'pointer', $3, 'ens_v1_registry_l1')",
+        )
+        .bind(CHAIN)
+        .bind(node(name))
+        .bind(resolver)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// The resource pointer of `resource` came from an ENSv1 registry `ResolverChanged` for
@@ -644,6 +672,70 @@ impl World {
         .await
     }
 
+    /// The resource `mount` gives the entry of `labelhash` in `registry`.
+    async fn resource(&self, registry: &str, labelhash: &str) -> Result<String> {
+        Ok(sqlx::query_scalar("SELECT md5($1 || $2)::uuid::text")
+            .bind(registry)
+            .bind(labelhash)
+            .fetch_one(&self.pool)
+            .await?)
+    }
+
+    /// A later `SubregistryChanged` event of a mounted entry: from `block` the entry points at
+    /// `subregistry`. Returns the event's identity.
+    async fn repoint(
+        &self,
+        registry: &str,
+        labelhash: &str,
+        subregistry: &str,
+        block: i64,
+    ) -> Result<String> {
+        let resource = self.resource(registry, labelhash).await?;
+        let identity = format!("repoint:{registry}:{labelhash}:{block}");
+        self.event(
+            &identity,
+            "SubregistryChanged",
+            "ens_v2_registry_l1",
+            block,
+            None,
+            Some(&resource),
+            json!({"subregistry": subregistry, "token_id": labelhash.to_lowercase()}),
+            registry,
+        )
+        .await?;
+        Ok(identity)
+    }
+
+    /// An event at `block` that makes `registry` a changed registry: `RegistryCreated` carries
+    /// it as `registry`, `Upgraded` and `ContractDiscovered` as `proxy_address`. Returns the
+    /// event's identity.
+    async fn registry_changed(
+        &self,
+        kind: &str,
+        family: &str,
+        registry: &str,
+        block: i64,
+    ) -> Result<String> {
+        let identity = format!("{kind}:{registry}:{block}");
+        let field = if kind == "RegistryCreated" {
+            "registry"
+        } else {
+            "proxy_address"
+        };
+        self.event(
+            &identity,
+            kind,
+            family,
+            block,
+            None,
+            None,
+            json!({field: registry}),
+            registry,
+        )
+        .await?;
+        Ok(identity)
+    }
+
     /// An ENSv1 to ENSv2 migration of `name`, applied at `block`, whose evidence is the
     /// creation of `registry` at block 1.
     async fn migrated(&self, name: &str, registry: &str, block: i64) -> Result<()> {
@@ -678,6 +770,25 @@ impl World {
         .await
     }
 
+    /// The names the frozen statement before this one selects for `call`.
+    async fn before(&self, call: Call<'_>) -> Result<BTreeSet<String>> {
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction = connection.begin().await?;
+        raw_sql(WORK_TABLE).execute(&mut *transaction).await?;
+        sqlx::query(&oracle::statement(SUMMARY_WORK_LIST))
+            .bind(CHAIN)
+            .bind(call.block)
+            .bind(call.time())
+            .bind(call.after)
+            .bind(call.root)
+            .execute(&mut *transaction)
+            .await
+            .context("the statement before the mount lookup")?;
+        let names = work(&mut transaction).await?;
+        transaction.rollback().await?;
+        Ok(names)
+    }
+
     /// The names `prepare` selects for `call` under plan cache mode `mode`.
     async fn selected(&self, call: Call<'_>, mode: &str) -> Result<BTreeSet<String>> {
         let mut connection = self.pool.acquire().await?;
@@ -704,7 +815,7 @@ impl World {
         Ok(names)
     }
 
-    /// `prepare` selects exactly `expected` for `call`.
+    /// `prepare` and the frozen statement before it both select exactly `expected` for `call`.
     async fn assert_selects(&self, call: Call<'_>, expected: &[&str]) -> Result<()> {
         let expected: BTreeSet<String> = expected.iter().map(|name| (*name).to_owned()).collect();
         ensure!(
@@ -722,6 +833,11 @@ impl World {
                 .map(|id| self.names.get(&id).cloned().unwrap_or(id))
                 .collect()
         };
+        let before = spelled(self.before(call).await?);
+        ensure!(
+            before == expected,
+            "the statement before the mount lookup selects {before:?}, not {expected:?}"
+        );
         for mode in PLAN_MODES {
             let selected = spelled(self.selected(call, mode).await?);
             ensure!(
@@ -947,7 +1063,8 @@ async fn a_touched_name_selects_itself_only() -> Result<()> {
 
 // An owner-only change of a parent entry recomposes the parent and no descendant: the
 // entry's owner is not one of the fields a descendant reads through its ancestors. A
-// resolver-pointer change of the same parent still recomposes its whole subtree.
+// registry pointer change of the same parent still recomposes the names under it without a
+// pointer of their own, which here is every one.
 #[tokio::test]
 async fn an_owner_only_parent_change_selects_the_parent_only() -> Result<()> {
     let mut world = World::new().await?;
@@ -1391,11 +1508,12 @@ async fn a_null_label_hash_element_keeps_the_scan_result() -> Result<()> {
     world.cleanup().await
 }
 
-// A registry created, upgraded or announced in the publication still expands through every
-// observed name. The registry mounted at `foo.eth` is created at block 5. Its mount is an older
-// entry that no changed entry names, so only the whole walk finds it. `bar`'s entry changes too.
+// A registry created, upgraded or announced in the publication selects the names under each
+// path that reaches it. The registry mounted at `foo.eth` is created at block 5. Its mount is an
+// older entry that no changed entry names. `bar`'s entry changes too. The same registry is
+// upgraded at block 7 and announced at block 9.
 #[tokio::test]
-async fn a_changed_registry_keeps_the_whole_walk() -> Result<()> {
+async fn a_registry_changed_after_its_mount_selects_the_names_under_it() -> Result<()> {
     let mut world = World::new().await?;
     world
         .surfaces(&[
@@ -1430,12 +1548,29 @@ async fn a_changed_registry_keeps_the_whole_walk() -> Result<()> {
     world
         .assert_selects(call, &["foo.eth", "a.foo.eth", "x.a.foo.eth", "bar.eth"])
         .await?;
+    for (block, kind, family) in [
+        (7, "Upgraded", "ens_v2_registry_l1"),
+        (9, "ContractDiscovered", "ens_v2_migration_l1"),
+    ] {
+        world
+            .registry_changed(kind, family, &registry(1), block)
+            .await?;
+        let call = Call {
+            block,
+            after: block - 1,
+            root: Some(ROOT),
+        };
+        world
+            .assert_selects(call, &["foo.eth", "a.foo.eth", "x.a.foo.eth"])
+            .await?;
+    }
     world.cleanup().await
 }
 
-// A change of the fallback resolver's classification, or of the root registry itself, selects
-// every readable `.eth` name: not a name of another top-level label, a shadow surface, or a
-// surface first observed above the publication.
+// A change of the fallback resolver's classification selects every readable `.eth` name: not a
+// name of another top-level label, a shadow surface, or a surface first observed above the
+// publication. `registry_route_tests.rs` holds the same selection for a change of the root
+// registry itself.
 #[tokio::test]
 async fn a_global_change_selects_every_eth_name() -> Result<()> {
     const FALLBACK: &str = "0x322b7581ca210a69c6d0e0d7c88a7688d2789cb0";
@@ -1460,25 +1595,6 @@ async fn a_global_change_selects_every_eth_name() -> Result<()> {
         root: Some(ROOT),
     };
     world.assert_selects(classified, &every).await?;
-
-    world
-        .event(
-            "upgraded",
-            "Upgraded",
-            "ens_v2_registry_l1",
-            7,
-            None,
-            None,
-            json!({"proxy_address": ROOT}),
-            ROOT,
-        )
-        .await?;
-    let upgraded = Call {
-        block: 7,
-        after: 6,
-        root: Some(ROOT),
-    };
-    world.assert_selects(upgraded, &every).await?;
     world.cleanup().await
 }
 
@@ -2441,12 +2557,12 @@ async fn a_resolver_classification_change_selects_the_names_that_read_the_resolv
     Ok(())
 }
 
-// Each kind of registry change in the window keeps the whole walk: an upgrade or a discovery
-// from the ENSv2 registry or migration family. The registry mounted at `foo.eth` changes, and
-// the names under that mount are selected. The same upgrade at the marker's block selects
-// nothing.
+// Each kind of registry change in the window selects the names under the entries that point at
+// the registry: an upgrade or a discovery from the ENSv2 registry or migration family. The
+// registry mounted at `foo.eth` changes, and the names under that mount are selected. The same
+// upgrade at the marker's block selects nothing.
 #[tokio::test]
-async fn each_registry_change_kind_keeps_the_whole_walk() -> Result<()> {
+async fn each_registry_change_kind_selects_the_names_under_its_mounts() -> Result<()> {
     let under: &[&str] = &["foo.eth", "a.foo.eth", "x.a.foo.eth"];
     for (kind, family, block, expected) in [
         ("Upgraded", "ens_v2_registry_l1", 5, under),
@@ -2528,6 +2644,205 @@ async fn in_a_mixed_batch_a_touched_name_expands_only_for_its_own_change() -> Re
             .assert_selects(call, &["bar.eth", "a.bar.eth", "foo.eth"])
             .await
             .with_context(|| format!("mixed batch case {case}"))?;
+        world.cleanup().await?;
+    }
+    Ok(())
+}
+
+/// A classification case: its name, the journal's before-image, the row the block left and the
+/// names it selects.
+type ClassificationCase<'a> = (&'a str, Option<Value>, Option<Value>, &'a [&'a str]);
+
+/// The classification row of `resolver` as the publication at block 5 left it, `current`
+/// (none for a deleted row), and its journal row with the before-image `before` (none for an
+/// inserted row). Both images hold the four fields a composition reads.
+async fn classification_changed(
+    world: &World,
+    resolver: &str,
+    before: Option<Value>,
+    current: Option<Value>,
+) -> Result<()> {
+    if let Some(row) = current {
+        sqlx::query(
+            "INSERT INTO project_resolver_classification (chain_id, resolver_address,
+                 block_number, event_identity, classification, support_status,
+                 unsupported_reason, manifest_id)
+             VALUES ($1, $2, 5, 'classified', $3 -> 'classification', $3 ->> 'support_status',
+                     $3 ->> 'unsupported_reason', ($3 ->> 'manifest_id')::bigint)",
+        )
+        .bind(CHAIN)
+        .bind(resolver)
+        .bind(row)
+        .execute(&world.pool)
+        .await?;
+    }
+    world
+        .journal(
+            5,
+            "project_resolver_classification",
+            json!([CHAIN, resolver]),
+            before,
+        )
+        .await
+}
+
+// A resolution path reads a classification only while it is supported (storage
+// `families/name/resolution_path.rs`, `Walk::evaluate`, and `families/records/mirror.rs`,
+// `classify`). An unsupported or missing row decides the path as not projected whatever its
+// fields say. So a change between two unsupported rows, or between no row and an unsupported
+// one, selects nothing. Any change with a supported side selects the names that point at the
+// resolver, a deleted supported row included. A null `manifest_id` on both sides is no change.
+#[tokio::test]
+async fn a_classification_change_selects_its_readers_only_when_a_side_is_supported() -> Result<()> {
+    const CHANGED: &str = "0x00000000000000000000000000000000000000c7";
+    let image = |kind: &str, status: &str, reason: Option<&str>, manifest: Option<i64>| {
+        json!({"classification": {"kind": kind}, "support_status": status,
+               "unsupported_reason": reason, "manifest_id": manifest})
+    };
+    let unsupported = image("a", "unsupported", Some("resolver_not_declared"), Some(1));
+    let supported = image("a", "supported", None, Some(1));
+    let readers: &[&str] = &["foo.eth", "a.foo.eth", "bar.eth", "a.bar.eth"];
+    let cases: [ClassificationCase<'_>; 10] = [
+        (
+            "unsupported re-filed with a new reason, manifest and classification",
+            Some(image(
+                "b",
+                "unsupported",
+                Some("resolver_manifest_not_active"),
+                None,
+            )),
+            Some(unsupported.clone()),
+            &[],
+        ),
+        (
+            "unsupported, manifest only",
+            Some(image(
+                "a",
+                "unsupported",
+                Some("resolver_not_declared"),
+                Some(2),
+            )),
+            Some(unsupported.clone()),
+            &[],
+        ),
+        (
+            "unsupported row inserted",
+            None,
+            Some(unsupported.clone()),
+            &[],
+        ),
+        (
+            "unsupported row deleted",
+            Some(unsupported.clone()),
+            None,
+            &[],
+        ),
+        (
+            "supported row inserted",
+            None,
+            Some(supported.clone()),
+            readers,
+        ),
+        (
+            "supported row deleted",
+            Some(supported.clone()),
+            None,
+            readers,
+        ),
+        (
+            "support withdrawn",
+            Some(supported.clone()),
+            Some(unsupported.clone()),
+            readers,
+        ),
+        (
+            "supported, manifest re-stamped",
+            Some(image("a", "supported", None, Some(2))),
+            Some(supported.clone()),
+            readers,
+        ),
+        (
+            "supported, classification changed",
+            Some(image("b", "supported", None, Some(1))),
+            Some(supported.clone()),
+            readers,
+        ),
+        (
+            "supported, nothing changed, no manifest",
+            Some(image("a", "supported", None, None)),
+            Some(image("a", "supported", None, None)),
+            &[],
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (case, before, current, expected) in cases {
+        let mut world = World::new().await?;
+        world
+            .surfaces(&[
+                "eth",
+                "foo.eth",
+                "a.foo.eth",
+                "bar.eth",
+                "a.bar.eth",
+                "other.eth",
+            ])
+            .await?;
+        world.eth().await?;
+        for name in ["foo.eth", "bar.eth"] {
+            world
+                .registry_pointer_changed(2, name, ZERO_ADDR, CHANGED)
+                .await?;
+        }
+        classification_changed(&world, CHANGED, before, current).await?;
+        let call = Call {
+            block: 5,
+            after: 4,
+            root: Some(ROOT),
+        };
+        if let Err(error) = world.assert_selects(call, expected).await {
+            wrong.push(format!("{case}: {error:#}"));
+        }
+        world.cleanup().await?;
+    }
+    ensure!(wrong.is_empty(), "wrong selections: {wrong:#?}");
+    Ok(())
+}
+
+// The declared ENSv1 mirror resolver, re-filed from one unsupported row to another, is no
+// global change: the walk reads the mirror only while it is supported. Withdrawing its support
+// is one, and selects every `.eth` name.
+#[tokio::test]
+async fn a_declared_mirror_refiled_as_unsupported_selects_no_name() -> Result<()> {
+    const MIRROR: &str = "0x394d8eb4a4fdf599384deab25f31d111d755c398";
+    let unsupported = json!({"classification": {"role": "ensv1_mirror_resolver"},
+        "support_status": "unsupported", "unsupported_reason": "resolver_not_declared",
+        "manifest_id": 1});
+    let refiled = json!({"classification": {}, "support_status": "unsupported",
+        "unsupported_reason": "resolver_manifest_not_active", "manifest_id": null});
+    let supported = json!({"classification": {"role": "ensv1_mirror_resolver"},
+        "support_status": "supported", "unsupported_reason": null, "manifest_id": 1});
+    for (case, before, expected) in [
+        ("re-filed", refiled, &[][..]),
+        ("withdrawn", supported, &["eth", "foo.eth", "bar.eth"][..]),
+    ] {
+        let mut world = World::new().await?;
+        world
+            .surfaces(&["eth", "foo.eth", "bar.eth", "xyz"])
+            .await?;
+        world.eth().await?;
+        world
+            .declare_mirror("ens_v2_mainnet_20261002", MIRROR)
+            .await?;
+        classification_changed(&world, MIRROR, Some(before), Some(unsupported.clone())).await?;
+        let call = Call {
+            block: 5,
+            after: 4,
+            root: Some(ROOT),
+        };
+        world
+            .assert_selects(call, expected)
+            .await
+            .with_context(|| format!("mirror case {case}"))?;
         world.cleanup().await?;
     }
     Ok(())

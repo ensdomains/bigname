@@ -15,6 +15,49 @@ impl fmt::Display for MalformedEventLog {
     }
 }
 
+/// A log that decoded cleanly but contradicts itself or its emitter's own earlier logs. `site`
+/// names the failed check. Interpret skips such a log from an undeclared emitter, as it skips a
+/// malformed one, and stops on one from a manifest-declared emitter.
+#[derive(Debug)]
+struct InconsistentEventLog {
+    site: &'static str,
+    message: String,
+}
+
+impl fmt::Display for InconsistentEventLog {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+pub(crate) fn inconsistent_event_log(
+    site: &'static str,
+    message: impl fmt::Display,
+) -> anyhow::Error {
+    anyhow::Error::msg(InconsistentEventLog {
+        site,
+        message: message.to_string(),
+    })
+}
+
+pub(crate) fn inconsistent_event_log_site(error: &anyhow::Error) -> Option<&'static str> {
+    error
+        .downcast_ref::<InconsistentEventLog>()
+        .map(|inconsistent| inconsistent.site)
+}
+
+/// An ENSv2 registry `LabelRegistered` or `LabelReserved` whose `label` does not hash to its
+/// `labelHash` contradicts itself.
+pub(crate) fn ensure_label_hash(label: &[u8], label_hash: B256, event: &str) -> Result<()> {
+    if keccak256(label) != label_hash {
+        return Err(inconsistent_event_log(
+            "label_hash_mismatch",
+            format!("{event} label does not hash to labelHash"),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn decode_event_log<E>(
     topics: &[String],
     data: &[u8],

@@ -384,7 +384,7 @@ fn verified_record_answers(
     }
 }
 
-fn verified_answers_from_results(
+pub(super) fn verified_answers_from_results(
     results: &[LookupRecordResult],
     records: &[ResolutionRecordKey],
 ) -> V2Result<BTreeMap<String, RecordAnswer>> {

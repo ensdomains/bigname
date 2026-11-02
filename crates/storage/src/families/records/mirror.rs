@@ -1,11 +1,12 @@
 //! The ENSv1 mirror walk over F4 (record_inventory/mirror.rs). A resource whose serving pointer is
-//! an ENSv2 registry or root pointer at a resolver classified as an ENSv1 mirror resolver serves
-//! the records of the ENSv1 resolver the mirror would call: the walk consults the queried name and
-//! each proper ancestor below the root, deepest first, reads the ENSv1 registry's current resolver
-//! of each node from `project_registry_pointer` (clears included, so a cleared node falls through),
-//! and keeps the nearest node with a resolver. Records are derived only when that resolver was
-//! found at the queried node itself, is a supported ENSv1 resolver declared in its pointer's
-//! namespace, and is not itself a mirror; otherwise the row is unsupported with the reason.
+//! an ENSv2 registry or root pointer, or an ENSv1 pointer, at a resolver classified as an ENSv1
+//! mirror resolver serves the records of the ENSv1 resolver the mirror would call: the walk
+//! consults the queried name and each proper ancestor below the root, deepest first, reads the
+//! ENSv1 registry's current resolver of each node from `project_registry_pointer` (clears
+//! included, so a cleared node falls through), and keeps the nearest node with a resolver.
+//! Records are derived only when that resolver was found at the queried node itself, is a
+//! supported ENSv1 resolver declared in its pointer's namespace, and is not itself a mirror;
+//! otherwise the row is unsupported with the reason.
 //! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
 //! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/libraries/LibResolution.sol:L39-L48 @ ens_v2_sepolia_20260916@366de741)
 //! (upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)
@@ -19,7 +20,11 @@ use crate::families::{
     position::emission_ordinal_sql,
 };
 
-use super::{facts::ResolverClassification, is_cleared, serving::ServingPointer};
+use super::{
+    facts::ResolverClassification,
+    is_cleared,
+    serving::{ServingPointer, V1_POINTER_FAMILIES},
+};
 
 const V2_POINTER_FAMILIES: [&str; 2] = ["ens_v2_registry_l1", "ens_v2_root_l1"];
 
@@ -139,13 +144,18 @@ impl MirrorSelection {
     }
 }
 
-/// Whether `pointer` is a mirror pointer: an ENSv2 registry or root pointer at a resolver
-/// classified as an ENSv1 mirror resolver.
+/// Whether `pointer` is a mirror pointer: an ENSv2 registry or root pointer, or an ENSv1 pointer,
+/// at a resolver classified as an ENSv1 mirror resolver. The mirror stores no records, so an
+/// ENSv1 name pointing at one is walked too. Its own registry node names the mirror, so the walk
+/// selects the mirror and the row is unsupported, where the mirror would call itself
+/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/AbstractMirrorResolver.sol:L67-L69 @ ens_v2_mainnet_20261002@b1f97b91)
+/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_mainnet_20261002@b1f97b91).
 pub(crate) fn is_mirror_pointer(
     pointer: &ServingPointer,
     classification: Option<&ResolverClassification>,
 ) -> bool {
-    V2_POINTER_FAMILIES.contains(&pointer.source_family.as_str())
+    let family = pointer.source_family.as_str();
+    (V2_POINTER_FAMILIES.contains(&family) || V1_POINTER_FAMILIES.contains(&family))
         && classification.is_some_and(|classification| {
             classification.field("source_family") == Some("ens_v2_resolver_l1")
                 && classification.field("role") == Some("ensv1_mirror_resolver")

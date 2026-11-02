@@ -127,7 +127,21 @@ pub(in crate::schema_v2) fn unwrapped_reconciliations(
         if boundary.after_state["migration_path"] != "unwrapped" {
             continue;
         }
+        // Without the proof the boundary still derives, and ordinary interpretation of the
+        // transaction stands. Name the clause that refused, so a stop at the predecessor close
+        // can be traced to it.
+        let refuse = |clause: &str| {
+            tracing::warn!(
+                chain_id = %boundary.chain_id,
+                block_number = ?boundary.block_number,
+                transaction_hash = ?boundary.transaction_hash,
+                logical_name_id = ?boundary.logical_name_id,
+                clause,
+                "unwrapped ENSv1→ENSv2 migration boundary derives without its cleanup proof"
+            );
+        };
         let Some(unlocked) = controllers.unlocked() else {
+            refuse("unlocked migration controller declared at the block");
             continue;
         };
         let matching = probe
@@ -140,6 +154,7 @@ pub(in crate::schema_v2) fn unwrapped_reconciliations(
             })
             .count();
         if matching != 1 {
+            refuse("one boundary for the name in the transaction");
             continue;
         }
         let transaction = transactions.get(&(
@@ -147,6 +162,7 @@ pub(in crate::schema_v2) fn unwrapped_reconciliations(
             boundary.transaction_hash.as_deref().unwrap_or_default(),
         ));
         let Some(transaction) = transaction else {
+            refuse("registrar observations in the boundary transaction");
             continue;
         };
         let label = transition.predecessor_selector["resource"]["labelhash"]
@@ -159,6 +175,7 @@ pub(in crate::schema_v2) fn unwrapped_reconciliations(
             .collect::<Vec<_>>();
         transfers.sort_by_key(|observation| observation.raw.log_index);
         let [.., incoming, cleanup] = transfers.as_slice() else {
+            refuse("incoming and cleanup registrar transfers of the label");
             continue;
         };
         // Earlier ordinary transfers remain in the prefix. Only the unique terminal pair
@@ -170,6 +187,7 @@ pub(in crate::schema_v2) fn unwrapped_reconciliations(
                 .windows(2)
                 .any(|pair| pair[0].raw.log_index >= pair[1].raw.log_index)
         {
+            refuse("terminal transfer pair ending at the selected cleanup");
             continue;
         }
         let prefix = output
@@ -192,7 +210,8 @@ pub(in crate::schema_v2) fn unwrapped_reconciliations(
             std::slice::from_ref(block),
         )?);
         predecessor_state.ensure_restore_succeeded()?;
-        if let Some(proof) = prove(
+        let mut clause = "";
+        match prove(
             catalog,
             boundary,
             incoming,
@@ -203,13 +222,16 @@ pub(in crate::schema_v2) fn unwrapped_reconciliations(
             base,
             unlocked,
             &graveyard,
+            &mut clause,
         ) {
-            proofs.push(proof);
+            Some(proof) => proofs.push(proof),
+            None => refuse(clause),
         }
     }
     Ok(proofs)
 }
 
+/// `clause` names the check in progress, so on `None` it is the one that refused.
 #[allow(clippy::too_many_arguments)]
 fn prove(
     catalog: &Catalog,
@@ -222,7 +244,9 @@ fn prove(
     base: &str,
     controller: &str,
     graveyard: &str,
+    clause: &mut &'static str,
 ) -> Option<UnwrappedReconciliation> {
+    *clause = "ENSv1 predecessor and registrar lease of the name";
     let logical = boundary.logical_name_id.as_ref()?;
     let node = logical.strip_prefix("ens:")?;
     let predecessor = state.v1_name("ens", node)?;
@@ -242,12 +266,14 @@ fn prove(
     let registry_only_bound = predecessor.resource_id == registry_resource_id
         && predecessor.authority_source_family == "ens_v1_registry_l1"
         && predecessor.token_lineage_id.is_none();
-    if !predecessor.surface_known
-        || !(lease_bound || registry_only_bound)
-        || registrar.expiry? <= incoming.raw.block_timestamp.unix_timestamp()
-    {
+    if !predecessor.surface_known || !(lease_bound || registry_only_bound) {
         return None;
     }
+    *clause = "lease live at the migration";
+    if registrar.expiry? <= incoming.raw.block_timestamp.unix_timestamp() {
+        return None;
+    }
+    *clause = "boundary selector names this BaseRegistrar lease and cleanup";
     let instance = catalog
         .contract_instance_for_address(base, incoming.raw.block_number)
         .ok()??;
@@ -262,6 +288,7 @@ fn prove(
     {
         return None;
     }
+    *clause = "registrar transfers on the lease token in the boundary transaction";
     for observation in [incoming, cleanup] {
         if observation.contract_instance_id != instance
             || !observation.raw.emitting_address.eq_ignore_ascii_case(base)
@@ -300,8 +327,19 @@ fn prove(
             .as_str()
             .is_some_and(|value| value.eq_ignore_ascii_case(address))
     };
-    if !equals(&incoming.decoded["from"], registrar.owner.as_deref()?)
-        || !equals(&incoming.decoded["to"], controller)
+    *clause = "incoming transfer from the registrar owner";
+    let owner = registrar.owner.as_deref()?;
+    // A lease whose first observed registrar event was a controller renewal records the zero
+    // address as its holder, so there is no recorded holder to compare `from` with. Only this
+    // comparison is skipped for it, and every other clause still applies. The controller's
+    // receiver ignores `from` and checks only its caller, the token and the migration data.
+    // (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L88-L121 @ ens_v2@a971bd64)
+    let holder_known = owner.parse::<Address>().ok() != Some(Address::ZERO);
+    if holder_known && !equals(&incoming.decoded["from"], owner) {
+        return None;
+    }
+    *clause = "registrar transfers into the controller and from it to the Graveyard, in order";
+    if !equals(&incoming.decoded["to"], controller)
         || !equals(&cleanup.decoded["from"], controller)
         || !equals(&cleanup.decoded["to"], graveyard)
         || incoming.raw.log_index >= cleanup.raw.log_index
@@ -309,9 +347,11 @@ fn prove(
     {
         return None;
     }
+    *clause = "complete ENSv2 successor";
     if !complete_successor(boundary, output, raw_logs, controller) {
         return None;
     }
+    *clause = "ENSv1 registry reclaim, transfer to the Graveyard and record clears";
     let registry = catalog.declared_address_for_role("ens_v1_registry_l1", "registry")?;
     let registry_instance = catalog
         .contract_instance_for_address(registry, incoming.raw.block_number)

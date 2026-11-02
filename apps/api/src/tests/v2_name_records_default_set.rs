@@ -298,7 +298,7 @@ async fn v2_get_name_records_default_set_reports_unsupported_inventory_per_key()
     let state = database.app_state();
     let refused = json!({
         "status": "unsupported",
-        "unsupported_reason": "resolver_implementation_unknown"
+        "unsupported_reason": "resolver_not_declared"
     });
 
     // Indexed evaluation and unkeyed auto answer each default key with the row's reason.

@@ -1,7 +1,7 @@
 //! Registration schedules are retained independently of current control and resolution.
 //! Only canonical lifecycle evidence changes a selected schedule; crossing its expiry never
 //! switches a name on a cut-over chain back to a different registration's dates.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
 
@@ -19,12 +19,20 @@ struct Instance<'a> {
     terminal: Option<&'a LifecycleEvent>,
     reserved: bool,
     attached: bool,
+    /// A never-live label allocation of the name: it keeps the key's position and dates nothing.
+    dateless: bool,
 }
 
 /// Retain one instance per admitted registry/token/resource key. The origin is distinct from the
 /// public registration handle. Unnamed changes belong only while the key still names this name;
 /// another name's association cannot renew or terminate its predecessor's retained instance.
-fn v2_instance<'a>(tagged: &[Tagged<'a>]) -> Option<Instance<'a>> {
+/// An event `never_live` names supplies nothing. When it is the name's own label allocation it
+/// still supersedes the key's instance. The replacement keeps the key's position but supplies no
+/// dates, until a later allocation or a revival of its entry.
+fn v2_instance<'a>(
+    tagged: &[Tagged<'a>],
+    never_live: impl Fn(&LifecycleEvent) -> bool,
+) -> Option<Instance<'a>> {
     let mut keys: BTreeMap<&str, Vec<&Tagged<'a>>> = BTreeMap::new();
     for item in tagged.iter().filter(|item| item.event.is_v2_family()) {
         if let Some(key) = item.key.as_deref() {
@@ -37,6 +45,36 @@ fn v2_instance<'a>(tagged: &[Tagged<'a>]) -> Option<Instance<'a>> {
         let mut current: Option<Instance<'a>> = None;
         for item in events {
             let event = item.event;
+            let explicit_origin = matches!(
+                event.source_event.as_deref(),
+                Some("LabelRegistered" | "LabelReserved")
+            ) && event.derived_from.as_deref() != Some("registry_state");
+            if never_live(event) {
+                // A re-reservation of a reserved entry keeps its token and resource, because the
+                // registry bumps their versions only when the previous owner is not zero. So a
+                // reservation already expired when written lands on the key of the reservation
+                // it replaces, and ends that one. The replacement keeps the key's position, so an
+                // older entry on another registry is not selected again, but it supplies no dates,
+                // so the name's dates fall back to its ENSv1 lease.
+                // (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registry/PermissionedRegistry.sol:L486-L494 @ ens_v2_mainnet_20261002@b1f97b91)
+                // (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/registry/PermissionedRegistry.sol:L499 @ ens_v2_mainnet_20261002@b1f97b91)
+                if item.staged == StagedName::Ours && explicit_origin {
+                    current = Some(Instance {
+                        origin: event,
+                        association: event,
+                        grant: None,
+                        resource_id: event.resource_id.as_deref(),
+                        key: key.to_owned(),
+                        latest: event,
+                        expiry: Value::Null,
+                        terminal: None,
+                        reserved: event.event_kind == "RegistrationReserved",
+                        attached: true,
+                        dateless: true,
+                    });
+                }
+                continue;
+            }
             if item.staged == StagedName::Other {
                 // A path expiry ends the other name's path on this key and never detaches this
                 // one. When the registry moves at a block boundary, the grant that moved the key
@@ -57,13 +95,11 @@ fn v2_instance<'a>(tagged: &[Tagged<'a>]) -> Option<Instance<'a>> {
                     && current
                         .as_ref()
                         .is_some_and(|instance| instance.reserved && instance.terminal.is_none());
-                let explicit_origin = matches!(
-                    event.source_event.as_deref(),
-                    Some("LabelRegistered" | "LabelReserved")
-                ) && event.derived_from.as_deref() != Some("registry_state");
                 // Topology reassertions can emit a reserved/granted snapshot after renewal or
                 // token regeneration. Only an actual label allocation starts a new instance.
-                if current.is_none() || (!claim && explicit_origin) {
+                if current.as_ref().is_none_or(|instance| instance.dateless)
+                    || (!claim && explicit_origin)
+                {
                     current = Some(Instance {
                         origin: event,
                         association: event,
@@ -75,6 +111,7 @@ fn v2_instance<'a>(tagged: &[Tagged<'a>]) -> Option<Instance<'a>> {
                         terminal: None,
                         reserved: kind == "RegistrationReserved",
                         attached: true,
+                        dateless: false,
                     });
                     continue;
                 }
@@ -115,13 +152,18 @@ fn v2_instance<'a>(tagged: &[Tagged<'a>]) -> Option<Instance<'a>> {
                     // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L664-L666 @ ens_v2_sepolia_20261001@07e55a05)
                     // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L671-L673 @ ens_v2_sepolia_20261001@07e55a05)
                     // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L41 @ ens_v2_sepolia_20261001@07e55a05)
-                    if event.source_event.as_deref() != Some("LabelUnregistered")
-                        && !event.expiry.is_null()
-                    {
+                    let dated = event.source_event.as_deref() != Some("LabelUnregistered")
+                        && !event.expiry.is_null();
+                    if dated {
                         instance.expiry = event.expiry.clone();
                     }
-                    if starts || event.revived_from_expiry == Some(true) {
+                    let revived = event.revived_from_expiry == Some(true);
+                    if starts || revived {
                         instance.terminal = None;
+                    }
+                    // A change that revives the entry of a never-live replacement dates it again.
+                    if revived && dated {
+                        instance.dateless = false;
                     }
                 }
                 _ => {}
@@ -201,8 +243,35 @@ pub(super) fn apply(
     registration: &mut Map<String, Value>,
     trace: &mut Map<String, Value>,
 ) -> anyhow::Result<()> {
-    let canonical =
-        v2_instance(tagged).filter(|_| facts.input.selection.is_v2() || facts.resolution_cutover);
+    // For a name ENSv1 decides, a reservation already expired when written is never live
+    // (`membership::expired_when_written`): it opens no dated instance and ends the one it
+    // replaces, so no lapse supplies dates over the ENSv1 lease, which stays the registration
+    // until premigration reserves the name again.
+    let mut never_live = BTreeSet::new();
+    if !facts.input.selection.is_v2() {
+        for item in tagged {
+            if super::membership::expired_when_written(facts, item.event)? {
+                never_live.insert(item.event.position.event_identity.as_str());
+            }
+        }
+    }
+    let selected = v2_instance(tagged, |event| {
+        never_live.contains(event.position.event_identity.as_str())
+    })
+    .filter(|_| facts.input.selection.is_v2() || facts.resolution_cutover);
+    // A selected never-live replacement dates nothing, so the name is dated as if no ENSv2
+    // instance were selected. It still keeps any older entry from being selected instead.
+    if let Some(instance) = selected.as_ref().filter(|instance| instance.dateless) {
+        trace.insert(
+            "dateless_instance".into(),
+            json!({
+                "state_key": instance.origin.state_key,
+                "event_identity": instance.origin.position.event_identity,
+                "source_family": instance.origin.source_family,
+            }),
+        );
+    }
+    let canonical = selected.filter(|instance| !instance.dateless);
     let mut terminal = false;
     // An authority-kind hint or a binding alone is not an observed allocation. During a
     // historical rebuild a later authority can already have a resource identity while its
@@ -269,12 +338,15 @@ pub(super) fn apply(
             // A later allocation cannot revive the premigration lease, even when current
             // control falls back to its retained ENSv1 binding after the ENSv2 release.
             // A lease registered after that allocation ended is a registration of its own.
+            // An earlier reservation is not such an allocation: premigration reserves only a
+            // name its ENSv1 lease still holds, so a reservation after the lease and before the
+            // current instance stood for the same lease.
             && !tagged.iter().any(|item| {
                 item.staged == StagedName::Ours
                     && item.event.is_v2_family()
                     && item.event.position < instance.origin.position
                     && lease.is_none_or(|lease| *lease < item.event.position)
-                    && matches!(item.event.event_kind.as_str(), "RegistrationGranted" | "RegistrationReserved")
+                    && item.event.event_kind == "RegistrationGranted"
                     && matches!(item.event.source_event.as_deref(), Some("LabelRegistered" | "LabelReserved"))
                     && item.event.derived_from.as_deref() != Some("registry_state")
             })
@@ -294,11 +366,10 @@ pub(super) fn apply(
         // That block names the lease's holder, so it keeps the lease's own release.
         let lease_released = lease_continues && registration.contains_key("lapsed_registration");
         if let Some(grant) = instance.grant {
-            let start = super::laterals::migrated_lease(facts, tagged, grant).unwrap_or(grant);
-            registration.insert(
-                "registered_at".into(),
-                super::laterals::registered_at(facts, start),
-            );
+            let start = super::laterals::registration_start(facts, tagged, grant);
+            // This start replaces the one served above, so the trace names only this one's.
+            trace.remove("registered_at_source");
+            registration.insert("registered_at".into(), start.time(facts, trace));
             registration.insert("identity_resource_id".into(), json!(instance.resource_id));
         } else if continuing_lease {
             registration.insert(
@@ -306,6 +377,7 @@ pub(super) fn apply(
                 registration["resource_id"].clone(),
             );
         } else {
+            trace.remove("registered_at_source");
             registration.insert("registered_at".into(), Value::Null);
             registration.insert("identity_resource_id".into(), Value::Null);
             registration.remove("lapsed_registration");
@@ -369,6 +441,18 @@ pub(super) fn apply(
     {
         (Grace::None, Boundary::Exclusive)
     } else {
+        // A release of an implied lease is terminal even without an expiry to schedule from.
+        // The implied lease is the registration's identity, also when no binding stands for it.
+        if trace.contains_key("implied_lease") {
+            terminal = registration.get("status").and_then(Value::as_str) == Some("released");
+            let lease = registration
+                .get("resource_id")
+                .cloned()
+                .unwrap_or(Value::Null);
+            if lease.is_string() {
+                registration.entry("identity_resource_id").or_insert(lease);
+            }
+        }
         match facts.input.place {
             NamePlace::EthSecondLevel => (Grace::EnsV1, Boundary::InclusiveGrace),
             NamePlace::BasenamesSecondLevel => (Grace::Basenames, Boundary::InclusiveGrace),
@@ -390,7 +474,10 @@ pub(super) fn apply(
                     == facts.input.selection.resource_id.as_deref()
         });
     anyhow::ensure!(
-        !allocated || expiry.is_some() || no_expiry,
+        !allocated
+            || expiry.is_some()
+            || no_expiry
+            || (terminal && trace.contains_key("implied_lease")),
         "allocated registration is missing its required expiry: {}",
         facts.input.logical_name_id
     );
@@ -483,3 +570,7 @@ mod tests {
 #[cfg(test)]
 #[path = "canonical_move_tests.rs"]
 mod move_tests;
+
+#[cfg(test)]
+#[path = "canonical_never_live_tests.rs"]
+mod never_live_tests;

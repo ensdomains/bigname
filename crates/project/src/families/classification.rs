@@ -11,17 +11,20 @@
 //!   current pointer is one of those rows, so a family with a count proposes the resolver.
 //! - `upgrades`: per family, the latest `Upgraded` of the proxy (build.sql:282-298).
 //!
-//! The discovered candidates (priority 0 declarations admitted by a same-namespace resolver edge,
-//! priority 1 the edges themselves, declaration_precedence.rs) and the manifests are read at the
-//! block. A resolver is classified again when an event of the block names it, when a pointer row
-//! moves to or from it, when a resolver edge, its contract address or a manifest declaration of
-//! it starts or stops at the block, and, every stored resolver and every address an active
-//! resolver edge reaches, when the block sees another active manifest set. A resolver with no candidate has no row. One with candidates but no active
-//! manifest of its family, which the served build leaves out, keeps a row marked unsupported with
-//! `resolver_manifest_not_active`. The row's position is the latest event that named the
-//! resolver, or `activation:<block>` for an activation; a manifest set change reclassifies
-//! without moving it, and `admission_manifests` records the key of the set the classification
-//! was made under.
+//! The discovered candidates (priority 0 declarations admitted by a same-namespace resolver edge
+//! or, for an ENSv2 declaration, by any candidate in its namespace, and priority 1 the edges
+//! themselves, declaration_precedence.rs) and the manifests are read at the block. Below
+//! priority 0 an ENSv2 candidate ranks last when the address has ENSv1 evidence and neither an
+//! ENSv2 declaration nor an `Upgraded` of the ENSv2 resolver family (sql.rs). A resolver is
+//! classified again when an event of the block names it, when a pointer row moves to or from it,
+//! when a resolver edge, its contract address or a manifest declaration of it starts or stops at
+//! the block, and, every stored resolver and every address an active resolver edge reaches, when
+//! the block sees another active manifest set. A resolver with no candidate has no row. One with
+//! candidates but no active manifest of its family, which the served build leaves out, keeps a
+//! row marked unsupported with `resolver_manifest_not_active`. The row's position is the latest
+//! event that named the resolver, or `activation:<block>` for an activation; a manifest set
+//! change reclassifies without moving it, and `admission_manifests` records the key of the set
+//! the classification was made under.
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};

@@ -88,3 +88,152 @@ async fn hydration_images_of_a_range_block_hold_only_that_blocks_changes() -> Re
     database.cleanup().await?;
     Ok(())
 }
+
+fn classification(kind: &str, status: &str, reason: Option<&str>, manifest: Option<i64>) -> Value {
+    json!({"chain_id": "ethereum-mainnet",
+           "resolver_address": "0x4976fb03c32e5b8cfe2b6ccb31c09ba78ebaba41",
+           "classification": {"kind": kind}, "support_status": status,
+           "unsupported_reason": reason, "manifest_id": manifest})
+}
+
+// A text overlay is served only while its resolver is supported and the overlay's admission
+// equals the four classification fields (storage `families/records/text_hydration.rs`), and a
+// selector is eligible for a read only while its resolver is supported (`text_eligible.sql`).
+// So a change between two unsupported rows, or between no row and an unsupported one, changes
+// no selector's hydration work, and any change with a supported side re-derives it. The images
+// are the block's: the before-image and the row the block wrote, or the key alone for a
+// deletion. The stored row is still the one before the block.
+#[tokio::test]
+async fn a_classification_change_re_derives_text_hydration_work_only_when_a_side_is_supported()
+-> Result<()> {
+    let unsupported = classification("a", "unsupported", Some("resolver_not_declared"), Some(1));
+    let supported = classification("a", "supported", None, Some(1));
+    let cases: [(&str, Option<Value>, Option<Value>, bool); 10] = [
+        (
+            "unsupported re-filed with a new reason, manifest and classification",
+            Some(classification(
+                "b",
+                "unsupported",
+                Some("resolver_manifest_not_active"),
+                None,
+            )),
+            Some(unsupported.clone()),
+            false,
+        ),
+        (
+            "unsupported, manifest only",
+            Some(classification(
+                "a",
+                "unsupported",
+                Some("resolver_not_declared"),
+                Some(2),
+            )),
+            Some(unsupported.clone()),
+            false,
+        ),
+        (
+            "unsupported row inserted",
+            None,
+            Some(unsupported.clone()),
+            false,
+        ),
+        (
+            "unsupported row deleted",
+            Some(unsupported.clone()),
+            None,
+            false,
+        ),
+        (
+            "supported row inserted",
+            None,
+            Some(supported.clone()),
+            true,
+        ),
+        ("supported row deleted", Some(supported.clone()), None, true),
+        (
+            "support withdrawn",
+            Some(supported.clone()),
+            Some(unsupported.clone()),
+            true,
+        ),
+        (
+            "supported, manifest re-stamped",
+            Some(classification("a", "supported", None, Some(2))),
+            Some(supported.clone()),
+            true,
+        ),
+        (
+            "supported, classification changed",
+            Some(classification("b", "supported", None, Some(1))),
+            Some(supported.clone()),
+            true,
+        ),
+        (
+            "supported, nothing changed",
+            Some(supported.clone()),
+            Some(supported.clone()),
+            false,
+        ),
+    ];
+    let (database, pool) = database().await?;
+    let mut wrong = Vec::new();
+    let mut selector = value("text:a");
+    selector.insert("arm".into(), json!("named"));
+    let classifications = &tables::RESOLVER_CLASSIFICATION;
+    for (case, before, after, re_derives) in cases {
+        let mut transaction = pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO project_node_record_value (chain_id, resolver_address, arm,
+                 arm_identity, record_key, block_number, event_identity, status, source_family,
+                 namespace)
+             VALUES ($1, $2, $3, $4, $5, 1, 'set', 'unsupported', 'ens_v1_resolver_l1', 'ens')",
+        )
+        .bind(selector["chain_id"].as_str())
+        .bind(selector["resolver_address"].as_str())
+        .bind(selector["arm"].as_str())
+        .bind(selector["arm_identity"].as_str())
+        .bind(selector["record_key"].as_str())
+        .execute(&mut *transaction)
+        .await?;
+        let mut images = Vec::new();
+        if let Some(stored) = &before {
+            sqlx::query(
+                "INSERT INTO project_resolver_classification (chain_id, resolver_address,
+                     block_number, event_identity, classification, support_status,
+                     unsupported_reason, manifest_id)
+                 VALUES ($1 ->> 'chain_id', $1 ->> 'resolver_address', 1, 'classified',
+                         $1 -> 'classification', $1 ->> 'support_status',
+                         $1 ->> 'unsupported_reason', ($1 ->> 'manifest_id')::bigint)",
+            )
+            .bind(stored)
+            .execute(&mut *transaction)
+            .await?;
+            images.push(stored.clone());
+        }
+        match after {
+            Some(after) => images.push(after),
+            None => images.push(Value::Object(key(
+                classifications,
+                &row(before.clone().expect("a deletion has its before-image")),
+            ))),
+        }
+        let keys = super::text_keys(
+            &mut transaction,
+            "ethereum-mainnet",
+            &Images::from([(classifications.name, images)]),
+        )
+        .await?;
+        let expected = if re_derives {
+            vec![Value::Object(key(&tables::NODE_RECORD_VALUE, &selector))]
+        } else {
+            vec![]
+        };
+        if keys != expected {
+            wrong.push(format!("{case}: {keys:?}"));
+        }
+        transaction.rollback().await?;
+    }
+    database.cleanup().await?;
+    assert!(wrong.is_empty(), "wrong text hydration keys: {wrong:#?}");
+    Ok(())
+}

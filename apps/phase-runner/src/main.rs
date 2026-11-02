@@ -65,6 +65,7 @@ async fn main() -> Result<()> {
             mut runtime,
             hydration_rpc_urls,
             project_families,
+            live_publication_lag_blocks,
         } => {
             // Only the supervised run and an explicit redo poll the token; the
             // one-shot commands keep the default SIGTERM disposition.
@@ -107,6 +108,7 @@ async fn main() -> Result<()> {
                     heartbeat_stale_after_secs,
                     runtime.chains.iter().map(|chain| chain.chain_id.as_str()),
                     true,
+                    live_publication_lag_blocks,
                 )
                 .await?;
                 rpc_chain_check::report(&metrics_feed, &verified_rpc);
@@ -130,10 +132,10 @@ async fn main() -> Result<()> {
                         IngestPhase::with_engine(Arc::clone(&ingest_engine))
                             .with_metrics(metrics_feed.clone()),
                     ),
-                    Arc::new(InterpretPhase::from_capacity(
-                        database.pool().clone(),
-                        &runtime.capacity,
-                    )),
+                    Arc::new(
+                        InterpretPhase::from_capacity(database.pool().clone(), &runtime.capacity)
+                            .with_metrics(metrics_feed.clone()),
+                    ),
                     Arc::new(
                         ProjectPhase::with_hydration(database.pool().clone(), hydration_rpc_urls)
                             .with_family_settings(project_families)
@@ -141,7 +143,9 @@ async fn main() -> Result<()> {
                     ),
                     Arc::new(VerifyPhase::new(verification_database, rpc_mode)),
                     Arc::new(
-                        LivePhase::with_engine(ingest_engine).with_metrics(metrics_feed.clone()),
+                        LivePhase::with_engine(ingest_engine)
+                            .with_metrics(metrics_feed.clone())
+                            .with_publication_lag_blocks(live_publication_lag_blocks),
                     ),
                 )?;
                 anyhow::Ok(Arc::new(
@@ -255,6 +259,7 @@ async fn main() -> Result<()> {
                     heartbeat_stale_after_secs,
                     chains.iter().map(|chain| chain.chain_id.as_str()),
                     false,
+                    0,
                 )
                 .await?;
                 rpc_chain_check::report(&metrics_feed, &verified_rpc);
@@ -266,7 +271,8 @@ async fn main() -> Result<()> {
                 let ingest = Arc::new(
                     IngestPhase::with_engine(ingest_engine).with_metrics(metrics_feed.clone()),
                 );
-                let interpret = InterpretPhase::from_capacity(database.pool().clone(), &capacity);
+                let interpret = InterpretPhase::from_capacity(database.pool().clone(), &capacity)
+                    .with_metrics(metrics_feed.clone());
                 let interpret = Arc::new(match interpret_adaptive {
                     Some(config) => interpret.with_adaptive_batching(config),
                     None => interpret,
@@ -366,6 +372,7 @@ async fn start_metrics<'a>(
     heartbeat_stale_after_secs: i64,
     chain_ids: impl IntoIterator<Item = &'a str>,
     seed_loop_heartbeats: bool,
+    live_publication_lag_blocks: u32,
 ) -> Result<(
     phase_runner::metrics::RunnerLoopHeartbeat,
     phase_runner::RunnerPhaseProgress,
@@ -378,6 +385,7 @@ async fn start_metrics<'a>(
             .expect("validated threshold"),
     ));
     let metrics_feed = phase_runner::metrics::RunnerMetricsFeed::default();
+    metrics_feed.set_live_publication_lag_blocks(live_publication_lag_blocks);
     for chain_id in chain_ids {
         if seed_loop_heartbeats {
             loop_heartbeat.record_progress(chain_id);

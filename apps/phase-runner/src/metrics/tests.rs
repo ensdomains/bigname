@@ -40,6 +40,7 @@ fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
         chain_id: "ethereum-mainnet".to_owned(),
         observed_head_block_number: Some(104),
         publication_block_number: Some(100),
+        publication_gap_blocks: Some(0),
     }]);
     metrics
         .universal_resolver
@@ -214,10 +215,13 @@ fn served_gauges_reconcile_chains_the_query_no_longer_returns() -> Result<()> {
         RunnerLoopHeartbeat::default(),
         RunnerPhaseProgress::default(),
     )?;
-    metrics.served_lag.configure(&[
-        "project-row-gone".to_owned(),
-        "configured-emptied".to_owned(),
-    ]);
+    metrics.served_lag.configure(
+        &[
+            "project-row-gone".to_owned(),
+            "configured-emptied".to_owned(),
+        ],
+        0,
+    );
     let phase = |chain: &str, phase: &str| PhaseMetricRow {
         chain_id: chain.to_owned(),
         ..metric_row(phase)
@@ -226,6 +230,7 @@ fn served_gauges_reconcile_chains_the_query_no_longer_returns() -> Result<()> {
         chain_id: chain.to_owned(),
         observed_head_block_number: Some(104),
         publication_block_number: Some(100),
+        publication_gap_blocks: Some(0),
     };
     metrics.apply_rows(&[
         phase("configured-emptied", "project"),
@@ -651,6 +656,37 @@ fn ingest_rpc_counters_follow_the_engine_totals() -> Result<()> {
         "phase_runner_ingest_rpc_requests_total{chain=\"ethereum-mainnet\",outcome=\"ok\",source=\"primary\"} 3\n",
         "phase_runner_ingest_rpc_calls_total{chain=\"ethereum-mainnet\",method=\"eth_getTransactionReceipt\",source=\"primary\"} 258\n",
         "phase_runner_ingest_provider_null_results_total{chain=\"ethereum-mainnet\",method=\"eth_getTransactionReceipt\",source=\"primary\"} 2\n",
+    ] {
+        assert!(scrape.contains(line), "missing {line}");
+    }
+    Ok(())
+}
+
+#[test]
+fn interpret_inconsistent_log_skips_add_up_across_committed_batches() -> Result<()> {
+    let metrics = PipelineMetrics::new(
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+    )?;
+    let feed = RunnerMetricsFeed::default();
+    feed.interpret_inconsistent_log_skips(
+        "ethereum-sepolia",
+        &BTreeMap::from([("label_hash_mismatch", 2), ("token_resource_conflict", 1)]),
+    );
+    metrics.apply_feed(&feed);
+    feed.interpret_inconsistent_log_skips(
+        "ethereum-sepolia",
+        &BTreeMap::from([("label_hash_mismatch", 1)]),
+    );
+    feed.interpret_inconsistent_log_skips("ethereum-sepolia", &BTreeMap::new());
+    metrics.apply_feed(&feed);
+
+    let scrape = metrics.registry.encode()?;
+    for line in [
+        "# TYPE phase_runner_interpret_inconsistent_log_skips_total counter",
+        "phase_runner_interpret_inconsistent_log_skips_total{chain=\"ethereum-sepolia\",site=\"label_hash_mismatch\"} 3\n",
+        "phase_runner_interpret_inconsistent_log_skips_total{chain=\"ethereum-sepolia\",site=\"token_resource_conflict\"} 1\n",
     ] {
         assert!(scrape.contains(line), "missing {line}");
     }

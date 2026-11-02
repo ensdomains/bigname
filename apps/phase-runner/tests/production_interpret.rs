@@ -1911,7 +1911,8 @@ async fn current_registry_handoff_retracts_surfaced_old_resolver_after_redo_and_
         projected.0, None,
         "Project must not serve the retired fallback"
     );
-    assert_eq!(projected.1, Some("unregistered"));
+    // The cleared registry record did not end the lease. Its lapse past grace releases it.
+    assert_eq!(projected.1, Some("released"));
     assert_eq!(projected.2, Some("unregistered"));
     assert_handoff_product_history(scratch.pool(), &clears).await?;
     scratch.cleanup().await

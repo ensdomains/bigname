@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, RawQuery, State},
 };
 use bigname_domain::resolver_read::ResolverReadFeature;
 use bigname_storage::{
@@ -30,6 +30,7 @@ use super::{
 
 mod build;
 mod keys;
+mod unretained;
 pub(crate) use build::{
     EXACT_NAME_AUTHORITY_NOT_VERIFIABLE, VERIFIED_NOT_SUPPORTED_REASON,
     build_authority_unsupported_name_records, build_auto_name_records, build_indexed_name_records,
@@ -178,8 +179,11 @@ pub(crate) enum VerifiedRecordLookup {
 pub(crate) async fn get_name_records(
     Path(input_name): Path<String>,
     params: NameRecordsQuery,
+    RawQuery(raw_query): RawQuery,
+    admission: Option<axum::Extension<crate::bounds::FillAdmission>>,
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<NameRecords>>> {
+    let fill_admission = unretained::admission(raw_query.as_deref(), admission);
     let params = params.into_inner();
     let normalized = normalize_inferred_route_name(&input_name)
         .map_err(|error| V2Error::invalid_input(error.message))?;
@@ -194,16 +198,17 @@ pub(crate) async fn get_name_records(
 
     let include_resolution_auxiliary =
         namespace == BASENAMES_NAMESPACE && params.source == RequestSource::Verified;
-    let (mut selected_snapshot, ServedName { mut row, mut alias }, mut record_inventory) =
-        load_name_records_snapshot_state(
-            &state,
-            &namespace,
-            &normalized.normalized_name,
-            params.at.as_ref(),
-            params.finality,
-            include_resolution_auxiliary,
-        )
-        .await?;
+    let (mut selected_snapshot, served, mut record_inventory) = load_name_records_snapshot_state(
+        &state,
+        &namespace,
+        &normalized.normalized_name,
+        params.at.as_ref(),
+        params.finality,
+        include_resolution_auxiliary,
+    )
+    .await?;
+    let (mut row, mut alias, lookup_discovery) =
+        (served.row, served.alias, served.lookup_discovery);
 
     // Without `keys`, every source answers the inventory-derived default set. Inventory is loaded
     // only for a row the name may serve, so reservation and audit-only rows derive no keys. The
@@ -235,18 +240,19 @@ pub(crate) async fn get_name_records(
         (source, data)
     } else {
         match params.source {
-            RequestSource::Indexed => (
-                Source::Indexed,
-                build_indexed_name_records(
+            RequestSource::Indexed => {
+                let data = build_indexed_name_records(
                     &row,
                     record_inventory.as_ref(),
                     selection,
                     include_inventory,
                     false,
-                )?,
-            ),
+                )?;
+                let reads = (&state, &row, alias.as_ref(), requested_records);
+                unretained::fill(fill_admission, reads, &mut selected_snapshot, data).await
+            }
             RequestSource::Verified => {
-                let admit_null_resolver_discovery = verified_discovery(&row, alias.as_ref());
+                let admit_null_resolver_discovery = lookup_discovery;
                 #[cfg(test)]
                 auto_fallback_test_hooks::run(&state.pool).await?;
                 let verified_lookup = load_verified_record_lookup(
@@ -290,7 +296,7 @@ pub(crate) async fn get_name_records(
                         )?,
                     )
                 } else {
-                    let admit_null_resolver_discovery = verified_discovery(&row, alias.as_ref());
+                    let admit_null_resolver_discovery = lookup_discovery;
                     let mut fallback_records = indexed_records_requiring_verified_fallback(
                         &row,
                         record_inventory.as_ref(),
@@ -460,7 +466,7 @@ async fn load_name_records_snapshot_state(
     let row = &served.row;
 
     let record_inventory = if super::name_record::row_has_current_registration(row) {
-        load_records_route_inventory(&state.pool, row, &selected_snapshot)
+        load_records_route_inventory(&state.pool, row, &served.registry, &selected_snapshot)
             .await
             .map_err(|error| {
                 api_error_to_v2_for_resource(

@@ -11,7 +11,7 @@ use crate::families::control::{
     rows::{BindingCandidate, LifecycleEvent},
 };
 
-use super::AuthoritySelection;
+use super::{AuthoritySelection, NameFacts, NamePlace, served::latest};
 
 pub(crate) const REGISTRAR: &str = "ens_v1_registrar_l1";
 pub(super) const WRAPPER: &str = "ens_v1_wrapper_l1";
@@ -31,6 +31,37 @@ const SIX_KINDS: [&str; 6] = [
     "ExpiryChanged",
     "TokenControlTransferred",
 ];
+
+/// The kinds a registrar lease's own lifecycle carries.
+const LEASE_KINDS: [&str; 4] = [
+    "RegistrationGranted",
+    "RegistrationRenewed",
+    "RegistrationReleased",
+    "ExpiryChanged",
+];
+
+/// The registrar lease of an ENSv1 `.eth` second-level name whose selected registry-only
+/// binding records none, or that is in the ownerless-registry profile.
+/// The 2020 registrar migration moved such names onto the BaseRegistrar without a controller
+/// `NameRegistered`, so no grant opened their lease, and the adapter first names the lease at
+/// its first controller renewal, with a grant derived there. The lease is the resource of the
+/// name's latest own registrar lifecycle event at or after the registry handoff block.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ImpliedLease<'a> {
+    pub(crate) resource: &'a str,
+    /// The name's first current-registry record block (`registry_generation`), none without one.
+    pub(crate) from_block: Option<i64>,
+}
+
+/// The block of the name's first current-registry record (`registry_generation`), none for a
+/// node only the 2017 registry recorded.
+pub(crate) fn first_current_record(facts: &NameFacts) -> Option<i64> {
+    facts
+        .registry_node
+        .as_ref()
+        .filter(|node| node.namespace == "ens")
+        .and_then(|node| node.first_current_record_block)
+}
 
 /// The name an event carries once staging has run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,6 +119,8 @@ pub(crate) struct Authority<'a> {
     pub(crate) wrapper_modifier: bool,
     /// Every retained event loaded for the name, read as witnesses.
     pub(crate) events: &'a [LifecycleEvent],
+    /// The lease the selected ENSv1 authority does not record (`ImpliedLease`).
+    pub(crate) implied_lease: Option<ImpliedLease<'a>>,
 }
 
 /// The one name of a pass's matches, none when several names match.
@@ -108,6 +141,100 @@ pub(crate) enum Pass {
 }
 
 impl<'a> Authority<'a> {
+    /// The admission inputs of one name: its selection, binding candidates, selected binding,
+    /// wrapper modifier, retained events and implied lease.
+    pub(crate) fn of(facts: &'a NameFacts) -> Self {
+        let selection = &facts.input.selection;
+        let mut authority = Self {
+            name: &facts.input.logical_name_id,
+            selection,
+            candidates: &facts.candidates,
+            lease_candidates: &facts.lease_candidates,
+            binding: selection.surface_binding_id.as_deref().and_then(|id| {
+                facts
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.surface_binding_id == id)
+            }),
+            wrapper_modifier: selection
+                .resource_id
+                .as_deref()
+                .and_then(|resource| facts.wrappers.get(resource))
+                .is_some_and(|wrapper| wrapper.has_modifier),
+            events: &facts.events,
+            implied_lease: None,
+        };
+        authority.implied_lease = authority.imply_lease(facts);
+        authority
+    }
+
+    fn imply_lease(&self, facts: &NameFacts) -> Option<ImpliedLease<'a>> {
+        let selection = self.selection;
+        if selection.authority_arm.as_deref() != Some("ens_v1")
+            || selection.unsupported_reason.is_some()
+            || facts.input.place != NamePlace::EthSecondLevel
+        {
+            return None;
+        }
+        let events = self.events;
+        let carries_lease = |resource: &str| {
+            events.iter().any(|event| {
+                event.source_family == REGISTRAR
+                    && LEASE_KINDS.contains(&event.event_kind.as_str())
+                    && event.resource_id.as_deref() == Some(resource)
+            })
+        };
+        // The ownerless-registry profile selects no binding: the cleared registry record
+        // leaves the BaseRegistrar lease standing.
+        let binding = self.registry_only_binding();
+        let ownerless = selection.ownerless_registry && self.binding.is_none();
+        if binding.is_none() && !ownerless {
+            return None;
+        }
+        if binding
+            .and_then(|binding| binding.lease_resource_id.as_deref())
+            .is_some_and(carries_lease)
+        {
+            return None;
+        }
+        let from_block = first_current_record(facts);
+        let name = self.name;
+        let latest = latest(
+            events.iter().filter(|event| {
+                event.original_logical_name_id.as_deref() == Some(name)
+                    && event.source_family == REGISTRAR
+                    && event.authority_kind == "registrar"
+                    && LEASE_KINDS.contains(&event.event_kind.as_str())
+                    && event.resource_id.is_some()
+                    && event.state_derived != Some(true)
+                    && from_block.is_none_or(|from| event.position.block_number >= from)
+            }),
+            |event| &event.position,
+        )?;
+        Some(ImpliedLease {
+            resource: latest.resource_id.as_deref()?,
+            from_block,
+        })
+    }
+
+    /// The implied lease's resource.
+    pub(crate) fn implied_resource(&self) -> Option<&'a str> {
+        self.implied_lease.map(|lease| lease.resource)
+    }
+
+    /// Whether the probe is a lifecycle event of the implied lease at or after its handoff.
+    fn on_implied_lease(&self, probe: &Probe<'_>) -> bool {
+        self.implied_lease.is_some_and(|lease| {
+            probe.source_family == REGISTRAR
+                && LEASE_KINDS.contains(&probe.event_kind)
+                && probe.authority_kind == "registrar"
+                && probe.resource_id == Some(lease.resource)
+                && lease
+                    .from_block
+                    .is_none_or(|from| probe.position.block_number >= from)
+        })
+    }
+
     /// The name the two staging passes give an unnamed registrar row, over the candidates of
     /// every name (as crates/project/src/families/decode.rs does): pass one first, and pass
     /// two only when pass one matches no name. A pass names the row only through one name: a
@@ -335,6 +462,7 @@ impl<'a> Authority<'a> {
                             == self.selection.authority_arm.as_deref())
                     || self.wrapped_lease(probe)
                     || self.handoff(probe)
+                    || self.on_implied_lease(probe)
             }
             Some("current_authority_not_projected") => {
                 probe.source_family == REGISTRAR && STAGED_KINDS.contains(&probe.event_kind)
@@ -456,6 +584,7 @@ mod tests {
             lease_candidates: &candidates,
             wrapper_modifier: false,
             events: &[],
+            implied_lease: None,
         };
         assert_eq!(
             authority
