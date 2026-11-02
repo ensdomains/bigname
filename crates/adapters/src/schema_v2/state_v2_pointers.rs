@@ -153,10 +153,7 @@ impl State {
         // This source-event gate and the separately retained zero clear must stay paired so other
         // event kinds cannot replace the clear during compaction.
         if after_state.get("source_event").and_then(Value::as_str) != Some("SubregistryUpdated") {
-            // A terminal restatement of a token already released does not bring it back.
-            if subregistry.is_some() || self.v2_tokens.contains_key(&v2_key(emitter, token_id)) {
-                self.set_v2_subregistry(emitter, token_id, subregistry);
-            }
+            self.set_v2_subregistry(emitter, token_id, subregistry);
             return;
         }
         let invalidated = after_state

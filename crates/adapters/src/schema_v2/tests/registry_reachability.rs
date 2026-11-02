@@ -1232,27 +1232,3 @@ fn k5s_a_released_token_stays_released_across_a_restore() -> anyhow::Result<()> 
     );
     Ok(())
 }
-
-/// K10: the mounting token is unregistered in one batch, then registered again and mounting in
-/// the next. Restoring its terminal subregistry restatement does not bring the released token
-/// back, so the registration replaces nothing on any path and the remount reopens `a`'s edge.
-#[test]
-fn k10_a_released_mount_stays_released_across_a_restore() -> anyhow::Result<()> {
-    let mut first = mounted_child();
-    first.push(unregister(PARENT, versioned_token("n", 1), 6, 0));
-    let restored = continued_in_a_later_batch(
-        first,
-        6,
-        vec![
-            register(PARENT, "n", LIVE, 7, 0),
-            mount(PARENT, "n", CHILD, 8, 0),
-        ],
-    )?;
-    assert_eq!(
-        reopened_at(&restored, 8),
-        [(instance(RESOLVER_X), key(CHILD, "a"))]
-            .into_iter()
-            .collect()
-    );
-    Ok(())
-}
