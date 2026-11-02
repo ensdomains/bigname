@@ -1,5 +1,5 @@
 -- Run with psql -X -v ON_ERROR_STOP=1 outside a transaction, before
--- 20261005200000, 20261019120000 and 20261027120000. Final names are new; no old index needs replacing.
+-- 20261005200000, 20261019120000 and 20261027150000. Final names are new; no old index needs replacing.
 SET lock_timeout = '0';
 SET statement_timeout = '6h';
 

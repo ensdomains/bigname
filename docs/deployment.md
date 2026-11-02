@@ -5471,7 +5471,7 @@ read by the range that holds each transaction's block. The build moves the
   Complete that Ingest redo, then the full-history Interpret redo with
   `--attest-watch-set-coverage`, then the Project redo it installs, before the matching
   API serves. Sepolia changes no manifest and gets no marker and no Ingest redo.
-- Schema-migration `20261027120000_registry_permission_departure_index.sql` installs one
+- Schema-migration `20261027150000_registry_permission_departure_index.sql` installs one
   read-only normalized-event index, `normalized_events_registry_departure_idx`, the
   upgrade-disqualifier probe for every declared implementation. A populated
   `normalized_events` requires it. Before applying the migration on an initialized

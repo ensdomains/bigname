@@ -12,7 +12,7 @@ and must be valid, ready, live, on their reviewed target relation, and have the 
 definitions before a populated upgrade can apply
 `20261005200000_registry_permission_history_indexes.sql`, which checks the first five,
 `20261019120000_registry_permission_mainnet_departure_indexes.sql`, which checks the two
-mainnet departure indexes, and `20261027120000_registry_permission_departure_index.sql`, which
+mainnet departure indexes, and `20261027150000_registry_permission_departure_index.sql`, which
 checks `normalized_events_registry_departure_idx`.
 
 Before applying any of these migrations on an initialized database, complete preceding migrations,

@@ -826,9 +826,9 @@ check_served_projection_removal() {
             emit_phase_migration "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" baseline-first
             # The registry departure index: absent from the pre-7c shape, present in the baseline.
             if [ "$suffix" = removal ]; then
-                emit_phase_migration "$ROOT/migrations/20261027120000_registry_permission_departure_index.sql" preceding-shape
+                emit_phase_migration "$ROOT/migrations/20261027150000_registry_permission_departure_index.sql" preceding-shape
             fi
-            emit_phase_migration "$ROOT/migrations/20261027120000_registry_permission_departure_index.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261027150000_registry_permission_departure_index.sql" baseline-first
             # The serving read indexes: the two on the pointer tables are absent from the pre-7c
             # shape. The lineage and name surface tables come from the current baseline, so the
             # other two are present there and are adopted.
@@ -993,7 +993,7 @@ for migration_file in \
     "$unnamed_lease_index_migration" \
     "$ROOT/migrations/20261016130000_project_repair_record_composing.sql" \
     "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" \
-    "$ROOT/migrations/20261027120000_registry_permission_departure_index.sql" \
+    "$ROOT/migrations/20261027150000_registry_permission_departure_index.sql" \
     "$serving_read_index_migration"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
@@ -1350,8 +1350,8 @@ emit_phase_migration "$ROOT/migrations/20261005200000_registry_permission_histor
 emit_phase_migration "$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql" baseline-first | run_psql
 emit_phase_migration "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" preceding-shape | run_psql
 emit_phase_migration "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" baseline-first | run_psql
-emit_phase_migration "$ROOT/migrations/20261027120000_registry_permission_departure_index.sql" preceding-shape | run_psql
-emit_phase_migration "$ROOT/migrations/20261027120000_registry_permission_departure_index.sql" baseline-first | run_psql
+emit_phase_migration "$ROOT/migrations/20261027150000_registry_permission_departure_index.sql" preceding-shape | run_psql
+emit_phase_migration "$ROOT/migrations/20261027150000_registry_permission_departure_index.sql" baseline-first | run_psql
 # The historical normalized-event fixture lacks the registrar lease index. Install
 # the current operational definition before walk-set and exact-adoption checks.
 render_phase_migration "$ROOT/ops/history-registrar-lease-index/install.sql" | run_psql
@@ -1367,7 +1367,7 @@ emit_phase_migration "$ROOT/migrations/20261007120000_project_lookup_precomputat
 # adoption/rerun, each refusal, and full-set validation before the first build.
 permission_index_migration="$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql"
 permission_mainnet_migration="$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql"
-permission_departure_migration="$ROOT/migrations/20261027120000_registry_permission_departure_index.sql"
+permission_departure_migration="$ROOT/migrations/20261027150000_registry_permission_departure_index.sql"
 permission_index_install="$ROOT/ops/registry-permission-indexes/install.sql"
 permission_indexes=(normalized_events_registry_origin_idx normalized_events_registry_announcement_idx normalized_events_wrapper_departure_idx normalized_events_user_registry_departure_idx normalized_events_mainnet_wrapper_departure_idx normalized_events_mainnet_user_registry_departure_idx normalized_events_registry_departure_idx project_grant_registry_parent_idx)
 {

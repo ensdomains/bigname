@@ -580,7 +580,7 @@ family, event-kind, activated-visibility and readable-canonicality predicate
 avoids scanning unrelated registry history, including when no announcement exists.
 `registry_support_departure` probes canonical upgrades of the registry's proxy away from the
 implementation of its factory origin. Schema-migration
-`20261027120000_registry_permission_departure_index.sql` and the phase baseline add
+`20261027150000_registry_permission_departure_index.sql` and the phase baseline add
 `normalized_events_registry_departure_idx`, keyed by chain, proxy, implementation and block,
 for every declared implementation of every deployment. The probe reads the proxy's rows
 either side of the origin's implementation and its rows with no implementation, so it never
