@@ -249,7 +249,10 @@ async fn check_binding(connection: &mut PgConnection) -> Result<()> {
                 .iter()
                 .any(|line| line.contains("Seq Scan on project_binding_candidate"))
             {
-                failures.push(format!("{label}: scans the candidates\n{}", plan.join("\n")));
+                failures.push(format!(
+                    "{label}: scans the candidates\n{}",
+                    plan.join("\n")
+                ));
             }
         }
         let found: Vec<String> = sqlx::query_scalar(&format!(

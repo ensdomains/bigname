@@ -321,7 +321,11 @@ async fn r2_an_unnamed_pointer_on_the_lease_serves_the_registry_resolver() -> Re
     let database = published_from(
         bare()?,
         written_then_transferred()?,
-        &[Reshape::Uncopied(1), Reshape::Unnamed(1), Reshape::Uncarried(3)],
+        &[
+            Reshape::Uncopied(1),
+            Reshape::Unnamed(1),
+            Reshape::Uncarried(3),
+        ],
     )
     .await?;
     let shape = shape(&database).await?;
@@ -442,7 +446,9 @@ async fn r6_a_node_without_a_registry_pointer_composes_nothing() -> Result<()> {
     );
     assert!(summary["ens_v1_resolver"].is_null(), "{summary:#}");
     assert!(
-        row.provenance.get("resolver_pointer_source_family").is_none(),
+        row.provenance
+            .get("resolver_pointer_source_family")
+            .is_none(),
         "{:#}",
         row.provenance
     );
@@ -538,7 +544,9 @@ async fn n1_resolves_to_skips_a_name_whose_selected_pointer_is_its_own() -> Resu
     for bounded in [false, true] {
         reads.push((
             bounded,
-            resolving_everywhere(&database, NEXT_HOLDER, bounded).await?.0,
+            resolving_everywhere(&database, NEXT_HOLDER, bounded)
+                .await?
+                .0,
             resolving_everywhere(&database, OWNER, bounded).await?.0,
         ));
     }
@@ -553,11 +561,7 @@ async fn n1_resolves_to_skips_a_name_whose_selected_pointer_is_its_own() -> Resu
     );
     assert_serves_next(&view);
     for (bounded, next_holder, owner) in reads {
-        assert_eq!(
-            next_holder,
-            vec![vec![json!(NAME)]; 3],
-            "bounded {bounded}"
-        );
+        assert_eq!(next_holder, vec![vec![json!(NAME)]; 3], "bounded {bounded}");
         assert_eq!(owner, vec![Vec::<Value>::new(); 3], "bounded {bounded}");
     }
     Ok(())

@@ -70,7 +70,12 @@ fn none() -> (Value, Value, Option<String>) {
 fn a_registry_pointer_on_another_resource_is_served() {
     let node = pointer(Some(LEASE), A, 10, Some(NAME));
     assert_eq!(
-        block(&scope(Some(REGISTRY_ONLY), "ens_v1"), None, Some(&node), None),
+        block(
+            &scope(Some(REGISTRY_ONLY), "ens_v1"),
+            None,
+            Some(&node),
+            None
+        ),
         served(A)
     );
     let node = pointer(Some(REGISTRY_ONLY), A, 10, Some(NAME));
@@ -106,17 +111,32 @@ fn an_admitted_pointer_keeps_the_registry_read_through() {
     let agreeing = pointer(Some(LEASE), A, 10, Some(NAME));
     let mut expected = served(A);
     assert_eq!(
-        block(&scope(Some(LEASE), "ens_v1"), Some(&agreeing), Some(&node), None),
+        block(
+            &scope(Some(LEASE), "ens_v1"),
+            Some(&agreeing),
+            Some(&node),
+            None
+        ),
         expected
     );
     let stale = pointer(Some(LEASE), B, 10, Some(NAME));
     assert_eq!(
-        block(&scope(Some(LEASE), "ens_v1"), Some(&stale), Some(&node), None),
+        block(
+            &scope(Some(LEASE), "ens_v1"),
+            Some(&stale),
+            Some(&node),
+            None
+        ),
         expected
     );
     let cleared = pointer(Some(LEASE), "", 11, Some(NAME));
     assert_eq!(
-        block(&scope(Some(LEASE), "ens_v1"), Some(&cleared), Some(&node), None),
+        block(
+            &scope(Some(LEASE), "ens_v1"),
+            Some(&cleared),
+            Some(&node),
+            None
+        ),
         expected
     );
     // With no registry pointer the admitted pointer is served as it is.
@@ -131,7 +151,12 @@ fn an_admitted_pointer_keeps_the_registry_read_through() {
 fn a_cleared_registry_pointer_composes_a_clear() {
     let node = pointer(Some(LEASE), "", 10, None);
     assert_eq!(
-        block(&scope(Some(REGISTRY_ONLY), "ens_v1"), None, Some(&node), None),
+        block(
+            &scope(Some(REGISTRY_ONLY), "ens_v1"),
+            None,
+            Some(&node),
+            None
+        ),
         (
             Value::Null,
             Value::from("ResolverChanged"),
@@ -208,7 +233,12 @@ fn another_arm_does_not_read_the_registry_pointer() {
 fn a_resourceless_registry_pointer_is_admitted_as_before() {
     let node = pointer(None, A, 10, Some(NAME));
     assert_eq!(
-        block(&scope(Some(REGISTRY_ONLY), "ens_v1"), None, Some(&node), None),
+        block(
+            &scope(Some(REGISTRY_ONLY), "ens_v1"),
+            None,
+            Some(&node),
+            None
+        ),
         served(A)
     );
 }

@@ -279,7 +279,10 @@ async fn unnamed_and_rebuilt(database: &TestDatabase, node: B256) -> Result<()> 
     .bind(format!("ens:{node:#x}"))
     .fetch_all(pool)
     .await?;
-    anyhow::ensure!(!cleared.is_empty(), "{node:#x} has no named registry pointer");
+    anyhow::ensure!(
+        !cleared.is_empty(),
+        "{node:#x} has no named registry pointer"
+    );
     let (number, hash): (i64, String) = sqlx::query_as(
         "SELECT latest_block_number, latest_block_hash FROM chain_heads WHERE chain_id = $1",
     )
