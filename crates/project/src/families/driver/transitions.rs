@@ -245,7 +245,8 @@ impl Run<'_> {
             .iter()
             .map(|table| table.name)
             .chain(tables::DERIVED)
-            .chain(["project_family_undo", tables::COMPOSE_NAME_WORK])
+            .chain(["project_family_undo"])
+            .chain(tables::COMPOSE_WORK)
         {
             sqlx::query(&format!(
                 "/* project:families.reset_{table} */ DELETE FROM {table} WHERE chain_id = $1"

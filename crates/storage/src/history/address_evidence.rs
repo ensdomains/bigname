@@ -345,6 +345,15 @@ pub struct HistoricalHistoryRelation {
     pub relation_mask: i16,
 }
 
+/// Which names or resources the shared matcher reads: bound arrays, a trusted one-column
+/// subselect of the caller's statement, or none, which leaves that arm out.
+#[derive(Clone, Copy, Debug)]
+pub enum HistoryWanted<'a, T> {
+    Arrays(&'a [T]),
+    Sql(&'a str),
+    None,
+}
+
 /// Re-evaluate the complete historical evidence of affected names/resources at publication.
 /// Each source is probed by its existing leading key before the shared matcher runs; the
 /// isolated changed event alone cannot decide custody or later lease-handoff exclusions.
@@ -357,61 +366,140 @@ pub async fn historical_history_relations(
     resources: &[uuid::Uuid],
 ) -> anyhow::Result<Vec<HistoricalHistoryRelation>> {
     use anyhow::Context;
-    let mut query = QueryBuilder::<Postgres>::new(
-        "/* storage:history.publication_memberships */ WITH evidence AS (
+    publication_memberships(chain_id, block_number, names, resources)
+        .build_query_as()
+        .fetch_all(connection)
+        .await
+        .context("failed to derive historical history membership")
+}
+
+fn publication_memberships<'a>(
+    chain_id: &'a str,
+    block_number: i64,
+    names: &'a [String],
+    resources: &'a [uuid::Uuid],
+) -> QueryBuilder<'a, Postgres> {
+    let mut query = QueryBuilder::<Postgres>::new("/* storage:history.publication_memberships */ ");
+    push_historical_history_relations(
+        &mut query,
+        chain_id,
+        block_number,
+        HistoryWanted::Arrays(names),
+        HistoryWanted::Arrays(resources),
+    );
+    query
+}
+
+const EVIDENCE_COLUMNS: &str = "
         SELECT ne.namespace, ne.logical_name_id, ne.resource_id, ne.event_kind,
             ne.source_family, ne.chain_id, ne.block_number, ne.block_hash,
             ne.transaction_index, ne.log_index, ne.derivation_kind,
-            ne.canonicality_state, ne.consumer_visibility, ne.after_state FROM unnest(",
-    );
-    query.push_bind(names).push(
-        "::text[]) wanted(name)
+            ne.canonicality_state, ne.consumer_visibility, ne.after_state FROM ";
+
+/// The statement of [`historical_history_relations`] after its comment: `WITH evidence AS
+/// (...) SELECT ...`, which a caller may also nest as a CTE body. The names arm reads each
+/// wanted name's events, the resources arm each wanted resource's events of no wanted name.
+pub fn push_historical_history_relations<'a>(
+    query: &mut QueryBuilder<'a, Postgres>,
+    chain_id: &'a str,
+    block_number: i64,
+    names: HistoryWanted<'a, String>,
+    resources: HistoryWanted<'a, uuid::Uuid>,
+) {
+    let names = match (names, resources) {
+        (HistoryWanted::None, HistoryWanted::None) => HistoryWanted::Arrays(&[]),
+        (names, _) => names,
+    };
+    query.push("WITH evidence AS (");
+    let named = !matches!(names, HistoryWanted::None);
+    if named {
+        query.push(EVIDENCE_COLUMNS);
+        match names {
+            HistoryWanted::Arrays(names) => {
+                query.push("unnest(").push_bind(names).push("::text[])");
+            }
+            HistoryWanted::Sql(sql) => {
+                query.push("(").push(sql).push(")");
+            }
+            HistoryWanted::None => {}
+        }
+        query.push(
+            " wanted(name)
         CROSS JOIN LATERAL (SELECT ne.namespace, ne.logical_name_id, ne.resource_id, ne.event_kind,
             ne.source_family, ne.chain_id, ne.block_number, ne.block_hash,
             ne.transaction_index, ne.log_index, ne.derivation_kind,
             ne.canonicality_state, ne.consumer_visibility, ne.after_state FROM normalized_events ne
             WHERE ne.logical_name_id = wanted.name AND ne.chain_id = ",
-    );
-    query
-        .push_bind(chain_id)
-        .push(" AND ne.block_number <= ")
-        .push_bind(block_number);
-    query
-        .push(
+        );
+        query
+            .push_bind(chain_id)
+            .push(" AND ne.block_number <= ")
+            .push_bind(block_number);
+        query.push(
             " AND ne.canonicality_state IN (
                 'canonical'::bigname_phase.canonicality_state,
                 'safe'::bigname_phase.canonicality_state,
                 'finalized'::bigname_phase.canonicality_state
-              ) OFFSET 0) ne UNION ALL
-        SELECT ne.namespace, ne.logical_name_id, ne.resource_id, ne.event_kind,
-            ne.source_family, ne.chain_id, ne.block_number, ne.block_hash,
-            ne.transaction_index, ne.log_index, ne.derivation_kind,
-            ne.canonicality_state, ne.consumer_visibility, ne.after_state FROM unnest(",
-        )
-        .push_bind(resources)
-        .push(
-            "::uuid[]) wanted(resource)
+              ) OFFSET 0) ne",
+        );
+    }
+    if !matches!(resources, HistoryWanted::None) {
+        if named {
+            query.push(" UNION ALL");
+        }
+        query.push(EVIDENCE_COLUMNS);
+        match resources {
+            HistoryWanted::Arrays(resources) => {
+                query.push("unnest(").push_bind(resources).push("::uuid[])");
+            }
+            HistoryWanted::Sql(sql) => {
+                query.push("(").push(sql).push(")");
+            }
+            HistoryWanted::None => {}
+        }
+        query.push(
+            " wanted(resource)
         CROSS JOIN LATERAL (SELECT ne.namespace, ne.logical_name_id, ne.resource_id, ne.event_kind,
             ne.source_family, ne.chain_id, ne.block_number, ne.block_hash,
             ne.transaction_index, ne.log_index, ne.derivation_kind,
             ne.canonicality_state, ne.consumer_visibility, ne.after_state FROM normalized_events ne
             WHERE ne.resource_id = wanted.resource AND ne.chain_id = ",
         );
-    query
-        .push_bind(chain_id)
-        .push(" AND ne.block_number <= ")
-        .push_bind(block_number);
-    query.push(
-        " AND ne.canonicality_state IN (
+        query
+            .push_bind(chain_id)
+            .push(" AND ne.block_number <= ")
+            .push_bind(block_number);
+        query.push(
+            " AND ne.canonicality_state IN (
             'canonical'::bigname_phase.canonicality_state,
             'safe'::bigname_phase.canonicality_state,
             'finalized'::bigname_phase.canonicality_state
-          ) OFFSET 0) ne
+          ) OFFSET 0) ne",
+        );
+        match names {
+            HistoryWanted::Arrays(names) => {
+                query
+                    .push(
+                        "
         WHERE (ne.logical_name_id IS NULL OR ne.logical_name_id <> ALL(",
-    );
-    query.push_bind(names);
+                    )
+                    .push_bind(names)
+                    .push("::text[]))");
+            }
+            HistoryWanted::Sql(sql) => {
+                query
+                    .push(
+                        "
+        WHERE (ne.logical_name_id IS NULL OR ne.logical_name_id <> ALL(ARRAY(",
+                    )
+                    .push(sql)
+                    .push(")))");
+            }
+            HistoryWanted::None => {}
+        }
+    }
     query.push(
-        "::text[])))
+        ")
         SELECT DISTINCT matched_address.address, ne.namespace, ne.logical_name_id,
                ne.resource_id, relation.mask AS relation_mask
         FROM evidence ne
@@ -432,25 +520,23 @@ pub async fn historical_history_relations(
         WHERE (relation.mask = 1 AND ",
     );
     push_address_match_filter(
-        &mut query,
+        query,
         Address::Candidate,
         Some(&[AddressNameRelation::TokenHolder]),
     );
     query.push(") OR (relation.mask = 2 AND ");
     push_address_match_filter(
-        &mut query,
+        query,
         Address::Candidate,
         Some(&[AddressNameRelation::EffectiveController]),
     );
     query.push(") OFFSET 0) relation ");
-    push_evidence_eligibility(&mut query, true, false);
-    query
-        .build_query_as()
-        .fetch_all(connection)
-        .await
-        .context("failed to derive historical history membership")
+    push_evidence_eligibility(query, true, false);
 }
 
 #[cfg(test)]
 #[path = "publication_membership_tests.rs"]
 mod publication_membership_tests;
+#[cfg(test)]
+#[path = "publication_membership_text_tests.rs"]
+mod publication_membership_text_tests;

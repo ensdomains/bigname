@@ -397,6 +397,11 @@ The implemented phases use:
 - `BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR`
 - `BIGNAME_PHASE_RUNNER_REDO_METRICS_BIND_ADDR`
 - `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS`
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_BLOCKS` — most owned key family blocks one Project batch applies or undoes, 256 by default
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_RANGE_EVENTS` — most interpreted events one [rebuild range](glossary.md#rebuild-range) applies, 4,096 by default
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_BLOCK_SPANS` — block spans of the [composition pass](glossary.md#composition-pass)'s history catalogue build, 64 by default; see [The composition pass builds the history catalogue once](#the-composition-pass-builds-the-history-catalogue-once)
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_KEY_PARTITIONS` — key partitions of that build, a power of two, 16 by default
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_WORK_MEM` — `work_mem` of each build transaction, the server's setting when unset
 
 An unset optional ceiling configures no limit; Docker inspection may show its bare
 variable name without `=`. An explicitly empty `KEY=` value is invalid.
@@ -447,6 +452,28 @@ values reduce process memory and cause more indexed reads from
 `normalized_events`; zero is valid and forces every required pre-batch value
 through that read path. The setting does not change stored output or the
 [interpreter content hash](glossary.md#interpreter-content-hash).
+
+`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_BLOCKS` bounds the work one Project
+batch commits for the [owned key families](glossary.md#owned-key-family): the
+blocks it applies or undoes, where each block of a [rebuild
+range](glossary.md#rebuild-range), each chunk of the [composition
+pass](glossary.md#composition-pass) and each partition of its history catalogue
+build counts as one. The runner records progress and writes its heartbeat
+between batches, so a long rebuild runs as a series of batches within this
+budget. `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_RANGE_EVENTS` bounds the
+interpreted events one rebuild range folds in its one transaction. The
+composition pass's history catalogue build does not read it: its block spans and
+key partitions split the build's transactions. A range keeps every row it
+loaded, with its pre-range and pre-block images, in memory until it commits. A
+resource-bearing event loads at least its resource pointer row, so the working
+set grows with this value. The default of 4,096 is about twice Sepolia's densest
+block and keeps a range's working set to tens of megabytes. A larger value grows
+the working set and the transaction one failure has to redo. A smaller one gives
+up more of the saving a range makes, about fifteen round trips for each block
+after its first. Live follow applies one block to a transaction and never reads
+the cap. Zero counts as one for the run budget and the range event cap, and
+neither of them changes stored output or the [projection content
+hash](glossary.md#projection-content-hash).
 
 Interpret chooses how it restores prior adapter state for each chain and each
 batch; there is nothing to enable. When every active or deprecated manifest of
@@ -4936,6 +4963,78 @@ content hash, then check on Sepolia that `GET /v1/names/phantombug01.eth` serves
 `0x8948458626811dd0c23eb25cc74291247077cc51`, equal to its `ens_v1.resolver` (registry
 `NewResolver` at block 11982720), and that `GET /v1/names/phantombug01.eth/records?keys=addr:61`
 finds the record.
+
+## Resolver boundary walks in the rebuild work list
+
+The build that walks the resolver boundaries of a rebuild work list block by block changes one
+Project statement, `project:families.input.work_blocks`
+([table ownership](storage.md#table-ownership)).
+
+- Before, the two sources of contract addresses that start or stop in the requested range
+  asked, address by address, whether any
+  [resolver edge](glossary.md#discovery-graph--discovery-edge) pointed at the address. When a
+  few resolver contracts hold most resolver edges, as on mainnet, PostgreSQL could answer each
+  question with a sequential scan of every resolver edge of the chain. Each address now asks
+  for the lowest resolver edge destination at or above its own contract, one step of
+  `project_families_discovery_edges_resolver_destination_idx`, and is kept when that is its own
+  contract.
+- Before, each of the four resolver boundary sources listed the distinct boundaries of the
+  whole requested range and then took the lowest. PostgreSQL could read and sort every boundary
+  in the range before the limit. Each source now walks its boundary index upward one block at a
+  time and stops once it holds as many blocks as the limit asks for. The blocks it returns are
+  the same.
+- Stored rows do not change. API responses do not change.
+- The statement is in `crates/project/src`, an input of the
+  [projection content hash](glossary.md#projection-content-hash) only. That hash rotates for
+  every chain. The [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, at a planned
+  [re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+  binaries. The change rides the next re-derivation release and shares that release's Project
+  redo.
+- It adds no schema-migration, table, index, manifest or setting. The manifest-authority
+  fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## The composition pass builds the history catalogue once
+
+The build whose [composition pass](glossary.md#composition-pass) builds the address history
+catalogue once at its block, from set-based statements in partitions, and whose names stream no
+longer refreshes the catalogue per chunk, changes `crates/project/src` and adds a
+schema-migration. It is an input of the
+[projection content hash](glossary.md#projection-content-hash) only. The served catalogue rows
+are the same, row for row.
+
+- The projection content hash rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not. Every chain needs
+  one full-range Project redo and no Interpret redo, under matching runner and API binaries.
+  The change rides the next re-derivation release and shares that release's Project redo. A
+  pass in flight under the previous binary does not resume: the rebuild starts again.
+- The schema-migration `20261027120000_project_compose_history_builder.sql` adds the work
+  list's `composed` and `relations` columns with the partial index over the names still to
+  compose, and the build's work table `project_compose_history_work`. It must run before the
+  new runner binary. Without it every family reset and every pass of the new binary fails.
+- Two runner settings split the build and a third sets its memory.
+  `--project-families-compose-block-spans`
+  (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_BLOCK_SPANS`, default 64, from 1 to 16384) is
+  the number of block spans the event scan runs in. `--project-families-compose-key-partitions`
+  (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_KEY_PARTITIONS`, default 16, a power of two)
+  is the number of key partitions of every other step. `--project-families-compose-work-mem`
+  (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_WORK_MEM`, unset by default) sets `work_mem`
+  inside each build transaction only. None of them changes a served row. Changing the spans or
+  partitions while a build is under way stops the run with an error naming both splits, so
+  change them only between passes or put the old values back. A build continued on another
+  Postgres server version is refused the same way, since key partitions hash by `hashtext`.
+- Each build partition is one transaction and logs "committed a partition of the catalogue
+  build" with its step, partition, rows and time. A partition that runs past the heartbeat
+  threshold fires `BignamePhaseRunnerHeartbeatStale`. Raise the spans or the partitions for
+  the next pass if the log shows long partitions.
+- During the build the [family marker](glossary.md#family-marker) stays on one block while
+  the [repair record](glossary.md#repair-record)'s `compose_stream` is 3 and its
+  `compose_cursor` names the last partition committed
+  ([pipeline monitoring](runbooks/pipeline-monitoring.md)).
+- Rolling the runner back mid-pass is safe. The previous binary resets the chain under its
+  own projection content hash. Its reset leaves the build's work table, which it never reads,
+  and the new binary clears it at its next reset or pass end. The manifest-authority
+  fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.
 
 ## Redo finds lost preimage witnesses without reading every surface
 

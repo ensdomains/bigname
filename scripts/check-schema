@@ -532,7 +532,7 @@ refusal_assertions_passed=0
 expected_refusal_assertions=484
 predecessor_shape_proof_count=0
 # Includes registration_lifecycle applied after lookup_precomputation on the removal path.
-expected_predecessor_shape_proof_count=86
+expected_predecessor_shape_proof_count=87
 refusal_probe_seconds=0
 timing_started=$SECONDS
 unread_index_migration="$ROOT/migrations/20261012130000_drop_unread_indexes.sql"
@@ -823,6 +823,13 @@ check_served_projection_removal() {
                 emit_phase_migration "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" preceding-shape
             fi
             emit_phase_migration "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" baseline-first
+            # The catalogue build's work columns and table: added to the pre-7c shape, already in
+            # the baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261027120000_project_compose_history_builder.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261027120000_project_compose_history_builder.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261027120000_project_compose_history_builder.sql" baseline-first
             # The lost-witness indexes: absent from the pre-7c shape, present in the baseline.
             if [ "$suffix" = removal ]; then
                 emit_phase_migration "$ROOT/migrations/20261027130000_name_surfaces_lost_witness_indexes.sql" preceding-shape
@@ -984,6 +991,7 @@ for migration_file in \
     "$unnamed_lease_index_migration" \
     "$ROOT/migrations/20261016130000_project_repair_record_composing.sql" \
     "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" \
+    "$ROOT/migrations/20261027120000_project_compose_history_builder.sql" \
     "$ROOT/migrations/20261027130000_name_surfaces_lost_witness_indexes.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
@@ -1325,6 +1333,8 @@ for migration_file in \
     "$ROOT/migrations/20261015120000_project_address_controller_candidate_transfer_comments.sql" \
     "$ROOT/migrations/20261016130000_project_repair_record_composing.sql" \
     "$ROOT/migrations/20261016130000_project_repair_record_composing.sql" \
+    "$ROOT/migrations/20261027120000_project_compose_history_builder.sql" \
+    "$ROOT/migrations/20261027120000_project_compose_history_builder.sql" \
     "$ROOT/migrations/20261027130000_name_surfaces_lost_witness_indexes.sql" \
     "$ROOT/migrations/20261027130000_name_surfaces_lost_witness_indexes.sql"
 do
@@ -6167,6 +6177,7 @@ BEGIN
             ('project_family_undo'),
             ('project_repair_record'),
             ('project_compose_name_work'),
+            ('project_compose_history_work'),
             ('project_name_state'),
             ('project_binding_candidate'),
             ('project_lifecycle_key_state'),
@@ -6289,6 +6300,7 @@ BEGIN
             ('project_family_undo'),
             ('project_repair_record'),
             ('project_compose_name_work'),
+            ('project_compose_history_work'),
             ('project_name_state'),
             ('project_binding_candidate'),
             ('project_lifecycle_key_state'),

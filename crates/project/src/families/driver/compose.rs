@@ -6,9 +6,13 @@
 //! fenced transition ends the pass: the record returns to rebuilding with `composed_block` set,
 //! and one marker journal row under the pass block ends the undo journal there. The transition
 //! that begins the pass also writes its name work list, which the names stream then pages
-//! through, and the pass end drops it. The pass end spends one block of the budget too. Every generation
+//! through, and the pass end drops it. The last stream builds the address history catalogue in
+//! partitions, each a chunk (history_catalogue/build). The pass end spends one block of the
+//! budget too. Every generation
 //! after that composes and journals as a block always did. A run that stops anywhere in the pass
 //! leaves the record saying where, and the next run continues from it.
+use std::time::Instant;
+
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 
@@ -18,6 +22,7 @@ use crate::{
     families::{
         FamilyOutcome, block,
         compose::{self, Stream},
+        history_catalogue::build,
         input::{self, Revision},
         manifests,
         marker::{self, Composition, FamilyMarker},
@@ -31,8 +36,8 @@ use crate::{
 enum Work<'a> {
     Names(&'a [(i64, String, compose::Reach)]),
     Pairs(Vec<(String, String)>),
-    /// The catalogue window after this block; its end is planned inside the chunk.
-    Window(i64),
+    /// One partition of the catalogue build.
+    Catalogue(build::Cursor),
 }
 
 impl Run<'_> {
@@ -74,7 +79,7 @@ impl Run<'_> {
             let names =
                 compose::prepare_names(&mut transaction, self.chain_id, pass.number).await?;
             commit(transaction).await?;
-            analyze_tables(self.pool, self.chain_id, &[tables::COMPOSE_NAME_WORK]).await;
+            analyze_tables(self.pool, self.chain_id, &tables::COMPOSE_WORK[..1]).await;
             record.state = State::Composing;
             record.compose_stream = Some(Stream::Names.index());
             record.compose_cursor = None;
@@ -87,12 +92,16 @@ impl Run<'_> {
             );
         }
         let composition = Composition::recorded(family);
-        let done = pass.number.to_string();
         let size = self.options.compose_chunk_keys.max(1);
+        let layout = build::Layout {
+            spans: self.options.compose_builder_block_spans,
+            partitions: self.options.compose_builder_key_partitions,
+        };
+        let mut server_version = None;
         loop {
             let stream = Stream::of(record.compose_stream);
             let cursor = record.compose_cursor.clone();
-            if stream == Stream::Windows && cursor.as_deref() == Some(done.as_str()) {
+            if stream == Stream::Catalogue && build::is_done(cursor.as_deref())? {
                 break;
             }
             if self.budget.left == 0 {
@@ -144,16 +153,14 @@ impl Run<'_> {
                     )
                     .await?
                 }
-                Stream::Windows => {
-                    let after = match cursor.as_deref() {
-                        Some(cursor) => cursor.parse().map_err(|error| {
-                            ProjectError::data_integrity(format!(
-                                "composition window cursor {cursor}: {error}"
-                            ))
-                        })?,
-                        None => -1,
+                Stream::Catalogue => {
+                    let version = match server_version {
+                        Some(version) => version,
+                        None => *server_version.insert(build::server_version(self.pool).await?),
                     };
-                    let chunks = vec![(Work::Window(after), None)];
+                    let step = build::next(cursor.as_deref(), layout, version)?;
+                    let at = Some(step.text());
+                    let chunks = vec![(Work::Catalogue(step), at)];
                     self.chunks(
                         family,
                         &mut record,
@@ -244,6 +251,7 @@ impl Run<'_> {
             let mut header = self.pass_block(&mut transaction, pass).await?;
             header.journal = false;
             let mut stats = block::BlockStats::default();
+            let mut built = None;
             let cursor = match work {
                 Work::Names(ids) => {
                     compose::names_chunk(
@@ -268,33 +276,21 @@ impl Run<'_> {
                     .await?;
                     cursor
                 }
-                Work::Window(after) => {
-                    let end = compose::window_end(
+                Work::Catalogue(step) => {
+                    let started = Instant::now();
+                    let (table, rows) = compose::catalogue_step(
                         &mut transaction,
                         self.chain_id,
-                        after,
-                        pass.number,
-                        self.options.max_range_events,
+                        &header,
+                        &step,
+                        self.options.compose_builder_work_mem.as_deref(),
                     )
                     .await?;
-                    let mut window = input::read_block(&mut transaction, self.chain_id, end)
-                        .await?
-                        .ok_or_else(|| {
-                            ProjectError::transient(format!(
-                                "block {end} of chain {} is not readable for its catalogue window",
-                                self.chain_id
-                            ))
-                        })?;
-                    window.journal = false;
-                    compose::window_chunk(
-                        &mut transaction,
-                        self.chain_id,
-                        &window,
-                        after,
-                        &mut stats,
-                    )
-                    .await?;
-                    Some(end.to_string())
+                    if table != build::WORK {
+                        *stats.rows.entry(table).or_default() += rows;
+                    }
+                    built = Some((step, rows, started));
+                    cursor
                 }
             };
             let committed = repair::compose_step(
@@ -310,6 +306,18 @@ impl Run<'_> {
             record.compose_cursor = cursor;
             outcome.compose_chunks += 1;
             outcome.add(stats);
+            if let Some((step, rows, started)) = built {
+                analyze_tables(self.pool, self.chain_id, build::analyzed(&step)).await;
+                tracing::info!(
+                    target: "bigname_project::families",
+                    chain_id = self.chain_id,
+                    step = step.step.name(),
+                    part = step.part,
+                    rows,
+                    elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    "committed a partition of the catalogue build"
+                );
+            }
             if committed.is_power_of_two() {
                 analyze_tables(self.pool, self.chain_id, &tables::COMPOSED).await;
                 outcome.statistics_refreshes += 1;

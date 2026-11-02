@@ -12,6 +12,7 @@ use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
 use sqlx::{PgPool, raw_sql};
 
+pub mod compose;
 pub mod ens_v2_path;
 mod expiry_policy;
 pub use expiry_policy::expected_registration_expiry;

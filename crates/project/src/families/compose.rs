@@ -1,22 +1,26 @@
 //! The composition pass of a rebuild in ranges: the work of its chunks, each run inside a
 //! transaction the driver fenced (driver/compose.rs). The ranges before the pass wrote the family
 //! rows only, so the pass composes, once, at the publication of the last range's block, what
-//! those ranges' blocks would each have composed: every name the incremental path names, every
-//! index key, and the address history catalogue's event windows. The keys come from the base
-//! families, the surfaces and the interpreted events, never from the journal, which the ranges
-//! did not write. A composition reads base rows and Interpret rows, never another composed row,
-//! so composing a name once at the pass block gives the row its last composition at or below that
-//! block would have given (docs/projections.md, "Owned key families").
+//! those ranges' blocks would each have composed: every name the incremental path names and every
+//! index key, then the address history catalogue, built once from set-based statements
+//! (history_catalogue/build). The keys come from the base families, the surfaces and the
+//! interpreted events, never from the journal, which the ranges did not write. A composition
+//! reads base rows and Interpret rows, never another composed row, so composing a name once at
+//! the pass block gives the row its last composition at or below that block would have given
+//! (docs/projections.md, "Owned key families").
 //!
 //! The pass journals nothing (`BlockHeader::journal`): its pass-end marker row ends the journal at
 //! its block.
+use std::collections::BTreeMap;
+
 use bigname_storage::families::records::CurrentHistoryRelation;
+use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 
 use super::{
     block::BlockStats,
     derived::{self, Touched},
-    history_catalogue,
+    history_catalogue::build::{self, PersistedRelation},
     input::BlockHeader,
     lookup, marker,
     tables::NAME_SUMMARY,
@@ -39,9 +43,9 @@ pub(crate) enum Stream {
     Nodes = 1,
     /// The (resolver, record id) pairs of the record-id values, for the record-id index.
     RecordIds = 2,
-    /// The address history catalogue over consecutive block windows; the cursor is the last
-    /// window's end, the pass block once the stream is done.
-    Windows = 3,
+    /// The address history catalogue, built in steps of partitions. The cursor names the last
+    /// partition committed (history_catalogue/build).
+    Catalogue = 3,
 }
 
 impl Stream {
@@ -49,7 +53,7 @@ impl Stream {
         match value {
             Some(1) => Self::Nodes,
             Some(2) => Self::RecordIds,
-            Some(3) => Self::Windows,
+            Some(3) => Self::Catalogue,
             _ => Self::Names,
         }
     }
@@ -62,7 +66,7 @@ impl Stream {
         match self {
             Self::Names => Self::Nodes,
             Self::Nodes => Self::RecordIds,
-            Self::RecordIds | Self::Windows => Self::Windows,
+            Self::RecordIds | Self::Catalogue => Self::Catalogue,
         }
     }
 }
@@ -168,6 +172,17 @@ const NAMES: &str = "/* project:families.compose.names */
 const CLEAR_NAMES: &str = "/* project:families.compose.clear_names */
     DELETE FROM project_compose_name_work WHERE chain_id = $1";
 
+const CLEAR_HISTORY: &str = "/* project:families.compose.clear_history */
+    DELETE FROM project_compose_history_work WHERE chain_id = $1";
+
+/// Mark the ids of a names chunk composed, each with the current relations the catalogue reads,
+/// in the chunk's transaction.
+const COMPOSED_NAMES: &str = "/* project:families.compose.composed */
+    UPDATE project_compose_name_work work
+    SET composed = true, relations = written.relations
+    FROM unnest($2::bigint[], $3::jsonb[]) written (serial, relations)
+    WHERE work.chain_id = $1 AND work.serial = written.serial";
+
 const NODES: &str = r#"/* project:families.compose.nodes */
     SELECT DISTINCT value.resolver_address, value.node FROM project_node_record_value value
     WHERE value.chain_id = $1 AND value.node IS NOT NULL
@@ -180,17 +195,6 @@ const RECORD_IDS: &str = r#"/* project:families.compose.record_ids */
     WHERE value.chain_id = $1 AND (value.resolver_address, value.record_id) > ($2, $3)
     ORDER BY value.resolver_address, value.record_id
     LIMIT $4"#;
-
-/// The blocks after `$2` up to the pass block `$3` that hold interpreted events, with the running
-/// count of their events, at most `$4` of them.
-const WINDOW: &str = "/* project:families.compose.window */
-    SELECT block.block_number, sum(block.events) OVER (ORDER BY block.block_number)::bigint
-    FROM (
-        SELECT event.block_number, count(*) AS events FROM normalized_events event
-        WHERE event.chain_id = $1 AND event.block_number > $2 AND event.block_number <= $3
-        GROUP BY event.block_number ORDER BY event.block_number LIMIT $4
-    ) block
-    ORDER BY block.block_number";
 
 /// Write the pass's work list for the pass block `block`, in the transaction that begins the
 /// pass, over whatever list an interrupted beginning left.
@@ -209,17 +213,21 @@ pub(crate) async fn prepare_names(
         .map_err(|error| ProjectError::database("failed to list the names to compose", error))
 }
 
-/// Drop the chain's work list, at the pass end.
+/// Drop the chain's work list and the catalogue build's work table, at the pass end.
 pub(crate) async fn clear_names(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
 ) -> Result<()> {
-    sqlx::query(CLEAR_NAMES)
-        .bind(chain_id)
-        .execute(&mut **transaction)
-        .await
-        .map(|_| ())
-        .map_err(|error| ProjectError::database("failed to clear the names to compose", error))
+    for sql in [CLEAR_NAMES, CLEAR_HISTORY] {
+        sqlx::query(sql)
+            .bind(chain_id)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to clear the composition work lists", error)
+            })?;
+    }
+    Ok(())
 }
 
 /// The next ids of the work list after the serial `cursor`, at most `limit`, each with its
@@ -282,39 +290,11 @@ pub(crate) fn pair_cursor(pair: &(String, String)) -> String {
     serde_json::to_string(pair).expect("a pair of strings serializes")
 }
 
-/// The end of the next catalogue window after `after`: the last block whose running event count
-/// stays within `events`, at least one block, or the pass block `through` once the window reaches
-/// every block with events, so the last window covers the blocks after them too.
-pub(crate) async fn window_end(
-    transaction: &mut Transaction<'_, Postgres>,
-    chain_id: &str,
-    after: i64,
-    through: i64,
-    events: u64,
-) -> Result<i64> {
-    let limit = i64::try_from(events).unwrap_or(i64::MAX).max(1);
-    let blocks: Vec<(i64, i64)> = sqlx::query_as(WINDOW)
-        .bind(chain_id)
-        .bind(after)
-        .bind(through)
-        .bind(limit)
-        .fetch_all(&mut **transaction)
-        .await
-        .map_err(|error| ProjectError::database("failed to plan a catalogue window", error))?;
-    let within = blocks
-        .iter()
-        .take_while(|(_, total)| *total <= limit)
-        .count()
-        .max(1);
-    if within >= blocks.len() && i64::try_from(blocks.len()).unwrap_or(i64::MAX) < limit {
-        return Ok(through);
-    }
-    Ok(blocks.get(within - 1).map_or(through, |(block, _)| *block))
-}
-
 /// Compose one chunk of the names stream at `block`, the pass block's publication with the
-/// marker's composition: the address name index of every id, the summaries and the catalogue of
-/// the composed ones, then the lookup names and inventories of those that reach the lookup.
+/// marker's composition: the address name index of every id, the summaries of the composed ones,
+/// then the lookup names and inventories of those that reach the lookup. Every id of the chunk is
+/// marked composed, a composed one with the current relations its summary gave, which the
+/// catalogue build reads.
 pub(crate) async fn names_chunk(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -348,16 +328,7 @@ pub(crate) async fn names_chunk(
                 .await?;
         *stats.rows.entry(NAME_SUMMARY.name).or_default() += rows;
     }
-    history_catalogue::refresh(
-        transaction,
-        chain_id,
-        block,
-        block.number,
-        &composed,
-        &current,
-        stats,
-    )
-    .await?;
+    mark_composed(transaction, chain_id, ids, &current).await?;
     lookup::prepare_names(transaction, &looked_up).await?;
     lookup::refresh(transaction, chain_id, block, composition, stats).await
 }
@@ -381,15 +352,46 @@ pub(crate) async fn pairs_chunk(
         .map(|_| ())
 }
 
-/// Refresh the catalogue for the events of the window `(after, block]`, with no name of its own:
-/// the names stream composed every name's own sources and current memberships, and this adds the
-/// sources and resource memberships of the window's events, as each block of it did.
-pub(crate) async fn window_chunk(
+async fn mark_composed(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    ids: &[(i64, String, Reach)],
+    current: &[CurrentHistoryRelation],
+) -> Result<()> {
+    let mut relations: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
+    for relation in current {
+        relations
+            .entry(relation.logical_name_id.as_str())
+            .or_default()
+            .push(PersistedRelation::of(relation).to_json());
+    }
+    let (serials, written): (Vec<i64>, Vec<Option<Value>>) = ids
+        .iter()
+        .map(|(serial, id, reach)| {
+            let persisted = (*reach >= COMPOSED)
+                .then(|| relations.remove(id.as_str()))
+                .flatten()
+                .map(Value::Array);
+            (*serial, persisted)
+        })
+        .unzip();
+    sqlx::query(COMPOSED_NAMES)
+        .bind(chain_id)
+        .bind(serials)
+        .bind(written)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to mark the names composed", error))?;
+    Ok(())
+}
+
+/// Run one partition of the catalogue build at the pass block `block`.
+pub(crate) async fn catalogue_step(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     block: &BlockHeader,
-    after: i64,
-    stats: &mut BlockStats,
-) -> Result<()> {
-    history_catalogue::refresh(transaction, chain_id, block, after, &[], &[], stats).await
+    cursor: &build::Cursor,
+    work_mem: Option<&str>,
+) -> Result<(&'static str, u64)> {
+    build::run(transaction, chain_id, block.number, cursor, work_mem).await
 }

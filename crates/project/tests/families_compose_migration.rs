@@ -15,8 +15,14 @@ use support::{CHAIN, CONTENT_HASH, Fixture};
 
 const MIGRATION: &str =
     include_str!("../../../migrations/20261016130000_project_repair_record_composing.sql");
+/// The later migration that gives the work list its catalogue build columns
+/// (families_compose_builder_migration.rs), which a database of the release before applies after
+/// this one.
+const BUILDER: &str =
+    include_str!("../../../migrations/20261027120000_project_compose_history_builder.sql");
 /// The record as the release before this one defines it.
-const PREDECESSOR: &str = "DROP TABLE IF EXISTS project_compose_name_work;
+const PREDECESSOR: &str = "DROP TABLE IF EXISTS project_compose_history_work;
+     DROP TABLE IF EXISTS project_compose_name_work;
      ALTER TABLE project_repair_record
          DROP CONSTRAINT project_repair_record_compose_check,
          DROP CONSTRAINT project_repair_record_rebuild_base_check,
@@ -123,6 +129,7 @@ async fn the_migration_gives_the_record_its_composition_pass() -> Result<()> {
     );
 
     sqlx::raw_sql(MIGRATION).execute(&fixture.pool).await?;
+    sqlx::raw_sql(BUILDER).execute(&fixture.pool).await?;
     ensure!(
         shape(&fixture).await? == baseline,
         "the migrated record is the baseline's: {:?} against {baseline:?}",
@@ -174,6 +181,7 @@ async fn the_migration_gives_the_record_its_composition_pass() -> Result<()> {
         "the row is kept: {kept:?}"
     );
     sqlx::raw_sql(MIGRATION).execute(&fixture.pool).await?;
+    sqlx::raw_sql(BUILDER).execute(&fixture.pool).await?;
     ensure!(
         shape(&fixture).await? == baseline,
         "applied again, the migration changes nothing"

@@ -440,7 +440,13 @@ not a stall, and the runner continues through runs that only compose.
 On a mainnet-sized corpus `BignamePhaseRunnerHeartbeatStale` can fire once as
 the pass begins, because the batch that begins it also lists every name to
 compose in the same transaction. It clears when that batch ends and needs no
-action.
+action. In the last stream, `compose_stream` 3, the cursor names the history
+catalogue build's step and partition, and the runner logs each partition it
+commits with its time. A partition longer than the heartbeat threshold fires
+the same alert. Raise
+`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_BLOCK_SPANS` or
+`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_KEY_PARTITIONS` for the next
+pass, not during one ([deployment](../deployment.md)).
 Failures leave the committed prefix available for resumption. A malformed
 journal is a data-integrity error to investigate, not an instruction to edit
 markers or silently discard it. Follow the recovery runbook for operator redo

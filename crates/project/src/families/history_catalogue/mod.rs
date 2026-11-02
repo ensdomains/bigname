@@ -1,5 +1,7 @@
 //! Compact Project-owned address history catalogue. Facts and pruning columns belong to
-//! their chain and use its ordinary family transaction and before-image journal.
+//! their chain and use its ordinary family transaction and before-image journal. A rebuild's
+//! composition pass builds it once instead (`build`).
+pub(crate) mod build;
 mod edges;
 mod envelopes;
 mod membership;
