@@ -117,11 +117,8 @@ async fn exercise(ownerless: bool) -> Result<()> {
         // The registrant is the lease's holder when its registrar rows record one. Here the
         // registrar's own mint precedes the lease the renewal names, so the lease records none.
         assert!(registration["registrant"].is_null(), "{name_body}");
-        // Its control is served like any lease's, which here records no status.
-        assert_eq!(
-            name_body["declared_state"]["control"]["status"],
-            Value::Null
-        );
+        // Its control stands on the lease and follows the lease's schedule.
+        assert_eq!(name_body["declared_state"]["control"]["status"], "active");
         assert_eq!(name_body["data"]["resource_id"], Value::Null);
         assert_eq!(name_body["data"]["token_lineage_id"], Value::Null);
         assert_eq!(name_body["data"]["binding_kind"], Value::Null);

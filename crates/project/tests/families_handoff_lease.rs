@@ -335,6 +335,11 @@ async fn served(fixture: &Fixture, name: &str) -> Result<Value> {
         "lifecycle_status": field("lifecycle_status"),
         "lapsed_owner": registration.pointer("/lapsed_registration/owner").cloned().unwrap_or(Value::Null),
         "registrant": field("registrant"),
+        "control_status": row
+            .declared_summary
+            .pointer("/control/status")
+            .cloned()
+            .unwrap_or(Value::Null),
         "owner": row.declared_summary.pointer("/control/owner").cloned().unwrap_or(Value::Null),
         "registry_owner": row
             .declared_summary
@@ -850,17 +855,19 @@ async fn a_live_reservation_on_the_reviewed_registry_lapses_into_its_grace() -> 
                "registered_at": block_time(1), "identity_resource_id": lease,
                "authority_kind": "registry_only",
                "ens_v1_expiry": lease_expiry.to_string(), "expires_at": reserved_until,
-               "grace_ends_at": grace_ends}),
+               "grace_ends_at": grace_ends, "owner": OWNER, "manager": OWNER}),
     )?;
     fixture.apply(8, FamilyMode::Normal).await?;
     let lapsed = served(&fixture, &name).await?;
+    // Inside the ETHRegistry's grace the name is expired, not released, and keeps its owner.
     check(
         &lapsed,
         json!({"status": "expired", "lifecycle_status": "expired",
                "registered_at": block_time(1), "identity_resource_id": lease,
                "authority_kind": "registry_only",
                "ens_v1_expiry": lease_expiry.to_string(), "expires_at": reserved_until,
-               "grace_ends_at": grace_ends}),
+               "grace_ends_at": grace_ends, "owner": OWNER, "summary_owner": OWNER,
+               "manager": OWNER}),
     )?;
     ensure!(
         lapsed["grace_ends_at"] == json!(lease_expiry + 90 * DAY),
@@ -875,7 +882,8 @@ async fn a_live_reservation_on_the_reviewed_registry_lapses_into_its_grace() -> 
                "registered_at": block_time(1), "identity_resource_id": lease,
                "authority_kind": "registry_only",
                "ens_v1_expiry": lease_expiry.to_string(), "expires_at": reserved_until,
-               "grace_ends_at": grace_ends}),
+               "grace_ends_at": grace_ends, "owner": Value::Null,
+               "summary_owner": Value::Null, "manager": Value::Null}),
     )?;
     fixture.assert_rebuild_equal(9).await?;
     fixture.cleanup().await
@@ -1683,7 +1691,7 @@ async fn an_ownerless_name_serves_its_lease_and_holder() -> Result<()> {
                "expires_at": LEASE_EXPIRY, "registrant": HOLDER,
                "authority_kind": Value::Null, "owner": HOLDER, "summary_owner": HOLDER,
                "registry_owner": Value::Null, "manager": Value::Null,
-               "public_authority": "ens_v1"}),
+               "public_authority": "ens_v1", "control_status": "active"}),
     )?;
     assert_listed_for_holder(&fixture, &name, &lease).await?;
     fixture.assert_rebuild_equal(5).await?;
@@ -2560,7 +2568,7 @@ async fn a_zero_registry_owner_serves_the_lease_holder() -> Result<()> {
                    "expires_at": expiry, "authority_kind": Value::Null, "owner": HOLDER,
                    "summary_owner": HOLDER, "registrant": HOLDER,
                    "registry_owner": Value::Null, "manager": Value::Null,
-                   "public_authority": "ens_v1"}),
+                   "public_authority": "ens_v1", "control_status": status}),
         )
         .with_context(|| format!("live or in grace: {name}"))?;
         assert_listed_for_holder(&fixture, name, lease).await?;
@@ -2569,14 +2577,15 @@ async fn a_zero_registry_owner_serves_the_lease_holder() -> Result<()> {
         &served(&fixture, &released).await?,
         json!({"status": "released", "lapsed_owner": HOLDER, "owner": Value::Null,
                "summary_owner": Value::Null, "manager": Value::Null,
-               "public_authority": "ens_v1"}),
+               "public_authority": "ens_v1", "control_status": "released"}),
     )
     .context("released")?;
     ensure!(relations(&fixture, HOLDER, &released).await?.is_empty());
     ensure!(lookup_relations(&fixture, &released).await?.is_empty());
     check(
         &served(&fixture, &unleased).await?,
-        json!({"owner": Value::Null, "summary_owner": Value::Null, "manager": Value::Null,
+        json!({"status": "unregistered", "control_status": "unregistered",
+               "owner": Value::Null, "summary_owner": Value::Null, "manager": Value::Null,
                "public_authority": Value::Null}),
     )
     .context("no lease")?;

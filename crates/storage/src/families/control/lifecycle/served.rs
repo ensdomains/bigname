@@ -514,6 +514,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
             Some("registrar" | "registry_only")
         );
     let serves_control = !(ownerless_unleased || selection.released_tombstone || v2_release);
+    let lease_control = selection.ownerless_registry && serves_control;
     // The ownerless profile's zero registry owner names nobody.
     let owner = served_owner(facts, folded, owner_required && serves_control)?
         .filter(|_| !selection.ownerless_registry);
@@ -590,7 +591,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         );
     }
     super::canonical::apply(facts, &tagged, clock, &mut registration, &mut trace)?;
-    released_control(&registration, &mut control);
+    released_control(&registration, &mut control, lease_control);
     Ok(ShadowName {
         registration,
         control,

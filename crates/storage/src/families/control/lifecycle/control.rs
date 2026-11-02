@@ -210,12 +210,19 @@ impl std::error::Error for RequiredOwnerMissing {}
 /// The served status is the lifecycle status `canonical::apply` schedules, so a name it releases
 /// has no owner, whichever evidence released it: its lease's release, the ENSv1 schedule past
 /// grace, or the lapse of the ENSv2 reservation that stood for it (`docs/api-v1.md`, `owner`).
-/// The registrant stays.
+/// The registrant stays. An ownerless name's control stands on its implied lease alone
+/// (`ownerless_lease`), so its status is that lease's schedule: `active`, `expired` or
+/// `released`, never absent.
 pub(super) fn released_control(
     registration: &Map<String, Value>,
     control: &mut Map<String, Value>,
+    ownerless_lease: bool,
 ) {
-    if registration.get("lifecycle_status").and_then(Value::as_str) == Some("released")
+    let lifecycle = registration.get("lifecycle_status").and_then(Value::as_str);
+    if ownerless_lease {
+        control.insert("status".into(), lifecycle.map_or(Value::Null, Value::from));
+    }
+    if lifecycle == Some("released")
         && let Some(owner) = control.get_mut("owner")
     {
         *owner = Value::Null;

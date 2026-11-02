@@ -5369,11 +5369,15 @@ For a registrar lease first identified by a later readable observation, registra
   `latestOwnerOf` still returns it, while `ownerOf` answers the zero address
   once the expiry passes
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L338-L354 @ ens_v2@a971bd64).
-  Bigname serves the latest holder, so an expired label counts as held by that
-  owner until its registration is released. Releasing it (`unregister`, which
-  emits `LabelUnregistered`) burns the token and ends the registration
+  Bigname serves the latest holder while the label's registration is not
+  released. A sub-registry label has no grace, so its registration is released
+  at its expiry: from then on it is served with `owner` absent, stays listed
+  and falls under `exclude_owner`, as `ownerOf` answers. A `.eth` label in the
+  ETHRegistry keeps its owner through its grace. Unregistering a label
+  (`unregister`, which emits `LabelUnregistered`) burns the token and ends the
+  registration
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64),
-  and a released label is not a label of the registry. The two parameters
+  and an unregistered label is not a label of the registry. The two parameters
   cannot be combined. A blank value, empty or
   only whitespace, counts as absent, as for the other optional address
   parameters: `owner=&exclude_owner=<address>` is an `exclude_owner` request and
