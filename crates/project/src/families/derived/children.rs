@@ -1,20 +1,20 @@
 //! The child listing family F17 (`project_child_listing`) and its counts
 //! (`project_child_listing_count`). After a block's name summaries are composed, the listing
 //! rows of every child the block can have moved are derived again by the children relation
-//! (`bigname_storage::families::topology::listing_rows`) at the block, compared with the stored
-//! rows, and every changed row is journalled with its before-image and written, in the block's
-//! transaction. The counts move by the same diff. Undo restores both from the journal, like any
-//! other family, so it derives nothing.
+//! (`bigname_storage::families::topology::listing_statement`) at the block, compared with the
+//! stored rows, and every changed row is journalled with its before-image and written, in the
+//! block's transaction. The counts move by the same diff. Undo restores both from the journal,
+//! like any other family, so it derives nothing.
 //!
-//! The work list has two arms. A child is derived again, under every parent that can list it,
-//! when the block touched a fact of its own: its name summary, an ENSv1 or Basenames edge naming
-//! it, an ENSv2 registration of it, its registry node, its NameWrapper row or a registrar
-//! lifecycle row of its node, a preimage observation of its name or of one of its labels, or the
-//! second at which the migration gate stops keeping it (`recompose_at`). A parent's own facts
-//! decide every child it lists: its migration state, its ENSv2 subregistry pointer, its surface,
-//! its raw name cleared in place or spelled by an observation, and an address window of its
-//! subregistry. Such a parent is derived whole, by one statement, and every row of it is
-//! journalled.
+//! The work list (`work.rs`) has two arms. A child is derived again, under every parent that can
+//! list it, when the block touched a fact of its own: its name summary, an ENSv1 or Basenames
+//! edge naming it, an ENSv2 registration of it, its registry node, its NameWrapper row or a
+//! registrar lifecycle row of its node, a preimage observation of its name or of one of its
+//! labels, or the second at which the migration gate stops keeping it (`recompose_at`). A
+//! parent's own facts decide every child it lists: its migration state, its ENSv2 subregistry
+//! pointer, its surface, its raw name cleared in place or spelled by an observation, and an
+//! address window of its subregistry. Such a parent is derived whole, by one statement, and
+//! every row of it is journalled.
 //!
 //! Inputs that change in place with no block, such as a lineage readability flip or a migration
 //! registry association recorded after the parent's migration, are covered by the rebuild a hash
@@ -22,6 +22,8 @@
 use sqlx::{Postgres, Transaction};
 
 use crate::{ProjectError, Result, families::input};
+
+mod work;
 
 /// Children derived per statement, to bound the working set.
 const CHUNK: usize = 1000;
@@ -37,141 +39,6 @@ pub(crate) struct Refreshed {
     pub(crate) rows: u64,
     pub(crate) undo_rows: u64,
 }
-
-/// The names whose listing rows block `$2` (at time `$4`, in seconds) of chain `$1` can have
-/// moved, after the family marker's block `$3`: `child` rows are children derived again under
-/// every parent that can list them, `parent` rows are parents derived whole. `$5` holds the names
-/// the block's summary refresh composed and `$6` the names whose raw name it swept.
-const WORK_LIST: &str = r#"/* project:families.derived.child_listing_work */
-    WITH journal AS MATERIALIZED (
-        SELECT family, key::jsonb AS key, before_image
-        FROM project_family_undo
-        WHERE chain_id = $1 AND block_number = $2
-          AND family IN ('project_name_summary', 'project_child_edge_candidate',
-                         'project_child_registration_state', 'project_registry_node_state',
-                         'project_wrapper_state', 'project_lifecycle_event', 'project_name_state',
-                         'project_parent_subregistry')
-    ),
-    lifecycle AS (
-        SELECT journal.before_image AS row FROM journal
-        WHERE journal.family = 'project_lifecycle_event' AND journal.before_image IS NOT NULL
-        UNION ALL
-        SELECT to_jsonb(event) FROM journal JOIN project_lifecycle_event event
-          ON journal.family = 'project_lifecycle_event'
-         AND event.chain_id = $1 AND event.state_kind = journal.key ->> 1
-         AND event.state_key = journal.key ->> 2 AND event.event_identity = journal.key ->> 3
-    ),
-    -- Each observation state is probed on its own, as the summary work list's `revealed` does,
-    -- so `normalized_events_projection_idx` bounds the range to the blocks.
-    revealed AS (
-        SELECT revealed_event.logical_name_id
-        FROM unnest('{canonical,safe,finalized}'::canonicality_state[]) AS state(canonicality_state)
-        CROSS JOIN LATERAL (
-            SELECT observed.logical_name_id
-            FROM normalized_events observed
-            WHERE observed.event_kind = 'PreimageObserved'
-              AND observed.canonicality_state = state.canonicality_state
-              AND observed.chain_id = $1
-              AND observed.block_number > $3 AND observed.block_number <= $2
-            OFFSET 0
-        ) revealed_event
-        WHERE revealed_event.logical_name_id IS NOT NULL
-    ),
-    -- The labels of the observed names: a label observed for one name spells every other name
-    -- that carries it.
-    observed AS MATERIALIZED (
-        SELECT DISTINCT label.labelhash
-        FROM revealed
-        JOIN name_surfaces surface ON surface.logical_name_id = revealed.logical_name_id
-        CROSS JOIN LATERAL unnest(surface.labelhashes) label (labelhash)
-    ),
-    -- The names with no raw bytes that carry an observed label, spelled from the label preimages
-    -- (name_surfaces_search_labelhashes_idx): as a child its own name moves, as a parent the name
-    -- of every child it lists.
-    spelled AS (
-        SELECT surface.logical_name_id
-        FROM name_surfaces surface
-        WHERE surface.raw_name IS NULL AND surface.chain_id = $1
-          AND surface.labelhashes && (SELECT array_agg(observed.labelhash) FROM observed)
-    ),
-    children AS (
-        SELECT name.id FROM unnest($5::text[]) name (id)
-        UNION SELECT journal.key ->> 1 FROM journal WHERE journal.family = 'project_name_summary'
-        UNION SELECT (journal.key ->> 1) || ':' || (journal.key ->> 3) FROM journal
-        WHERE journal.family = 'project_child_edge_candidate'
-        UNION SELECT journal.key ->> 1 FROM journal
-        WHERE journal.family = 'project_child_registration_state'
-        UNION SELECT (journal.key ->> 1) || ':' || lower(journal.key ->> 2) FROM journal
-        WHERE journal.family = 'project_registry_node_state'
-        UNION SELECT journal.before_image ->> 'logical_name_id' FROM journal
-        WHERE journal.family = 'project_wrapper_state'
-        UNION SELECT wrapper.logical_name_id FROM journal JOIN project_wrapper_state wrapper
-          ON journal.family = 'project_wrapper_state'
-         AND wrapper.chain_id = $1 AND wrapper.resource_id = (journal.key ->> 1)::uuid
-        -- A registrar lease row names its node; the relation reads it by node
-        -- (children_page/child_flags.rs), under the registrar's namespace.
-        UNION SELECT CASE lifecycle.row ->> 'source_family'
-                         WHEN 'ens_v1_registrar_l1' THEN 'ens'
-                         WHEN 'basenames_base_registrar' THEN 'basenames' END
-                     || ':' || lower(lifecycle.row ->> 'namehash')
-        FROM lifecycle
-        UNION SELECT revealed.logical_name_id FROM revealed
-        UNION SELECT spelled.logical_name_id FROM spelled
-        -- An observed label spells every ENSv1 or Basenames edge child that carries it, under
-        -- any parent, with or without a surface (project_child_edge_candidate_labelhash_idx).
-        UNION SELECT edge.namespace || ':' || edge.child_node
-        FROM (SELECT DISTINCT lower(observed.labelhash) AS labelhash FROM observed) observed
-        JOIN project_child_edge_candidate edge
-          ON edge.chain_id = $1 AND edge.labelhash = observed.labelhash
-        UNION SELECT listing.child_logical_name_id FROM project_child_listing listing
-        WHERE listing.chain_id = $1 AND listing.recompose_at <= $4
-    ),
-    parents AS (
-        -- The migration columns the gate reads (topology/children.rs, `parent_migration`).
-        SELECT journal.key ->> 2 AS id
-        FROM journal
-        LEFT JOIN project_name_state state
-          ON state.chain_id = $1 AND state.namespace = journal.key ->> 1
-         AND state.logical_name_id = journal.key ->> 2
-        WHERE journal.family = 'project_name_state'
-          AND jsonb_build_array(
-                  COALESCE(journal.before_image, '{}'::jsonb) ->> 'migration_path',
-                  COALESCE(journal.before_image, '{}'::jsonb) -> 'migration_evidence',
-                  COALESCE(journal.before_image, '{}'::jsonb) -> 'migration_position')
-              IS DISTINCT FROM jsonb_build_array(
-                  state.migration_path, state.migration_evidence, state.migration_position)
-        UNION SELECT journal.key ->> 1 FROM journal
-        WHERE journal.family = 'project_parent_subregistry'
-        UNION SELECT name.id FROM unnest($6::text[]) name (id)
-        -- An observation gives the observed name's surface its raw bytes in place, and a label
-        -- observed for any name spells a parent with none: either moves the parent's spelling,
-        -- which every child it lists ends with.
-        UNION SELECT revealed.logical_name_id FROM revealed
-        UNION SELECT spelled.logical_name_id FROM spelled
-        UNION SELECT surface.logical_name_id FROM name_surfaces surface
-        WHERE surface.chain_id = $1 AND surface.block_number > $3 AND surface.block_number <= $2
-        UNION SELECT pointer.logical_name_id
-        FROM contract_instance_addresses address
-        JOIN project_parent_subregistry pointer
-          ON pointer.chain_id = $1 AND pointer.subregistry_address = lower(address.address)
-        WHERE address.chain_id = $1
-          AND ((address.active_from_block_number > $3 AND address.active_from_block_number <= $2)
-               OR (address.active_to_block_number > $3 AND address.active_to_block_number <= $2))
-    )
-    SELECT 'child', children.id FROM children
-    WHERE children.id IS NOT NULL AND children.id LIKE '%:%'
-    UNION
-    SELECT 'parent', parents.id FROM parents
-    WHERE parents.id IS NOT NULL
-      AND (EXISTS (SELECT 1 FROM project_child_edge_candidate edge
-                   WHERE edge.chain_id = $1 AND edge.namespace = split_part(parents.id, ':', 1)
-                     AND edge.parent_node = lower(split_part(parents.id, ':', 2)))
-           OR EXISTS (SELECT 1 FROM project_parent_subregistry pointer
-                      WHERE pointer.chain_id = $1 AND pointer.logical_name_id = parents.id)
-           OR EXISTS (SELECT 1 FROM project_child_listing listing
-                      WHERE listing.chain_id = $1
-                        AND listing.parent_logical_name_id = parents.id))
-    ORDER BY 1, 2"#;
 
 /// Every parent that can list one of the children `$2` of chain `$1`: the parent of each of its
 /// ENSv1 or Basenames edges, and each parent whose ENSv2 subregistry is an address of a registry
@@ -193,19 +60,26 @@ const CANDIDATE_PARENTS: &str = "/* project:families.derived.child_listing_paren
     WHERE registration.chain_id = $1 AND registration.logical_name_id = ANY($2)
     ORDER BY 1";
 
-const PREPARE: &str = "/* project:families.derived.child_listing_prepare */
-    CREATE TEMP TABLE IF NOT EXISTS bigname_child_listing_fresh
-        (LIKE project_child_listing) ON COMMIT DROP;
-    CREATE TEMP TABLE IF NOT EXISTS bigname_child_listing_scope
-        (kind smallint NOT NULL, id text NOT NULL) ON COMMIT DROP;
-    CREATE TEMP TABLE IF NOT EXISTS bigname_child_listing_change
-        (child_logical_name_id text NOT NULL, before_image jsonb, after_image jsonb)
-        ON COMMIT DROP;
-    CREATE TEMP TABLE IF NOT EXISTS bigname_child_listing_count_change
-        (parent_logical_name_id text NOT NULL, registry_address text NOT NULL,
-         child_count bigint NOT NULL, before_image jsonb) ON COMMIT DROP;
-    TRUNCATE pg_temp.bigname_child_listing_fresh, pg_temp.bigname_child_listing_scope,
-             pg_temp.bigname_child_listing_change, pg_temp.bigname_child_listing_count_change";
+/// The refresh's temporary tables, emptied for this block, one statement each.
+const PREPARE: [&str; 5] = [
+    "/* project:families.derived.child_listing_prepare_fresh */
+     CREATE TEMP TABLE IF NOT EXISTS bigname_child_listing_fresh
+         (LIKE project_child_listing) ON COMMIT DROP",
+    "/* project:families.derived.child_listing_prepare_scope */
+     CREATE TEMP TABLE IF NOT EXISTS bigname_child_listing_scope
+         (kind smallint NOT NULL, id text NOT NULL) ON COMMIT DROP",
+    "/* project:families.derived.child_listing_prepare_change */
+     CREATE TEMP TABLE IF NOT EXISTS bigname_child_listing_change
+         (child_logical_name_id text NOT NULL, before_image jsonb, after_image jsonb)
+         ON COMMIT DROP",
+    "/* project:families.derived.child_listing_prepare_count_change */
+     CREATE TEMP TABLE IF NOT EXISTS bigname_child_listing_count_change
+         (parent_logical_name_id text NOT NULL, registry_address text NOT NULL,
+          child_count bigint NOT NULL, before_image jsonb) ON COMMIT DROP",
+    "/* project:families.derived.child_listing_prepare_truncate */
+     TRUNCATE pg_temp.bigname_child_listing_fresh, pg_temp.bigname_child_listing_scope,
+              pg_temp.bigname_child_listing_change, pg_temp.bigname_child_listing_count_change",
+];
 
 /// Scope kind of a parent derived whole.
 const WHOLE_PARENT: i16 = 0;
@@ -352,40 +226,6 @@ const COUNT_INSERT: &str = "/* project:families.derived.child_listing_count_inse
     FROM pg_temp.bigname_child_listing_count_change change
     WHERE change.child_count > 0";
 
-/// The work list of block `block`, which follows the family marker's block `after` (-1 with
-/// none): the children to derive again and the parents to derive whole. `names` are the names the
-/// block's summary refresh composed and `swept` those whose raw name it swept.
-async fn work_list(
-    transaction: &mut Transaction<'_, Postgres>,
-    chain_id: &str,
-    block: &input::BlockHeader,
-    after: i64,
-    (names, swept): (&[String], &[String]),
-) -> Result<(Vec<String>, Vec<String>)> {
-    let rows: Vec<(String, String)> = sqlx::query_as(WORK_LIST)
-        .bind(chain_id)
-        .bind(block.number)
-        .bind(after)
-        .bind(block.timestamp_seconds)
-        .bind(names)
-        .bind(swept)
-        .fetch_all(&mut **transaction)
-        .await
-        .map_err(|error| {
-            ProjectError::database("failed to read the children a family block touched", error)
-        })?;
-    let mut children = Vec::new();
-    let mut parents = Vec::new();
-    for (kind, id) in rows {
-        if kind == "parent" {
-            parents.push(id);
-        } else {
-            children.push(id);
-        }
-    }
-    Ok((children, parents))
-}
-
 /// Derive again, journal and write the listing rows and counts block `block` moved, after the
 /// family marker's block `after` (-1 with none).
 pub(crate) async fn refresh(
@@ -395,7 +235,7 @@ pub(crate) async fn refresh(
     after: i64,
     touched: (&[String], &[String]),
 ) -> Result<Refreshed> {
-    let (children, parents) = work_list(transaction, chain_id, block, after, touched).await?;
+    let (children, parents) = work::list(transaction, chain_id, block, after, touched).await?;
     derive(transaction, chain_id, block, &parents, &children).await
 }
 
@@ -412,12 +252,14 @@ pub(crate) async fn derive(
     if parents.is_empty() && children.is_empty() {
         return Ok(Refreshed::default());
     }
-    execute_raw(
-        transaction,
-        PREPARE,
-        "failed to prepare the child listing refresh",
-    )
-    .await?;
+    for statement in PREPARE {
+        sqlx::query(statement)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to prepare the child listing refresh", error)
+            })?;
+    }
     let listing = bigname_storage::families::topology::ListingBlock {
         chain_id,
         number: block.number,
@@ -589,18 +431,6 @@ async fn scope(
         .await
         .map(|_| ())
         .map_err(|error| ProjectError::database("failed to scope the child listing", error))
-}
-
-async fn execute_raw(
-    transaction: &mut Transaction<'_, Postgres>,
-    sql: &str,
-    context: &str,
-) -> Result<()> {
-    sqlx::raw_sql(sql)
-        .execute(&mut **transaction)
-        .await
-        .map(|_| ())
-        .map_err(|error| ProjectError::database(context, error))
 }
 
 async fn execute(
