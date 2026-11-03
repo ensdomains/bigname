@@ -10,13 +10,14 @@
 //! | 5 | A table, a view or another table's index under a listed name | Refused, nothing dropped, Project not started | `restore_refuses_a_foreign_relation_under_a_dropped_name` |
 //! | 7 | A writer while the build waits | The writer commits, the build finishes | `restore_builds_concurrently_while_a_writer_commits` |
 //! | 9 | A second Project entry, then a fresh runner | No DDL | `restore_is_idempotent_across_boots` |
-//! | 10 | A valid index with another definition | Kept, warned with both definitions | `restore_keeps_a_valid_index_with_another_definition_and_warns` |
+//! | 10 | A valid index with another definition | Kept, warned with both definitions once per process | `restore_keeps_a_valid_index_with_another_definition_and_warns` |
 //! | 11 | A supervised walk | Interpret runs without the index, Project's first batch has it | `restore_runs_before_projects_first_batch_and_not_during_interpret` |
 //! | 12 | A one-shot Interpret redo | Absent through Interpret, present for the stamped Project redo | `interpret_redo_walks_without_the_index_and_project_redo_gets_it_back` |
 //! | 13 | Another chain still in an Interpret redo | Built, warned naming that chain | `restore_warns_about_a_chain_still_in_an_interpret_redo` |
 //! | 14 | A build that fails | Error names the index and the cause, not retried, Project not started | `a_failed_build_stops_project_with_the_error_line` |
 //! | 15 | A stop during a build | Returns within the stop budget, the server build is cancelled, the leftover is rebuilt next time | `a_stop_during_the_restore_cancels_the_build_and_leaves_a_rebuildable_leftover` |
 //! | 20 | The transfer node schema-migration | Adopts the runner's build, and the runner keeps the migration's | `the_transfer_node_migration_and_the_runner_build_each_others_index_once` |
+//! | 23 | Another login's build, `VACUUM` or `ANALYZE` on the table | Waits naming the backend, keeps the loop heartbeat fresh, then builds | `restore_waits_for_another_build_on_the_table` |
 
 use std::collections::BTreeMap;
 
@@ -167,13 +168,15 @@ async fn open_writer(scratch: &ScratchDatabase) -> Result<PgConnection> {
     Ok(writer)
 }
 
-/// Waits until a backend reports an index build on `normalized_events`.
+/// Waits until a concurrent build on `normalized_events` waits for the writers, by which point
+/// its invalid catalog entry is committed.
 async fn await_build(pool: &sqlx::PgPool) -> Result<()> {
     tokio::time::timeout(BUILD_WAIT, async {
         loop {
             let building: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM pg_stat_progress_create_index
-                 WHERE relid = 'normalized_events'::regclass",
+                 WHERE relid = 'normalized_events'::regclass
+                   AND phase = 'waiting for writers before build'",
             )
             .fetch_one(pool)
             .await?;
@@ -366,6 +369,50 @@ async fn restore_builds_concurrently_while_a_writer_commits() -> Result<()> {
 }
 
 #[tokio::test]
+async fn restore_waits_for_another_build_on_the_table() -> Result<()> {
+    let scratch = ScratchDatabase::create("walk_index_restore_other_build").await?;
+    let chain_id = "walk-index-other-build";
+    completed_chain(&scratch, chain_id).await?;
+    drop_index(scratch.pool(), DROPPED).await?;
+    // The lock a concurrent build, a VACUUM or an ANALYZE holds, taken by another login, whose
+    // builds pg_stat_progress_create_index would not show.
+    let mut holder = PgConnection::connect_with(&scratch.writer_connect_options()).await?;
+    sqlx::raw_sql("BEGIN; LOCK TABLE normalized_events IN SHARE UPDATE EXCLUSIVE MODE")
+        .execute(&mut holder)
+        .await?;
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut holder)
+        .await?;
+    let heartbeat = RunnerLoopHeartbeat::default();
+    let runner = loopback_runner(&scratch, "walk-index-other-build-runner")?
+        .with_loop_heartbeat(heartbeat.clone());
+    let task = tokio::spawn(logged(async move {
+        project_redo(&runner, chain_id, CancellationToken::new()).await
+    }));
+
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    assert!(!task.is_finished(), "the restore must wait for the holder");
+    assert_eq!(oid(scratch.pool(), DROPPED).await?, None);
+    let age = heartbeat.age_seconds(chain_id);
+    assert!(
+        age.is_some_and(|age| age <= 4),
+        "the wait must keep recording loop progress, last {age:?} s ago"
+    );
+    sqlx::raw_sql("ROLLBACK").execute(&mut holder).await?;
+    holder.close().await?;
+
+    let (result, logs) = tokio::time::timeout(BUILD_WAIT, task).await??;
+    result?;
+    assert!(usable(scratch.pool(), DROPPED).await?);
+    let waited = logs
+        .lines()
+        .find(|line| line.contains("waiting for another index build or maintenance"))
+        .unwrap_or_else(|| panic!("no wait line: {logs}"));
+    assert!(waited.contains(&holder_pid.to_string()), "{waited}");
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn restore_is_idempotent_across_boots() -> Result<()> {
     let scratch = ScratchDatabase::create("walk_index_restore_idempotent").await?;
     let chain_id = "walk-index-idempotent";
@@ -417,6 +464,21 @@ async fn restore_keeps_a_valid_index_with_another_definition_and_warns() -> Resu
     assert!(warning.contains("USING btree (chain_id)"), "{warning}");
     assert!(warning.contains("RegistryCreated"), "{warning}");
     assert!(warning.contains("docs/storage.md"), "{warning}");
+
+    let (result, logs) = logged(project_redo(
+        &loopback_runner(&scratch, "walk-index-definition-second-runner")?,
+        chain_id,
+        CancellationToken::new(),
+    ))
+    .await;
+    result?;
+    assert!(
+        !logs
+            .lines()
+            .any(|line| line.contains("WARN") && line.contains(DROPPED)),
+        "one warning per definition per process: {logs}"
+    );
+    assert_eq!(oid(scratch.pool(), DROPPED).await?, held);
     scratch.cleanup().await
 }
 
