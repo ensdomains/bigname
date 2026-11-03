@@ -413,6 +413,28 @@ WHERE source_family = 'ens_v2_registry_l1' AND event_kind = 'RegistryCreated'
         definition: r#"CREATE INDEX normalized_events_address_root_permission_idx ON bigname_phase.normalized_events USING btree (lower((after_state ->> 'subject'::text)), block_number DESC NULLS LAST, log_index DESC NULLS LAST, normalized_event_id DESC) WHERE ((event_kind = 'RootPermissionChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))"#,
     },
     DroppedIndex {
+        name: "normalized_events_registry_roles_idx",
+        create: r#"CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_registry_roles_idx
+    ON bigname_phase.normalized_events (
+        chain_id,
+        lower(raw_fact_ref ->> 'emitting_address'),
+        resource_id,
+        lower(after_state ->> 'subject'),
+        block_number DESC,
+        transaction_index DESC NULLS LAST,
+        log_index DESC NULLS LAST,
+        normalized_event_id DESC
+    )
+    WHERE source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+      AND event_kind IN ('PermissionChanged', 'RootPermissionChanged')
+      AND after_state ->> 'source_event' = 'EACRolesChanged'
+      AND resource_id IS NOT NULL
+      AND after_state ->> 'subject' IS NOT NULL
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')"#,
+        definition: r#"CREATE INDEX normalized_events_registry_roles_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((raw_fact_ref ->> 'emitting_address'::text)), resource_id, lower((after_state ->> 'subject'::text)), block_number DESC, transaction_index DESC NULLS LAST, log_index DESC NULLS LAST, normalized_event_id DESC) WHERE ((source_family = ANY (ARRAY['ens_v2_root_l1'::text, 'ens_v2_registry_l1'::text])) AND (event_kind = ANY (ARRAY['PermissionChanged'::text, 'RootPermissionChanged'::text])) AND ((after_state ->> 'source_event'::text) = 'EACRolesChanged'::text) AND (resource_id IS NOT NULL) AND ((after_state ->> 'subject'::text) IS NOT NULL) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))"#,
+    },
+    DroppedIndex {
         name: "normalized_events_project_node_history_idx",
         create: r#"CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_project_node_history_idx
     ON bigname_phase.normalized_events (

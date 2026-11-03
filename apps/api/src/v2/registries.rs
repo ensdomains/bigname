@@ -25,6 +25,8 @@ mod labels;
 #[path = "registries/role_counts.rs"]
 mod role_counts;
 pub(crate) use labels::get_registry_labels;
+#[cfg(test)]
+pub(crate) use role_counts::test_hooks as role_counts_test_hooks;
 
 const REFERENCED_BY_SORT: &str = "display_name_asc";
 const CHAIN_ID_FILTER_KEY: &str = "chain_id";

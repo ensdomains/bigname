@@ -950,6 +950,24 @@ the parent's own transfers and nothing else. The handoff read no longer uses
 `history/registry_handoffs_tests.rs` checks that each arm reads its index, and that the
 Transfer arms under a parent with many children read none of the children's rows.
 
+A registry's role counts (`registry_role_count` and `label_role_counts` in
+`apps/api/src/v2/registries/role_counts.rs`) read one index on `normalized_events`. The
+registry detail route and its labels route run them with `include=counts`. The
+normalized-events baseline and `20261102140000_normalized_events_registry_roles_index.sql`
+install it:
+
+| Index | Serves |
+| --- | --- |
+| `normalized_events_registry_roles_idx` | the `latest` step of `CURRENT_ROLES`: activated, readable `PermissionChanged` and `RootPermissionChanged` rows from `EACRolesChanged` in source families `ens_v2_root_l1` and `ens_v2_registry_l1` with a resource and a subject, by chain and lowercased emitting registry, then in the statement's `DISTINCT ON` order |
+
+Its predicate is the statement's constant terms on `normalized_events`, so it holds only the
+rows the statement reads. The lineage join, the block bound and `DISTINCT ON` still drop some
+of them. Its key order lets `DISTINCT ON` read it without a sort. Without it the statement reads
+`normalized_events_emitter_history_idx`, which holds every event the registry emitted, and
+drops every row that is not a role change.
+`apps/api/src/tests/v2_registry_role_counts_index.rs` checks that both statements read the
+index under custom and generic plans and return what the unindexed read returns.
+
 When an ENSv1 BaseRegistrar manifest admits ordinary numeric registration and renewal,
 Interpret retains the registrar resource, token lineage, owner and expiry independently of
 registrar-controller logs. Before an admitted plaintext label is known, these lifecycle rows
@@ -3058,7 +3076,7 @@ The 17 kept indexes and the statements that read them:
 | `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |
 | `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows |
 
-The other 33 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
+The other 34 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
 these: `normalized_events_history_account_owner_idx`,
 `normalized_events_history_account_subject_idx`, `normalized_events_history_reverse_address_idx`,
 `normalized_events_history_registrar_lease_idx`, `normalized_events_registry_token_idx`,
@@ -3078,7 +3096,8 @@ these: `normalized_events_history_account_owner_idx`,
 `normalized_events_address_registrant_match_idx`,
 `normalized_events_address_token_holder_match_idx`,
 `normalized_events_address_registry_owner_match_idx`,
-`normalized_events_address_root_permission_idx`, `normalized_events_project_node_history_idx`
+`normalized_events_address_root_permission_idx`, `normalized_events_registry_roles_idx`,
+`normalized_events_project_node_history_idx`
 and `normalized_events_project_v1_pointer_addressed_node_idx`.
 
 A new index on `normalized_events` joins one list in the change that adds it: the drop list

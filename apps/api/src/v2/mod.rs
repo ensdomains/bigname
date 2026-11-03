@@ -38,6 +38,8 @@ mod permissions;
 mod primary_name;
 pub(crate) mod record_groups;
 mod registries;
+#[cfg(test)]
+pub(crate) use registries::role_counts_test_hooks as registry_role_counts_test_hooks;
 mod resolvers;
 #[cfg(test)]
 pub(crate) use resolvers::generation_test_hooks as resolver_generation_test_hooks;

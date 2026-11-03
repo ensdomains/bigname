@@ -3379,8 +3379,8 @@ runner behavior, so it needs no redo and no historical ingest fetch. Deploying i
 nothing until an operator runs the scripts.
 
 The scripts are an optional step for a from-zero walk or a full-history Interpret redo:
-`drop.sql` drops the 33 `normalized_events` indexes Interpret does not read, so Interpret
-maintains 17 indexes on the table instead of 50, and `install.sql` rebuilds them concurrently with their
+`drop.sql` drops the 34 `normalized_events` indexes Interpret does not read, so Interpret
+maintains 17 indexes on the table instead of 51, and `install.sql` rebuilds them concurrently with their
 reviewed definitions and analyzes the table before Project runs. `drop.sql` refuses while any
 chain on the database may be served. Rebuilding takes a pass over the table per index; on a
 large database, schedule it before Project starts, as the
@@ -5239,6 +5239,95 @@ steps:
   still running, drop it with
   `DROP INDEX CONCURRENTLY bigname_phase.normalized_events_v1_transfer_node_idx`, then build
   it again with the statement above.
+
+Then run the schema-migrations again. `ops/walk-index-set/drop.sql` drops the index with the
+other Project and API indexes, and its `install.sql` rebuilds it.
+
+## A partial index for the registry role counts
+
+The build that adds `normalized_events_registry_roles_idx` changes how a registry's role
+counts are read. The registry detail route and its labels route read them with
+`include=counts` ([table ownership](storage.md#table-ownership)).
+
+- Before, the statement in `apps/api/src/v2/registries/role_counts.rs` read
+  `normalized_events_emitter_history_idx`, which holds every event a registry emitted, and
+  dropped every row that was not a role change. For a registry with a long history the counts
+  could fail at the API's statement timeout.
+- The statement now reads the new partial index, which holds the registry role changes only.
+  Responses do not change. The statement is unchanged.
+- Neither content hash rotates. The baseline and the schema-migration are inputs of neither,
+  and no hashed file changes. No redo is needed. The change ships as an image swap plus the
+  schema-migration.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Schema-migration `20261102140000_normalized_events_registry_roles_index.sql` installs the
+index. Where an index of that name already exists, valid and ready, with the reviewed
+definition, the schema-migration adopts it without a build and without a lock, so it is a
+no-op on a database where the index was already built by hand with the statement below. An
+empty `normalized_events` builds it directly. A populated table without it is refused, so on
+an initialized database prebuild it concurrently first, outside a transaction. The phase
+runner and API can keep running while it builds, and the API reads it as soon as it is
+valid:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_registry_roles_idx
+    ON bigname_phase.normalized_events (
+        chain_id,
+        lower(raw_fact_ref ->> 'emitting_address'),
+        resource_id,
+        lower(after_state ->> 'subject'),
+        block_number DESC,
+        transaction_index DESC NULLS LAST,
+        log_index DESC NULLS LAST,
+        normalized_event_id DESC
+    )
+    WHERE source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+      AND event_kind IN ('PermissionChanged', 'RootPermissionChanged')
+      AND after_state ->> 'source_event' = 'EACRolesChanged'
+      AND resource_id IS NOT NULL
+      AND after_state ->> 'subject' IS NOT NULL
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+ANALYZE bigname_phase.normalized_events;
+```
+
+`ops/walk-index-set/install.sql` also builds it, together with any other index of the walk
+index set that is missing. The statement above builds this one only.
+
+`IF NOT EXISTS` matches the index name only, and an interrupted concurrent build leaves an
+invalid index. Check the index after the build:
+
+```sql
+SET search_path = pg_catalog;
+SELECT c.relkind, i.indrelid::regclass, i.indisvalid, i.indisready,
+       pg_get_indexdef(i.indexrelid)
+FROM pg_class AS c
+LEFT JOIN pg_index AS i ON i.indexrelid = c.oid
+WHERE c.relnamespace = 'bigname_phase'::regnamespace
+  AND c.relname = 'normalized_events_registry_roles_idx';
+RESET search_path;
+```
+
+It must return one row with `relkind` `i`, `indrelid` `bigname_phase.normalized_events`, and
+`indisvalid` and `indisready` true. The definition must be exactly this line, which is the
+text the schema-migration compares:
+
+```text
+CREATE INDEX normalized_events_registry_roles_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((raw_fact_ref ->> 'emitting_address'::text)), resource_id, lower((after_state ->> 'subject'::text)), block_number DESC, transaction_index DESC NULLS LAST, log_index DESC NULLS LAST, normalized_event_id DESC) WHERE ((source_family = ANY (ARRAY['ens_v2_root_l1'::text, 'ens_v2_registry_l1'::text])) AND (event_kind = ANY (ARRAY['PermissionChanged'::text, 'RootPermissionChanged'::text])) AND ((after_state ->> 'source_event'::text) = 'EACRolesChanged'::text) AND (resource_id IS NOT NULL) AND ((after_state ->> 'subject'::text) IS NOT NULL) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))
+```
+
+The schema-migration refuses a name that is not an index, an index on another table or one
+that is not valid and ready, and another definition. Its error names the index and, for
+another definition, prints the definition it found and the one it expects. The recovery
+steps:
+
+- A name that is not an index: remove or rename that relation, then build the index with the
+  statement above.
+- Any other refusal: confirm in `pg_stat_progress_create_index` that no build of the index is
+  still running, drop it with
+  `DROP INDEX CONCURRENTLY bigname_phase.normalized_events_registry_roles_idx`, then build it
+  again with the statement above.
 
 Then run the schema-migrations again. `ops/walk-index-set/drop.sql` drops the index with the
 other Project and API indexes, and its `install.sql` rebuilds it.
