@@ -10,9 +10,9 @@ use sqlx::raw_sql;
 
 use super::*;
 
-const CHILDREN: i64 = 2_000;
+pub(super) const CHILDREN: i64 = 2_000;
 const PARENT: &str = "ens:parent";
-const CHAIN: &str = "ethereum-mainnet";
+pub(super) const CHAIN: &str = "ethereum-mainnet";
 
 #[tokio::test]
 async fn a_small_child_page_does_not_rescan_all_candidates_per_child() -> Result<()> {
@@ -82,7 +82,7 @@ fn child_id(n: i64) -> String {
     format!("ens:0x{n:064x}")
 }
 
-async fn install(conn: &mut PgConnection) -> Result<()> {
+pub(super) async fn install(conn: &mut PgConnection) -> Result<()> {
     raw_sql("CREATE SCHEMA bigname_phase; SET search_path TO bigname_phase, public; SET jit = off")
         .execute(&mut *conn)
         .await?;

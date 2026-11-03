@@ -2392,6 +2392,7 @@ CREATE TABLE IF NOT EXISTS project_child_listing (
     expires_key numeric NOT NULL,
     registered_key numeric NOT NULL,
     recompose_at numeric,
+    unhealed_labelhashes text[] NOT NULL DEFAULT '{}',
     PRIMARY KEY (chain_id, child_logical_name_id)
 );
 COMMENT ON TABLE project_child_listing IS
@@ -2457,9 +2458,14 @@ CREATE INDEX IF NOT EXISTS project_child_listing_label_owners_idx
         (chain_id, parent_logical_name_id, registry_address, summary_owner, display_key,
          child_logical_name_id)
     WHERE registry_address IS NOT NULL;
+COMMENT ON COLUMN project_child_listing.unhealed_labelhashes IS
+    'This value is the label hashes display_name still spells as [labelhash], the child''s own label first then its parent''s in order, empty when the name is fully spelled; the family step derives again the rows that hold a label a preimage observation names.';
 CREATE INDEX IF NOT EXISTS project_child_listing_recompose_idx
     ON project_child_listing (chain_id, recompose_at)
     WHERE recompose_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS project_child_listing_unhealed_idx
+    ON project_child_listing USING gin (unhealed_labelhashes)
+    WHERE unhealed_labelhashes <> '{}';
 CREATE TABLE IF NOT EXISTS project_child_listing_count (
     chain_id text NOT NULL,
     parent_logical_name_id text NOT NULL,
@@ -2480,9 +2486,6 @@ COMMENT ON COLUMN project_child_listing_count.child_count IS
     'This value is the number of listed rows the key covers.';
 CREATE INDEX IF NOT EXISTS project_parent_subregistry_address_idx
     ON project_parent_subregistry (chain_id, subregistry_address);
-CREATE INDEX IF NOT EXISTS project_child_edge_candidate_labelhash_idx
-    ON project_child_edge_candidate (chain_id, labelhash)
-    WHERE labelhash IS NOT NULL;
 
 COMMENT ON COLUMN project_name_summary.resolver_chain_id IS
     'This value is the chain of the resolver the composed name row serves (declared_summary.resolver.chain_id). It is null when it serves none or the name composes no row.';

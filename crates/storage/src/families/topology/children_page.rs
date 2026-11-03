@@ -516,4 +516,6 @@ fn null_rank(is_null: bool, order: ChildrenCurrentOrder) -> i32 {
 #[cfg(test)]
 mod performance_tests;
 #[cfg(test)]
+mod narrowed_plan_tests;
+#[cfg(test)]
 mod registry_labels_tests;

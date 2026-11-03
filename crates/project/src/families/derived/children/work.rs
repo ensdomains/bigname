@@ -51,22 +51,13 @@ const WORK_LIST: &str = r#"/* project:families.derived.child_listing_work */
         ) revealed_event
         WHERE revealed_event.logical_name_id IS NOT NULL
     ),
-    -- The labels of the observed names: a label observed for one name spells every other name
-    -- that carries it.
+    -- The labels of the observed names, as the stored rows keep them: a label observed for one
+    -- name spells every other name that carries it.
     observed AS MATERIALIZED (
-        SELECT DISTINCT label.labelhash
+        SELECT array_agg(DISTINCT lower(label.labelhash)) AS labelhashes
         FROM revealed
         JOIN name_surfaces surface ON surface.logical_name_id = revealed.logical_name_id
         CROSS JOIN LATERAL unnest(surface.labelhashes) label (labelhash)
-    ),
-    -- The names with no raw bytes that carry an observed label, spelled from the label preimages
-    -- (name_surfaces_search_labelhashes_idx): as a child its own name moves, as a parent the name
-    -- of every child it lists.
-    spelled AS (
-        SELECT surface.logical_name_id
-        FROM name_surfaces surface
-        WHERE surface.raw_name IS NULL AND surface.chain_id = $1
-          AND surface.labelhashes && (SELECT array_agg(observed.labelhash) FROM observed)
     ),
     children AS (
         SELECT name.id FROM unnest($5::text[]) name (id)
@@ -94,13 +85,13 @@ const WORK_LIST: &str = r#"/* project:families.derived.child_listing_work */
                      || ':' || lower(lifecycle.row ->> 'namehash')
         FROM lifecycle
         UNION SELECT revealed.logical_name_id FROM revealed
-        UNION SELECT spelled.logical_name_id FROM spelled
-        -- An observed label spells every ENSv1 or Basenames edge child that carries it, under
-        -- any parent, with or without a surface (project_child_edge_candidate_labelhash_idx).
-        UNION SELECT edge.namespace || ':' || edge.child_node
-        FROM (SELECT DISTINCT lower(observed.labelhash) AS labelhash FROM observed) observed
-        JOIN project_child_edge_candidate edge
-          ON edge.chain_id = $1 AND edge.labelhash = observed.labelhash
+        -- A stored row whose name still spells an observed label as `[labelhash]`, its own or
+        -- its parent's, under any parent (project_child_listing_unhealed_idx). Only those rows
+        -- can spell it: a row whose name holds none of the labels keeps its name, and nothing
+        -- is derived by parent.
+        UNION SELECT listing.child_logical_name_id FROM project_child_listing listing
+        WHERE listing.chain_id = $1 AND listing.unhealed_labelhashes <> '{}'
+          AND listing.unhealed_labelhashes && (SELECT observed.labelhashes FROM observed)
         UNION SELECT listing.child_logical_name_id FROM project_child_listing listing
         WHERE listing.chain_id = $1 AND listing.recompose_at <= $4
     ),
@@ -125,11 +116,6 @@ const WORK_LIST: &str = r#"/* project:families.derived.child_listing_work */
         UNION SELECT journal.key ->> 1 FROM journal
         WHERE journal.family = 'project_parent_subregistry'
         UNION SELECT name.id FROM unnest($6::text[]) name (id)
-        -- An observation gives the observed name's surface its raw bytes in place, and a label
-        -- observed for any name spells a parent with none: either moves the parent's spelling,
-        -- which every child it lists ends with.
-        UNION SELECT revealed.logical_name_id FROM revealed
-        UNION SELECT spelled.logical_name_id FROM spelled
         UNION SELECT surface.logical_name_id FROM name_surfaces surface
         WHERE surface.chain_id = $1 AND surface.block_number > $3 AND surface.block_number <= $2
         UNION SELECT pointer.logical_name_id
@@ -188,3 +174,7 @@ pub(super) async fn list(
     }
     Ok((children, parents))
 }
+
+#[cfg(test)]
+#[path = "work_tests.rs"]
+mod tests;

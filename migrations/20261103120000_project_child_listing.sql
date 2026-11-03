@@ -1,15 +1,14 @@
 -- The child listing family F17: project_child_listing, one row per child a parent lists at the
 -- publication, with its six read indexes, and project_child_listing_count, the per-parent and
--- per-registry child counts the family step keeps from the same diff. Two indexes on existing
--- family tables serve the step's work list: project_parent_subregistry by subregistry address
--- and project_child_edge_candidate by labelhash.
+-- per-registry child counts the family step keeps from the same diff. An index on an existing
+-- family table serves the step's work list: project_parent_subregistry by subregistry address.
 --
 -- The new tables start empty and need no reset. The release that adds them rotates the
 -- projection content hash, so the runner refuses a normal Project or Live start until a
 -- full-range Project redo, which composes every row at its composition pass; until then the
 -- API serves no family publication of the new build.
 --
--- The two indexes on the populated tables are built in this transaction, not concurrently, on
+-- The index on the populated table is built in this transaction, not concurrently, on
 -- the redo's maintenance window. The family marker table is taken in EXCLUSIVE mode first, as
 -- 20261014120000_project_name_summary_bound_names.sql does, so no family run writes meanwhile.
 -- An empty schema-migration database has no phase baseline yet, so this schema-migration is a
@@ -42,6 +41,7 @@ CREATE TABLE IF NOT EXISTS bigname_phase.project_child_listing (
     expires_key numeric NOT NULL,
     registered_key numeric NOT NULL,
     recompose_at numeric,
+    unhealed_labelhashes text[] NOT NULL DEFAULT '{}',
     PRIMARY KEY (chain_id, child_logical_name_id)
 );
 COMMENT ON TABLE bigname_phase.project_child_listing IS
@@ -107,9 +107,14 @@ CREATE INDEX IF NOT EXISTS project_child_listing_label_owners_idx
         (chain_id, parent_logical_name_id, registry_address, summary_owner, display_key,
          child_logical_name_id)
     WHERE registry_address IS NOT NULL;
+COMMENT ON COLUMN bigname_phase.project_child_listing.unhealed_labelhashes IS
+    'This value is the label hashes display_name still spells as [labelhash], the child''s own label first then its parent''s in order, empty when the name is fully spelled; the family step derives again the rows that hold a label a preimage observation names.';
 CREATE INDEX IF NOT EXISTS project_child_listing_recompose_idx
     ON bigname_phase.project_child_listing (chain_id, recompose_at)
     WHERE recompose_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS project_child_listing_unhealed_idx
+    ON bigname_phase.project_child_listing USING gin (unhealed_labelhashes)
+    WHERE unhealed_labelhashes <> '{}';
 CREATE TABLE IF NOT EXISTS bigname_phase.project_child_listing_count (
     chain_id text NOT NULL,
     parent_logical_name_id text NOT NULL,
@@ -130,8 +135,5 @@ COMMENT ON COLUMN bigname_phase.project_child_listing_count.child_count IS
     'This value is the number of listed rows the key covers.';
 CREATE INDEX IF NOT EXISTS project_parent_subregistry_address_idx
     ON bigname_phase.project_parent_subregistry (chain_id, subregistry_address);
-CREATE INDEX IF NOT EXISTS project_child_edge_candidate_labelhash_idx
-    ON bigname_phase.project_child_edge_candidate (chain_id, labelhash)
-    WHERE labelhash IS NOT NULL;
 END
 $migration$;

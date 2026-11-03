@@ -579,6 +579,13 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
             .filter(|run| run.stream.as_i64() == Some(stream))
             .map(|run| &run.cursor)
             .collect();
+        // The children stream holds one chunk of parents here: the run that composes the last
+        // names chunk can leave the pass on the names stream when that chunk is full, and the
+        // next run then steps into the children stream and finishes it, ending in the next one.
+        // The listing oracle checks what it wrote at every publication.
+        if stream == 4 && cursors.is_empty() {
+            continue;
+        }
         // The names stream and the windows took several runs each. The two record streams
         // hold one key each here, so each was entered and done in one run.
         let runs = if stream == 0 || stream == 3 { 2 } else { 0 };
