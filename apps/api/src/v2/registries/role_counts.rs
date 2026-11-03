@@ -88,6 +88,11 @@ pub(super) async fn label_role_counts(
         .collect())
 }
 
+fn count_error(error: &sqlx::Error) -> V2Error {
+    tracing::error!(?error, "failed to count registry roles");
+    V2Error::internal_error("failed to count registry roles")
+}
+
 /// The two role-count statements as the routes run them, for tests that compare them with
 /// an unindexed read and check their plans.
 #[cfg(test)]
@@ -118,9 +123,4 @@ pub(crate) mod test_hooks {
     ) -> V2Result<BTreeMap<Uuid, u64>> {
         super::label_role_counts(conn, chain, registry, resources, at).await
     }
-}
-
-fn count_error(error: &sqlx::Error) -> V2Error {
-    tracing::error!(?error, "failed to count registry roles");
-    V2Error::internal_error("failed to count registry roles")
 }
