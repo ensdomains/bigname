@@ -390,17 +390,21 @@ starting durable cursor, no-head completion, capacity pause, and completed Verif
 A from-zero walk on a large database may run with only the
 [walk index set](../glossary.md#walk-index-set) on `normalized_events`. Run
 [`ops/walk-index-set/drop.sql`](../../ops/walk-index-set/README.md) after `init-schema` and
-before the first start. Once Interpret completes, the runner rebuilds the dropped indexes
-before Project's first batch and logs
-`every normalized_events index the walk index set scripts drop is in place`. Record that line
-in the walk log. Project waits for the builds. To build while Interpret's last batches run
-instead, stop the runner then, run `ops/walk-index-set/install.sql`, record its output, and
-start the runner again. A build that fails stops the chain with an error naming the index and
-the cause, and the runner exits non-zero without retrying it. Under the container's restart
-policy that shows as a restart loop in the restart count, and each start drops the invalid
-leftover and builds it again. The
-[walk index set README](../../ops/walk-index-set/README.md#the-phase-runners-rebuild) gives the
-recovery.
+before the first start. Then:
+
+- Once Interpret completes, the runner rebuilds the dropped indexes before Project's first
+  batch and logs `every normalized_events index the walk index set scripts drop is in place`.
+  Record that line in the walk log. Project waits for the builds.
+- To build while Interpret's last batches run instead, stop the runner then, run
+  `ops/walk-index-set/install.sql`, record its output, and start the runner again. The runner
+  then finds every index in place and logs no build line.
+- A build that fails stops the chain with an error naming the index and the cause. The
+  runner does not retry it, and exits non-zero once every chain has stopped.
+- Under the container's restart policy a failed build shows as a restart loop in the restart
+  count, and each start drops the invalid leftover and builds it again.
+
+The [walk index set README](../../ops/walk-index-set/README.md#the-phase-runners-rebuild)
+gives the recovery.
 
 ## Planned migration and fingerprint boundary
 

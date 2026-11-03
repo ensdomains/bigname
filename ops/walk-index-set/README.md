@@ -123,24 +123,34 @@ remaining batches maintain the rebuilt indexes, as they would after a hand-run `
 ## The phase runner's rebuild
 
 At every Project entry, normal or redo, supervised or one-shot, the runner reads the state of
-every name `drop.sql` drops in the catalog. When every one is a valid, ready index on `normalized_events`
-it does nothing more. Otherwise it opens a connection of its own, takes a session advisory
-lock so that one rebuild runs at a time across every process on the database, and waits for
-any other index build on the table to finish. Then, one index at a time, it drops an invalid
-leftover with `DROP INDEX CONCURRENTLY` and runs `install.sql`'s `CREATE INDEX CONCURRENTLY`
-statement, outside a transaction, with `lock_timeout` 0 and each build bounded to six hours.
-It logs each index it built with its duration, analyzes the table, checks every name again
-and logs `every normalized_events index the walk index set scripts drop is in place`.
+every name `drop.sql` drops in the catalog. When every one is a valid, ready index on
+`normalized_events` it does nothing more and logs nothing. Otherwise it:
+
+1. Opens a connection of its own and takes a session advisory lock, so that one rebuild runs
+   at a time across every process on the database. Another chain's Project entry waits on the
+   lock, then finds the indexes in place.
+2. Waits for any other index build, `VACUUM` or `ANALYZE` on the table, from any login, to
+   finish. Autovacuum is not waited for.
+3. One index at a time, drops an invalid leftover with `DROP INDEX CONCURRENTLY` and runs
+   `install.sql`'s `CREATE INDEX CONCURRENTLY` statement, outside a transaction, with
+   `lock_timeout` 0 and each build bounded to six hours. It logs each index it built with its
+   duration.
+4. Analyzes the table, checks every name again and logs
+   `every normalized_events index the walk index set scripts drop is in place`.
+
+While it waits or builds it records loop progress, so a long build does not raise the
+stale-loop alert.
 
 - A valid index under one of the names is kept whatever its definition. When the definition
   differs from `install.sql`'s, the runner logs a warning with the definition it found and
-  the one it expects, and Project reads the index as found. A changed definition takes a new
+  the one it expects, once per process, and Project reads the index as found. A changed definition takes a new
   name ([`docs/storage.md`](../../docs/storage.md#walk-index-set)).
 - A name held by a table, a view or an index on another table stops the chain with an error
   naming the relation, and nothing is dropped. Remove or rename that relation, then restart
   the runner.
-- A build or drop that fails stops the chain with an error naming the index and the cause,
-  and the process exits non-zero. It is not retried in the process. Under a restart policy
+- A build or drop that fails stops the chain with an error naming the index and the cause.
+  It is not retried in the process, and once every chain has stopped the process exits
+  non-zero. Under a restart policy
   each start drops the invalid leftover and builds it again, so a cause that persists, such
   as a login that does not own the table, shows as a restart loop with the same error each
   time.

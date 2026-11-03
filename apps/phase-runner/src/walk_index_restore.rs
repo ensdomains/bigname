@@ -5,7 +5,11 @@
 //! restore holds at a time across every process on the database. A valid index is kept
 //! whatever its definition, and a name another relation holds stops Project instead of being
 //! dropped.
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeSet,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use bigname_storage::walk_index_set::{IndexState, IndexStatus, load_drop_list_state};
 use sqlx::{Connection, PgConnection, PgPool};
@@ -15,11 +19,15 @@ use tracing::{info, warn};
 use crate::{
     database::RunnerDatabase,
     error::{ErrorKind, RunnerError, RunnerResult},
+    runner_support::StopClock,
     shutdown::until_cancelled,
 };
 
 const LOCK: &str = "bigname.walk_index_set";
 const POLL: Duration = Duration::from_secs(5);
+const CLOSE: Duration = Duration::from_secs(10);
+/// How often a running build records loop progress, well inside the runner's stale-loop alert.
+const PROGRESS: Duration = Duration::from_secs(30);
 /// `install.sql`'s bound. A concurrent build waits for every transaction already running, such
 /// as another chain's Interpret batch.
 const BUILD_TIMEOUT: &str = "6h";
@@ -34,14 +42,24 @@ pub struct IndexBuildSettings {
     pub max_parallel_maintenance_workers: Option<u16>,
 }
 
+/// What a restore reports to the runner while it waits or builds.
+pub(crate) struct Restore<'a> {
+    pub(crate) chain_id: &'a str,
+    pub(crate) cancellation: &'a CancellationToken,
+    /// The chain's stop clock, which bounds everything after a stop.
+    pub(crate) stop_clock: &'a StopClock,
+    /// Records loop progress, so a long build does not read as a stalled runner.
+    pub(crate) progress: &'a (dyn Fn() + Sync),
+}
+
 /// Returns once every index is in place, or as soon as `cancellation` fires. A failed build is
 /// not retried in this process: the next start drops its invalid leftover and builds it again.
-pub(crate) async fn restore(
-    database: &RunnerDatabase,
-    chain_id: &str,
-    cancellation: &CancellationToken,
-    stop_budget: Duration,
-) -> RunnerResult<()> {
+pub(crate) async fn restore(database: &RunnerDatabase, run: &Restore<'_>) -> RunnerResult<()> {
+    let Restore {
+        chain_id,
+        cancellation,
+        ..
+    } = *run;
     let Some(states) = until_cancelled(cancellation, load(database.pool())).await? else {
         return Ok(());
     };
@@ -52,13 +70,11 @@ pub(crate) async fn restore(
     let Some(mut session) = until_cancelled(cancellation, Session::open(database)).await? else {
         return Ok(());
     };
-    let result = session
-        .restore(database, chain_id, cancellation, stop_budget)
-        .await;
+    let result = session.restore(database, run).await;
     // After a stop a cancelled statement may still be owed its reply, so the session is dropped
     // rather than closed. Either way the advisory lock goes with it.
     if !cancellation.is_cancelled() {
-        let _ = tokio::time::timeout(stop_budget, session.connection.close()).await;
+        let _ = tokio::time::timeout(CLOSE, session.connection.close()).await;
     }
     result
 }
@@ -92,9 +108,20 @@ fn describe(state: &IndexState) -> &'static str {
     }
 }
 
+/// Each index and definition already warned about in this process. Project is entered again
+/// after every post-Live pass, and one warning per definition is enough.
+static WARNED: Mutex<BTreeSet<(&str, String)>> = Mutex::new(BTreeSet::new());
+
 fn warn_other_definitions(chain_id: &str, states: &[IndexStatus]) {
     for status in states {
-        if let Some(found) = status.other_definition() {
+        let Some(found) = status.other_definition() else {
+            continue;
+        };
+        let first = WARNED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert((status.index.name, found.to_owned()));
+        if first {
             warn!(
                 chain_id,
                 index = status.index.name,
@@ -129,16 +156,9 @@ impl Session {
         Ok(Self { connection, pid })
     }
 
-    async fn restore(
-        &mut self,
-        database: &RunnerDatabase,
-        chain_id: &str,
-        cancellation: &CancellationToken,
-        stop_budget: Duration,
-    ) -> RunnerResult<()> {
-        if !self.lock(chain_id, cancellation).await?
-            || !self.await_other_builds(cancellation).await?
-        {
+    async fn restore(&mut self, database: &RunnerDatabase, run: &Restore<'_>) -> RunnerResult<()> {
+        let chain_id = run.chain_id;
+        if !self.lock(run).await? || !self.await_other_builds(run).await? {
             return Ok(());
         }
         // Another process may have finished while this one waited.
@@ -177,18 +197,12 @@ impl Session {
             let name = status.index.name;
             if status.state == IndexState::Invalid {
                 let statement = format!("DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.{name}");
-                if !self
-                    .run(pool, &statement, cancellation, stop_budget)
-                    .await?
-                {
+                if !self.run(pool, &statement, run).await? {
                     return Ok(());
                 }
             }
             let started = Instant::now();
-            if !self
-                .run(pool, status.index.create, cancellation, stop_budget)
-                .await?
-            {
+            if !self.run(pool, status.index.create, run).await? {
                 return Ok(());
             }
             info!(
@@ -198,10 +212,7 @@ impl Session {
                 "built a normalized_events index the walk index set scripts drop"
             );
         }
-        if !self
-            .analyze(pool, chain_id, cancellation, stop_budget)
-            .await?
-        {
+        if !self.analyze(pool, run).await? {
             return Ok(());
         }
         let states = load(&mut self.connection).await?;
@@ -224,11 +235,7 @@ impl Session {
     }
 
     /// Waits for the restore lock. `false` when a stop came first.
-    async fn lock(
-        &mut self,
-        chain_id: &str,
-        cancellation: &CancellationToken,
-    ) -> RunnerResult<bool> {
+    async fn lock(&mut self, run: &Restore<'_>) -> RunnerResult<bool> {
         let mut logged = false;
         loop {
             let acquired: bool = sqlx::query_scalar(
@@ -245,28 +252,38 @@ impl Session {
             }
             if !logged {
                 info!(
-                    chain_id,
+                    chain_id = run.chain_id,
                     "waiting for another restore of the normalized_events indexes to finish"
                 );
                 logged = true;
             }
-            if !pause(cancellation).await {
+            if !pause(run).await {
                 return Ok(false);
             }
         }
     }
 
-    /// Waits until no other backend is building an index on the table, so an invalid index is
-    /// never dropped while a build of it, say one a killed runner left on the server, can
-    /// still complete. `false` when a stop came first.
-    async fn await_other_builds(&mut self, cancellation: &CancellationToken) -> RunnerResult<bool> {
+    /// Waits until no other backend holds the lock an index build, a `VACUUM` or an `ANALYZE`
+    /// holds on the table, so an invalid index is never dropped while a build of it, say one a
+    /// killed runner or another login left on the server, can still complete. `pg_locks` shows
+    /// every login's locks, where `pg_stat_progress_create_index` shows only this login's
+    /// builds. Autovacuum is not waited for: it gives way to a build. `false` when a stop came
+    /// first.
+    async fn await_other_builds(&mut self, run: &Restore<'_>) -> RunnerResult<bool> {
         let mut logged = false;
         loop {
             let building: Option<String> = sqlx::query_scalar(
-                "SELECT string_agg(pid::text || ' (' || phase || ')', ', ' ORDER BY pid)
-                 FROM pg_stat_progress_create_index
-                 WHERE relid = to_regclass('bigname_phase.normalized_events')
-                   AND pid <> pg_backend_pid()",
+                "SELECT string_agg(DISTINCT held.pid::text, ', ')
+                 FROM pg_locks held
+                 LEFT JOIN pg_stat_activity activity ON activity.pid = held.pid
+                 WHERE held.locktype = 'relation'
+                   AND held.database = (SELECT oid FROM pg_database
+                                        WHERE datname = current_database())
+                   AND held.relation = to_regclass('bigname_phase.normalized_events')
+                   AND held.mode = 'ShareUpdateExclusiveLock'
+                   AND held.granted
+                   AND held.pid <> pg_backend_pid()
+                   AND activity.backend_type IS DISTINCT FROM 'autovacuum worker'",
             )
             .fetch_one(&mut self.connection)
             .await
@@ -278,12 +295,14 @@ impl Session {
             };
             if !logged {
                 info!(
+                    chain_id = run.chain_id,
                     backends = %building,
-                    "waiting for other index builds on normalized_events to finish"
+                    "waiting for another index build or maintenance on normalized_events to \
+                     finish"
                 );
                 logged = true;
             }
-            if !pause(cancellation).await {
+            if !pause(run).await {
                 return Ok(false);
             }
         }
@@ -363,13 +382,7 @@ impl Session {
 
     /// Refreshes the planner statistics, which expression and partial indexes lack until the
     /// table is analyzed. A failure is a warning: Interpret and the next restore analyze again.
-    async fn analyze(
-        &mut self,
-        pool: &PgPool,
-        chain_id: &str,
-        cancellation: &CancellationToken,
-        stop_budget: Duration,
-    ) -> RunnerResult<bool> {
+    async fn analyze(&mut self, pool: &PgPool, run: &Restore<'_>) -> RunnerResult<bool> {
         let analyzed = match sqlx::query(
             "SELECT set_config('lock_timeout', '10s', false),
                     set_config('statement_timeout', '1h', false)",
@@ -378,13 +391,8 @@ impl Session {
         .await
         {
             Ok(_) => {
-                self.statement(
-                    pool,
-                    "ANALYZE bigname_phase.normalized_events",
-                    cancellation,
-                    stop_budget,
-                )
-                .await
+                self.statement(pool, "ANALYZE bigname_phase.normalized_events", run)
+                    .await
             }
             Err(error) => Err(error),
         };
@@ -392,7 +400,7 @@ impl Session {
             Ok(done) => Ok(done),
             Err(error) => {
                 warn!(
-                    chain_id,
+                    chain_id = run.chain_id,
                     error = %error,
                     "could not refresh normalized_events statistics after building its indexes"
                 );
@@ -406,52 +414,60 @@ impl Session {
         &mut self,
         pool: &PgPool,
         statement: &str,
-        cancellation: &CancellationToken,
-        stop_budget: Duration,
+        run: &Restore<'_>,
     ) -> RunnerResult<bool> {
-        self.statement(pool, statement, cancellation, stop_budget)
-            .await
-            .map_err(|error| {
-                let what = statement.lines().next().unwrap_or(statement);
-                RunnerError::transient(format!(
-                    "failed to build the normalized_events indexes the walk index set scripts \
-                     drop: {what} failed: {error}; {RECOVERY}"
-                ))
-                .not_retried()
-            })
+        self.statement(pool, statement, run).await.map_err(|error| {
+            let what = statement.lines().next().unwrap_or(statement);
+            RunnerError::transient(format!(
+                "failed to build the normalized_events indexes the walk index set scripts \
+                 drop: {what} failed: {error}; {RECOVERY}"
+            ))
+            .not_retried()
+        })
     }
 
     /// A stop cancels the statement on the server: a dropped connection alone would leave a
-    /// build running there until it next writes to this client.
+    /// build running there until it next writes to this client. The cancel and its reply share
+    /// what is left of the chain's stop budget.
     async fn statement(
         &mut self,
         pool: &PgPool,
         statement: &str,
-        cancellation: &CancellationToken,
-        stop_budget: Duration,
+        run: &Restore<'_>,
     ) -> Result<bool, sqlx::Error> {
-        if cancellation.is_cancelled() {
+        if run.cancellation.is_cancelled() {
             return Ok(false);
         }
         let pid = self.pid;
         let mut running = std::pin::pin!(sqlx::raw_sql(statement).execute(&mut self.connection));
-        tokio::select! {
-            biased;
-            result = &mut running => result.map(|_| true),
-            () = cancellation.cancelled() => {
-                let cancel = sqlx::query("SELECT pg_cancel_backend($1)").bind(pid).execute(pool);
-                let _ = tokio::time::timeout(stop_budget, cancel).await;
-                let _ = tokio::time::timeout(stop_budget, running).await;
-                Ok(false)
+        let mut progress = tokio::time::interval(PROGRESS);
+        progress.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut running => return result.map(|_| true),
+                () = run.cancellation.cancelled() => {
+                    let _ = tokio::time::timeout(run.stop_clock.remaining(), async {
+                        let _ = sqlx::query("SELECT pg_cancel_backend($1)")
+                            .bind(pid)
+                            .execute(pool)
+                            .await;
+                        let _ = (&mut running).await;
+                    })
+                    .await;
+                    return Ok(false);
+                }
+                _ = progress.tick() => (run.progress)(),
             }
         }
     }
 }
 
-/// Waits one poll interval. `false` when a stop came first.
-async fn pause(cancellation: &CancellationToken) -> bool {
+/// Waits one poll interval, recording loop progress. `false` when a stop came first.
+async fn pause(run: &Restore<'_>) -> bool {
+    (run.progress)();
     tokio::select! {
-        () = cancellation.cancelled() => false,
+        () = run.cancellation.cancelled() => false,
         () = tokio::time::sleep(POLL) => true,
     }
 }

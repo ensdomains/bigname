@@ -42,14 +42,17 @@ impl PhaseRunner {
             // Every Project entry, normal or redo, supervised or one-shot, passes here, after its
             // chain's Interpret completed. A failed build is not retried.
             let restored = if phase_name == PhaseName::Project {
-                crate::walk_index_restore::restore(
-                    &self.database,
-                    &chain.chain_id,
-                    &cancellation,
-                    self.stop_budget,
-                )
-                .await
-                .map(|()| !cancellation.is_cancelled())
+                let stop_clock = self.chain_stop_clock(&chain.chain_id);
+                let progress = || self.record_loop_progress(&chain.chain_id);
+                let run = crate::walk_index_restore::Restore {
+                    chain_id: &chain.chain_id,
+                    cancellation: &cancellation,
+                    stop_clock: &stop_clock,
+                    progress: &progress,
+                };
+                crate::walk_index_restore::restore(&self.database, &run)
+                    .await
+                    .map(|()| !cancellation.is_cancelled())
             } else {
                 Ok(true)
             };
