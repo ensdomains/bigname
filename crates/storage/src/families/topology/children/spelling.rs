@@ -113,6 +113,5 @@ pub(super) const CHILD_UNHEALED_LABELHASHES: &str = concat!(
     "CASE WHEN ",
     child_spelled_name!(),
     " IS NULL AND selected.labelhash IS NOT NULL
-      THEN ARRAY[lower(selected.labelhash)] ELSE '{}'::text[] END
-    || parent.unhealed_labelhashes"
+      THEN ARRAY[lower(selected.labelhash)] ELSE '{}'::text[] END"
 );
