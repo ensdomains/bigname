@@ -53,6 +53,8 @@ const FAMILY_TABLES: &[&str] = &[
     "project_address_record_id_index",
     "project_name_history",
     "project_name_summary",
+    "project_child_listing",
+    "project_child_listing_count",
     "project_lookup_name",
     "project_lookup_relation",
     "project_lookup_inventory",

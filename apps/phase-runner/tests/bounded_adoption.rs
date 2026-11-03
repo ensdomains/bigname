@@ -93,7 +93,7 @@ const INTERPRET_TABLES: [&str; 13] = [
 /// rows are keyed upserts, so the family half of the snapshot catches only content changes: a
 /// Project start too low shows in the recorded driver request and in the repair record's trusted
 /// base (row 41).
-const UNDATED: [(&str, &str); 17] = [
+const UNDATED: [(&str, &str); 19] = [
     ("contract_instances", "no block column"),
     ("name_search_documents", "no block column"),
     ("name_search_postings", "no block column"),
@@ -108,6 +108,8 @@ const UNDATED: [(&str, &str); 17] = [
     ("project_lookup_record", "no block column"),
     ("project_lookup_dependency", "no block column"),
     ("project_name_summary", "no block column"),
+    ("project_child_listing", "no block column"),
+    ("project_child_listing_count", "no block column"),
     ("project_address_history_anchor", "no block column"),
     ("project_history_source", "no block column"),
     ("project_history_source_edge", "no block column"),

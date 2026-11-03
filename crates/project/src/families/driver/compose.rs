@@ -123,7 +123,7 @@ impl Run<'_> {
                     )
                     .await?
                 }
-                Stream::Nodes | Stream::RecordIds => {
+                Stream::Nodes | Stream::RecordIds | Stream::Children => {
                     let pairs =
                         compose::pairs(self.pool, self.chain_id, stream, cursor.as_deref(), limit)
                             .await?;
@@ -261,9 +261,10 @@ impl Run<'_> {
                     compose::pairs_chunk(
                         &mut transaction,
                         self.chain_id,
-                        stream,
+                        (stream, &header),
                         composition,
                         pairs,
+                        &mut stats,
                     )
                     .await?;
                     cursor

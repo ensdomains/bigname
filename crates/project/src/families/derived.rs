@@ -5,7 +5,10 @@
 //! them before an undo's restore and after a block's write covers both states.
 //!
 //! After a block's write the name summaries of the names it touched are composed again
-//! (`summary.rs`); those are journalled, so an undo restores them with the other families.
+//! (`summary.rs`), then the child listing rows they move (`children.rs`); both are journalled, so
+//! an undo restores them with the other families.
+mod children;
+pub(crate) use children::derive as derive_child_listing;
 mod summary;
 pub(crate) use summary::{
     CHUNK as SUMMARY_CHUNK, WORK_LIST as SUMMARY_WORK_LIST, compose as compose_summaries,
@@ -16,7 +19,11 @@ mod summary_plan_tests;
 
 use sqlx::{Postgres, Transaction};
 
-use super::{block::BlockStats, input, marker, tables::NAME_SUMMARY};
+use super::{
+    block::BlockStats,
+    input, marker,
+    tables::{CHILD_LISTING, NAME_SUMMARY},
+};
 use crate::{ProjectError, Result};
 
 /// The names a publication composes again beyond the ones its block touched.
@@ -453,5 +460,18 @@ pub(super) async fn refresh_block(
     *stats.rows.entry(NAME_SUMMARY.name).or_default() += rows;
     stats.undo_rows += undo_rows;
     super::lookup::refresh(transaction, chain_id, block, composition, stats).await?;
+    // Last: a child's listing row reads its name summary, which every step above can rewrite.
+    let listing = children::refresh(
+        transaction,
+        chain_id,
+        block,
+        after,
+        (&summary.names, &summary.raw_name_swept),
+    )
+    .await?;
+    if listing.rows > 0 {
+        *stats.rows.entry(CHILD_LISTING.name).or_default() += listing.rows;
+    }
+    stats.undo_rows += listing.undo_rows;
     Ok(())
 }

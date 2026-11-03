@@ -30,10 +30,13 @@ const EXPIRY: &str = "the expiry eligibility and authority Project's summary sto
 const PATHS: &str = "ENSv2 path decisions that schedule Project's summary deadlines";
 /// The lifecycle evaluation and the control rows it loads and decides from.
 const LIFECYCLE: &str = "the lifecycle evaluation Project's summary decides from";
+/// The children relation, whose listed rows Project stores as the child listing family.
+const LISTING: &str = "Project's child listing composition";
 
 /// Reached from Project's family step (`crates/project/src/families`): the name summary
-/// composition (`derived/summary.rs`), its `RequiredOwnerMissing` check, and the family position
-/// ordinals (`position.rs`, `hydrate/{reverse,text}.rs`). Every entry is project-class except one
+/// composition (`derived/summary.rs`), its `RequiredOwnerMissing` check, the child listing
+/// composition (`derived/children.rs`), and the family position ordinals (`position.rs`,
+/// `hydrate/{reverse,text}.rs`). Every entry is project-class except one
 /// Interpret also reaches.
 pub(crate) const COMPOSITION_FILES: &[Classified] = &[
     project("crates/storage/src/families/lookup/mod.rs", LOOKUP),
@@ -135,6 +138,17 @@ pub(crate) const COMPOSITION_FILES: &[Classified] = &[
         "crates/storage/src/families/control/permissions/grants.rs",
         PATHS,
     ),
+    project("crates/storage/src/families/topology/children.rs", LISTING),
+    project(
+        "crates/storage/src/families/topology/children_page/child_flags.rs",
+        LISTING,
+    ),
+    project("crates/storage/src/families/topology/listing.rs", LISTING),
+    project(
+        "crates/storage/src/families/topology/name_summary.rs",
+        LISTING,
+    ),
+    project("crates/storage/src/families/topology/shims.rs", LISTING),
     project("crates/storage/src/families/control/cutover.rs", LIFECYCLE),
     project("crates/storage/src/families/control/position.rs", LIFECYCLE),
     project("crates/storage/src/families/control/registry.rs", LIFECYCLE),
@@ -243,17 +257,13 @@ const READER_FILES: &[&str] = &[
     "crates/storage/src/families/records/reverse.rs",
     "crates/storage/src/families/records/reverse_page.rs",
     "crates/storage/src/families/records/seams.rs",
-    "crates/storage/src/families/topology/children.rs",
     "crates/storage/src/families/topology/children_page.rs",
-    "crates/storage/src/families/topology/children_page/child_flags.rs",
     "crates/storage/src/families/topology/collections.rs",
     "crates/storage/src/families/topology/mod.rs",
-    "crates/storage/src/families/topology/name_summary.rs",
     "crates/storage/src/families/topology/name_topology.rs",
     "crates/storage/src/families/topology/overview.rs",
     "crates/storage/src/families/topology/pointers.rs",
     "crates/storage/src/families/topology/registry_children.rs",
-    "crates/storage/src/families/topology/shims.rs",
 ];
 
 pub(crate) fn collect(
