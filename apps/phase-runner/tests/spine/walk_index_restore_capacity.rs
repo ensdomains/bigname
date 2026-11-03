@@ -9,7 +9,8 @@ fn first_two() -> (&'static str, &'static str) {
 }
 
 /// Reports a full disk to the rebuild's checks: while the chain's Interpret is complete,
-/// `missing` is not in place and `present`, when set, is, until `released` is set. Batch checks
+/// `missing` is not a valid, ready index and `present`, when set, exists, until `released` is
+/// set. Batch checks
 /// before Interpret completed or after the rebuild see room. With `start_project`, the first
 /// full report also starts the chain's Project row, as a restart-loop retry finds it.
 struct RebuildDisk {
@@ -38,7 +39,9 @@ impl RebuildDisk {
             return Ok(false);
         }
         let full: bool = sqlx::query_scalar(
-            "SELECT to_regclass('bigname_phase.' || $2) IS NULL
+            "SELECT NOT EXISTS (SELECT 1 FROM pg_index
+                                WHERE indexrelid = to_regclass('bigname_phase.' || $2)
+                                  AND indisvalid AND indisready)
                 AND ($3::text IS NULL OR to_regclass('bigname_phase.' || $3) IS NOT NULL)
                 AND EXISTS (SELECT 1 FROM chain_phase_state
                             WHERE chain_id = $1 AND phase_name = 'interpret'
@@ -277,25 +280,12 @@ async fn a_running_project_row_is_paused_while_the_rebuild_waits() -> Result<()>
         start_project: true,
         ..RebuildDisk::new(chain_id, DROPPED)
     });
-    let at_first_batch = Arc::new(Mutex::new(None::<String>));
-    let seen = Arc::clone(&at_first_batch);
-    let pool = scratch.pool().clone();
     let runner = runner(
         scratch.runner(),
         complete_phase_set(Some(heads)),
         guard(&disk),
         "walk-index-capacity-running-runner",
-    )?
-    .with_before_phase_context(move |phase| {
-        let pool = pool.clone();
-        let seen = Arc::clone(&seen);
-        async move {
-            if phase == PhaseName::Project && seen.lock().expect("seen lock").is_none() {
-                let status = project_row(&pool, chain_id).await.expect("project row").0;
-                seen.lock().expect("seen lock").get_or_insert(status);
-            }
-        }
-    });
+    )?;
     let mut chain = chain(chain_id)?;
     chain.verify_before_live = true;
     let task = tokio::spawn(logged(async move {
@@ -313,15 +303,21 @@ async fn a_running_project_row_is_paused_while_the_rebuild_waits() -> Result<()>
     .context("the running Project row must be paused while the rebuild waits")??;
     assert_eq!(oid(scratch.pool(), DROPPED).await?, None);
 
+    // A writer holds the build once it starts, while the restore still runs, so the row is read
+    // between the wait and Project's own start.
+    let mut writer = open_writer(&scratch).await?;
     disk.released.store(true, Ordering::SeqCst);
+    await_build(scratch.pool()).await?;
+    assert_eq!(
+        project_row(scratch.pool(), chain_id).await?.0,
+        "running",
+        "the wait resumes the row it paused once capacity recovers"
+    );
+    sqlx::raw_sql("ROLLBACK").execute(&mut writer).await?;
+    writer.close().await?;
     let (result, logs) = tokio::time::timeout(BUILD_WAIT, task).await??;
     result?;
     assert!(usable(scratch.pool(), DROPPED).await?);
-    assert_eq!(
-        at_first_batch.lock().expect("seen lock").as_deref(),
-        Some("running"),
-        "Project runs again once capacity recovers"
-    );
     assert!(
         !logs.contains("illegal phase transition"),
         "no state error: {logs}"
@@ -387,21 +383,23 @@ async fn a_stop_while_a_rebuild_read_waits_on_a_lock_returns_and_releases_the_re
     .context("no rebuild read waited on the phase-row lock")??;
 
     cancellation.cancel();
-    let (stopped, _) = tokio::time::timeout(Duration::from_secs(15), task)
-        .await
-        .context("the rebuild must return within the stop budget")??;
-    assert!(
-        stopped.is_err(),
-        "a stopped Project redo reports itself incomplete"
-    );
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // The rebuild returns, and its session with the lock goes, while the holder still holds the
+    // phase rows. The redo's own read of its row after the stop then waits out the stop budget.
+    tokio::time::timeout(Duration::from_secs(3), async {
         while !restore_lock_free(&scratch).await? {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         anyhow::Ok(())
     })
     .await
-    .context("the stop must release the rebuild lock")??;
+    .context("the stop must end the rebuild and release its lock at once")??;
+    let (stopped, _) = tokio::time::timeout(Duration::from_secs(15), task)
+        .await
+        .context("the redo must return within the stop budget")??;
+    assert!(
+        stopped.is_err(),
+        "a stopped Project redo reports itself incomplete"
+    );
     assert_eq!(
         oid(scratch.pool(), DROPPED).await?,
         None,
@@ -409,5 +407,44 @@ async fn a_stop_while_a_rebuild_read_waits_on_a_lock_returns_and_releases_the_re
     );
     sqlx::raw_sql("ROLLBACK").execute(&mut holder).await?;
     holder.close().await?;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn an_invalid_leftover_is_dropped_before_the_wait_for_capacity() -> Result<()> {
+    let scratch = ScratchDatabase::create("walk_index_restore_capacity_invalid").await?;
+    let chain_id = "walk-index-capacity-invalid";
+    completed_chain(&scratch, chain_id).await?;
+    sqlx::raw_sql(&format!(
+        "UPDATE pg_index SET indisvalid = false WHERE indexrelid = '{DROPPED}'::regclass"
+    ))
+    .execute(scratch.pool())
+    .await?;
+    let leftover = oid(scratch.pool(), DROPPED).await?;
+    assert!(leftover.is_some());
+    let disk = Arc::new(RebuildDisk::new(chain_id, DROPPED));
+    let runner = runner(
+        scratch.runner(),
+        PhaseSet::loopback(),
+        guard(&disk),
+        "walk-index-capacity-invalid-runner",
+    )?;
+    let task =
+        tokio::spawn(
+            async move { project_redo(&runner, chain_id, CancellationToken::new()).await },
+        );
+
+    await_full_reports(&disk, 2).await?;
+    assert!(!task.is_finished(), "the build must wait for capacity");
+    assert_eq!(
+        oid(scratch.pool(), DROPPED).await?,
+        None,
+        "the leftover, and the space it holds, is dropped before the wait"
+    );
+
+    disk.released.store(true, Ordering::SeqCst);
+    tokio::time::timeout(BUILD_WAIT, task).await???;
+    assert!(usable(scratch.pool(), DROPPED).await?);
+    assert_ne!(oid(scratch.pool(), DROPPED).await?, leftover);
     scratch.cleanup().await
 }
