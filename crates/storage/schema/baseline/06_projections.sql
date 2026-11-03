@@ -2723,7 +2723,7 @@ CREATE TABLE IF NOT EXISTS project_event_count (
 );
 
 COMMENT ON TABLE project_event_count IS
-    'Project-owned stored event counts of family F20: per chain, anchor, namespace and event kind, the number of product-visible normalized events with a block at or below the family publication that the anchor''s event read admits. Each block adds its range''s counts in the family transaction and journals them for undo; a count of zero has no row.';
+    'Project-owned stored event counts of family F20: per chain, anchor, namespace and event kind, the number of product-visible normalized events with a block at or below the family publication that the anchor''s event read admits. Each block adds its range''s counts in the family transaction and journals them for undo. A count of zero has no row.';
 
 COMMENT ON COLUMN project_event_count.chain_id IS
     'This value is the chain every counted event lies on.';

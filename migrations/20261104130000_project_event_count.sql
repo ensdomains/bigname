@@ -4,7 +4,7 @@
 --
 -- The new table starts empty and needs no reset. The release that adds it rotates the projection
 -- content hash, so the runner refuses a normal Project or Live start until a full-range Project
--- redo, whose composition pass counts every catalogue window; until then the API serves no family
+-- redo, whose composition pass counts every catalogue window. Until then the API serves no family
 -- publication of the new build.
 --
 -- An empty schema-migration database has no phase baseline yet, so this schema-migration is a
@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS bigname_phase.project_event_count (
     CHECK (event_count > 0)
 );
 COMMENT ON TABLE bigname_phase.project_event_count IS
-    'Project-owned stored event counts of family F20: per chain, anchor, namespace and event kind, the number of product-visible normalized events with a block at or below the family publication that the anchor''s event read admits. Each block adds its range''s counts in the family transaction and journals them for undo; a count of zero has no row.';
+    'Project-owned stored event counts of family F20: per chain, anchor, namespace and event kind, the number of product-visible normalized events with a block at or below the family publication that the anchor''s event read admits. Each block adds its range''s counts in the family transaction and journals them for undo. A count of zero has no row.';
 COMMENT ON COLUMN bigname_phase.project_event_count.chain_id IS
     'This value is the chain every counted event lies on.';
 COMMENT ON COLUMN bigname_phase.project_event_count.anchor_kind IS
