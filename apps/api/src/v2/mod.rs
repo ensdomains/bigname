@@ -81,11 +81,13 @@ pub(crate) use event_data::{
 pub(crate) use events::{
     Event, build_event, events_cursor_payload, events_storage_cursor, get_events,
 };
+#[cfg(test)]
+pub(crate) use events::{events_summary_mode, parse_events_filter, with_emitter_count_cap};
 pub(crate) use history::{
     HISTORY_TOTAL_COUNT_CAP, format_timestamp, get_history, history_event_id, history_event_type,
     history_page_options, history_sort_token, history_storage_order, history_storage_scope,
-    history_total_count, insert_history_filter_keys, map_history_page_error,
-    product_history_event_kinds, resolve_history_block_window, v2_exact_name_snapshot_scope,
+    insert_history_filter_keys, map_history_page_error, product_history_event_kinds,
+    resolve_history_block_window, v2_exact_name_snapshot_scope,
     v2_exact_name_snapshot_scope_with_resolution_auxiliary,
 };
 #[cfg(test)]
