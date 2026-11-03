@@ -642,16 +642,14 @@ async fn restore_warns_about_a_chain_still_on_its_first_interpret_walk() -> Resu
     let done = "walk-index-first-walk-done";
     completed_chain(&scratch, chain_id).await?;
     completed_chain(&scratch, done).await?;
-    PhaseStore::new(scratch.pool().clone())
-        .initialize_chain(walking)
+    // The walking chain's Ingest is done and its Interpret started, as the runner leaves a
+    // first walk part way through.
+    let store = PhaseStore::new(scratch.pool().clone());
+    store.initialize_chain(walking).await?;
+    mark_completed(scratch.pool(), walking, PhaseName::Ingest, None).await?;
+    store
+        .start_phase(walking, PhaseName::Interpret, &RunMode::Normal)
         .await?;
-    sqlx::query(
-        "UPDATE chain_phase_state SET phase_status = 'running'
-         WHERE chain_id = $1 AND phase_name = 'interpret'",
-    )
-    .bind(walking)
-    .execute(scratch.pool())
-    .await?;
     drop_index(scratch.pool(), DROPPED).await?;
 
     let (result, logs) = logged(project_redo(
