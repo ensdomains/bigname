@@ -507,6 +507,7 @@ WHERE indexrelid IN (
     to_regclass('bigname_phase.normalized_events_history_account_subject_idx'),
     to_regclass('bigname_phase.normalized_events_history_reverse_address_idx'),
     to_regclass('bigname_phase.normalized_events_history_registrar_lease_idx'),
+    to_regclass('bigname_phase.normalized_events_registry_token_idx'),
     to_regclass('bigname_phase.normalized_events_v1_subregistry_after_child_scope_idx'),
     to_regclass('bigname_phase.normalized_events_v2_subregistry_pointer_scope_idx'),
     to_regclass('bigname_phase.normalized_events_block_idx'),

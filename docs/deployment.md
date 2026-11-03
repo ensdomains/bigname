@@ -398,9 +398,12 @@ The implemented phases use:
 - `BIGNAME_PHASE_RUNNER_REDO_METRICS_BIND_ADDR`
 - `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS`
 - `BIGNAME_PHASE_RUNNER_LIVE_PUBLICATION_LAG_BLOCKS` — optional, 0 (default) to 3; see [Live publication lag](#live-publication-lag)
+- `BIGNAME_PHASE_RUNNER_RESTORE_MAINTENANCE_WORK_MEM` — optional `maintenance_work_mem` for the walk index rebuild; see [The phase runner rebuilds the indexes drop.sql drops before Project](#the-phase-runner-rebuilds-the-indexes-dropsql-drops-before-project)
+- `BIGNAME_PHASE_RUNNER_RESTORE_PARALLEL_MAINTENANCE_WORKERS` — optional `max_parallel_maintenance_workers` for the same rebuild
 
 An unset optional ceiling configures no limit; Docker inspection may show its bare
 variable name without `=`. An explicitly empty `KEY=` value is invalid.
+The two rebuild settings follow the same rule: unset keeps the server's value.
 A configured ceiling must parse as an unsigned 64-bit integer; zero is a limit,
 not a way to disable it. The floor must also parse as an unsigned 64-bit integer.
 Operational admission rejects floor zero: Compose only enforces presence, and
@@ -3376,8 +3379,8 @@ runner behavior, so it needs no redo and no historical ingest fetch. Deploying i
 nothing until an operator runs the scripts.
 
 The scripts are an optional step for a from-zero walk or a full-history Interpret redo:
-`drop.sql` drops the 37 `normalized_events` indexes Interpret does not read, so Interpret
-maintains 17 indexes on the table instead of 54, and `install.sql` rebuilds them concurrently with their
+`drop.sql` drops the 34 `normalized_events` indexes Interpret does not read, so Interpret
+maintains 17 indexes on the table instead of 51, and `install.sql` rebuilds them concurrently with their
 reviewed definitions and analyzes the table before Project runs. `drop.sql` refuses while any
 chain on the database may be served. Rebuilding takes a pass over the table per index; on a
 large database, schedule it before Project starts, as the
@@ -5405,3 +5408,79 @@ steps:
 
 Then run the schema-migrations again. An image swap without the index serves the same
 responses, but each page sorts every link of the resolver first.
+
+## The phase runner rebuilds the indexes drop.sql drops before Project
+
+The build that has the phase runner rebuild the `normalized_events` indexes
+[`ops/walk-index-set/drop.sql`](../ops/walk-index-set/README.md) drops (TYR-457, see
+[walk index set](storage.md#walk-index-set)) changes the runner and adds a read of the drop
+list's catalog state to `bigname-storage`.
+
+- Before, after `drop.sql` an operator had to stop the runner or the one-shot redo while
+  Interpret's last batches ran and run `install.sql`. A missed stop let Project, and the API
+  after it, read without those indexes, and on a large database an API read could exceed
+  `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`.
+- Now, at every Project entry, the runner builds any index of the list that is missing, and
+  drops and rebuilds one that is not valid and ready, before Project's first batch. It uses
+  `install.sql`'s statements, one at a time with `CREATE INDEX CONCURRENTLY`, then analyzes
+  the table. With every index in place it reads the catalog once and builds nothing.
+- Neither content hash rotates: no hashed file changes. It adds no schema-migration, no
+  manifest change and no redo. It ships as an image swap.
+- It adds two optional settings for the rebuild's connection,
+  `BIGNAME_PHASE_RUNNER_RESTORE_MAINTENANCE_WORK_MEM` and
+  `BIGNAME_PHASE_RUNNER_RESTORE_PARALLEL_MAINTENANCE_WORKERS`. Unset, the server's
+  `maintenance_work_mem` and `max_parallel_maintenance_workers` apply.
+
+The runner's login must own `normalized_events`, as it does when that login ran
+`init-schema`. Check it before the swap:
+
+```sql
+SELECT tableowner = current_user FROM pg_tables
+WHERE schemaname = 'bigname_phase' AND tablename = 'normalized_events';
+```
+
+If any index of the list is missing on a database whose chains are served, run
+`install.sql` by hand before the swap, with the runner still on the old image. The new runner
+then finds every index in place and builds nothing, so Project and Live do not wait.
+
+While the runner builds:
+
+- The chain's Project, and so its Live, wait. Another chain's Project entry waits too, on the
+  rebuild's lock, and then finds the indexes in place.
+- Interpret on another chain keeps running, and the API keeps serving what was published.
+- The runner records loop progress, so a long build does not raise the stale-loop alert.
+- Each build first waits for storage capacity, with the batch loop's ceiling and floor. While
+  either is breached the runner logs
+  `the rebuild of the normalized_events indexes the walk index set scripts drop waits until storage capacity recovers`
+  with `breach_reasons`, `database_size_bytes` and `free_disk_bytes`, and the gauge
+  `phase_runner_walk_index_capacity_blocked{chain}` reads 1. A running Project row is paused
+  meanwhile and resumed after. An idle or completed one records no loop progress, so a long
+  wait raises the stale-loop alert. An invalid leftover is dropped before the wait, which
+  frees the space it holds.
+
+When a build fails:
+
+- A build or drop that fails stops the chain with an error that names the index and the
+  cause. The runner does not retry it in the process: another chain's Project entry stops
+  with the same error instead of building again. Once every chain has stopped, the process
+  exits non-zero.
+- Under a restart policy each start drops the invalid leftover and builds it again, so a cause
+  that persists shows as a restart loop with the same error.
+- A name held by another relation is refused and never dropped.
+
+The [walk index set README](../ops/walk-index-set/README.md#the-phase-runners-rebuild) lists
+the log lines and the recovery.
+
+A release that adds an index to the drop list is deployed in this order:
+
+1. The phase runner. On an initialized database it builds the new index at its first Project
+   entry, and after the build logs
+   `every normalized_events index the walk index set scripts drop is in place`. On a served
+   chain that build holds Project and Live for its length, so prefer building the index by
+   hand first with the release's statement while the runner keeps running. The runner then
+   finds it in place, builds nothing and logs no build line.
+2. The schema-migrations, once the runner has logged that line or the operator's build has
+   finished. A schema-migration that installs such an index adopts the valid index the runner
+   or the operator built, without a build. Run while the build is still going, it finds an
+   invalid index under the name and fails its check.
+3. The API.
