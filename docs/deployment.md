@@ -5372,6 +5372,13 @@ While the runner builds:
   rebuild's lock, and then finds the indexes in place.
 - Interpret on another chain keeps running, and the API keeps serving what was published.
 - The runner records loop progress, so a long build does not raise the stale-loop alert.
+- Each build first waits for storage capacity, with the batch loop's ceiling and floor. While
+  either is breached the runner logs
+  `the rebuild of the normalized_events indexes the walk index set scripts drop waits until storage capacity recovers`
+  with `breach_reasons`, `database_size_bytes` and `free_disk_bytes`, and the gauge
+  `phase_runner_walk_index_capacity_blocked{chain}` reads 1. A running Project row is paused
+  meanwhile. An idle or completed one records no loop progress, so a long wait raises the
+  stale-loop alert.
 
 When a build fails:
 

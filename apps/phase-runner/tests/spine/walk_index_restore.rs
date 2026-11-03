@@ -21,6 +21,11 @@
 //! | 22 | The fresh baseline | Every listed definition is the baseline's, and the two lists are every index | `module_definitions_are_the_baselines` |
 //! | 23 | Another login's build, `VACUUM` or `ANALYZE` on the table | Waits naming the backend, keeps the loop heartbeat fresh, then builds | `restore_waits_for_another_build_on_the_table` |
 //! | 25 | A build that failed, then another chain's Project entry in the same process, then a restart | The other chain stops with the same error and no build, the restart builds again | `a_failed_build_stops_every_chain_in_the_process_and_a_restart_builds_again` |
+//! | 27 | Storage over the batch loop's limit before the first build, on a completed Project row | Nothing built, the WARN with the breach, size and free disk on every poll, gauge 1, row left completed and no loop progress, then built once capacity recovers, gauge 0 | `a_breach_before_the_first_build_waits_without_writing_the_phase_row` |
+//! | 28 | Storage over the limit after the first of two builds | The second waits, then builds | `a_breach_between_two_builds_holds_the_second` |
+//! | 29 | A stop while waiting for capacity | Returns, no build issued, gauge 0, rebuild lock released | `a_stop_while_waiting_for_capacity_exits_without_building` |
+//! | 30 | Storage over the limit with the Project row running, as a restart-loop retry finds it | Paused while waiting, running for Project's first batch, no state error | `a_running_project_row_is_paused_while_the_rebuild_waits` (in `walk_index_restore_capacity.rs`, with 27 to 29) |
+//! | 31 | A stop while a rebuild read waits on an `ACCESS EXCLUSIVE` lock on `chain_phase_state` | Returns within the stop budget, rebuild lock released, nothing left invalid | `a_stop_while_a_rebuild_read_waits_on_a_lock_returns_and_releases_the_rebuild_lock` |
 //! | D5 | Rebuild settings set, and unset | The build session runs with them, or with the server's | `restore_applies_the_build_settings` |
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,6 +36,9 @@ use sqlx::{Connection, PgConnection};
 use tracing::instrument::WithSubscriber;
 
 use super::*;
+
+#[path = "walk_index_restore_capacity.rs"]
+mod capacity;
 
 /// One of the indexes `drop.sql` drops.
 const DROPPED: &str = "normalized_events_registry_announcement_idx";

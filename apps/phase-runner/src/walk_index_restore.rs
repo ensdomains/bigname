@@ -5,26 +5,26 @@
 //! restore holds at a time across every process on the database. A valid index is kept
 //! whatever its definition, and a name another relation holds stops Project instead of being
 //! dropped.
-use std::{
-    collections::BTreeSet,
-    future::Future,
-    pin::Pin,
-    sync::Mutex,
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeSet, future::Future, pin::Pin, sync::Mutex, time::Duration};
 
 use bigname_storage::walk_index_set::{IndexState, IndexStatus, load_drop_list_state};
 use sqlx::{Connection, PgConnection, PgPool};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::{
+    capacity::CapacityGuard,
     database::RunnerDatabase,
     error::{ErrorKind, RunnerError, RunnerResult},
     metrics::RunnerLoopHeartbeat,
     runner_support::StopClock,
     shutdown::until_cancelled,
+    state::PhaseStore,
 };
+
+mod session;
+
+use session::Session;
 
 const LOCK: &str = "bigname.walk_index_set";
 const POLL: Duration = Duration::from_secs(5);
@@ -53,14 +53,25 @@ pub(crate) struct Restore<'a> {
     pub(crate) cancellation: &'a CancellationToken,
     /// The chain's stop clock, which bounds everything after a stop.
     pub(crate) stop_clock: &'a StopClock,
-    /// Where loop progress is recorded, so a long build does not read as a stalled runner.
+    /// Where loop progress and a wait for storage capacity are recorded, so a long build does
+    /// not read as a stalled runner and a wait for capacity shows on its gauge.
     pub(crate) heartbeat: Option<&'a RunnerLoopHeartbeat>,
+    /// The batch loop's storage capacity check, which each build waits on.
+    pub(crate) capacity: &'a CapacityGuard,
+    /// The chain's phase rows, for pausing a running Project row while a build waits.
+    pub(crate) store: &'a PhaseStore,
 }
 
 impl Restore<'_> {
     fn progress(&self) {
         if let Some(heartbeat) = self.heartbeat {
             heartbeat.record_progress(self.chain_id);
+        }
+    }
+
+    fn set_capacity_blocked(&self, blocked: bool) {
+        if let Some(heartbeat) = self.heartbeat {
+            heartbeat.set_walk_index_capacity_blocked(self.chain_id, blocked);
         }
     }
 }
@@ -181,396 +192,5 @@ fn warn_other_definitions(chain_id: &str, states: &[IndexStatus]) {
                  changed definition takes a new name (docs/storage.md, Walk index set)"
             );
         }
-    }
-}
-
-struct Session {
-    connection: PgConnection,
-    pid: i32,
-}
-
-impl Session {
-    async fn open(database: &RunnerDatabase) -> RunnerResult<Self> {
-        let mut connection = PgConnection::connect_with(&database.connect_options())
-            .await
-            .map_err(|error| {
-                RunnerError::database("failed to open the index rebuild connection", error)
-            })?;
-        let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut connection)
-            .await
-            .map_err(|error| {
-                RunnerError::database("failed to read the index rebuild backend", error)
-            })?;
-        Ok(Self { connection, pid })
-    }
-
-    async fn restore(&mut self, database: &RunnerDatabase, run: &Restore<'_>) -> RunnerResult<()> {
-        let chain_id = run.chain_id;
-        if !self.lock(run).await? {
-            return Ok(());
-        }
-        // Another chain or process may have finished while this one waited.
-        let states = load(&mut self.connection).await?;
-        if states.iter().all(present) {
-            warn_other_definitions(chain_id, &states);
-            return Ok(());
-        }
-        failed_before(database)?;
-        if !self.await_other_builds(run).await? {
-            return Ok(());
-        }
-        let states = load(&mut self.connection).await?;
-        if let Some((name, held_by)) = states.iter().find_map(|status| match &status.state {
-            IndexState::Foreign { held_by } => Some((status.index.name, held_by)),
-            _ => None,
-        }) {
-            return Err(RunnerError::new(
-                ErrorKind::Configuration,
-                format!(
-                    "bigname_phase.{name} is {held_by}, not an index on \
-                     bigname_phase.normalized_events, so the index the walk index set scripts \
-                     drop under that name cannot be built; remove or rename that relation, then \
-                     restart the runner"
-                ),
-            ));
-        }
-        let pending: Vec<&IndexStatus> = states.iter().filter(|status| !present(status)).collect();
-        if pending.is_empty() {
-            warn_other_definitions(chain_id, &states);
-            return Ok(());
-        }
-        self.warn_unfinished_interprets(chain_id).await?;
-        let (maintenance_work_mem, max_parallel_maintenance_workers) =
-            self.configure(database.index_build_settings()).await?;
-        info!(
-            chain_id,
-            indexes = pending.len(),
-            maintenance_work_mem = %maintenance_work_mem,
-            max_parallel_maintenance_workers = %max_parallel_maintenance_workers,
-            "building the normalized_events indexes the walk index set scripts drop before Project"
-        );
-        let pool = database.pool();
-        for status in &pending {
-            let name = status.index.name;
-            if status.state == IndexState::Invalid {
-                let statement = format!("DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.{name}");
-                if !self.run(pool, &statement, run).await? {
-                    return Ok(());
-                }
-            }
-            let started = Instant::now();
-            if !self.run(pool, status.index.create, run).await? {
-                return Ok(());
-            }
-            info!(
-                chain_id,
-                index = name,
-                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                "built a normalized_events index the walk index set scripts drop"
-            );
-        }
-        if !self.analyze(pool, run).await? {
-            return Ok(());
-        }
-        let states = load(&mut self.connection).await?;
-        if let Some(status) = states.iter().find(|status| !present(status)) {
-            return Err(RunnerError::transient(format!(
-                "failed to build the normalized_events indexes the walk index set scripts drop: \
-                 bigname_phase.{} is {} after its build; {RECOVERY}",
-                status.index.name,
-                describe(&status.state)
-            ))
-            .not_retried());
-        }
-        warn_other_definitions(chain_id, &states);
-        info!(
-            chain_id,
-            built = pending.len(),
-            "every normalized_events index the walk index set scripts drop is in place"
-        );
-        Ok(())
-    }
-
-    /// Waits for the restore lock. `false` when a stop came first.
-    async fn lock(&mut self, run: &Restore<'_>) -> RunnerResult<bool> {
-        let mut logged = false;
-        loop {
-            let acquired: bool = sqlx::query_scalar(
-                "SELECT pg_try_advisory_lock(hashtextextended($1::text, 0::bigint))",
-            )
-            .bind(LOCK)
-            .fetch_one(&mut self.connection)
-            .await
-            .map_err(|error| {
-                RunnerError::database("failed to take the index rebuild lock", error)
-            })?;
-            if acquired {
-                return Ok(true);
-            }
-            if !logged {
-                info!(
-                    chain_id = run.chain_id,
-                    "waiting for another restore of the normalized_events indexes to finish"
-                );
-                logged = true;
-            }
-            if !pause(run).await {
-                return Ok(false);
-            }
-        }
-    }
-
-    /// Waits until no other backend holds the lock an index build, a `VACUUM` or an `ANALYZE`
-    /// holds on the table, so an invalid index is never dropped while a build of it, say one a
-    /// killed runner or another login left on the server, can still complete. `pg_locks` shows
-    /// every login's locks, where `pg_stat_progress_create_index` shows only this login's
-    /// builds. Autovacuum is not waited for: it gives way to a build, apart from an
-    /// anti-wraparound vacuum, which the build itself then waits behind. `false` when a stop
-    /// came first.
-    async fn await_other_builds(&mut self, run: &Restore<'_>) -> RunnerResult<bool> {
-        let mut logged = false;
-        loop {
-            let building: Option<String> = sqlx::query_scalar(
-                "SELECT string_agg(DISTINCT held.pid::text, ', ')
-                 FROM pg_locks held
-                 LEFT JOIN pg_stat_activity activity ON activity.pid = held.pid
-                 WHERE held.locktype = 'relation'
-                   AND held.database = (SELECT oid FROM pg_database
-                                        WHERE datname = current_database())
-                   AND held.relation = to_regclass('bigname_phase.normalized_events')
-                   AND held.mode = 'ShareUpdateExclusiveLock'
-                   AND held.granted
-                   AND held.pid <> pg_backend_pid()
-                   AND activity.backend_type IS DISTINCT FROM 'autovacuum worker'",
-            )
-            .fetch_one(&mut self.connection)
-            .await
-            .map_err(|error| {
-                RunnerError::database("failed to read the index builds in progress", error)
-            })?;
-            let Some(building) = building else {
-                return Ok(true);
-            };
-            if !logged {
-                info!(
-                    chain_id = run.chain_id,
-                    backends = %building,
-                    "waiting for another index build or maintenance on normalized_events to \
-                     finish"
-                );
-                logged = true;
-            }
-            if !pause(run).await {
-                return Ok(false);
-            }
-        }
-    }
-
-    /// The indexes serve every chain on the database, so a build while another chain's Interpret
-    /// has not completed, in a redo or on its first walk, makes that chain's remaining batches
-    /// maintain them.
-    async fn warn_unfinished_interprets(&mut self, chain_id: &str) -> RunnerResult<()> {
-        let walking: Option<String> = sqlx::query_scalar(
-            "SELECT string_agg(
-                        chain_id || ' (' || phase_status::text
-                            || CASE WHEN redo_in_progress THEN ', redo' ELSE '' END || ')',
-                        ', ' ORDER BY chain_id)
-             FROM chain_phase_state
-             WHERE phase_name = 'interpret'
-               AND chain_id <> $1
-               AND (redo_in_progress OR phase_status::text <> 'completed')",
-        )
-        .bind(chain_id)
-        .fetch_one(&mut self.connection)
-        .await
-        .map_err(|error| {
-            RunnerError::database("failed to read the other chains' Interpret state", error)
-        })?;
-        if let Some(walking) = walking {
-            warn!(
-                chain_id,
-                interpret_unfinished_chains = %walking,
-                "building the normalized_events indexes the walk index set scripts drop while \
-                 these chains' Interpret has not completed; their remaining batches maintain the \
-                 rebuilt indexes"
-            );
-        }
-        Ok(())
-    }
-
-    /// Sets the session up for the builds and returns the maintenance settings in force.
-    async fn configure(&mut self, settings: &IndexBuildSettings) -> RunnerResult<(String, String)> {
-        sqlx::query(
-            "SELECT set_config('lock_timeout', '0', false),
-                    set_config('statement_timeout', $1, false)",
-        )
-        .bind(BUILD_TIMEOUT)
-        .execute(&mut self.connection)
-        .await
-        .map_err(|error| {
-            RunnerError::database("failed to set the index rebuild timeouts", error)
-        })?;
-        for (setting, environment, value) in [
-            (
-                "maintenance_work_mem",
-                "BIGNAME_PHASE_RUNNER_RESTORE_MAINTENANCE_WORK_MEM",
-                settings.maintenance_work_mem.clone(),
-            ),
-            (
-                "max_parallel_maintenance_workers",
-                "BIGNAME_PHASE_RUNNER_RESTORE_PARALLEL_MAINTENANCE_WORKERS",
-                settings
-                    .max_parallel_maintenance_workers
-                    .map(|workers| workers.to_string()),
-            ),
-        ] {
-            let Some(value) = value else {
-                continue;
-            };
-            sqlx::query("SELECT set_config($1, $2, false)")
-                .bind(setting)
-                .bind(&value)
-                .execute(&mut self.connection)
-                .await
-                .map_err(|error| match error {
-                    sqlx::Error::Database(ref refused)
-                        if refused
-                            .code()
-                            .is_some_and(|code| matches!(&*code, "22023" | "22003")) =>
-                    {
-                        RunnerError::new(
-                            ErrorKind::Configuration,
-                            format!(
-                                "PostgreSQL refused {environment}={value} as {setting}: {error}"
-                            ),
-                        )
-                    }
-                    error => {
-                        RunnerError::database("failed to set the index rebuild settings", error)
-                    }
-                })?;
-        }
-        sqlx::query_as::<_, (String, String)>(
-            "SELECT current_setting('maintenance_work_mem'),
-                    current_setting('max_parallel_maintenance_workers')",
-        )
-        .fetch_one(&mut self.connection)
-        .await
-        .map_err(|error| RunnerError::database("failed to read the index rebuild settings", error))
-    }
-
-    /// Refreshes the planner statistics, which expression and partial indexes lack until the
-    /// table is analyzed. A failure or a stop is a warning that asks for an `ANALYZE` by hand: a
-    /// later restore finds every index in place and does not analyze.
-    async fn analyze(&mut self, pool: &PgPool, run: &Restore<'_>) -> RunnerResult<bool> {
-        let analyzed = match sqlx::query(
-            "SELECT set_config('lock_timeout', '10s', false),
-                    set_config('statement_timeout', '1h', false)",
-        )
-        .execute(&mut self.connection)
-        .await
-        {
-            Ok(_) => {
-                self.statement(pool, "ANALYZE bigname_phase.normalized_events", run)
-                    .await
-            }
-            Err(error) => Err(error),
-        };
-        let (done, error) = match analyzed {
-            Ok(done) => (done, None),
-            Err(error) => (true, Some(error.to_string())),
-        };
-        if !done || error.is_some() {
-            warn!(
-                chain_id = run.chain_id,
-                error = error.as_deref().unwrap_or("stopped"),
-                "could not refresh normalized_events statistics after building its indexes, and \
-                 no later restore does; run ANALYZE bigname_phase.normalized_events by hand"
-            );
-        }
-        Ok(done)
-    }
-
-    /// Runs one DDL statement. `false` when a stop came first.
-    async fn run(
-        &mut self,
-        pool: &PgPool,
-        statement: &str,
-        run: &Restore<'_>,
-    ) -> RunnerResult<bool> {
-        self.statement(pool, statement, run).await.map_err(|error| {
-            let what = statement.lines().next().unwrap_or(statement);
-            RunnerError::transient(format!(
-                "failed to build the normalized_events indexes the walk index set scripts \
-                 drop: {what} failed: {error}; {RECOVERY}"
-            ))
-            .not_retried()
-        })
-    }
-
-    /// A stop cancels the statement on the server: a dropped connection alone would leave a
-    /// build running there until it next writes to this client. The cancel and its reply share
-    /// what is left of the chain's stop budget. Under Verify and Live a Verify failure cancels
-    /// the same token and so starts that budget, which then bounds only the chain's exit.
-    async fn statement(
-        &mut self,
-        pool: &PgPool,
-        statement: &str,
-        run: &Restore<'_>,
-    ) -> Result<bool, sqlx::Error> {
-        if run.cancellation.is_cancelled() {
-            return Ok(false);
-        }
-        let pid = self.pid;
-        // `Executor::execute` returns a boxed `Send` future, and a `&str` goes out as a simple
-        // query, outside any transaction, as a concurrent build needs.
-        let mut running = sqlx::Executor::execute(&mut self.connection, statement);
-        let mut progress =
-            tokio::time::interval_at(tokio::time::Instant::now() + PROGRESS, PROGRESS);
-        progress.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tokio::select! {
-                biased;
-                result = &mut running => return result.map(|_| true),
-                () = run.cancellation.cancelled() => {
-                    let _ = tokio::time::timeout(run.stop_clock.remaining(), async {
-                        let _ = sqlx::query("SELECT pg_cancel_backend($1)")
-                            .bind(pid)
-                            .execute(pool)
-                            .await;
-                        let _ = (&mut running).await;
-                    })
-                    .await;
-                    return Ok(false);
-                }
-                _ = progress.tick() => {
-                    if building_on_server(pool, pid).await {
-                        run.progress();
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Whether the rebuild's backend is still running its statement, read through the pool. Loop
-/// progress is recorded only then, so a connection that died without a reply reads as a
-/// stalled loop rather than a build.
-async fn building_on_server(pool: &PgPool, pid: i32) -> bool {
-    let active = sqlx::query_scalar::<_, bool>(
-        "SELECT coalesce(state = 'active', false) FROM pg_stat_activity WHERE pid = $1",
-    )
-    .bind(pid)
-    .fetch_optional(pool);
-    matches!(tokio::time::timeout(POLL, active).await, Ok(Ok(Some(true))))
-}
-
-/// Waits one poll interval, recording loop progress. `false` when a stop came first.
-async fn pause(run: &Restore<'_>) -> bool {
-    run.progress();
-    tokio::select! {
-        () = run.cancellation.cancelled() => false,
-        () = tokio::time::sleep(POLL) => true,
     }
 }

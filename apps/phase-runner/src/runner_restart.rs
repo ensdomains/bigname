@@ -48,6 +48,8 @@ impl PhaseRunner {
                     cancellation: &cancellation,
                     stop_clock: &stop_clock,
                     heartbeat: self.loop_heartbeat.as_ref(),
+                    capacity: &self.capacity,
+                    store: &self.store,
                 };
                 crate::walk_index_restore::restore(&self.database, &run)
                     .await

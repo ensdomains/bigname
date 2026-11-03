@@ -394,7 +394,10 @@ before the first start. Then:
 
 - Once Interpret completes, the runner rebuilds the dropped indexes before Project's first
   batch and logs `every normalized_events index the walk index set scripts drop is in place`.
-  Record that line in the walk log. Project waits for the builds.
+  Record that line in the walk log. Project waits for the builds. Each build first waits for
+  storage capacity like a batch: while the database ceiling or free-disk floor is breached the
+  runner logs `waits until storage capacity recovers` with the breach, and
+  `phase_runner_walk_index_capacity_blocked` reads 1 for the chain.
 - To build while Interpret's last batches run instead, stop the runner then, run
   `ops/walk-index-set/install.sql`, record its output, and start the runner again. The runner
   then finds every index in place and logs no build line.
