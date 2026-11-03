@@ -10,7 +10,9 @@
 //! The plan test requires the page to read `project_resolver_link_order_idx` from the cursor
 //! under a `Limit`, reading only the page's rows, with no sort anywhere in the statement, under
 //! both plan modes. The fixture is analyzed and costs are left alone, so the plans are the
-//! planner's own choice for a resolver with many links.
+//! planner's own choice for a resolver with many links. Its joined tables, label preimages
+//! included, are large enough that the page's lookups and the rendered-name fallback probe
+//! their indexes rather than hash a whole table, as they do at real sizes.
 //!
 //! Expected keys and totals come from SQL over the fixture, never from a Rust ordering, because
 //! the database collation decides the order.
@@ -212,7 +214,8 @@ async fn links_page_is_a_limit_over_the_order_index() -> Result<()> {
         load(connection, LARGE, Some(&resume), 51).await?;
         let prepared: Vec<(String, Vec<String>)> = sqlx::query_as(
             "SELECT name, parameter_types::text[] FROM pg_prepared_statements
-             WHERE statement LIKE '%FROM bigname_phase.project_resolver_link link%'",
+             WHERE statement LIKE '%FROM bigname_phase.project_resolver_link link%'
+               AND statement NOT LIKE '%pg_prepared_statements%'",
         )
         .fetch_all(&mut *connection)
         .await?;
@@ -370,8 +373,8 @@ fn node(index: i64) -> String {
 }
 
 /// The `/links` statement before the order index, as it stood with the `/roles` statement's
-/// shared page: `items` holds every link of the resolver, rendered, and is read twice, once for
-/// the total and once for the page.
+/// shared page, less its probes of the parameters it did not read: `items` holds every link of
+/// the resolver, rendered, and is read twice, once for the total and once for the page.
 async fn today(
     connection: &mut PgConnection,
     resolver: &str,
@@ -601,8 +604,14 @@ async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
                1 + n % {MARKER}, 'canonical'::canonicality_state
         FROM generate_series(1, 20000) n;
 
+        INSERT INTO label_preimages (labelhash, raw_label, decoded_label, normalizer_version,
+            normalized_under_version, normalization_error, source_kind, source_priority)
+        SELECT '0x' || lpad(to_hex(5000000 + n), 64, '0'), convert_to('l' || n, 'UTF8'),
+               'l' || n, 'v', true, NULL, 'fixture', 0
+        FROM generate_series(1, 50000) n;
+
         ANALYZE chain_lineage, project_family_marker, project_resolver_link, normalized_events,
-            name_surfaces;
+            name_surfaces, label_preimages;
         "#
     ))
     .execute(&mut *connection)
