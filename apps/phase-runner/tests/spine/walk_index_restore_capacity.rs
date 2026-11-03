@@ -18,6 +18,9 @@ struct RebuildDisk {
     missing: &'static str,
     present: Option<&'static str>,
     start_project: bool,
+    /// With `start_project`, also pauses the row it started, as a retry after a batch-loop
+    /// pause finds it.
+    pause_project: bool,
     released: AtomicBool,
     full_reports: AtomicUsize,
 }
@@ -29,6 +32,7 @@ impl RebuildDisk {
             missing,
             present: None,
             start_project: false,
+            pause_project: false,
             released: AtomicBool::new(false),
             full_reports: AtomicUsize::new(0),
         }
@@ -54,9 +58,13 @@ impl RebuildDisk {
         .await
         .map_err(|error| RunnerError::transient(format!("test capacity probe: {error}")))?;
         if full && self.full_reports.fetch_add(1, Ordering::SeqCst) == 0 && self.start_project {
-            PhaseStore::new(pool.clone())
+            let store = PhaseStore::new(pool.clone());
+            store
                 .start_phase(self.chain_id, PhaseName::Project, &RunMode::Normal)
                 .await?;
+            if self.pause_project {
+                store.pause_phase(self.chain_id, PhaseName::Project).await?;
+            }
         }
         Ok(full)
     }
@@ -446,5 +454,130 @@ async fn an_invalid_leftover_is_dropped_before_the_wait_for_capacity() -> Result
     tokio::time::timeout(BUILD_WAIT, task).await???;
     assert!(usable(scratch.pool(), DROPPED).await?);
     assert_ne!(oid(scratch.pool(), DROPPED).await?, leftover);
+    scratch.cleanup().await
+}
+
+/// The backend holding the rebuild lock, the rebuild's own session.
+async fn restore_backend(pool: &sqlx::PgPool) -> Result<Option<i32>> {
+    Ok(sqlx::query_scalar(
+        "SELECT held.pid FROM pg_locks held,
+                (SELECT hashtextextended('bigname.walk_index_set', 0) AS key) lock
+         WHERE held.locktype = 'advisory' AND held.granted AND held.objsubid = 1
+           AND held.classid = ((lock.key >> 32) & 4294967295)::oid
+           AND held.objid = (lock.key & 4294967295)::oid",
+    )
+    .fetch_optional(pool)
+    .await?)
+}
+
+#[tokio::test]
+async fn a_session_lost_while_waiting_for_capacity_is_retried_not_failed() -> Result<()> {
+    let scratch = ScratchDatabase::create("walk_index_restore_capacity_lost").await?;
+    let chain_id = "walk-index-capacity-lost";
+    completed_chain(&scratch, chain_id).await?;
+    drop_index(scratch.pool(), DROPPED).await?;
+    let disk = Arc::new(RebuildDisk::new(chain_id, DROPPED));
+    let runner = runner(
+        scratch.runner(),
+        PhaseSet::loopback(),
+        guard(&disk),
+        "walk-index-capacity-lost-runner",
+    )?;
+    let task = tokio::spawn(logged(async move {
+        project_redo(&runner, chain_id, CancellationToken::new()).await
+    }));
+    await_full_reports(&disk, 2).await?;
+    let first = restore_backend(scratch.pool())
+        .await?
+        .context("the waiting rebuild holds its lock")?;
+
+    // An idle cutoff, or anything else that ends the session while it waits.
+    sqlx::query("SELECT pg_terminate_backend($1)")
+        .bind(first)
+        .execute(scratch.pool())
+        .await?;
+    tokio::time::timeout(BUILD_WAIT, async {
+        while restore_backend(scratch.pool())
+            .await?
+            .is_none_or(|backend| backend == first)
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        anyhow::Ok(())
+    })
+    .await
+    .context("the restart loop must open a new session and wait again")??;
+    assert_eq!(oid(scratch.pool(), DROPPED).await?, None);
+
+    disk.released.store(true, Ordering::SeqCst);
+    let (result, logs) = tokio::time::timeout(BUILD_WAIT, task).await??;
+    result?;
+    assert!(usable(scratch.pool(), DROPPED).await?);
+    assert!(
+        logs.contains("the index rebuild connection failed while it waited for storage capacity"),
+        "{logs}"
+    );
+    assert!(
+        !logs.contains("already failed in this process"),
+        "a lost session is not a failed build: {logs}"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn a_paused_project_row_records_progress_and_is_left_paused() -> Result<()> {
+    let scratch = ScratchDatabase::create("walk_index_restore_capacity_paused").await?;
+    let chain_id = "walk-index-capacity-paused";
+    seed_identified_lineage(scratch.pool(), chain_id, 3).await?;
+    let heads = HeadMarkers {
+        latest: BlockMarker::new(3, format!("{chain_id}-block-3"))?,
+        safe: Some(BlockMarker::new(2, format!("{chain_id}-block-2"))?),
+        finalized: Some(BlockMarker::new(1, format!("{chain_id}-block-1"))?),
+    };
+    drop_index(scratch.pool(), DROPPED).await?;
+    let disk = Arc::new(RebuildDisk {
+        start_project: true,
+        pause_project: true,
+        ..RebuildDisk::new(chain_id, DROPPED)
+    });
+    let heartbeat = RunnerLoopHeartbeat::default();
+    let runner = runner(
+        scratch.runner(),
+        complete_phase_set(Some(heads)),
+        guard(&disk),
+        "walk-index-capacity-paused-runner",
+    )?
+    .with_loop_heartbeat(heartbeat.clone());
+    let mut chain = chain(chain_id)?;
+    chain.verify_before_live = true;
+    let task = tokio::spawn(logged(async move {
+        runner.run_chain(&chain, CancellationToken::new()).await
+    }));
+
+    await_full_reports(&disk, 2).await?;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(!task.is_finished(), "the rebuild must wait for capacity");
+    assert_eq!(project_row(scratch.pool(), chain_id).await?.0, "paused");
+    let age = heartbeat.age_seconds(chain_id);
+    assert!(
+        age.is_some_and(|age| age <= 1),
+        "a paused row's wait records loop progress, last {age:?} s ago"
+    );
+
+    // The wait resumes only a row it paused, so the row is still paused at the build, and
+    // Project's own start resumes it.
+    let mut writer = open_writer(&scratch).await?;
+    disk.released.store(true, Ordering::SeqCst);
+    await_build(scratch.pool()).await?;
+    assert_eq!(project_row(scratch.pool(), chain_id).await?.0, "paused");
+    sqlx::raw_sql("ROLLBACK").execute(&mut writer).await?;
+    writer.close().await?;
+    let (result, logs) = tokio::time::timeout(BUILD_WAIT, task).await??;
+    result?;
+    assert!(usable(scratch.pool(), DROPPED).await?);
+    assert!(
+        !logs.contains("illegal phase transition"),
+        "no state error: {logs}"
+    );
     scratch.cleanup().await
 }
