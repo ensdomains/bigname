@@ -13,7 +13,10 @@ use super::{
         PartitionKey, RecordCandidate, admitted_partitions, load_partitions, load_record_id_values,
         select_values,
     },
-    serving::{ServingPointer, family_pointer_eligibility, registry_node, serving_pointers},
+    serving::{
+        ServingPointer, family_pointer_eligibility, registry_node, registry_stand_ins,
+        serving_pointers,
+    },
 };
 use anyhow::Result;
 use sqlx::PgConnection;
@@ -88,7 +91,25 @@ pub(super) async fn select(
                 .insert(Dependency::RegistryNode { namespace, node });
         }
     }
-    let servings = serving_pointers(conn, pointers.values()).await?;
+    let mut servings = serving_pointers(conn, pointers.values()).await?;
+    // A selected ENSv1 resource with no serving pointer of its own serves the records of its
+    // node's registry pointer, as the composed resolver does (`name/serving.rs`), and a later
+    // registry pointer write at the node recomposes it.
+    let missing: Vec<Uuid> = resource_ids
+        .iter()
+        .filter(|id| !servings.contains_key(id))
+        .copied()
+        .collect();
+    for stand_in in registry_stand_ins(conn, chain_id, &missing).await? {
+        let (namespace, node) = stand_in.node;
+        out.get_mut(&stand_in.resource_id)
+            .expect("requested resource")
+            .dependencies
+            .insert(Dependency::RegistryNode { namespace, node });
+        if let Some(pointer) = stand_in.pointer {
+            servings.insert(stand_in.resource_id, pointer);
+        }
+    }
     if servings.is_empty() {
         return Ok(Prepared {
             publications: out,
