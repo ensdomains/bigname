@@ -1413,7 +1413,8 @@ normalized text instead:
 - `GET /v1/names/{name}`: `name`, `display_name`, and `canonical_name` on an
   alias path.
 - `GET /v1/names/{name}/subnames`: `name` and `display_name` of every row. A
-  child's own label is not part of the request, so it keeps its placeholder.
+  child's own label is not part of the request, so it keeps its placeholder
+  unless the request spells that same label elsewhere.
 - `POST /v1/lookup`: `name` and `display_name` of every record of the batch,
   the records of its address inputs included. Every name input of the batch
   proves its labels for all of them.
@@ -1431,7 +1432,11 @@ this way as a candidate for the
 read serves as placeholders, though its response carries no name. This is the
 API's only database write. No serving path reads that table, so a staged label
 changes no answer by itself. Once the operator's import proof-checks and stores
-it, every route shows the text with no request proof. The write is best effort
+it, every route shows the text with no request proof. The import keeps a
+preimage bigname already stores. One stored as not normalized under an older
+normalizer stays bracketed on other routes until
+`phase-runner redo --phase recompute-flags` repairs it
+([deployment](deployment.md)). The write is best effort
 and never changes or delays the response
 ([deployment](deployment.md#api-label-candidates)).
 

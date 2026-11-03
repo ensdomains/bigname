@@ -238,8 +238,9 @@ impl LabelStaging {
                 .unzip();
             let result = write(&pool, &hashes, &names).await;
             let outcome = Outcome::of(&result);
-            if outcome == Outcome::Failed {
-                // Another request may try these labels again.
+            if !matches!(outcome, Outcome::Staged | Outcome::Duplicate) {
+                // Another request may try these labels again, as after the grant a refusal
+                // names. The bucket still bounds how often.
                 let mut staged = staging.inner.lock_staged();
                 for labelhash in labels.keys() {
                     staged.remove(labelhash);

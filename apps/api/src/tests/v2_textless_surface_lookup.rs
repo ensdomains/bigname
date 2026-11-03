@@ -75,7 +75,7 @@ async fn verified_lookup_of_a_textless_name_is_unsupported_without_a_provider_ca
     let unreachable = unreachable_rpc_url()?;
     let alice = format!("{}.eth", tl_bracket(&child_labelhash("alice")));
 
-    // The plain spelling proves `alice`, so it shows the text; the store still holds no bytes.
+    // The plain spelling proves `alice`, so it shows the text. The store still holds no bytes.
     for (route, served) in [("alice.eth".to_owned(), "alice.eth"), (tl_path(&alice), alice.as_str())] {
         let uri = format!("/v1/names/{route}?source=verified");
         let (status, detail) = sepolia_verified_get(&database, &unreachable, &uri).await?;

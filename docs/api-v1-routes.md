@@ -2055,7 +2055,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   stores no raw label bytes lists and counts its children under its own
   rendered name, at any depth. A parent label the request spells as text shows
   as that text in every row's `name` and `display_name`, while a child's own
-  label keeps its placeholder ([name inputs](api-v1.md#name-inputs)). Cursors,
+  label keeps its placeholder unless the request spells that same label
+  ([name inputs](api-v1.md#name-inputs)). Cursors,
   order and counts do not change with the spelling. Admitted ENSv1 `NewOwner`
   events create these surfaces when the complete labelhash path is proven back
   to the root.

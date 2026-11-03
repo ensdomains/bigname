@@ -1388,8 +1388,11 @@ So a write changes no served answer until the operator runs the import.
 
 The write is best effort and never delays or fails a response. On a hot
 standby, or for a role without `INSERT` on the table, the database refuses it.
-The API then serves exactly as before, logs one warning per process, and counts
-each refusal. The counter is `label_candidate_writes_total`, by `outcome`:
+The API then serves exactly as before and counts each refusal. It logs one
+warning for the first refusal of each kind, and a warning at each doubling of
+the count of other failures. A refused label is offered again by a later
+request, within the same bounds, so a grant applied to a running API takes
+effect without a restart. The counter is `label_candidate_writes_total`, by `outcome`:
 `staged`, `duplicate`, `throttled`, `denied`, `read_only`, `disabled`, or
 `failed`. These settings bound the writes of one process:
 

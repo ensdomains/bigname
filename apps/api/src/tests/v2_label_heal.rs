@@ -117,16 +117,19 @@ fn lh_documented_grant(grant: &str) -> Result<String> {
         .to_owned())
 }
 
-/// A pool whose sessions run `setup` first, on the test database.
+/// A pool whose sessions run the single statement `setup` first, on the test database.
 async fn lh_pool(database: &TestDatabase, setup: String) -> Result<PgPool> {
     let config = database.database_config(2)?;
     let options = PgConnectOptions::from_str(config.database_url.as_deref().context("test URL")?)?
         .options([("search_path", "bigname_phase".to_owned())]);
     Ok(PgPoolOptions::new()
         .max_connections(2)
-        .after_connect(move |connection, _| {
+        .after_connect(move |connection, _metadata| {
             let setup = setup.clone();
-            Box::pin(async move { sqlx::raw_sql(&setup).execute(connection).await.map(|_| ()) })
+            Box::pin(async move {
+                sqlx::query(&setup).execute(&mut *connection).await?;
+                Ok(())
+            })
         })
         .connect_with(options)
         .await?)
@@ -351,7 +354,7 @@ async fn v2_label_heal_stages_a_label_once_across_requests_and_processes() -> Re
 
 /// Row 14: a role with only the documented reads serves healed answers and is counted
 /// `denied`. Startup does not require the write. The documented INSERT grant is the whole of
-/// what the write needs.
+/// what the write needs, and the running process writes as soon as it lands.
 #[tokio::test]
 async fn v2_label_heal_a_role_without_insert_serves_alike_and_the_documented_grant_writes()
 -> Result<()> {
@@ -390,10 +393,13 @@ async fn v2_label_heal_a_role_without_insert_serves_alike_and_the_documented_gra
     sqlx::query(&format!("GRANT INSERT ON TABLE {insert} TO {role}"))
         .execute(&database.pool)
         .await?;
-    let granted = lh_state(pool.clone());
-    assert_eq!(lh_ok(&granted, "/v1/names/first.alpha.eth").await?, detail);
-    assert_eq!(lh_staged(&database, &granted).await?, lh_rows(&["first"]));
-    assert_eq!(lh_counts(&granted), BTreeMap::from([("staged", 1)]));
+    // The same process writes once the grant lands: a refused label is not held as staged.
+    assert_eq!(lh_ok(&refused, "/v1/names/first.alpha.eth").await?, detail);
+    assert_eq!(lh_staged(&database, &refused).await?, lh_rows(&["first"]));
+    assert_eq!(
+        lh_counts(&refused),
+        BTreeMap::from([("denied", 1), ("staged", 1)])
+    );
 
     pool.close().await;
     sqlx::query(&format!("DROP OWNED BY {role}")).execute(&database.pool).await?;

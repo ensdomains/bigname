@@ -109,7 +109,8 @@ pub(crate) fn heal_name_record(
     heal.stage(state);
 }
 
-/// A child's own label is not part of the request, so only its parent's labels heal.
+/// A child's own label is not part of the request, so it heals only when the request spells
+/// that same label elsewhere, as `x` in `x.x.eth`.
 pub(crate) fn heal_subnames(
     state: &AppState,
     input: &NormalizedRouteNameInput,
