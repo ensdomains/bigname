@@ -1,5 +1,5 @@
 //! TYR-428: a registry's role counts read `normalized_events_registry_roles_idx`, which holds
-//! only the registry permission rows the role-count statements keep, and return what the
+//! only the registry role-change rows the role-count statements read, and return what the
 //! unindexed read returns.
 use std::collections::BTreeMap;
 
@@ -492,7 +492,7 @@ async fn registry_role_counts_read_the_roles_index() -> Result<()> {
                 assert_eq!(scan["Node Type"], "Index Scan", "{suffix} {mode}: {scan}");
                 assert_eq!(scan["Index Name"], INDEX, "{suffix} {mode}: {scan}");
                 assert_ne!(scan["Index Name"], EMITTER_INDEX, "{suffix} {mode}: {scan}");
-                // The index holds only the rows the statement keeps.
+                // The index holds only rows that pass the statement's constant terms.
                 assert_eq!(
                     scan["Rows Removed by Filter"].as_u64().unwrap_or(0),
                     0,

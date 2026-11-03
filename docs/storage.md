@@ -960,8 +960,9 @@ install it:
 | --- | --- |
 | `normalized_events_registry_roles_idx` | the `latest` step of `CURRENT_ROLES`: activated, readable `PermissionChanged` and `RootPermissionChanged` rows from `EACRolesChanged` in source families `ens_v2_root_l1` and `ens_v2_registry_l1` with a resource and a subject, by chain and lowercased emitting registry, then in the statement's `DISTINCT ON` order |
 
-Its predicate is the statement's constant terms, so it holds only the rows the statement keeps,
-and its key order lets `DISTINCT ON` read it without a sort. Without it the statement reads
+Its predicate is the statement's constant terms on `normalized_events`, so it holds only the
+rows the statement reads. The lineage join, the block bound and `DISTINCT ON` still drop some
+of them. Its key order lets `DISTINCT ON` read it without a sort. Without it the statement reads
 `normalized_events_emitter_history_idx`, which holds every event the registry emitted, and
 drops every row that is not a role change.
 `apps/api/src/tests/v2_registry_role_counts_index.rs` checks that both statements read the

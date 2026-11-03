@@ -727,9 +727,9 @@ CREATE INDEX IF NOT EXISTS normalized_events_address_root_permission_idx
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
 -- A registry's role counts (CURRENT_ROLES in apps/api/src/v2/registries/role_counts.rs) read
--- the registry's current role assignments. This index holds exactly the role-change rows that
--- statement keeps, keyed by chain and emitting registry and then in its DISTINCT ON order, so
--- it reads no other event of the registry and needs no sort. Keep it identical to
+-- the registry's current role assignments. This index holds the role-change rows that pass
+-- that statement's constant terms, keyed by chain and emitting registry and then in its
+-- DISTINCT ON order, so it reads no other event of the registry and needs no sort. Keep it identical to
 -- migrations/20261102140000_normalized_events_registry_roles_index.sql.
 CREATE INDEX IF NOT EXISTS normalized_events_registry_roles_idx
     ON normalized_events (
