@@ -691,7 +691,7 @@ Family indexes serve these concrete readers:
 - The children relation, which composes the listing rows and spells a page row's label
   placeholders again at read, checks that an ENSv1 or Basenames edge is its child's latest across
   parents through `project_child_edge_candidate_child_idx`, by chain, namespace and child
-  node, and find a registry instance's ENSv2 registrations through
+  node, and finds a registry instance's ENSv2 registrations through
   `project_child_registration_state_registry_idx`; both primary keys lead with a column
   those lookups do not bind. The registry children an address owns read their edges through
   the same index by their candidate nodes rather than by parent.

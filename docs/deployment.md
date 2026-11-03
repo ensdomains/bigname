@@ -5781,9 +5781,9 @@ composition pass derives every parent's rows in a children stream after the name
   - `order=desc` is the exact reverse of `order=asc`. Children with equal timestamps used to
     run by name ascending in a descending page, and children with equal names by child
     identity ascending. Both now run descending.
-  - `q` matches the stored name. It differs from the served name only for a label that the
-    rainbow-table import alone spells, which serves healed but sorts and matches by its
-    placeholder.
+  - `q` matches the stored name. It differs from the served name for a label that the
+    rainbow-table import alone spells, and for one first observed on another chain until the
+    row is derived again. Such a child serves healed but sorts and matches by its placeholder.
   - A name longer than 2,000 bytes sorts by its first 500 characters, then child identity.
   - A cursor issued before the change is still accepted. It resumes at its last row's position
     in the new order, so rows the old order placed differently can be skipped or repeated, and

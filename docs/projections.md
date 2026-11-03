@@ -2588,8 +2588,9 @@ compose no child at read. A row holds the child's served fields, its stored name
 and the label registry, and is composed by the children relation
 (`crates/storage/src/families/topology/listing.rs`) at the block Project publishes. The stored
 name spells a label from chain-observed preimages only. A preimage from the rainbow-table
-import has no block, so the reader spells such a label at read
-(`crates/storage/src/families/topology/listing_page.rs`) and the row keeps its placeholder.
+import has no block, and an observation on another chain derives no row of this one, so the
+reader spells such a label at read (`crates/storage/src/families/topology/listing_page.rs`)
+and the row keeps its placeholder until it is derived again.
 
 `display_key` is the stored name in C collation, or its first 500 characters when it is longer
 than 2,000 bytes. `expires_key` and `registered_key` are the child's name summary timestamps in

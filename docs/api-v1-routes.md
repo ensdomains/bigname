@@ -1870,9 +1870,10 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   prefix (the default) or substring matching exactly as on
   `GET /v1/addresses/{address}/names`, so `q=o&match=contains` matches
   `carol.parent.eth` and `two.parent.eth`. The comparison is byte-wise against
-  the child's stored name, the spelling its labels have from chain-observed
-  preimages. That is the served name except for a label only the
-  proof-checked rainbow import spells, whose child matches by its placeholder.
+  the child's stored name, the spelling its row had when it was last derived.
+  That is the served name except for a label the proof-checked rainbow import
+  alone spells, or one first observed on another chain until the row is
+  derived again: such a child matches by its placeholder.
   So a [non-name form](glossary.md#non-name-form) row matches
   only a prefix, or with `match=contains` a substring, of its placeholder or
   escaped text.
@@ -1885,8 +1886,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   collation), and then by child identity. A stored name longer than 2,000 bytes
   sorts by its first 500 characters. `order=desc` is the exact reverse of
   `order=asc`, ties included: equal timestamps run by stored name and child
-  identity descending too. A child whose label only the rainbow import spells
-  serves its healed name and sorts by its placeholder. Any other `sort` or
+  identity descending too. A child whose stored name keeps a placeholder the
+  served name spells serves its healed name and sorts by its placeholder. Any other `sort` or
   `order` value returns `400 invalid_input`.
   `include_expired` defaults to `true`: the last ended registration remains
   listable until a later registration supersedes it, subject to the route's
