@@ -279,7 +279,7 @@ pub(super) async fn read(
         let revision = (hash, attempt);
         let stored = has_row.then_some((block.unwrap_or(-1), &revision));
         let token = input::token_in(transaction, &source).await?;
-        let current = token.revision();
+        let current = token.revision().or(Some((None, None)));
         let redo_from = token
             .project_redo_mode
             .as_ref()
