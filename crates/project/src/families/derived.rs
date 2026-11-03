@@ -461,13 +461,14 @@ pub(super) async fn refresh_block(
     stats.undo_rows += undo_rows;
     super::lookup::refresh(transaction, chain_id, block, composition, stats).await?;
     // Last: a child's listing row reads its name summary, which every step above can rewrite.
-    let listing = children::refresh(
+    // Boxed, so the block's future does not carry the refresh's state on the caller's stack.
+    let listing = Box::pin(children::refresh(
         transaction,
         chain_id,
         block,
         after,
         (&summary.names, &summary.raw_name_swept),
-    )
+    ))
     .await?;
     if listing.rows > 0 {
         *stats.rows.entry(CHILD_LISTING.name).or_default() += listing.rows;

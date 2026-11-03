@@ -149,6 +149,10 @@ pub(super) async fn list(
     after: i64,
     (names, swept): (&[String], &[String]),
 ) -> Result<(Vec<String>, Vec<String>)> {
+    if names.len() > 500 {
+        diag(transaction, chain_id, block, after, (names, swept)).await;
+    }
+    let started = std::time::Instant::now();
     let rows: Vec<(String, String)> = sqlx::query_as(WORK_LIST)
         .bind(chain_id)
         .bind(block.number)
@@ -161,6 +165,20 @@ pub(super) async fn list(
         .map_err(|error| {
             ProjectError::database("failed to read the children a family block touched", error)
         })?;
+    if started.elapsed().as_secs() > 2 {
+        println!(
+            "TYR455DIAG slow work list block {} names {} took {:?}",
+            block.number,
+            names.len(),
+            started.elapsed()
+        );
+        eprintln!(
+            "TYR455DIAG slow work list block {} names {} took {:?}",
+            block.number,
+            names.len(),
+            started.elapsed()
+        );
+    }
     let mut children = Vec::new();
     let mut parents = Vec::new();
     for (kind, id) in rows {
@@ -171,4 +189,67 @@ pub(super) async fn list(
         }
     }
     Ok((children, parents))
+}
+
+async fn diag(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    block: &input::BlockHeader,
+    after: i64,
+    (names, swept): (&[String], &[String]),
+) {
+    let report = |text: String| {
+        println!("{text}");
+        eprintln!("{text}");
+    };
+    for (mode, explain) in [
+        ("force_custom_plan", "EXPLAIN"),
+        ("force_generic_plan", "EXPLAIN"),
+        ("auto", "EXPLAIN (ANALYZE, BUFFERS)"),
+    ] {
+        let _ = sqlx::query("/* project:diag.savepoint */ SAVEPOINT tyr455_diag")
+            .execute(&mut **transaction)
+            .await;
+        let _ = sqlx::query(&format!(
+            "/* project:diag.mode */ SET LOCAL plan_cache_mode = {mode}"
+        ))
+        .execute(&mut **transaction)
+        .await;
+        let _ = sqlx::query("/* project:diag.timeout */ SET LOCAL statement_timeout = '90s'")
+            .execute(&mut **transaction)
+            .await;
+        let started = std::time::Instant::now();
+        let plan: std::result::Result<Vec<String>, sqlx::Error> =
+            sqlx::query_scalar(&format!("/* project:diag.explain */ {explain} {WORK_LIST}"))
+                .bind(chain_id)
+                .bind(block.number)
+                .bind(after)
+                .bind(block.timestamp_seconds)
+                .bind(names)
+                .bind(swept)
+                .fetch_all(&mut **transaction)
+                .await;
+        match plan {
+            Ok(lines) => report(format!(
+                "TYR455DIAG block {} after {} names {} swept {} mode {mode} {explain} in {:?}\n{}",
+                block.number,
+                after,
+                names.len(),
+                swept.len(),
+                started.elapsed(),
+                lines.join("\n")
+            )),
+            Err(error) => report(format!(
+                "TYR455DIAG block {} mode {mode} {explain} failed after {:?}: {error}",
+                block.number,
+                started.elapsed()
+            )),
+        }
+        let _ = sqlx::query("/* project:diag.rollback */ ROLLBACK TO SAVEPOINT tyr455_diag")
+            .execute(&mut **transaction)
+            .await;
+        let _ = sqlx::query("/* project:diag.release */ RELEASE SAVEPOINT tyr455_diag")
+            .execute(&mut **transaction)
+            .await;
+    }
 }

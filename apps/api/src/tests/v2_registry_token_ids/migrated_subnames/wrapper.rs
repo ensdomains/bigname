@@ -56,7 +56,8 @@ fn wrapped_until(
     .encode_log_data())
 }
 async fn wrapped_setup() -> Result<(TestDatabase, Address)> {
-    wrapped_setup_until(WRAPPED_EXPIRY).await
+    // Boxed: the deepest test of the module runs within a few KiB of the test-thread stack.
+    Box::pin(wrapped_setup_until(WRAPPED_EXPIRY)).await
 }
 /// The wrapped setup with the locked child's wrapper expiry at `child_expiry`.
 async fn wrapped_setup_until(child_expiry: u64) -> Result<(TestDatabase, Address)> {

@@ -3,7 +3,10 @@
 //! composes at the published block, and the stored counts (`project_child_listing_count`) equal
 //! the listing's own counts per parent and per (parent, label registry).
 use anyhow::{Result, ensure};
-use bigname_storage::families::topology::{ListingBlock, listing_rows};
+use bigname_storage::families::{
+    name::{ensure_family_publications, is_publication_unavailable},
+    topology::{ListingBlock, listing_rows},
+};
 
 use super::Fixture;
 
@@ -44,7 +47,8 @@ const COUNTED: &str = "SELECT coalesce(jsonb_agg(jsonb_build_array(counted.paren
 
 impl Fixture {
     /// The listing of `chain` equals the relation at its family marker's block, and its counts
-    /// equal the listing's. A chain with no marker block has neither rows nor counts.
+    /// equal the listing's, while the readers would serve the publication. A chain with no marker
+    /// block has neither rows nor counts.
     pub async fn assert_child_listing(&self, chain: &str) -> Result<()> {
         let marker: Option<(Option<i64>, Option<i64>)> = sqlx::query_as(
             "SELECT current_block_number, extract(epoch FROM block_timestamp)::bigint
@@ -68,6 +72,13 @@ impl Fixture {
             );
             return Ok(());
         };
+        // A publication the readers refuse, such as a rebuild still composing its pass, is not
+        // checked: its children stream may not have reached every parent yet.
+        match ensure_family_publications(&self.pool, &[chain.to_owned()]).await {
+            Ok(_) => {}
+            Err(error) if is_publication_unavailable(&error) => return Ok(()),
+            Err(error) => return Err(error),
+        }
         let parents: Vec<String> = sqlx::query_scalar(PARENTS)
             .bind(chain)
             .fetch_all(&self.pool)
