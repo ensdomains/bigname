@@ -111,9 +111,15 @@ async fn observe(fixture: &Fixture, block: i64, id: u64) -> Result<()> {
     let identity = format!("source:{block}:{id}");
     fixture
         .event(
-            Event::new(&identity, block, 0, "PreimageObserved", "ens_v1_registry_l1")
-                .on(SOURCE)
-                .name(&name(id)),
+            Event::new(
+                &identity,
+                block,
+                0,
+                "PreimageObserved",
+                "ens_v1_registry_l1",
+            )
+            .on(SOURCE)
+            .name(&name(id)),
         )
         .await?;
     Ok(())
@@ -271,9 +277,11 @@ async fn the_migration_starts_at_the_source_head_and_a_rebuild_from_zero() -> Re
     chain_with_heads(&fixture, unmarked, None, None).await?;
     ensure!(watermark(&fixture).await?.is_none());
 
-    raw_sql(include_str!("../../../migrations/20261103120000_project_child_listing.sql"))
-        .execute(&fixture.pool)
-        .await?;
+    raw_sql(include_str!(
+        "../../../migrations/20261103120000_project_child_listing.sql"
+    ))
+    .execute(&fixture.pool)
+    .await?;
     ensure!(
         watermark(&fixture).await? == Some(4),
         "the migration starts the watermark at the source's floor, below its last observation"
@@ -300,8 +308,13 @@ async fn the_migration_starts_at_the_source_head_and_a_rebuild_from_zero() -> Re
     .execute(&fixture.pool)
     .await?;
     let options = FamilyOptions::new(CONTENT_HASH).with_rebuild_ranges(RebuildRanges::Off);
-    fixture.apply_with(12, FamilyMode::Rebuild, &options).await?;
-    ensure!(watermark(&fixture).await? == Some(4), "the rebuild reads the source from block 0");
+    fixture
+        .apply_with(12, FamilyMode::Rebuild, &options)
+        .await?;
+    ensure!(
+        watermark(&fixture).await? == Some(4),
+        "the rebuild reads the source from block 0"
+    );
     assert_served(&fixture, &name(1)).await?;
     fixture.cleanup().await
 }
@@ -390,7 +403,10 @@ async fn a_dense_unfinalized_tail_heals_its_last_row_in_one_step() -> Result<()>
     source_surface(&fixture, 9, &[&labelhash("y")]).await?;
     observe(&fixture, 0, 9).await?;
     fixture.apply(12, FamilyMode::Normal).await?;
-    ensure!(watermark(&fixture).await? == Some(0), "the watermark reaches the floor");
+    ensure!(
+        watermark(&fixture).await? == Some(0),
+        "the watermark reaches the floor"
+    );
 
     observe_many(&fixture, 1, 8, 1001).await?;
     observe(&fixture, 15, 7).await?;
@@ -433,9 +449,15 @@ async fn a_block_denser_than_a_read_is_read_whole_and_passed() -> Result<()> {
         healed[0].1.starts_with("c.") && healed[0].2 == healed[0].1,
         "the block's last observation heals the child: {healed:?}"
     );
-    ensure!(watermark(&fixture).await? == Some(3), "the read stops at the dense block's end");
+    ensure!(
+        watermark(&fixture).await? == Some(3),
+        "the read stops at the dense block's end"
+    );
     fixture.apply(13, FamilyMode::Normal).await?;
-    ensure!(watermark(&fixture).await? == Some(6), "the next step reads past it");
+    ensure!(
+        watermark(&fixture).await? == Some(6),
+        "the next step reads past it"
+    );
     // No rebuild comparison: a rebuild reads the source again from block 0 and catches up over
     // the blocks it composes, so its watermark can stand below this one until its next steps.
     assert_served(&fixture, &name(1)).await?;

@@ -247,8 +247,14 @@ mod tests {
                     let after = to.or(watermark);
                     if let Some(to) = to {
                         let floor = floor.expect("only a floor moves the watermark");
-                        assert!(to <= floor && to <= cutoff, "{watermark:?} {cutoff} {floor}");
-                        assert!(to > watermark.unwrap_or(-1), "{watermark:?} {cutoff} {floor}");
+                        assert!(
+                            to <= floor && to <= cutoff,
+                            "{watermark:?} {cutoff} {floor}"
+                        );
+                        assert!(
+                            to > watermark.unwrap_or(-1),
+                            "{watermark:?} {cutoff} {floor}"
+                        );
                     }
                     assert!(
                         after >= watermark,
