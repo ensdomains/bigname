@@ -38,10 +38,10 @@ const TARGET: i64 = 300;
 /// family marker and the history catalogue marker are taken without their generation and
 /// without the content hash of the build that wrote them, which differs between builds by
 /// design.
-const RECORDED: &str = "60d7f0a1b6cdb4ea6ec6ca9f20861d70d43d31d9ab845a07155c14989148c152";
+const RECORDED: &str = "5719ce58bfb88a37809cf3e4fb0c4664b2d908c595976a0b2713d6a926e1fd6d";
 const MAINNET: &str = "ethereum-mainnet";
 /// The same digest for the seed alone on `MAINNET`.
-const RECORDED_MAINNET: &str = "b76c2d6e653162d58179081f79e396dc1987197c7e10db2513b07b060f932540";
+const RECORDED_MAINNET: &str = "012a05d6d8e4276e8d59046e08d64fe23da1aa3af17c1240d32843c2d4f258aa";
 
 /// The tables the ENSv2 path history fills. The digest holds a selection change to account
 /// only where they have rows.
@@ -99,6 +99,11 @@ async fn digest(
             let mut stamps: Vec<Value> = serde_json::from_str(&rows)?;
             stamps.iter_mut().for_each(without_content_hash);
             rows = Value::Array(stamps).to_string();
+        }
+        // Proof only: the new table has no rows, and leaving it out gives the old digest.
+        if table == "project_child_preimage_watermark" {
+            ensure!(rows == "[]", "the watermark table has rows: {rows}");
+            continue;
         }
         ensure!(
             !filled.contains(&table.as_str()) || rows != "[]",
