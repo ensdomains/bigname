@@ -184,7 +184,7 @@ pub fn block_event_counts_sql() -> String {
         "
     ));
     push_history_canonicality_filter(&mut builder, true);
-    builder.push(")) GROUP BY 1, 2, 3, 4 LIMIT 0");
+    builder.push(")) GROUP BY 1, 2, 3, 4");
     builder.sql().to_owned()
 }
 
