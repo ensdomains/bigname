@@ -143,6 +143,15 @@ async fn endpoint_exports_failed_phase_and_stale_heartbeat_signals() -> Result<(
     assert_eq!(
         sample(
             body,
+            "phase_runner_walk_index_capacity_blocked",
+            &["chain=\"ethereum-mainnet\""]
+        )?,
+        0.0,
+        "the walk index rebuild's capacity gauge reads 0 before any wait"
+    );
+    assert_eq!(
+        sample(
+            body,
             "phase_runner_heartbeat_stale_threshold_seconds",
             &["threshold_seconds=\"900\""]
         )?,
