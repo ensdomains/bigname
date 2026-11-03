@@ -63,7 +63,8 @@ const SOURCES: &str = "/* project:families.derived.child_listing_sources */
     LEFT JOIN project_child_preimage_watermark watermark
       ON watermark.chain_id = $1 AND watermark.source_chain_id = head.chain_id
     WHERE head.chain_id <> $1
-    ORDER BY head.chain_id";
+    ORDER BY head.chain_id
+    LIMIT 1";
 
 /// The highest block of chain `$1` among its first `$3` preimage observations above block `$2`
 /// (every one with a null `$3`): the activated rows of a canonical, safe or finalized block
