@@ -6,8 +6,9 @@ use alloy_primitives::{Address, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, DiscoveryRuleInput, ManifestInput, RawBlockInput,
-    RawLogInput, StateCacheCapacity, prepare_schema_v2_batch_incremental,
+    RawLogInput, StateCacheCapacity,
 };
+use bigname_test_support::fixture_logs::prepare_checked;
 
 const PROXY: &str = "0xeeeeeeee14d718c2b47d9923deab1335e144eeee";
 const ROOT: &str = "0xb458d6a3a77919449d03e7a6903c26827c1ec43f";
@@ -229,7 +230,7 @@ fn producer(
             0,
         ));
     }
-    let (output, _) = prepare_schema_v2_batch_incremental(
+    let (output, _) = prepare_checked(
         BatchInput {
             chain_id: chain.into(),
             manifests: manifests.clone(),

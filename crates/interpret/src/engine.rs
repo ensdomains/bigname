@@ -237,6 +237,8 @@ impl Engine {
         let adapter_session = loaded.adapter_session;
         let provenance_manifests = loaded.provenance_manifests;
         let input = loaded.input;
+        #[cfg(any(test, feature = "test-support"))]
+        let fixture_logs = bigname_test_support::fixture_logs::Snapshot::of(&input);
         let loaded_markers = input
             .blocks
             .iter()
@@ -278,6 +280,8 @@ impl Engine {
                 "hash-covered adapter state reload failed: {error:#}"
             ))
         })?;
+        #[cfg(any(test, feature = "test-support"))]
+        fixture_logs.check(&self.pool, &output).await;
         profile_phase(
             profile,
             "adapter_restore_and_batch",

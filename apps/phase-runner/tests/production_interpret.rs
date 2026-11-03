@@ -215,6 +215,60 @@ async fn production_interpret_writes_plain_events_identity_preimages_and_flags()
     scratch.cleanup().await
 }
 
+/// A raw log no admitted manifest event selects fails a test that runs the Interpret engine, and
+/// passes once the test names it with a reason (`bigname_test_support::fixture_logs`).
+#[tokio::test]
+async fn an_unselected_fixture_log_fails_an_engine_batch_unless_allowed() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_unselected_fixture_log").await?;
+    let chain = "unselected-fixture-log";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
+    insert_log(
+        scratch.pool(),
+        chain,
+        &format!("{chain}-transaction-1"),
+        1,
+        CONTRACT,
+        &[keccak256("Undeclared(address)")],
+        &[],
+    )
+    .await?;
+
+    let pool = scratch.pool().clone();
+    let failed =
+        tokio::spawn(async move { run_engine(&pool, chain, 0, 1, InterpretRunMode::Normal).await })
+            .await
+            .expect_err("an unselected fixture log fails the engine batch");
+    let message = failed
+        .into_panic()
+        .downcast::<String>()
+        .map(|message| *message)
+        .unwrap_or_default();
+    for expected in [
+        "matched no catalog candidate",
+        "an_unselected_fixture_log_fails_an_engine_batch_unless_allowed",
+        "database: production_interpret_unselected",
+        CONTRACT,
+        "no topic",
+    ] {
+        assert!(
+            message.contains(expected),
+            "{expected} missing from:\n{message}"
+        );
+    }
+
+    let allowance = bigname_test_support::fixture_logs::allow_unmatched_in(
+        scratch.pool(),
+        &[(
+            "Undeclared(address)",
+            "the test seeds this log to prove the engine check",
+        )],
+    )
+    .await;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+    drop(allowance);
+    scratch.cleanup().await
+}
+
 #[tokio::test]
 async fn same_transaction_registry_permission_writes_with_registration_resource() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_same_transaction_resource").await?;
@@ -1041,6 +1095,7 @@ async fn restarted_interpret_redo_and_family_replay_match_fresh_after_suffix_ret
     let scratch = ScratchDatabase::create("production_interpret_redo_resolver_handoff").await?;
     let chain = "interpret-redo-resolver-handoff";
     seed_discovery_fixture(scratch.pool(), chain).await?;
+    let _unread = allow_unread_pointer_record(scratch.pool()).await;
     sqlx::query(
         "INSERT INTO chain_lineage (
              chain_id, block_hash, parent_hash, block_number,
@@ -4101,6 +4156,7 @@ async fn registry_pointer_alone_does_not_admit_the_resolver() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_pointer_only").await?;
     let chain = "interpret-pointer-only";
     seed_discovery_fixture(scratch.pool(), chain).await?;
+    let _unread = allow_unread_pointer_record(scratch.pool()).await;
 
     run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
 
@@ -4517,6 +4573,7 @@ async fn exact_discovery_redo_reuses_the_existing_edge_epoch() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_discovery_redo").await?;
     let chain = "interpret-discovery-redo";
     seed_discovery_fixture(scratch.pool(), chain).await?;
+    let _unread = allow_unread_pointer_record(scratch.pool()).await;
 
     run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
     let original_edge_id: i64 =
@@ -4599,6 +4656,7 @@ async fn discovery_open_redo_preserves_a_terminal_close_after_the_range() -> Res
     let scratch = ScratchDatabase::create("production_interpret_discovery_terminal").await?;
     let chain = "interpret-discovery-terminal";
     seed_discovery_fixture(scratch.pool(), chain).await?;
+    let _unread = allow_unread_pointer_record(scratch.pool()).await;
     sqlx::query(
         "
         INSERT INTO chain_lineage (
@@ -4672,6 +4730,7 @@ async fn discovery_backfill_does_not_cross_a_retained_address_epoch() -> Result<
     let scratch = ScratchDatabase::create("production_interpret_address_epoch").await?;
     let chain = "interpret-address-epoch";
     seed_discovery_fixture(scratch.pool(), chain).await?;
+    let _unread = allow_unread_pointer_record(scratch.pool()).await;
     run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
 
     sqlx::query(
@@ -4921,6 +4980,7 @@ async fn discovery_redo_reopens_an_edge_when_the_replacement_range_omits_its_clo
     let scratch = ScratchDatabase::create("production_interpret_discovery_reopen").await?;
     let chain = "interpret-discovery-reopen";
     seed_discovery_fixture(scratch.pool(), chain).await?;
+    let _unread = allow_unread_pointer_record(scratch.pool()).await;
     run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
 
     let block_two_hash = block_hash(chain, 2);
@@ -8416,6 +8476,21 @@ async fn run_project(
 /// the name and admits nothing, so the record stays uninterpreted.
 async fn seed_discovery_fixture(pool: &PgPool, chain_id: &str) -> Result<()> {
     seed_discovery_fixture_with(pool, chain_id, false).await
+}
+
+/// [`seed_discovery_fixture`]'s record log is dropped on purpose, so a test that interprets its
+/// block names it.
+async fn allow_unread_pointer_record(
+    pool: &PgPool,
+) -> bigname_test_support::fixture_logs::DatabaseAllowGuard {
+    bigname_test_support::fixture_logs::allow_unmatched_in(
+        pool,
+        &[(
+            DISCOVERED_RESOLVER,
+            "a registry pointer admits nothing, so the resolver's record log stays unread",
+        )],
+    )
+    .await
 }
 
 /// The same fixture, with the resolver announcing itself (`ResolverCreated()`) first. That

@@ -3,8 +3,9 @@ use alloy_primitives::{B256, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, ManifestInput, RawBlockInput, RawLogInput,
-    StateCacheCapacity, prepare_schema_v2_batch_incremental,
+    StateCacheCapacity,
 };
+use bigname_test_support::fixture_logs::prepare_checked;
 
 const REGISTRY: &str = "0x00000000000000000000000000000000000000a1";
 const REGISTRAR: &str = "0x00000000000000000000000000000000000000a2";
@@ -132,7 +133,7 @@ async fn token_only_handoff_follows_actual_nodeless_authority_epoch() -> Result<
         token_transfer(REGISTRY_OWNER, HOLDER, id, 123)?,
     ];
     let (manifests, admissions) = family_inputs();
-    let (output, _) = prepare_schema_v2_batch_incremental(
+    let (output, _) = prepare_checked(
         BatchInput {
             chain_id: CHAIN.into(),
             manifests,

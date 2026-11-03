@@ -7,12 +7,18 @@ license.workspace = true
 # The interpreter content hash cannot cover a build script, so its walk requires `build = false` here.
 build = false
 
+[features]
+# Checks every Interpret batch for raw logs no catalog candidate selects
+# (crates/test-support/src/fixture_logs.rs). Only test dev-dependencies enable it.
+test-support = ["dep:bigname-test-support"]
+
 [dependencies]
 anyhow.workspace = true
 bigname-adapters.workspace = true
 bigname-domain.workspace = true
 bigname-manifests.workspace = true
 bigname-storage.workspace = true
+bigname-test-support = { workspace = true, optional = true }
 futures-util = "0.3.32"
 serde_json = "1.0.149"
 sqlx = { workspace = true, features = ["time"] }

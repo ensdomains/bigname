@@ -12,8 +12,9 @@ use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use bigname_adapters::schema_v2::{
     AdapterSession, AddressAdmissionInput, BatchInput, BatchOutput, ManifestInput, RawBlockInput,
-    RawLogInput, StateCacheCapacity, prepare_schema_v2_batch_incremental,
+    RawLogInput, StateCacheCapacity,
 };
+use bigname_test_support::fixture_logs::prepare_checked;
 
 const CHAIN: &str = "ethereum-mainnet";
 const REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
@@ -163,8 +164,7 @@ fn interpret_logs(
         raw_logs,
     };
     let (output, session) =
-        prepare_schema_v2_batch_incremental(input, session, StateCacheCapacity::Unlimited)?
-            .finish(Vec::new())?;
+        prepare_checked(input, session, StateCacheCapacity::Unlimited)?.finish(Vec::new())?;
     assert!(output.decode_skips.is_empty(), "{:?}", output.decode_skips);
     Ok((output, session))
 }
@@ -531,8 +531,7 @@ fn a_same_owner_transfer_handoff_derives_a_current_registry_record() -> Result<(
             raw_logs,
         };
         let (output, next) =
-            prepare_schema_v2_batch_incremental(input, session, StateCacheCapacity::Unlimited)?
-                .finish(Vec::new())?;
+            prepare_checked(input, session, StateCacheCapacity::Unlimited)?.finish(Vec::new())?;
         session = Some(next);
         if block == HANDOFF {
             handoff = output.normalized_events;
@@ -674,7 +673,7 @@ fn interpret_marked(
         .into_iter()
         .filter(|log| blocks.contains(&log.block_number))
         .collect();
-    let (output, session) = prepare_schema_v2_batch_incremental(
+    let (output, session) = prepare_checked(
         BatchInput {
             chain_id: CHAIN.into(),
             manifests,
@@ -778,7 +777,7 @@ fn marked_batch(logs: Vec<RawLogInput>) -> Result<BatchOutput> {
     let (manifests, admissions) = inputs();
     let mut raw_logs = vec![new_owner("marked", HOLDER, 120, 0, OLD_REGISTRY)];
     raw_logs.extend(logs);
-    let (output, _) = prepare_schema_v2_batch_incremental(
+    let (output, _) = prepare_checked(
         BatchInput {
             chain_id: CHAIN.into(),
             manifests,

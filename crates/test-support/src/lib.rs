@@ -10,6 +10,7 @@ use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 
+pub mod fixture_logs;
 mod statement_count;
 mod test_hook_registry;
 #[cfg(test)]

@@ -394,6 +394,15 @@ async fn verification_only_source_never_reaches_finite_ingest_or_cursors() -> Re
 async fn address_scoped_approvals_follow_raw_intake_and_transaction_context_boundaries()
 -> Result<()> {
     let scratch = ScratchDatabase::create("production_ingest_address_scoped_approval").await?;
+    let _sibling = bigname_test_support::fixture_logs::allow_unmatched_in(
+        scratch.pool(),
+        &[(
+            SIBLING_CONTRACT,
+            "the sibling is not admitted, and the test proves only the admitted registry's \
+             approvals produce permission state",
+        )],
+    )
+    .await;
     let chain_id = "rpc-address-scoped-approval";
     let manifests = ApprovalManifestFixture::new(chain_id)?;
     sync_schema_v2_repository(scratch.pool(), &load_repository(&manifests.root)?).await?;

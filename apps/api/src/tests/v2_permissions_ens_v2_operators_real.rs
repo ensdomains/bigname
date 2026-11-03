@@ -13,8 +13,9 @@ use alloy_primitives::{Address, LogData, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, DiscoveryRuleInput, ManifestInput, RawBlockInput,
-    RawLogInput, StateCacheCapacity, prepare_schema_v2_batch_incremental,
+    RawLogInput, StateCacheCapacity,
 };
+use bigname_test_support::fixture_logs::prepare_checked;
 
 sol! {
     event LabelUnregistered(uint256 indexed tokenId, address indexed sender);
@@ -358,7 +359,7 @@ async fn seed_in(
 /// is admitted only by the `RegistryCreated` its own logs announce.
 fn interpret_in(registry: Registry, logs: Logs, admitted: bool) -> Result<Output> {
     let (manifest, admission) = registry_family(registry);
-    let (output, _) = prepare_schema_v2_batch_incremental(
+    let (output, _) = prepare_checked(
         BatchInput {
             chain_id: CHAIN.into(),
             manifests: vec![manifest],

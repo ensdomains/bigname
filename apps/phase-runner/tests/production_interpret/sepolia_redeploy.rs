@@ -550,6 +550,15 @@ async fn the_sepolia_redeploy_replaces_the_dropped_set_through_the_attested_redo
     .bind(block_hash(CHAIN, HEAD + 2))
     .execute(pool)
     .await?;
+    let _capped = bigname_test_support::fixture_logs::allow_unmatched_in(
+        pool,
+        &[(
+            OLD_REGISTRY,
+            "the retired declaration caps the old registry's admission, and the test proves its \
+             write after the head derives nothing",
+        )],
+    )
+    .await;
     interpret_through(pool, HEAD + 1, HEAD + 2, InterpretRunMode::Normal).await?;
     let after_head: Vec<(i64, bool)> = sqlx::query_as(
         "SELECT block_number, logical_name_id IS NOT NULL FROM normalized_events

@@ -415,13 +415,16 @@ fn prepare_with_provenance(
         }
         batch.blocks = blocks.into_values().collect();
     }
-    super::super::prepare_schema_v2_batch_incremental_with_provenance(
+    let checked = batch.clone();
+    let (output, session) = super::super::prepare_schema_v2_batch_incremental_with_provenance(
         batch,
         provenance,
         session,
         StateCacheCapacity::Unlimited,
     )?
-    .finish(Vec::new())
+    .finish(Vec::new())?;
+    check_fixture_logs(&checked, &output);
+    Ok((output, session))
 }
 
 fn state_derived_pointer(output: &BatchOutput) -> Option<&NormalizedEvent> {
@@ -2472,6 +2475,10 @@ mod public_v2_records {
     }
     #[test]
     fn wrong_role_and_undeclared_address_do_not_admit_public_node_decoder() -> anyhow::Result<()> {
+        let _dropped = allow_unmatched(&[(
+            CONTRACT,
+            "the test proves a public node event under the wrong role or from an undeclared address is not read",
+        )]);
         let event = raw(resolver::AddrChanged {
             node: B256::ZERO,
             a: ZERO_ADDRESS.parse()?,

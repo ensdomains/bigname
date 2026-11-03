@@ -922,6 +922,10 @@ fn no_block_takes_a_third_pass() -> anyhow::Result<()> {
 /// announces in. No row is written, since no admission follows in the batch.
 #[test]
 fn logs_of_an_emitter_never_announced_stay_unselected_without_a_row() -> anyhow::Result<()> {
+    let _dropped = allow_unmatched(&[(
+        "0x0000000000000000000000000000000000000072",
+        "the emitter is never announced, and the test proves its logs stay unread",
+    )]);
     let output = interpret_test_batch(batch(
         Vec::new(),
         vec![
@@ -1024,7 +1028,8 @@ fn a_resolver_pointer_to_its_own_registry_in_an_announcing_block_warns_once() ->
             ),
         ],
     );
-    tracing::subscriber::with_default(warnings.clone(), || {
+    let checked = input.clone();
+    let prepared = tracing::subscriber::with_default(warnings.clone(), || {
         crate::schema_v2::prepare_schema_v2_batch_incremental(
             input,
             None,
@@ -1032,6 +1037,8 @@ fn a_resolver_pointer_to_its_own_registry_in_an_announcing_block_warns_once() ->
         )
     })?;
     assert_eq!(warnings.count(), 1);
+    let (output, _) = prepared.finish(Vec::new())?;
+    super::check_fixture_logs(&checked, &output);
     Ok(())
 }
 

@@ -138,6 +138,35 @@ test stopped, before a limit ends it:
   prints when the job ends, names every lock wait longer than one second with
   the sessions that hold the lock.
 
+## Fixture logs must reach interpretation
+
+The schema-v2 adapter drops an event log that no admitted manifest event
+selects, and records nothing. A fixture log encoded under the wrong event
+signature, or emitted by an address the batch never admits, would leave a test
+checking a smaller batch than the one it builds. Tests therefore fail on such a
+log:
+
+- In-process batches go through `bigname_test_support::fixture_logs`
+  (`interpret_checked`, `prepare_checked`) or, in the adapters crate, through
+  `interpret_test_batch` and its siblings.
+- Batches the Interpret engine runs against a test database are checked inside
+  `Engine::run_batch`. Only test builds compile that check: `bigname-interpret`
+  enables it under `cfg(test)` or its `test-support` feature, which only
+  dev-dependencies turn on.
+- A log that was recorded as a decode skip, for example one logged before its
+  emitter's same-batch discovery admission, passes.
+- A test that drops a log on purpose names it with `allow_unmatched` and gives
+  the reason. That scope covers batches on the test's thread, including engine
+  runs under a current-thread `#[tokio::test]`. `allow_unmatched_in` covers
+  every batch the engine runs against one test database, on any thread. An
+  allowance that matches no dropped log fails the test.
+
+The check mirrors the adapter's event selection. Every adapters fixture batch
+also compares the static selection with the real selector, so a change there
+that the mirror misses fails CI. The admissions the adapter opens inside a
+batch are mirrored by hand (`Replay::new` in
+`crates/test-support/src/fixture_logs.rs`).
+
 ## Bootstrap migration hygiene
 
 During bootstrap, bigname has no active deployments or shared production

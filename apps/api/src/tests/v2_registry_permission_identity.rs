@@ -3,8 +3,9 @@ use alloy_primitives::{B256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, BatchOutput, ManifestInput, PriorEventInput, RawBlockInput,
-    RawLogInput, StateCacheCapacity, prepare_schema_v2_batch_incremental,
+    RawLogInput, StateCacheCapacity,
 };
+use bigname_test_support::fixture_logs::prepare_checked;
 use time::OffsetDateTime;
 
 const CHAIN: &str = "ethereum-mainnet";
@@ -56,7 +57,7 @@ async fn registry_owned_subname_permission_handle_is_followable_from_real_new_ow
         owner: OWNER.parse()?,
     }
     .encode_log_data();
-    let (output, _) = prepare_schema_v2_batch_incremental(BatchInput {
+    let (output, _) = prepare_checked(BatchInput {
         chain_id: CHAIN.into(), manifests: manifests(), discovery_rules: vec![],
         admissions: vec![AddressAdmissionInput {
             address: REGISTRY.into(), contract_instance_id: Uuid::from_u128(911),

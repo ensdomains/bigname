@@ -11,6 +11,15 @@ async fn factory_origin_before_delayed_initialization_does_not_admit_a_registry(
         .initialize_wrapper(5, WRAPPER, PARENT, LABEL, bitmap())
         .approve(6, PARENT, ALICE, OPERATOR, true);
     let database = setup(&logs).await?;
+    let _before_admission = bigname_test_support::fixture_logs::allow_unmatched_in(
+        &database.pool,
+        &[(
+            "Upgraded(address)",
+            "the proxy's upgrade log lands before the delayed initializer admits it; the test \
+             proves the factory fact does not widen admission",
+        )],
+    )
+    .await;
     interpret(&database, true, true).await?;
     let origin: i64 = sqlx::query_scalar(
         "SELECT block_number FROM normalized_events
@@ -61,6 +70,15 @@ async fn self_announced_unknown_and_wrong_factory_registries_do_not_derive_or_re
         .roles(4, CHILD, U256::ZERO, ALICE, U256::ZERO, bit(20))
         .approve(4, PARENT, ALICE, OPERATOR, true);
     let database = setup(&logs).await?;
+    let _unknown_factory = bigname_test_support::fixture_logs::allow_unmatched_in(
+        &database.pool,
+        &[(
+            UNKNOWN,
+            "no manifest declares this factory, and the test proves its ProxyDeployed derives \
+             nothing",
+        )],
+    )
+    .await;
     interpret(&database, false, false).await?;
     publish(&database, 4).await?;
     for registry in [WRAPPER, CHILD] {

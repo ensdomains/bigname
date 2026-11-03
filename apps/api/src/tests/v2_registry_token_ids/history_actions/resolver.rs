@@ -27,7 +27,7 @@ async fn resolver_database(role: &str, logs: Vec<RawLogInput>) -> Result<TestDat
         normalizer_version: source.normalizer_version.clone(),
         payload_json: serde_json::to_string(&source)?,
     };
-    let (output, _) = prepare_schema_v2_batch_incremental(
+    let (output, _) = prepare_checked(
         BatchInput {
             chain_id: CHAIN.into(),
             manifests: vec![manifest.clone()],

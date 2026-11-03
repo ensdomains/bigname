@@ -435,7 +435,7 @@ fn scoped_suffix_matches_producer_history_and_drops_disjoint_names() -> anyhow::
         admissions.clone(),
         vec![register("alice", 0), register("bob", 1)],
     );
-    let output = interpret_schema_v2_batch(prefix.clone())?;
+    let output = checked_interpret(prefix.clone())?;
     let prior = seam::fold_prior_events(vec![], &output.normalized_events, &prefix.blocks)?;
     for (name, other) in [("alice", "bob"), ("bob", "alice"), ("alice", "bob")] {
         let mut suffix = input(
@@ -592,7 +592,7 @@ fn wrapper_batch_transfers_request_every_token_before_state_exists() -> anyhow::
         })
         .collect();
     let prefix = input(manifests.clone(), admissions.clone(), logs);
-    let output = interpret_schema_v2_batch(prefix.clone())?;
+    let output = checked_interpret(prefix.clone())?;
     let mut suffix = input(
         manifests,
         admissions,
@@ -657,7 +657,7 @@ fn registry_parent_request_does_not_expand_unrelated_children() -> anyhow::Resul
             CONTRACT,
         )],
     );
-    let prefix_output = interpret_schema_v2_batch(prefix.clone())?;
+    let prefix_output = checked_interpret(prefix.clone())?;
     let prior = seam::fold_prior_events(vec![], &prefix_output.normalized_events, &prefix.blocks)?;
     let suffix = input(
         vec![manifest],
@@ -703,7 +703,7 @@ fn quiet_due_node_requires_a_loaded_certificate_before_publication() -> anyhow::
         }
         .encode_log_data())],
     );
-    let output = interpret_schema_v2_batch(prefix.clone())?;
+    let output = checked_interpret(prefix.clone())?;
     let prior = seam::fold_prior_events(vec![], &output.normalized_events, &prefix.blocks)?;
     let mut quiet = input(prefix.manifests, prefix.admissions, vec![]);
     let mut next = block(2);
@@ -823,7 +823,7 @@ fn child_only_history_does_not_supply_parent_surface_membership() -> anyhow::Res
             ),
         ],
     );
-    let output = interpret_schema_v2_batch(prefix.clone())?;
+    let output = checked_interpret(prefix.clone())?;
     let edge = output
         .normalized_events
         .iter()
@@ -890,7 +890,7 @@ fn restore_reads_outside_loaded_nodes_fail() -> anyhow::Result<()> {
         admissions.clone(),
         vec![register("alice", 0), register("bob", 1)],
     );
-    let output = interpret_schema_v2_batch(prefix.clone())?;
+    let output = checked_interpret(prefix.clone())?;
     let prior = seam::fold_prior_events(vec![], &output.normalized_events, &prefix.blocks)?;
     let node = |name: &str| V1NodeRequest {
         namespace: "ens".to_owned(),
@@ -1015,7 +1015,7 @@ fn covered_families_outside_the_name_families_refuse_registrar_events() {
         assert!(v1_lookahead_supports_family(family));
         let mut manifest = registrar_manifest();
         manifest.source_family = family.to_owned();
-        let error = interpret_schema_v2_batch(input(vec![manifest], vec![], vec![]))
+        let error = checked_interpret(input(vec![manifest], vec![], vec![]))
             .expect_err("a declared event must be refused");
         assert!(
             format!("{error:#}").contains("has no typed schema-v2 adapter"),
