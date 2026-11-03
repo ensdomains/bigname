@@ -88,11 +88,12 @@ pub(super) fn operator_candidates() -> String {
 }
 
 /// The root grants `resources` selects on chain `$9`, then for each grant its WrapperRegistry's
-/// parent row and the parent's live entry, each found by its primary key. Each step is an
-/// `OFFSET 0` subquery, which the planner cannot merge into a join: it cannot start from the
-/// entries or the parent rows, whatever their estimates. The first also keeps a page's outer
-/// bound on the resource ids out of the root-grant lookup, so the array predicate is applied
-/// once: applied twice, it misestimates the selected root grants.
+/// parent row and the parent's live entry, each found by its primary key. The root grants are
+/// one `OFFSET 0` subquery, and the parent row with its entry another. The planner cannot
+/// merge either into a join, so it cannot start from the entries or the parent rows, whatever
+/// their estimates. A page's outer bound on the resource ids stays a filter above the first
+/// subquery. So the root-grant lookup is estimated with the array predicate once: counted
+/// twice, it misestimates the selected root grants.
 fn resource_root(resources: &str) -> String {
     format!(
         "FROM (SELECT grant_row.chain_id, grant_row.resource_id, grant_row.subject,

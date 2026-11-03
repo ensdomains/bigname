@@ -5,7 +5,8 @@
 //! before.
 //!
 //! The fixture is a chain just after the ENSv2 activation: 700 WrapperRegistries under one
-//! parent registry, whose entries 148 owners hold, beside 100,000 entries of other registries
+//! parent registry, whose entries 148 owners hold but for three special ones, beside 100,000
+//! entries of other registries
 //! and 100,000 other grants. The approvals table was analyzed before its first
 //! `ens_v2_registry` row, and autovacuum is off on it, so the planner estimates those approvals
 //! at about none. The fixture checks that in `pg_stats` before anything is planned. Sequential
@@ -13,7 +14,7 @@
 //! choice.
 //!
 //! Each source is planned on its own, cut out of the statement the reader sends: a source's
-//! plan is that of its leg of the union. The statement as sent is planned as well.
+//! plan is that of its leg of the union. Each statement as sent is planned as well.
 
 use std::collections::BTreeMap;
 
@@ -528,6 +529,15 @@ async fn wrapper_sources_reach_each_row_by_key_from_the_resources() -> Result<()
                 .await?;
                 failures.extend(made_before(&cell, &plan, before_misses));
             }
+            let plan = explain(connection, &mut count, &sql, PAGE_TYPES, &values, mode).await?;
+            let scans = unkeyed_owner_scans(&plan);
+            if !scans.is_empty() {
+                failures.push(format!(
+                    "200 resources, {mode}: the statement walks the entry owner index without \
+                     the owner: {scans:?}\n{}",
+                    shown(&plan)
+                ));
+            }
         }
 
         // An address read keeps its text and its plan: the subject's approvals, then the
@@ -612,10 +622,10 @@ async fn wrapper_sources_keep_every_key_of_the_resources() -> Result<()> {
         );
         let mut read_keys = BTreeMap::new();
         for read in &reads {
-            // 64 is the reader's batch. 7 cuts inside every resource's keys, and 501 inside
+            // 64 is the reader's batch. 1 continues every read from a cursor, and 501 cuts
             // those of the two roots with 2,000 keys or more.
             let heavy = [root(1), root(4)].contains(&read.resource);
-            for limit in if heavy { [64, 501] } else { [64, 7] } {
+            for limit in if heavy { [64, 501] } else { [64, 1] } {
                 let mut all = Vec::new();
                 let mut after: Option<Cursor> = None;
                 loop {
@@ -797,6 +807,46 @@ async fn wrapper_sources_keep_every_key_of_the_resources() -> Result<()> {
                 "page limit {limit}: keys differ from the per-resource reads"
             );
         }
+        // The page statement before returns them too, chain by chain.
+        let sql = resource_page_statement();
+        let sql_before = before_statement(&sql, false);
+        ensure!(sql_before != sql, "the page statement sends no page source");
+        let mut before = Vec::new();
+        for (chain, resources) in &chains {
+            let mut after: Option<Key> = None;
+            loop {
+                let keys: Vec<Key> = sqlx::query_as(&sql_before)
+                    .persistent(false)
+                    .bind(None::<&str>)
+                    .bind(resources)
+                    .bind(None::<&str>)
+                    .bind(after.as_ref().map(|key| key.subject.as_str()))
+                    .bind(after.as_ref().map(|key| key.resource_id))
+                    .bind(after.as_ref().map(|key| key.scope.as_str()))
+                    .bind(64_i64)
+                    .bind(None::<Uuid>)
+                    .bind(*chain)
+                    .fetch_all(&mut *connection)
+                    .await?;
+                let last = keys.len() < 64;
+                after = keys.last().cloned();
+                before.extend(keys);
+                if last {
+                    break;
+                }
+            }
+        }
+        before.sort_by(|left, right| {
+            (left.resource_id, &left.subject, &left.scope).cmp(&(
+                right.resource_id,
+                &right.subject,
+                &right.scope,
+            ))
+        });
+        ensure!(
+            before == expected,
+            "the page statement before returns other keys"
+        );
         Ok(())
     })
     .await
@@ -809,10 +859,13 @@ async fn keys_before(
     limit: i64,
 ) -> Result<Vec<Key>> {
     let subject = read.subject.as_deref();
-    let sql = before_statement(
-        &statement(subject, Some(read.resource), after, Some(&read.token())),
-        subject.is_some(),
+    let sql = statement(subject, Some(read.resource), after, Some(&read.token()));
+    let sql_before = before_statement(&sql, subject.is_some());
+    ensure!(
+        sql_before != sql,
+        "{read:?}: the statement sends no bound source"
     );
+    let sql = sql_before;
     sqlx::query_as(&sql)
         .persistent(false)
         .bind(subject)
