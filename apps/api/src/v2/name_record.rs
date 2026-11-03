@@ -292,7 +292,6 @@ pub(crate) async fn get_name_record(
     .await?;
     let mut meta = snapshot_meta(&selected_snapshot)?;
     meta.source = Some(route_source);
-    super::support::heal_name_record(&state, &normalized, &mut record);
 
     Ok(Json(Envelope {
         data: record,

@@ -283,7 +283,7 @@ pub(crate) async fn get_subnames(
     .await?;
     Ok(Json(Envelope {
         meta: snapshot.finish(&state).await?,
-        data: super::support::heal_subnames(&state, &normalized, data),
+        data,
         page: Some(Page {
             cursor: params.cursor.clone(),
             next_cursor,
