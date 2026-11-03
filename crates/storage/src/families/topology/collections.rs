@@ -9,7 +9,7 @@
 //! them.
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use sqlx::{PgConnection, Row};
+use sqlx::{PgConnection, Row, postgres::PgRow};
 use uuid::Uuid;
 
 use crate::families::{
@@ -47,6 +47,9 @@ async fn marker(conn: &mut PgConnection, chain_id: &str) -> Result<FamilyPublica
 /// ens_v2@a971bd64) and each `Linked` overwrites it (upstream:
 /// .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64).
 /// `storage_model` is an annotation and plays no part (see `load_family_link_selection`).
+///
+/// The page walks `project_resolver_link_order_idx` from the cursor and stops at `limit`, and only
+/// its links are rendered. The total counts the same links, all of them.
 pub async fn load_resolver_links_shadow(
     db: impl Into<crate::ReadDb<'_>>,
     chain_id: &str,
@@ -55,12 +58,25 @@ pub async fn load_resolver_links_shadow(
     after: Option<&(String, String)>,
     limit: i64,
 ) -> Result<FamilyCollectionPage> {
-    let items = format!(
-        "WITH clock AS (
+    // `marker` has read the marker row in this snapshot, so `clock` is one row.
+    // An absent cursor compares as ('', ''), below every key: key1 always has 78 characters.
+    let statement = format!(
+        "/* storage:families.topology.resolver_links */
+        WITH clock AS (
             SELECT current_block_number AS block_number
             FROM bigname_phase.project_family_marker WHERE chain_id = $1
+        ), selected_page AS (
+            SELECT lpad(link.record_id, 78, '0') AS key1, link.node, link.chain_id,
+                   link.record_id, link.block_number, link.log_index, link.event_identity,
+                   link.normalized_event_id
+            FROM bigname_phase.project_resolver_link link
+            WHERE link.chain_id = $1 AND link.resolver_address = $2
+              AND link.record_id <> '0'
+              AND (lpad(link.record_id, 78, '0'), link.node)
+                  > (COALESCE($4::text, ''), COALESCE($5::text, ''))
+            ORDER BY lpad(link.record_id, 78, '0'), link.node LIMIT $6
         ), items AS (
-            SELECT lpad(link.record_id, 78, '0') AS key1, link.node AS key2,
+            SELECT link.key1, link.node AS key2,
                 jsonb_strip_nulls(jsonb_build_object(
                     'record_id', link.record_id, 'namehash', link.node,
                     'default', link.node =
@@ -74,8 +90,7 @@ pub async fn load_resolver_links_shadow(
                         'log_index', link.log_index,
                         'timestamp', to_char(lineage.block_timestamp AT TIME ZONE 'UTC',
                                              'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))))) AS item
-            FROM bigname_phase.project_resolver_link link
-            CROSS JOIN clock
+            FROM selected_page link
             LEFT JOIN bigname_phase.normalized_events event
               ON event.event_identity = link.event_identity
             LEFT JOIN bigname_phase.chain_lineage lineage
@@ -94,27 +109,34 @@ pub async fn load_resolver_links_shadow(
                 WHERE link.node <>
                       '0x0000000000000000000000000000000000000000000000000000000000000000'
                   AND surface.logical_name_id = $3 || ':' || link.node
-                  AND surface.chain_id = $1 AND surface.block_number <= clock.block_number
+                  AND surface.chain_id = $1
+                  AND surface.block_number <= (SELECT block_number FROM clock)
                   AND surface.visibility_state = 'active'
                   AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
             ) named ON TRUE
-            WHERE link.chain_id = $1 AND link.resolver_address = $2
-              AND link.record_id <> '0'
-        )",
+        ) SELECT (
+                SELECT count(*) FROM bigname_phase.project_resolver_link link
+                WHERE link.chain_id = $1 AND link.resolver_address = $2
+                  AND link.record_id <> '0'
+            ) AS total,
+            COALESCE((SELECT jsonb_agg(jsonb_build_object('key1', key1, 'key2', key2,
+                'item', item) ORDER BY key1, key2) FROM items), '[]'::jsonb) AS rows",
         name = rendered_name_sql("surface")
     );
     let address = resolver_address.to_ascii_lowercase();
     let mut snapshot = db.into().snapshot().await?;
     marker(&mut snapshot, chain_id).await?;
-    let page = page(
-        &mut snapshot,
-        &items,
-        (chain_id, &address, Some(namespace)),
-        after,
-        limit,
-        &Value::Null,
-    )
-    .await?;
+    let row = sqlx::query(&statement)
+        .bind(chain_id)
+        .bind(&address)
+        .bind(namespace)
+        .bind(after.map(|key| key.0.as_str()))
+        .bind(after.map(|key| key.1.as_str()))
+        .bind(limit)
+        .fetch_one(&mut *snapshot)
+        .await
+        .with_context(|| format!("failed to load a resolver collection of {address}"))?;
+    let page = collection_page(&row)?;
     snapshot.close().await?;
     Ok(page)
 }
@@ -210,12 +232,12 @@ pub async fn load_resolver_roles_shadow(
                     'record_resource_selector', granted -> 'selector',
                     'event_ids', granted -> 'event_ids',
                     'grant_source', granted -> 'grant_source')) AS item
-            FROM jsonb_array_elements($7::jsonb) granted
+            FROM jsonb_array_elements($6::jsonb) granted
         )";
     let page = page(
         &mut snapshot,
         items,
-        (chain_id, &address, None),
+        (chain_id, &address),
         after,
         limit,
         &Value::Array(granted),
@@ -226,13 +248,13 @@ pub async fn load_resolver_roles_shadow(
 }
 
 /// Page `items` (a `WITH items AS (...)` of `(key1, key2, item)`) after `after`, with its exact
-/// total. `$1` is the chain, `$2` the lower-cased resolver, `$3` the namespace (links only) and
-/// `$7` a JSON array the items may read (the arms computed outside SQL); every statement binds
-/// all of them.
+/// total. `$1` is the chain, `$2` the lower-cased resolver, `$3` to `$5` the keyset position and
+/// limit, and `$6` a JSON array the items may read (the arms computed outside SQL); every
+/// statement binds all of them.
 async fn page(
     conn: &mut PgConnection,
     items: &str,
-    (chain_id, resolver_address, namespace): (&str, &str, Option<&str>),
+    (chain_id, resolver_address): (&str, &str),
     after: Option<&(String, String)>,
     limit: i64,
     computed: &Value,
@@ -240,17 +262,15 @@ async fn page(
     let query = format!(
         "{items}, selected_page AS (
             SELECT key1, key2, item FROM items
-            WHERE $4::text IS NULL OR (key1, key2) > ($4, $5)
-            ORDER BY key1, key2 LIMIT $6
+            WHERE $3::text IS NULL OR (key1, key2) > ($3, $4)
+            ORDER BY key1, key2 LIMIT $5
         ) SELECT (SELECT count(*) FROM items) AS total,
             COALESCE((SELECT jsonb_agg(jsonb_build_object('key1', key1, 'key2', key2,
-                'item', item) ORDER BY key1, key2) FROM selected_page), '[]'::jsonb) AS rows,
-            $3::text IS NULL AS unused_namespace, $7::jsonb IS NULL AS unused_computed"
+                'item', item) ORDER BY key1, key2) FROM selected_page), '[]'::jsonb) AS rows"
     );
     let row = sqlx::query(&query)
         .bind(chain_id)
         .bind(resolver_address)
-        .bind(namespace)
         .bind(after.map(|key| key.0.as_str()))
         .bind(after.map(|key| key.1.as_str()))
         .bind(limit)
@@ -258,6 +278,11 @@ async fn page(
         .fetch_one(conn)
         .await
         .with_context(|| format!("failed to load a resolver collection of {resolver_address}"))?;
+    collection_page(&row)
+}
+
+/// A collection statement's `total` and `rows`, a JSON array of `{key1, key2, item}`.
+fn collection_page(row: &PgRow) -> Result<FamilyCollectionPage> {
     let total: i64 = row.try_get("total")?;
     let rows: Value = row.try_get("rows")?;
     let rows = rows
