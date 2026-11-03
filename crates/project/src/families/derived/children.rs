@@ -346,6 +346,51 @@ pub(crate) async fn derive(
                     .map(|(_, node)| node.to_ascii_lowercase())
             })
             .collect();
+        if candidates.len() > 500 {
+            for (explain, timeout) in [("EXPLAIN", "60s"), ("EXPLAIN (ANALYZE, BUFFERS)", "150s")] {
+                let (sql, arguments) =
+                    statement(&head, listing, &candidates, Some(nodes.as_slice()))?;
+                for setup in [
+                    "/* project:diag.savepoint3 */ SAVEPOINT tyr455_chunk".to_owned(),
+                    format!("/* project:diag.timeout3 */ SET LOCAL statement_timeout = '{timeout}'"),
+                ] {
+                    sqlx::query(&setup)
+                        .execute(&mut **transaction)
+                        .await
+                        .map_err(|error| ProjectError::database("diag chunk setup", error))?;
+                }
+                let started = std::time::Instant::now();
+                let plan: std::result::Result<Vec<String>, sqlx::Error> =
+                    sqlx::query_scalar_with(&format!("{explain} {sql}"), arguments)
+                        .fetch_all(&mut **transaction)
+                        .await;
+                let text = match plan {
+                    Ok(lines) => format!(
+                        "TYR455DIAG chunk block {} candidates {} children {} {explain} in {:?}\n{}",
+                        block.number,
+                        candidates.len(),
+                        chunk.len(),
+                        started.elapsed(),
+                        lines.join("\n")
+                    ),
+                    Err(error) => format!(
+                        "TYR455DIAG chunk block {} {explain} failed after {:?}: {error}",
+                        block.number,
+                        started.elapsed()
+                    ),
+                };
+                println!("{text}");
+                eprintln!("{text}");
+                sqlx::query("/* project:diag.rollback3 */ ROLLBACK TO SAVEPOINT tyr455_chunk")
+                    .execute(&mut **transaction)
+                    .await
+                    .map_err(|error| ProjectError::database("diag chunk rollback", error))?;
+            }
+            return Err(ProjectError::data_integrity(format!(
+                "TYR455DIAG chunk stop at block {}",
+                block.number
+            )));
+        }
         let (sql, arguments) = statement(&head, listing, &candidates, Some(nodes.as_slice()))?;
         sqlx::query_with(&sql, arguments)
             .execute(&mut **transaction)
