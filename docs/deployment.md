@@ -5762,9 +5762,11 @@ composition pass derives every parent's rows in a children stream after the name
   above it. The row keeps the other chain's Interpret revision it was read under, so an
   Interpret redo of that chain alone, such as a manifest-authority redo, sends the reading back
   below the redo's start. The schema-migration creates the table empty. The redo's composition
-  pass starts each watermark at the other chain's highest observation or its finalized block,
-  whichever is lower, because the pass composes every row from the preimages already stored.
-- Apply it before starting the release. The family writer inserts into both tables, so without
+  pass starts each watermark at the other chain's highest observation or its finalized block
+  (safe when finalized is unset), whichever is lower, because the pass composes every row from
+  the preimages already stored. A chain with neither block, or with its Interpret redo open, is
+  not started and is read from block 0 at the first step.
+- Apply it before starting the release. The family writer inserts into the new tables, so without
   them the first family block fails.
 - A block that moves a parent's own facts (its migration state, its ENSv2 subregistry pointer,
   its surface, its spelling, or an address window of its subregistry) derives that parent's every

@@ -316,10 +316,35 @@ async fn the_rebuild_pass_starts_the_watermarks_and_the_steps_read_on() -> Resul
     fixture.apply(11, FamilyMode::Normal).await?;
     // No stored name holds the observed labels, so reading them heals nothing.
     source(&fixture, 7, &[&labelhash("x"), &labelhash("y")]).await?;
-    observe_many(&fixture, 3, 7, 1001).await?;
+    // More blocks denser than a read than the rebuild has steps, so a rebuild that read from
+    // block 0 would stop below the last observation.
+    for block in 3..=5 {
+        observe_many(&fixture, block, 7, 1001).await?;
+    }
     observe(&fixture, 6, 7).await?;
     let unmarked = "ethereum-holesky";
     chain_with_heads(&fixture, unmarked, None, None).await?;
+    sqlx::query(
+        "INSERT INTO name_surfaces (logical_name_id, namespace, namehash, labelhashes,
+             normalizer_version, visibility_state, chain_id, block_hash, block_number,
+             canonicality_state)
+         VALUES ($1, 'ens', $2, ARRAY[$3], $4, 'active', $5, $6, 0, 'canonical')",
+    )
+    .bind(name(8))
+    .bind(node(8))
+    .bind(labelhash("z"))
+    .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
+    .bind(unmarked)
+    .bind(hash(0))
+    .execute(&fixture.pool)
+    .await?;
+    fixture
+        .event(
+            Event::new("unmarked:4:8", 4, 0, "PreimageObserved", "ens_v1_registry_l1")
+                .on(unmarked)
+                .name(&name(8)),
+        )
+        .await?;
 
     raw_sql(include_str!(
         "../../../migrations/20261103120000_project_child_listing.sql"
@@ -394,13 +419,14 @@ async fn replacement_heals(fixture: &Fixture, (c, o): (String, String)) -> Resul
     fixture.assert_rebuild_equal(13).await
 }
 
-// Row 5: the watermark stops at the other chain's finalized block, below the block it read, so
-// a label revealed only in a replacement block of a reorg below that read heals here too. A
-// watermark at the highest block read would skip the replacement.
+// Row 5: the watermark stops at the other chain's finalized block, below the block it read and
+// below its safe block, so a label revealed only in a replacement block of a reorg below that
+// read heals here too. A watermark at the highest block read, or at the safe block, would skip
+// the replacement.
 #[tokio::test]
 async fn a_replacement_block_below_the_read_heals_with_finality_markers() -> Result<()> {
     let fixture = Fixture::new("families_child_listing_source_reorg", 20).await?;
-    let labels = read_before_reorg(&fixture, Some(2), Some(2)).await?;
+    let labels = read_before_reorg(&fixture, Some(10), Some(2)).await?;
     replacement_heals(&fixture, labels).await?;
     ensure!(
         watermark(&fixture).await? == Some(2),
@@ -716,6 +742,14 @@ async fn a_stale_fork_observation_is_not_read_past_its_replacement() -> Result<(
     ensure!(
         watermark(&fixture).await?.is_none(),
         "the stale observation is not read"
+    );
+    let options = FamilyOptions::new(CONTENT_HASH).with_rebuild_ranges(RebuildRanges::Through(12));
+    fixture
+        .apply_with(12, FamilyMode::Rebuild, &options)
+        .await?;
+    ensure!(
+        watermark(&fixture).await?.is_none(),
+        "the rebuild's pass does not start the watermark at the stale observation"
     );
 
     sqlx::query("DELETE FROM normalized_events WHERE chain_id = $1")

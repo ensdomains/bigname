@@ -34,8 +34,10 @@
 //! - Undoing B's block restores the watermark from the journal. Reading an A block again derives
 //!   rows that already spell its labels again, which changes nothing.
 //! - A source without a watermark is read from block 0. A rebuild's reset clears the watermarks
-//!   and its composition pass starts them again at each source's highest observation, or its
-//!   floor if lower ([`seed`]): the pass composes every row from the preimages already stored.
+//!   and its composition pass starts them again at each source's highest observation on its
+//!   readable lineage, or its floor if lower ([`seed`]): the pass composes every row from the
+//!   preimages already stored. A source with no floor, or with its Interpret redo open, is not
+//!   started, and the first step reads it from block 0.
 use sqlx::{Postgres, Transaction};
 
 use crate::{ProjectError, Result, families::input};
@@ -236,9 +238,9 @@ fn advance_to(after: i64, cutoff: i64, floor: Option<i64>) -> Option<i64> {
 }
 
 /// The block a step writes for a source it planned with `plan` and read through `cutoff` (none
-/// with nothing above `plan.after`); none writes nothing.
+/// with nothing above `plan.after`); none writes nothing, as for a source with no floor.
 fn written(plan: &Plan, cutoff: Option<i64>, floor: Option<i64>) -> Option<i64> {
-    if !plan.advances {
+    if !plan.advances || floor.is_none() {
         return None;
     }
     cutoff
